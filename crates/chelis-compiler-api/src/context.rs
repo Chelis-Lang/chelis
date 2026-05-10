@@ -682,9 +682,24 @@ pub fn compile_reef_context(
 
     let reef_state = prepare_reef_graph(package_dir).map_err(|e| reef_error(&e))?;
     log_phase("prepare_reef_graph", &mut t);
-    let digests = reef_state.source_digests().map_err(|e| hash_error(&e))?;
+    let digests = match reef_state.source_digests() {
+        Ok(digests) => Some(digests),
+        Err(e) if e.contains("LocalRegistry") => {
+            // LocalRegistry-backed dependency sources cannot be hashed yet
+            // because the loaded package does not retain its registry cache
+            // root. Disk-cache lookup still errors before this point in
+            // `load_or_compile_for_package`, but an uncached in-memory
+            // context build is still valid and is needed by `chelis test`
+            // to share one compiled dependency graph across workers.
+            None
+        }
+        Err(e) => return Err(hash_error(&e)),
+    };
     log_phase("source_digests", &mut t);
-    let source_hash = ContextHash::from_digests(&digests);
+    let source_hash = digests
+        .as_deref()
+        .map(ContextHash::from_digests)
+        .unwrap_or(ContextHash([0u8; 32]));
     log_phase("hash_digests", &mut t);
 
     // Surf → Deep desugar + macro expand of the library decls.

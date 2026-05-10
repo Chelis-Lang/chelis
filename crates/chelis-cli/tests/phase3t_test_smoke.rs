@@ -214,6 +214,70 @@ def test_two() -> unit = test_assert(false, "two broken")
 }
 
 #[test]
+fn chelis_test_jobs_emits_json_in_discovery_order() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-jobs");
+    write_file(
+        &pkg.join("tests/a_first.ch"),
+        r#"module Smoke.Tests.First
+
+def test_first() -> unit = test_assert(true, "first")
+"#,
+    );
+    write_file(
+        &pkg.join("tests/b_second.ch"),
+        r#"module Smoke.Tests.Second
+
+def test_second() -> unit = test_assert(true, "second")
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--json", "--jobs", "2", "tests/"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).expect("utf-8 stdout");
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("json line"))
+        .collect();
+    assert_eq!(lines[0]["file"], "tests/a_first.ch");
+    assert_eq!(lines[0]["test"], "test_first");
+    assert_eq!(lines[1]["file"], "tests/b_second.ch");
+    assert_eq!(lines[1]["test"], "test_second");
+    assert_eq!(lines[2]["summary"]["passed"], 2);
+    assert_eq!(lines[2]["summary"]["failed"], 0);
+}
+
+#[test]
+fn chelis_test_rejects_zero_jobs() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-zero-jobs");
+    write_file(
+        &pkg.join("tests/pass.ch"),
+        r#"module Smoke.Tests.Pass
+
+def test_ok() -> unit = test_assert(true, "ok")
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--jobs", "0", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("jobs"));
+}
+
+#[test]
 fn chelis_test_missing_tests_dir_exits_two() {
     let (_dir, pkg) = make_reef_package("phase3t-smoke-nodir");
     // Remove the tests dir so the default path does not resolve.

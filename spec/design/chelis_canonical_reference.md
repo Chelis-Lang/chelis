@@ -279,6 +279,7 @@ chelis test tests/                    # discover and run Chelis-native test file
 chelis test tests/foo.ch              # run a specific test file
 chelis test tests/ --filter erf     # run only tests matching "erf"
 chelis test tests/ --timeout 10       # per-test wall-clock timeout (seconds, default 30)
+chelis test tests/ --jobs auto        # parallel file workers; `--jobs 1` preserves serial mode
 chelis test tests/ --json             # emit newline-delimited JSON records instead of plain text
 chelis prove                           # discover properties in current package, run all
 chelis prove src/                      # explicit path

@@ -10,6 +10,7 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis deep` prints canonical Deep for a Surf program.
 - `chelis surf` decompiles Deep back to Surf.
 - `chelis eval` runs the host/runtime evaluator.
+- `chelis test` discovers and runs Chelis-native Reef package tests.
 - `chelis prove` discovers and runs Level 2 executable properties.
 - `chelis validate` runs the executable-grammar validator on the input.
 - `chelis build` emits C or HIP source plus runtime artifacts and compile flags.
@@ -67,6 +68,23 @@ same gate before doing semantic work.
 When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
+
+## Native Test Loop
+
+`chelis test` runs `def test_*()` functions in `tests/**/*.ch` files:
+
+```sh
+chelis test
+chelis test tests/
+chelis test tests/core.ch
+chelis test tests/ --filter pricing --timeout 10 --jobs auto
+chelis test tests/ --json --jobs 1
+```
+
+Directory runs execute files concurrently by default. `--jobs auto` uses the
+available CPU count capped by the number of selected files; pass `--jobs 1`
+to preserve serial file execution while debugging. Output remains stable in
+discovery order for both plain text and NDJSON.
 
 ## Property Proof Loop
 

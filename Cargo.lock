@@ -399,6 +399,7 @@ dependencies = [
  "chelis-types",
  "chelis-validate",
  "clap",
+ "libc",
  "predicates",
  "serde_json",
  "sha2",
