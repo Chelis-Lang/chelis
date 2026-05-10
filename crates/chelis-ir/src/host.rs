@@ -3870,8 +3870,16 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Log
             | crate::dag::RiscOp::Sin
             | crate::dag::RiscOp::Sqrt
+            | crate::dag::RiscOp::Cos
+            | crate::dag::RiscOp::Tan
+            | crate::dag::RiscOp::Atan
+            | crate::dag::RiscOp::Abs
+            | crate::dag::RiscOp::Floor
+            | crate::dag::RiscOp::Ceil
             | crate::dag::RiscOp::UniformLike { .. }
             | crate::dag::RiscOp::Dropout { .. }
+            | crate::dag::RiscOp::Copy
+            | crate::dag::RiscOp::Drop
             | crate::dag::RiscOp::Realize
             | crate::dag::RiscOp::Cast { .. } => node
                 .inputs
@@ -5187,6 +5195,7 @@ fn param_host_type(expr: &Expr) -> Option<HostType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
 
     fn parse_and_check(src: &str) -> CheckedProgram {
@@ -5197,6 +5206,79 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
+    }
+
+    #[test]
+    fn named_tensor_entry_inserts_copy_for_consuming_fanout() {
+        let checked = parse_and_check(
+            r#"
+                (def {} consume
+                  (fn {type: (t-fn {}
+                                (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+                                (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32)))}
+                    (params {}
+                      (x {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}))
+                    (realize {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                      (var {} x))))
+                (def {} double_it
+                  (fn {type: (t-fn {}
+                                (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+                                (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32)))}
+                    (params {}
+                      (x {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}))
+                    (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                      (var {} add)
+                      (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                        (var {} consume)
+                        (var {} x))
+                      (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                        (var {} consume)
+                        (var {} x)))))
+            "#,
+        );
+        let dag = lower_named_tensor_entry_dag(&checked, "double_it").expect("lower entry");
+        let copy_count = dag
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Copy))
+            .count();
+        assert_eq!(copy_count, 1, "{:?}", dag.nodes());
+    }
+
+    #[test]
+    fn tensor_helper_exp_body_keeps_exp_root() {
+        let checked = parse_and_check(
+            r#"
+                (def {} softplus
+                  (fn {type: (t-fn {}
+                                (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+                                (t-tensor {} (d-lit {} 4) (t-prim {} f32)))}
+                    (params {}
+                      (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
+                    (app {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}
+                      (var {} exp)
+                      (var {} x))))
+            "#,
+        );
+        let defs = collect_program_defs(checked.exprs());
+        let body = lookup_program_def(&defs, "softplus").unwrap();
+        let fn_list = as_list(body).unwrap();
+        let body = children(fn_list).get(1).unwrap();
+        let mut scope = HashMap::new();
+        scope.insert(
+            "x".to_string(),
+            HostType::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            }),
+        );
+        let expected = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let dag = lower_tensor_helper_dag(body, &checked, &scope, &expected).expect("helper dag");
+        let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
+        assert_eq!(root.op, RiscOp::Exp, "{:?}", dag.nodes());
     }
 
     #[test]

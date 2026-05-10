@@ -1,6 +1,8 @@
 # Borrow-Typed Primitives
 
 **Status:** Implemented for compiler `0.7.0` and `chelis-std` `0.3.0`.
+The local-drop ceremony described here is superseded by
+`spec/design/implicit_linearity.md` for the `copy-drop` work.
 **Owning specs:** `spec/02-surf-syntax.md`, `spec/03-deep-syntax.md`,
 `spec/04-type-system.md`, and `spec/05-risc-primitives.md`.
 
@@ -22,19 +24,18 @@ the resolved parameter type is owned. Borrowed parameters do not consume their o
 This replaces the previous name-based read-only exception list as the main rule, with
 builtin metadata used only to type unresolved builtins consistently.
 
-Local owned bindings still require an explicit consume on every path. Chelis does not
-perform implicit local drop. The new borrowed-but-never-consumed diagnostic reports the
-borrow sites and the missing final consume separately from the fully unused-value case.
-Function parameters are treated as ownership-transfer boundaries, so an owned parameter
-may be borrowed through the function body and leave the function scope without a local
-`drop` ceremony.
+Local owned bindings formerly required an explicit consume on every path. The
+`copy-drop` model supersedes that rule: the compiler inserts end-of-scope drops and
+fan-out copies, while preserving borrow-escape and impossible-ownership diagnostics.
+Function parameters remain ownership-transfer boundaries unless signature inference
+marks an unannotated parameter as read-only.
 
 ## Backend Boundary
 
-Borrowing is erased before IR and backend lowering. The IR DAG already represents reads
-from live tensors by reference-like handles, so C, HIP, Metal, AD, and `vmap` do not
-need a new borrow payload. The type checker and linearity checker enforce the borrow
-discipline; lowerings see the same owned tensor IR they saw before.
+Borrowing is erased before IR and backend lowering. The implicit-linearity model adds
+explicit `RiscOp::Copy` and `RiscOp::Drop` liveness nodes after checking; backends emit
+no computation for `Drop`, and slot planners use it as the authoritative live-range
+close.
 
 ## Standard Library
 

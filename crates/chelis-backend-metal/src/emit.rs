@@ -390,6 +390,7 @@ impl Emitter {
             RiscOp::Load { name } => self.emit_load(node, name.as_str(), inputs),
             RiscOp::Store { name } => self.emit_store(dag, node, name.as_str(), outputs),
             RiscOp::Const { value } => self.emit_const(node, *value),
+            RiscOp::Copy | RiscOp::Drop => Ok(()),
 
             // Unary elementwise (M2 first cut).
             RiscOp::Neg

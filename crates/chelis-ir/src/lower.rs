@@ -332,17 +332,27 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
 
     let (dce_dag, remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
     log_sub("dce", &mut sub_t);
+    let (copy_dag, linear_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
+    log_sub("implicit_copy_nodes", &mut sub_t);
+    let linear_dag = insert_drop_nodes_for_unconsumed_values(copy_dag);
+    log_sub("implicit_drop_nodes", &mut sub_t);
 
     // Renumber the symbol table through DCE's remap. Names whose nodes
     // were eliminated drop out of the table.
     let symbol_table: HashMap<String, NodeId> = pre_dce_table
         .into_iter()
-        .filter_map(|(name, old)| remap.get(&old).map(|new| (name, *new)))
+        .filter_map(|(name, old)| {
+            remap
+                .get(&old)
+                .and_then(|new| linear_remap.get(new))
+                .copied()
+                .map(|new| (name, new))
+        })
         .collect();
     log_sub("renumber_symbol_table", &mut sub_t);
 
     LoweredLibrary {
-        dag: dce_dag,
+        dag: linear_dag,
         symbol_table,
         program_defs,
         program_types,
@@ -351,11 +361,154 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
     }
 }
 
+fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
+    let mut consuming_uses = HashMap::<NodeId, usize>::new();
+    for node in dag.nodes() {
+        if !op_consumes_inputs(&node.op) {
+            continue;
+        }
+        for input in &node.inputs {
+            *consuming_uses.entry(*input).or_default() += 1;
+        }
+    }
+
+    let mut seen_consuming_uses = HashMap::<NodeId, usize>::new();
+    let mut out = Dag::new();
+    let mut id_map = HashMap::<NodeId, NodeId>::new();
+
+    for node in dag.nodes() {
+        let mut inputs = Vec::with_capacity(node.inputs.len());
+        for input in &node.inputs {
+            let mapped = *id_map
+                .get(input)
+                .expect("input must have been remapped before consumer");
+            let total = consuming_uses.get(input).copied().unwrap_or_default();
+            if op_consumes_inputs(&node.op) && total > 1 {
+                let seen = seen_consuming_uses.entry(*input).or_default();
+                *seen += 1;
+                if *seen < total {
+                    let input_ty = out
+                        .get(mapped)
+                        .map(|n| n.output_type.clone())
+                        .unwrap_or_else(LowerCtx::default_type);
+                    let copy =
+                        out.add_node(RiscOp::Copy, vec![mapped], input_ty, node.span_id.clone());
+                    inputs.push(copy);
+                    continue;
+                }
+            }
+            inputs.push(mapped);
+        }
+
+        let new_id = out.add_node(
+            node.op.clone(),
+            inputs,
+            node.output_type.clone(),
+            node.span_id.clone(),
+        );
+        if let Some(new_node) = out.node_mut(new_id) {
+            new_node.reusable_input = node
+                .reusable_input
+                .and_then(|old| id_map.get(&old).copied());
+            new_node.merged_spans = node.merged_spans.clone();
+        }
+        id_map.insert(node.id, new_id);
+    }
+
+    for root in dag.roots() {
+        if let Some(new_root) = id_map.get(root) {
+            out.add_root(*new_root);
+        }
+    }
+
+    (out, id_map)
+}
+
+fn op_consumes_inputs(op: &RiscOp) -> bool {
+    matches!(op, RiscOp::Realize | RiscOp::Drop | RiscOp::Store { .. })
+}
+
+fn insert_drop_nodes_for_unconsumed_values(mut dag: Dag) -> Dag {
+    let mut consumed = HashSet::<NodeId>::new();
+    for node in dag.nodes() {
+        if !op_consumes_inputs(&node.op) {
+            continue;
+        }
+        consumed.extend(node.inputs.iter().copied());
+    }
+    let roots = dag.roots().iter().copied().collect::<HashSet<_>>();
+    let values_to_drop = dag
+        .nodes()
+        .iter()
+        .filter(|node| !roots.contains(&node.id))
+        .filter(|node| !consumed.contains(&node.id))
+        .filter(|node| {
+            !matches!(
+                node.op,
+                RiscOp::Load { .. } | RiscOp::Drop | RiscOp::Store { .. }
+            )
+        })
+        .map(|node| {
+            (
+                node.id,
+                node.output_type.clone(),
+                node.span_id.clone(),
+                node.merged_spans.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (id, ty, span_id, merged_spans) in values_to_drop {
+        let drop = dag.add_node(RiscOp::Drop, vec![id], ty, span_id);
+        if let Some(node) = dag.node_mut(drop) {
+            node.merged_spans = merged_spans;
+        }
+    }
+
+    dag
+}
+
+fn strip_drop_nodes(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
+    let mut out = Dag::new();
+    let mut id_map = HashMap::<NodeId, NodeId>::new();
+
+    for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Drop) {
+            continue;
+        }
+        let inputs = node
+            .inputs
+            .iter()
+            .filter_map(|input| id_map.get(input).copied())
+            .collect::<Vec<_>>();
+        let new_id = out.add_node(
+            node.op.clone(),
+            inputs,
+            node.output_type.clone(),
+            node.span_id.clone(),
+        );
+        if let Some(new_node) = out.node_mut(new_id) {
+            new_node.reusable_input = node
+                .reusable_input
+                .and_then(|old| id_map.get(&old).copied());
+            new_node.merged_spans = node.merged_spans.clone();
+        }
+        id_map.insert(node.id, new_id);
+    }
+
+    for root in dag.roots() {
+        if let Some(new_root) = id_map.get(root) {
+            out.add_root(*new_root);
+        }
+    }
+
+    (out, id_map)
+}
+
 /// Compose a library's lowered DAG with a new-code [`CheckedProgram`].
 /// The library was already lowered via [`lower_program_to_library`]
 /// (which is what `lower_program(library)` runs internally); the returned
-/// DAG holds the library DAG verbatim plus new-code nodes whose IDs are
-/// strictly above the library's max ID.
+/// DAG holds the library roots plus new-code nodes.
 ///
 /// `&library` is never mutated; the function is pure and the input
 /// library carrier is safe to reuse across many `new_program` snippets.
@@ -406,14 +559,17 @@ fn lower_program_with_context_inner(library: &LoweredLibrary, new_program: &Chec
     let mut ctx = LowerCtx::new(program_types, program_defs, new_program.linearity().clone());
 
     // Seed the lowering ctx with the cloned library DAG and the library's
-    // name -> NodeId bindings. Cloning preserves NodeIds verbatim (the
-    // Dag is a flat Vec, so push-only growth keeps existing IDs stable),
-    // satisfying the disjointness invariant: any new node added by
-    // new-code lowering takes id == library.dag.len() + k.
-    ctx.dag = library.dag.clone();
+    // name -> NodeId bindings. Library drops are terminal markers for the
+    // standalone library snapshot; composition can make formerly terminal
+    // values live again, so we strip them and re-normalize Copy/Drop across
+    // the combined DAG below.
+    let (library_dag, library_remap) = strip_drop_nodes(&library.dag);
+    ctx.dag = library_dag;
     for (name, node_id) in &library.symbol_table {
-        ctx.bindings
-            .insert(name.clone(), LoweredValue::Node(*node_id));
+        if let Some(mapped) = library_remap.get(node_id).copied() {
+            ctx.bindings
+                .insert(name.clone(), LoweredValue::Node(mapped));
+        }
     }
 
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
@@ -426,11 +582,13 @@ fn lower_program_with_context_inner(library: &LoweredLibrary, new_program: &Chec
     });
 
     // Skip DCE on the composed DAG: the library DAG was already DCE'd by
-    // `lower_program_to_library`, and re-DCE'ing here could prune
-    // library roots that are not referenced by the current `new_program`
-    // but are part of the library's contractual surface (per spec:
-    // "the returned Dag contains the library DAG + new-code roots").
-    ctx.dag
+    // `lower_program_to_library`, and re-DCE'ing here could prune library
+    // roots that are not referenced by the current `new_program`. We still
+    // run the linearity normalization passes so consuming fan-out across the
+    // library/new-code boundary gets the same Copy nodes as monolithic
+    // lowering, and every surviving linear value receives a terminal Drop.
+    let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&ctx.dag);
+    insert_drop_nodes_for_unconsumed_values(copy_dag)
 }
 
 fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut HashMap<String, NodeId>) {
@@ -477,6 +635,7 @@ fn lower_subexpr_program_inner(
     full_type_env: HashMap<String, Expr>,
     program_defs: HashMap<String, Expr>,
 ) -> Dag {
+    let scoped_tensor_types_for_bindings = scoped_tensor_types.clone();
     let mut merged_types = full_type_env
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
@@ -484,11 +643,24 @@ fn lower_subexpr_program_inner(
     merged_types.extend(scoped_tensor_types);
 
     let mut ctx = LowerCtx::new(merged_types, program_defs, LinearityInfo::default());
+    for (name, tensor_ty) in scoped_tensor_types_for_bindings {
+        let load = ctx.dag.add_node(
+            RiscOp::Load {
+                name: name.as_str().into(),
+            },
+            vec![],
+            tensor_ty,
+            ctx.current_span_id.clone(),
+        );
+        ctx.bindings.insert(name, LoweredValue::Node(load));
+    }
     let value = ctx.lower_expr(expr);
     for id in value.flatten_nodes() {
         ctx.dag.add_root(id);
     }
-    crate::optimize::dead_code_eliminate(&ctx.dag)
+    let dce_dag = crate::optimize::dead_code_eliminate(&ctx.dag);
+    let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
+    insert_drop_nodes_for_unconsumed_values(copy_dag)
 }
 
 pub fn remap_tensor_dim_symbols(
@@ -2266,7 +2438,7 @@ impl LowerCtx {
             "tuple" => self.lower_tuple(elems),
             "par" => self.lower_par(elems),
             "realize" => self.lower_realize(elems),
-            "copy" => self.lower_identity(elems),
+            "copy" => self.lower_copy(elems),
             "borrow" => self.lower_identity(elems),
             "tuple-get" => self.lower_tuple_get(elems),
             "match" => self.lower_match(elems),
@@ -3310,11 +3482,16 @@ impl LowerCtx {
 
             // Tier 1: unary elementwise
             "drop" if args.len() == 1 => {
-                let _ = self.lower_expr_node(&args[0], "drop input");
+                let input = self.lower_expr_node(&args[0], "drop input");
+                let output_type = self
+                    .dag
+                    .get(input)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
                 self.dag.add_node(
-                    RiscOp::Const { value: 0.0 },
-                    vec![],
-                    Self::default_type(),
+                    RiscOp::Drop,
+                    vec![input],
+                    output_type,
                     self.current_span_id.clone(),
                 )
             }
@@ -4565,6 +4742,53 @@ impl LowerCtx {
     }
 
     /// `(copy {} expr)` -- identity in Phase 0/1.
+    fn lower_copy(&mut self, elems: &[Expr]) -> LoweredValue {
+        if elems.len() >= 3 {
+            let input = self.lower_expr(&elems[2]);
+            if let LoweredValue::Tuple(items) = &input {
+                return LoweredValue::Tuple(
+                    items
+                        .iter()
+                        .map(|item| {
+                            let id = item.expect_node("copy tuple leaf");
+                            let output_type = self
+                                .dag
+                                .get(id)
+                                .map(|node| node.output_type.clone())
+                                .unwrap_or_else(Self::default_type);
+                            LoweredValue::Node(self.dag.add_node(
+                                RiscOp::Copy,
+                                vec![id],
+                                output_type,
+                                self.current_span_id.clone(),
+                            ))
+                        })
+                        .collect(),
+                );
+            }
+            let input = input.expect_node("copy input");
+            let output_type = self
+                .dag
+                .get(input)
+                .map(|node| node.output_type.clone())
+                .unwrap_or_else(Self::default_type);
+            LoweredValue::Node(self.dag.add_node(
+                RiscOp::Copy,
+                vec![input],
+                output_type,
+                self.current_span_id.clone(),
+            ))
+        } else {
+            LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+                self.current_span_id.clone(),
+            ))
+        }
+    }
+
+    /// `(borrow {} expr)` -- erased before executable lowering.
     fn lower_identity(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() >= 3 {
             self.lower_expr(&elems[2])
@@ -4702,6 +4926,20 @@ mod tests {
         ctx.dag
     }
 
+    fn non_drop_len(dag: &Dag) -> usize {
+        dag.nodes()
+            .iter()
+            .filter(|node| !matches!(node.op, RiscOp::Drop))
+            .count()
+    }
+
+    fn root_node(dag: &Dag) -> &crate::dag::DagNode {
+        dag.roots()
+            .last()
+            .and_then(|id| dag.get(*id))
+            .expect("expected lowered root")
+    }
+
     #[test]
     fn lower_single_const() {
         let dag = parse_and_lower("(def {} x (lit {type: (t-prim {} f32)} 1.0))");
@@ -4736,7 +4974,7 @@ mod tests {
             (def {} c (app {} (var {} add) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        assert_eq!(dag.len(), 3);
+        assert_eq!(non_drop_len(&dag), 3);
         let add_node = dag.get(NodeId(2)).unwrap();
         assert_eq!(add_node.op, RiscOp::Add);
         assert_eq!(add_node.inputs, vec![NodeId(0), NodeId(1)]);
@@ -4766,10 +5004,9 @@ mod tests {
         "#;
         let dag = parse_and_lower(src);
         // a=Const(3), b=Const(1), Neg(b), Add(a, Neg(b))
-        assert_eq!(dag.len(), 4);
+        assert_eq!(non_drop_len(&dag), 4);
         assert!(verify::verify(&dag).is_empty());
-        let last = dag.get(NodeId(3)).unwrap();
-        assert_eq!(last.op, RiscOp::Add);
+        assert_eq!(root_node(&dag).op, RiscOp::Add);
     }
 
     #[test]
@@ -4780,10 +5017,9 @@ mod tests {
         "#;
         let dag = parse_and_lower(src);
         // x=Const(-2), Const(0), MaxElem(x, 0)
-        assert_eq!(dag.len(), 3);
+        assert_eq!(non_drop_len(&dag), 3);
         assert!(verify::verify(&dag).is_empty());
-        let last = dag.get(NodeId(2)).unwrap();
-        assert_eq!(last.op, RiscOp::MaxElem);
+        assert_eq!(root_node(&dag).op, RiscOp::MaxElem);
     }
 
     #[test]
@@ -4798,7 +5034,124 @@ mod tests {
         "#;
         let dag = parse_and_lower(src);
         // x=Const(10), Neg(x)
-        assert_eq!(dag.len(), 2);
+        assert_eq!(non_drop_len(&dag), 2);
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn unconsumed_let_binding_gets_terminal_drop() {
+        let src = r#"
+            (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 10.0))
+                (let {}
+                  (bind {} out (app {} (var {} neg) (var {} x)))
+                  (var {} out)))
+        "#;
+        let dag = parse_and_lower(src);
+        assert_eq!(non_drop_len(&dag), 2);
+        let drops = dag
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Drop))
+            .map(|node| node.inputs.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(drops, vec![vec![NodeId(0)]]);
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn repeated_consuming_user_call_gets_copy() {
+        let src = r#"
+            (def {} consume
+              (fn {type: (t-fn {}
+                            (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+                            (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32)))}
+                (params {}
+                  (x {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}))
+                (realize {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                  (var {} x))))
+            (def {} double_it
+              (fn {type: (t-fn {}
+                            (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+                            (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32)))}
+                (params {}
+                  (x {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}))
+                (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                  (var {} add)
+                  (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                    (var {} consume)
+                    (var {} x))
+                  (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                    (var {} consume)
+                    (var {} x)))))
+        "#;
+        let dag = parse_and_lower(src);
+        let copy_count = dag
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Copy))
+            .count();
+        assert_eq!(copy_count, 1);
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn context_lowering_inserts_copy_for_library_boundary_fanout() {
+        let library_exprs = chelis_deep::parser::parse_str(
+            r#"
+                (def {} consume
+                  (fn {type: (t-fn {}
+                                (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+                                (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32)))}
+                    (params {}
+                      (x {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}))
+                    (realize {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                      (var {} x))))
+            "#,
+        )
+        .expect("parse library");
+        let (type_env, library_checked) =
+            chelis_types::build_compiled_library_context(&library_exprs).expect("library checks");
+        let library_checked =
+            chelis_effects::check_program(&library_checked).expect("library effects");
+        let library_checked =
+            chelis_types::check_linearity(&library_checked).expect("library linearity");
+        let library = lower_program_to_library(&library_checked);
+
+        let new_exprs = chelis_deep::parser::parse_str(
+            r#"
+                (def {} double_it
+                  (fn {type: (t-fn {}
+                                (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
+                                (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32)))}
+                    (params {}
+                      (x {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}))
+                    (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                      (var {} add)
+                      (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                        (var {} consume)
+                        (var {} x))
+                      (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+                        (var {} consume)
+                        (var {} x)))))
+            "#,
+        )
+        .expect("parse new code");
+        let new_checked =
+            chelis_types::check_ir_with_context(&type_env, &new_exprs).expect("new code checks");
+        let new_checked =
+            chelis_effects::check_effects_with_context(&library_checked, &new_checked)
+                .expect("new code effects");
+        let new_checked =
+            chelis_types::check_linearity_with_context(&library_checked, &new_checked)
+                .expect("new code linearity");
+
+        let dag = lower_program_with_context(&library, &new_checked);
+        let copy_count = dag
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Copy))
+            .count();
+        assert_eq!(copy_count, 1, "{:?}", dag.nodes());
         assert!(verify::verify(&dag).is_empty());
     }
 
@@ -5277,7 +5630,7 @@ mod tests {
         "#;
         let dag = parse_and_lower(src);
         // a, b, CmpLt(b, a)
-        assert_eq!(dag.len(), 3);
+        assert_eq!(non_drop_len(&dag), 3);
         let node = dag.get(NodeId(2)).unwrap();
         assert_eq!(node.op, RiscOp::CmpLt);
         // Args are swapped: b, a
@@ -5293,9 +5646,8 @@ mod tests {
         "#;
         let dag = parse_and_lower(src);
         // a, b, CmpLt(a,b), Const(1), CmpLt(lt, 1)
-        assert_eq!(dag.len(), 5);
-        let node = dag.get(NodeId(dag.len() - 1)).unwrap();
-        assert_eq!(node.op, RiscOp::CmpLt);
+        assert_eq!(non_drop_len(&dag), 5);
+        assert_eq!(root_node(&dag).op, RiscOp::CmpLt);
     }
 
     #[test]
@@ -5306,7 +5658,7 @@ mod tests {
             (def {} c (app {} (var {} lte) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        assert_eq!(dag.len(), 5);
+        assert_eq!(non_drop_len(&dag), 5);
     }
 
     #[test]
@@ -5318,7 +5670,7 @@ mod tests {
         "#;
         let dag = parse_and_lower(src);
         // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem, Const(1), CmpLt(or, 1)
-        assert_eq!(dag.len(), 7);
+        assert_eq!(non_drop_len(&dag), 7);
     }
 
     #[test]
@@ -5330,9 +5682,8 @@ mod tests {
         "#;
         let dag = parse_and_lower(src);
         // a, b, neg(a), neg(b), max(neg_a, neg_b), neg(max)
-        assert_eq!(dag.len(), 6);
-        let node = dag.get(NodeId(dag.len() - 1)).unwrap();
-        assert_eq!(node.op, RiscOp::Neg);
+        assert_eq!(non_drop_len(&dag), 6);
+        assert_eq!(root_node(&dag).op, RiscOp::Neg);
         assert!(verify::verify(&dag).is_empty());
     }
 
@@ -5347,7 +5698,7 @@ mod tests {
         "#;
         let dag = parse_and_lower(src);
         // a, b, Mul(a, b)
-        assert_eq!(dag.len(), 3);
+        assert_eq!(non_drop_len(&dag), 3);
         let node = dag.get(NodeId(2)).unwrap();
         assert_eq!(node.op, RiscOp::Mul);
     }
@@ -5374,9 +5725,8 @@ mod tests {
         "#;
         let dag = parse_and_lower(src);
         // a, Const(1), CmpLt(a, 1)
-        assert_eq!(dag.len(), 3);
-        let node = dag.get(NodeId(2)).unwrap();
-        assert_eq!(node.op, RiscOp::CmpLt);
+        assert_eq!(non_drop_len(&dag), 3);
+        assert_eq!(root_node(&dag).op, RiscOp::CmpLt);
     }
 
     // --- H3: Movement op stubs ---
@@ -5545,6 +5895,13 @@ mod regression_tests {
         ctx.dag
     }
 
+    fn non_drop_len(dag: &Dag) -> usize {
+        dag.nodes()
+            .iter()
+            .filter(|node| !matches!(node.op, RiscOp::Drop))
+            .count()
+    }
+
     fn captured_lower_message(payload: Box<dyn std::any::Any + Send>) -> String {
         if let Some(diagnostic) = payload.downcast_ref::<LowerDiagnostic>() {
             diagnostic.to_string()
@@ -5614,7 +5971,7 @@ mod regression_tests {
                       (var {} out)))))
         "#;
         let dag = parse_and_lower(src);
-        assert_eq!(dag.len(), 3);
+        assert_eq!(non_drop_len(&dag), 3);
         let add_node = dag.get(NodeId(2)).unwrap();
         assert_eq!(add_node.op, RiscOp::Add);
         assert_eq!(add_node.inputs, vec![NodeId(0), NodeId(1)]);
@@ -5767,7 +6124,7 @@ mod regression_tests {
     fn fix4_realize_lowers_to_materialization_barrier() {
         let src = "(realize {} (lit {} 42.0))";
         let dag = parse_and_lower(src);
-        assert_eq!(dag.len(), 2);
+        assert_eq!(non_drop_len(&dag), 2);
         assert_eq!(
             dag.get(NodeId(0)).unwrap().op,
             RiscOp::Const { value: 42.0 }
@@ -5776,11 +6133,23 @@ mod regression_tests {
     }
 
     #[test]
-    fn fix4_copy_is_identity() {
+    fn fix4_copy_lowers_to_copy_node() {
         let src = "(copy {} (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
         let dag = parse_and_lower(src);
-        assert_eq!(dag.len(), 1);
+        assert_eq!(non_drop_len(&dag), 2);
         assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 7.0 });
+        assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Copy);
+        assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
+    }
+
+    #[test]
+    fn explicit_drop_lowers_to_drop_node() {
+        let src = "(app {} (var {} drop) (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
+        let dag = parse_and_lower(src);
+        assert_eq!(dag.len(), 2);
+        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 7.0 });
+        assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Drop);
+        assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
     }
 
     // Fix 9: Cast with (t-prim {} int32) node. Exercises the lowerer's

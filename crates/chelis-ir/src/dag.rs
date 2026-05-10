@@ -299,6 +299,11 @@ pub enum RiscOp {
     Store {
         name: LoadStoreName,
     },
+    /// Explicit linearity copy marker. Source-level `copy()` and compiler-inserted
+    /// fan-out copies both lower to this operation.
+    Copy,
+    /// Explicit live-range close marker. Backends emit no computation for this op.
+    Drop,
     Realize,
 
     // --- Cast ---
@@ -508,6 +513,9 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     // is a bug in the producing pass and we surface it loudly via
     // `panic!` rather than silently emitting C that won't compile.
     for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Drop) {
+            continue;
+        }
         for dim in &node.output_type.dims {
             if let DimInfo::Named(symbol, None) = dim
                 && !named_dims_in_loads.contains(symbol)
@@ -541,12 +549,29 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
                         break;
                     }
                 }
+                if !bound
+                    && let Some(axis) =
+                        node.output_type.dims.iter().position(
+                            |dim| matches!(dim, DimInfo::Named(name, None) if name == symbol),
+                        )
+                    && let Some((input_label, input_axis)) =
+                        shape_source_for_axis(dag, node.id, axis)
+                {
+                    occurrences.push(SymbolicDimOccurrence {
+                        name: symbol.clone(),
+                        input_label,
+                        axis: input_axis,
+                    });
+                    named_dims_in_loads.insert(symbol.clone());
+                    bound = true;
+                }
                 if !bound {
                     panic!(
                         "internal compiler error: symbolic dim `{symbol}` is referenced by a \
-                         non-Load node (id {}) but no Load input declares it. The C codegen \
-                         would emit an undeclared identifier; fix the producing IR pass.",
-                        node.id.0
+                         non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) but no Load input \
+                         declares it. The C codegen would emit an undeclared identifier; fix the \
+                         producing IR pass.",
+                        node.id.0, node.op, node.inputs, node.output_type
                     );
                 }
             }
@@ -554,6 +579,45 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     }
 
     occurrences
+}
+
+fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, usize)> {
+    let node = dag.get(id)?;
+    match &node.op {
+        RiscOp::Load { name } => Some((name.as_str().to_string(), axis)),
+        RiscOp::Add | RiscOp::Mul | RiscOp::CmpLt | RiscOp::MaxElem => node
+            .inputs
+            .iter()
+            .find_map(|input| shape_source_for_axis(dag, *input, axis)),
+        RiscOp::Neg
+        | RiscOp::Exp
+        | RiscOp::Log
+        | RiscOp::Sin
+        | RiscOp::Sqrt
+        | RiscOp::Cos
+        | RiscOp::Tan
+        | RiscOp::Atan
+        | RiscOp::Abs
+        | RiscOp::Floor
+        | RiscOp::Ceil
+        | RiscOp::UniformLike { .. }
+        | RiscOp::Dropout { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        RiscOp::Copy | RiscOp::Drop | RiscOp::Realize | RiscOp::Cast { .. } => {
+            shape_source_for_axis(dag, *node.inputs.first()?, axis)
+        }
+        RiscOp::Reshape { .. }
+        | RiscOp::Permute { .. }
+        | RiscOp::Expand { .. }
+        | RiscOp::Pad { .. }
+        | RiscOp::Shrink { .. }
+        | RiscOp::Stride { .. }
+        | RiscOp::Store { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        RiscOp::FusedElem { .. } => node
+            .inputs
+            .iter()
+            .find_map(|input| shape_source_for_axis(dag, *input, axis)),
+        _ => None,
+    }
 }
 
 pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {

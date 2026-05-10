@@ -848,6 +848,8 @@ fn compute_adjoints(
             // is not yet supported.
             None
         }
+        RiscOp::Copy => Some(vec![(node.inputs[0], g)]),
+        RiscOp::Drop => None,
         RiscOp::BlasMatmul { .. } => None,
     }
 }

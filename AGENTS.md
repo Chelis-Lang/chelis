@@ -219,6 +219,10 @@ When writing or rewriting Surf in this repository:
   into read-only primitives; auto-borrow handles it. Write `&x` when an exported
   API or dense signature benefits from clarity. Write `copy(x)` only when forking
   ownership for downstream consumption.
+- lowered IR now carries compiler-inserted `Copy` and `Drop` nodes for implicit
+  linearity. If auto-copy/auto-drop produces unexpected IR, treat it as a
+  structural blocker and escalate against `spec/design/implicit_linearity.md`
+  rather than papering over it as a routine fixture bug.
 - type identifiers are PascalCase (`surf-type-pascal-case`, §3.1)
 - function/value identifiers are snake_case (`surf-value-snake-case`, §3.2)
 - functions carrying the `Test` effect are named `test_*` or `example_*`

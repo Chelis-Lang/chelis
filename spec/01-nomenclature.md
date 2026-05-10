@@ -893,6 +893,15 @@ use:
   the integration-test corpus (tests that synthesize ad-hoc Surf to
   exercise type/effect/linearity behavior independently of style).
 
+Advisory rules may be registered outside the blocking style-gate rule
+set. `redundant-linearity-call` is advisory: `chelis lint` reports
+explicit `copy()` and `drop()` source calls as warnings because
+implicit linearity inserts equivalent IR nodes, and `chelis check`
+prints the same warnings on user-facing runs. These warnings do not
+make `chelis lint --check` fail and are suppressed when
+`CHELIS_STYLE_GATE_DISABLE=1` disables the fixture/test compilation
+gate.
+
 Exception entries inside the lint must carry a rule-id cross-reference
 to a section of this document, not free-form prose. The schema:
 

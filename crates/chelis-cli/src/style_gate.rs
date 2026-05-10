@@ -80,6 +80,10 @@ fn env_disables_gate() -> bool {
         .unwrap_or(false)
 }
 
+pub fn disabled_by_env() -> bool {
+    env_disables_gate()
+}
+
 /// Run the style gate on `file`. Returns `Ok(())` if clean (or if
 /// `allow_violations` is true, even when issues were found — a warning
 /// is emitted to `stderr` in that case). Otherwise returns the joined

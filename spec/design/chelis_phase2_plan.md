@@ -297,17 +297,18 @@ borrowing, lifetimes, move semantics, and the borrow checker is over-engineering
 Chelis's use case. The RISC DAG structure, where tensors flow through a fixed set of
 primitives, allows an even simpler model.
 
-**The rule:** A tensor consumed by a RISC op is dead unless explicitly `copy()`'d.
-Consumption is static - the compiler tracks which variables have been consumed and
-rejects programs that use a consumed variable.
+**Superseded rule:** Early Phase 2b required a tensor consumed by a RISC op to be
+explicitly `copy()`'d before reuse. The active `copy-drop` contract in
+`spec/design/implicit_linearity.md` keeps explicit `copy()` valid, but ordinary
+source-level consuming fan-out is handled by inserted `RiscOp::Copy` nodes.
 
 ```text
 a = matmul(x, w)
 b = relu(a)
-c = add(a, b)        -- ERROR: a was consumed by relu on the previous line
+c = add(a, b)        -- old Phase 2b: ERROR; copy-drop: compiler inserts Copy
 ```
 
-Fix: `c = add(copy(a), b)` - explicit copy makes the cost visible.
+Explicit `c = add(copy(a), b)` remains valid and lowers to the same `RiscOp::Copy`.
 
 **Borrowing:** `&tensor` for read-only access. A borrow does not consume the tensor.
 Borrows cannot be stored in data structures, returned from functions, or captured by

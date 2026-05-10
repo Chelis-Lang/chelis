@@ -9,7 +9,7 @@ use std::process::Command;
 
 use chelis_deep::ast::{Atom, Expr};
 use chelis_e2e::pipeline::compile_surf;
-use chelis_ir::dag::{Dag, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_scalar, eval_tensor, eval_tensor_roots_with_strict};
 use chelis_ir::grad::grad_dag;
 use chelis_types::errors::CheckErrorKind;
@@ -912,7 +912,7 @@ fn spec_eval_matmul_correct() {
     );
 
     let vals = eval_tensor(&dag, &inputs).unwrap();
-    let result_id = NodeId(dag.len() - 1);
+    let result_id = *dag.roots().last().expect("DAG root");
     let result = &vals[&result_id];
 
     assert_eq!(result.shape, vec![2, 2]);
@@ -935,7 +935,7 @@ fn spec_eval_softmax_sums_to_one() {
     );
 
     let vals = eval_tensor(&dag, &inputs).unwrap();
-    let result_id = NodeId(dag.len() - 1);
+    let result_id = *dag.roots().last().expect("DAG root");
     let result = &vals[&result_id];
 
     let sum: f64 = result.data.iter().sum();
@@ -970,7 +970,7 @@ fn spec_eval_relu_preserves_positive() {
     );
 
     let vals = eval_tensor(&dag, &inputs).unwrap();
-    let result_id = NodeId(dag.len() - 1);
+    let result_id = *dag.roots().last().expect("DAG root");
     let result = &vals[&result_id];
 
     assert_eq!(result.shape, vec![5]);

@@ -394,13 +394,15 @@ fn compile_new_source_in_context(
     .into_exprs();
 
     // Phase C: type-check new code against the library type env.
-    let new_checked =
-        chelis_types::check_ir_with_context(&context.type_env, &new_deep).map_err(|report| {
-            CompilerError {
-                stage: "check".to_string(),
-                errors: report.errors.iter().map(check_error_diagnostic).collect(),
-            }
-        })?;
+    let new_checked = chelis_types::check_ir_with_signature_context(
+        &context.type_env,
+        context.library_checked.signature_inference(),
+        &new_deep,
+    )
+    .map_err(|report| CompilerError {
+        stage: "check".to_string(),
+        errors: report.errors.iter().map(check_error_diagnostic).collect(),
+    })?;
 
     // Phase D: effects checker, library + new.
     let new_checked =
@@ -2139,6 +2141,8 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Store { name } => WireRiscOp::Store {
             name: name.as_str().to_string(),
         },
+        RiscOp::Copy => WireRiscOp::Copy,
+        RiscOp::Drop => WireRiscOp::Drop,
         RiscOp::Realize => WireRiscOp::Realize,
         RiscOp::Cast { new_precision } => WireRiscOp::Cast {
             new_precision: new_precision.name().to_string(),

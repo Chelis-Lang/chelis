@@ -11,6 +11,7 @@ pub mod module_pascal_components;
 pub mod no_shell_scripts;
 pub mod phase_identifier_case;
 pub mod prefix_namespace;
+pub mod redundant_linearity_call;
 pub mod snapshot_filename_pattern;
 pub mod surf_def_arrow_form;
 pub mod surf_test_name_prefix;

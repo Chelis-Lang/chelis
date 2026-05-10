@@ -2,7 +2,7 @@
 //!
 //! Walks Deep AST nodes and assigns types using Hindley-Milner inference.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
@@ -29,6 +29,7 @@ pub struct CheckedProgram {
     annotated_exprs: Vec<deep::Expr>,
     type_env: HashMap<String, deep::Expr>,
     linearity: LinearityInfo,
+    signature_inference: SignatureInferenceMetadata,
 }
 
 impl CheckedProgram {
@@ -36,10 +37,27 @@ impl CheckedProgram {
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
     ) -> Self {
+        let signature_inference = infer_signature_metadata(&annotated_exprs, &type_env);
         Self {
             annotated_exprs,
             type_env,
             linearity: LinearityInfo::default(),
+            signature_inference,
+        }
+    }
+
+    pub fn from_parts_with_signature_context(
+        annotated_exprs: Vec<deep::Expr>,
+        type_env: HashMap<String, deep::Expr>,
+        signature_context: &SignatureInferenceMetadata,
+    ) -> Self {
+        let signature_inference =
+            infer_signature_metadata_with_context(&annotated_exprs, &type_env, signature_context);
+        Self {
+            annotated_exprs,
+            type_env,
+            linearity: LinearityInfo::default(),
+            signature_inference,
         }
     }
 
@@ -59,10 +77,44 @@ impl CheckedProgram {
         &self.linearity
     }
 
+    pub fn signature_inference(&self) -> &SignatureInferenceMetadata {
+        &self.signature_inference
+    }
+
     pub fn with_linearity(mut self, linearity: LinearityInfo) -> Self {
         self.linearity = linearity;
         self
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SignatureInferenceMetadata {
+    pub functions: BTreeMap<String, FunctionSignatureInference>,
+}
+
+impl SignatureInferenceMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.functions.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FunctionSignatureInference {
+    pub name: String,
+    pub recursive_cycle: bool,
+    pub checked_signature: Type,
+    pub display_signature: Type,
+    pub params: Vec<ParamSignatureInference>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParamSignatureInference {
+    pub index: usize,
+    pub name: String,
+    pub written: bool,
+    pub inferred_read_only: bool,
+    pub checked_type: Type,
+    pub display_type: Type,
 }
 
 /// Run type inference on a list of top-level Deep expressions.
@@ -356,6 +408,14 @@ pub fn check_ir_with_context(
     context: &TypeEnv,
     new_exprs: &[deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
+    check_ir_with_signature_context(context, &SignatureInferenceMetadata::default(), new_exprs)
+}
+
+pub fn check_ir_with_signature_context(
+    context: &TypeEnv,
+    signature_context: &SignatureInferenceMetadata,
+    new_exprs: &[deep::Expr],
+) -> Result<CheckedProgram, InferResult> {
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -425,9 +485,10 @@ pub fn check_ir_with_context(
             .or_insert_with(|| ty.clone());
     }
     log_sub("annotated_type_env_build", &mut sub_t);
-    Ok(CheckedProgram::from_parts(
+    Ok(CheckedProgram::from_parts_with_signature_context(
         annotated_exprs,
         annotated_type_env,
+        signature_context,
     ))
 }
 
@@ -1010,6 +1071,769 @@ fn top_level_decl_items(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
         push(expr, &mut out);
     }
     out
+}
+
+fn infer_signature_metadata(
+    exprs: &[deep::Expr],
+    type_env: &HashMap<String, deep::Expr>,
+) -> SignatureInferenceMetadata {
+    infer_signature_metadata_with_context(exprs, type_env, &SignatureInferenceMetadata::default())
+}
+
+fn infer_signature_metadata_with_context(
+    exprs: &[deep::Expr],
+    type_env: &HashMap<String, deep::Expr>,
+    signature_context: &SignatureInferenceMetadata,
+) -> SignatureInferenceMetadata {
+    let defsig_names = collect_defsig_names(exprs);
+    let recursive_members = recursive_call_cycle_members(exprs);
+    let mut functions = BTreeMap::new();
+    let ordered_defs = signature_inference_def_order(exprs);
+    let passes = ordered_defs.len().max(1);
+    let imported_signatures = signature_context
+        .functions
+        .iter()
+        .map(|(name, inference)| (name.clone(), inference.display_signature.clone()))
+        .collect::<HashMap<_, _>>();
+
+    for _ in 0..passes {
+        functions.clear();
+        let mut available_signatures = imported_signatures.clone();
+        for expr in &ordered_defs {
+            let deep::Expr::List(list, _) = expr else {
+                continue;
+            };
+            if get_tag(list) != Some("def") {
+                continue;
+            }
+            let kids = children(list);
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            let Some(fn_list) = kids.get(1).and_then(as_tagged_list_expr("fn")) else {
+                continue;
+            };
+            let Some(checked_signature) = type_env.get(name).and_then(type_from_deep_expr) else {
+                continue;
+            };
+            let Type::Fn(checked_args, checked_ret) = checked_signature.clone() else {
+                continue;
+            };
+            let fn_kids = children(fn_list);
+            let Some(params_expr) = fn_kids.first() else {
+                continue;
+            };
+            let Some(body) = fn_kids.get(1) else {
+                continue;
+            };
+            let param_infos = param_source_infos(params_expr);
+            let recursive_cycle = recursive_members.contains(name);
+            let all_written_by_defsig =
+                defsig_names.contains(name) && param_infos.iter().all(|(_, written)| !*written);
+            let mut display_args = checked_args.clone();
+            let mut params = Vec::new();
+
+            for (index, (pname, param_written)) in param_infos.iter().enumerate() {
+                let Some(checked_type) = checked_args.get(index).cloned() else {
+                    continue;
+                };
+                let written = all_written_by_defsig || *param_written;
+                let can_infer = !recursive_cycle
+                    && !written
+                    && type_contains_tensor(&checked_type)
+                    && !matches!(checked_type, Type::Ref(_));
+                let inferred_read_only = can_infer
+                    && !param_has_consuming_use(body, pname, &available_signatures, type_env);
+                let display_type = if inferred_read_only {
+                    Type::Ref(Box::new(checked_type.clone()))
+                } else {
+                    checked_type.clone()
+                };
+                if let Some(slot) = display_args.get_mut(index) {
+                    *slot = display_type.clone();
+                }
+                params.push(ParamSignatureInference {
+                    index,
+                    name: pname.clone(),
+                    written,
+                    inferred_read_only,
+                    checked_type,
+                    display_type,
+                });
+            }
+
+            let display_signature = Type::Fn(display_args, checked_ret);
+            available_signatures.insert(name.to_string(), display_signature.clone());
+            functions.insert(
+                name.to_string(),
+                FunctionSignatureInference {
+                    name: name.to_string(),
+                    recursive_cycle,
+                    checked_signature,
+                    display_signature,
+                    params,
+                },
+            );
+        }
+    }
+
+    SignatureInferenceMetadata { functions }
+}
+
+fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
+    let def_items = top_level_decl_items(exprs)
+        .into_iter()
+        .filter_map(|expr| {
+            let deep::Expr::List(list, _) = expr else {
+                return None;
+            };
+            if get_tag(list) != Some("def") {
+                return None;
+            }
+            let name = children(list).first().and_then(symbol_name)?;
+            children(list).get(1).and_then(as_tagged_list_expr("fn"))?;
+            Some((name.to_string(), expr))
+        })
+        .collect::<Vec<_>>();
+    let def_names = def_items
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<HashSet<_>>();
+    let def_by_name = def_items
+        .iter()
+        .map(|(name, expr)| (name.clone(), *expr))
+        .collect::<HashMap<_, _>>();
+    let mut graph = HashMap::<String, HashSet<String>>::new();
+    for (name, expr) in &def_items {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        let Some(fn_list) = children(list).get(1).and_then(as_tagged_list_expr("fn")) else {
+            continue;
+        };
+        let fn_kids = children(fn_list);
+        let (Some(params), Some(body)) = (fn_kids.first(), fn_kids.get(1)) else {
+            continue;
+        };
+        let mut bound = vec![
+            param_source_infos(params)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect(),
+        ];
+        let mut calls = HashSet::new();
+        collect_top_level_calls(body, &def_names, &mut bound, &mut calls);
+        graph.insert(name.clone(), calls);
+    }
+
+    fn visit<'a>(
+        name: &str,
+        graph: &HashMap<String, HashSet<String>>,
+        def_by_name: &HashMap<String, &'a deep::Expr>,
+        visiting: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+        out: &mut Vec<&'a deep::Expr>,
+    ) {
+        if visited.contains(name) || !visiting.insert(name.to_string()) {
+            return;
+        }
+        if let Some(callees) = graph.get(name) {
+            let mut callees = callees.iter().collect::<Vec<_>>();
+            callees.sort();
+            for callee in callees {
+                visit(callee, graph, def_by_name, visiting, visited, out);
+            }
+        }
+        visiting.remove(name);
+        visited.insert(name.to_string());
+        if let Some(expr) = def_by_name.get(name) {
+            out.push(*expr);
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for (name, _) in &def_items {
+        visit(
+            name,
+            &graph,
+            &def_by_name,
+            &mut visiting,
+            &mut visited,
+            &mut out,
+        );
+    }
+    out
+}
+
+fn collect_defsig_names(exprs: &[deep::Expr]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for expr in top_level_decl_items(exprs) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("defsig")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+fn recursive_call_cycle_members(exprs: &[deep::Expr]) -> HashSet<String> {
+    let mut def_names = HashSet::new();
+    let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for expr in top_level_decl_items(exprs) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+            && children(list)
+                .get(1)
+                .and_then(as_tagged_list_expr("fn"))
+                .is_some()
+        {
+            def_names.insert(name.to_string());
+        }
+    }
+
+    for expr in top_level_decl_items(exprs) {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(fn_list) = kids.get(1).and_then(as_tagged_list_expr("fn")) else {
+            continue;
+        };
+        let fn_kids = children(fn_list);
+        let Some(params) = fn_kids.first() else {
+            continue;
+        };
+        let Some(body) = fn_kids.get(1) else {
+            continue;
+        };
+        let mut bound = vec![
+            param_source_infos(params)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect(),
+        ];
+        let mut calls = HashSet::new();
+        collect_top_level_calls(body, &def_names, &mut bound, &mut calls);
+        graph.insert(name.to_string(), calls);
+    }
+
+    let mut recursive = HashSet::new();
+    for name in &def_names {
+        let mut visited = HashSet::new();
+        if reaches_name(name, name, &graph, &mut visited) {
+            recursive.insert(name.clone());
+        }
+    }
+    recursive
+}
+
+fn reaches_name(
+    start: &str,
+    current: &str,
+    graph: &HashMap<String, HashSet<String>>,
+    visited: &mut HashSet<String>,
+) -> bool {
+    let Some(nexts) = graph.get(current) else {
+        return false;
+    };
+    for next in nexts {
+        if next == start {
+            return true;
+        }
+        if visited.insert(next.clone()) && reaches_name(start, next, graph, visited) {
+            return true;
+        }
+    }
+    false
+}
+
+fn collect_top_level_calls(
+    expr: &deep::Expr,
+    def_names: &HashSet<String>,
+    bound: &mut Vec<HashSet<String>>,
+    calls: &mut HashSet<String>,
+) {
+    match expr {
+        deep::Expr::Atom(_, _) => {}
+        deep::Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_top_level_calls(value, def_names, bound, calls);
+            }
+        }
+        deep::Expr::MetaExpr(meta, _) => {
+            collect_top_level_calls(&meta.expr, def_names, bound, calls)
+        }
+        deep::Expr::List(list, _) => match get_tag(list) {
+            Some("app") => {
+                let kids = children(list);
+                if let Some(callee) = kids.first().and_then(var_name_expr)
+                    && def_names.contains(callee)
+                    && !is_bound_name(callee, bound)
+                {
+                    calls.insert(callee.to_string());
+                }
+                for child in kids {
+                    collect_top_level_calls(child, def_names, bound, calls);
+                }
+            }
+            Some("fn") => {
+                let kids = children(list);
+                if kids.len() >= 2 {
+                    bound.push(
+                        param_source_infos(&kids[0])
+                            .into_iter()
+                            .map(|(n, _)| n)
+                            .collect(),
+                    );
+                    collect_top_level_calls(&kids[1], def_names, bound, calls);
+                    bound.pop();
+                }
+            }
+            Some("let") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return;
+                }
+                let mut let_names = HashSet::new();
+                if let Some(bind_list) = kids.first().and_then(as_tagged_list_expr("bind")) {
+                    let bind_kids = children(bind_list);
+                    let mut index = 0;
+                    while index + 1 < bind_kids.len() {
+                        collect_top_level_calls(&bind_kids[index + 1], def_names, bound, calls);
+                        if let Some(name) = symbol_name(&bind_kids[index]) {
+                            let_names.insert(name.to_string());
+                        }
+                        index += 2;
+                    }
+                }
+                bound.push(let_names);
+                collect_top_level_calls(&kids[1], def_names, bound, calls);
+                bound.pop();
+            }
+            Some("match") => {
+                let kids = children(list);
+                if let Some(scrutinee) = kids.first() {
+                    collect_top_level_calls(scrutinee, def_names, bound, calls);
+                }
+                for arm in kids.iter().skip(1) {
+                    let Some(arm_list) = as_tagged_list_expr("arm")(arm) else {
+                        continue;
+                    };
+                    let arm_kids = children(arm_list);
+                    if arm_kids.len() < 3 {
+                        continue;
+                    }
+                    bound.push(pattern_names_for_signature(&arm_kids[0]));
+                    collect_top_level_calls(&arm_kids[1], def_names, bound, calls);
+                    collect_top_level_calls(&arm_kids[2], def_names, bound, calls);
+                    bound.pop();
+                }
+            }
+            _ => {
+                for child in children(list) {
+                    collect_top_level_calls(child, def_names, bound, calls);
+                }
+            }
+        },
+    }
+}
+
+fn param_has_consuming_use(
+    expr: &deep::Expr,
+    param: &str,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+) -> bool {
+    let mut bound = Vec::new();
+    param_has_consuming_use_inner(expr, param, &mut bound, available_signatures, type_env)
+}
+
+fn param_has_consuming_use_inner(
+    expr: &deep::Expr,
+    param: &str,
+    bound: &mut Vec<HashSet<String>>,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+) -> bool {
+    match expr {
+        deep::Expr::Atom(_, _) => false,
+        deep::Expr::Map(map, _) => map.entries.iter().any(|(_, value)| {
+            param_has_consuming_use_inner(value, param, bound, available_signatures, type_env)
+        }),
+        deep::Expr::MetaExpr(meta, _) => {
+            param_has_consuming_use_inner(&meta.expr, param, bound, available_signatures, type_env)
+        }
+        deep::Expr::List(list, _) => match get_tag(list) {
+            Some("var") => var_name_list(list) == Some(param) && !is_bound_name(param, bound),
+            Some("borrow") | Some("copy") => children(list).first().is_some_and(|child| {
+                param_nested_consuming_use(child, param, bound, available_signatures, type_env)
+            }),
+            Some("drop") | Some("realize") => children(list)
+                .first()
+                .is_some_and(|child| expr_mentions_unshadowed_name(child, param, bound)),
+            Some("app") => app_consumes_param(list, param, bound, available_signatures, type_env),
+            Some("pipe") => pipe_consumes_param(list, param, bound, available_signatures, type_env),
+            Some("fn") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return false;
+                }
+                if expr_mentions_unshadowed_name(&kids[1], param, bound) {
+                    return true;
+                }
+                false
+            }
+            Some("let") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return false;
+                }
+                let mut let_names = HashSet::new();
+                if let Some(bind_list) = kids.first().and_then(as_tagged_list_expr("bind")) {
+                    let bind_kids = children(bind_list);
+                    let mut index = 0;
+                    while index + 1 < bind_kids.len() {
+                        if param_has_consuming_use_inner(
+                            &bind_kids[index + 1],
+                            param,
+                            bound,
+                            available_signatures,
+                            type_env,
+                        ) {
+                            return true;
+                        }
+                        if let Some(name) = symbol_name(&bind_kids[index]) {
+                            let_names.insert(name.to_string());
+                        }
+                        index += 2;
+                    }
+                }
+                bound.push(let_names);
+                let result = param_has_consuming_use_inner(
+                    &kids[1],
+                    param,
+                    bound,
+                    available_signatures,
+                    type_env,
+                );
+                bound.pop();
+                result
+            }
+            Some("match") => {
+                let kids = children(list);
+                if kids
+                    .first()
+                    .is_some_and(|scrutinee| expr_mentions_unshadowed_name(scrutinee, param, bound))
+                {
+                    return true;
+                }
+                for arm in kids.iter().skip(1) {
+                    let Some(arm_list) = as_tagged_list_expr("arm")(arm) else {
+                        continue;
+                    };
+                    let arm_kids = children(arm_list);
+                    if arm_kids.len() < 3 {
+                        continue;
+                    }
+                    bound.push(pattern_names_for_signature(&arm_kids[0]));
+                    let consumes = param_has_consuming_use_inner(
+                        &arm_kids[1],
+                        param,
+                        bound,
+                        available_signatures,
+                        type_env,
+                    ) || param_has_consuming_use_inner(
+                        &arm_kids[2],
+                        param,
+                        bound,
+                        available_signatures,
+                        type_env,
+                    );
+                    bound.pop();
+                    if consumes {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => children(list).iter().any(|child| {
+                param_has_consuming_use_inner(child, param, bound, available_signatures, type_env)
+            }),
+        },
+    }
+}
+
+fn param_nested_consuming_use(
+    expr: &deep::Expr,
+    param: &str,
+    bound: &mut Vec<HashSet<String>>,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+) -> bool {
+    if is_direct_unshadowed_var(expr, param, bound) {
+        return false;
+    }
+    param_has_consuming_use_inner(expr, param, bound, available_signatures, type_env)
+}
+
+fn app_consumes_param(
+    list: &deep::List,
+    param: &str,
+    bound: &mut Vec<HashSet<String>>,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+) -> bool {
+    let kids = children(list);
+    let callee = kids.first().and_then(var_name_expr);
+    if let Some(func) = kids.first()
+        && !matches!(callee, Some(name) if name != param)
+        && param_has_consuming_use_inner(func, param, bound, available_signatures, type_env)
+    {
+        return true;
+    }
+    for (index, arg) in kids.iter().skip(1).enumerate() {
+        if borrow_inner_for_signature(arg)
+            .is_some_and(|inner| is_direct_unshadowed_var(inner, param, bound))
+        {
+            continue;
+        }
+        if is_direct_unshadowed_var(arg, param, bound) {
+            if callee_arg_is_borrowed(callee, index, available_signatures, type_env) {
+                continue;
+            }
+            return true;
+        }
+        if param_has_consuming_use_inner(arg, param, bound, available_signatures, type_env) {
+            return true;
+        }
+    }
+    false
+}
+
+fn pipe_consumes_param(
+    list: &deep::List,
+    param: &str,
+    bound: &mut Vec<HashSet<String>>,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+) -> bool {
+    let kids = children(list);
+    if kids.is_empty() {
+        return false;
+    }
+    let mut current = &kids[0];
+    for stage in &kids[1..] {
+        let stage_name = var_name_expr(stage);
+        if is_direct_unshadowed_var(current, param, bound) {
+            if !callee_arg_is_borrowed(stage_name, 0, available_signatures, type_env) {
+                return true;
+            }
+        } else if param_has_consuming_use_inner(
+            current,
+            param,
+            bound,
+            available_signatures,
+            type_env,
+        ) {
+            return true;
+        }
+        current = stage;
+    }
+    false
+}
+
+fn callee_arg_is_borrowed(
+    callee: Option<&str>,
+    index: usize,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+) -> bool {
+    let Some(callee) = callee else {
+        return false;
+    };
+    if let Some(Type::Fn(args, _)) = available_signatures.get(callee)
+        && args.get(index).is_some_and(|ty| matches!(ty, Type::Ref(_)))
+    {
+        return true;
+    }
+    if let Some(Type::Fn(args, _)) = type_env.get(callee).and_then(type_from_deep_expr)
+        && args.get(index).is_some_and(|ty| matches!(ty, Type::Ref(_)))
+    {
+        return true;
+    }
+    builtin_arg_is_ref(callee, index)
+}
+
+fn builtin_arg_is_ref(name: &str, index: usize) -> bool {
+    let (env, _) = builtins::builtin_env();
+    if let Some(Type::Fn(args, _)) = env.lookup(name).map(|scheme| &scheme.body) {
+        return args.get(index).is_some_and(|ty| matches!(ty, Type::Ref(_)));
+    }
+    false
+}
+
+fn expr_mentions_unshadowed_name(
+    expr: &deep::Expr,
+    name: &str,
+    bound: &mut Vec<HashSet<String>>,
+) -> bool {
+    match expr {
+        deep::Expr::Atom(_, _) => false,
+        deep::Expr::Map(map, _) => map
+            .entries
+            .iter()
+            .any(|(_, value)| expr_mentions_unshadowed_name(value, name, bound)),
+        deep::Expr::MetaExpr(meta, _) => expr_mentions_unshadowed_name(&meta.expr, name, bound),
+        deep::Expr::List(list, _) => match get_tag(list) {
+            Some("var") => var_name_list(list) == Some(name) && !is_bound_name(name, bound),
+            Some("fn") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return false;
+                }
+                bound.push(
+                    param_source_infos(&kids[0])
+                        .into_iter()
+                        .map(|(n, _)| n)
+                        .collect(),
+                );
+                let result = expr_mentions_unshadowed_name(&kids[1], name, bound);
+                bound.pop();
+                result
+            }
+            _ => children(list)
+                .iter()
+                .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
+        },
+    }
+}
+
+fn type_from_deep_expr(expr: &deep::Expr) -> Option<Type> {
+    let mut vg = VarGen::default();
+    let mut tvar_map = HashMap::new();
+    let ty = deep_type_to_type(expr, &mut vg, &mut tvar_map);
+    (!matches!(ty, Type::Error)).then_some(ty)
+}
+
+fn type_contains_tensor(ty: &Type) -> bool {
+    match ty {
+        Type::Tensor(_, _) => true,
+        Type::Ref(inner) => type_contains_tensor(inner),
+        Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(type_contains_tensor),
+        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+    }
+}
+
+fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
+    let Some(list) = as_tagged_list_expr("params")(expr) else {
+        return Vec::new();
+    };
+    children(list)
+        .iter()
+        .filter_map(|param| match param {
+            deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some((name.clone(), false)),
+            deep::Expr::MetaExpr(meta, _) => {
+                let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref() else {
+                    return None;
+                };
+                Some((
+                    name.clone(),
+                    meta.entries.iter().any(|(key, _)| key == "type"),
+                ))
+            }
+            deep::Expr::List(param_list, _) => {
+                let name = param_list.elements.first().and_then(symbol_name)?;
+                let written = get_meta(param_list)
+                    .is_some_and(|meta| meta.entries.iter().any(|(key, _)| key == "type"));
+                Some((name.to_string(), written))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn pattern_names_for_signature(expr: &deep::Expr) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_pattern_names_for_signature(expr, &mut names);
+    names
+}
+
+fn collect_pattern_names_for_signature(expr: &deep::Expr, names: &mut HashSet<String>) {
+    let deep::Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        Some("pat-var") => {
+            if let Some(name) = children(list).first().and_then(symbol_name) {
+                names.insert(name.to_string());
+            }
+        }
+        Some("pat-as") => {
+            let kids = children(list);
+            if let Some(name) = kids.first().and_then(symbol_name) {
+                names.insert(name.to_string());
+            }
+            if let Some(inner) = kids.get(1) {
+                collect_pattern_names_for_signature(inner, names);
+            }
+        }
+        _ => {
+            for child in children(list) {
+                collect_pattern_names_for_signature(child, names);
+            }
+        }
+    }
+}
+
+fn as_tagged_list_expr(tag: &'static str) -> impl Fn(&deep::Expr) -> Option<&deep::List> {
+    move |expr| match expr {
+        deep::Expr::List(list, _) if get_tag(list) == Some(tag) => Some(list),
+        _ => None,
+    }
+}
+
+fn var_name_expr(expr: &deep::Expr) -> Option<&str> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    var_name_list(list)
+}
+
+fn var_name_list(list: &deep::List) -> Option<&str> {
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
+}
+
+fn borrow_inner_for_signature(expr: &deep::Expr) -> Option<&deep::Expr> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("borrow") {
+        return None;
+    }
+    children(list).first()
+}
+
+fn is_direct_unshadowed_var(expr: &deep::Expr, name: &str, bound: &[HashSet<String>]) -> bool {
+    var_name_expr(expr) == Some(name) && !is_bound_name(name, bound)
+}
+
+fn is_bound_name(name: &str, bound: &[HashSet<String>]) -> bool {
+    bound.iter().rev().any(|scope| scope.contains(name))
 }
 
 /// Detect cycles among top-level `def` bindings.

@@ -21,3 +21,11 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(rules::surf_def_arrow_form::SurfDefArrowForm),
     ]
 }
+
+/// Return warning-only rules. These are user-facing lint advisories, but they
+/// are intentionally excluded from the blocking style-gate registry.
+pub fn advisory_rules() -> Vec<Box<dyn Rule>> {
+    vec![Box::new(
+        rules::redundant_linearity_call::RedundantLinearityCall,
+    )]
+}

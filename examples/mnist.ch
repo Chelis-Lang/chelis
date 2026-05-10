@@ -6,12 +6,6 @@ def logits(x: tensor[32, 784, f32], labels: tensor[32, 10, f32], w1: tensor[784,
   logits_linear = matmul(h1, w2)
   b2_expanded = expand(b2, 0, 32)
   out = add(logits_linear, b2_expanded)
-  _ = drop(b1_expanded)
-  _ = drop(hidden_linear)
-  _ = drop(hidden_pre)
-  _ = drop(h1)
-  _ = drop(logits_linear)
-  _ = drop(b2_expanded)
   out
 }
 def loss(x: tensor[32, 784, f32], labels: tensor[32, 10, f32], w1: tensor[784, 128, f32], b1: tensor[128, f32], w2: tensor[128, 10, f32], b2: tensor[10, f32]) -> tensor[f32] = {
@@ -28,17 +22,5 @@ def loss(x: tensor[32, 784, f32], labels: tensor[32, 10, f32], w1: tensor[784, 1
   per_row = sum(weighted, 1)
   neg_loss = neg(per_row)
   out = mean(neg_loss, 0)
-  _ = drop(b1_expanded)
-  _ = drop(hidden_linear)
-  _ = drop(hidden_pre)
-  _ = drop(h1)
-  _ = drop(logits_linear)
-  _ = drop(b2_expanded)
-  _ = drop(logits)
-  _ = drop(probs)
-  _ = drop(log_probs)
-  _ = drop(weighted)
-  _ = drop(per_row)
-  _ = drop(neg_loss)
   out
 }

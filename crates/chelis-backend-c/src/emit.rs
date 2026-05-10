@@ -280,6 +280,8 @@ impl CEmitter {
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before C code generation")
             }
+            RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
+            RiscOp::Drop => {}
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {

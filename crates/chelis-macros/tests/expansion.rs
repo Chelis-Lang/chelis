@@ -62,6 +62,22 @@ def f(x: f32): f32 = capture(x)
 }
 
 #[test]
+fn hygiene_preserves_call_argument_binders() {
+    let text = expand_surf(
+        r#"
+macro bump(x) = add(x, 1.0)
+def f(y: f32): f32 = bump({ z = y; z })
+"#,
+    );
+
+    assert_contains_var_ref(&text, "z");
+    assert!(
+        !text.contains("z_macro_"),
+        "call-site binders must not be hygienized as macro-introduced binders:\n{text}"
+    );
+}
+
+#[test]
 fn free_references_survive_hygiene() {
     let text = expand_surf(
         r#"

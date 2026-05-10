@@ -271,6 +271,8 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Ceil
         | RiscOp::UniformLike { .. }
         | RiscOp::Dropout { .. }
+        | RiscOp::Copy
+        | RiscOp::Drop
         | RiscOp::Sum { .. }
         | RiscOp::MaxReduce { .. }
         | RiscOp::MinReduce { .. }
@@ -588,6 +590,45 @@ mod tests {
                 .iter()
                 .any(|node| matches!(node.op, RiscOp::Mul | RiscOp::Expand { .. })),
             "batched BLAS specialization must remove the dense [..., m, k, n] product"
+        );
+    }
+
+    #[test]
+    fn terminal_drop_markers_do_not_block_matmul_specialization() {
+        let mut dag = Dag::new();
+        let a_ty = mat(8, 16);
+        let b_ty = mat(16, 4);
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        let out = crate::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let mul = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Mul))
+            .expect("tier2 matmul contains mul")
+            .id;
+        dag.add_node(RiscOp::Drop, vec![mul], t3(8, 16, 4), None);
+        dag.add_root(out);
+
+        let specialized = specialize_for_blas(&dag);
+        let fused = crate::fuse::fuse(&specialized);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
+            "{:?}",
+            fused.nodes()
         );
     }
 }

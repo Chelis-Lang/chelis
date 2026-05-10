@@ -1,20 +1,18 @@
-//! Test 1 — Copy Elision via emitted C source.
+//! Test 1 — Explicit Copy Materialization via emitted C source.
 //!
-//! Third-party Test 1 prediction: a Surf function that calls `copy(x)` five
-//! times either (a) elides every copy and uses ~one buffer of `x` worth of
-//! memory, or (b) literally allocates one buffer per `copy` and balloons to
-//! ~6× input size.
+//! The `copy-drop` contract makes source-level `copy(x)` explicit in IR as
+//! `RiscOp::Copy`. This canary checks the emitted C follows that new wire
+//! shape instead of silently erasing the copies.
 //!
 //! This test compiles `examples/illustrative/copy_elision_probe.ch` to C and
 //! inspects the output. The locked findings:
 //!
-//!   * Zero `memcpy` calls. The five `copy(x)` markers in Surf are *not*
-//!     lowered as memory copies — they are linearity-discharge markers that
-//!     authorize multi-consumer reads of the same backing buffer.
-//!   * Four large `chelis_slot*` backing allocations, with the final output
-//!     wrapper reusing a dead intermediate slot. No extra allocation per
-//!     `copy(x)` and no allocation for the four source-level `add`
-//!     intermediates (those fuse).
+//!   * Zero `memcpy` calls. Explicit copies materialize through the same
+//!     contiguous realization loop used by `realize`, not through raw byte
+//!     copying.
+//!   * Six large `chelis_slot*` backing allocations for the current
+//!     conservative planner: explicit copy materialization plus fused fan-in
+//!     intermediates.
 //!   * Multiple `parallel for simd` blocks — kernel fusion combines the
 //!     elementwise unary results and the add chain into SIMD-vectorized
 //!     loops without source-level add intermediates.
@@ -22,19 +20,14 @@
 //!     qualifier. This is the linearity → no-aliasing guarantee surfacing in
 //!     the C codegen so the host compiler can vectorize aggressively.
 //!
-//! Net: `copy()` is free at the buffer level, and C codegen now reuses
-//! backing slots when liveness proves non-overlap. The remaining 4× helper
-//! footprint is not copy materialization; it is the conservative M2a outcome
-//! for the current out-of-place fused fan-in shape. Shrinking this probe to
-//! 2-3 buffers requires fan-in/in-place fusion beyond the M2a memory planner.
-//!
-//! The cost profile here is "four out-of-place buffers for the fused fan-in
-//! shape," not "five copies materialized."
+//! Net: explicit `copy()` is now visible to the IR/cost surface. The planner
+//! may still reuse backing slots when liveness proves non-overlap, but this
+//! canary no longer asserts that source copies are free.
 //!
 //! ## Cost profile (computed from emitted C)
 //!
 //! For the probe shape `tensor[1024, 1024, f32]` (~4 MiB per buffer):
-//!   * 4 backing slots × (1024×1024×4 B) = **16 MiB allocated by helper**.
+//!   * 6 backing slots × (1024×1024×4 B) = **24 MiB allocated by helper**.
 //!   * The input `x` itself is borrowed (not allocated) so it does not
 //!     contribute to the helper's allocation footprint.
 //!   * Metadata wrappers are still freed at function epilogue, but backing
@@ -42,8 +35,8 @@
 //!
 //! Linear projection to a 2 GiB input (~22300×22300 f32 ≈ 2 GiB):
 //!   * Caller-side: 1 × 2 GiB input.
-//!   * Helper-side: 4 × 2 GiB backing slots = **8 GiB peak working set**.
-//!   * Total RAM with the input: ~10 GiB. A later fan-in/in-place fusion pass
+//!   * Helper-side: 6 × 2 GiB backing slots = **12 GiB peak working set**.
+//!   * Total RAM with the input: ~14 GiB. A later fan-in/in-place fusion pass
 //!     could collapse this further, but that is not part of M2a.
 
 use std::fs;
@@ -144,7 +137,7 @@ pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
 }
 
 #[test]
-fn copy_elision_probe_reuses_c_backend_slots_without_materializing_copies() {
+fn copy_probe_materializes_explicit_copies_without_memcpy() {
     let source = build_copy_elision_c_source();
 
     let alloc_calls = source.matches("chelis_alloc(").count();
@@ -154,24 +147,15 @@ fn copy_elision_probe_reuses_c_backend_slots_without_materializing_copies() {
 
     assert_eq!(
         memcpy_calls, 0,
-        "expected zero memcpy calls — `copy(x)` markers must NOT lower to \
-         physical buffer copies. Got {memcpy_calls}. If this fails, the \
-         linearity-discharge contract has regressed and `copy(x)` is now \
-         producing real allocations."
+        "expected zero memcpy calls — `copy(x)` materializes through tensor \
+         realization loops, not raw byte copies. Got {memcpy_calls}."
     );
 
-    assert!(
-        alloc_calls <= 4,
-        "expected at most 4 C backing-slot allocations for the conservative \
-         M2a planner. Got {alloc_calls}. More means slot reuse regressed; \
-         fewer means fan-in/in-place fusion improved and this assertion can \
-         be tightened."
-    );
-
-    assert!(
-        source.contains("chelis_tensor *t5 = chelis_alloc_view(2, (int[]){ 1024, 1024 }, CHELIS_F32, chelis_slot1->data);"),
-        "expected the final output wrapper to reuse the dead intermediate \
-         slot from t2. This locks real slot reuse, not only aggregate count."
+    assert_eq!(
+        alloc_calls, 6,
+        "expected 6 C backing-slot allocations after explicit Copy reached \
+         IR. Fewer means copy materialization was optimized away; more means \
+         slot reuse regressed."
     );
 
     assert!(
@@ -198,18 +182,17 @@ fn copy_elision_probe_reuses_c_backend_slots_without_materializing_copies() {
          ({mib:.2} MiB). Per-alloc bytes: {per:?}"
     );
 
-    // For tensor[1024, 1024, f32], each backing slot is 4 MiB. The M2a
-    // conservative C planner should need at most four such slots for the
-    // current out-of-place fused fan-in shape.
-    let expected_max = 4 * 1024 * 1024 * 4; // 16 MiB
-    assert!(
-        total_bytes <= expected_max,
-        "expected peak C backing-slot footprint <= 16 MiB (4 slots × 4 MiB), \
+    // For tensor[1024, 1024, f32], each backing slot is 4 MiB. Explicit
+    // copy materialization currently brings this probe to six slots.
+    let expected = 6 * 1024 * 1024 * 4; // 24 MiB
+    assert_eq!(
+        total_bytes, expected,
+        "expected peak C backing-slot footprint of 24 MiB (6 slots × 4 MiB), \
          got {total_bytes} bytes ({mib:.2} MiB). Per-alloc bytes: {per:?}"
     );
 
     // Linear projection: scale input from 4 MiB (1024×1024 f32) to 2 GiB
-    // (~512× larger). Four backing slots scale to 8 GiB helper-side peak.
+    // (~512× larger). Six backing slots scale to 12 GiB helper-side peak.
     let scale_to_2gib = (2_u64 * 1024 * 1024 * 1024) / (1024 * 1024 * 4);
     let projected_2gib_peak_bytes = (total_bytes as u64) * scale_to_2gib;
     let projected_2gib_peak_gib = projected_2gib_peak_bytes as f64 / (1024.0 * 1024.0 * 1024.0);

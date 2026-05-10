@@ -645,7 +645,8 @@ impl HipEmitter {
             RiscOp::Floor => Some("kernel_floor".into()),
             RiscOp::Ceil => Some("kernel_ceil".into()),
             RiscOp::UniformLike { .. } => Some("kernel_uniform_like".into()),
-            RiscOp::Dropout { .. } => None,
+            RiscOp::Dropout { .. } | RiscOp::Drop => None,
+            RiscOp::Copy => Some("kernel_cast".into()),
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -730,6 +731,7 @@ impl HipEmitter {
             RiscOp::Const { .. } => kernels::fill(name),
             RiscOp::Realize => kernels::cast(name),
             RiscOp::Cast { .. } => kernels::cast(name),
+            RiscOp::Copy => kernels::cast(name),
             RiscOp::FusedElem { ops } => kernels::fused_elementwise(name, ops, node.inputs.len()),
             _ => unreachable!("no kernel for op: {op:?}"),
         }
@@ -833,6 +835,10 @@ impl HipEmitter {
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before HIP code generation")
             }
+            RiscOp::Copy => {
+                self.emit_unary_launch(id, "kernel_cast", &node.inputs, &node.output_type);
+            }
+            RiscOp::Drop => {}
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -1754,6 +1760,8 @@ impl HipEmitter {
             | RiscOp::Ceil
             | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
+            | RiscOp::Copy
+            | RiscOp::Drop
             | RiscOp::Sum { .. }
             | RiscOp::MaxReduce { .. }
             | RiscOp::MinReduce { .. }
