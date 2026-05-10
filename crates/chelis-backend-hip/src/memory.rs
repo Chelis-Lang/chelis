@@ -161,6 +161,7 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::ProdReduce { .. }
                 | RiscOp::Argmax { .. }
                 | RiscOp::Argmin { .. }
+                | RiscOp::OneHot { .. }
                 | RiscOp::Realize
                 | RiscOp::Cast { .. }
                 | RiscOp::FusedElem { .. }
@@ -397,9 +398,10 @@ impl MemoryPlan {
 
 fn bytes_per_element(dtype: Prim) -> usize {
     match dtype {
-        Prim::F32 | Prim::Bool => 4,
+        Prim::F32 | Prim::Bool | Prim::Int32 => 4,
+        Prim::Int64 => 8,
         other => panic!(
-            "Phase 1c HIP memory planner only supports f32/bool tensors, got {}",
+            "Phase 1c HIP memory planner only supports f32/bool/int32/int64 tensors, got {}",
             other.name()
         ),
     }

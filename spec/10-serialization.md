@@ -30,9 +30,11 @@ implementation is still expected to evolve.
 
 The compiler API wire models in `crates/chelis-compiler-api/src/schema.rs` are
 the current machine-facing JSON surface. During this pre-release period, adding
-new tagged variants such as `WireRiscOp::Gather` or
-`WireRiscOp::ScatterAdd` is an additive schema change. Producers may emit the
-new variant after the owning compiler behavior lands.
+new tagged variants such as `WireRiscOp::Gather`,
+`WireRiscOp::ScatterAdd`, or internal `WireRiscOp::OneHot` is an additive
+schema change. Producers may emit the new variant after the owning compiler
+behavior lands. `OneHot` is only a transient IR/specialization marker; backends
+must not receive it after specialization.
 
 Consumers should tolerate unknown additive variants where possible and report a
 clear unsupported-variant diagnostic rather than failing only because the enum

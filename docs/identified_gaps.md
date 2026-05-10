@@ -2,9 +2,10 @@
 
 **Status:** partially closed — Gaps 2 and 6 are closed by M1; the adjacent
 Surf-span finding is closed by M2b; Gap 4's rank ≥ 2 expressibility and
-symbolic/batched BLAS performance paths are closed by M3/M3b. The remaining
+symbolic/batched BLAS performance paths are closed by M3/M3b; Gap 3's scoped
+sparse gather/scatter path is closed by M4. The remaining
 work is explicitly tracked in `docs/gap_synthesis.md` §5 "Remaining Work
-Register": Gap 3/M4, Gap 5 implementation, HIP strided-batched quality work,
+Register": Gap 5 implementation, HIP strided-batched quality work,
 post-BLAS slot/fusion compounding, and the formal red-team follow-up.
 **Filed:** 2026-05-08
 **Owning phase:** cross-phase (perf + ergonomics)
@@ -198,26 +199,27 @@ The structurally-better fix shipped in M1: BLAS detection moved into
 the IR specialization substrate, paired with post-specialization DCE.
 Gap 2 and Gap 6 close together under this approach.
 
-## Gap 3 — Surf `gather` lowering / sparse recognizer not wired; OOM trap conditional
+## Gap 3 — Surf `gather` lowering / sparse recognizer — CLOSED for scoped sparse path
 
 **Claim qualified:** "`gather` decomposes via `one_hot + expand + mul + sum`
 (spec §3.5) so AD flows correctly through it."
 
-**Current status:** the current branch ships the first sparse IR slice:
+**Current status:** the current branch ships the scoped sparse path:
 `RiscOp::Gather { axis }` and `RiscOp::ScatterAdd { axis }` have verifier,
-evaluator, AD, C codegen, and compiler-API wire coverage. Duplicate-index
-gradients accumulate through `ScatterAdd`, and generated C for first-class
-sparse nodes has both bounded-memory structural coverage and a compile/run
-numeric oracle.
+evaluator, AD, C codegen, HIP codegen, and compiler-API wire coverage.
+Duplicate-index gradients accumulate through `ScatterAdd`, generated C/HIP for
+first-class sparse nodes has bounded-memory structural coverage, and C plus HIP
+manual gates have numeric oracles. Tensor-lane Surf `gather` lowers directly to
+the first-class sparse `RiscOp::Gather` node, so the old host/runtime path is no
+longer the tensor-lane behavior.
 
-**Remaining observation:** tensor-lane Surf `gather` now lowers directly to
-the first-class sparse `RiscOp::Gather` node, so the old host/runtime path is
-no longer the tensor-lane behavior. What remains open is the spec's §3.5
-dense-decomposition route: the shared specialization substrate still does not
-recognize a dense `one_hot + expand + mul + sum` tree and replace it with
-sparse nodes before codegen. The OOM trap is still real if that dense lowering
-ships without the recognizer, and HIP still rejects sparse gather/scatter with
-an explicit diagnostic rather than emitting GPU kernels.
+**Dense recognizer status:** the specialization substrate now recognizes the
+internal §3.5 tag tree
+`Sum(Mul(Expand(OneHot(indices,V)), Expand(values)))` and replaces it with
+`RiscOp::Gather` before DCE/codegen. `OneHot` is internal-only, not Surf
+surface. If a future producer emits a dense gather decomposition, it must use
+this `OneHot` anchor; arbitrary historical const/eq encodings are not
+recognizable because they no longer preserve the source index operand.
 
 **Why this is a gap:** the spec promises §3.5 lowering. When that
 lowering ships:
@@ -229,14 +231,19 @@ lowering ships:
   For typical LLM-scale shapes (V = 50K, D = 1K), that's ~200 GB —
   an OOM.
 
-**What needs to ship together:** the §3.5 lowering AND a
-scatter-recognition pattern matcher that turns the dense
-`reshape+expand+mul+sum` shape back into a sparse scatter-add kernel.
-Shipping the lowering without the recognizer arms the OOM trap.
+**What closed it:** the sparse IR/AD path, direct tensor-lane Surf lowering,
+C/HIP sparse codegen, and the internal dense gather recognizer now ship
+together. The branch also keeps `OneHot` out of backend codegen by lowering any
+unmatched internal one-hot marker to primitive dense IR before codegen.
 
-**Where the recognizer would live:** the shared IR specialization substrate
+**Explicit non-closure:** replace-scatter (last-write-wins) is intentionally
+not `ScatterAdd`. It remains a separate future work item with different
+duplicate-index and AD semantics.
+
+**Where the recognizer lives:** the shared IR specialization substrate
 (`crates/chelis-ir/src/specialize.rs`), reusing the pass order that already
-handles BLAS before DCE/codegen. No dense gather recognizer exists today.
+handles BLAS before DCE/codegen. The scoped recognizer matches the internal
+`RiscOp::OneHot { vocab }` tag tree.
 
 **Spec coverage:**
 - `spec/05-risc-primitives.md` §3.5 documents the lowering shape
@@ -246,26 +253,19 @@ handles BLAS before DCE/codegen. No dense gather recognizer exists today.
 - `spec/design/chelis_phase3_plan.md` Phase 3h scope adds gather /
   scatter as core primitives and ships `Std.Nn.Embedding` as the
   named user-facing surface.
-- **Roadmap status conflict partially reduced:** first-class sparse IR,
-  tensor-lane Surf `gather` lowering, AD, and C codegen now exist, but Phase
-  3h still should not be considered complete until the dense §3.5 recognizer
-  and HIP sparse backend path ship.
-- **Not fully addressed:** the joint requirement that any dense §3.5 lowering
-  must ship paired with a scatter/gather recognizer.
+- **Roadmap status conflict reduced for the scoped sparse path:** first-class
+  sparse IR, tensor-lane Surf `gather` lowering, AD, C codegen, HIP codegen,
+  and the internal dense §3.5 recognizer now exist. Replace-scatter remains
+  future work because it is not the same operation as AD `ScatterAdd`.
 
 **Locked test:** `crates/chelis-ir/tests/grad_gather_contract.rs` —
 `gather_via_section_3_5_lowering_accumulates_duplicate_indices`.
-Builds the post-§3.5 RISC DAG by hand and asserts the duplicate-index
-gradient `[3, 3, 0, 0]` for an all-zero indices stress case. The test
-proves the AD side will be correct by construction whenever §3.5
-ships; it does not prove the OOM trap is closed.
-
-**Required remaining M4 oracle:** closure must add the dense §3.5 recognizer
-and HIP sparse codegen, then prove HIP build output for embedding/MoE-shaped
-Surf lowering does not allocate the dense `[N, V, D]` one-hot materialization.
-The C tensor-lane Surf path now lowers directly to first-class `Gather`, with
-bounded emitted-code and small compile/run numerical coverage; the remaining
-oracle is about the dense recognizer path and HIP parity.
+Builds the sparse RISC DAG by hand and asserts the duplicate-index gradient
+`[3, 3, 0, 0]` for an all-zero indices stress case. The specialization tests
+cover the dense internal `OneHot + Expand + Mul + Sum` recognizer and the
+negative unmatched-`OneHot` fallback. C/HIP structural tests assert bounded
+sparse codegen, and the HIP sparse correctness tests are part of the manual GPU
+gate.
 
 **Probe corpus:** `examples/illustrative/moe_gather_duplicate_indices.ch`
 (single MoE-style routing block with deliberately duplicated indices).

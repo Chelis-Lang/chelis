@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 
-use crate::dag::{Dag, DagNode, DimExpr, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_types::types::Prim;
 
 /// Compiler pipeline ordering around backend specialization.
 ///
@@ -16,7 +17,9 @@ use crate::dag::{Dag, DagNode, DimExpr, NodeId, RiscOp, TensorType};
 pub const SPECIALIZATION_PIPELINE_ORDER: &[&str] = &[
     "ad",
     "no_op_cleanup",
-    "blas_gather_scatter_recognizers",
+    "dense_gather_recognizer",
+    "one_hot_fallback_lowering",
+    "blas_matmul_recognizer",
     "cross_function_specialization",
     "dce",
     "in_place_fusion",
@@ -26,7 +29,9 @@ pub const SPECIALIZATION_PIPELINE_ORDER: &[&str] = &[
 /// Run the closed-list no-op cleanup plus backend specialization, then DCE.
 pub fn specialize_for_blas(dag: &Dag) -> Dag {
     let cleaned = eliminate_closed_list_noops(dag);
-    let specialized = replace_matmul_patterns(&cleaned);
+    let gathered = replace_dense_gather_patterns(&cleaned);
+    let lowered = lower_unmatched_one_hot(&gathered);
+    let specialized = replace_matmul_patterns(&lowered);
     crate::optimize::dead_code_eliminate(&specialized)
 }
 
@@ -153,6 +158,206 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
     out
 }
 
+fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
+    let mut out = Dag::new();
+    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+
+    for node in dag.nodes() {
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id) {
+            let values = id_map[&info.values];
+            let indices = id_map[&info.indices];
+            let new_id = out.add_node(
+                RiscOp::Gather { axis: 0 },
+                vec![values, indices],
+                node.output_type.clone(),
+                node.span_id.clone(),
+            );
+            append_dense_gather_provenance(&mut out, new_id, dag, node, &info);
+            id_map.insert(node.id, new_id);
+            continue;
+        }
+
+        let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
+        let new_id = out.add_node(
+            node.op.clone(),
+            remapped_inputs,
+            node.output_type.clone(),
+            node.span_id.clone(),
+        );
+        if let Some(reusable) = node.reusable_input
+            && let Some(mapped) = id_map.get(&reusable).copied()
+        {
+            out.set_reusable_input(new_id, mapped);
+        }
+        if !node.merged_spans.is_empty()
+            && let Some(new_node) = out.node_mut(new_id)
+        {
+            new_node.merged_spans = node.merged_spans.clone();
+        }
+        id_map.insert(node.id, new_id);
+    }
+
+    for &root in dag.roots() {
+        if let Some(&mapped) = id_map.get(&root) {
+            out.add_root(mapped);
+        }
+    }
+    out
+}
+
+fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
+    let mut out = Dag::new();
+    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+
+    for node in dag.nodes() {
+        if let RiscOp::OneHot { vocab } = node.op {
+            let indices = id_map[&node.inputs[0]];
+            let new_id = lower_one_hot_node(&mut out, indices, node, vocab);
+            id_map.insert(node.id, new_id);
+            continue;
+        }
+
+        let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
+        let new_id = out.add_node(
+            node.op.clone(),
+            remapped_inputs,
+            node.output_type.clone(),
+            node.span_id.clone(),
+        );
+        if let Some(reusable) = node.reusable_input
+            && let Some(mapped) = id_map.get(&reusable).copied()
+        {
+            out.set_reusable_input(new_id, mapped);
+        }
+        if !node.merged_spans.is_empty()
+            && let Some(new_node) = out.node_mut(new_id)
+        {
+            new_node.merged_spans = node.merged_spans.clone();
+        }
+        id_map.insert(node.id, new_id);
+    }
+
+    for &root in dag.roots() {
+        if let Some(&mapped) = id_map.get(&root) {
+            out.add_root(mapped);
+        }
+    }
+    out
+}
+
+fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: usize) -> NodeId {
+    assert!(vocab > 0, "one_hot vocab must be nonzero");
+    let indices_ty = out
+        .get(indices)
+        .expect("one_hot input must have been remapped")
+        .output_type
+        .clone();
+    let bool_ty = TensorType {
+        dims: indices_ty.dims.clone(),
+        precision: Prim::Bool,
+    };
+    let col_ty = TensorType {
+        dims: indices_ty
+            .dims
+            .iter()
+            .cloned()
+            .chain([DimInfo::Lit(1)])
+            .collect(),
+        precision: Prim::F32,
+    };
+    let vocab_axis = indices_ty.dims.len();
+    let mut accumulated = None;
+
+    for class in 0..vocab {
+        let class_id = out.add_node(
+            RiscOp::Const {
+                value: class as f64,
+            },
+            vec![],
+            indices_ty.clone(),
+            source.span_id.clone(),
+        );
+        let lt_l = out.add_node(
+            RiscOp::CmpLt,
+            vec![indices, class_id],
+            bool_ty.clone(),
+            source.span_id.clone(),
+        );
+        let lt_r = out.add_node(
+            RiscOp::CmpLt,
+            vec![class_id, indices],
+            bool_ty.clone(),
+            source.span_id.clone(),
+        );
+        let neq = out.add_node(
+            RiscOp::MaxElem,
+            vec![lt_l, lt_r],
+            bool_ty.clone(),
+            source.span_id.clone(),
+        );
+        let one = out.add_node(
+            RiscOp::Const { value: 1.0 },
+            vec![],
+            bool_ty.clone(),
+            source.span_id.clone(),
+        );
+        let eq_bool = out.add_node(
+            RiscOp::CmpLt,
+            vec![neq, one],
+            bool_ty.clone(),
+            source.span_id.clone(),
+        );
+        let eq_f32 = out.add_node(
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![eq_bool],
+            TensorType {
+                dims: indices_ty.dims.clone(),
+                precision: Prim::F32,
+            },
+            source.span_id.clone(),
+        );
+        let col = out.add_node(
+            RiscOp::Expand {
+                axis: vocab_axis,
+                size: DimExpr::Concrete(1),
+            },
+            vec![eq_f32],
+            col_ty.clone(),
+            source.span_id.clone(),
+        );
+        let padded = out.add_node(
+            RiscOp::Pad {
+                padding: indices_ty
+                    .dims
+                    .iter()
+                    .map(|_| (0, 0))
+                    .chain([(class, vocab - class - 1)])
+                    .collect(),
+                fill: 0.0,
+            },
+            vec![col],
+            source.output_type.clone(),
+            source.span_id.clone(),
+        );
+        append_node_provenance(out, padded, source);
+        accumulated = Some(match accumulated {
+            Some(prev) => out.add_node(
+                RiscOp::Add,
+                vec![prev, padded],
+                source.output_type.clone(),
+                source.span_id.clone(),
+            ),
+            None => padded,
+        });
+    }
+
+    let result = accumulated.expect("nonzero vocab creates at least one column");
+    append_node_provenance(out, result, source);
+    result
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MatmulInfo {
     a: NodeId,
@@ -164,6 +369,137 @@ struct MatmulInfo {
     mul: NodeId,
     expand_a: NodeId,
     expand_b: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DenseGatherInfo {
+    values: NodeId,
+    indices: NodeId,
+    mul: NodeId,
+    expand_one_hot: NodeId,
+    expand_values: NodeId,
+    one_hot: NodeId,
+}
+
+fn detect_dense_gather_pattern(dag: &Dag, sum_id: NodeId) -> Option<DenseGatherInfo> {
+    let sum_node = dag.get(sum_id)?;
+    let sum_axis = match &sum_node.op {
+        RiscOp::Sum { axis } => *axis,
+        _ => return None,
+    };
+    if sum_node.inputs.len() != 1 {
+        return None;
+    }
+
+    let mul_id = sum_node.inputs[0];
+    let mul_node = dag.get(mul_id)?;
+    if !matches!(mul_node.op, RiscOp::Mul) || mul_node.inputs.len() != 2 {
+        return None;
+    }
+
+    detect_dense_gather_operands(
+        dag,
+        sum_node,
+        sum_axis,
+        mul_id,
+        mul_node.inputs[0],
+        mul_node.inputs[1],
+    )
+    .or_else(|| {
+        detect_dense_gather_operands(
+            dag,
+            sum_node,
+            sum_axis,
+            mul_id,
+            mul_node.inputs[1],
+            mul_node.inputs[0],
+        )
+    })
+}
+
+fn detect_dense_gather_operands(
+    dag: &Dag,
+    sum_node: &DagNode,
+    sum_axis: usize,
+    mul_id: NodeId,
+    expand_one_hot_id: NodeId,
+    expand_values_id: NodeId,
+) -> Option<DenseGatherInfo> {
+    let expand_one_hot = dag.get(expand_one_hot_id)?;
+    let expand_values = dag.get(expand_values_id)?;
+    let RiscOp::Expand {
+        axis: one_hot_expand_axis,
+        ..
+    } = expand_one_hot.op
+    else {
+        return None;
+    };
+    let RiscOp::Expand {
+        axis: values_expand_axis,
+        ..
+    } = expand_values.op
+    else {
+        return None;
+    };
+    if expand_one_hot.inputs.len() != 1 || expand_values.inputs.len() != 1 {
+        return None;
+    }
+
+    let one_hot_id = expand_one_hot.inputs[0];
+    let one_hot = dag.get(one_hot_id)?;
+    let RiscOp::OneHot { vocab } = one_hot.op else {
+        return None;
+    };
+    if one_hot.inputs.len() != 1 {
+        return None;
+    }
+    let indices_id = one_hot.inputs[0];
+    let indices_ty = &dag.get(indices_id)?.output_type;
+    if indices_ty.dims.len() != 1 {
+        return None;
+    }
+    let values_id = expand_values.inputs[0];
+    let values_ty = &dag.get(values_id)?.output_type;
+    if values_ty.dims.len() != 2 {
+        return None;
+    }
+    let vocab_axis = indices_ty.dims.len();
+    if sum_axis != vocab_axis || one_hot_expand_axis != vocab_axis + 1 || values_expand_axis != 0 {
+        return None;
+    }
+    if one_hot.output_type.dims != vec![indices_ty.dims[0].clone(), DimInfo::Lit(vocab)] {
+        return None;
+    }
+    if !dims_equivalent(&values_ty.dims[0], &DimInfo::Lit(vocab)) {
+        return None;
+    }
+    let expected_expanded = vec![
+        indices_ty.dims[0].clone(),
+        values_ty.dims[0].clone(),
+        values_ty.dims[1].clone(),
+    ];
+    if expand_one_hot.output_type.dims != expected_expanded
+        || expand_values.output_type.dims != expected_expanded
+    {
+        return None;
+    }
+    let expected_output = vec![indices_ty.dims[0].clone(), values_ty.dims[1].clone()];
+    if sum_node.output_type.dims != expected_output {
+        return None;
+    }
+
+    Some(DenseGatherInfo {
+        values: values_id,
+        indices: indices_id,
+        mul: mul_id,
+        expand_one_hot: expand_one_hot_id,
+        expand_values: expand_values_id,
+        one_hot: one_hot_id,
+    })
+}
+
+fn dims_equivalent(lhs: &DimInfo, rhs: &DimInfo) -> bool {
+    DimExpr::from(lhs).normalized_key() == DimExpr::from(rhs).normalized_key()
 }
 
 fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
@@ -298,6 +634,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Cast { .. }
         | RiscOp::FusedElem { .. }
         | RiscOp::BlasMatmul { .. }
+        | RiscOp::OneHot { .. }
         | RiscOp::Gather { .. }
         | RiscOp::ScatterAdd { .. } => true,
         RiscOp::Reshape { .. } | RiscOp::Store { .. } => node
@@ -336,6 +673,26 @@ fn append_consumed_provenance(
     }
 }
 
+fn append_dense_gather_provenance(
+    out: &mut Dag,
+    target: NodeId,
+    dag: &Dag,
+    sum_node: &DagNode,
+    info: &DenseGatherInfo,
+) {
+    append_node_provenance(out, target, sum_node);
+    for id in [
+        info.mul,
+        info.expand_one_hot,
+        info.expand_values,
+        info.one_hot,
+    ] {
+        if let Some(node) = dag.get(id) {
+            append_node_provenance(out, target, node);
+        }
+    }
+}
+
 fn append_node_provenance(out: &mut Dag, target: NodeId, source: &DagNode) {
     crate::span_merge::append_span_to_node(out, target, source.span_id.as_deref());
     crate::span_merge::append_spans_to_node(out, target, &source.merged_spans);
@@ -361,6 +718,13 @@ mod tests {
         }
     }
 
+    fn vec_i32(n: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: Prim::Int32,
+        }
+    }
+
     #[test]
     fn specialization_pipeline_order_is_pinned() {
         assert_eq!(
@@ -368,7 +732,9 @@ mod tests {
             &[
                 "ad",
                 "no_op_cleanup",
-                "blas_gather_scatter_recognizers",
+                "dense_gather_recognizer",
+                "one_hot_fallback_lowering",
+                "blas_matmul_recognizer",
                 "cross_function_specialization",
                 "dce",
                 "in_place_fusion",
@@ -662,6 +1028,142 @@ mod tests {
                 .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
             "{:?}",
             fused.nodes()
+        );
+    }
+
+    #[test]
+    fn one_hot_dense_gather_specializes_before_matmul() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            mat(2, 3),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i32(4),
+            None,
+        );
+        let one_hot = dag.add_node(RiscOp::OneHot { vocab: 2 }, vec![indices], mat(4, 2), None);
+        let one_hot_exp = dag.add_node(
+            RiscOp::Expand {
+                axis: 2,
+                size: DimExpr::Concrete(3),
+            },
+            vec![one_hot],
+            t3(4, 2, 3),
+            None,
+        );
+        let values_exp = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Concrete(4),
+            },
+            vec![values],
+            t3(4, 2, 3),
+            None,
+        );
+        let product = dag.add_node(
+            RiscOp::Mul,
+            vec![one_hot_exp, values_exp],
+            t3(4, 2, 3),
+            None,
+        );
+        let gathered = dag.add_node(RiscOp::Sum { axis: 1 }, vec![product], mat(4, 3), None);
+        dag.add_root(gathered);
+
+        let specialized = specialize_for_blas(&dag);
+        assert!(specialized.nodes().iter().any(|node| {
+            matches!(node.op, RiscOp::Gather { axis: 0 })
+                && node.output_type.dims == vec![DimInfo::Lit(4), DimInfo::Lit(3)]
+        }));
+        assert!(
+            !specialized
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::OneHot { .. } | RiscOp::BlasMatmul { .. })),
+            "dense one-hot gather must become Gather before matmul recognition"
+        );
+        assert!(
+            crate::verify::verify(&specialized).is_empty(),
+            "specialized gather DAG must verify"
+        );
+
+        let inputs = std::collections::HashMap::from([
+            (
+                "values".to_string(),
+                crate::eval::TensorValue::from_vec(
+                    vec![2, 3],
+                    vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0],
+                ),
+            ),
+            (
+                "indices".to_string(),
+                crate::eval::TensorValue::from_vec(vec![4], vec![0.0, 1.0, 0.0, 1.0]),
+            ),
+        ]);
+        let before = crate::eval::eval_tensor(&dag, &inputs).expect("dense gather eval");
+        let after = crate::eval::eval_tensor(&specialized, &inputs).expect("specialized eval");
+        assert_eq!(
+            before[&gathered].data,
+            after[specialized.roots().first().expect("root")].data
+        );
+    }
+
+    #[test]
+    fn unmatched_one_hot_lowers_to_primitive_ir() {
+        let mut dag = Dag::new();
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i32(3),
+            None,
+        );
+        let one_hot = dag.add_node(
+            RiscOp::OneHot { vocab: 3 },
+            vec![indices],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(one_hot);
+
+        let specialized = specialize_for_blas(&dag);
+        assert!(
+            !specialized
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::OneHot { .. })),
+            "fallback lowering must remove unmatched OneHot"
+        );
+        assert!(
+            crate::verify::verify(&specialized).is_empty(),
+            "lowered one_hot DAG must verify"
+        );
+
+        let inputs = std::collections::HashMap::from([(
+            "indices".to_string(),
+            crate::eval::TensorValue::from_vec(vec![3], vec![2.0, 0.0, 1.0]),
+        )]);
+        let before = crate::eval::eval_tensor(&dag, &inputs).expect("one_hot eval");
+        let after = crate::eval::eval_tensor(&specialized, &inputs).expect("lowered eval");
+        assert_eq!(
+            before[&one_hot].data,
+            after[specialized.roots().first().expect("root")].data
+        );
+        assert_eq!(
+            after[specialized.roots().first().expect("root")].data,
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
     }
 }

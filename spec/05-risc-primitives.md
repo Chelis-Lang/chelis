@@ -199,12 +199,13 @@ pattern-matched operations. Most decompose into Tier 1 primitives:
 
 Implementation note: the compiler now also has first-class specialized sparse
 IR nodes `RiscOp::Gather { axis }` and `RiscOp::ScatterAdd { axis }`, with
-evaluator, verifier, AD, C backend, and wire-schema support. Tensor-lane Surf
-`gather(values, indices, axis)` lowers directly to `RiscOp::Gather` in the
+evaluator, verifier, AD, C/HIP backend, and wire-schema support. Tensor-lane
+Surf `gather(values, indices, axis)` lowers directly to `RiscOp::Gather` in the
 current implementation, avoiding the host runtime call and the dense one-hot
-materialization. Do not treat this as closure of the full §3.5 lowering
-contract until the dense decomposition recognizer also prevents `[N,V,D]`
-materialization before codegen.
+materialization. The shared specialization pass also recognizes the internal
+`RiscOp::OneHot { vocab } + Expand + Mul + Sum` gather tree and collapses it
+before DCE/codegen. Arbitrary historical const/eq one-hot encodings are not
+recognized because they do not preserve the original index operand.
 
 ---
 

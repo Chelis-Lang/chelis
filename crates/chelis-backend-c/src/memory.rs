@@ -140,6 +140,7 @@ fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
                 | RiscOp::Realize
                 | RiscOp::Cast { .. }
                 | RiscOp::FusedElem { .. }
+                | RiscOp::OneHot { .. }
                 | RiscOp::Pad { .. }
                 | RiscOp::Shrink { .. }
                 | RiscOp::BlasMatmul { .. }

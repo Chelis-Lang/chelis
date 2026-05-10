@@ -323,6 +323,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Reshape { .. }
             | RiscOp::Permute { .. }
             | RiscOp::Expand { .. }
+            | RiscOp::OneHot { .. }
             | RiscOp::Pad { .. }
             | RiscOp::Shrink { .. }
             | RiscOp::Stride { .. }
@@ -594,6 +595,34 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             output_rank,
                             input_rank,
                             input_rank + 1
+                        ));
+                    }
+                }
+            }
+            RiscOp::OneHot { vocab } => {
+                if arity == 1 {
+                    let input = dag.get(node.inputs[0]).unwrap();
+                    if *vocab == 0 {
+                        errors.push(format!("one_hot at node {}: vocab must be > 0", node.id.0));
+                    }
+                    if !matches!(input.output_type.precision, Prim::Int32 | Prim::Int64) {
+                        errors.push(format!(
+                            "one_hot at node {} requires int32/int64 indices, got {:?}",
+                            node.id.0, input.output_type.precision
+                        ));
+                    }
+                    if node.output_type.precision != Prim::F32 {
+                        errors.push(format!(
+                            "one_hot at node {} output precision {:?}, expected F32",
+                            node.id.0, node.output_type.precision
+                        ));
+                    }
+                    let mut expected = input.output_type.dims.clone();
+                    expected.push(DimInfo::Lit(*vocab));
+                    if node.output_type.dims != expected {
+                        errors.push(format!(
+                            "one_hot at node {} has output dims {:?}, expected {:?}",
+                            node.id.0, node.output_type.dims, expected
                         ));
                     }
                 }

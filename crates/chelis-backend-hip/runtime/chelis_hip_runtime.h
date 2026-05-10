@@ -3,6 +3,7 @@
 
 #include <hip/hip_runtime.h>
 #include <hip/hiprtc.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,6 +103,10 @@ typedef struct {
 
 /* ---- Allocation / deallocation ---- */
 
+static inline size_t chelis_gpu_dtype_size(int dtype) {
+    return (dtype == CHELIS_I64 || dtype == CHELIS_F64) ? sizeof(int64_t) : sizeof(float);
+}
+
 static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {
     chelis_gpu_tensor *t = (chelis_gpu_tensor*)calloc(1, sizeof(chelis_gpu_tensor));
     t->ndim = ndim;
@@ -117,7 +122,7 @@ static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, in
     for (int d = ndim - 1; d >= 0; d--) {
         t->strides[d] = (d == ndim - 1) ? 1 : t->strides[d + 1] * t->shape[d + 1];
     }
-    CHELIS_HIP_CHECK(hipMalloc(&t->data, t->size * sizeof(float)));
+    CHELIS_HIP_CHECK(hipMalloc(&t->data, t->size * chelis_gpu_dtype_size(dtype)));
     return t;
 }
 
@@ -163,13 +168,13 @@ static inline void chelis_gpu_free_view(chelis_gpu_tensor *t) {
 
 static inline void chelis_host_to_device(chelis_gpu_tensor *dst, const chelis_tensor *src) {
     CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data,
-                               dst->size * sizeof(float),
+                               dst->size * chelis_gpu_dtype_size(dst->dtype),
                                hipMemcpyHostToDevice));
 }
 
 static inline void chelis_device_to_host(chelis_tensor *dst, const chelis_gpu_tensor *src) {
     CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data,
-                               dst->size * sizeof(float),
+                               dst->size * chelis_gpu_dtype_size(src->dtype),
                                hipMemcpyDeviceToHost));
 }
 
@@ -183,7 +188,7 @@ static inline chelis_gpu_tensor* chelis_gpu_clone(const chelis_gpu_tensor *src) 
     CHELIS_HIP_CHECK(hipMemcpy(
         dst->data,
         src->data,
-        src->size * sizeof(float),
+        src->size * chelis_gpu_dtype_size(src->dtype),
         hipMemcpyDeviceToDevice
     ));
     return dst;

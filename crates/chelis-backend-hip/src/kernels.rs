@@ -1206,6 +1206,68 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+/// Generate sparse gather kernel for f32 payloads and typed integer indices.
+pub fn gather(kernel_name: &str, index_ty: &str) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const float *values,
+    const {index_ty} *indices,
+    float *out,
+    int before,
+    int axis_size,
+    int after,
+    int index_count,
+    int total) {{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= total) return;
+  int d = i % after;
+  int tmp = i / after;
+  int index_pos = tmp % index_count;
+  int b = tmp / index_count;
+  int g = (int)indices[index_pos];
+  if (g < 0 || g >= axis_size || b >= before) {{
+    CHELIS_GUARD_INDEX(g, axis_size, 2);
+    return;
+  }}
+  int src = ((b * axis_size + g) * after) + d;
+  out[i] = values[src];
+}}
+"
+    )
+}
+
+/// Generate sparse scatter-add kernel for f32 payloads and typed integer indices.
+pub fn scatter_add(kernel_name: &str, index_ty: &str) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {index_ty} *indices,
+    const float *updates,
+    float *out,
+    int before,
+    int axis_size,
+    int after,
+    int index_count,
+    int total) {{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= total) return;
+  int d = i % after;
+  int tmp = i / after;
+  int index_pos = tmp % index_count;
+  int b = tmp / index_count;
+  int g = (int)indices[index_pos];
+  if (g < 0 || g >= axis_size || b >= before) {{
+    CHELIS_GUARD_INDEX(g, axis_size, 3);
+    return;
+  }}
+  int dst = ((b * axis_size + g) * after) + d;
+  atomicAdd(&out[dst], updates[i]);
+}}
+"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

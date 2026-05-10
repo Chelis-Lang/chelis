@@ -881,6 +881,9 @@ pub enum WireRiscOp {
         axis: usize,
         size: String,
     },
+    OneHot {
+        vocab: usize,
+    },
     Pad {
         padding: Vec<(usize, usize)>,
         fill: f64,
@@ -945,6 +948,13 @@ mod tests {
         match serde_json::from_str::<WireRiscOp>(&scatter).unwrap() {
             WireRiscOp::ScatterAdd { axis } => assert_eq!(axis, 0),
             other => panic!("expected scatter_add wire op, got {other:?}"),
+        }
+
+        let one_hot = serde_json::to_string(&WireRiscOp::OneHot { vocab: 7 }).unwrap();
+        assert_eq!(one_hot, r#"{"kind":"one_hot","vocab":7}"#);
+        match serde_json::from_str::<WireRiscOp>(&one_hot).unwrap() {
+            WireRiscOp::OneHot { vocab } => assert_eq!(vocab, 7),
+            other => panic!("expected one_hot wire op, got {other:?}"),
         }
     }
 }

@@ -3835,9 +3835,10 @@ fn build_hip_rejects_pad_lowering_without_panic() {
 }
 
 #[test]
-fn build_hip_rejects_sparse_gather_with_specific_diagnostic() {
+fn build_hip_emits_sparse_gather_kernel() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("gather.ch");
+    let out_dir = dir.path().join("hip-gather-out");
     write_file(
         &path,
         "def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n",
@@ -3846,15 +3847,20 @@ fn build_hip_rejects_sparse_gather_with_specific_diagnostic() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "HIP sparse gather/scatter kernels are not implemented",
-        ))
-        .stderr(predicate::str::contains(
-            "Use the C backend (`--target c`) for sparse gather/scatter",
-        ));
+        .success();
+
+    let hip_src = fs::read_to_string(out_dir.join("gather_hip.cpp")).expect("hip source");
+    assert!(hip_src.contains("kernel_gather_i64"));
+    assert!(hip_src.contains("const long long *indices"));
 }
 
 #[test]

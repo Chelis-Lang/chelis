@@ -351,6 +351,14 @@ pub enum RiscOp {
         axis: usize,
         size: DimExpr,
     },
+    /// Internal dense one-hot marker used by IR specialization.
+    ///
+    /// Input is an integer index tensor. Output shape is
+    /// `indices.dims + [vocab]`, with f32 zeros and ones. This op must be
+    /// consumed or lowered before backend emission.
+    OneHot {
+        vocab: usize,
+    },
     Pad {
         padding: Vec<(usize, usize)>,
         fill: f64,

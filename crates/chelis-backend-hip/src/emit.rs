@@ -634,7 +634,7 @@ impl HipEmitter {
         vec![(name, source)]
     }
 
-    fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, _dag: &Dag) -> Option<String> {
+    fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, dag: &Dag) -> Option<String> {
         match op {
             RiscOp::Add => Some("kernel_add".into()),
             RiscOp::Mul => Some("kernel_mul".into()),
@@ -679,7 +679,8 @@ impl HipEmitter {
             RiscOp::MinReduce { .. }
             | RiscOp::ProdReduce { .. }
             | RiscOp::Argmax { .. }
-            | RiscOp::Argmin { .. } => None,
+            | RiscOp::Argmin { .. }
+            | RiscOp::OneHot { .. } => None,
             RiscOp::Const { .. } => Some("kernel_fill".into()),
             RiscOp::Realize => Some("kernel_cast".into()),
             RiscOp::Cast { .. } => Some("kernel_cast".into()),
@@ -692,9 +693,23 @@ impl HipEmitter {
             | RiscOp::Pad { .. }
             | RiscOp::Shrink { .. }
             | RiscOp::Stride { .. }
-            | RiscOp::BlasMatmul { .. }
-            | RiscOp::Gather { .. }
-            | RiscOp::ScatterAdd { .. } => None,
+            | RiscOp::BlasMatmul { .. } => None,
+            RiscOp::Gather { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                Some(match indices_ty.precision {
+                    Prim::Int32 => "kernel_gather_i32".into(),
+                    Prim::Int64 => "kernel_gather_i64".into(),
+                    _ => "kernel_gather_invalid".into(),
+                })
+            }
+            RiscOp::ScatterAdd { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                Some(match indices_ty.precision {
+                    Prim::Int32 => "kernel_scatter_add_i32".into(),
+                    Prim::Int64 => "kernel_scatter_add_i64".into(),
+                    _ => "kernel_scatter_add_invalid".into(),
+                })
+            }
             RiscOp::FusedElem { .. } => Some(format!("kernel_fused_{}", node.id.0)),
         }
     }
@@ -742,6 +757,28 @@ impl HipEmitter {
             RiscOp::Cast { .. } => kernels::cast(name),
             RiscOp::Copy => kernels::cast(name),
             RiscOp::FusedElem { ops } => kernels::fused_elementwise(name, ops, node.inputs.len()),
+            RiscOp::Gather { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                match indices_ty.precision {
+                    Prim::Int32 => kernels::gather(name, "int"),
+                    Prim::Int64 => kernels::gather(name, "long long"),
+                    other => panic!(
+                        "HIP backend sparse gather requires int32/int64 indices, got {}",
+                        other.name()
+                    ),
+                }
+            }
+            RiscOp::ScatterAdd { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                match indices_ty.precision {
+                    Prim::Int32 => kernels::scatter_add(name, "int"),
+                    Prim::Int64 => kernels::scatter_add(name, "long long"),
+                    other => panic!(
+                        "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                        other.name()
+                    ),
+                }
+            }
             _ => unreachable!("no kernel for op: {op:?}"),
         }
     }
@@ -898,6 +935,11 @@ impl HipEmitter {
                     "HIP backend: Argmin is not yet supported (Phase 3j-pre ships C backend only)"
                 );
             }
+            RiscOp::OneHot { .. } => {
+                panic!(
+                    "HIP backend: internal OneHot must be consumed by specialization before codegen"
+                )
+            }
             RiscOp::Reshape { .. } => {
                 self.emit_reshape(id, &node.inputs, &node.output_type);
             }
@@ -955,12 +997,11 @@ impl HipEmitter {
                     dag,
                 );
             }
-            RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } => {
-                panic!(
-                    "HIP backend: sparse gather/scatter kernels are not implemented; \
-                     ScatterAdd additionally needs duplicate-index accumulation/atomic semantics. \
-                     Use the C backend for sparse gather/scatter on this branch."
-                )
+            RiscOp::Gather { axis } => {
+                self.emit_gather_launch(id, *axis, &node.inputs, &node.output_type, dag)
+            }
+            RiscOp::ScatterAdd { axis } => {
+                self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
         }
     }
@@ -1214,6 +1255,118 @@ impl HipEmitter {
             "mod_kernel_uniform_like",
             "kernel_uniform_like",
             &format!("(t{id}_size + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_gather_launch(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let values = inputs[0].0;
+        let indices = inputs[1].0;
+        let values_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        if values_ty.precision != Prim::F32 || ty.precision != Prim::F32 {
+            panic!("HIP backend sparse gather currently supports f32 payloads only");
+        }
+        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+            panic!(
+                "HIP backend sparse gather requires int32/int64 indices, got {}",
+                indices_ty.precision.name()
+            );
+        }
+        let before = Self::dim_product_expr(&values_ty.dims[..axis]);
+        let axis_size = Self::emit_dim_info(&values_ty.dims[axis]);
+        let after = Self::dim_product_expr(&values_ty.dims[axis + 1..]);
+        let kernel_name = match indices_ty.precision {
+            Prim::Int32 => "kernel_gather_i32",
+            Prim::Int64 => "kernel_gather_i64",
+            _ => unreachable!(),
+        };
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_before = {before};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_after = {after};"));
+        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
+        self.line(&format!("int t{id}_total = d_t{id}->size;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{values}->data, &d_t{indices}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("(t{id}_total + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_scatter_add_launch(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let target = inputs[0].0;
+        let indices = inputs[1].0;
+        let updates = inputs[2].0;
+        let target_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
+        if target_ty.precision != Prim::F32
+            || updates_ty.precision != Prim::F32
+            || ty.precision != Prim::F32
+        {
+            panic!("HIP backend sparse scatter_add currently supports f32 payloads only");
+        }
+        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+            panic!(
+                "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                indices_ty.precision.name()
+            );
+        }
+        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
+        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
+        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
+        let kernel_name = match indices_ty.precision {
+            Prim::Int32 => "kernel_scatter_add_i32",
+            Prim::Int64 => "kernel_scatter_add_i64",
+            _ => unreachable!(),
+        };
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+        ));
+        self.line(&format!("int t{id}_before = {before};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_after = {after};"));
+        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
+        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("(t{id}_total + 255) / 256"),
             "256",
             "args",
         );
@@ -1838,6 +1991,13 @@ impl HipEmitter {
             .unwrap_or_else(|| "1".to_string())
     }
 
+    fn dim_product_expr(dims: &[DimInfo]) -> String {
+        dims.iter()
+            .map(Self::emit_dim_info)
+            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
+            .unwrap_or_else(|| "1".to_string())
+    }
+
     #[allow(dead_code)]
     fn supports_staged_scalar_reduction(
         node: &DagNode,
@@ -1881,6 +2041,7 @@ impl HipEmitter {
             | RiscOp::ProdReduce { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
+            | RiscOp::OneHot { .. }
             | RiscOp::Realize
             | RiscOp::Cast { .. }
             | RiscOp::FusedElem { .. }
@@ -1901,7 +2062,8 @@ impl HipEmitter {
     #[allow(dead_code)]
     fn bytes_per_element(dtype: Prim) -> usize {
         match dtype {
-            Prim::F32 | Prim::Bool => 4,
+            Prim::F32 | Prim::Bool | Prim::Int32 => 4,
+            Prim::Int64 => 8,
             other => panic!(
                 "unsupported HIP dtype in device-memory estimate: {}",
                 other.name()
@@ -2046,8 +2208,10 @@ impl HipEmitter {
         match ty.precision {
             Prim::F32 => "CHELIS_F32",
             Prim::Bool => "CHELIS_BOOL",
+            Prim::Int32 => "CHELIS_I32",
+            Prim::Int64 => "CHELIS_I64",
             other => panic!(
-                "Phase 1a HIP backend only supports f32/bool tensors, got {}",
+                "Phase 1a HIP backend only supports f32/bool/int32/int64 tensors, got {}",
                 other.name()
             ),
         }
@@ -2133,6 +2297,13 @@ mod tests {
         }
     }
 
+    fn vec_i64(n: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: Prim::Int64,
+        }
+    }
+
     fn mat_f32(rows: usize, cols: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
@@ -2154,7 +2325,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_scatter_add_panic_names_hip_kernel_and_atomic_blockers() {
+    fn sparse_scatter_add_emits_hip_atomic_kernel() {
         let mut dag = Dag::new();
         let target = dag.add_node(
             RiscOp::Load {
@@ -2169,7 +2340,7 @@ mod tests {
                 name: "indices".into(),
             },
             vec![],
-            vec_f32(4),
+            vec_i64(4),
             None,
         );
         let updates = dag.add_node(
@@ -2188,21 +2359,11 @@ mod tests {
         );
         dag.add_root(out);
 
-        let panic = match std::panic::catch_unwind(|| HipEmitter::emit_dag(&dag, "test_sparse")) {
-            Ok(_) => panic!("HIP emitter should reject sparse scatter_add"),
-            Err(panic) => panic,
-        };
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .expect("panic payload should be string-like");
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_sparse");
 
-        assert!(message.contains("HIP backend: sparse gather/scatter kernels are not implemented"));
-        assert!(message.contains(
-            "ScatterAdd additionally needs duplicate-index accumulation/atomic semantics"
-        ));
-        assert!(message.contains("C backend"));
+        assert!(hip.contains("kernel_scatter_add_i64"));
+        assert!(hip.contains("const long long *indices"));
+        assert!(hip.contains("atomicAdd(&out[dst], updates[i]);"));
     }
 
     #[test]

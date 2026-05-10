@@ -781,6 +781,7 @@ fn compute_adjoints(
             let dx = dag.add_node(RiscOp::Sum { axis: *axis }, vec![g], input_ty, None);
             Some(vec![(x, dx)])
         }
+        RiscOp::OneHot { .. } => Some(vec![]),
         RiscOp::Pad { padding, .. } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();

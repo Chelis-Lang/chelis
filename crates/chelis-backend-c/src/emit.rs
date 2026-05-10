@@ -385,6 +385,11 @@ impl CEmitter {
             RiscOp::Expand { axis, size } => {
                 self.emit_expand(id, *axis, size, &node.inputs, &node.output_type, dag);
             }
+            RiscOp::OneHot { .. } => {
+                panic!(
+                    "C backend: internal OneHot must be consumed by specialization before codegen"
+                )
+            }
             RiscOp::Pad { padding, fill } => {
                 self.emit_pad(id, padding, *fill, &node.inputs, &node.output_type, dag);
             }

@@ -514,6 +514,26 @@ fn expand(input: &TensorValue, axis: usize, _size: usize, out_shape: Vec<usize>)
     }
 }
 
+fn one_hot(indices: &TensorValue, vocab: usize) -> TensorValue {
+    let mut out_shape = indices.shape.clone();
+    out_shape.push(vocab);
+    let mut out = vec![0.0; numel(&out_shape)];
+    for (index_linear, &raw_index) in indices.data.iter().enumerate() {
+        let class = raw_index as isize;
+        assert!(
+            class >= 0 && (class as usize) < vocab,
+            "one_hot index {class} out of bounds for vocab {vocab}"
+        );
+        let mut out_index = linear_to_index(index_linear, &indices.shape);
+        out_index.push(class as usize);
+        out[index_to_linear(&out_index, &out_shape)] = 1.0;
+    }
+    TensorValue {
+        data: out,
+        shape: out_shape,
+    }
+}
+
 fn pad(input: &TensorValue, padding: &[(usize, usize)], fill: f64) -> TensorValue {
     assert_eq!(padding.len(), input.shape.len());
     let out_shape: Vec<usize> = input
@@ -742,6 +762,7 @@ where
                     .expect("symbolic expands must be rebound before evaluation"),
                 concrete_shape(&node.output_type)?,
             ),
+            RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab),
             RiscOp::Pad { padding, fill } => pad(&values[&node.inputs[0]], padding, *fill),
             RiscOp::Shrink { bounds } => shrink(&values[&node.inputs[0]], bounds),
             RiscOp::Stride { strides } => stride(&values[&node.inputs[0]], strides),

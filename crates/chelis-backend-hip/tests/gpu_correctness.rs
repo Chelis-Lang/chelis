@@ -22,6 +22,7 @@ struct TestInput {
     name: String,
     shape: Vec<usize>,
     data: Vec<f32>,
+    dtype: Prim,
 }
 
 impl TestInput {
@@ -30,6 +31,25 @@ impl TestInput {
             name: name.to_string(),
             shape: shape.to_vec(),
             data: data.to_vec(),
+            dtype: Prim::F32,
+        }
+    }
+
+    fn int64(name: &str, shape: &[usize], data: &[i64]) -> Self {
+        Self {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            data: data.iter().map(|value| *value as f32).collect(),
+            dtype: Prim::Int64,
+        }
+    }
+
+    fn int32(name: &str, shape: &[usize], data: &[i32]) -> Self {
+        Self {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            data: data.iter().map(|value| *value as f32).collect(),
+            dtype: Prim::Int32,
         }
     }
 
@@ -56,6 +76,20 @@ fn vec_f32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
         precision: Prim::F32,
+    }
+}
+
+fn vec_i32(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int32,
+    }
+}
+
+fn vec_i64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int64,
     }
 }
 
@@ -210,13 +244,30 @@ fn append_case_lines(
                 "    int {prefix}_shape_{slot}[{ndim}] = {{ {dims} }};"
             ));
             lines.push(format!(
-                "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, CHELIS_F32);"
+                "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
+                dtype = match input.dtype {
+                    Prim::F32 => "CHELIS_F32",
+                    Prim::Int32 => "CHELIS_I32",
+                    Prim::Int64 => "CHELIS_I64",
+                    other => panic!("unsupported manual HIP test dtype {}", other.name()),
+                }
             ));
             for (idx, value) in input.data.iter().enumerate() {
-                lines.push(format!(
-                    "    {prefix}_input_storage[{slot}]->data[{idx}] = {:.8}f;",
-                    value
-                ));
+                match input.dtype {
+                    Prim::F32 => lines.push(format!(
+                        "    {prefix}_input_storage[{slot}]->data[{idx}] = {:.8}f;",
+                        value
+                    )),
+                    Prim::Int32 => lines.push(format!(
+                        "    ((int*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
+                        *value as i32
+                    )),
+                    Prim::Int64 => lines.push(format!(
+                        "    ((int64_t*){prefix}_input_storage[{slot}]->data)[{idx}] = {}LL;",
+                        *value as i64
+                    )),
+                    other => panic!("unsupported manual HIP test dtype {}", other.name()),
+                }
             }
         }
     }
@@ -1438,6 +1489,101 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
                 "b",
                 &[3, 4],
                 &[1.0, 0.0, 2.0, 1.0, -1.0, 3.0, 0.5, 2.0, 4.0, -2.0, 1.0, 0.0],
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_sparse_gather_i64_matches_eval() {
+    let mut dag = Dag::new();
+    let table = dag.add_node(
+        RiscOp::Load {
+            name: "table".into(),
+        },
+        vec![],
+        mat_f32(4, 3),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        vec_i64(3),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Gather { axis: 0 },
+        vec![table, indices],
+        mat_f32(3, 3),
+        None,
+    );
+    dag.add_root(out);
+
+    assert_gpu_matches_eval(
+        &dag,
+        "g16_sparse_gather_i64",
+        &[
+            TestInput::new(
+                "table",
+                &[4, 3],
+                &[
+                    1.0, 2.0, 3.0, 10.0, 20.0, 30.0, -1.0, -2.0, -3.0, 7.0, 8.0, 9.0,
+                ],
+            ),
+            TestInput::int64("indices", &[3], &[2, 0, 3]),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_sparse_scatter_add_i32_matches_eval_with_duplicate_indices() {
+    let mut dag = Dag::new();
+    let target = dag.add_node(
+        RiscOp::Load {
+            name: "target".into(),
+        },
+        vec![],
+        mat_f32(3, 2),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let updates = dag.add_node(
+        RiscOp::Load {
+            name: "updates".into(),
+        },
+        vec![],
+        mat_f32(4, 2),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::ScatterAdd { axis: 0 },
+        vec![target, indices, updates],
+        mat_f32(3, 2),
+        None,
+    );
+    dag.add_root(out);
+
+    assert_gpu_matches_eval(
+        &dag,
+        "g16_sparse_scatter_add_i32",
+        &[
+            TestInput::new("target", &[3, 2], &[1.0, 2.0, 10.0, 20.0, -1.0, -2.0]),
+            TestInput::int32("indices", &[4], &[1, 0, 1, 2]),
+            TestInput::new(
+                "updates",
+                &[4, 2],
+                &[0.5, 1.0, 2.0, 3.0, -4.0, 5.0, 6.0, -7.0],
             ),
         ],
     );

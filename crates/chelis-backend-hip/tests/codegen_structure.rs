@@ -27,6 +27,20 @@ fn vec_f32(n: usize) -> TensorType {
     }
 }
 
+fn vec_i32(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int32,
+    }
+}
+
+fn vec_i64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int64,
+    }
+}
+
 fn mat_f32(rows: usize, cols: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
@@ -1014,6 +1028,96 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         result.link_flags.iter().any(|flag| flag == "-lhipblas"),
         "hipBLAS specialization must surface the extra link flag"
     );
+}
+
+#[test]
+fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
+    let mut dag = Dag::new();
+    let table = dag.add_node(
+        RiscOp::Load {
+            name: "table".into(),
+        },
+        vec![],
+        mat_f32(8, 4),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        vec_i64(3),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Gather { axis: 0 },
+        vec![table, indices],
+        mat_f32(3, 4),
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "test_sparse_gather_i64");
+    assert!(result.c_source.contains("kernel_gather_i64"));
+    assert!(result.c_source.contains("const long long *indices"));
+    assert!(result.c_source.contains("CHELIS_I64"));
+    assert!(
+        result
+            .c_source
+            .contains("chelis_gpu_dtype_size(dst->dtype)")
+            || hip_runtime_header().contains("chelis_gpu_dtype_size")
+    );
+    assert!(
+        !result
+            .c_source
+            .contains("sparse gather/scatter kernels are not implemented")
+    );
+}
+
+#[test]
+fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
+    let mut dag = Dag::new();
+    let target = dag.add_node(
+        RiscOp::Load {
+            name: "target".into(),
+        },
+        vec![],
+        mat_f32(3, 2),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let updates = dag.add_node(
+        RiscOp::Load {
+            name: "updates".into(),
+        },
+        vec![],
+        mat_f32(4, 2),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::ScatterAdd { axis: 0 },
+        vec![target, indices, updates],
+        mat_f32(3, 2),
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "test_sparse_scatter_i32");
+    assert!(result.c_source.contains("kernel_scatter_add_i32"));
+    assert!(result.c_source.contains("const int *indices"));
+    assert!(
+        result
+            .c_source
+            .contains("atomicAdd(&out[dst], updates[i]);")
+    );
+    assert!(result.c_source.contains("hipMemcpyDeviceToDevice"));
 }
 
 #[test]

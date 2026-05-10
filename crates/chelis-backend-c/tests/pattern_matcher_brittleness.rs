@@ -8,14 +8,11 @@
 //!
 //! There are two relevant facts to capture in this file:
 //!
-//! 1. There is *no* `detect_gather_pattern` in Chelis today. `gather` is
-//!    host-only (`crates/chelis-ir/src/host.rs:4640`); the spec §3.5
-//!    `one_hot+expand+mul+sum` lowering is not wired. So the original Test 2
-//!    framing — "implement spec gather lowering, see whether it folds back to
-//!    a hardware lookup" — has nothing to break: the lowering doesn't ship.
-//!    The risk re-arms only if Phase 3h adds the lowering paired with a
-//!    recognizer. Until then, gather doesn't OOM because the dangerous
-//!    decomposition isn't generated.
+//! 1. The shared IR specialization pass now has a scoped dense-gather
+//!    recognizer. It matches the internal `OneHot + Expand + Mul + Sum` tree
+//!    and rewrites it to first-class `RiscOp::Gather` before DCE/codegen.
+//!    Arbitrary historical const/eq one-hot encodings are not covered because
+//!    they no longer preserve the original index operand.
 //!
 //! 2. The raw backend detector still keys off `Sum -> Mul -> (Expand, Expand)`,
 //!    but M1 added `chelis_ir::specialize`, which runs closed-list no-op
@@ -38,6 +35,13 @@ fn t3(a: usize, b: usize, c: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(a), DimInfo::Lit(b), DimInfo::Lit(c)],
         precision: Prim::F32,
+    }
+}
+
+fn vec_i64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int64,
     }
 }
 
@@ -166,18 +170,54 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
 }
 
 #[test]
-fn structural_no_gather_recognizer_today() {
-    // Sentinel: there is no gather→pointer-lookup recognizer in this snapshot.
-    // If a future commit adds one (e.g., `detect_gather_pattern` in this crate
-    // or in `chelis-ir/src/optimize.rs`), the gather OOM trap re-arms unless
-    // the same change adds tests like `cast_perturbed_gather_pattern_misses`
-    // analogous to the matmul case above. This test exists to be a noisy
-    // reminder when grep'ing.
-    //
-    // Verify by absence: the C backend's blas module exports only
-    // `MatmulInfo`/`detect_matmul_pattern`, not any gather variant.
-    //
-    // This test passes by construction; the comment is the durable artifact.
-    let probe = std::any::type_name::<chelis_backend_c::blas::MatmulInfo>();
-    assert!(probe.ends_with("::blas::MatmulInfo"));
+fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
+    let mut dag = Dag::new();
+    let values = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat(3, 2), None);
+    let indices = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_i64(4), None);
+    let one_hot = dag.add_node(RiscOp::OneHot { vocab: 3 }, vec![indices], mat(4, 3), None);
+    let expanded_one_hot = dag.add_node(
+        RiscOp::Expand {
+            axis: 2,
+            size: DimExpr::Concrete(2),
+        },
+        vec![one_hot],
+        t3(4, 3, 2),
+        None,
+    );
+    let expanded_values = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: DimExpr::Concrete(4),
+        },
+        vec![values],
+        t3(4, 3, 2),
+        None,
+    );
+    let product = dag.add_node(
+        RiscOp::Mul,
+        vec![expanded_one_hot, expanded_values],
+        t3(4, 3, 2),
+        None,
+    );
+    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![product], mat(4, 2), None);
+    dag.add_root(out);
+
+    let specialized = specialize_for_blas(&dag);
+    assert!(
+        specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::Gather { axis: 0 })),
+        "the IR specialize pass must collapse the internal dense gather tree \
+         to first-class sparse Gather"
+    );
+    assert!(
+        !specialized.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::OneHot { .. } | RiscOp::Mul | RiscOp::Expand { .. }
+            )
+        }),
+        "post-specialization DCE must remove the dense one-hot/product tree"
+    );
 }
