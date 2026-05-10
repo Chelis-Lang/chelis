@@ -3,6 +3,7 @@
 
 #include <hip/hip_runtime.h>
 #include <hip/hiprtc.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,26 @@ extern hipblasStatus_t hipblasSgemm(
     const float *beta,
     float *C,
     int ldc
+);
+extern hipblasStatus_t hipblasSgemmStridedBatched(
+    hipblasHandle_t handle,
+    hipblasOperation_t transa,
+    hipblasOperation_t transb,
+    int m,
+    int n,
+    int k,
+    const float *alpha,
+    const float *A,
+    int lda,
+    long long strideA,
+    const float *B,
+    int ldb,
+    long long strideB,
+    const float *beta,
+    float *C,
+    int ldc,
+    long long strideC,
+    int batchCount
 );
 #endif
 
@@ -82,6 +103,10 @@ typedef struct {
 
 /* ---- Allocation / deallocation ---- */
 
+static inline size_t chelis_gpu_dtype_size(int dtype) {
+    return (dtype == CHELIS_I64 || dtype == CHELIS_F64) ? sizeof(int64_t) : sizeof(float);
+}
+
 static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {
     chelis_gpu_tensor *t = (chelis_gpu_tensor*)calloc(1, sizeof(chelis_gpu_tensor));
     t->ndim = ndim;
@@ -97,7 +122,7 @@ static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, in
     for (int d = ndim - 1; d >= 0; d--) {
         t->strides[d] = (d == ndim - 1) ? 1 : t->strides[d + 1] * t->shape[d + 1];
     }
-    CHELIS_HIP_CHECK(hipMalloc(&t->data, t->size * sizeof(float)));
+    CHELIS_HIP_CHECK(hipMalloc(&t->data, t->size * chelis_gpu_dtype_size(dtype)));
     return t;
 }
 
@@ -143,13 +168,13 @@ static inline void chelis_gpu_free_view(chelis_gpu_tensor *t) {
 
 static inline void chelis_host_to_device(chelis_gpu_tensor *dst, const chelis_tensor *src) {
     CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data,
-                               dst->size * sizeof(float),
+                               dst->size * chelis_gpu_dtype_size(dst->dtype),
                                hipMemcpyHostToDevice));
 }
 
 static inline void chelis_device_to_host(chelis_tensor *dst, const chelis_gpu_tensor *src) {
     CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data,
-                               dst->size * sizeof(float),
+                               dst->size * chelis_gpu_dtype_size(src->dtype),
                                hipMemcpyDeviceToHost));
 }
 
@@ -163,7 +188,7 @@ static inline chelis_gpu_tensor* chelis_gpu_clone(const chelis_gpu_tensor *src) 
     CHELIS_HIP_CHECK(hipMemcpy(
         dst->data,
         src->data,
-        src->size * sizeof(float),
+        src->size * chelis_gpu_dtype_size(src->dtype),
         hipMemcpyDeviceToDevice
     ));
     return dst;
@@ -277,6 +302,53 @@ static inline void chelis_hipblas_sgemm_batched_row_major(
             n
         ));
     }
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
+}
+
+static inline void chelis_hipblas_sgemm_strided_batched_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k,
+    int batch_count,
+    long long a_batch_stride,
+    long long b_batch_stride,
+    long long out_batch_stride
+) {
+    if (!chelis_gpu_matrix_slices_contiguous(a, k)
+        || !chelis_gpu_matrix_slices_contiguous(b, n)
+        || !chelis_gpu_matrix_slices_contiguous(out, n)) {
+        fprintf(stderr, "chelis_hipblas_sgemm_strided_batched_row_major: matrix slices must be contiguous\n");
+        abort();
+    }
+
+    hipblasHandle_t handle;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    /* hipBLAS is column-major by default. Swap A/B and m/n to preserve row-major semantics. */
+    CHELIS_HIPBLAS_CHECK(hipblasSgemmStridedBatched(
+        handle,
+        HIPBLAS_OP_N,
+        HIPBLAS_OP_N,
+        n,
+        m,
+        k,
+        &alpha,
+        b->data,
+        n,
+        b_batch_stride,
+        a->data,
+        k,
+        a_batch_stride,
+        &beta,
+        out->data,
+        n,
+        out_batch_stride,
+        batch_count
+    ));
     CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
 }
 

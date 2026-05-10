@@ -781,6 +781,7 @@ fn compute_adjoints(
             let dx = dag.add_node(RiscOp::Sum { axis: *axis }, vec![g], input_ty, None);
             Some(vec![(x, dx)])
         }
+        RiscOp::OneHot { .. } => Some(vec![]),
         RiscOp::Pad { padding, .. } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
@@ -850,6 +851,25 @@ fn compute_adjoints(
         }
         RiscOp::Copy => Some(vec![(node.inputs[0], g)]),
         RiscOp::Drop => None,
+        RiscOp::Gather { axis } => {
+            let values = node.inputs[0];
+            let indices = node.inputs[1];
+            let values_ty = forward.get(values).unwrap().output_type.clone();
+            let zero = dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                values_ty.clone(),
+                None,
+            );
+            let dvalues = dag.add_node(
+                RiscOp::ScatterAdd { axis: *axis },
+                vec![zero, indices, g],
+                values_ty,
+                None,
+            );
+            Some(vec![(values, dvalues)])
+        }
+        RiscOp::ScatterAdd { .. } => None,
         RiscOp::BlasMatmul { .. } => None,
     }
 }

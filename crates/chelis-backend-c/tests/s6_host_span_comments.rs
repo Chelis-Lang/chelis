@@ -30,6 +30,7 @@ fn make_program(body: HostExpr) -> HostProgram {
             ret_ty: HostType::Float64,
             body,
             tensor_helpers: Vec::new(),
+            specialization: None,
         }],
     }
 }

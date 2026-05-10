@@ -439,9 +439,9 @@ Current 2d performance boundary:
 
 - batched `matmul` is correct on both backends and specializes to runtime-sized BLAS when
   the operands have contiguous trailing matrix slices
-- the C backend emits a host loop over `cblas_sgemm` for batched matmul; HIP currently
-  uses a helper loop over hipBLAS calls, with direct `hipblasSgemmStridedBatched` dispatch
-  left as a backend-quality follow-up for uniformly strided batch layouts
+- the C backend emits a host loop over `cblas_sgemm` for batched matmul; HIP emits
+  `hipblasSgemmStridedBatched` for uniformly strided batched layouts and keeps the
+  helper loop as a fallback for ineligible batched layouts
 
 ---
 
@@ -462,13 +462,12 @@ them to RISC primitives during IR lowering.
 The type checker knows their signatures.
 The optimizer can fuse them.
 In the shipped compiler, ordinary user-space functions cannot teach the AD engine a new
-adjoint or the backend a new library/kernel specialization strategy.
-That is a current boundary, not a permanent design principle: cross-function
-user-defined specialization is a known limitation tracked as a separate workstream in
-[`cross_function_specialization.md`](cross_function_specialization.md).
-Until that workstream ships, library helpers that wrap `matmul`-equivalent tensor math
-may compile correctly but miss the BLAS fast path when the helper sits behind a
-function-call boundary.
+adjoint. Backend specialization is narrower but no longer strictly intraprocedural:
+the C backend can derive BLAS-equivalent summaries for simple pure tensor helpers and
+wrappers, so user-defined `matmul` helpers hit the BLAS path without relying on native
+LTO. This is not a general user annotation mechanism and does not yet cover arbitrary
+library abstractions, gather summaries, or HIP callsite summary emission; the active
+scope is tracked in [`cross_function_specialization.md`](cross_function_specialization.md).
 
 The core transforms (`grad`, `vmap`, `jit`) are also compiler-intrinsic for the same
 reason: they require compiler cooperation to implement.

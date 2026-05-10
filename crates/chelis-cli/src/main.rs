@@ -8,7 +8,7 @@ use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
 use chelis_types::types::{Dim, Type};
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -1595,8 +1595,8 @@ fn cmd_build(
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
-                reject_unsupported_hip_ops(&hip_dag)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
+                reject_unsupported_hip_ops(&specialized)?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
@@ -1810,8 +1810,8 @@ fn cmd_build_deep(
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
-                reject_unsupported_hip_ops(&hip_dag)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
+                reject_unsupported_hip_ops(&specialized)?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
@@ -3417,6 +3417,16 @@ fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::e
 }
 
 fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn std::error::Error>> {
+    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> =
+        dag.nodes()
+            .iter()
+            .filter_map(|node| match node.op {
+                chelis_ir::dag::RiscOp::Gather { .. }
+                | chelis_ir::dag::RiscOp::ScatterAdd { .. } => node.inputs.get(1).copied(),
+                _ => None,
+            })
+            .collect();
+
     for node in dag.nodes() {
         match &node.op {
             chelis_ir::dag::RiscOp::Pad { .. } => {
@@ -3433,13 +3443,109 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 )
                 .into());
             }
+            chelis_ir::dag::RiscOp::OneHot { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` cannot compile internal one_hot node {}: \
+                     the sparse gather recognizer must consume OneHot before backend emission",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::Gather { .. } => {
+                let values = &dag.get(node.inputs[0]).unwrap().output_type;
+                let index_node = dag.get(node.inputs[1]).unwrap();
+                let indices = &index_node.output_type;
+                if values.precision != chelis_types::types::Prim::F32
+                    || node.output_type.precision != chelis_types::types::Prim::F32
+                {
+                    return Err(format!(
+                        "`chelis build --target hip` sparse gather supports f32 payloads only; \
+                         node {} carries payload precision `{}` and output precision `{}`",
+                        node.id.0,
+                        values.precision.name(),
+                        node.output_type.precision.name()
+                    )
+                    .into());
+                }
+                if !matches!(
+                    indices.precision,
+                    chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
+                ) {
+                    return Err(format!(
+                        "`chelis build --target hip` sparse gather requires int32/int64 indices; \
+                         node {} uses `{}`",
+                        node.id.0,
+                        indices.precision.name()
+                    )
+                    .into());
+                }
+                if !matches!(index_node.op, chelis_ir::dag::RiscOp::Load { .. }) {
+                    return Err(format!(
+                        "`chelis build --target hip` sparse gather requires indices to be loaded input tensors in this milestone; \
+                         node {} uses indices produced by {:?}. \
+                         Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
+                        node.id.0,
+                        index_node.op
+                    )
+                    .into());
+                }
+            }
+            chelis_ir::dag::RiscOp::ScatterAdd { .. } => {
+                let target = &dag.get(node.inputs[0]).unwrap().output_type;
+                let index_node = dag.get(node.inputs[1]).unwrap();
+                let indices = &index_node.output_type;
+                let updates = &dag.get(node.inputs[2]).unwrap().output_type;
+                if target.precision != chelis_types::types::Prim::F32
+                    || updates.precision != chelis_types::types::Prim::F32
+                    || node.output_type.precision != chelis_types::types::Prim::F32
+                {
+                    return Err(format!(
+                        "`chelis build --target hip` sparse scatter_add supports f32 payloads only; \
+                         node {} carries target `{}`, updates `{}`, output `{}`. \
+                         f64 scatter_add needs backend-specific atomic support and is not in this milestone.",
+                        node.id.0,
+                        target.precision.name(),
+                        updates.precision.name(),
+                        node.output_type.precision.name()
+                    )
+                    .into());
+                }
+                if !matches!(
+                    indices.precision,
+                    chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
+                ) {
+                    return Err(format!(
+                        "`chelis build --target hip` sparse scatter_add requires int32/int64 indices; \
+                         node {} uses `{}`",
+                        node.id.0,
+                        indices.precision.name()
+                    )
+                    .into());
+                }
+                if !matches!(index_node.op, chelis_ir::dag::RiscOp::Load { .. }) {
+                    return Err(format!(
+                        "`chelis build --target hip` sparse scatter_add requires indices to be loaded input tensors in this milestone; \
+                         node {} uses indices produced by {:?}. \
+                         Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
+                        node.id.0,
+                        index_node.op
+                    )
+                    .into());
+                }
+            }
             _ => {}
         }
+    }
+    for node in dag.nodes() {
         match node.output_type.precision {
             chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
+            chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
+                if sparse_index_nodes.contains(&node.id)
+                    && matches!(node.op, chelis_ir::dag::RiscOp::Load { .. }) => {}
             other => {
                 return Err(format!(
-                    "`chelis build --target hip` DAG path only supports f32/bool tensors; \
+                    "`chelis build --target hip` DAG path only supports f32/bool tensors, \
+                     plus loaded int32/int64 tensors when they are consumed as sparse indices; \
                      node {} carries precision `{}`. \
                      The HIP backend is single-entry and doesn't route through a \
                      host-lane wrapper — rewrite the program to use f32 tensors or \
@@ -3506,12 +3612,25 @@ fn reject_unsupported_metal_ops(
 fn reject_unsupported_c_precisions(
     dag: &chelis_ir::dag::Dag,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> =
+        dag.nodes()
+            .iter()
+            .filter_map(|node| match node.op {
+                chelis_ir::dag::RiscOp::Gather { .. }
+                | chelis_ir::dag::RiscOp::ScatterAdd { .. } => node.inputs.get(1).copied(),
+                _ => None,
+            })
+            .collect();
+
     for node in dag.nodes() {
         match node.output_type.precision {
             chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
+            chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
+                if sparse_index_nodes.contains(&node.id) => {}
             other => {
                 return Err(format!(
-                    "`chelis build --target c` DAG path only supports f32/bool tensors; \
+                    "`chelis build --target c` DAG path only supports f32/bool tensors, \
+                     plus int32/int64 tensors when they are consumed as sparse indices; \
                      node {} carries precision `{}`. \
                      Non-f32/bool tensors must flow through the host-lane wrapper \
                      (use `to_tensor([...])`/`pad_sequences` or declare a helper fn \

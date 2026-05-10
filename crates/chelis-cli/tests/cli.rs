@@ -3835,6 +3835,93 @@ fn build_hip_rejects_pad_lowering_without_panic() {
 }
 
 #[test]
+fn build_hip_emits_sparse_gather_kernel() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("gather.ch");
+    let out_dir = dir.path().join("hip-gather-out");
+    write_file(
+        &path,
+        "def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let hip_src = fs::read_to_string(out_dir.join("gather_hip.cpp")).expect("hip source");
+    assert!(hip_src.contains("kernel_gather_i64"));
+    assert!(hip_src.contains("const long long *indices"));
+}
+
+#[test]
+fn build_c_emits_sparse_gather_loop_for_int32_indices() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("gather_c.ch");
+    let out_dir = dir.path().join("c-gather-out");
+    write_file(
+        &path,
+        "def f(table: tensor[1000, 128, f32], indices: tensor[64, int32]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let c_src = fs::read_to_string(out_dir.join("gather_c.c")).expect("c source");
+    assert!(c_src.contains("const int32_t *"));
+    assert!(c_src.contains("values_data"));
+    assert!(c_src.contains("_out_data"));
+    assert!(!c_src.contains("chelis_tensor_gather("));
+    assert!(
+        !c_src.contains("(int[]){ 64, 1000, 128 }"),
+        "C sparse gather must not allocate the dense [N,V,D] one-hot/product shape"
+    );
+}
+
+#[test]
+fn build_hip_rejects_sparse_gather_with_non_load_cast_indices() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("gather_cast.ch");
+    write_file(
+        &path,
+        "def f(table: tensor[1000, 128, f32], raw: tensor[64, f32]) -> tensor[64, 128, f32] = gather(table, cast(raw, int64), 0)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "sparse gather requires indices to be loaded input tensors",
+        ))
+        .stderr(predicate::str::contains(
+            "Non-load integer index producers need integer HIP codegen",
+        ));
+}
+
+#[test]
 fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
     let dir = tempdir().expect("tempdir");
     let out_dir = dir.path().join("nested/hip-output");

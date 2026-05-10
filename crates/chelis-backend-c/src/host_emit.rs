@@ -1,10 +1,11 @@
 use chelis_ir::host::{
-    HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostFunction, HostMatchArm, HostParam,
-    HostProgram, HostTensorHelper, HostType,
+    HostBlasMatmulSummary, HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostFunction,
+    HostFunctionSpecialization, HostMatchArm, HostParam, HostProgram, HostTensorHelper,
+    HostTensorSpecialization, HostType,
 };
 
 use crate::emit::CEmitter;
-use chelis_ir::dag::RiscOp;
+use chelis_ir::dag::{DimExpr, DimInfo, RiscOp};
 use std::collections::HashMap;
 
 pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
@@ -16,7 +17,7 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     // `#include "chelis_math.h"` and the resulting `main.c` calls vvexpf with
     // no declaration in scope.
     let mut body: Vec<String> = Vec::new();
-    let mut needs_math_header = false;
+    let mut helper_requirements = HelperRequirements::default();
     append_tensor_reshape_helper(&mut body);
     body.push(String::new());
     append_tensor_print_helper(&mut body);
@@ -33,6 +34,7 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     // linker.
     let internal_linkage = !program.globals.is_empty();
     let emitted_names = emitted_function_names(program, program_name);
+    let function_specializations = function_specializations(program);
     let header = emit_host_header_with_linkage(program, program_name, internal_linkage);
     if !header.is_empty() {
         body.push(header);
@@ -40,26 +42,22 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     }
 
     for (index, helper) in program.global_tensor_helpers.iter().enumerate() {
-        if append_helper(
+        helper_requirements.merge(append_helper(
             &mut body,
             helper,
             &format!("{program_name}__global__tensor_{index}"),
-        ) {
-            needs_math_header = true;
-        }
+        ));
     }
     for function in &program.functions {
         for (index, helper) in function.tensor_helpers.iter().enumerate() {
             let function_name = emitted_names
                 .get(&function.name)
                 .expect("host function emitted name");
-            if append_helper(
+            helper_requirements.merge(append_helper(
                 &mut body,
                 helper,
                 &format!("{function_name}__tensor_{index}"),
-            ) {
-                needs_math_header = true;
-            }
+            ));
         }
     }
 
@@ -71,6 +69,7 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
                 .get(&function.name)
                 .expect("host function emitted name"),
             &emitted_names,
+            &function_specializations,
             internal_linkage,
         );
         body.push(String::new());
@@ -85,7 +84,10 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
         "#include <assert.h>".to_string(),
         "#include <math.h>".to_string(),
     ];
-    if needs_math_header {
+    if helper_requirements.needs_blas_header {
+        out.push("#include \"chelis_blas.h\"".to_string());
+    }
+    if helper_requirements.needs_math_header {
         out.push("#include \"chelis_math.h\"".to_string());
     }
     out.push(String::new());
@@ -110,6 +112,19 @@ fn emitted_function_names(program: &HostProgram, program_name: &str) -> HashMap<
                 function.name.clone(),
                 emitted_function_name(program_name, &function.name),
             )
+        })
+        .collect()
+}
+
+fn function_specializations(program: &HostProgram) -> HashMap<String, HostFunctionSpecialization> {
+    program
+        .functions
+        .iter()
+        .filter_map(|function| {
+            function
+                .specialization
+                .clone()
+                .map(|summary| (function.name.clone(), summary))
         })
         .collect()
 }
@@ -290,10 +305,27 @@ fn emit_host_header_with_linkage(
         .join("\n")
 }
 
-/// Append a tensor helper to `out` and return `true` if the inner emitter
-/// included `chelis_math.h`.  The caller propagates that signal to the host
-/// preamble so the math header is emitted exactly once at file scope.
-fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: &str) -> bool {
+#[derive(Debug, Clone, Copy, Default)]
+struct HelperRequirements {
+    needs_blas_header: bool,
+    needs_math_header: bool,
+}
+
+impl HelperRequirements {
+    fn merge(&mut self, other: Self) {
+        self.needs_blas_header |= other.needs_blas_header;
+        self.needs_math_header |= other.needs_math_header;
+    }
+}
+
+/// Append a tensor helper to `out` and return the runtime headers required by
+/// the inner emitter. The caller propagates these headers to the host preamble
+/// so each one is emitted exactly once at file scope.
+fn append_helper(
+    out: &mut Vec<String>,
+    helper: &HostTensorHelper,
+    helper_name: &str,
+) -> HelperRequirements {
     if let Some((_input_name, _input_ty)) = identity_helper_input(helper) {
         out.push(format!(
             "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
@@ -304,17 +336,23 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
-        return false;
+        return HelperRequirements::default();
     }
 
     // Tensor helpers are TU-internal: they are only called from within this
     // generated `.c` file and must never be exported symbols.  `static_entry`
     // ensures the kernel function itself gets `static` linkage so that when
     // compiled with `-shared -fPIC` the symbol is not exported via PLT.
+    let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
+    let uses_blas = specialized
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
     let helper_src = CEmitter::emit_dag_with_options(
-        &helper.dag,
+        &specialized,
         helper_name,
         crate::CodegenOptions {
+            use_blas: uses_blas,
             static_entry: true,
             ..crate::CodegenOptions::default()
         },
@@ -326,15 +364,14 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
     // redefinition. We filter the prelude out here and rely on
     // `emit_host_program` to emit exactly one copy at file scope.
     let mut skipping_uniform_prelude = false;
-    let mut needs_math_header = false;
+    let mut requirements = HelperRequirements::default();
     for line in helper_src.lines() {
         if line.starts_with("#include ") {
-            // Track whether the inner emitter pulled in chelis_math.h so the
-            // host preamble can re-emit it once.  Otherwise vForce intrinsics
-            // such as vvexpf/vvlogf reach the compiler with no declaration in
-            // scope.
+            if line.contains("\"chelis_blas.h\"") {
+                requirements.needs_blas_header = true;
+            }
             if line.contains("\"chelis_math.h\"") {
-                needs_math_header = true;
+                requirements.needs_math_header = true;
             }
             continue;
         }
@@ -354,7 +391,7 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
         out.push(line.to_string());
     }
     out.push(String::new());
-    needs_math_header
+    requirements
 }
 
 fn identity_helper_input(
@@ -380,6 +417,7 @@ fn emit_function(
     function: &HostFunction,
     emitted_name: &str,
     emitted_names: &HashMap<String, String>,
+    function_specializations: &HashMap<String, HostFunctionSpecialization>,
     internal_linkage: bool,
 ) {
     let params = function
@@ -399,7 +437,13 @@ fn emit_function(
         emitted_name,
         params
     ));
-    let mut emitter = HostEmitter::new("    ".to_string(), emitted_name, emitted_names.clone());
+    let mut emitter = HostEmitter::new(
+        "    ".to_string(),
+        emitted_name,
+        emitted_names.clone(),
+        function_specializations.clone(),
+        &function.tensor_helpers,
+    );
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty);
     out.extend(emitter.lines);
     out.push("    return __result;".to_string());
@@ -412,6 +456,8 @@ fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
         "    ".to_string(),
         &format!("{program_name}__global"),
         HashMap::new(),
+        function_specializations(program),
+        &program.global_tensor_helpers,
     );
     for (index, binding) in program.globals.iter().enumerate() {
         emitter.emit_expr_to_var(
@@ -435,21 +481,31 @@ fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
     out.push("}".to_string());
 }
 
-struct HostEmitter {
+struct HostEmitter<'a> {
     lines: Vec<String>,
     indent: String,
     helper_prefix: String,
     emitted_names: HashMap<String, String>,
+    function_specializations: HashMap<String, HostFunctionSpecialization>,
+    tensor_helpers: &'a [HostTensorHelper],
     temp_counter: usize,
 }
 
-impl HostEmitter {
-    fn new(indent: String, helper_prefix: &str, emitted_names: HashMap<String, String>) -> Self {
+impl<'a> HostEmitter<'a> {
+    fn new(
+        indent: String,
+        helper_prefix: &str,
+        emitted_names: HashMap<String, String>,
+        function_specializations: HashMap<String, HostFunctionSpecialization>,
+        tensor_helpers: &'a [HostTensorHelper],
+    ) -> Self {
         Self {
             lines: Vec::new(),
             indent,
             helper_prefix: helper_prefix.to_string(),
             emitted_names,
+            function_specializations,
+            tensor_helpers,
             temp_counter: 0,
         }
     }
@@ -1579,8 +1635,17 @@ impl HostEmitter {
         target: &str,
         helper: usize,
         args: &[HostExpr],
-        _ty: &HostType,
+        ty: &HostType,
     ) {
+        if let Some(HostTensorHelper {
+            specialization: Some(HostTensorSpecialization::BlasMatmul(summary)),
+            ..
+        }) = self.tensor_helpers.get(helper)
+        {
+            self.assign_blas_matmul_summary(target, summary, args, ty);
+            return;
+        }
+
         let helper_name = format!("{}__tensor_{helper}", self.helper_prefix);
         let tensor_args = args
             .iter()
@@ -1658,14 +1723,288 @@ impl HostEmitter {
         }
     }
 
+    fn assign_blas_matmul_summary(
+        &mut self,
+        target: &str,
+        summary: &HostBlasMatmulSummary,
+        args: &[HostExpr],
+        _ty: &HostType,
+    ) {
+        assert_eq!(
+            args.len(),
+            summary.input_tys.len(),
+            "BLAS summary argument count must match callsite argument count"
+        );
+        let tensor_args = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                let arg_name = self.next_temp(&format!("blas_arg{index}"));
+                let expected_ty = HostType::Tensor(
+                    summary
+                        .input_tys
+                        .get(index)
+                        .expect("summary input type")
+                        .clone(),
+                );
+                self.emit_expr_to_var(arg, &arg_name, &expected_ty);
+                arg_name
+            })
+            .collect::<Vec<_>>();
+        self.emit_blas_summary_contract(summary, &tensor_args);
+
+        let lhs = tensor_args
+            .get(summary.lhs_input)
+            .expect("summary lhs input index");
+        let rhs = tensor_args
+            .get(summary.rhs_input)
+            .expect("summary rhs input index");
+        let m_expr = self.summary_dim_expr(&summary.m, summary, &tensor_args);
+        let n_expr = self.summary_dim_expr(&summary.n, summary, &tensor_args);
+        let k_expr = self.summary_dim_expr(&summary.k, summary, &tensor_args);
+        let output_dims = summary
+            .batch_dims
+            .iter()
+            .chain([&summary.m, &summary.n])
+            .map(|dim| self.summary_dim_expr(dim, summary, &tensor_args))
+            .collect::<Vec<_>>();
+        let shape_name = self.next_temp("blas_shape");
+        self.lines.push(format!(
+            "{}int {shape_name}[{}] = {{ {} }};",
+            self.indent,
+            output_dims.len(),
+            output_dims.join(", ")
+        ));
+        self.lines.push(format!(
+            "{}{target} = chelis_alloc({}, {shape_name}, CHELIS_F32);",
+            self.indent,
+            output_dims.len()
+        ));
+
+        let lhs_contig = self.next_temp("blas_lhs");
+        let rhs_contig = self.next_temp("blas_rhs");
+        self.lines.push(format!(
+            "{}chelis_tensor *{lhs_contig} = {lhs};",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}if (!({lhs_contig}->ndim >= 2 && {lhs_contig}->strides[{lhs_contig}->ndim - 1] == 1 && {lhs_contig}->strides[{lhs_contig}->ndim - 2] == {k_expr})) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    {lhs_contig} = chelis_contiguous({lhs_contig});",
+            self.indent
+        ));
+        self.lines.push(format!("{}}}", self.indent));
+        self.lines.push(format!(
+            "{}chelis_tensor *{rhs_contig} = {rhs};",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}if (!({rhs_contig}->ndim >= 2 && {rhs_contig}->strides[{rhs_contig}->ndim - 1] == 1 && {rhs_contig}->strides[{rhs_contig}->ndim - 2] == {n_expr})) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    {rhs_contig} = chelis_contiguous({rhs_contig});",
+            self.indent
+        ));
+        self.lines.push(format!("{}}}", self.indent));
+
+        if summary.batch_dims.is_empty() {
+            self.lines.push(format!(
+                "{}cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, {lhs_contig}->data, {k_expr}, {rhs_contig}->data, {n_expr}, 0.0f, {target}->data, {n_expr});",
+                self.indent
+            ));
+        } else {
+            let batch_count = summary
+                .batch_dims
+                .iter()
+                .map(|dim| self.summary_dim_expr(dim, summary, &tensor_args))
+                .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
+                .unwrap_or_else(|| "1".to_string());
+            let batch = self.next_temp("blas_batch");
+            let rem = self.next_temp("blas_rem");
+            let lhs_offset = self.next_temp("blas_lhs_offset");
+            let rhs_offset = self.next_temp("blas_rhs_offset");
+            let out_offset = self.next_temp("blas_out_offset");
+            self.lines.push(format!(
+                "{}for (int {batch} = 0; {batch} < {batch_count}; {batch}++) {{",
+                self.indent
+            ));
+            self.lines
+                .push(format!("{}    int {rem} = {batch};", self.indent));
+            self.lines
+                .push(format!("{}    int {lhs_offset} = 0;", self.indent));
+            self.lines
+                .push(format!("{}    int {rhs_offset} = 0;", self.indent));
+            self.lines
+                .push(format!("{}    int {out_offset} = 0;", self.indent));
+            for axis in (0..summary.batch_dims.len()).rev() {
+                let dim_expr =
+                    self.summary_dim_expr(&summary.batch_dims[axis], summary, &tensor_args);
+                let coord = self.next_temp(&format!("blas_coord_{axis}"));
+                self.lines.push(format!(
+                    "{}    int {coord} = {rem} % ({dim_expr});",
+                    self.indent
+                ));
+                self.lines
+                    .push(format!("{}    {rem} /= ({dim_expr});", self.indent));
+                self.lines.push(format!(
+                    "{}    {lhs_offset} += {coord} * {lhs_contig}->strides[{axis}];",
+                    self.indent
+                ));
+                self.lines.push(format!(
+                    "{}    {rhs_offset} += {coord} * {rhs_contig}->strides[{axis}];",
+                    self.indent
+                ));
+                self.lines.push(format!(
+                    "{}    {out_offset} += {coord} * {target}->strides[{axis}];",
+                    self.indent
+                ));
+            }
+            self.lines.push(format!(
+                "{}    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, {lhs_contig}->data + {lhs_offset}, {k_expr}, {rhs_contig}->data + {rhs_offset}, {n_expr}, 0.0f, {target}->data + {out_offset}, {n_expr});",
+                self.indent
+            ));
+            self.lines.push(format!("{}}}", self.indent));
+        }
+        self.lines.push(format!(
+            "{}if ({lhs_contig} != {lhs}) chelis_free({lhs_contig});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}if ({rhs_contig} != {rhs}) chelis_free({rhs_contig});",
+            self.indent
+        ));
+    }
+
+    fn emit_blas_summary_contract(
+        &mut self,
+        summary: &HostBlasMatmulSummary,
+        tensor_args: &[String],
+    ) {
+        let mut symbolic_first = HashMap::<String, String>::new();
+        for (input_index, (arg, ty)) in tensor_args.iter().zip(summary.input_tys.iter()).enumerate()
+        {
+            self.lines
+                .push(format!("{}if ({arg} == NULL) {{", self.indent));
+            self.lines.push(format!(
+                "{}    fprintf(stderr, \"specialized BLAS call input {input_index} is NULL\\n\");",
+                self.indent
+            ));
+            self.lines.push(format!("{}    abort();", self.indent));
+            self.lines.push(format!("{}}}", self.indent));
+            self.lines
+                .push(format!("{}if ({arg}->dtype != CHELIS_F32) {{", self.indent));
+            self.lines.push(format!(
+                "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected f32 tensor\\n\");",
+                self.indent
+            ));
+            self.lines.push(format!("{}    abort();", self.indent));
+            self.lines.push(format!("{}}}", self.indent));
+            self.lines.push(format!(
+                "{}if ({arg}->ndim != {}) {{",
+                self.indent,
+                ty.dims.len()
+            ));
+            self.lines.push(format!(
+                "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected rank {}, got %d\\n\", {arg}->ndim);",
+                self.indent,
+                ty.dims.len()
+            ));
+            self.lines.push(format!("{}    abort();", self.indent));
+            self.lines.push(format!("{}}}", self.indent));
+            for (axis, dim) in ty.dims.iter().enumerate() {
+                match dim {
+                    DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
+                        self.lines.push(format!(
+                            "{}if ({arg}->shape[{axis}] != {size}) {{",
+                            self.indent
+                        ));
+                        self.lines.push(format!(
+                            "{}    fprintf(stderr, \"specialized BLAS call input {input_index} axis {axis} expected {size}, got %d\\n\", {arg}->shape[{axis}]);",
+                            self.indent
+                        ));
+                        self.lines.push(format!("{}    abort();", self.indent));
+                        self.lines.push(format!("{}}}", self.indent));
+                    }
+                    DimInfo::Named(name, None) => {
+                        let expr = format!("{arg}->shape[{axis}]");
+                        if let Some(first) = symbolic_first.get(name) {
+                            self.lines
+                                .push(format!("{}if ({expr} != {first}) {{", self.indent));
+                            self.lines.push(format!(
+                                "{}    fprintf(stderr, \"specialized BLAS call symbolic dimension mismatch\\n\");",
+                                self.indent
+                            ));
+                            self.lines.push(format!("{}    abort();", self.indent));
+                            self.lines.push(format!("{}}}", self.indent));
+                        } else {
+                            symbolic_first.insert(name.clone(), expr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn summary_dim_expr(
+        &self,
+        dim: &DimExpr,
+        summary: &HostBlasMatmulSummary,
+        tensor_args: &[String],
+    ) -> String {
+        match dim {
+            DimExpr::Concrete(value) => value.to_string(),
+            DimExpr::Sym(name) => self
+                .summary_symbol_expr(name, summary, tensor_args)
+                .unwrap_or_else(|| panic!("BLAS summary symbol `{name}` has no input binding")),
+            DimExpr::Mul(lhs, rhs) => format!(
+                "({} * {})",
+                self.summary_dim_expr(lhs, summary, tensor_args),
+                self.summary_dim_expr(rhs, summary, tensor_args)
+            ),
+            DimExpr::Div(lhs, rhs) => format!(
+                "({} / {})",
+                self.summary_dim_expr(lhs, summary, tensor_args),
+                self.summary_dim_expr(rhs, summary, tensor_args)
+            ),
+        }
+    }
+
+    fn summary_symbol_expr(
+        &self,
+        name: &str,
+        summary: &HostBlasMatmulSummary,
+        tensor_args: &[String],
+    ) -> Option<String> {
+        summary
+            .input_tys
+            .iter()
+            .zip(tensor_args.iter())
+            .find_map(|(ty, arg)| {
+                ty.dims.iter().enumerate().find_map(|(axis, dim)| {
+                    matches!(dim, DimInfo::Named(dim_name, None) if dim_name == name)
+                        .then(|| format!("{arg}->shape[{axis}]"))
+                })
+            })
+    }
+
     fn assign_call(
         &mut self,
         target: &str,
         function: &str,
         args: &[HostExpr],
         arg_tys: &[HostType],
-        _ty: &HostType,
+        ty: &HostType,
     ) {
+        if let Some(HostFunctionSpecialization::BlasMatmul(summary)) =
+            self.function_specializations.get(function).cloned()
+        {
+            self.assign_blas_matmul_summary(target, &summary, args, ty);
+            return;
+        }
+
         let arg_vars = args
             .iter()
             .enumerate()

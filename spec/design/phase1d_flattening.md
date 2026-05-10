@@ -14,8 +14,9 @@ Phase 1d ships inside the HIP backend code generator and runtime header:
   routed through the Phase 1c slot planner
 - the HIP peak-memory reporting includes the worst single staged scratch chain
 - contiguous `f32` matmul subgraphs with rank ≥ 2 specialize to hipBLAS-backed helpers:
-  rank-2 uses `chelis_hipblas_sgemm_row_major(...)`, and batched/symbolic matmul uses
-  `chelis_hipblas_sgemm_batched_row_major(...)`
+  rank-2 uses `chelis_hipblas_sgemm_row_major(...)`; uniformly strided batched
+  matmul uses `chelis_hipblas_sgemm_strided_batched_row_major(...)`; ineligible
+  batched/symbolic matmul falls back to `chelis_hipblas_sgemm_batched_row_major(...)`
 - non-contiguous matmul-shaped DAGs fall back to the generic reduction path
 
 Phase 1d still does **not** implement flattening for irregular nested parallelism, autotuned
@@ -38,10 +39,10 @@ other multi-output reductions stay on the segmented path.
 
 **hipBLAS specialization is deliberately constrained.**
 Only operands with contiguous trailing matrix slices take the hipBLAS path. Rank ≥ 3
-batched matmul is supported by looping over batch slices in the runtime helper; using
-`hipblasSgemmStridedBatched` directly for uniformly strided batches remains a performance
-follow-up. Non-contiguous matmul-shaped DAGs remain correct via the generic reduction
-fallback.
+batched matmul uses `hipblasSgemmStridedBatched` when per-batch strides are uniform and
+statically computable. The older helper loop remains the silent fallback for supported
+batched layouts that are not strided-batched eligible. Non-contiguous matmul-shaped DAGs
+remain correct via the generic reduction fallback.
 
 **Runtime-sized BLAS dimensions.**
 Symbolic dimensions are not required to be compile-time constants for BLAS. Generated
@@ -87,5 +88,4 @@ Supporting evidence:
 
 - benchmark the optimized reduction and hipBLAS paths against the C backend and PyTorch (Phase 1e)
 - add monotonic-threshold autotuning once the kernel selection surface is stable
-- use `hipblasSgemmStridedBatched` for uniformly strided batched matmul layouts
 - consider LMAD-style memory-layout reasoning only if profiling shows coalescing/layout is the next bottleneck

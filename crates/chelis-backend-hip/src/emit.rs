@@ -54,6 +54,13 @@ struct MatmulEmitSpec {
     k: DimExpr,
 }
 
+struct StridedBatchedMatmulPlan {
+    batch_count_expr: String,
+    a_batch_stride: usize,
+    b_batch_stride: usize,
+    out_batch_stride: usize,
+}
+
 impl HipEmitter {
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(dag: &Dag, func_name: &str) -> (String, PeakDeviceBytesBreakdown) {
@@ -627,7 +634,7 @@ impl HipEmitter {
         vec![(name, source)]
     }
 
-    fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, _dag: &Dag) -> Option<String> {
+    fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, dag: &Dag) -> Option<String> {
         match op {
             RiscOp::Add => Some("kernel_add".into()),
             RiscOp::Mul => Some("kernel_mul".into()),
@@ -672,7 +679,8 @@ impl HipEmitter {
             RiscOp::MinReduce { .. }
             | RiscOp::ProdReduce { .. }
             | RiscOp::Argmax { .. }
-            | RiscOp::Argmin { .. } => None,
+            | RiscOp::Argmin { .. }
+            | RiscOp::OneHot { .. } => None,
             RiscOp::Const { .. } => Some("kernel_fill".into()),
             RiscOp::Realize => Some("kernel_cast".into()),
             RiscOp::Cast { .. } => Some("kernel_cast".into()),
@@ -686,6 +694,22 @@ impl HipEmitter {
             | RiscOp::Shrink { .. }
             | RiscOp::Stride { .. }
             | RiscOp::BlasMatmul { .. } => None,
+            RiscOp::Gather { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                Some(match indices_ty.precision {
+                    Prim::Int32 => "kernel_gather_i32".into(),
+                    Prim::Int64 => "kernel_gather_i64".into(),
+                    _ => "kernel_gather_invalid".into(),
+                })
+            }
+            RiscOp::ScatterAdd { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                Some(match indices_ty.precision {
+                    Prim::Int32 => "kernel_scatter_add_i32".into(),
+                    Prim::Int64 => "kernel_scatter_add_i64".into(),
+                    _ => "kernel_scatter_add_invalid".into(),
+                })
+            }
             RiscOp::FusedElem { .. } => Some(format!("kernel_fused_{}", node.id.0)),
         }
     }
@@ -733,6 +757,28 @@ impl HipEmitter {
             RiscOp::Cast { .. } => kernels::cast(name),
             RiscOp::Copy => kernels::cast(name),
             RiscOp::FusedElem { ops } => kernels::fused_elementwise(name, ops, node.inputs.len()),
+            RiscOp::Gather { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                match indices_ty.precision {
+                    Prim::Int32 => kernels::gather(name, "int"),
+                    Prim::Int64 => kernels::gather(name, "long long"),
+                    other => panic!(
+                        "HIP backend sparse gather requires int32/int64 indices, got {}",
+                        other.name()
+                    ),
+                }
+            }
+            RiscOp::ScatterAdd { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                match indices_ty.precision {
+                    Prim::Int32 => kernels::scatter_add(name, "int"),
+                    Prim::Int64 => kernels::scatter_add(name, "long long"),
+                    other => panic!(
+                        "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                        other.name()
+                    ),
+                }
+            }
             _ => unreachable!("no kernel for op: {op:?}"),
         }
     }
@@ -889,6 +935,11 @@ impl HipEmitter {
                     "HIP backend: Argmin is not yet supported (Phase 3j-pre ships C backend only)"
                 );
             }
+            RiscOp::OneHot { .. } => {
+                panic!(
+                    "HIP backend: internal OneHot must be consumed by specialization before codegen"
+                )
+            }
             RiscOp::Reshape { .. } => {
                 self.emit_reshape(id, &node.inputs, &node.output_type);
             }
@@ -943,7 +994,14 @@ impl HipEmitter {
                         k: k.clone(),
                     },
                     &node.output_type,
+                    dag,
                 );
+            }
+            RiscOp::Gather { axis } => {
+                self.emit_gather_launch(id, *axis, &node.inputs, &node.output_type, dag)
+            }
+            RiscOp::ScatterAdd { axis } => {
+                self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
         }
     }
@@ -1204,6 +1262,118 @@ impl HipEmitter {
         self.line("}");
     }
 
+    fn emit_gather_launch(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let values = inputs[0].0;
+        let indices = inputs[1].0;
+        let values_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        if values_ty.precision != Prim::F32 || ty.precision != Prim::F32 {
+            panic!("HIP backend sparse gather currently supports f32 payloads only");
+        }
+        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+            panic!(
+                "HIP backend sparse gather requires int32/int64 indices, got {}",
+                indices_ty.precision.name()
+            );
+        }
+        let before = Self::dim_product_expr(&values_ty.dims[..axis]);
+        let axis_size = Self::emit_dim_info(&values_ty.dims[axis]);
+        let after = Self::dim_product_expr(&values_ty.dims[axis + 1..]);
+        let kernel_name = match indices_ty.precision {
+            Prim::Int32 => "kernel_gather_i32",
+            Prim::Int64 => "kernel_gather_i64",
+            _ => unreachable!(),
+        };
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_before = {before};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_after = {after};"));
+        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
+        self.line(&format!("int t{id}_total = d_t{id}->size;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{values}->data, &d_t{indices}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("(t{id}_total + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_scatter_add_launch(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let target = inputs[0].0;
+        let indices = inputs[1].0;
+        let updates = inputs[2].0;
+        let target_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
+        if target_ty.precision != Prim::F32
+            || updates_ty.precision != Prim::F32
+            || ty.precision != Prim::F32
+        {
+            panic!("HIP backend sparse scatter_add currently supports f32 payloads only");
+        }
+        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+            panic!(
+                "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                indices_ty.precision.name()
+            );
+        }
+        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
+        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
+        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
+        let kernel_name = match indices_ty.precision {
+            Prim::Int32 => "kernel_scatter_add_i32",
+            Prim::Int64 => "kernel_scatter_add_i64",
+            _ => unreachable!(),
+        };
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+        ));
+        self.line(&format!("int t{id}_before = {before};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_after = {after};"));
+        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
+        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("(t{id}_total + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
     // ------------------------------------------------------------------
     // Fused elementwise kernel launch
     // ------------------------------------------------------------------
@@ -1291,6 +1461,7 @@ impl HipEmitter {
                     k: DimExpr::Concrete(matmul.k),
                 },
                 ty,
+                dag,
             );
             return;
         }
@@ -1395,7 +1566,7 @@ impl HipEmitter {
     }
 
     #[allow(dead_code)]
-    fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
+    fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType, dag: &Dag) {
         let a = spec.a.0;
         let b = spec.b.0;
         let m_expr = Self::emit_dim_expr(&spec.m);
@@ -1405,6 +1576,14 @@ impl HipEmitter {
         if spec.batch_dims.is_empty() {
             self.line(&format!(
                 "chelis_hipblas_sgemm_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
+            ));
+        } else if let Some(plan) = Self::strided_batched_hipblas_plan(dag, spec, ty) {
+            self.line(&format!(
+                "chelis_hipblas_sgemm_strided_batched_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, {batch_count}, {a_stride}LL, {b_stride}LL, {out_stride}LL);",
+                batch_count = plan.batch_count_expr,
+                a_stride = plan.a_batch_stride,
+                b_stride = plan.b_batch_stride,
+                out_stride = plan.out_batch_stride,
             ));
         } else {
             self.line(&format!(
@@ -1725,6 +1904,100 @@ impl HipEmitter {
             && Self::node_is_statically_contiguous(dag, info.b)
     }
 
+    fn strided_batched_hipblas_plan(
+        dag: &Dag,
+        spec: &MatmulEmitSpec,
+        ty: &TensorType,
+    ) -> Option<StridedBatchedMatmulPlan> {
+        if spec.batch_dims.is_empty()
+            || ty.precision != Prim::F32
+            || !spec.batch_dims.iter().all(Self::is_simple_runtime_dim)
+        {
+            return None;
+        }
+
+        let m = spec.m.as_concrete()?;
+        let n = spec.n.as_concrete()?;
+        let k = spec.k.as_concrete()?;
+        let batch_rank = spec.batch_dims.len();
+        if ty.dims.len() != batch_rank + 2 {
+            return None;
+        }
+
+        let a_node = dag.get(spec.a)?;
+        let b_node = dag.get(spec.b)?;
+        if a_node.output_type.precision != Prim::F32
+            || b_node.output_type.precision != Prim::F32
+            || a_node.output_type.dims.len() != batch_rank + 2
+            || b_node.output_type.dims.len() != batch_rank + 2
+            || !Self::node_is_statically_contiguous(dag, spec.a)
+            || !Self::node_is_statically_contiguous(dag, spec.b)
+        {
+            return None;
+        }
+
+        let expected_out = spec
+            .batch_dims
+            .iter()
+            .cloned()
+            .chain([spec.m.clone(), spec.n.clone()])
+            .collect::<Vec<_>>();
+        let expected_a = spec
+            .batch_dims
+            .iter()
+            .cloned()
+            .chain([spec.m.clone(), spec.k.clone()])
+            .collect::<Vec<_>>();
+        let expected_b = spec
+            .batch_dims
+            .iter()
+            .cloned()
+            .chain([spec.k.clone(), spec.n.clone()])
+            .collect::<Vec<_>>();
+        let out_dims = ty.dims.iter().map(DimExpr::from).collect::<Vec<_>>();
+        let a_dims = a_node
+            .output_type
+            .dims
+            .iter()
+            .map(DimExpr::from)
+            .collect::<Vec<_>>();
+        let b_dims = b_node
+            .output_type
+            .dims
+            .iter()
+            .map(DimExpr::from)
+            .collect::<Vec<_>>();
+        if out_dims != expected_out || a_dims != expected_a || b_dims != expected_b {
+            return None;
+        }
+
+        Some(StridedBatchedMatmulPlan {
+            batch_count_expr: Self::batch_count_expr(&spec.batch_dims),
+            a_batch_stride: m * k,
+            b_batch_stride: k * n,
+            out_batch_stride: m * n,
+        })
+    }
+
+    fn is_simple_runtime_dim(expr: &DimExpr) -> bool {
+        matches!(expr, DimExpr::Concrete(_) | DimExpr::Sym(_))
+    }
+
+    fn batch_count_expr(batch_dims: &[DimExpr]) -> String {
+        batch_dims
+            .iter()
+            .map(Self::emit_dim_expr)
+            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
+            .unwrap_or_else(|| "1".to_string())
+    }
+
+    fn dim_product_expr(dims: &[DimInfo]) -> String {
+        dims.iter()
+            .map(Self::emit_dim_info)
+            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
+            .unwrap_or_else(|| "1".to_string())
+    }
+
     #[allow(dead_code)]
     fn supports_staged_scalar_reduction(
         node: &DagNode,
@@ -1768,10 +2041,13 @@ impl HipEmitter {
             | RiscOp::ProdReduce { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
+            | RiscOp::OneHot { .. }
             | RiscOp::Realize
             | RiscOp::Cast { .. }
             | RiscOp::FusedElem { .. }
-            | RiscOp::BlasMatmul { .. } => true,
+            | RiscOp::BlasMatmul { .. }
+            | RiscOp::Gather { .. }
+            | RiscOp::ScatterAdd { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }
@@ -1786,7 +2062,8 @@ impl HipEmitter {
     #[allow(dead_code)]
     fn bytes_per_element(dtype: Prim) -> usize {
         match dtype {
-            Prim::F32 | Prim::Bool => 4,
+            Prim::F32 | Prim::Bool | Prim::Int32 => 4,
+            Prim::Int64 => 8,
             other => panic!(
                 "unsupported HIP dtype in device-memory estimate: {}",
                 other.name()
@@ -1931,8 +2208,10 @@ impl HipEmitter {
         match ty.precision {
             Prim::F32 => "CHELIS_F32",
             Prim::Bool => "CHELIS_BOOL",
+            Prim::Int32 => "CHELIS_I32",
+            Prim::Int64 => "CHELIS_I64",
             other => panic!(
-                "Phase 1a HIP backend only supports f32/bool tensors, got {}",
+                "Phase 1a HIP backend only supports f32/bool/int32/int64 tensors, got {}",
                 other.name()
             ),
         }
@@ -2003,5 +2282,114 @@ impl HipEmitter {
             .enumerate()
             .map(|(slot, label)| (label, slot))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+
+    fn vec_f32(n: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn vec_i64(n: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: Prim::Int64,
+        }
+    }
+
+    fn mat_f32(rows: usize, cols: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn fused_mul_reusable_input_dag() -> Dag {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        dag.set_reusable_input(fused, x);
+        dag
+    }
+
+    #[test]
+    fn sparse_scatter_add_emits_hip_atomic_kernel() {
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            mat_f32(3, 2),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i64(4),
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            mat_f32(4, 2),
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            mat_f32(3, 2),
+            None,
+        );
+        dag.add_root(out);
+
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_sparse");
+
+        assert!(hip.contains("kernel_scatter_add_i64"));
+        assert!(hip.contains("const long long *indices"));
+        assert!(hip.contains("atomicAdd(&out[dst], updates[i]);"));
+    }
+
+    #[test]
+    fn current_fused_reusable_input_does_not_emit_hip_restrict_shape() {
+        let dag = fused_mul_reusable_input_dag();
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
+        assert!(hip.contains("const float *ext0"));
+        assert!(hip.contains("const float *ext1"));
+        assert!(hip.contains("float *out"));
+        assert!(
+            !hip.contains("__restrict__"),
+            "current HIP fused kernels do not yet express in-place restrict shape"
+        );
+    }
+
+    #[test]
+    #[ignore = "target behavior: enable when HIP fused in-place codegen aliases reusable_input"]
+    fn target_fused_in_place_hip_restrict_shape_preserves_non_aliased_inputs() {
+        let dag = fused_mul_reusable_input_dag();
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
+        assert!(!hip.contains("const float *__restrict__ ext0"));
+        assert!(!hip.contains("float *__restrict__ out"));
+        assert!(hip.contains("const float *__restrict__ ext1"));
     }
 }

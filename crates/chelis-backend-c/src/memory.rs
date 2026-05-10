@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_types::types::Prim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +43,8 @@ struct OwnerRequirement {
     birth_index: usize,
     last_use_index: usize,
     capacity_elems: DimExpr,
+    capacity_concrete: Option<usize>,
+    capacity_key: DimExprKey,
     dtype: Prim,
 }
 
@@ -138,9 +140,12 @@ fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
                 | RiscOp::Realize
                 | RiscOp::Cast { .. }
                 | RiscOp::FusedElem { .. }
+                | RiscOp::OneHot { .. }
                 | RiscOp::Pad { .. }
                 | RiscOp::Shrink { .. }
-                | RiscOp::BlasMatmul { .. } => NodeMemoryKind::SlotBacked { slot: usize::MAX },
+                | RiscOp::BlasMatmul { .. }
+                | RiscOp::Gather { .. }
+                | RiscOp::ScatterAdd { .. } => NodeMemoryKind::SlotBacked { slot: usize::MAX },
             }
         };
         kinds.push(kind);
@@ -174,13 +179,16 @@ fn owner_requirements(
 
     for node in dag.nodes() {
         if matches!(node_kinds[node.id.0], NodeMemoryKind::SlotBacked { .. }) {
+            let capacity_elems = logical_elements(&node.output_type);
             by_owner.insert(
                 node.id,
                 OwnerRequirement {
                     owner: node.id,
                     birth_index: node.id.0,
                     last_use_index: node.id.0,
-                    capacity_elems: logical_elements(&node.output_type),
+                    capacity_concrete: capacity_elems.as_concrete(),
+                    capacity_key: capacity_elems.normalized_key(),
+                    capacity_elems,
                     dtype: node.output_type.precision,
                 },
             );
@@ -244,13 +252,20 @@ fn assign_slots(
 ) -> Vec<SlotPlan> {
     let mut slots = Vec::<SlotPlan>::new();
     let mut availability = Vec::<usize>::new();
+    let mut slot_capacity_concretes = Vec::<Option<usize>>::new();
+    let mut slot_capacity_keys = Vec::<DimExprKey>::new();
     let mut owner_to_slot = HashMap::<NodeId, usize>::new();
 
     for req in requirements {
         let reused = slots.iter().enumerate().find_map(|(slot_id, slot)| {
             let reusable = slot.dtype == req.dtype
                 && availability[slot_id] < req.birth_index
-                && capacity_fits(&slot.capacity_elems, &req.capacity_elems);
+                && capacity_fits(
+                    slot_capacity_concretes[slot_id],
+                    &slot_capacity_keys[slot_id],
+                    req.capacity_concrete,
+                    &req.capacity_key,
+                );
             reusable.then_some(slot_id)
         });
 
@@ -264,6 +279,8 @@ fn assign_slots(
                 last_use_index: req.last_use_index,
             });
             availability.push(usize::MIN);
+            slot_capacity_concretes.push(req.capacity_concrete);
+            slot_capacity_keys.push(req.capacity_key.clone());
             slot_id
         });
 
@@ -281,10 +298,15 @@ fn assign_slots(
     slots
 }
 
-fn capacity_fits(slot: &DimExpr, req: &DimExpr) -> bool {
-    match (slot.as_concrete(), req.as_concrete()) {
+fn capacity_fits(
+    slot_concrete: Option<usize>,
+    slot_key: &DimExprKey,
+    req_concrete: Option<usize>,
+    req_key: &DimExprKey,
+) -> bool {
+    match (slot_concrete, req_concrete) {
         (Some(slot_elems), Some(req_elems)) => slot_elems >= req_elems,
-        _ => slot == req,
+        _ => slot_key == req_key,
     }
 }
 
@@ -322,6 +344,13 @@ mod tests {
     fn sym_f32(name: &str) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Named(name.to_string(), None)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn tensor_f32(dims: Vec<DimInfo>) -> TensorType {
+        TensorType {
+            dims,
             precision: Prim::F32,
         }
     }
@@ -465,6 +494,103 @@ mod tests {
         let c = mismatch.add_node(RiscOp::Const { value: 2.0 }, vec![], sym_f32("n"), None);
         mismatch.add_root(c);
         assert_eq!(build_plan(&mismatch, &[c]).slots().len(), 3);
+    }
+
+    #[test]
+    fn planner_reuses_commuted_symbolic_product_capacity() {
+        let mn = tensor_f32(vec![
+            DimInfo::Named("m".into(), None),
+            DimInfo::Named("n".into(), None),
+        ]);
+        let nm = tensor_f32(vec![
+            DimInfo::Named("n".into(), None),
+            DimInfo::Named("m".into(), None),
+        ]);
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mn.clone(), None);
+        let b = dag.add_node(RiscOp::Neg, vec![a], mn, None);
+        let c = dag.add_node(RiscOp::Neg, vec![b], nm, None);
+        dag.add_root(c);
+
+        let plan = build_plan(&dag, &[c]);
+        assert_eq!(
+            plan.slots().len(),
+            2,
+            "dead m*n capacity should fit later n*m requirement"
+        );
+        assert_eq!(plan.node_kind(a), plan.node_kind(c));
+    }
+
+    #[test]
+    fn planner_reuses_identity_simplified_symbolic_capacity() {
+        let n = sym_f32("n");
+        let n_by_one = tensor_f32(vec![DimInfo::Named("n".into(), None), DimInfo::Lit(1)]);
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], n_by_one, None);
+        let b = dag.add_node(RiscOp::Neg, vec![a], n.clone(), None);
+        let c = dag.add_node(RiscOp::Neg, vec![b], n, None);
+        dag.add_root(c);
+
+        let plan = build_plan(&dag, &[c]);
+        assert_eq!(
+            plan.slots().len(),
+            2,
+            "n*1 capacity should fit later n requirement"
+        );
+        assert_eq!(plan.node_kind(a), plan.node_kind(c));
+    }
+
+    #[test]
+    fn planner_does_not_alpha_rename_unrelated_symbolic_capacity() {
+        let mn = tensor_f32(vec![
+            DimInfo::Named("m".into(), None),
+            DimInfo::Named("n".into(), None),
+        ]);
+        let xy = tensor_f32(vec![
+            DimInfo::Named("x".into(), None),
+            DimInfo::Named("y".into(), None),
+        ]);
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mn.clone(), None);
+        let b = dag.add_node(RiscOp::Neg, vec![a], mn, None);
+        let c = dag.add_node(RiscOp::Neg, vec![b], xy, None);
+        dag.add_root(c);
+
+        let plan = build_plan(&dag, &[c]);
+        assert_eq!(
+            plan.slots().len(),
+            3,
+            "same-shaped symbolic products are not equivalent without \
+             explicit binder identity"
+        );
+        assert_ne!(plan.node_kind(a), plan.node_kind(c));
+    }
+
+    #[test]
+    fn capacity_fits_concrete_larger_and_rejects_distinct_symbolic_keys() {
+        let slot = DimExpr::Concrete(8);
+        let req = DimExpr::Concrete(4);
+        assert!(capacity_fits(
+            slot.as_concrete(),
+            &slot.normalized_key(),
+            req.as_concrete(),
+            &req.normalized_key()
+        ));
+
+        let slot = DimExpr::Mul(
+            Box::new(DimExpr::Sym("m".into())),
+            Box::new(DimExpr::Sym("n".into())),
+        );
+        let req = DimExpr::Mul(
+            Box::new(DimExpr::Sym("m".into())),
+            Box::new(DimExpr::Sym("k".into())),
+        );
+        assert!(!capacity_fits(
+            slot.as_concrete(),
+            &slot.normalized_key(),
+            req.as_concrete(),
+            &req.normalized_key()
+        ));
     }
 
     #[test]

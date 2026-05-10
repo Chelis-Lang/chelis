@@ -204,6 +204,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
             // This is the chain output node — emit a FusedElem.
             let chain = &chains[ci];
             let (fused_op, external_inputs) = build_fused_elem(dag, chain, &id_map);
+            let reusable_input = reusable_external_input(dag, chain, &external_inputs);
 
             let remapped_inputs: Vec<NodeId> = external_inputs
                 .iter()
@@ -226,6 +227,12 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
                 output_type,
                 first.span_id.clone(),
             );
+            if let Some(reusable) = reusable_input {
+                let mapped = *id_map
+                    .get(&reusable.0)
+                    .unwrap_or_else(|| panic!("unmapped reusable input {reusable:?} in fusion"));
+                new_dag.set_reusable_input(new_id, mapped);
+            }
             // Carry the first contributor's pre-existing merged_spans
             // verbatim onto the FusedElem (they already belong to the
             // canonical contributor's audit chain).
@@ -274,6 +281,11 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
                 node.output_type.clone(),
                 node.span_id.clone(),
             );
+            if let Some(reusable_input) = node.reusable_input
+                && let Some(&mapped_input) = id_map.get(&reusable_input.0)
+            {
+                new_dag.set_reusable_input(new_id, mapped_input);
+            }
             if !node.merged_spans.is_empty()
                 && let Some(new_node) = new_dag.node_mut(new_id)
             {
@@ -346,6 +358,27 @@ fn build_fused_elem(
     }
 
     (RiscOp::FusedElem { ops: steps }, external_inputs)
+}
+
+fn reusable_external_input(dag: &Dag, chain: &Chain, external_inputs: &[NodeId]) -> Option<NodeId> {
+    let external: HashSet<NodeId> = external_inputs.iter().copied().collect();
+    let mut reusable = None;
+
+    for &nid in &chain.nodes {
+        let Some(candidate) = dag.get(nid).and_then(|node| node.reusable_input) else {
+            continue;
+        };
+        if !external.contains(&candidate) {
+            continue;
+        }
+        match reusable {
+            None => reusable = Some(candidate),
+            Some(existing) if existing == candidate => {}
+            Some(_) => return None,
+        }
+    }
+
+    reusable
 }
 
 /// Identify FusedElem nodes whose sole consumer is a reduction (Sum or MaxReduce).
@@ -444,5 +477,56 @@ mod tests {
         let chains = find_chains(&dag, &counts);
         assert_eq!(chains.len(), 1);
         assert_eq!(chains[0].nodes.len(), 2); // add, neg
+    }
+
+    #[test]
+    fn fusion_preserves_unambiguous_external_reusable_input() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let bias = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let add = dag.add_node(RiscOp::Add, vec![x, bias], vec_f32(4), None);
+        dag.set_reusable_input(add, x);
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let mul = dag.add_node(RiscOp::Mul, vec![add, scale], vec_f32(4), None);
+        dag.add_root(mul);
+
+        let fused = fuse_with_remap(&dag);
+        let fused_id = fused.old_to_new[&mul];
+        let fused_node = fused.dag.get(fused_id).unwrap();
+
+        assert!(
+            matches!(fused_node.op, RiscOp::FusedElem { .. }),
+            "add/mul chain should fuse"
+        );
+        assert_eq!(
+            fused_node.reusable_input,
+            Some(fused.old_to_new[&x]),
+            "fusion should preserve the reusable external input"
+        );
+    }
+
+    #[test]
+    fn fusion_drops_ambiguous_reusable_inputs() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
+        let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+        dag.set_reusable_input(add, x);
+        let mul = dag.add_node(RiscOp::Mul, vec![add, y], vec_f32(4), None);
+        dag.set_reusable_input(mul, y);
+        dag.add_root(mul);
+
+        let fused = fuse_with_remap(&dag);
+        let fused_id = fused.old_to_new[&mul];
+        let fused_node = fused.dag.get(fused_id).unwrap();
+
+        assert!(
+            matches!(fused_node.op, RiscOp::FusedElem { .. }),
+            "add/mul chain should fuse"
+        );
+        assert_eq!(
+            fused_node.reusable_input, None,
+            "fusion must not choose between conflicting reusable external inputs"
+        );
     }
 }

@@ -117,12 +117,14 @@ Same logical 8×16 @ 16×4 matmul, four code paths:
 |---|:---:|---|---|
 | `f(a, b) = matmul(a, b)` | ✅ | 128 | ~100% (sgemm) |
 | `f(a, b) = { ae=expand(a,...); be=expand(b,...); sum(mul(ae,be), 1) }` | ✅ | 128 | same |
-| `def my_mm = matmul; def f = my_mm` | ❌ | 2176 (Mul allocated either way) | ~1-2% (scalar reduction) |
-| `def my_mm = expand+mul+sum; def f = my_mm` | ❌ | 0 (host lane) | host-lane scalar |
+| `def my_mm = matmul; def f = my_mm` | ✅ | 128 | same C BLAS path for simple wrappers |
+| `def my_mm = expand+mul+sum; def f = my_mm` | ✅ | 128 | same C BLAS path for simple wrappers |
 
-M1 makes inline BLAS-hit matmul result-only in memory. The remaining Gap 5
-cost is the function-boundary specialization miss: user-`def` wrappers still
-lose BLAS dispatch and take the scalar-reduction fallback.
+M1 makes inline BLAS-hit matmul result-only in memory. The current branch also
+closes the first Gap 5 executable slice for simple C user-`def` wrappers:
+helper summaries and helper-body specialization recover the BLAS path without
+clang LTO. The remaining Gap 5 work is broader summary coverage, negative
+diagnostics, HIP summary consumption, and non-BLAS recognizer summaries.
 
 ### Specialization dispatch reality
 
@@ -179,15 +181,16 @@ rules, anchored by `cross_library_semantic_gap.rs`.
 
 ## 5. Remaining Work Register
 
-These items are not optional cleanup. They are the explicit backlog left
-after the M1/M2b/M3/M5 documentation batch.
+These items are not optional cleanup. They are the explicit backlog left after
+the M1/M2b/M3/M4/M5 batch, plus closed items retained here as completion
+anchors for future audits.
 
 | ID | Tracks | Required closure | Current executable anchor |
 |---|---|---|---|
-| **M4** | Gap 3, gather/scatter lowering | Ship §3.5 gather lowering together with sparse gather/scatter recognition so embedding/MoE-shaped programs do not allocate dense `[N, V, D]` intermediates. | `crates/chelis-ir/tests/grad_gather_contract.rs` locks duplicate-index AD; emitted C/HIP structural tests for bounded sparse kernels still need to be added. |
-| **M5-impl** | Gap 5, cross-function specialization | Implement verified BLAS-equivalent helper summaries and callsite emission rules from `spec/design/cross_function_specialization.md`. | `crates/chelis-cli/tests/cross_library_semantic_gap.rs::target_behavior_user_def_matmul_helpers_hit_blas` is ignored until this lands. |
-| **Perf-F1** | HIP batched matmul implementation quality | Replace the current HIP batched helper loop over `hipblasSgemm` with `hipblasSgemmStridedBatched` when the batch layout is uniformly strided, retaining the helper loop for broadcasted/non-uniform leading strides. | Current default coverage proves helper-loop emission and GPU correctness; a future structural test should require the strided-batched API on uniform layouts. |
-| **Perf-F2** | Post-BLAS allocator/fusion compounding | Normalize equivalent symbolic shape expressions for slot reuse and add in-place elementwise/fan-in fusion where aliasing permits. | No target tests yet; these are explicitly second-order behind symbolic/batched BLAS. |
+| **M4** | Gap 3, gather/scatter lowering | Closed for the scoped sparse path: tensor-lane Surf lowers directly to sparse IR, the internal dense §3.5 `OneHot + Expand + Mul + Sum` tree collapses to `Gather`, and C/HIP emit bounded sparse code for supported dtypes. Remaining future work is replace-scatter semantics, not `ScatterAdd`. | `crates/chelis-ir` specialization tests cover the dense recognizer and unmatched `OneHot` fallback; `grad_gather_contract.rs` locks duplicate-index AD; C/HIP emitted-code and GPU manual tests cover bounded sparse backend behavior. |
+| **M5-follow-up** | Gap 5, cross-function specialization | Broaden verified summaries beyond simple C BLAS helpers, add rejected-callsite diagnostics, and carry summary consumption into HIP. | `crates/chelis-cli/tests/cross_library_semantic_gap.rs` now proves direct, inline, user-def, and nested user-def C BLAS hits. Remaining work needs new negative and HIP tests. |
+| **Perf-F1** | HIP batched matmul implementation quality | Benchmark and tune the `hipblasSgemmStridedBatched` path, retaining the helper loop for broadcasted/non-uniform leading strides. | Default structural coverage requires the strided-batched API on uniform layouts; the HIP manual GPU gate covers numerical agreement. |
+| **Perf-F2** | Post-BLAS allocator/fusion compounding | Normalize equivalent symbolic shape expressions for slot reuse and broaden in-place elementwise/fan-in fusion where aliasing permits. | DimExpr normalization v1 now has target tests for product/identity canonicalization and negative tests that unrelated symbols are not alpha-renamed. C fused-elementwise in-place codegen now aliases a proven single reusable input and falls back for strided inputs; HIP in-place codegen and scoped same-property `forall` / binder-equivalent aliases remain future work. |
 
 Fresh-context red-team status for M3/M3b: run 2026-05-10. The red-team
 pass found one medium issue: the legacy C codegen-time BLAS detector could
@@ -199,8 +202,9 @@ codegen through `RiscOp::BlasMatmul` produced by the IR specialization pass.
 HIP manual gate status for this batch: run 2026-05-10 on the local ROCm/HIP
 workstation with the documented `HSA_OVERRIDE_GFX_VERSION=11.5.1` environment;
 `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored
---test-threads=1` passed all 33 GPU correctness tests, including the new
-batched hipBLAS helper test.
+--test-threads=1` passed the available GPU correctness tests, including
+batched hipBLAS. The sparse follow-up adds the focused
+`g16_sparse_*` manual gate for HIP gather and duplicate-index scatter-add.
 
 ## 6. Verdict on structural feasibility
 

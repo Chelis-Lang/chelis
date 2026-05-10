@@ -6,8 +6,8 @@ Phase 1 is structurally complete. The GPU backend works, real models compile and
 correctly, and the benchmark suite proves correctness across CPU/HIP/PyTorch. Known
 limitations carried forward: `pad`/`shrink` not implemented in HIP, `layer_norm`
 still requiring a concrete normalized-axis extent, dotted Deep path round-trip gap, and
-cross-function user-defined specialization not yet preserving BLAS-equivalent helper
-semantics across ordinary function-call boundaries.
+cross-function user-defined specialization still needing broader backend and pattern
+coverage beyond the first C BLAS helper-summary slice.
 
 **Phase 2 deliverable:** The language is usable by researchers. Effects, linear types,
 macros, the agent API, and tooling make Chelis a credible alternative to PyTorch for
@@ -18,9 +18,9 @@ toolchain.
 **Phase 2 does NOT deliver:** A package manager (Phase 3a), alternative backends like
 StableHLO/FX/Triton (Phase 5), Python FFI (Phase 3b), or the local coding model
 (Phase 4). Phase 2 is about making the language complete; Phase 3 is about making the
-ecosystem polished and externally usable. Cross-function specialization for user-defined
-library helpers is also outside the Phase 2 completion claim; it is tracked as a
-separate compiler/codegen workstream in
+ecosystem polished and externally usable. Full cross-function specialization for
+user-defined library helpers is also outside the Phase 2 completion claim; it is tracked
+as a separate compiler/codegen workstream in
 [`cross_function_specialization.md`](cross_function_specialization.md).
 
 ---
@@ -99,22 +99,26 @@ output.
 
 ### Cross-Function Specialization Follow-Up
 
-**Current state:** Inline `matmul` and inline hand-written `expand -> mul -> sum`
-patterns hit the C backend BLAS specializer, but the same computation wrapped in a
-user-defined helper does not. The compiler emits the helper as a separate generated
-function, and the current BLAS detector runs on the caller's per-function DAG rather
-than on a call-graph-aware summary.
+**Current state:** Inline `matmul`, inline hand-written `expand -> mul -> sum`
+patterns, and simple C user-defined helper wrappers now hit the C backend BLAS path.
+The compiler derives narrow `blas_matmul` summaries from pure tensor helpers and simple
+wrappers, consumes those summaries at C callsites, and still emits the helper body for
+debugging and non-specialized callers.
 
 **Phase boundary:** This is a known limitation, not a Phase 2 language-maturity
-deliverable. It should close in the dedicated cross-function specialization workstream,
-using the path described in
-[`cross_function_specialization.md`](cross_function_specialization.md): BLAS-equivalent
-function annotations plus verified callsite emission rules.
+deliverable. It should continue in the dedicated cross-function specialization
+workstream, using the path described in
+[`cross_function_specialization.md`](cross_function_specialization.md): auto-derived
+function summaries plus verified callsite emission rules. Remaining scope includes HIP
+summary consumption, gather/scatter summaries, explicit negative diagnostics for
+summary-derived-but-callsite-rejected cases, and broader helper shapes.
 
 **Workaround status:** clang LTO may inline generated helper functions and recover some
 ordinary C optimization, but it cannot be the compiler's backend-dispatch story. The
 decision to emit `cblas_sgemm`, hipBLAS, or a generic fused loop must be made by Chelis
-before the native compiler sees the generated C/HIP.
+before the native compiler sees the generated C/HIP. The first C summary slice no
+longer relies on clang LTO for the simple helper cases covered by
+`crates/chelis-cli/tests/cross_library_semantic_gap.rs`.
 
 ### Deep Dotted Path Round-Trip
 

@@ -20,31 +20,25 @@
 //!   4. `def my_mm(a, b) = { ae = ...; ... }; def f(a, b) = my_mm(a, b)`
 //!      — hand-written expand+mul+sum in a user def.
 //!
-//! Findings (locked here):
+//! Findings and target behavior locked here:
 //!
 //!   * (1) and (2) both fire `cblas_sgemm`. The IR optimizer treats inline
 //!     expand+mul+sum identically to a Tier 2 desugared matmul. **Semantic
 //!     gap is bridged at the IR level for inline code.**
-//!   * (3) and (4) both miss `cblas_sgemm`. When matmul math (or anything
-//!     that decomposes into expand+mul+sum) lives inside a user-level `def`
-//!     called from another `def`, the user def is emitted as a separate
-//!     C function (`my_mm__tensor_0(inputs, n_in, outputs, n_out)`) and the
-//!     BLAS detector keys off the *caller* DAG, not the helper. The Tier 2
-//!     fused expansion and stride-view expand still happen (so it's not as
-//!     bad as a scalar fallback), but the BLAS specialization is lost.
-//!   * (4) additionally fails to lower `expand` in the host lane in some
-//!     historical revisions; in the current snapshot the helper goes
-//!     through the IR/tier2 path, but the lack of BLAS specialization
-//!     remains the dominant cost difference.
+//!   * (3) and (4) are the cross-function target: user-level helpers remain
+//!     emitted as helper functions for debugging and non-specialized callers,
+//!     while eligible call sites may bypass the helper and emit BLAS directly.
+//!     The generated C should contain `cblas_sgemm`/`chelis_blas_matmul`
+//!     without relying on clang/gcc LTO to rediscover the computation after
+//!     emission.
 //!
 //! Implication for cross-library AD: a Coral `groupby+sum` or a Nautilus
 //! Simpson's-rule integrator written as a user `def` won't get BLAS or
 //! cuDNN specialization just by virtue of decomposing into RISC primitives.
 //! The "semantic gap" the third-party identified is real for any
 //! library-level abstraction that sits behind a function-call boundary.
-//! The mitigations that would close it: aggressive cross-function inlining
-//! before the optimize/fuse pass, or moving the BLAS detector to operate
-//! on the call-graph rather than per-function DAGs.
+//! The mitigation under test is compiler-derived specialization for helper
+//! DAGs. There are no source annotations in these fixtures.
 
 use std::fs;
 use std::process::Command;
@@ -56,6 +50,7 @@ struct Counts {
     blas: usize,
     allocs: usize,
     fused: usize,
+    user_helper_defs: usize,
     /// Total bytes summed across every `chelis_alloc(N, (int[]){...},
     /// CHELIS_F32)` call. This approximates peak working set under the C
     /// backend's Phase-0 free-all-at-end strategy.
@@ -87,6 +82,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
     let blas = c.matches("cblas_sgemm").count() + c.matches("chelis_blas_matmul").count();
     let allocs = c.matches("chelis_alloc(").count();
     let fused = c.matches("parallel for simd").count();
+    let user_helper_defs = c.matches("static void my_mm__tensor_").count();
 
     // Sum bytes across every chelis_alloc(N, (int[]){...}, CHELIS_F32) call.
     let mut total_alloc_bytes = 0usize;
@@ -128,6 +124,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
         blas,
         allocs,
         fused,
+        user_helper_defs,
         total_alloc_bytes,
     }
 }
@@ -158,12 +155,10 @@ fn semantic_gap_sources() -> (&'static str, &'static str, &'static str, &'static
 }
 
 #[test]
-fn semantic_gap_inline_vs_user_def() {
-    let (direct, inline_manual, user_def_builtin, user_def_manual) = semantic_gap_sources();
+fn inline_matmul_forms_hit_blas_and_allocate_only_result() {
+    let (direct, inline_manual, _, _) = semantic_gap_sources();
     let direct_c = build_and_count(direct, "sgap_direct");
     let inline_c = build_and_count(inline_manual, "sgap_inline_manual");
-    let user_b = build_and_count(user_def_builtin, "sgap_user_def_builtin");
-    let user_m = build_and_count(user_def_manual, "sgap_user_def_manual");
 
     // Inline forms must hit BLAS — direct call OR hand-written Einstein math.
     // This is the "semantic gap is bridged at IR level for inline code"
@@ -182,25 +177,6 @@ fn semantic_gap_inline_vs_user_def() {
         inline_c.blas
     );
 
-    // User-def forms must NOT hit BLAS — this is the semantic-gap finding.
-    // If a future change starts inlining or cross-function pattern-matching,
-    // this assertion will flip and the finding above must be updated.
-    assert_eq!(
-        user_b.blas, 0,
-        "matmul wrapped in a user def is NOT specialized to BLAS in the \
-         current snapshot. If this changes (cross-function inlining or \
-         call-graph-aware pattern matching shipped), update the test docs \
-         to reflect the new behavior. Got {} BLAS calls.",
-        user_b.blas
-    );
-    assert_eq!(
-        user_m.blas, 0,
-        "hand-written Einstein-form matmul wrapped in a user def is NOT \
-         specialized to BLAS. Same caveat as the previous assertion. Got \
-         {} BLAS calls.",
-        user_m.blas
-    );
-
     // ---- Cost profile ----
     //
     // Same logical 8×16 @ 16×4 matmul, four code paths, four working sets.
@@ -216,15 +192,6 @@ fn semantic_gap_inline_vs_user_def() {
         "  inline expand+mul+sum          : blas={} allocs={} fused={} total_bytes={}",
         inline_c.blas, inline_c.allocs, inline_c.fused, inline_c.total_alloc_bytes
     );
-    eprintln!(
-        "  user_def of builtin matmul     : blas={} allocs={} fused={} total_bytes={}",
-        user_b.blas, user_b.allocs, user_b.fused, user_b.total_alloc_bytes
-    );
-    eprintln!(
-        "  user_def of expand+mul+sum     : blas={} allocs={} fused={} total_bytes={}",
-        user_m.blas, user_m.allocs, user_m.fused, user_m.total_alloc_bytes
-    );
-
     // ---- Closed finding: dead-Mul intermediate ----
     //
     // M1 moved matmul specialization into an IR pass. Direct and inline
@@ -257,18 +224,15 @@ fn semantic_gap_inline_vs_user_def() {
     eprintln!(
         "Linear projection to 1024×1024 @ 1024×1024 inputs:\n  \
          direct (BLAS hit, no dead Mul): {proj_direct_mib:.2} MiB result buffer\n  \
-         inline (same IR, same codegen): {proj_direct_mib:.2} MiB result buffer\n  \
-         user_def variants: still miss BLAS specialization across the call boundary, \
-         so the compute path is scalar reduction instead of sgemm — much slower."
+         inline (same IR, same codegen): {proj_direct_mib:.2} MiB result buffer"
     );
 }
 
 #[test]
-#[ignore = "M5 target behavior: enable when cross-function specialization summaries land"]
-fn target_behavior_user_def_matmul_helpers_hit_blas() {
+fn user_def_matmul_helpers_hit_blas() {
     let (_, _, user_def_builtin, user_def_manual) = semantic_gap_sources();
-    let user_b = build_and_count(user_def_builtin, "sgap_target_user_def_builtin");
-    let user_m = build_and_count(user_def_manual, "sgap_target_user_def_manual");
+    let user_b = build_and_count(user_def_builtin, "sgap_user_def_builtin");
+    let user_m = build_and_count(user_def_manual, "sgap_user_def_manual");
 
     assert!(
         user_b.blas >= 1,
@@ -277,5 +241,49 @@ fn target_behavior_user_def_matmul_helpers_hit_blas() {
     assert!(
         user_m.blas >= 1,
         "target behavior: user-def wrapper around expand+mul+sum should emit BLAS"
+    );
+    assert!(
+        user_b.user_helper_defs >= 1,
+        "target behavior: builtin matmul helper should still be emitted for debug/fallback"
+    );
+    assert!(
+        user_m.user_helper_defs >= 1,
+        "target behavior: manual matmul helper should still be emitted for debug/fallback"
+    );
+
+    eprintln!("== User-def helper target behavior ==");
+    eprintln!(
+        "  user_def of builtin matmul     : blas={} allocs={} fused={} total_bytes={}",
+        user_b.blas, user_b.allocs, user_b.fused, user_b.total_alloc_bytes
+    );
+    eprintln!(
+        "  user_def of expand+mul+sum     : blas={} allocs={} fused={} total_bytes={}",
+        user_m.blas, user_m.allocs, user_m.fused, user_m.total_alloc_bytes
+    );
+}
+
+#[test]
+fn nested_user_def_matmul_helper_hits_blas() {
+    let nested = "def my_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
+                  -> tensor[8, 4, f32] = matmul(a, b)\n\
+                  def wrap_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
+                  -> tensor[8, 4, f32] = my_mm(a, b)\n\
+                  def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
+                  -> tensor[8, 4, f32] = wrap_mm(a, b)\n";
+    let nested_c = build_and_count(nested, "sgap_nested_user_def");
+
+    assert!(
+        nested_c.blas >= 1,
+        "nested user-def wrapper around builtin matmul should emit BLAS"
+    );
+    assert!(
+        nested_c.user_helper_defs >= 1,
+        "nested fixture should still emit the original helper surface"
+    );
+
+    eprintln!("== Nested user-def helper target behavior ==");
+    eprintln!(
+        "  nested user_def matmul       : blas={} allocs={} fused={} total_bytes={}",
+        nested_c.blas, nested_c.allocs, nested_c.fused, nested_c.total_alloc_bytes
     );
 }

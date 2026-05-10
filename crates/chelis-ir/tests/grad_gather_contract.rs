@@ -14,14 +14,12 @@
 //! wrote a naive backward and silently dropped 99/100 of the batch" bug class
 //! that motivated the linearity feature in the first place.
 //!
-//! The test is independent of whether `gather` ever becomes a RiscOp variant.
-//! Today gather is a host-only Tier 2 builtin (no `RiscOp::Gather`,
-//! see `crates/chelis-ir/src/host.rs:4640`), so a
-//! Surf program containing `gather` cannot reach `grad_dag_checked` at all —
-//! it takes the host runtime path before the IR is built. If a future commit
-//! either (a) wires the §3.5 lowering or (b) adds a hand-rolled `RiscOp::Gather`
-//! adjoint, this test must continue to pass — failing here means duplicate-
-//! index gradients are being silently dropped.
+//! The hand-built §3.5 decomposition test is independent of whether Surf-level
+//! `gather` reaches IR directly. This branch also adds a first-class
+//! `RiscOp::Gather` / `RiscOp::ScatterAdd` slice and verifies that its adjoint
+//! preserves duplicate-index accumulation. Surf `gather` is still host-lane
+//! unless a future change wires the dense lowering and sparse recognizer
+//! together; that future path must keep these duplicate-index assertions green.
 //!
 //! Implementation note on `Expand`: Chelis's `RiscOp::Expand` adjoint
 //! (`grad.rs`) wires only the rank-increasing form (insert a new axis), not
@@ -40,6 +38,13 @@ fn t(dims: Vec<usize>) -> TensorType {
     TensorType {
         dims: dims.into_iter().map(DimInfo::Lit).collect(),
         precision: Prim::F32,
+    }
+}
+
+fn t_i32(dims: Vec<usize>) -> TensorType {
+    TensorType {
+        dims: dims.into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::Int32,
     }
 }
 
@@ -148,6 +153,118 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
             (dtable.data[i] - want).abs() < 1e-6,
             "duplicate-index grad table[{i}]: expected {want}, got {} \
              (silent-drop bug? see crate-level docs)",
+            dtable.data[i]
+        );
+    }
+}
+
+#[test]
+fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
+    let mut dag = Dag::new();
+    let table = dag.add_node(
+        RiscOp::Load {
+            name: "table".into(),
+        },
+        vec![],
+        t(vec![2, 2]),
+        None,
+    );
+    let indices = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], t_i32(vec![3]), None);
+    let gathered = dag.add_node(
+        RiscOp::Gather { axis: 0 },
+        vec![table, indices],
+        t(vec![3, 2]),
+        None,
+    );
+    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![gathered], t(vec![2]), None);
+    let s2 = dag.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![s1],
+        TensorType::scalar_f32(),
+        None,
+    );
+
+    let fwd_errs = chelis_ir::verify::verify(&dag);
+    assert!(
+        fwd_errs.is_empty(),
+        "first-class gather verification errors: {fwd_errs:?}"
+    );
+
+    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    inputs.insert(
+        "table".to_string(),
+        TensorValue {
+            data: vec![1.0, 2.0, 3.0, 4.0],
+            shape: vec![2, 2],
+        },
+    );
+    let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad through gather must succeed");
+    let grad_node = grad.grad_nodes[&table];
+    let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("backward eval");
+    let dtable = &vals[&grad_node];
+
+    assert_eq!(dtable.shape, vec![2, 2]);
+    let expected = [3.0, 3.0, 0.0, 0.0];
+    for (i, want) in expected.iter().enumerate() {
+        assert!(
+            (dtable.data[i] - want).abs() < 1e-6,
+            "first-class gather grad table[{i}]: expected {want}, got {}",
+            dtable.data[i]
+        );
+    }
+}
+
+#[test]
+fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() {
+    let mut dag = Dag::new();
+    let table = dag.add_node(
+        RiscOp::Load {
+            name: "table".into(),
+        },
+        vec![],
+        t(vec![2, 3]),
+        None,
+    );
+    let indices = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], t_i32(vec![4]), None);
+    let gathered = dag.add_node(
+        RiscOp::Gather { axis: 1 },
+        vec![table, indices],
+        t(vec![2, 4]),
+        None,
+    );
+    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![gathered], t(vec![4]), None);
+    let s2 = dag.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![s1],
+        TensorType::scalar_f32(),
+        None,
+    );
+
+    let fwd_errs = chelis_ir::verify::verify(&dag);
+    assert!(
+        fwd_errs.is_empty(),
+        "axis-1 gather verification errors: {fwd_errs:?}"
+    );
+
+    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    inputs.insert(
+        "table".to_string(),
+        TensorValue {
+            data: vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0],
+            shape: vec![2, 3],
+        },
+    );
+    let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad through axis-1 gather");
+    let grad_node = grad.grad_nodes[&table];
+    let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("backward eval");
+    let dtable = &vals[&grad_node];
+
+    assert_eq!(dtable.shape, vec![2, 3]);
+    let expected = [4.0, 0.0, 0.0, 4.0, 0.0, 0.0];
+    for (i, want) in expected.iter().enumerate() {
+        assert!(
+            (dtable.data[i] - want).abs() < 1e-6,
+            "axis-1 gather grad table[{i}]: expected {want}, got {}",
             dtable.data[i]
         );
     }

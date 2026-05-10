@@ -762,29 +762,31 @@ Transformations can produce the following errors:
 
 ### 9.1 Standard Pipeline
 
-The complete optimization pipeline, in order:
+The standard tensor compiler pipeline, in order:
 
 ```
-1. grad expansion          -- transform grad nodes into backward DAGs
-2. vmap expansion          -- transform vmap nodes into batched DAGs (Phase 2)
-3. Algebraic simplification
-4. Constant folding
-5. Common subexpression elimination (CSE)
-6. Dead code elimination (DCE)
-7. (Repeat steps 3-6 until fixpoint or 10 iterations)
-8. Operator fusion          -- merge elementwise chains (Phase 1)
-9. Memory planning          -- schedule buffer reuse (Phase 1)
-10. Code generation          -- emit target code
+1. AD expansion                         -- transform grad nodes into backward DAGs
+2. closed-list no-op cleanup            -- remove identity cast/reshape/permute only
+3. BLAS/gather/scatter recognizers      -- replace dense patterns with explicit RISC ops
+4. cross-function specialization        -- specialize call sites after AD
+5. dead code elimination (DCE)          -- prune orphan dense intermediates
+6. in-place fusion                      -- reuse buffers only after DCE settles liveness
+7. code generation                      -- emit target code
 ```
+
+This order is semantic, not only an optimization preference: AD must see the
+ordinary RISC decomposition, recognizers must run before DCE/fusion/codegen, and
+DCE must run after recognizers so replaced dense paths are removed. The
+source-level tripwire is `chelis_ir::specialize::SPECIALIZATION_PIPELINE_ORDER`.
 
 ### 9.2 Fixpoint Convergence
 
-The simplification loop (steps 3-6) is guaranteed to terminate because:
+Any local cleanup loop nested inside the standard pipeline is guaranteed to
+terminate because:
 - Each pass either reduces the number of nodes or leaves it unchanged.
-- The minimum number of nodes is bounded below (by the number of Load and Store nodes).
-- The iteration limit (10) provides an absolute guarantee.
-
-In practice, convergence occurs within 3-5 iterations. The first iteration after `grad` expansion is the most productive (cleaning up zeros, double negations, and duplicate subexpressions).
+- The minimum number of nodes is bounded below by the number of load/store roots
+  and required output nodes.
+- The iteration limit provides an absolute guarantee.
 
 ### 9.3 Correctness Requirement
 

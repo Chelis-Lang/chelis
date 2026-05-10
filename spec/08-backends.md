@@ -194,6 +194,11 @@ is shipped. Known carried-forward limitations remain explicit:
 - symbolic dimensions are implemented on the stable tensor ABI for both backends:
   generated functions bind symbolic names from input tensor metadata at runtime and
   validate repeated occurrences across all participating inputs
+- symbolic shape normalization v1 is name-stable and conservative: memory planners
+  canonicalize product ordering/associativity and arithmetic identities such as
+  `n * 1`, but they do not alpha-rename unrelated symbols. Alpha-renaming is only
+  valid for future paths that carry explicit same-property `forall` or
+  binder-equivalent dimension identity.
 - `layer_norm` still requires a concrete normalized-axis extent; symbolic leading dims
   are supported, but a symbolic hidden size remains a follow-up
 - dotted Deep module/import round-trip remains a separate Phase 2 parser/decompiler follow-up

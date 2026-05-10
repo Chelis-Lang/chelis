@@ -27,6 +27,20 @@ fn vec_f32(n: usize) -> TensorType {
     }
 }
 
+fn vec_i32(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int32,
+    }
+}
+
+fn vec_i64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int64,
+    }
+}
+
 fn mat_f32(rows: usize, cols: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
@@ -1017,7 +1031,97 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
 }
 
 #[test]
-fn s15_batched_matmul_emits_hipblas_batched_helper_and_link_flag() {
+fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
+    let mut dag = Dag::new();
+    let table = dag.add_node(
+        RiscOp::Load {
+            name: "table".into(),
+        },
+        vec![],
+        mat_f32(8, 4),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        vec_i64(3),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Gather { axis: 0 },
+        vec![table, indices],
+        mat_f32(3, 4),
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "test_sparse_gather_i64");
+    assert!(result.c_source.contains("kernel_gather_i64"));
+    assert!(result.c_source.contains("const long long *indices"));
+    assert!(result.c_source.contains("CHELIS_I64"));
+    assert!(
+        result
+            .c_source
+            .contains("chelis_gpu_dtype_size(dst->dtype)")
+            || hip_runtime_header().contains("chelis_gpu_dtype_size")
+    );
+    assert!(
+        !result
+            .c_source
+            .contains("sparse gather/scatter kernels are not implemented")
+    );
+}
+
+#[test]
+fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
+    let mut dag = Dag::new();
+    let target = dag.add_node(
+        RiscOp::Load {
+            name: "target".into(),
+        },
+        vec![],
+        mat_f32(3, 2),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let updates = dag.add_node(
+        RiscOp::Load {
+            name: "updates".into(),
+        },
+        vec![],
+        mat_f32(4, 2),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::ScatterAdd { axis: 0 },
+        vec![target, indices, updates],
+        mat_f32(3, 2),
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "test_sparse_scatter_i32");
+    assert!(result.c_source.contains("kernel_scatter_add_i32"));
+    assert!(result.c_source.contains("const int *indices"));
+    assert!(
+        result
+            .c_source
+            .contains("atomicAdd(&out[dst], updates[i]);")
+    );
+    assert!(result.c_source.contains("hipMemcpyDeviceToDevice"));
+}
+
+#[test]
+fn s15_batched_matmul_emits_hipblas_strided_batched_helper_and_link_flag() {
     let mut dag = Dag::new();
     let a_ty = tensor4_f32(2, 3, 4, 5);
     let b_ty = tensor4_f32(2, 3, 5, 6);
@@ -1030,8 +1134,18 @@ fn s15_batched_matmul_emits_hipblas_batched_helper_and_link_flag() {
     assert!(
         result
             .c_source
+            .contains("chelis_hipblas_sgemm_strided_batched_row_major"),
+        "eligible rank-4 batched matmul should lower to the hipBLAS strided-batched helper"
+    );
+    assert!(
+        result.c_source.contains(", 20LL, 30LL, 24LL);"),
+        "strided-batched helper call should pass concrete row-major per-batch strides"
+    );
+    assert!(
+        !result
+            .c_source
             .contains("chelis_hipblas_sgemm_batched_row_major"),
-        "rank-4 batched matmul should lower to the hipBLAS batched helper"
+        "eligible batched matmul should not use the per-batch helper loop"
     );
     assert!(
         !result.c_source.contains("kernel_sum_ax3"),
@@ -1040,6 +1154,169 @@ fn s15_batched_matmul_emits_hipblas_batched_helper_and_link_flag() {
     assert!(
         result.link_flags.iter().any(|flag| flag == "-lhipblas"),
         "batched hipBLAS specialization must surface the extra link flag"
+    );
+}
+
+#[test]
+fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
+    let mut dag = Dag::new();
+    let a_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Lit(4),
+            DimInfo::Lit(5),
+        ],
+        precision: Prim::F32,
+    };
+    let b_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Lit(5),
+            DimInfo::Lit(6),
+        ],
+        precision: Prim::F32,
+    };
+    let out_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Lit(4),
+            DimInfo::Lit(6),
+        ],
+        precision: Prim::F32,
+    };
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
+    let out = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![chelis_ir::dag::DimExpr::Sym("batch".into())],
+            m: chelis_ir::dag::DimExpr::Concrete(4),
+            n: chelis_ir::dag::DimExpr::Concrete(6),
+            k: chelis_ir::dag::DimExpr::Concrete(5),
+        },
+        vec![a, b],
+        out_ty,
+        None,
+    );
+    dag.add_root(out);
+    let result = codegen_hip(&dag, "test_hipblas_symbolic_batch_strided_matmul");
+
+    assert!(
+        result
+            .c_source
+            .contains("chelis_hipblas_sgemm_strided_batched_row_major"),
+        "symbolic batch with concrete matrix dimensions should use strided-batched hipBLAS"
+    );
+    assert!(
+        result.c_source.contains(", batch, 20LL, 30LL, 24LL);"),
+        "runtime symbolic batch count should be passed with concrete matrix strides"
+    );
+}
+
+#[test]
+fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
+    let mut dag = Dag::new();
+    let a_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Named("m".into(), None),
+            DimInfo::Named("k".into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let b_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Named("k".into(), None),
+            DimInfo::Named("n".into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let out_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Named("m".into(), None),
+            DimInfo::Named("n".into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
+    let out = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![chelis_ir::dag::DimExpr::Sym("batch".into())],
+            m: chelis_ir::dag::DimExpr::Sym("m".into()),
+            n: chelis_ir::dag::DimExpr::Sym("n".into()),
+            k: chelis_ir::dag::DimExpr::Sym("k".into()),
+        },
+        vec![a, b],
+        out_ty,
+        None,
+    );
+    dag.add_root(out);
+    let result = codegen_hip(&dag, "test_hipblas_batched_loop_fallback");
+
+    assert!(
+        result
+            .c_source
+            .contains("chelis_hipblas_sgemm_batched_row_major"),
+        "symbolic matrix dimensions should preserve the existing helper-loop fallback"
+    );
+    assert!(
+        !result
+            .c_source
+            .contains("chelis_hipblas_sgemm_strided_batched_row_major"),
+        "fallback path must not call strided-batched hipBLAS when matrix strides are not concrete"
+    );
+    assert!(
+        result.link_flags.iter().any(|flag| flag == "-lhipblas"),
+        "helper-loop fallback still requires hipBLAS"
+    );
+}
+
+#[test]
+fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
+    let mut dag = Dag::new();
+    let base_a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(4, 5), None);
+    let a = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(3),
+        },
+        vec![base_a],
+        tensor3_f32(3, 4, 5),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        tensor3_f32(3, 5, 6),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![chelis_ir::dag::DimExpr::Concrete(3)],
+            m: chelis_ir::dag::DimExpr::Concrete(4),
+            n: chelis_ir::dag::DimExpr::Concrete(6),
+            k: chelis_ir::dag::DimExpr::Concrete(5),
+        },
+        vec![a, b],
+        tensor3_f32(3, 4, 6),
+        None,
+    );
+    dag.add_root(out);
+    let result = codegen_hip(&dag, "test_hipblas_noncontiguous_batch_loop_fallback");
+
+    assert!(
+        result
+            .c_source
+            .contains("chelis_hipblas_sgemm_batched_row_major"),
+        "non-contiguous leading batch layout should preserve the helper-loop fallback"
+    );
+    assert!(
+        !result
+            .c_source
+            .contains("chelis_hipblas_sgemm_strided_batched_row_major"),
+        "non-contiguous leading batch layout must not call strided-batched hipBLAS"
     );
 }
 

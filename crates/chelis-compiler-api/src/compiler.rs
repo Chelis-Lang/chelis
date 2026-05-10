@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
@@ -224,8 +224,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             };
             hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
             reject_unsized_named_dims(&hip_dag, "hip")?;
-            reject_unsupported_hip_ops(&hip_dag)?;
             let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
+            reject_unsupported_hip_ops(&specialized)?;
             let fused = chelis_ir::fuse::fuse(&specialized);
             let result = chelis_backend_hip::codegen_hip(&fused, &func_name);
             Ok(compiled_execution_artifact(
@@ -1425,6 +1425,15 @@ fn reject_unsized_named_dims(dag: &Dag, target: &str) -> Result<()> {
 }
 
 fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
+    let sparse_index_nodes: HashSet<NodeId> = dag
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.op {
+            RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } => node.inputs.get(1).copied(),
+            _ => None,
+        })
+        .collect();
+
     for node in dag.nodes() {
         match &node.op {
             RiscOp::Pad { .. } => {
@@ -1447,7 +1456,138 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     "unsupported_feature",
                 ));
             }
+            RiscOp::OneHot { .. } => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` cannot compile internal one_hot node {}: \
+                         the sparse gather recognizer must consume OneHot before backend emission",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            RiscOp::Gather { .. } => {
+                let values = &dag.get(node.inputs[0]).unwrap().output_type;
+                let index_node = dag.get(node.inputs[1]).unwrap();
+                let indices = &index_node.output_type;
+                if values.precision != chelis_types::types::Prim::F32
+                    || node.output_type.precision != chelis_types::types::Prim::F32
+                {
+                    return Err(stage_error(
+                        "compile",
+                        format!(
+                            "`chelis build --target hip` sparse gather supports f32 payloads only; \
+                             node {} carries payload precision `{}` and output precision `{}`",
+                            node.id.0,
+                            values.precision.name(),
+                            node.output_type.precision.name()
+                        ),
+                        "unsupported_feature",
+                    ));
+                }
+                if !matches!(
+                    indices.precision,
+                    chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
+                ) {
+                    return Err(stage_error(
+                        "compile",
+                        format!(
+                            "`chelis build --target hip` sparse gather requires int32/int64 indices; \
+                             node {} uses `{}`",
+                            node.id.0,
+                            indices.precision.name()
+                        ),
+                        "unsupported_feature",
+                    ));
+                }
+                if !matches!(index_node.op, RiscOp::Load { .. }) {
+                    return Err(stage_error(
+                        "compile",
+                        format!(
+                            "`chelis build --target hip` sparse gather requires indices to be loaded input tensors in this milestone; \
+                             node {} uses indices produced by {:?}. \
+                             Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
+                            node.id.0, index_node.op
+                        ),
+                        "unsupported_feature",
+                    ));
+                }
+            }
+            RiscOp::ScatterAdd { .. } => {
+                let target = &dag.get(node.inputs[0]).unwrap().output_type;
+                let index_node = dag.get(node.inputs[1]).unwrap();
+                let indices = &index_node.output_type;
+                let updates = &dag.get(node.inputs[2]).unwrap().output_type;
+                if target.precision != chelis_types::types::Prim::F32
+                    || updates.precision != chelis_types::types::Prim::F32
+                    || node.output_type.precision != chelis_types::types::Prim::F32
+                {
+                    return Err(stage_error(
+                        "compile",
+                        format!(
+                            "`chelis build --target hip` sparse scatter_add supports f32 payloads only; \
+                             node {} carries target `{}`, updates `{}`, output `{}`. \
+                             f64 scatter_add needs backend-specific atomic support and is not in this milestone.",
+                            node.id.0,
+                            target.precision.name(),
+                            updates.precision.name(),
+                            node.output_type.precision.name()
+                        ),
+                        "unsupported_feature",
+                    ));
+                }
+                if !matches!(
+                    indices.precision,
+                    chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
+                ) {
+                    return Err(stage_error(
+                        "compile",
+                        format!(
+                            "`chelis build --target hip` sparse scatter_add requires int32/int64 indices; \
+                             node {} uses `{}`",
+                            node.id.0,
+                            indices.precision.name()
+                        ),
+                        "unsupported_feature",
+                    ));
+                }
+                if !matches!(index_node.op, RiscOp::Load { .. }) {
+                    return Err(stage_error(
+                        "compile",
+                        format!(
+                            "`chelis build --target hip` sparse scatter_add requires indices to be loaded input tensors in this milestone; \
+                             node {} uses indices produced by {:?}. \
+                             Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
+                            node.id.0, index_node.op
+                        ),
+                        "unsupported_feature",
+                    ));
+                }
+            }
             _ => {}
+        }
+    }
+    for node in dag.nodes() {
+        match node.output_type.precision {
+            chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
+            chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
+                if sparse_index_nodes.contains(&node.id)
+                    && matches!(node.op, RiscOp::Load { .. }) => {}
+            other => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` DAG path only supports f32/bool tensors, \
+                         plus loaded int32/int64 tensors when they are consumed as sparse indices; \
+                         node {} carries precision `{}`. \
+                         Rewrite the program to use f32 tensors or build it with `--target c` instead.",
+                        node.id.0,
+                        other.name()
+                    ),
+                    "unsupported_feature",
+                ));
+            }
         }
     }
     Ok(())
@@ -2124,6 +2264,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             axis: *axis,
             size: size.to_string(),
         },
+        RiscOp::OneHot { vocab } => WireRiscOp::OneHot { vocab: *vocab },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
             padding: padding.clone(),
             fill: *fill,
@@ -2194,6 +2335,8 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             n: wire_dim_expr(n),
             k: wire_dim_expr(k),
         },
+        RiscOp::Gather { axis } => WireRiscOp::Gather { axis: *axis },
+        RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd { axis: *axis },
     }
 }
 
@@ -2247,6 +2390,156 @@ mod tests {
         )
         .expect("write lib copy module");
         (dir, root)
+    }
+
+    fn tensor_type(dims: Vec<usize>, precision: chelis_types::types::Prim) -> TensorType {
+        TensorType {
+            dims: dims.into_iter().map(DimInfo::Lit).collect(),
+            precision,
+        }
+    }
+
+    #[test]
+    fn hip_sparse_gather_is_supported_with_integer_indices() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::Int64),
+            None,
+        );
+        let gather = dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![values, indices],
+            tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_root(gather);
+
+        reject_unsupported_hip_ops(&dag).expect("HIP should allow sparse gather");
+    }
+
+    #[test]
+    fn hip_sparse_gather_rejects_non_load_integer_index_producer() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::Int64),
+            None,
+        );
+        let gather = dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![values, indices],
+            tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_root(gather);
+
+        let err = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP should reject non-load integer index producers");
+        let message = &err.errors[0].message;
+        assert!(message.contains("indices to be loaded input tensors"));
+        assert!(message.contains("Non-load integer index producers need integer HIP codegen"));
+    }
+
+    #[test]
+    fn hip_sparse_scatter_add_rejects_non_load_integer_index_producer() {
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::Int32),
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        let scatter = dag.add_node(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_root(scatter);
+
+        let err = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP should reject non-load scatter_add index producers");
+        let message = &err.errors[0].message;
+        assert!(message.contains("indices to be loaded input tensors"));
+        assert!(message.contains("Non-load integer index producers need integer HIP codegen"));
+    }
+
+    #[test]
+    fn hip_sparse_scatter_f64_rejection_names_atomic_blocker() {
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            tensor_type(vec![3, 2], chelis_types::types::Prim::F64),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::Int64),
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            tensor_type(vec![4, 2], chelis_types::types::Prim::F64),
+            None,
+        );
+        let scatter = dag.add_node(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            tensor_type(vec![3, 2], chelis_types::types::Prim::F64),
+            None,
+        );
+        dag.add_root(scatter);
+
+        let err = reject_unsupported_hip_ops(&dag).expect_err("HIP should reject f64 scatter_add");
+        let message = &err.errors[0].message;
+        assert!(message.contains("sparse scatter_add supports f32 payloads only"));
+        assert!(message.contains("f64 scatter_add needs backend-specific atomic support"));
     }
 
     #[test]

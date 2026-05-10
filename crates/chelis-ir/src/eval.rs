@@ -343,6 +343,73 @@ fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue) -> TensorValue {
     }
 }
 
+fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> TensorValue {
+    assert!(axis < values.shape.len());
+    let index_rank = indices.shape.len();
+    let mut out_shape = Vec::with_capacity(values.shape.len() - 1 + index_rank);
+    out_shape.extend_from_slice(&values.shape[..axis]);
+    out_shape.extend_from_slice(&indices.shape);
+    out_shape.extend_from_slice(&values.shape[axis + 1..]);
+    let mut data = vec![0.0; numel(&out_shape)];
+    for (out_linear, out_slot) in data.iter_mut().enumerate() {
+        let out_index = linear_to_index(out_linear, &out_shape);
+        let mut idx_index = Vec::with_capacity(index_rank);
+        for pos in 0..index_rank {
+            idx_index.push(out_index[axis + pos]);
+        }
+        let gathered = indices.data[index_to_linear(&idx_index, &indices.shape)] as isize;
+        assert!(
+            gathered >= 0 && (gathered as usize) < values.shape[axis],
+            "gather index {gathered} out of bounds for axis {axis}"
+        );
+        let mut value_index = Vec::with_capacity(values.shape.len());
+        value_index.extend_from_slice(&out_index[..axis]);
+        value_index.push(gathered as usize);
+        value_index.extend_from_slice(&out_index[axis + index_rank..]);
+        *out_slot = values.data[index_to_linear(&value_index, &values.shape)];
+    }
+    TensorValue {
+        data,
+        shape: out_shape,
+    }
+}
+
+fn scatter_add(
+    target: &TensorValue,
+    indices: &TensorValue,
+    updates: &TensorValue,
+    axis: usize,
+) -> TensorValue {
+    assert!(axis < target.shape.len());
+    let index_rank = indices.shape.len();
+    let mut expected_updates = Vec::with_capacity(target.shape.len() - 1 + index_rank);
+    expected_updates.extend_from_slice(&target.shape[..axis]);
+    expected_updates.extend_from_slice(&indices.shape);
+    expected_updates.extend_from_slice(&target.shape[axis + 1..]);
+    assert_eq!(updates.shape, expected_updates);
+
+    let mut out = target.clone();
+    for update_linear in 0..updates.data.len() {
+        let update_index = linear_to_index(update_linear, &updates.shape);
+        let mut idx_index = Vec::with_capacity(index_rank);
+        for pos in 0..index_rank {
+            idx_index.push(update_index[axis + pos]);
+        }
+        let gathered = indices.data[index_to_linear(&idx_index, &indices.shape)] as isize;
+        assert!(
+            gathered >= 0 && (gathered as usize) < target.shape[axis],
+            "scatter_add index {gathered} out of bounds for axis {axis}"
+        );
+        let mut target_index = Vec::with_capacity(target.shape.len());
+        target_index.extend_from_slice(&update_index[..axis]);
+        target_index.push(gathered as usize);
+        target_index.extend_from_slice(&update_index[axis + index_rank..]);
+        let target_linear = index_to_linear(&target_index, &target.shape);
+        out.data[target_linear] += updates.data[update_linear];
+    }
+    out
+}
+
 fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f64) -> TensorValue {
     assert!(axis < input.shape.len());
     let mut out_shape = input.shape.clone();
@@ -440,6 +507,26 @@ fn expand(input: &TensorValue, axis: usize, _size: usize, out_shape: Vec<usize>)
             idx
         };
         *slot = input.data[index_to_linear(&in_index, &input.shape)];
+    }
+    TensorValue {
+        data: out,
+        shape: out_shape,
+    }
+}
+
+fn one_hot(indices: &TensorValue, vocab: usize) -> TensorValue {
+    let mut out_shape = indices.shape.clone();
+    out_shape.push(vocab);
+    let mut out = vec![0.0; numel(&out_shape)];
+    for (index_linear, &raw_index) in indices.data.iter().enumerate() {
+        let class = raw_index as isize;
+        assert!(
+            class >= 0 && (class as usize) < vocab,
+            "one_hot index {class} out of bounds for vocab {vocab}"
+        );
+        let mut out_index = linear_to_index(index_linear, &indices.shape);
+        out_index.push(class as usize);
+        out[index_to_linear(&out_index, &out_shape)] = 1.0;
     }
     TensorValue {
         data: out,
@@ -675,6 +762,7 @@ where
                     .expect("symbolic expands must be rebound before evaluation"),
                 concrete_shape(&node.output_type)?,
             ),
+            RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab),
             RiscOp::Pad { padding, fill } => pad(&values[&node.inputs[0]], padding, *fill),
             RiscOp::Shrink { bounds } => shrink(&values[&node.inputs[0]], bounds),
             RiscOp::Stride { strides } => stride(&values[&node.inputs[0]], strides),
@@ -749,6 +837,15 @@ where
                     batched_matmul(lhs, rhs)
                 }
             }
+            RiscOp::Gather { axis } => {
+                gather(&values[&node.inputs[0]], &values[&node.inputs[1]], *axis)
+            }
+            RiscOp::ScatterAdd { axis } => scatter_add(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                &values[&node.inputs[2]],
+                *axis,
+            ),
         };
         values.insert(node.id, value);
     }
@@ -858,6 +955,13 @@ mod tests {
         }
     }
 
+    fn tensor_ty(dims: &[usize], precision: Prim) -> TensorType {
+        TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision,
+        }
+    }
+
     #[test]
     fn eval_add() {
         let mut dag = Dag::new();
@@ -887,6 +991,122 @@ mod tests {
         assert_eq!(
             vals[&c],
             TensorValue::from_vec(vec![3], vec![5.0, 7.0, 9.0])
+        );
+    }
+
+    #[test]
+    fn eval_sparse_gather_axis1_preserves_outer_and_inner_layout() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_ty(&[2, 4, 2], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_ty(&[3], Prim::Int64),
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::Gather { axis: 1 },
+            vec![values, indices],
+            tensor_ty(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        dag.add_root(out);
+
+        let inputs = HashMap::from([
+            (
+                "values".to_string(),
+                TensorValue::from_vec(vec![2, 4, 2], (0..16).map(|x| x as f64).collect()),
+            ),
+            (
+                "indices".to_string(),
+                TensorValue::from_vec(vec![3], vec![2.0, 0.0, 3.0]),
+            ),
+        ]);
+        let vals = eval_tensor(&dag, &inputs).unwrap();
+        assert_eq!(
+            vals[&out],
+            TensorValue::from_vec(
+                vec![2, 3, 2],
+                vec![
+                    4.0, 5.0, 0.0, 1.0, 6.0, 7.0, 12.0, 13.0, 8.0, 9.0, 14.0, 15.0
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn eval_sparse_scatter_add_axis1_accumulates_duplicate_indices() {
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            tensor_ty(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_ty(&[4], Prim::Int32),
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            tensor_ty(&[2, 4, 2], Prim::F32),
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::ScatterAdd { axis: 1 },
+            vec![target, indices, updates],
+            tensor_ty(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        dag.add_root(out);
+
+        let inputs = HashMap::from([
+            (
+                "target".to_string(),
+                TensorValue::from_vec(vec![2, 3, 2], vec![0.0; 12]),
+            ),
+            (
+                "indices".to_string(),
+                TensorValue::from_vec(vec![4], vec![1.0, 0.0, 1.0, 2.0]),
+            ),
+            (
+                "updates".to_string(),
+                TensorValue::from_vec(
+                    vec![2, 4, 2],
+                    vec![
+                        1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0, 5.0, 50.0, 6.0, 60.0, 7.0,
+                        70.0, 8.0, 80.0,
+                    ],
+                ),
+            ),
+        ]);
+        let vals = eval_tensor(&dag, &inputs).unwrap();
+        assert_eq!(
+            vals[&out],
+            TensorValue::from_vec(
+                vec![2, 3, 2],
+                vec![
+                    2.0, 20.0, 4.0, 40.0, 4.0, 40.0, 6.0, 60.0, 12.0, 120.0, 8.0, 80.0,
+                ],
+            )
         );
     }
 

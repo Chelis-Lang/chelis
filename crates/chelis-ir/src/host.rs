@@ -2,9 +2,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast::{Atom, Expr, List};
+use chelis_types::types::Prim;
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 
-use crate::dag::TensorType;
+use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::lower::top_level_lowering_map;
 
 thread_local! {
@@ -57,6 +58,7 @@ pub struct HostFunction {
     pub ret_ty: HostType,
     pub body: HostExpr,
     pub tensor_helpers: Vec<HostTensorHelper>,
+    pub specialization: Option<HostFunctionSpecialization>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,12 +73,35 @@ pub struct HostTensorHelper {
     pub dag: crate::Dag,
     pub inputs: Vec<HostTensorInput>,
     pub output: TensorType,
+    pub specialization: Option<HostTensorSpecialization>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HostTensorInput {
     pub name: String,
     pub ty: TensorType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostTensorSpecialization {
+    BlasMatmul(HostBlasMatmulSummary),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostFunctionSpecialization {
+    BlasMatmul(HostBlasMatmulSummary),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBlasMatmulSummary {
+    pub lhs_input: usize,
+    pub rhs_input: usize,
+    pub input_tys: Vec<TensorType>,
+    pub output: TensorType,
+    pub batch_dims: Vec<DimExpr>,
+    pub m: DimExpr,
+    pub n: DimExpr,
+    pub k: DimExpr,
 }
 
 #[derive(Debug, Clone)]
@@ -662,6 +687,7 @@ fn lower_host_program(
             break;
         }
     }
+    derive_host_function_specializations(&mut host.functions);
     host
 }
 
@@ -689,6 +715,103 @@ pub fn host_program_unresolved_call_sites(program: &HostProgram) -> Vec<String> 
         }
     }
     out
+}
+
+fn derive_host_function_specializations(functions: &mut [HostFunction]) {
+    let mut summaries = functions
+        .iter()
+        .filter_map(|function| {
+            function
+                .specialization
+                .clone()
+                .map(|summary| (function.name.clone(), summary))
+        })
+        .collect::<HashMap<_, _>>();
+
+    loop {
+        let mut changed = false;
+        for function in functions.iter_mut() {
+            if summaries.contains_key(&function.name) {
+                continue;
+            }
+            let Some(summary) = derive_host_function_specialization(function, &summaries) else {
+                continue;
+            };
+            summaries.insert(function.name.clone(), summary.clone());
+            function.specialization = Some(summary);
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn derive_host_function_specialization(
+    function: &HostFunction,
+    summaries: &HashMap<String, HostFunctionSpecialization>,
+) -> Option<HostFunctionSpecialization> {
+    match &function.body.kind {
+        HostExprKind::TensorCall { helper, args, .. } => {
+            let HostTensorSpecialization::BlasMatmul(summary) = function
+                .tensor_helpers
+                .get(*helper)?
+                .specialization
+                .as_ref()?;
+            remap_blas_summary_to_params(summary, args, &function.params)
+                .map(HostFunctionSpecialization::BlasMatmul)
+        }
+        HostExprKind::Call {
+            function: callee,
+            args,
+            ..
+        } => {
+            let HostFunctionSpecialization::BlasMatmul(summary) = summaries.get(callee)?;
+            remap_blas_summary_to_params(summary, args, &function.params)
+                .map(HostFunctionSpecialization::BlasMatmul)
+        }
+        _ => None,
+    }
+}
+
+fn remap_blas_summary_to_params(
+    summary: &HostBlasMatmulSummary,
+    args: &[HostExpr],
+    params: &[HostParam],
+) -> Option<HostBlasMatmulSummary> {
+    let arg_to_param = args
+        .iter()
+        .map(|arg| {
+            let HostExprKind::Var(name, HostType::Tensor(_)) = &arg.kind else {
+                return None;
+            };
+            params.iter().position(|param| param.name == *name)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let lhs_input = *arg_to_param.get(summary.lhs_input)?;
+    let rhs_input = *arg_to_param.get(summary.rhs_input)?;
+    let input_tys = params
+        .iter()
+        .map(|param| match &param.ty {
+            HostType::Tensor(ty) => Some(ty.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if input_tys.get(lhs_input)? != summary.input_tys.get(summary.lhs_input)?
+        || input_tys.get(rhs_input)? != summary.input_tys.get(summary.rhs_input)?
+    {
+        return None;
+    }
+    Some(HostBlasMatmulSummary {
+        lhs_input,
+        rhs_input,
+        input_tys,
+        output: summary.output.clone(),
+        batch_dims: summary.batch_dims.clone(),
+        m: summary.m.clone(),
+        n: summary.n.clone(),
+        k: summary.k.clone(),
+    })
 }
 
 /// Scan a host program for functions with `HostType::Unknown` params or
@@ -939,6 +1062,7 @@ fn lower_host_function(
         ret_ty,
         body: host_body,
         tensor_helpers,
+        specialization: None,
     })
 }
 
@@ -1058,17 +1182,98 @@ fn finish_tensor_helper_call(
         .map(|node| node.output_type.clone())
         .unwrap_or_else(|| expected.clone());
     let args = tensor_helper_args(&inputs, scope);
+    let specialization = summarize_blas_helper_from_parts(&dag, &inputs, &output)
+        .map(HostTensorSpecialization::BlasMatmul);
     tensor_helpers.push(HostTensorHelper {
         name: helper_name,
         dag,
         inputs,
         output,
+        specialization,
     });
     HostExpr::new(HostExprKind::TensorCall {
         helper: helper_index,
         args,
         ty: HostType::Tensor(expected),
     })
+}
+
+fn summarize_blas_helper_from_parts(
+    dag: &crate::Dag,
+    inputs: &[HostTensorInput],
+    output: &TensorType,
+) -> Option<HostBlasMatmulSummary> {
+    if output.precision != Prim::F32 {
+        return None;
+    }
+    let specialized = crate::specialize::specialize_for_blas(dag);
+    let root = specialized.roots().first().copied()?;
+    if specialized.roots().len() != 1 {
+        return None;
+    }
+    let root_node = specialized.get(root)?;
+    let RiscOp::BlasMatmul {
+        batch_dims,
+        m,
+        n,
+        k,
+    } = &root_node.op
+    else {
+        return None;
+    };
+    if root_node.output_type.precision != Prim::F32 || root_node.inputs.len() != 2 {
+        return None;
+    }
+    let lhs_input = helper_load_input_index(&specialized, root_node.inputs[0], inputs)?;
+    let rhs_input = helper_load_input_index(&specialized, root_node.inputs[1], inputs)?;
+    let input_tys = inputs
+        .iter()
+        .map(|input| input.ty.clone())
+        .collect::<Vec<_>>();
+    if input_tys.iter().any(|ty| ty.precision != Prim::F32)
+        || !summary_dims_bind_to_inputs(&input_tys, batch_dims)
+        || !summary_dims_bind_to_inputs(&input_tys, &[m.clone(), n.clone(), k.clone()])
+    {
+        return None;
+    }
+    Some(HostBlasMatmulSummary {
+        lhs_input,
+        rhs_input,
+        input_tys,
+        output: output.clone(),
+        batch_dims: batch_dims.clone(),
+        m: m.clone(),
+        n: n.clone(),
+        k: k.clone(),
+    })
+}
+
+fn helper_load_input_index(
+    dag: &crate::Dag,
+    id: crate::dag::NodeId,
+    inputs: &[HostTensorInput],
+) -> Option<usize> {
+    let node = dag.get(id)?;
+    let RiscOp::Load { name } = &node.op else {
+        return None;
+    };
+    inputs
+        .iter()
+        .position(|input| input.name == name.as_str() && input.ty == node.output_type)
+}
+
+fn summary_dims_bind_to_inputs(input_tys: &[TensorType], dims: &[DimExpr]) -> bool {
+    let available = input_tys
+        .iter()
+        .flat_map(|ty| ty.dims.iter())
+        .filter_map(|dim| match dim {
+            DimInfo::Named(name, None) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    dims.iter()
+        .flat_map(|dim| dim.symbolic_names())
+        .all(|name| available.contains(name.as_str()))
 }
 
 fn lower_host_expr(
@@ -2380,7 +2585,6 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
                 | "pad_sequences_to"
                 | "concat"
                 | "split"
-                | "gather"
                 | "scatter"
                 | "where"
                 | "cumsum"
@@ -4719,9 +4923,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             )))),
             _ => Some(HostType::Unknown),
         },
-        "gather" | "scatter" | "where" | "cumsum" | "diagonal" | "trace" | "clamp" => {
-            arg_tys.first().cloned()
-        }
+        "scatter" | "where" | "cumsum" | "diagonal" | "trace" | "clamp" => arg_tys.first().cloned(),
         "sort" => match arg_tys.first() {
             Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tuple(vec![
                 HostType::Tensor(tensor_ty.clone()),

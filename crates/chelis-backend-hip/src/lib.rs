@@ -75,6 +75,7 @@ pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResu
     let mut link_flags = vec!["-lhiprtc".to_string()];
     if c_source.contains("chelis_hipblas_sgemm_row_major(")
         || c_source.contains("chelis_hipblas_sgemm_batched_row_major(")
+        || c_source.contains("chelis_hipblas_sgemm_strided_batched_row_major(")
     {
         link_flags.push("-lhipblas".to_string());
     }
