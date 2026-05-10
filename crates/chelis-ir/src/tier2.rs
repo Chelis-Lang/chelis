@@ -699,12 +699,39 @@ fn align_matmul_operand(
         }
     }
 
-    debug_assert_eq!(
+    debug_assert!(
+        checked_matmul_dims_compatible(&current_dims[current_dims.len() - 2..], matrix_dims),
+        "matmul matrix dims must already be checked before lowering: current={:?}, target={:?}",
         &current_dims[current_dims.len() - 2..],
-        matrix_dims,
-        "matmul matrix dims must already be checked before lowering"
+        matrix_dims
     );
     current
+}
+
+fn checked_matmul_dims_compatible(current: &[DimInfo], target: &[DimInfo; 2]) -> bool {
+    current.len() == target.len()
+        && current
+            .iter()
+            .zip(target.iter())
+            .all(|(current, target)| checked_dim_compatible(current, target))
+}
+
+fn checked_dim_compatible(current: &DimInfo, target: &DimInfo) -> bool {
+    match (current, target) {
+        (DimInfo::Lit(a), DimInfo::Lit(b)) => a == b,
+        (DimInfo::Named(a_name, a_size), DimInfo::Named(b_name, b_size)) => {
+            a_name == b_name
+                || match (a_size, b_size) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                }
+        }
+        (DimInfo::Named(_, Some(a)), DimInfo::Lit(b))
+        | (DimInfo::Lit(b), DimInfo::Named(_, Some(a))) => a == b,
+        (DimInfo::Named(_, None), DimInfo::Lit(_)) | (DimInfo::Lit(_), DimInfo::Named(_, None)) => {
+            true
+        }
+    }
 }
 
 /// softmax(x, axis) = exp(x - max_reduce(x, axis)) / sum(exp(x - max_reduce(x, axis)), axis)
