@@ -14,7 +14,13 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::str::FromStr;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -283,6 +289,9 @@ enum Command {
         /// Per-test wall-clock timeout (seconds)
         #[clap(long, default_value = "30")]
         timeout: u64,
+        /// Test-file workers to run concurrently (`auto` uses available CPUs)
+        #[clap(long, default_value = "auto", value_name = "N|auto")]
+        jobs: TestJobs,
     },
     /// Run L2 property checks discovered in Surf or Deep inputs
     Prove {
@@ -558,7 +567,8 @@ fn main() {
             filter,
             json,
             timeout,
-        }) => match cmd_test(path.as_deref(), filter.as_deref(), json, timeout) {
+            jobs,
+        }) => match cmd_test(path.as_deref(), filter.as_deref(), json, timeout, jobs) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 eprintln!("error: {err}");
@@ -2154,6 +2164,54 @@ impl CompiledContextTempfile {
 // without leaking the file handle into worker subprocesses (workers
 // reopen the path themselves).
 
+#[derive(Debug, Clone, Copy)]
+enum TestJobs {
+    Auto,
+    Count(usize),
+}
+
+impl TestJobs {
+    fn resolve(self, test_file_count: usize) -> usize {
+        let requested = match self {
+            TestJobs::Auto => std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1),
+            TestJobs::Count(count) => count,
+        };
+        requested.max(1).min(test_file_count.max(1))
+    }
+}
+
+impl FromStr for TestJobs {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("auto") {
+            return Ok(TestJobs::Auto);
+        }
+        let count = value
+            .parse::<usize>()
+            .map_err(|_| "`--jobs` must be `auto` or a positive integer".to_string())?;
+        if count == 0 {
+            return Err("`--jobs` must be greater than zero".to_string());
+        }
+        Ok(TestJobs::Count(count))
+    }
+}
+
+#[derive(Clone)]
+struct TestFileJob {
+    index: usize,
+    file: PathBuf,
+    rel_display: String,
+}
+
+struct TestFileResult {
+    index: usize,
+    rel_display: String,
+    rows: Vec<TestRow>,
+}
+
 /// Discover and execute Chelis-native tests.
 ///
 /// Walks `.ch` files under `path` (default `tests/` in CWD), extracts nullary
@@ -2168,6 +2226,7 @@ fn cmd_test(
     filter: Option<&str>,
     json: bool,
     timeout_secs: u64,
+    jobs: TestJobs,
 ) -> Result<i32, String> {
     let raw_cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
     let target = match path {
@@ -2285,32 +2344,35 @@ fn cmd_test(
     // rehydrate the library snapshot ONCE per spawn instead of
     // re-running the full reef graph + compile pipeline per file.
     //
-    // Best-effort: failures fall back to the legacy reef-graph path,
-    // which is still correct (just slower). Today the most common
-    // miss is LocalRegistry packages whose `source_digests` step
-    // isn't yet implemented.
-    //
     // Phase K: route through `load_or_compile_for_package` so an
     // unchanged-source re-run (typical CI / dev-loop iteration on
     // tests) skips the ~67s library compile entirely. When
-    // CHELIS_REEF_HOME is unset we still fall back to the legacy
-    // `compile_reef_context` path via the helper's empty-reef-home
-    // guardrail (see `load_or_compile_for_package` doc comment) — same
-    // wall-clock as pre-Phase-K, no leakage.
+    // CHELIS_REEF_HOME is unset the helper falls through to a direct
+    // context compile. This parent context build is intentionally
+    // fail-fast: a shared dependency compile error is one real runner
+    // error, not N repeated per-worker fallbacks.
     let reef_home_path = env::var("CHELIS_REEF_HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let context_tempfile_opt: Option<CompiledContextTempfile> =
+    let context =
         match chelis_compiler_api::load_or_compile_for_package(&reef_home_path, &cwd, true) {
-            Ok(context) => {
-                let context_bytes = context.encode()?;
-                drop(context);
-                let tempfile = CompiledContextTempfile::write(&context_bytes)?;
-                drop(context_bytes);
-                Some(tempfile)
+            Ok(context) => context,
+            Err(err) if is_local_registry_hash_unsupported(&err) => {
+                chelis_compiler_api::compile_reef_context(&reef_home_path, &cwd).map_err(|err| {
+                    format!("compile test context: {}", compiler_error_messages(&err))
+                })?
             }
-            Err(_err) => None,
+            Err(err) => {
+                return Err(format!(
+                    "compile test context: {}",
+                    compiler_error_messages(&err)
+                ));
+            }
         };
+    let context_bytes = context.encode()?;
+    drop(context);
+    let context_tempfile = CompiledContextTempfile::write(&context_bytes)?;
+    drop(context_bytes);
 
     let mut passed: usize = 0;
     let mut failed: usize = 0;
@@ -2320,48 +2382,33 @@ fn cmd_test(
     let self_path =
         std::env::current_exe().map_err(|e| format!("could not locate chelis binary: {e}"))?;
 
-    for file in &test_files {
-        let rel_display = file
-            .strip_prefix(&cwd)
-            .unwrap_or(file.as_path())
-            .display()
-            .to_string();
-
-        let rows = run_test_file_subprocess(
-            &self_path,
-            &cwd,
-            file,
-            &rel_display,
-            filter,
-            timeout_secs,
-            context_tempfile_opt.as_ref().map(|t| t.path()),
-        );
-
-        if rows.is_empty() {
-            // Nothing matched the filter in this file — skip silently so the
-            // operator can narrow a run without seeing noise.
-            continue;
-        }
-
-        if json {
-            for row in &rows {
-                writeln!(out, "{}", row.to_json()).map_err(|e| e.to_string())?;
-                match row.status {
-                    TestStatus::Pass => passed += 1,
-                    TestStatus::Fail => failed += 1,
-                }
-            }
-        } else {
-            writeln!(out, "{rel_display}").map_err(|e| e.to_string())?;
-            for row in &rows {
-                writeln!(out, "  {}", row.render_plain()).map_err(|e| e.to_string())?;
-                match row.status {
-                    TestStatus::Pass => passed += 1,
-                    TestStatus::Fail => failed += 1,
-                }
-            }
-        }
-    }
+    let test_jobs = test_files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| TestFileJob {
+            index,
+            file: file.clone(),
+            rel_display: file
+                .strip_prefix(&cwd)
+                .unwrap_or(file.as_path())
+                .display()
+                .to_string(),
+        })
+        .collect::<Vec<_>>();
+    let worker_count = jobs.resolve(test_jobs.len());
+    run_test_file_jobs(
+        &self_path,
+        &cwd,
+        &test_jobs,
+        worker_count,
+        filter,
+        timeout_secs,
+        context_tempfile.path(),
+        json,
+        &mut out,
+        &mut passed,
+        &mut failed,
+    )?;
 
     if json {
         writeln!(
@@ -2374,6 +2421,166 @@ fn cmd_test(
     }
 
     Ok(if failed == 0 { 0 } else { 1 })
+}
+
+fn compiler_error_messages(err: &chelis_compiler_api::compiler::CompilerError) -> String {
+    let messages = err
+        .errors
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if messages.is_empty() {
+        err.stage.clone()
+    } else {
+        messages
+    }
+}
+
+fn is_local_registry_hash_unsupported(err: &chelis_compiler_api::compiler::CompilerError) -> bool {
+    err.errors.iter().any(|diagnostic| {
+        diagnostic.kind == "hash_error" && diagnostic.message.contains("LocalRegistry")
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_test_file_jobs(
+    self_path: &Path,
+    cwd: &Path,
+    test_jobs: &[TestFileJob],
+    worker_count: usize,
+    filter: Option<&str>,
+    timeout_secs: u64,
+    compiled_context_path: &Path,
+    json: bool,
+    out: &mut impl Write,
+    passed: &mut usize,
+    failed: &mut usize,
+) -> Result<(), String> {
+    if worker_count <= 1 {
+        for job in test_jobs {
+            let rows = run_test_file_subprocess(
+                self_path,
+                cwd,
+                &job.file,
+                &job.rel_display,
+                filter,
+                timeout_secs,
+                Some(compiled_context_path),
+            );
+            emit_test_file_rows(out, json, &job.rel_display, &rows, passed, failed)?;
+        }
+        return Ok(());
+    }
+
+    let jobs = Arc::new(test_jobs.to_vec());
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<TestFileResult>();
+    let self_path = self_path.to_path_buf();
+    let cwd = cwd.to_path_buf();
+    let filter = filter.map(str::to_string);
+    let compiled_context_path = compiled_context_path.to_path_buf();
+    let mut handles = Vec::new();
+
+    for _ in 0..worker_count {
+        let jobs = Arc::clone(&jobs);
+        let next_index = Arc::clone(&next_index);
+        let result_tx = result_tx.clone();
+        let self_path = self_path.clone();
+        let cwd = cwd.clone();
+        let filter = filter.clone();
+        let compiled_context_path = compiled_context_path.clone();
+        handles.push(thread::spawn(move || {
+            loop {
+                let index = next_index.fetch_add(1, Ordering::SeqCst);
+                let Some(job) = jobs.get(index).cloned() else {
+                    break;
+                };
+                let rows = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_test_file_subprocess(
+                        &self_path,
+                        &cwd,
+                        &job.file,
+                        &job.rel_display,
+                        filter.as_deref(),
+                        timeout_secs,
+                        Some(&compiled_context_path),
+                    )
+                })) {
+                    Ok(rows) => rows,
+                    Err(_) => vec![TestRow {
+                        file: job.rel_display.clone(),
+                        test: "<file>".to_string(),
+                        status: TestStatus::Fail,
+                        message: Some("parent worker thread panicked".to_string()),
+                    }],
+                };
+                let _ = result_tx.send(TestFileResult {
+                    index: job.index,
+                    rel_display: job.rel_display,
+                    rows,
+                });
+            }
+        }));
+    }
+    drop(result_tx);
+
+    let mut pending = BTreeMap::<usize, TestFileResult>::new();
+    let mut next_emit = 0usize;
+    let mut received = 0usize;
+    while received < test_jobs.len() {
+        let result = result_rx
+            .recv()
+            .map_err(|_| "test worker pool terminated before every file completed".to_string())?;
+        received += 1;
+        pending.insert(result.index, result);
+        while let Some(result) = pending.remove(&next_emit) {
+            emit_test_file_rows(out, json, &result.rel_display, &result.rows, passed, failed)?;
+            next_emit += 1;
+        }
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| "test worker pool thread panicked".to_string())?;
+    }
+    Ok(())
+}
+
+fn emit_test_file_rows(
+    out: &mut impl Write,
+    json: bool,
+    rel_display: &str,
+    rows: &[TestRow],
+    passed: &mut usize,
+    failed: &mut usize,
+) -> Result<(), String> {
+    if rows.is_empty() {
+        // Nothing matched the filter in this file — skip silently so the
+        // operator can narrow a run without seeing noise.
+        return Ok(());
+    }
+
+    if json {
+        for row in rows {
+            writeln!(out, "{}", row.to_json()).map_err(|e| e.to_string())?;
+            match row.status {
+                TestStatus::Pass => *passed += 1,
+                TestStatus::Fail => *failed += 1,
+            }
+        }
+    } else {
+        writeln!(out, "{rel_display}").map_err(|e| e.to_string())?;
+        for row in rows {
+            writeln!(out, "  {}", row.render_plain()).map_err(|e| e.to_string())?;
+            match row.status {
+                TestStatus::Pass => *passed += 1,
+                TestStatus::Fail => *failed += 1,
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Phase G' — pre-flight filter scan. Returns `true` if any test file
@@ -2561,6 +2768,93 @@ fn tag_filter_inactive(row: &mut TestRow) {
     row.message = Some(format!("{FILTER_INACTIVE_MARKER}{existing}"));
 }
 
+struct TestWorkerOutput {
+    output: std::process::Output,
+    timed_out: bool,
+}
+
+fn run_worker_command_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<TestWorkerOutput, std::io::Error> {
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            terminate_worker_process(&mut child)?;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output()?;
+    Ok(TestWorkerOutput { output, timed_out })
+}
+
+fn terminate_worker_process(child: &mut std::process::Child) -> Result<(), std::io::Error> {
+    send_worker_sigterm(child)?;
+    let grace_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= grace_deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    child.kill()
+}
+
+#[cfg(unix)]
+fn send_worker_sigterm(child: &mut std::process::Child) -> Result<(), std::io::Error> {
+    let rc = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn send_worker_sigterm(child: &mut std::process::Child) -> Result<(), std::io::Error> {
+    child.kill()
+}
+
+fn worker_process_timeout(
+    file: &Path,
+    filter: Option<&str>,
+    rel_display: &str,
+    timeout_secs: u64,
+) -> Duration {
+    let selected_count = estimate_selected_test_count(file, filter, rel_display).max(1);
+    let per_test = timeout_secs.max(1);
+    let test_budget = per_test
+        .saturating_mul(selected_count.saturating_add(1) as u64)
+        .saturating_add(10);
+    Duration::from_secs(test_budget.max(60))
+}
+
+fn estimate_selected_test_count(file: &Path, filter: Option<&str>, rel_display: &str) -> usize {
+    let Ok(source) = fs::read_to_string(file) else {
+        return 1;
+    };
+    let Ok(parsed) = chelis_surf::parser::parse_str(&source) else {
+        return 1;
+    };
+    let flat = flatten_module_decls(&parsed);
+    match enumerate_test_fns(&flat, filter, rel_display) {
+        EnumerationOutcome::Tests(tests) => tests.len(),
+        EnumerationOutcome::Error(_) => 1,
+    }
+}
+
 /// Spawn `chelis __test_file <file> --rel-display ... --filter ... --timeout N`
 /// as a subprocess. Capture its NDJSON stdout and parse into TestRows. A
 /// child crash (stack overflow, panic in the evaluator) only kills the child;
@@ -2602,7 +2896,8 @@ fn run_test_file_subprocess(
     }
     // Inherit CHELIS_REEF_HOME and PATH; the child needs the same reef
     // registry the parent was configured with.
-    let output = match cmd.output() {
+    let worker_timeout = worker_process_timeout(file, filter, rel_display, timeout_secs);
+    let output = match run_worker_command_with_timeout(cmd, worker_timeout) {
         Ok(o) => o,
         Err(err) => {
             return vec![TestRow {
@@ -2618,7 +2913,7 @@ fn run_test_file_subprocess(
     // record per line. A malformed or empty line is ignored; a completely empty
     // stdout combined with a non-zero exit means the child crashed before
     // running anything.
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output.output.stdout);
     let mut rows = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();
@@ -2667,18 +2962,31 @@ fn run_test_file_subprocess(
     //     the failure so it does not silently disappear.
     // Exit 1 with at least one row is the normal "some test failed" exit
     // and does not warrant a synthetic row.
-    let worker_crashed = match output.status.code() {
-        None => true,
-        Some(0) => false,
-        Some(1) => rows.is_empty(),
-        Some(_) => true,
-    };
+    if output.timed_out {
+        rows.push(TestRow {
+            file: rel_display.to_string(),
+            test: "<file>".to_string(),
+            status: TestStatus::Fail,
+            message: Some(format!(
+                "worker timeout after {}s; sent SIGTERM, then SIGKILL after 5s if needed",
+                worker_timeout.as_secs()
+            )),
+        });
+    }
+
+    let worker_crashed = !output.timed_out
+        && match output.output.status.code() {
+            None => true,
+            Some(0) => false,
+            Some(1) => rows.is_empty(),
+            Some(_) => true,
+        };
     if worker_crashed {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = if let Some(code) = output.status.code() {
+        let stderr = String::from_utf8_lossy(&output.output.stderr);
+        let msg = if let Some(code) = output.output.status.code() {
             format!("worker exited {code}: {}", stderr.trim())
         } else {
-            let signal_str = worker_signal_str(&output.status);
+            let signal_str = worker_signal_str(&output.output.status);
             format!("worker killed by signal {signal_str}: {}", stderr.trim())
         };
         rows.push(TestRow {

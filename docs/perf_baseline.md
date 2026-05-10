@@ -21,3 +21,16 @@ Summary of the Phase J measurement:
 The reproducible manual gate remains `phase4_perf_baseline` in
 [`manual_gates.md`](manual_gates.md). Update this file only with concise current status;
 move long dated measurement logs into `archive/perf/`.
+
+## Node-Local Test Parallelism
+
+Current baseline from `/home/jeff/Documents/scratch/coral` on this workstation with
+`target/release/chelis`:
+
+- `chelis test tests/ --jobs auto`: `30.64 s` for 65 tests, 0 failures.
+- `chelis test tests/ --jobs 1`: `40.28 s` for the same corpus, 0 failures.
+
+`--jobs auto` uses `min(selected_test_files, available_parallelism())`; it has no
+fixed cap. Output remains deterministic in discovery order, so CI logs do not depend
+on worker completion order. LocalRegistry packages bypass the disk-cache hash probe
+and still compile one in-memory context that is shared by every worker.

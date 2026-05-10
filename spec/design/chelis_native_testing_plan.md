@@ -49,6 +49,7 @@ If the `Test` effect adds too much complexity to the initial implementation, the
 chelis test                     # discover and run all test files in tests/
 chelis test tests/frame.ch      # run a specific test file
 chelis test tests/ --filter erf # run only tests whose names contain "erf"
+chelis test tests/ --jobs auto  # run test files concurrently on available CPUs
 ```
 
 Discovery convention: test files live in `tests/*.ch` (or `tests/**/*.ch` for subdirectories). Each test file contains zero or more `def test_*()` functions. The CLI discovers test files, evaluates each via the evaluator (not build→gcc→link→run), calls every `test_*` function, and reports results.
@@ -417,6 +418,19 @@ tests/core.ch
 
 A filter that matches nothing still exits `0` with `0 passed, 0 failed` — consistent
 with `cargo test` and `pytest` ergonomics.
+
+### Parallel file execution with `--jobs`
+
+Directory runs execute test files concurrently by default. `--jobs auto` resolves to
+`min(number_of_selected_test_files, available_parallelism())`; there is no fixed cap.
+Use `--jobs 1` for serial file execution while debugging. The parent buffers completed
+file results by discovery index and emits the next in-order file as soon as all prior
+files have completed, so plain text and NDJSON remain deterministic even when workers
+finish out of order.
+
+The parent builds the shared package context once before spawning workers. If that
+context fails to compile, `chelis test` fails fast and does not fan out identical
+per-worker errors.
 
 ### Machine-readable output with `--json`
 
