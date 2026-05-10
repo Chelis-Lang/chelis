@@ -164,12 +164,34 @@ fn quoted_spans(source: &str, surface: Surface) -> Vec<StringSpan> {
         if ch == '"' || (surface == Surface::PythonSource && ch == '\'') {
             string_quote = Some(ch);
             start = cursor + ch.len_utf8();
-        } else if surface == Surface::RustSource && ch == '\'' {
+        } else if surface == Surface::RustSource
+            && ch == '\''
+            && starts_rust_char_literal(source, cursor)
+        {
             in_char = true;
         }
         cursor += ch.len_utf8();
     }
     spans
+}
+
+fn starts_rust_char_literal(source: &str, quote: usize) -> bool {
+    let mut cursor = quote + 1;
+    let Some(ch) = source[cursor..].chars().next() else {
+        return false;
+    };
+    if ch == '\\' {
+        cursor += ch.len_utf8();
+        let Some(escaped) = source[cursor..].chars().next() else {
+            return false;
+        };
+        cursor += escaped.len_utf8();
+    } else if ch == '\n' || ch == '\'' {
+        return false;
+    } else {
+        cursor += ch.len_utf8();
+    }
+    source[cursor..].starts_with('\'')
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -322,6 +344,14 @@ mod tests {
             surface: Surface::PythonSource,
         };
         assert_eq!(NoEmDashInPublicStrings.check(&ctx).len(), 1);
+    }
+
+    #[test]
+    fn flags_rust_string_after_lifetime_parameter() {
+        let dash = '\u{2014}';
+        let src = format!("fn f<'a>() {{ println!(\"one {dash} two\"); }}\n");
+        let violations = NoEmDashInPublicStrings.check(&ctx(&src));
+        assert_eq!(violations.len(), 1);
     }
 
     #[test]

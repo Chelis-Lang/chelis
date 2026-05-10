@@ -129,7 +129,8 @@ pub trait Rule: Send + Sync {
     fn check(&self, ctx: &Context<'_>) -> Vec<Violation>;
 
     /// Return an auto-fix for `violation`, when this occurrence is safely
-    /// fixable. Rules should return `None` when a `keep` annotation applies.
+    /// fixable. The CLI fix driver suppresses fixes when a `keep` annotation
+    /// applies.
     fn fix(&self, _ctx: &Context<'_>, _violation: &Violation) -> Option<Replacement> {
         None
     }
@@ -180,7 +181,7 @@ pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, Lint
             violations.extend(
                 rule.check(&ctx)
                     .into_iter()
-                    .filter(|v| !inline_allows(source.as_deref(), v)),
+                    .filter(|v| !inline_allows(source.as_deref(), surface, v)),
             );
         }
     }
@@ -193,7 +194,7 @@ pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, Lint
     Ok(violations)
 }
 
-fn inline_allows(source: Option<&str>, violation: &Violation) -> bool {
+fn inline_allows(source: Option<&str>, surface: Surface, violation: &Violation) -> bool {
     let Some(source) = source else {
         return false;
     };
@@ -211,11 +212,22 @@ fn inline_allows(source: Option<&str>, violation: &Violation) -> bool {
         .and_then(|idx| lines.get(idx))
         .copied()
         .unwrap_or("");
-    inline_line_allows(current, rule) || inline_line_allows(previous, rule)
+    inline_line_allows(current, surface, rule) || inline_line_allows(previous, surface, rule)
 }
 
-fn inline_line_allows(line: &str, rule: &str) -> bool {
-    let Some(directive) = lint_directive(line) else {
+pub fn inline_keeps(source: &str, surface: Surface, line_no: usize, rule: &str) -> bool {
+    let lines: Vec<&str> = source.lines().collect();
+    let current = lines.get(line_no.saturating_sub(1)).copied().unwrap_or("");
+    let previous = line_no
+        .checked_sub(2)
+        .and_then(|idx| lines.get(idx))
+        .copied()
+        .unwrap_or("");
+    inline_line_keeps(current, surface, rule) || inline_line_keeps(previous, surface, rule)
+}
+
+fn inline_line_allows(line: &str, surface: Surface, rule: &str) -> bool {
+    let Some(directive) = lint_directive(line, surface) else {
         return false;
     };
     let directive = directive.trim();
@@ -225,12 +237,23 @@ fn inline_line_allows(line: &str, rule: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn inline_line_keeps(line: &str, surface: Surface, rule: &str) -> bool {
+    let Some(directive) = lint_directive(line, surface) else {
+        return false;
+    };
+    let directive = directive.trim();
+    directive
+        .strip_prefix("keep")
+        .map(|rest| rest.split_whitespace().any(|name| name == rule))
+        .unwrap_or(false)
+}
+
 fn file_level_allows(source: &str, rule: &str) -> bool {
     let allow = format!("#[allow({rule})]");
     source.lines().any(|line| line.trim() == allow)
 }
 
-pub(crate) fn lint_directive(line: &str) -> Option<&str> {
+pub(crate) fn lint_directive(line: &str, surface: Surface) -> Option<&str> {
     let mut in_string = false;
     let mut escaped = false;
     let mut cursor = 0usize;
@@ -254,7 +277,17 @@ pub(crate) fn lint_directive(line: &str) -> Option<&str> {
             cursor += ch.len_utf8();
             continue;
         }
-        if line[cursor..].starts_with("//") || line[cursor..].starts_with('#') {
+        let starts_comment = match surface {
+            Surface::DeepSource => line[cursor..].starts_with(';'),
+            Surface::PythonSource => line[cursor..].starts_with('#'),
+            Surface::SurfSource | Surface::RustSource => line[cursor..].starts_with("//"),
+            _ => {
+                line[cursor..].starts_with("//")
+                    || line[cursor..].starts_with('#')
+                    || line[cursor..].starts_with(';')
+            }
+        };
+        if starts_comment {
             return line[cursor..]
                 .split_once("chelis-lint:")
                 .map(|(_, directive)| directive);

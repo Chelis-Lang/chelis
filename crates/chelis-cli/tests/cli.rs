@@ -5266,6 +5266,55 @@ fn lint_keep_preserves_fixable_linearity_call_but_still_warns() {
 }
 
 #[test]
+fn lint_keep_preserves_pipe_fix_but_still_warns() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("keep_pipe.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(x), scale) // chelis-lint: keep prefer-pipe-operator\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("warning:")
+                .and(predicate::str::contains("prefer-pipe-operator"))
+                .and(predicate::str::contains("[fix]").not()),
+        );
+
+    let rewritten = fs::read_to_string(path).expect("read rewritten");
+    assert!(rewritten.contains("outer(inner(x), scale)"));
+    assert!(!rewritten.contains("|>"));
+}
+
+#[test]
+fn lint_keep_preserves_no_em_dash_fix_but_still_reports_error() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("keep_dash.rs");
+    let dash = '\u{2014}';
+    let original = format!(
+        "fn main() {{ println!(\"one {dash} two\"); }} // chelis-lint: keep no-em-dash-in-public-strings\n"
+    );
+    write_file(&path, &original);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("no-em-dash-in-public-strings")
+                .and(predicate::str::contains("[fix]").not()),
+        );
+
+    let rewritten = fs::read_to_string(path).expect("read rewritten");
+    assert_eq!(rewritten, original);
+}
+
+#[test]
 fn lint_allow_suppresses_diagnostic_and_fix() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("allow.ch");
@@ -5283,6 +5332,30 @@ fn lint_allow_suppresses_diagnostic_and_fix() {
 
     let rewritten = fs::read_to_string(path).expect("read rewritten");
     assert!(rewritten.contains("copy(x)"));
+}
+
+#[test]
+fn lint_fix_does_not_rewrite_list_drop_builtin() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("list_drop.ch");
+    let original = "def f(ys: list[int64]) -> list[int64] = drop(ys, cast(1, int64))\n";
+    write_file(&path, original);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "lint",
+            "--fix",
+            "--rule",
+            "redundant-linearity-call",
+            path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    let rewritten = fs::read_to_string(path).expect("read rewritten");
+    assert_eq!(rewritten, original);
 }
 
 #[test]
@@ -5412,6 +5485,55 @@ fn lint_allow_directive_must_be_a_real_directive() {
 }
 
 #[test]
+fn lint_deep_semicolon_allow_suppresses_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("allow.dp");
+    write_file(
+        &path,
+        "; chelis-lint: allow deep-user-symbol-charset\n(def {} my-func (params {}) (lit {} 1))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "lint",
+            "--check",
+            "--rule",
+            "deep-user-symbol-charset",
+            path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn lint_semicolon_directive_does_not_suppress_rust_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("fake_semicolon.rs");
+    let dash = '\u{2014}';
+    write_file(
+        &path,
+        &format!(
+            "; chelis-lint: allow no-em-dash-in-public-strings\nfn main() {{ println!(\"one {dash} two\"); }}\n"
+        ),
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "lint",
+            "--check",
+            "--rule",
+            "no-em-dash-in-public-strings",
+            path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("no-em-dash-in-public-strings"));
+}
+
+#[test]
 fn lint_no_em_dash_ignores_quoted_text_in_rust_comments() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("comment.rs");
@@ -5455,6 +5577,24 @@ fn lint_no_em_dash_flags_python_single_quoted_strings() {
         .assert()
         .failure()
         .stdout(predicate::str::contains("no-em-dash-in-public-strings"));
+}
+
+#[test]
+fn check_relative_file_emits_non_blocking_lint_warning() {
+    let dir = tempdir().expect("tempdir");
+    write_file(
+        &dir.path().join("redundant.ch"),
+        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
+         result = keep(to_tensor([1.0, 2.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(dir.path())
+        .args(["check", "redundant.ch"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("redundant-linearity-call"));
 }
 
 /// Bucket 6b: empty directory is a legitimate state (fresh project,

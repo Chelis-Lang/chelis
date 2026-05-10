@@ -6,7 +6,7 @@
 //! instead of `registry::all_rules`, so it does not fail style-gated build,
 //! check, eval, or validate paths.
 
-use crate::{Context, Replacement, Rule, Severity, Surface, Violation, lint_directive};
+use crate::{Context, Replacement, Rule, Severity, Surface, Violation};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -52,6 +52,13 @@ impl Rule for RedundantLinearityCall {
                     let whole = matched.get(0).unwrap();
                     let call = matched.get(1).unwrap().as_str();
                     let absolute = offset + segment.start + whole.start();
+                    let open = absolute + whole.as_str().len() - 1;
+                    let Some(close) = matching_paren(source, open) else {
+                        continue;
+                    };
+                    if !has_single_top_level_argument(source, open, close) {
+                        continue;
+                    }
                     let (line_no, col_no) = line_col(source, absolute);
                     out.push(Violation {
                     rule_id: self.id().to_string(),
@@ -84,6 +91,9 @@ impl Rule for RedundantLinearityCall {
         }
         let open = call_match.end().checked_sub(1)?;
         let close = matching_paren(source, open)?;
+        if !has_single_top_level_argument(source, open, close) {
+            return None;
+        }
         let inner = source[open + 1..close].trim();
         Some(Replacement {
             path: ctx.path.to_path_buf(),
@@ -92,6 +102,47 @@ impl Rule for RedundantLinearityCall {
             text: inner.to_string(),
         })
     }
+}
+
+fn has_single_top_level_argument(source: &str, open: usize, close: usize) -> bool {
+    let inner = &source[open + 1..close];
+    if inner.trim().is_empty() {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut cursor = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    while cursor < inner.len() {
+        let ch = inner[cursor..].chars().next().unwrap();
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else {
+                match ch {
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+            }
+            cursor += ch.len_utf8();
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                let Some(next) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next;
+            }
+            ',' if depth == 0 => return false,
+            _ => {}
+        }
+        cursor += ch.len_utf8();
+    }
+    !in_string && depth == 0
 }
 
 fn line_col(source: &str, offset: usize) -> (usize, usize) {
@@ -146,25 +197,7 @@ fn matching_paren(source: &str, open: usize) -> Option<usize> {
 }
 
 fn inline_keeps(source: &str, line_no: usize, rule: &str) -> bool {
-    let lines: Vec<&str> = source.lines().collect();
-    let current = lines.get(line_no.saturating_sub(1)).copied().unwrap_or("");
-    let previous = line_no
-        .checked_sub(2)
-        .and_then(|idx| lines.get(idx))
-        .copied()
-        .unwrap_or("");
-    line_keeps(current, rule) || line_keeps(previous, rule)
-}
-
-fn line_keeps(line: &str, rule: &str) -> bool {
-    let Some(directive) = lint_directive(line) else {
-        return false;
-    };
-    directive
-        .trim()
-        .strip_prefix("keep")
-        .map(|rest| rest.split_whitespace().any(|name| name == rule))
-        .unwrap_or(false)
+    crate::inline_keeps(source, Surface::SurfSource, line_no, rule)
 }
 
 fn code_segments(line: &str) -> Vec<std::ops::Range<usize>> {
@@ -244,6 +277,12 @@ mod tests {
     #[test]
     fn ignores_string_literals() {
         let violations = run("def f() -> string = \"copy(x)\"\n");
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn ignores_list_drop_with_two_arguments() {
+        let violations = run("def f(ys: list[int64]) -> list[int64] = drop(ys, cast(1, int64))\n");
         assert!(violations.is_empty());
     }
 }
