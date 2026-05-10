@@ -6,6 +6,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-05-10
+
+### Fixed - conservative lint auto-fix rollout
+
+`chelis lint --fix` no longer rewrites `redundant-linearity-call` or
+`prefer-pipe-operator` warnings. Those rules remain visible as
+warnings, but their source rewrites are disabled until the fixer can
+prove that removing explicit linearity calls or converting nested calls
+to pipes preserves type, ownership, and call-argument behavior.
+
 ## [0.7.5] — 2026-05-10
 
 ### Fixed - context lowering for shell test runs

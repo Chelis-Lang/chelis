@@ -1004,6 +1004,15 @@ the example is specifically teaching or testing the explicit forms. A
 future promotion from advisory to blocking requires a separate cleanup
 plan and updated docs before the registry changes.
 
+`redundant-linearity-call` and `prefer-pipe-operator` do not expose
+auto-fixes until the fixer can prove the rewrite preserves semantics.
+For `copy()` / `drop()`, that proof requires the type and linearity
+pipeline, not source-text matching. For pipe rewrites, that proof
+requires knowing that the expression is a true first-argument dataflow
+chain, not merely a call nested inside a sibling argument. Until that
+semantic proof exists, `chelis lint --fix` must leave both warning
+classes unchanged.
+
 Exception entries inside the lint must carry a rule-id cross-reference
 to a section of this document, not free-form prose. The schema:
 

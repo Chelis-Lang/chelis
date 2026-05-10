@@ -6,7 +6,7 @@
 //! instead of `registry::all_rules`, so it does not fail style-gated build,
 //! check, eval, or validate paths.
 
-use crate::{Context, Replacement, Rule, Severity, Surface, Violation};
+use crate::{Context, Rule, Severity, Surface, Violation};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -77,31 +77,9 @@ impl Rule for RedundantLinearityCall {
         out
     }
 
-    fn fix(&self, ctx: &Context<'_>, violation: &Violation) -> Option<Replacement> {
-        let source = ctx.source?;
-        if inline_keeps(source, violation.line?, self.id()) {
-            return None;
-        }
-        let line_start = line_start_offset(source, violation.line?)?;
-        let col = violation.col?.checked_sub(1)?;
-        let start = line_start + col;
-        let call_match = call_re().find_at(source, start)?;
-        if call_match.start() != start {
-            return None;
-        }
-        let open = call_match.end().checked_sub(1)?;
-        let close = matching_paren(source, open)?;
-        if !has_single_top_level_argument(source, open, close) {
-            return None;
-        }
-        let inner = source[open + 1..close].trim();
-        Some(Replacement {
-            path: ctx.path.to_path_buf(),
-            start,
-            end: close + 1,
-            text: inner.to_string(),
-        })
-    }
+    // Deliberately no auto-fix in v1. The source-only lint walker cannot prove
+    // that an explicit `copy()` is not carrying required ownership fan-out, so
+    // removing it during ecosystem rollout is not semantics-preserving.
 }
 
 fn has_single_top_level_argument(source: &str, open: usize, close: usize) -> bool {
@@ -160,25 +138,6 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, offset.saturating_sub(line_start) + 1)
 }
 
-fn line_start_offset(source: &str, line_no: usize) -> Option<usize> {
-    if line_no == 0 {
-        return None;
-    }
-    if line_no == 1 {
-        return Some(0);
-    }
-    let mut line = 1usize;
-    for (index, byte) in source.bytes().enumerate() {
-        if byte == b'\n' {
-            line += 1;
-            if line == line_no {
-                return Some(index + 1);
-            }
-        }
-    }
-    None
-}
-
 fn matching_paren(source: &str, open: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (offset, ch) in source[open..].char_indices() {
@@ -194,10 +153,6 @@ fn matching_paren(source: &str, open: usize) -> Option<usize> {
         }
     }
     None
-}
-
-fn inline_keeps(source: &str, line_no: usize, rule: &str) -> bool {
-    crate::inline_keeps(source, Surface::SurfSource, line_no, rule)
 }
 
 fn code_segments(line: &str) -> Vec<std::ops::Range<usize>> {
@@ -284,5 +239,20 @@ mod tests {
     fn ignores_list_drop_with_two_arguments() {
         let violations = run("def f(ys: list[int64]) -> list[int64] = drop(ys, cast(1, int64))\n");
         assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn fix_is_unavailable_without_linearity_proof() {
+        let src = "def f(x: tensor[2, f32]) -> tensor[2, f32] = add(copy(x), x)\n";
+        let violations = run(src);
+        assert_eq!(violations.len(), 1);
+        let path = Path::new("test.ch");
+        let ctx = Context {
+            root: Path::new("/"),
+            path,
+            source: Some(src),
+            surface: Surface::SurfSource,
+        };
+        assert!(RedundantLinearityCall.fix(&ctx, &violations[0]).is_none());
     }
 }
