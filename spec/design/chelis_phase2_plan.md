@@ -582,8 +582,8 @@ applied as `vmap(f)(xs)`
 - `vmap(grad(f))` matches a per-example loop baseline
 - `vmap` with explicit axis parameter
 - Nested `vmap` (batch + sequence dimensions)
-- batched matmul stays correct through the generic decomposition even without a batched
-  HIP BLAS fast path
+- batched matmul stays correct through the generic decomposition and now specializes to
+  runtime-sized BLAS when the generated matrix slices are contiguous
 
 ### Acceptance Gate
 

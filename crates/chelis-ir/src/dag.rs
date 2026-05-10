@@ -316,9 +316,10 @@ pub enum RiscOp {
     /// Matmul recognized from the Tier-2 `Sum(Mul(Expand(A), Expand(B)))`
     /// lowering after AD has run.
     BlasMatmul {
-        m: usize,
-        n: usize,
-        k: usize,
+        batch_dims: Vec<DimExpr>,
+        m: DimExpr,
+        n: DimExpr,
+        k: DimExpr,
     },
 }
 
@@ -622,6 +623,20 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                     .iter()
                     .map(|dim| bind_dim(dim, bindings))
                     .collect::<Result<_, _>>()?,
+            },
+            RiscOp::BlasMatmul {
+                batch_dims,
+                m,
+                n,
+                k,
+            } => RiscOp::BlasMatmul {
+                batch_dims: batch_dims
+                    .iter()
+                    .map(|dim| dim.bind(bindings))
+                    .collect::<Result<_, _>>()?,
+                m: m.bind(bindings)?,
+                n: n.bind(bindings)?,
+                k: k.bind(bindings)?,
             },
             other => other.clone(),
         };

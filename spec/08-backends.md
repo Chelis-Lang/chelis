@@ -131,7 +131,9 @@ Current implementation:
 - fused elementwise→reduction kernels reuse that same runtime-sized segmented reduction path
 - scalar contiguous reductions use a staged scratch-chain reduction with inline `hipMalloc`/`hipFree`, outside the Phase 1c slot planner
 - the peak-memory formula includes the worst single staged scratch chain alongside the slot-plan terms
-- rank-2 contiguous `f32` matmul subgraphs (`expand + mul + sum(axis=1)`) specialize to `chelis_hipblas_sgemm_row_major(...)`
+- contiguous `f32` matmul subgraphs with rank ≥ 2 specialize to hipBLAS-backed helpers:
+  rank-2 emits `chelis_hipblas_sgemm_row_major(...)`, while batched/symbolic matmul emits
+  runtime-sized calls through `chelis_hipblas_sgemm_batched_row_major(...)`
 - non-contiguous matmul-shaped DAGs fall back to the generic reduction path
 - `chelis build --target hip` surfaces the required `-lhipblas` link flag when hipBLAS specialization is emitted
 
@@ -318,8 +320,10 @@ cargo test -p chelis-backend-metal --test codegen_structure -- reduction
 ### Phase M5: Tiled matmul
 
 Custom 16×16 tiled MSL matmul kernel (no MPS dep). The specialization rule
-mirrors HIP's hipBLAS detection: rank-2 contiguous f32 matmul subgraphs
-(`expand + mul + sum(axis=1)`) route to `chelis_metal_matmul_tiled`.
+mirrors the original HIP hipBLAS detection: rank-2 contiguous f32 matmul
+subgraphs (`expand + mul + sum(axis=1)`) route to
+`chelis_metal_matmul_tiled`. Rank ≥ 3 and symbolic batched matmul remain a
+Metal follow-up.
 
 Authoritative oracle:
 

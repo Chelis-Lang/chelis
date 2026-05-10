@@ -139,10 +139,20 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
 
     let specialized = specialize_for_blas(&dag);
     assert!(
-        specialized
-            .nodes()
-            .iter()
-            .any(|node| matches!(node.op, RiscOp::BlasMatmul { m: 2, n: 4, k: 3 })),
+        specialized.nodes().iter().any(|node| {
+            matches!(
+                &node.op,
+                RiscOp::BlasMatmul {
+                    batch_dims,
+                    m,
+                    n,
+                    k,
+                } if batch_dims.is_empty()
+                    && *m == DimExpr::Concrete(2)
+                    && *n == DimExpr::Concrete(4)
+                    && *k == DimExpr::Concrete(3)
+            )
+        }),
         "identity casts must not prevent the IR specialize pass from replacing \
          the matmul pattern with a specialized BLAS node"
     );

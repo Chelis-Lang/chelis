@@ -308,6 +308,41 @@ fn matmul(lhs: &TensorValue, rhs: &TensorValue) -> TensorValue {
     }
 }
 
+fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue) -> TensorValue {
+    assert!(lhs.shape.len() >= 2);
+    assert!(rhs.shape.len() >= 2);
+    assert_eq!(lhs.shape.len(), rhs.shape.len());
+    let rank = lhs.shape.len();
+    let batch = &lhs.shape[..rank - 2];
+    assert_eq!(batch, &rhs.shape[..rank - 2]);
+    let m = lhs.shape[rank - 2];
+    let k = lhs.shape[rank - 1];
+    assert_eq!(rhs.shape[rank - 2], k);
+    let n = rhs.shape[rank - 1];
+    let batch_count = batch.iter().product::<usize>();
+    let mut out_shape = batch.to_vec();
+    out_shape.extend([m, n]);
+    let mut data = vec![0.0; batch_count * m * n];
+    for batch_idx in 0..batch_count {
+        let lhs_base = batch_idx * m * k;
+        let rhs_base = batch_idx * k * n;
+        let out_base = batch_idx * m * n;
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = 0.0;
+                for kk in 0..k {
+                    acc += lhs.data[lhs_base + i * k + kk] * rhs.data[rhs_base + kk * n + j];
+                }
+                data[out_base + i * n + j] = acc;
+            }
+        }
+    }
+    TensorValue {
+        data,
+        shape: out_shape,
+    }
+}
+
 fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f64) -> TensorValue {
     assert!(axis < input.shape.len());
     let mut out_shape = input.shape.clone();
@@ -703,7 +738,15 @@ where
                     .expect("FusedElem must have at least one step")
             }
             RiscOp::Cast { .. } => values[&node.inputs[0]].clone(),
-            RiscOp::BlasMatmul { .. } => matmul(&values[&node.inputs[0]], &values[&node.inputs[1]]),
+            RiscOp::BlasMatmul { .. } => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                if lhs.shape.len() == 2 && rhs.shape.len() == 2 {
+                    matmul(lhs, rhs)
+                } else {
+                    batched_matmul(lhs, rhs)
+                }
+            }
         };
         values.insert(node.id, value);
     }

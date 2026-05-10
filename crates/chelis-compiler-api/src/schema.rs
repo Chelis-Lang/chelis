@@ -775,6 +775,25 @@ pub enum WireDimInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireDimExpr {
+    Concrete {
+        value: usize,
+    },
+    Sym {
+        name: String,
+    },
+    Mul {
+        lhs: Box<WireDimExpr>,
+        rhs: Box<WireDimExpr>,
+    },
+    Div {
+        lhs: Box<WireDimExpr>,
+        rhs: Box<WireDimExpr>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireFusedStep {
     pub op: WireFusedStepOp,
     pub input_indices: Vec<WireFusedInput>,
@@ -889,9 +908,10 @@ pub enum WireRiscOp {
         ops: Vec<WireFusedStep>,
     },
     BlasMatmul {
-        m: usize,
-        n: usize,
-        k: usize,
+        batch_dims: Vec<WireDimExpr>,
+        m: WireDimExpr,
+        n: WireDimExpr,
+        k: WireDimExpr,
     },
 }
 

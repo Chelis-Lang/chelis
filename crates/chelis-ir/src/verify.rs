@@ -97,7 +97,12 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     }
                 }
             }
-            RiscOp::BlasMatmul { m, n, k } => {
+            RiscOp::BlasMatmul {
+                batch_dims,
+                m,
+                n,
+                k,
+            } => {
                 if arity != 2 {
                     errors.push(format!(
                         "blas matmul at node {} has {} inputs (expected 2)",
@@ -114,26 +119,81 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             node.id.0, lhs.output_type.precision, rhs.output_type.precision
                         ));
                     }
-                    if lhs.output_type.dims.len() != 2 || rhs.output_type.dims.len() != 2 {
+                    if lhs.output_type.dims.len() < 2 || rhs.output_type.dims.len() < 2 {
                         errors.push(format!(
-                            "blas matmul at node {} expects rank-2 inputs, got rank {} and {}",
+                            "blas matmul at node {} expects rank >= 2 inputs, got rank {} and {}",
                             node.id.0,
                             lhs.output_type.dims.len(),
                             rhs.output_type.dims.len()
                         ));
                     }
-                    if node.output_type.dims.len() != 2 {
+                    if node.output_type.dims.len() < 2 {
                         errors.push(format!(
-                            "blas matmul at node {} expects rank-2 output, got rank {}",
+                            "blas matmul at node {} expects rank >= 2 output, got rank {}",
                             node.id.0,
                             node.output_type.dims.len()
                         ));
                     }
-                    if *m == 0 || *n == 0 || *k == 0 {
+                    if m.as_concrete() == Some(0)
+                        || n.as_concrete() == Some(0)
+                        || k.as_concrete() == Some(0)
+                    {
                         errors.push(format!(
                             "blas matmul at node {} has zero dimension m={m} n={n} k={k}",
                             node.id.0
                         ));
+                    }
+                    if node.output_type.dims.len() >= 2 {
+                        let out_batch_len = node.output_type.dims.len() - 2;
+                        if batch_dims.len() != out_batch_len {
+                            errors.push(format!(
+                                "blas matmul at node {} has {} batch dims for rank {} output",
+                                node.id.0,
+                                batch_dims.len(),
+                                node.output_type.dims.len()
+                            ));
+                        }
+                        let expected_out_dims = batch_dims
+                            .iter()
+                            .cloned()
+                            .chain([m.clone(), n.clone()])
+                            .collect::<Vec<_>>();
+                        let actual_out_dims = node
+                            .output_type
+                            .dims
+                            .iter()
+                            .map(crate::dag::DimExpr::from)
+                            .collect::<Vec<_>>();
+                        if expected_out_dims != actual_out_dims {
+                            errors.push(format!(
+                                "blas matmul at node {} has output dims {:?}, expected {:?}",
+                                node.id.0, actual_out_dims, expected_out_dims
+                            ));
+                        }
+                    }
+                    if lhs.output_type.dims.len() >= 2 && rhs.output_type.dims.len() >= 2 {
+                        let lhs_dims = lhs
+                            .output_type
+                            .dims
+                            .iter()
+                            .map(crate::dag::DimExpr::from)
+                            .collect::<Vec<_>>();
+                        let rhs_dims = rhs
+                            .output_type
+                            .dims
+                            .iter()
+                            .map(crate::dag::DimExpr::from)
+                            .collect::<Vec<_>>();
+                        let lhs_matrix = &lhs_dims[lhs_dims.len() - 2..];
+                        let rhs_matrix = &rhs_dims[rhs_dims.len() - 2..];
+                        if lhs_matrix != [m.clone(), k.clone()]
+                            || rhs_matrix != [k.clone(), n.clone()]
+                        {
+                            errors.push(format!(
+                                "blas matmul at node {} has incompatible matrix dims",
+                                node.id.0
+                            ));
+                        }
                     }
                 }
             }

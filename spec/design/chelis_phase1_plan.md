@@ -16,7 +16,7 @@ from Phase 0g still runs on the unfused DAG, and
 backend now reuses backing slots, deduplicates repeated input transfers, reports
 estimated peak device bytes through codegen/CLI output, emits segmented reduction
 strategies, uses staged scratch buffers for safe scalar reductions, and specializes
-contiguous rank-2 `f32` matmul patterns to hipBLAS. Phase 1e now ships a fixed
+contiguous rank ≥ 2 `f32` matmul patterns to hipBLAS-backed helpers. Phase 1e now ships a fixed
 benchmark oracle plus checked-in local PyTorch comparison artifacts. Phase 1f now ships
 the standalone `chelis-validate` crate plus `chelis validate --surf/--deep/--desugar`
 CLI modes and a dedicated conformance oracle at

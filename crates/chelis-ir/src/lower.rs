@@ -392,6 +392,20 @@ pub fn remap_tensor_dim_symbols(
                     .map(|dim| rewrite_dim_info(dim, &substitutions))
                     .collect(),
             },
+            RiscOp::BlasMatmul {
+                batch_dims,
+                m,
+                n,
+                k,
+            } => RiscOp::BlasMatmul {
+                batch_dims: batch_dims
+                    .iter()
+                    .map(|dim| rewrite_dim_expr(dim, &substitutions))
+                    .collect(),
+                m: rewrite_dim_expr(&m, &substitutions),
+                n: rewrite_dim_expr(&n, &substitutions),
+                k: rewrite_dim_expr(&k, &substitutions),
+            },
             other => other,
         };
         specialized.replace_node(id, op, node.inputs, output_type);

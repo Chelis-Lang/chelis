@@ -13,8 +13,9 @@ Phase 1d ships inside the HIP backend code generator and runtime header:
 - staged partial buffers are allocated/freed inline in generated host code and are **not**
   routed through the Phase 1c slot planner
 - the HIP peak-memory reporting includes the worst single staged scratch chain
-- contiguous rank-2 `f32` matmul subgraphs (`expand + mul + sum(axis=1)`) specialize to
-  hipBLAS via `chelis_hipblas_sgemm_row_major(...)`
+- contiguous `f32` matmul subgraphs with rank ≥ 2 specialize to hipBLAS-backed helpers:
+  rank-2 uses `chelis_hipblas_sgemm_row_major(...)`, and batched/symbolic matmul uses
+  `chelis_hipblas_sgemm_batched_row_major(...)`
 - non-contiguous matmul-shaped DAGs fall back to the generic reduction path
 
 Phase 1d still does **not** implement flattening for irregular nested parallelism, autotuned
@@ -36,9 +37,28 @@ The staged scratch-chain path is used only for safe scalar contiguous reductions
 other multi-output reductions stay on the segmented path.
 
 **hipBLAS specialization is deliberately constrained.**
-Only statically contiguous rank-2 `f32` operands take the hipBLAS path. This avoids inventing a
-new GPU "make contiguous" runtime surface in Phase 1d. Non-contiguous matmul-shaped DAGs remain
-correct via the generic reduction fallback.
+Only operands with contiguous trailing matrix slices take the hipBLAS path. Rank ≥ 3
+batched matmul is supported by looping over batch slices in the runtime helper; using
+`hipblasSgemmStridedBatched` directly for uniformly strided batches remains a performance
+follow-up. Non-contiguous matmul-shaped DAGs remain correct via the generic reduction
+fallback.
+
+**Runtime-sized BLAS dimensions.**
+Symbolic dimensions are not required to be compile-time constants for BLAS. Generated
+host code uses the existing symbolic preamble bindings from input tensor metadata and
+passes those runtime integers as `m`, `n`, `k`, and batch-loop bounds. V1 handles symbols
+bound by load tensor shapes and shape-preserving transformations that preserve those
+bindings; it does not introduce a new symbolic solver.
+
+**Contiguity guard semantics.**
+The runtime guard is a stride comparison on the trailing matrix slice:
+`stride[-1] == 1` and `stride[-2] == trailing_column_count`. The check is emitted once
+per specialized matmul callsite, before any C batch loop. On the C backend a failed
+operand check materializes a contiguous copy with `chelis_contiguous(...)` and then
+continues through BLAS. On the HIP backend the current helper expects specialization to
+have proved contiguous matrix slices; a failed runtime check aborts rather than silently
+launching the generic lowering. This keeps the HIP ABI narrow until a GPU make-contiguous
+fallback is designed.
 
 ### Acceptance Oracle
 
@@ -58,7 +78,8 @@ Supporting evidence:
 
 - [x] tiny/small/large segmented kernels are selected for the expected axis-size ranges
 - [x] staged scalar reductions emit inline scratch buffers and extend the peak-memory estimate
-- [x] contiguous matmul patterns emit the hipBLAS helper call and surface `-lhipblas`
+- [x] contiguous rank-2 and batched/symbolic matmul patterns emit hipBLAS helper calls
+  and surface `-lhipblas`
 - [x] non-contiguous matmul-shaped DAGs stay on the generic reduction path
 - [x] manual GPU correctness covers segmented reductions, staged scalar reduction, hipBLAS matmul, and the non-contiguous fallback
 
@@ -66,4 +87,5 @@ Supporting evidence:
 
 - benchmark the optimized reduction and hipBLAS paths against the C backend and PyTorch (Phase 1e)
 - add monotonic-threshold autotuning once the kernel selection surface is stable
+- use `hipblasSgemmStridedBatched` for uniformly strided batched matmul layouts
 - consider LMAD-style memory-layout reasoning only if profiling shows coalescing/layout is the next bottleneck

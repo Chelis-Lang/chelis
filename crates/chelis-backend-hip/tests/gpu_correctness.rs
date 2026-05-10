@@ -80,6 +80,18 @@ fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
     }
 }
 
+fn tensor4_f32(a: usize, b: usize, c: usize, d: usize) -> TensorType {
+    TensorType {
+        dims: vec![
+            DimInfo::Lit(a),
+            DimInfo::Lit(b),
+            DimInfo::Lit(c),
+            DimInfo::Lit(d),
+        ],
+        precision: Prim::F32,
+    }
+}
+
 fn write_temp_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, contents).expect("write temp file");
@@ -1226,6 +1238,62 @@ fn g15_hipblas_matmul_matches_eval() {
                 "b",
                 &[3, 4],
                 &[1.0, 0.0, 2.0, 1.0, -1.0, 3.0, 0.5, 2.0, 4.0, -2.0, 1.0, 0.0],
+            ),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU, hipcc, and hipBLAS"]
+fn g15_hipblas_batched_matmul_matches_eval() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        tensor4_f32(2, 2, 2, 3),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        tensor4_f32(2, 2, 3, 2),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![
+                chelis_ir::dag::DimExpr::Concrete(2),
+                chelis_ir::dag::DimExpr::Concrete(2),
+            ],
+            m: chelis_ir::dag::DimExpr::Concrete(2),
+            n: chelis_ir::dag::DimExpr::Concrete(2),
+            k: chelis_ir::dag::DimExpr::Concrete(3),
+        },
+        vec![a, b],
+        tensor4_f32(2, 2, 2, 2),
+        None,
+    );
+    dag.add_root(out);
+
+    assert_gpu_matches_eval(
+        &dag,
+        "g15_hipblas_batched_matmul",
+        &[
+            TestInput::new(
+                "a",
+                &[2, 2, 2, 3],
+                &[
+                    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 0.5, 2.0, 3.5, -2.0, 1.0, 0.0, 1.0, -3.0,
+                    2.0, 4.0, -1.0, 5.0, -2.0, 0.5, 1.5, 3.0, -4.0,
+                ],
+            ),
+            TestInput::new(
+                "b",
+                &[2, 2, 3, 2],
+                &[
+                    1.0, 0.0, -1.0, 2.0, 0.5, 3.0, 2.0, -2.0, 1.0, 1.5, -0.5, 4.0, 3.0, 1.0, 0.0,
+                    -1.0, 2.0, 2.5, -3.0, 0.5, 1.5, -2.0, 4.0, 1.0,
+                ],
             ),
         ],
     );

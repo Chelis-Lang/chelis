@@ -45,6 +45,15 @@ struct OutputSpec {
     is_store: bool,
 }
 
+struct MatmulEmitSpec {
+    a: NodeId,
+    b: NodeId,
+    batch_dims: Vec<DimExpr>,
+    m: DimExpr,
+    n: DimExpr,
+    k: DimExpr,
+}
+
 impl HipEmitter {
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(dag: &Dag, func_name: &str) -> (String, PeakDeviceBytesBreakdown) {
@@ -911,15 +920,24 @@ impl HipEmitter {
                     &node.output_type,
                 );
             }
-            RiscOp::BlasMatmul { m, n, k } => {
-                let info = blas::MatmulInfo {
-                    a: node.inputs[0],
-                    b: node.inputs[1],
-                    m: *m,
-                    n: *n,
-                    k: *k,
-                };
-                self.emit_blas_matmul(id, &info, &node.output_type);
+            RiscOp::BlasMatmul {
+                batch_dims,
+                m,
+                n,
+                k,
+            } => {
+                self.emit_blas_matmul(
+                    id,
+                    &MatmulEmitSpec {
+                        a: node.inputs[0],
+                        b: node.inputs[1],
+                        batch_dims: batch_dims.clone(),
+                        m: m.clone(),
+                        n: n.clone(),
+                        k: k.clone(),
+                    },
+                    &node.output_type,
+                );
             }
         }
     }
@@ -1256,7 +1274,18 @@ impl HipEmitter {
             && let Some(matmul) = blas::detect_matmul_pattern(dag, NodeId(id))
             && Self::supports_static_hipblas_matmul(dag, &matmul, ty)
         {
-            self.emit_blas_matmul(id, &matmul, ty);
+            self.emit_blas_matmul(
+                id,
+                &MatmulEmitSpec {
+                    a: matmul.a,
+                    b: matmul.b,
+                    batch_dims: Vec::new(),
+                    m: DimExpr::Concrete(matmul.m),
+                    n: DimExpr::Concrete(matmul.n),
+                    k: DimExpr::Concrete(matmul.k),
+                },
+                ty,
+            );
             return;
         }
         let kernel_name = Self::reduction_kernel_name(kind, axis);
@@ -1360,14 +1389,22 @@ impl HipEmitter {
     }
 
     #[allow(dead_code)]
-    fn emit_blas_matmul(&mut self, id: usize, info: &blas::MatmulInfo, ty: &TensorType) {
-        let a = info.a.0;
-        let b = info.b.0;
+    fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
+        let a = spec.a.0;
+        let b = spec.b.0;
+        let m_expr = Self::emit_dim_expr(&spec.m);
+        let n_expr = Self::emit_dim_expr(&spec.n);
+        let k_expr = Self::emit_dim_expr(&spec.k);
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "chelis_hipblas_sgemm_row_major(d_t{a}, d_t{b}, d_t{id}, {}, {}, {});",
-            info.m, info.n, info.k
-        ));
+        if spec.batch_dims.is_empty() {
+            self.line(&format!(
+                "chelis_hipblas_sgemm_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
+            ));
+        } else {
+            self.line(&format!(
+                "chelis_hipblas_sgemm_batched_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
+            ));
+        }
     }
 
     #[allow(dead_code)]
@@ -1843,6 +1880,27 @@ impl HipEmitter {
             DimInfo::Lit(n) => n.to_string(),
             DimInfo::Named(_, Some(n)) => n.to_string(),
             DimInfo::Named(name, None) => name.clone(),
+        }
+    }
+
+    fn emit_dim_expr(expr: &DimExpr) -> String {
+        match expr {
+            DimExpr::Concrete(n) => n.to_string(),
+            DimExpr::Sym(name) => name.clone(),
+            DimExpr::Mul(lhs, rhs) => {
+                format!(
+                    "({} * {})",
+                    Self::emit_dim_expr(lhs),
+                    Self::emit_dim_expr(rhs)
+                )
+            }
+            DimExpr::Div(lhs, rhs) => {
+                format!(
+                    "({} / {})",
+                    Self::emit_dim_expr(lhs),
+                    Self::emit_dim_expr(rhs)
+                )
+            }
         }
     }
 

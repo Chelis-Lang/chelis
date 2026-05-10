@@ -1,7 +1,8 @@
 # matmul-rank2-rule-vs-einsum-shipped: `matmul` type rule rejected rank ≥ 2 even though `einsum` is the documented batched answer
 
-**Status:** **PARTIALLY CLOSED by M3** — rank ≥ 2 `matmul` now type-checks
-and lowers generically; batched BLAS specialization remains open.
+**Status:** **CLOSED by M3/M3b** — rank ≥ 2 `matmul` now type-checks
+and symbolic/batched matmul specializes to runtime-sized BLAS when
+matrix slices are contiguous.
 **Filed:** 2026-05-08
 **Owning phase:** Phase 3h / language ergonomics
 **Discovered by:** Canonical heads-as-dimension MHA expressibility
@@ -60,9 +61,11 @@ shape.
    is `[batch, head, seq, dim]` with batched matmul broadcasting
    over leading axes. M3 closes this expressibility gap.
 
-2. **The performance fast path still has a narrower scope.** C and HIP
-   specialization still target rank-2 BLAS matmul. Batched matmul stays
-   correct through generic lowering until a batched BLAS recognizer lands.
+2. **The performance fast path now covers the transformer-shaped case.**
+   Symbolic and batched matmul specialize through the IR BLAS node when
+   trailing matrix slices are contiguous. The C backend loops over batch
+   slices with `cblas_sgemm`; the HIP backend uses a helper loop over
+   hipBLAS calls.
 
 3. **It used to block honest expression of `Std.Nn.Attention`.** The
    `scaled_dot_product_attention` reference shipped in
@@ -80,27 +83,16 @@ M3 resolved the language-level question in favor of Option B:
   batched contraction.
 
 - **Option B: `matmul` should also accept rank ≥ 2 with leading-axis
-  broadcasting.** Then this is a language-feature gap: lift the type
-  rule, generalize `lower_matmul` to emit batched expand+mul+sum,
-  and add a batched-GEMM specializer to the BLAS recognizer in both
-  backends. M3 implemented the type rule and generic lowering pieces.
-  The batched-GEMM specializer is still a performance follow-up.
+  broadcasting.** This is the shipped path. M3 implemented the type rule
+  and generic lowering pieces; M3b added symbolic/batched BLAS
+  specialization from the IR-level `RiscOp::BlasMatmul`.
 
-Per `spec/design/chelis_canonical_reference.md:438-443` ("the
-existing HIP rank-2 BLAS fast path does not yet upgrade vmapped
-rank-3 matmul into a batched BLAS call"), the implicit current
-intent is Option A *for the BLAS specialization* but Option B
-*for type-checker acceptance*. That's not yet decided in writing.
+## Remaining quality work
 
-## Remaining closure plan
-
-Add batched-GEMM detection in `crates/chelis-backend-c/src/blas.rs` and
-the HIP analogue. Static eligibility should match the existing rank-2
-detector discipline: every operand/result dimension needed for loop
-bounds and BLAS strides must be `Lit(n)` or `Named(_, Some(n))`; any
-symbolic or polymorphic dimension falls through to the generic lowering.
-The test suite should lock both the positive statically concrete case and
-the negative symbolic-dimension case.
+The user-facing gap is closed. Remaining work is backend quality:
+replace the HIP batched helper loop with `hipblasSgemmStridedBatched`
+when the batch layout is uniformly strided, while retaining the helper
+loop for broadcasted or otherwise non-uniform leading strides.
 
 ## Probe corpus
 

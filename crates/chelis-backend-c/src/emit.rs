@@ -28,6 +28,15 @@ struct OutputSpec {
     is_store: bool,
 }
 
+struct MatmulEmitSpec {
+    a: NodeId,
+    b: NodeId,
+    batch_dims: Vec<DimExpr>,
+    m: DimExpr,
+    n: DimExpr,
+    k: DimExpr,
+}
+
 impl CEmitter {
     /// Emit C source for an entire DAG as a function.
     pub fn emit_dag(dag: &Dag, func_name: &str) -> String {
@@ -359,15 +368,24 @@ impl CEmitter {
             RiscOp::FusedElem { ops } => {
                 self.emit_fused_elem(id, ops, &node.inputs, &node.output_type);
             }
-            RiscOp::BlasMatmul { m, n, k } => {
-                let info = crate::blas::MatmulInfo {
-                    a: node.inputs[0],
-                    b: node.inputs[1],
-                    m: *m,
-                    n: *n,
-                    k: *k,
-                };
-                self.emit_blas_matmul(id, &info, &node.output_type);
+            RiscOp::BlasMatmul {
+                batch_dims,
+                m,
+                n,
+                k,
+            } => {
+                self.emit_blas_matmul(
+                    id,
+                    &MatmulEmitSpec {
+                        a: node.inputs[0],
+                        b: node.inputs[1],
+                        batch_dims: batch_dims.clone(),
+                        m: m.clone(),
+                        n: n.clone(),
+                        k: k.clone(),
+                    },
+                    &node.output_type,
+                );
             }
         }
     }
@@ -1490,28 +1508,71 @@ impl CEmitter {
     }
 
     // ---- BLAS matmul ----
-    fn emit_blas_matmul(&mut self, id: usize, info: &crate::blas::MatmulInfo, ty: &TensorType) {
-        let a = info.a.0;
-        let b = info.b.0;
-        let m = info.m;
-        let n = info.n;
-        let k = info.k;
+    fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
+        let a = spec.a.0;
+        let b = spec.b.0;
+        let m_expr = Self::emit_dim_expr(&spec.m);
+        let n_expr = Self::emit_dim_expr(&spec.n);
+        let k_expr = Self::emit_dim_expr(&spec.k);
         self.line(&format!("chelis_tensor *t{id}_a = t{a};"));
-        self.line(&format!("if (!chelis_is_contiguous(t{id}_a)) {{"));
+        self.line(&format!(
+            "if (!(t{id}_a->ndim >= 2 && t{id}_a->strides[t{id}_a->ndim - 1] == 1 && t{id}_a->strides[t{id}_a->ndim - 2] == {k_expr})) {{"
+        ));
         self.indent += 1;
         self.line(&format!("t{id}_a = chelis_contiguous(t{id}_a);"));
         self.indent -= 1;
         self.line("}");
         self.line(&format!("chelis_tensor *t{id}_b = t{b};"));
-        self.line(&format!("if (!chelis_is_contiguous(t{id}_b)) {{"));
+        self.line(&format!(
+            "if (!(t{id}_b->ndim >= 2 && t{id}_b->strides[t{id}_b->ndim - 1] == 1 && t{id}_b->strides[t{id}_b->ndim - 2] == {n_expr})) {{"
+        ));
         self.indent += 1;
         self.line(&format!("t{id}_b = chelis_contiguous(t{id}_b);"));
         self.indent -= 1;
         self.line("}");
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m}, {n}, {k}, 1.0f, t{id}_a->data, {k}, t{id}_b->data, {n}, 0.0f, t{id}->data, {n});"
-        ));
+        if spec.batch_dims.is_empty() {
+            self.line(&format!(
+                "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_a->data, {k_expr}, t{id}_b->data, {n_expr}, 0.0f, t{id}->data, {n_expr});"
+            ));
+        } else {
+            let batch_count = spec
+                .batch_dims
+                .iter()
+                .map(Self::emit_dim_expr)
+                .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
+                .unwrap_or_else(|| "1".to_string());
+            self.line(&format!("int t{id}_batch_count = {batch_count};"));
+            self.line(&format!(
+                "for (int t{id}_batch = 0; t{id}_batch < t{id}_batch_count; t{id}_batch++) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!("int t{id}_rem = t{id}_batch;"));
+            self.line(&format!("int t{id}_a_offset = 0;"));
+            self.line(&format!("int t{id}_b_offset = 0;"));
+            self.line(&format!("int t{id}_out_offset = 0;"));
+            for axis in (0..spec.batch_dims.len()).rev() {
+                let dim_expr = Self::emit_dim_expr(&spec.batch_dims[axis]);
+                self.line(&format!(
+                    "int t{id}_coord_{axis} = t{id}_rem % ({dim_expr});"
+                ));
+                self.line(&format!("t{id}_rem /= ({dim_expr});"));
+                self.line(&format!(
+                    "t{id}_a_offset += t{id}_coord_{axis} * t{id}_a->strides[{axis}];"
+                ));
+                self.line(&format!(
+                    "t{id}_b_offset += t{id}_coord_{axis} * t{id}_b->strides[{axis}];"
+                ));
+                self.line(&format!(
+                    "t{id}_out_offset += t{id}_coord_{axis} * t{id}->strides[{axis}];"
+                ));
+            }
+            self.line(&format!(
+                "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_a->data + t{id}_a_offset, {k_expr}, t{id}_b->data + t{id}_b_offset, {n_expr}, 0.0f, t{id}->data + t{id}_out_offset, {n_expr});"
+            ));
+            self.indent -= 1;
+            self.line("}");
+        }
         self.line(&format!("if (t{id}_a != t{a}) chelis_free(t{id}_a);"));
         self.line(&format!("if (t{id}_b != t{b}) chelis_free(t{id}_b);"));
     }
@@ -1525,13 +1586,6 @@ impl CEmitter {
         ty: &TensorType,
         dag: &Dag,
     ) {
-        // Check for matmul pattern before generic reduction
-        if self.use_blas
-            && let Some(matmul) = crate::blas::detect_matmul_pattern(dag, NodeId(id))
-        {
-            self.emit_blas_matmul(id, &matmul, ty);
-            return;
-        }
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
         let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
@@ -2851,7 +2905,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
-        let c = CEmitter::emit_dag_with_options(
+        let result = crate::codegen_with_options(
             &dag,
             "test_fn",
             crate::CodegenOptions {
@@ -2859,7 +2913,7 @@ mod tests {
                 ..crate::CodegenOptions::default()
             },
         );
-        assert!(c.contains("cblas_sgemm("));
+        assert!(result.c_source.contains("cblas_sgemm("));
     }
 
     #[test]

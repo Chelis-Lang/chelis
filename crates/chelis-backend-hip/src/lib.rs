@@ -73,7 +73,9 @@ pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResu
     let output_labels = emit::HipEmitter::output_labels(dag);
     let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
     let mut link_flags = vec!["-lhiprtc".to_string()];
-    if c_source.contains("chelis_hipblas_sgemm_row_major(") {
+    if c_source.contains("chelis_hipblas_sgemm_row_major(")
+        || c_source.contains("chelis_hipblas_sgemm_batched_row_major(")
+    {
         link_flags.push("-lhipblas".to_string());
     }
     HipCodegenResult {

@@ -214,6 +214,72 @@ static inline void chelis_hipblas_sgemm_row_major(
     CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
 }
 
+static inline int chelis_gpu_matrix_slices_contiguous(
+    const chelis_gpu_tensor *t,
+    int trailing_cols
+) {
+    if (t->ndim < 2) return 0;
+    return t->strides[t->ndim - 1] == 1
+        && t->strides[t->ndim - 2] == trailing_cols;
+}
+
+static inline void chelis_hipblas_sgemm_batched_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k
+) {
+    if (!chelis_gpu_matrix_slices_contiguous(a, k)
+        || !chelis_gpu_matrix_slices_contiguous(b, n)
+        || !chelis_gpu_matrix_slices_contiguous(out, n)) {
+        fprintf(stderr, "chelis_hipblas_sgemm_batched_row_major: matrix slices must be contiguous\n");
+        abort();
+    }
+
+    int batch_ndim = out->ndim - 2;
+    int batch_count = 1;
+    for (int d = 0; d < batch_ndim; d++) {
+        batch_count *= out->shape[d];
+    }
+
+    hipblasHandle_t handle;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    for (int batch = 0; batch < batch_count; batch++) {
+        int rem = batch;
+        int a_offset = 0;
+        int b_offset = 0;
+        int out_offset = 0;
+        for (int d = batch_ndim - 1; d >= 0; d--) {
+            int coord = rem % out->shape[d];
+            rem /= out->shape[d];
+            a_offset += coord * a->strides[d];
+            b_offset += coord * b->strides[d];
+            out_offset += coord * out->strides[d];
+        }
+        CHELIS_HIPBLAS_CHECK(hipblasSgemm(
+            handle,
+            HIPBLAS_OP_N,
+            HIPBLAS_OP_N,
+            n,
+            m,
+            k,
+            &alpha,
+            b->data + b_offset,
+            n,
+            a->data + a_offset,
+            k,
+            &beta,
+            out->data + out_offset,
+            n
+        ));
+    }
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
+}
+
 /* ---- JIT compilation ---- */
 
 static inline hipModule_t chelis_compile_kernel(const char *source, const char *name) {

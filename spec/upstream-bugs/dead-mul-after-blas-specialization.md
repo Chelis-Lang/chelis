@@ -70,12 +70,12 @@ bytes. Concrete examples:
 | 1024 × 4096 × 1024 (f32, FFN) | 16 GiB | 4 MiB |
 
 For the 4-head MHA + FFN block in
-`examples/transformer_block.ch`, symbolic `seq` still prevents BLAS
-specialization, so generic matmul lowering remains a dominant
-working-set cost. M2a slot planning reduces the `seq = 2048`
-helper-side projection from the original ~14.6 GiB to ~6.3 GiB, but
-the live generic-matmul intermediates remain until symbolic/batched
-specialization closes.
+`examples/transformer_block.ch`, M3b extends this closure to symbolic
+and batched matmul. The `seq = 2048` helper-side projection drops from
+the prior M2a ~6.3 GiB state to ~1.06 GiB because the generated C emits
+runtime-sized `cblas_sgemm` calls instead of dense generic matmul product
+buffers. The remaining dominant cost is vanilla attention's real
+`[seq, seq]` score/probability state.
 
 The compute waste is also non-trivial: the `parallel for simd`
 loop runs `m * k * n` multiplies for every BLAS-hit matmul, in
