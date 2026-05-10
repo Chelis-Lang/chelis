@@ -1117,6 +1117,75 @@ mod tests {
     }
 
     #[test]
+    fn one_hot_similar_tree_with_wrong_reduction_axis_does_not_false_match_gather() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            mat(2, 3),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i32(4),
+            None,
+        );
+        let one_hot = dag.add_node(RiscOp::OneHot { vocab: 2 }, vec![indices], mat(4, 2), None);
+        let one_hot_exp = dag.add_node(
+            RiscOp::Expand {
+                axis: 2,
+                size: DimExpr::Concrete(3),
+            },
+            vec![one_hot],
+            t3(4, 2, 3),
+            None,
+        );
+        let values_exp = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Concrete(4),
+            },
+            vec![values],
+            t3(4, 2, 3),
+            None,
+        );
+        let product = dag.add_node(
+            RiscOp::Mul,
+            vec![one_hot_exp, values_exp],
+            t3(4, 2, 3),
+            None,
+        );
+        let not_gather = dag.add_node(RiscOp::Sum { axis: 2 }, vec![product], mat(4, 2), None);
+        dag.add_root(not_gather);
+
+        let specialized = specialize_for_blas(&dag);
+        assert!(
+            !specialized
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Gather { .. })),
+            "the dense gather recognizer must reject similar one-hot trees \
+             that reduce a non-vocabulary axis"
+        );
+        assert!(
+            !specialized
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::OneHot { .. })),
+            "the non-matching internal OneHot should still lower before backend codegen"
+        );
+        assert!(
+            crate::verify::verify(&specialized).is_empty(),
+            "fallback-lowered non-gather DAG must verify"
+        );
+    }
+
+    #[test]
     fn unmatched_one_hot_lowers_to_primitive_ir() {
         let mut dag = Dag::new();
         let indices = dag.add_node(

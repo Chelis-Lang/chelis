@@ -955,6 +955,13 @@ mod tests {
         }
     }
 
+    fn tensor_ty(dims: &[usize], precision: Prim) -> TensorType {
+        TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision,
+        }
+    }
+
     #[test]
     fn eval_add() {
         let mut dag = Dag::new();
@@ -984,6 +991,122 @@ mod tests {
         assert_eq!(
             vals[&c],
             TensorValue::from_vec(vec![3], vec![5.0, 7.0, 9.0])
+        );
+    }
+
+    #[test]
+    fn eval_sparse_gather_axis1_preserves_outer_and_inner_layout() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_ty(&[2, 4, 2], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_ty(&[3], Prim::Int64),
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::Gather { axis: 1 },
+            vec![values, indices],
+            tensor_ty(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        dag.add_root(out);
+
+        let inputs = HashMap::from([
+            (
+                "values".to_string(),
+                TensorValue::from_vec(vec![2, 4, 2], (0..16).map(|x| x as f64).collect()),
+            ),
+            (
+                "indices".to_string(),
+                TensorValue::from_vec(vec![3], vec![2.0, 0.0, 3.0]),
+            ),
+        ]);
+        let vals = eval_tensor(&dag, &inputs).unwrap();
+        assert_eq!(
+            vals[&out],
+            TensorValue::from_vec(
+                vec![2, 3, 2],
+                vec![
+                    4.0, 5.0, 0.0, 1.0, 6.0, 7.0, 12.0, 13.0, 8.0, 9.0, 14.0, 15.0
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn eval_sparse_scatter_add_axis1_accumulates_duplicate_indices() {
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            tensor_ty(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_ty(&[4], Prim::Int32),
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            tensor_ty(&[2, 4, 2], Prim::F32),
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::ScatterAdd { axis: 1 },
+            vec![target, indices, updates],
+            tensor_ty(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        dag.add_root(out);
+
+        let inputs = HashMap::from([
+            (
+                "target".to_string(),
+                TensorValue::from_vec(vec![2, 3, 2], vec![0.0; 12]),
+            ),
+            (
+                "indices".to_string(),
+                TensorValue::from_vec(vec![4], vec![1.0, 0.0, 1.0, 2.0]),
+            ),
+            (
+                "updates".to_string(),
+                TensorValue::from_vec(
+                    vec![2, 4, 2],
+                    vec![
+                        1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0, 5.0, 50.0, 6.0, 60.0, 7.0,
+                        70.0, 8.0, 80.0,
+                    ],
+                ),
+            ),
+        ]);
+        let vals = eval_tensor(&dag, &inputs).unwrap();
+        assert_eq!(
+            vals[&out],
+            TensorValue::from_vec(
+                vec![2, 3, 2],
+                vec![
+                    2.0, 20.0, 4.0, 40.0, 4.0, 40.0, 6.0, 60.0, 12.0, 120.0, 8.0, 80.0,
+                ],
+            )
         );
     }
 
