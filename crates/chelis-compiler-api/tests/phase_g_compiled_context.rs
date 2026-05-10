@@ -64,10 +64,11 @@ fn library_fixture() -> (TempDir, PathBuf) {
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
     fs::write(
         root.join("mylib/src/math.ch"),
-        "module Mylib.Math\nexport (add, double, square)\n\n\
+        "module Mylib.Math\nexport (add, double, square, host_len)\n\n\
          def add(x: int32, y: int32) -> int32 = x + y\n\
          def double(x: int32) -> int32 = x + x\n\
-         def square(x: int32) -> int32 = x * x\n",
+         def square(x: int32) -> int32 = x * x\n\
+         def host_len[n](xs: tensor[n, f32]) -> int64 = len(to_list(xs))\n",
     )
     .expect("write math.ch");
 
@@ -192,6 +193,56 @@ fn eval_in_context_matches_prepare_eval_int_square_compose() {
     let result_named = collect_named_roots_json(&result.roots, &["composed"]);
 
     assert_eq!(baseline_named, result_named);
+}
+
+#[test]
+fn eval_in_context_uses_context_lowering_map_for_host_library_calls() {
+    let (_dir, root) = library_fixture();
+    let snippet = "module App.Eval\nimport Mylib.Math (host_len)\n\n\
+                   def length_from_host -> int64 = host_len(to_tensor([1.0, 2.0]))\n";
+
+    let formatted = format_library_plus_snippet(&root, snippet);
+    let baseline = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: formatted,
+        bindings: BTreeMap::new(),
+    })
+    .expect("baseline eval");
+    let baseline_named = collect_named_roots_json(&baseline.roots, &["length_from_host"]);
+
+    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
+    let result_named = collect_named_roots_json(&result.roots, &["length_from_host"]);
+
+    assert_eq!(
+        baseline_named, result_named,
+        "new-code lowering must use the library-aware lowering map so host-only library calls do not add unexpected IR roots"
+    );
+}
+
+#[test]
+fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().join("myapp");
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
+
+    fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
+    fs::write(
+        root.join("src/main.ch"),
+        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+    )
+    .expect("write main.ch");
+    fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
+    fs::write(
+        root.join("mylib/src/lin.ch"),
+        "module Mylib.Lin\nexport (gram)\n\n\
+         def gram[m, n](a: tensor[m, n, f32]) -> tensor[n, n, f32] = matmul(permute(copy(a), 1, 0), a)\n",
+    )
+    .expect("write lin.ch");
+    fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
+
+    let _ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 }
 
 #[test]

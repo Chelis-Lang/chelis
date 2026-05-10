@@ -6,6 +6,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.5] — 2026-05-10
+
+### Fixed - context lowering for shell test runs
+
+Context-based evaluation now uses the same library-aware lowering map
+when lowering new code that the compiler API uses when counting new-code
+roots. This fixes `chelis test` failures in downstream shells where a
+test wrapper called a host-only library helper returning a scalar value.
+
 ## [0.7.4] — 2026-05-10
 
 ### Added - lint auto-fix and cleanup rules

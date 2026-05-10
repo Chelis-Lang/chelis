@@ -532,9 +532,10 @@ pub fn try_lower_program_with_context(
 
 fn lower_program_with_context_inner(library: &LoweredLibrary, new_program: &CheckedProgram) -> Dag {
     let new_type_env = new_program.type_env();
-    let lowered_names = top_level_lowering_map(new_program.exprs(), new_type_env);
+    let lowered_names =
+        top_level_lowering_map_with_context(library, new_program.exprs(), new_type_env);
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
-        if top_level_expr_is_lowered(expr, new_program.exprs(), new_type_env) {
+        if top_level_expr_is_lowered_with_names(expr, new_type_env, &lowered_names) {
             assert_ir_lowerable(expr);
             assert_ir_typed(expr);
         }
