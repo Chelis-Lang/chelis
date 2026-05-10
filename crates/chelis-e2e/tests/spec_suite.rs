@@ -25,7 +25,7 @@ fn scalar_f32() -> TensorType {
 /// Lower Deep source text to a RISC DAG via the types-checked lowering path.
 fn lower_deep(src: &str) -> Dag {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep parse failed");
-    let checked = chelis_types::check_phase0e_program(&exprs)
+    let checked = chelis_types::check_ir_program(&exprs)
         .unwrap_or_else(|r| panic!("type check failed: {:?}", r.errors));
     let checked = chelis_effects::check_program(&checked)
         .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
@@ -105,7 +105,7 @@ fn spec_all_executable_examples_parse_and_check() {
                 "{} desugared to empty",
                 path.display()
             );
-            let report = chelis_types::check_phase0e_fitness(&deep_exprs);
+            let report = chelis_types::check_ir_fitness(&deep_exprs);
             assert!(
                 report.errors.is_empty(),
                 "{} must remain executable in Phase 0: {:?}",

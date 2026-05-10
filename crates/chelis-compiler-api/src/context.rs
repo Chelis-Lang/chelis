@@ -9,7 +9,7 @@
 //!
 //! - `compile_reef_context` (this file): runs the full library pipeline
 //!   ONCE. Parses + desugars + macro-expands the linked library decls,
-//!   builds a Phase 0e [`TypeEnv`], then runs the monolithic Phase 0e
+//!   builds an IR [`TypeEnv`], then runs the monolithic IR
 //!   checker, the effects checker, and the linearity checker on the
 //!   library, and lowers it to a [`LoweredLibrary`].
 //! - `eval_in_context` / `check_in_context` / `eval_many_in_context`
@@ -20,7 +20,7 @@
 //! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
 //! for the full plan.
 
-use chelis_ir::lower::{LoweredLibrary, lower_program_to_library};
+use chelis_ir::lower::LoweredLibrary;
 use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph};
 use chelis_types::{CheckedProgram, TypeEnv, build_compiled_library_context, check_linearity};
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::compiler::{CompilerError, check_error_diagnostic, stage_error};
-use crate::schema::Diagnostic;
+use crate::schema::{Diagnostic, Span};
 
 /// 32-byte content hash of every source file that contributed to a
 /// `CompiledContext`. Phase I disk cache keys on this for invalidation.
@@ -64,9 +64,9 @@ impl ContextHash {
 /// Phase G composes the result of every pipeline stage:
 /// - `source_hash`: content hash for disk-cache invalidation (Phase I).
 /// - `reef_state`: linked library decls + reef metadata (Phase B).
-/// - `type_env`: Phase 0e type-checker snapshot (Phase C). Used by
-///   `check_phase0e_with_context` for new-code type checking.
-/// - `library_checked`: monolithic Phase 0e + effects + linearity result
+/// - `type_env`: IR type-checker snapshot. Used by
+///   `check_ir_with_context` for new-code type checking.
+/// - `library_checked`: monolithic IR + effects + linearity result
 ///   over the library decls (Phases C/D/E). Used by
 ///   `check_effects_with_context` and `check_linearity_with_context`.
 /// - `library_dag`: lowered library DAG carrier (Phase F). Used by
@@ -83,10 +83,10 @@ pub struct CompiledContext {
     /// The reef state (lockfile-backed package graph + linked library
     /// decls + internal-name maps + dep shells).
     pub(crate) reef_state: PreparedReefGraph,
-    /// Phase 0e type-checker snapshot — the outer scope for new-code
-    /// type checking via `check_phase0e_with_context`.
+    /// IR type-checker snapshot — the outer scope for new-code
+    /// type checking via `check_ir_with_context`.
     pub(crate) type_env: TypeEnv,
-    /// Library Phase 0e + effects + linearity result. Feeds the
+    /// Library IR + effects + linearity result. Feeds the
     /// `_with_context` variants of effects and linearity.
     pub(crate) library_checked: CheckedProgram,
     /// Lowered library carrier. Feeds `lower_program_with_context`.
@@ -646,8 +646,8 @@ fn sanitize_path_component(s: &str) -> String {
 /// 1. `prepare_reef_graph` — resolve the package graph, link library
 ///    decls, hash the source files.
 /// 2. Surf-desugar + macro-expand the linked library decls into Deep.
-/// 3. Build a Phase 0e [`TypeEnv`] over the library (Phase C).
-/// 4. Run the monolithic Phase 0e checker, the effects checker, and the
+/// 3. Build an IR [`TypeEnv`] over the library.
+/// 4. Run the monolithic IR checker, the effects checker, and the
 ///    linearity checker over the library to produce a
 ///    [`CheckedProgram`] (Phases C/D/E feed into this composite library
 ///    snapshot — the `_with_context` callers receive this as their
@@ -714,7 +714,7 @@ pub fn compile_reef_context(
     // [`CheckedProgram`] (for effects + linearity + lowering).
     //
     // The previous code path called `build_type_env_from_library`
-    // and `check_phase0e_with_context(&TypeEnv::empty(), library)`
+    // and `check_ir_with_context(&TypeEnv::empty(), library)`
     // sequentially; both ran a full inference + annotation pass,
     // duplicating ~16s of work on Coral.
     let (type_env, checked) =
@@ -745,8 +745,25 @@ pub fn compile_reef_context(
     })?;
     log_phase("check_linearity", &mut t);
 
-    // Phase F: lower the library to a `LoweredLibrary` carrier.
-    let library_dag = lower_program_to_library(&library_checked);
+    // Lower the library to a `LoweredLibrary` carrier.
+    let library_dag =
+        chelis_ir::lower::try_lower_program_to_library(&library_checked).map_err(|diagnostic| {
+            CompilerError {
+                stage: "lower".to_string(),
+                errors: vec![Diagnostic {
+                    kind: "lower_error".to_string(),
+                    message: diagnostic.to_string(),
+                    severity: 1.0,
+                    expected: None,
+                    got: None,
+                    suggestions: vec![],
+                    span: diagnostic.span.map(|span| Span {
+                        offset: span.offset,
+                        len: span.len,
+                    }),
+                }],
+            }
+        })?;
     log_phase("lower_program_to_library", &mut t);
 
     Ok(CompiledContext {

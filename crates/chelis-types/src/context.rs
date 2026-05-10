@@ -25,14 +25,14 @@
 //!   high-water mark.
 //! - **`Subst`**: cloned per check call. Library-derived constraints
 //!   stay visible to new-code unification.
-//! - **Phase0e type-env**: cloned per check call. Library declared types
+//! - **Ir type-env**: cloned per check call. Library declared types
 //!   remain visible to new-code shape validation; the new-code's own
 //!   declared types are added on top.
 //!
 //! ## No leak invariant
 //!
 //! The library snapshot is shared via [`Arc`] and is never written to.
-//! Each `check_phase0e_with_context` call clones the inner state at the
+//! Each `check_ir_with_context` call clones the inner state at the
 //! start, mutates the clone with new-code bindings, and discards the
 //! clone when the call returns. A binding declared in one new-code
 //! snippet is therefore invisible to a subsequent snippet checked
@@ -57,7 +57,7 @@ use crate::env::Env;
 use crate::types::VarGen;
 use crate::unify::Subst;
 
-/// Outer-scope snapshot for stacked Phase 0e type checking.
+/// Outer-scope snapshot for stacked IR type checking.
 ///
 /// Cheap to clone — internally `Arc`-shared. Build from a library decl
 /// list with [`crate::build_type_env_from_library`], or create an
@@ -81,10 +81,10 @@ pub(crate) struct TypeEnvInner {
     /// ADT registry containing library `deftype`s, type aliases, and
     /// prelude ADTs (Option, List, etc).
     pub(crate) adt_reg: AdtRegistry,
-    /// Phase 0e declared-type lookup: library def name → declared type
+    /// IR declared-type lookup: library def name → declared type
     /// expression. Used by the validate pass (which checks shape
     /// invariants against declared types).
-    pub(crate) phase0e_types: HashMap<String, deep::Expr>,
+    pub(crate) ir_types: HashMap<String, deep::Expr>,
     /// Set of names declared by the library — used by the new-code
     /// cycle / unbound suppression logic to distinguish library
     /// references from new-code references.
@@ -93,8 +93,8 @@ pub(crate) struct TypeEnvInner {
 
 impl TypeEnv {
     /// Empty outer scope — the result of building a context from `&[]`.
-    /// `check_phase0e_with_context(&TypeEnv::empty(), exprs)` is
-    /// behaviorally equivalent to [`crate::check_phase0e_program(exprs)`]
+    /// `check_ir_with_context(&TypeEnv::empty(), exprs)` is
+    /// behaviorally equivalent to [`crate::check_ir_program(exprs)`]
     /// on the same `exprs`.
     pub fn empty() -> Self {
         let (env, var_gen) = builtins::builtin_env();
@@ -108,14 +108,14 @@ impl TypeEnv {
                 var_gen,
                 subst: Subst::new(),
                 adt_reg,
-                phase0e_types: HashMap::new(),
+                ir_types: HashMap::new(),
                 library_def_names: HashSet::new(),
             }),
         }
     }
 
     /// Internal constructor — only the `infer` module calls this after
-    /// running the library through the full Phase 0e pipeline.
+    /// running the library through the full IR pipeline.
     pub(crate) fn from_inner(inner: TypeEnvInner) -> Self {
         Self {
             inner: Arc::new(inner),

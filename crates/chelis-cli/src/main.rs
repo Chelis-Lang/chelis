@@ -593,7 +593,7 @@ fn cmd_deep(file: &Path, flat: bool, annotate: bool) -> Result<(), Box<dyn std::
     let decls = chelis_surf::parser::parse_str(&source)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let deep_exprs = if annotate {
-        match chelis_types::check_phase0e_program(&deep_exprs) {
+        match chelis_types::check_ir_program(&deep_exprs) {
             Ok(checked) => checked.annotated_exprs().to_vec(),
             Err(result) => {
                 return Err(format!(
@@ -961,7 +961,7 @@ fn cmd_check_one(
     }
     let (decls, _) = load_check_build_decls(file)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-    let mut report = chelis_types::check_phase0e_fitness(&deep_exprs);
+    let mut report = chelis_types::check_ir_fitness(&deep_exprs);
     let (effect_errors, linearity_errors) = match chelis_types::check_typed_program(&deep_exprs) {
         Ok(checked) => match chelis_effects::check_program(&checked) {
             Ok(checked) => (
@@ -1161,7 +1161,7 @@ fn cmd_build(
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
     let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
-    let mut dag = chelis_ir::lower::lower_program(&checked);
+    let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
     let all_root_names = lowered_root_names_from_exprs(&deep_exprs, checked.type_env());
     let entry_root_names =
         lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env());
@@ -1288,7 +1288,7 @@ fn cmd_build(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    chelis_ir::lower::lower_program(&checked)
+                    lower_checked_for_cli(&checked, compiled_program.host.as_ref())?
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
@@ -1329,7 +1329,7 @@ fn cmd_build(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    chelis_ir::lower::lower_program(&checked)
+                    lower_checked_for_cli(&checked, compiled_program.host.as_ref())?
                 };
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
                 reject_unsupported_effect_ops(&metal_dag, "metal")?;
@@ -1348,7 +1348,7 @@ fn cmd_build(
 /// directly via `chelis_deep::parser::parse_str_strict` and skips the
 /// Surf desugar / macro-expand phase (Deep is canonical post-expansion
 /// per `spec/03-deep-syntax.md` §2). All metadata — including span IDs
-/// — flows through the existing `chelis_types::check_phase0e_program`
+/// — flows through the existing `chelis_types::check_ir_program`
 /// → `chelis_ir::lower::lower_program` → optimization → backend
 /// codegen path; this function is plumbing, not new semantics.
 ///
@@ -1396,7 +1396,7 @@ fn cmd_build_deep(
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
     let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
-    let mut dag = chelis_ir::lower::lower_program(&checked);
+    let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
     let all_root_names = lowered_root_names_from_exprs(&final_deep_exprs, checked.type_env());
     let entry_root_names = lowered_root_names_from_exprs(&entry_deep_exprs, checked.type_env());
     let entry_display_root_names = root_names_from_exprs(&entry_deep_exprs, checked.type_env())
@@ -1501,7 +1501,7 @@ fn cmd_build_deep(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    chelis_ir::lower::lower_program(&checked)
+                    lower_checked_for_cli(&checked, compiled_program.host.as_ref())?
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
@@ -1535,7 +1535,7 @@ fn cmd_build_deep(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    chelis_ir::lower::lower_program(&checked)
+                    lower_checked_for_cli(&checked, compiled_program.host.as_ref())?
                 };
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
                 reject_unsupported_effect_ops(&metal_dag, "metal")?;
@@ -1957,7 +1957,7 @@ fn cmd_test(
     let _ = chelis_reef::prepare_reef_graph(&cwd)?;
 
     // Phase G' (final) — with the linearity divergence root-caused
-    // (annotate_phase0e_program now registers prelude ADTs, matching
+    // (annotate_ir_program now registers prelude ADTs, matching
     // the _with_context variants) and the worker re-wired through
     // prepare_eval_in_context, the parent re-enables the
     // `compile_reef_context` build. The encoded context is handed to
@@ -2807,7 +2807,7 @@ fn compile_check_in_exec_context(
 /// `Context` variant.
 ///
 /// Phase G' (final) — with the linearity divergence root-caused (the
-/// monolithic `annotate_phase0e_program` was masking real
+/// monolithic `annotate_ir_program` was masking real
 /// use-after-consume violations because it built with an empty
 /// `AdtRegistry`; see `docs/archive/rca/lin_rca_report.md`) and chelis-std + the
 /// CLI test fixtures rewritten to use `&t` / `copy(t)` at the right
@@ -3768,7 +3768,7 @@ fn format_execution_value(value: &ExecutionValue) -> String {
 fn checked_program_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_types::CheckedProgram, String> {
-    let checked = chelis_types::check_phase0e_program(deep_exprs)
+    let checked = chelis_types::check_ir_program(deep_exprs)
         .map_err(|r| format!("Type errors: {:?}", r.errors))?;
     let checked =
         chelis_effects::check_program(&checked).map_err(|errors| format_effect_errors(&errors))?;
@@ -3782,6 +3782,23 @@ fn expanded_desugared_program(
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .map(|expanded| expanded.into_exprs())
         .map_err(|err| err.to_string())
+}
+
+fn lower_checked_for_cli(
+    checked: &chelis_types::CheckedProgram,
+    host_program: Option<&chelis_ir::host::HostProgram>,
+) -> Result<chelis_ir::Dag, Box<dyn std::error::Error>> {
+    match chelis_ir::lower::try_lower_program(checked) {
+        Ok(dag) => Ok(dag),
+        Err(_diagnostic)
+            if host_program
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false) =>
+        {
+            Ok(chelis_ir::Dag::new())
+        }
+        Err(diagnostic) => Err(boxed_string_error(diagnostic.to_string())),
+    }
 }
 
 fn boxed_string_error(message: String) -> Box<dyn std::error::Error> {

@@ -18,7 +18,7 @@ into a real end-to-end AI-programming surface rather than only syntax or type ex
 The type checker is the first pass that upgrades raw Deep into the downstream
 compiler-facing representation.
 
-- `check_phase0e_program(...)` returns a `CheckedProgram`, not just a success/failure bit
+- `check_ir_program(...)` returns a `CheckedProgram`, not just a success/failure bit
 - a `CheckedProgram` carries annotated Deep, with `type` metadata written onto the
   returned tree
 - lowering, evaluation, effect checking, and CLI build/eval paths consume that

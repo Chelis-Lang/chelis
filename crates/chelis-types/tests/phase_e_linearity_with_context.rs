@@ -10,7 +10,7 @@
 //! 4. New unit test: parity vs monolithic for at least 3 library + snippet
 //!    pairs.
 //!
-//! The library leg is fed through the same Phase 0e + linearity pipeline
+//! The library leg is fed through the same IR check + linearity pipeline
 //! as the monolithic flow, so library-internal linearity is validated
 //! before any new-code check runs.
 
@@ -18,8 +18,8 @@ use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{
-    build_type_env_from_library, check_linearity, check_linearity_with_context,
-    check_phase0e_program, check_phase0e_with_context, check_typed_program,
+    build_type_env_from_library, check_ir_program, check_ir_with_context, check_linearity,
+    check_linearity_with_context, check_typed_program,
 };
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
@@ -28,11 +28,11 @@ fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
 }
 
 fn check_library_with_linearity(library_src: &str) -> chelis_types::CheckedProgram {
-    // Library leg: full Phase 0e check, then linearity. Mirrors what the
+    // Library leg: full IR check check, then linearity. Mirrors what the
     // production pipeline does before stashing a CompiledContext.
     let library_deep = surf_to_deep(library_src);
-    let checked = check_phase0e_program(&library_deep)
-        .unwrap_or_else(|e| panic!("library Phase 0e check failed: {:?}", e.errors));
+    let checked = check_ir_program(&library_deep)
+        .unwrap_or_else(|e| panic!("library IR check check failed: {:?}", e.errors));
     check_linearity(&checked).expect("library linearity must be clean")
 }
 
@@ -44,8 +44,8 @@ fn check_new_with_context(
     let ctx =
         build_type_env_from_library(&surf_to_deep(library_src)).expect("library context build OK");
     let new_deep = surf_to_deep(new_src);
-    let new_checked = check_phase0e_with_context(&ctx, &new_deep)
-        .unwrap_or_else(|e| panic!("with-context Phase 0e failed: {:?}", e.errors));
+    let new_checked = check_ir_with_context(&ctx, &new_deep)
+        .unwrap_or_else(|e| panic!("with-context IR check failed: {:?}", e.errors));
     check_linearity_with_context(&library_program, &new_checked).map(|_| ())
 }
 
@@ -56,7 +56,7 @@ fn check_monolithic_combined(
     let combined_src = format!("{library_src}\n{new_src}");
     let combined_deep = surf_to_deep(&combined_src);
     let checked = check_typed_program(&combined_deep)
-        .unwrap_or_else(|e| panic!("monolithic Phase 0e failed: {:?}", e.errors));
+        .unwrap_or_else(|e| panic!("monolithic IR check failed: {:?}", e.errors));
     check_linearity(&checked).map(|_| ())
 }
 
@@ -171,13 +171,13 @@ def bad(my_x: tensor[4, f32]): tensor[4, f32] =
   }
 "#,
     );
-    let bad_checked = check_phase0e_with_context(&ctx, &bad_deep).expect("Phase 0e clean");
+    let bad_checked = check_ir_with_context(&ctx, &bad_deep).expect("IR check clean");
     let bad_res = check_linearity_with_context(&library_program, &bad_checked);
     assert!(bad_res.is_err(), "bad snippet must be rejected");
 
     // Snippet B: clean — must still succeed despite snippet A's failure.
     let good_deep = surf_to_deep("def good(my_x: tensor[4, f32]): tensor[4, f32] = lib_id(my_x)");
-    let good_checked = check_phase0e_with_context(&ctx, &good_deep).expect("Phase 0e clean");
+    let good_checked = check_ir_with_context(&ctx, &good_deep).expect("IR check clean");
     let good_res = check_linearity_with_context(&library_program, &good_checked);
     assert!(
         good_res.is_ok(),
@@ -495,7 +495,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 "#,
     );
     let ctx_empty = chelis_types::TypeEnv::empty();
-    let new_checked = check_phase0e_with_context(&ctx_empty, &new_deep).expect("Phase 0e clean");
+    let new_checked = check_ir_with_context(&ctx_empty, &new_deep).expect("IR check clean");
     let res = check_linearity_with_context(&empty_lib_program, &new_checked);
     assert!(
         res.is_ok(),

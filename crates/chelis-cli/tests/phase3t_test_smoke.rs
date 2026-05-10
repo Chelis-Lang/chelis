@@ -90,6 +90,42 @@ def test_bad() -> unit = test_assert(false, "boom")
 }
 
 #[test]
+fn chelis_test_pipe_stage_host_runtime_fallback_does_not_panic() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-pipe-stage");
+    write_file(
+        &pkg.join("tests/pipe.ch"),
+        r#"module Smoke.Tests.Pipe
+
+type Sign =
+  | Neg
+  | Pos
+
+def choose(s: Sign) -> f32 = match s with {
+  | Neg => cast(0.0, f32)
+  | Pos => cast(1.0, f32)
+}
+
+def pipe_choose(s: Sign) -> f32 = s |> choose
+
+def test_pipe_choose() -> unit = test_assert(pipe_choose(Pos) == cast(1.0, f32), "pipe choose")
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/pipe.ch"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("test_pipe_choose"))
+        .stdout(predicate::str::contains("PASS"))
+        .stdout(predicate::str::contains("worker exited").not())
+        .stdout(predicate::str::contains("panic").not())
+        .stderr(predicate::str::contains("panic").not());
+}
+
+#[test]
 fn chelis_test_filter_narrows_selection() {
     let (_dir, pkg) = make_reef_package("phase3t-smoke-filter");
     write_file(

@@ -17,8 +17,8 @@
 //! shapes, both tracked as non-silent deferrals in
 //! `spec/design/chelis_phase3_plan.md` §3j-pre:
 //!
-//!   1. `conv2d` requires concrete d-lit output dims at Phase 0e lowering
-//!      time (`validate_phase0e_builtin_symbolic_requirements`); a
+//!   1. `conv2d` requires concrete d-lit output dims at IR check lowering
+//!      time (`validate_ir_builtin_symbolic_requirements`); a
 //!      polymorphic `conv2d_forward[batch, in_c, out_c, ...]` wrapper is
 //!      rejected.
 //!
@@ -66,7 +66,7 @@ mod common;
 use common::{make_app, write_file};
 
 /// Publishing the full `chelis-std` package (done by `make_app`) already
-/// exercises the type checker + Phase 0e lowering pass on every wrapper
+/// exercises the type checker + IR check lowering pass on every wrapper
 /// in `Std.Nn.Conv` and `Std.Nn.Attention`. If either file failed to
 /// type-check or triggered the `conv2d` concrete-output assertion in
 /// `tier2.rs`, `reef publish` would fail.

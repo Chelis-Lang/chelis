@@ -4,7 +4,7 @@ use std::io::{self, Read};
 use chelis_deep::validate::validate;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::check_phase0e_fitness;
+use chelis_types::check_ir_fitness;
 
 fn json_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 8);
@@ -66,7 +66,7 @@ fn check_surf(source: &str) {
                 chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
                     .expect("macro expansion should succeed for snippet checking")
                     .into_exprs();
-            let report = check_phase0e_fitness(&deep);
+            let report = check_ir_fitness(&deep);
             json.push('{');
             json.push_str("\"lang\":\"surf\",");
             json.push_str("\"parse_error\":null,");
@@ -106,7 +106,7 @@ fn check_deep(source: &str) {
     match strict {
         Ok(exprs) => {
             let warnings = validate(&exprs);
-            let report = check_phase0e_fitness(&exprs);
+            let report = check_ir_fitness(&exprs);
             json.push('{');
             json.push_str("\"lang\":\"deep\",");
             json.push_str("\"parse_error\":null,");

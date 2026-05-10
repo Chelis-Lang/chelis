@@ -207,7 +207,7 @@ resumable computations - complexity that is hard for both humans and LLMs.
   structured effect errors
 
 **Integration points:**
-- `chelis-types::check_phase0e_program()` returns the upgraded `CheckedProgram`
+- `chelis-types::check_ir_program()` returns the upgraded `CheckedProgram`
 - after type checking succeeds, run `chelis-effects::check_program()` on the annotated AST
 - inferred effect information is stored as metadata on checked `fn` nodes where the
   checker synthesizes it today

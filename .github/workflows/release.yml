@@ -29,6 +29,11 @@ jobs:
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
 
+      - name: Release binary test fixture
+        run: |
+          set -euo pipefail
+          (cd crates/chelis-cli/tests/fixtures/release_pipe_stage && ../../../../../target/release/chelis test tests)
+
       - name: Strip binary
         run: strip target/release/chelis
 
@@ -88,6 +93,11 @@ jobs:
 
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
+
+      - name: Release binary test fixture
+        run: |
+          set -euo pipefail
+          (cd crates/chelis-cli/tests/fixtures/release_pipe_stage && ../../../../../target/release/chelis test tests)
 
       - name: Assert Apple Silicon runner
         run: |

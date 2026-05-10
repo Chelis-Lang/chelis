@@ -1,12 +1,11 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 
 use crate::dag::TensorType;
-use crate::lower::{lower_program, top_level_lowering_map};
+use crate::lower::top_level_lowering_map;
 
 thread_local! {
     // Tracks top-level callee names currently being inlined by
@@ -324,11 +323,11 @@ pub enum HostExprKind {
 
 pub fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
     let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
-    let dag = lower_program(program);
+    let dag = crate::lower::try_lower_program(program).ok();
     let host = lower_host_program(program, &lowered_names);
 
     CompiledProgram {
-        dag: (!dag.roots().is_empty()).then_some(dag),
+        dag: dag.filter(|dag| !dag.roots().is_empty()),
         host: if host.globals.is_empty() && host.functions.is_empty() {
             None
         } else {
@@ -451,12 +450,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     }
 
     let body_expr = kids.get(1)?;
-    Some(crate::lower::lower_subexpr_program(
-        body_expr,
-        scope,
-        program.type_env().clone(),
-        defs,
-    ))
+    crate::lower::try_lower_subexpr_program(body_expr, scope, program.type_env().clone(), defs).ok()
 }
 
 fn lower_host_program(
@@ -1011,16 +1005,7 @@ fn try_lower_tensor_helper_call(
             HostType::Tensor(expected),
         )));
     }
-    // Mark this catch_unwind scope so the DAG lowerer's `lower_unrepresentable`
-    // can abort quietly instead of printing a stderr panic-location trace.
-    // The outer host-lane fallback handles the un-representable case cleanly;
-    // the panic message itself was pure noise.
-    let result = crate::lower::with_suppress_unrepresentable_panic(|| {
-        catch_unwind(AssertUnwindSafe(|| {
-            lower_tensor_helper_dag(expr, program, scope, &expected)
-        }))
-    });
-    let dag = result.ok()?;
+    let dag = lower_tensor_helper_dag(expr, program, scope, &expected)?;
     // Reject DAGs whose inputs reference known builtin names: a `Load("fold")`
     // (or `einsum`, `map`, etc.) means the lowerer fell back to treating a
     // host-lane builtin as a free variable. Emitting this DAG would generate
@@ -1046,14 +1031,15 @@ fn lower_tensor_helper_dag(
     program: &CheckedProgram,
     scope: &HashMap<String, HostType>,
     expected: &TensorType,
-) -> crate::Dag {
-    let dag = crate::lower::lower_subexpr_program(
+) -> Option<crate::Dag> {
+    let dag = crate::lower::try_lower_subexpr_program(
         expr,
         collect_tensor_scope(scope),
         program.type_env().clone(),
         collect_program_defs(program.exprs()),
-    );
-    remap_tensor_helper_dim_symbols(&dag, scope, expected)
+    )
+    .ok()?;
+    Some(remap_tensor_helper_dim_symbols(&dag, scope, expected))
 }
 
 fn finish_tensor_helper_call(
@@ -5205,8 +5191,8 @@ mod tests {
 
     fn parse_and_check(src: &str) -> CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_phase0e_program(&exprs)
-            .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        let checked = chelis_types::check_ir_program(&exprs)
+            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         chelis_types::check_linearity(&checked)

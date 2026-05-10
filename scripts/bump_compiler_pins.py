@@ -45,6 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PINNED_REAL_TOML_FILES: list[Path] = [
     REPO_ROOT / "packages/chelis-std/reef.toml",
     REPO_ROOT / "crates/chelis-cli/tests/fixtures/pseudo_nautilus/reef.toml",
+    REPO_ROOT / "crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.toml",
     REPO_ROOT / "examples/illustrative/phase3g_text_pipeline/reef.toml",
 ]
 

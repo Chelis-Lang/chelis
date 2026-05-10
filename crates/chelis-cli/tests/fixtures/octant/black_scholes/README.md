@@ -88,7 +88,7 @@ rank-0-tensor form needed for multi-use of `s`, `k`, `r`, `t`,
 Used by:
 
 - `chelis-cli/tests/wrapped_black_scholes_fixture.rs` — fmt round-trip,
-  Phase 0e typecheck, span-vs-sidecar parity (S5.0 oracle).
+  IR check typecheck, span-vs-sidecar parity (S5.0 oracle).
 - `chelis-cli/tests/build_deep_ingestion.rs` — `chelis build --deep`
   end-to-end tests including the S5 audit chain canary and gcc
   compile-success on the emitted host-side C.

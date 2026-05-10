@@ -15,7 +15,7 @@
 //! with a confusing `compiler = "=0.3.0"` mismatch error.
 //!
 //! This file pins the invariant: when the workspace version changes,
-//! all three real `.toml` files must change in lockstep, and the failure
+//! all real `.toml` files must change in lockstep, and the failure
 //! must point the operator at `scripts/bump_compiler_pins.py` so the
 //! release flow stays a one-liner.
 
@@ -39,6 +39,7 @@ fn pinned_real_toml_files() -> Vec<PathBuf> {
     vec![
         root.join("packages/chelis-std/reef.toml"),
         root.join("crates/chelis-cli/tests/fixtures/pseudo_nautilus/reef.toml"),
+        root.join("crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.toml"),
         root.join("examples/illustrative/phase3g_text_pipeline/reef.toml"),
     ]
 }

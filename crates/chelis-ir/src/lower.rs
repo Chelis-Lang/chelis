@@ -2,8 +2,10 @@
 //!
 //! Walks the Deep AST and produces a flat DAG of RISC primitive nodes.
 
+use std::any::Any;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::OnceLock;
 
 thread_local! {
@@ -15,6 +17,10 @@ thread_local! {
     /// panic, and proceeds with host lowering — we don't want that
     /// speculative attempt to write a misleading panic to stderr.
     static SUPPRESS_UNREPRESENTABLE_PANIC: Cell<bool> = const { Cell::new(false) };
+    /// Set while a public `try_lower_*` API is converting legacy lowering
+    /// unwinds into structured diagnostics. The panic hook stays quiet in
+    /// that scope so users see only the returned diagnostic.
+    static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn with_suppress_unrepresentable_panic<R>(f: impl FnOnce() -> R) -> R {
@@ -36,6 +42,112 @@ fn unrepresentable_panic_suppressed() -> bool {
 /// Marker payload for a suppressed un-representable-DAG unwind.
 struct UnrepresentableDag;
 
+/// User-facing lowering diagnostic returned by `try_lower_*` APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LowerDiagnostic {
+    pub message: String,
+    pub span: Option<Span>,
+    pub span_id: Option<String>,
+}
+
+impl LowerDiagnostic {
+    fn new(message: impl Into<String>, span: Option<Span>, span_id: Option<String>) -> Self {
+        Self {
+            message: message.into(),
+            span,
+            span_id,
+        }
+    }
+}
+
+impl fmt::Display for LowerDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)?;
+        if let Some(span_id) = &self.span_id {
+            write!(f, " at source span `{span_id}`")?;
+        } else if let Some(span) = self.span
+            && span.len > 0
+        {
+            write!(f, " at byte {}..{}", span.offset, span.end())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for LowerDiagnostic {}
+
+fn unsupported_lowering_message(tag: &str) -> String {
+    let subject = if tag == "pipe stage" {
+        "pipe stage".to_string()
+    } else {
+        format!("`{tag}`")
+    };
+    format!(
+        "{subject} is not supported by IR evaluation yet; use `chelis build --target c` instead"
+    )
+}
+
+fn expr_diagnostic_location(expr: &Expr) -> (Option<Span>, Option<String>) {
+    (Some(expr.span()), expr.span_id().map(ToOwned::to_owned))
+}
+
+fn lower_diagnostic_for_expr(message: impl Into<String>, expr: &Expr) -> LowerDiagnostic {
+    let (span, span_id) = expr_diagnostic_location(expr);
+    LowerDiagnostic::new(message, span, span_id)
+}
+
+fn raise_lowering_diagnostic(diagnostic: LowerDiagnostic) -> ! {
+    if unrepresentable_panic_suppressed() {
+        std::panic::panic_any(UnrepresentableDag);
+    }
+    std::panic::panic_any(diagnostic);
+}
+
+fn raise_lowering_error(
+    message: impl Into<String>,
+    span: Option<Span>,
+    span_id: Option<String>,
+) -> ! {
+    raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id))
+}
+
+fn panic_payload_to_lower_diagnostic(payload: &(dyn Any + Send)) -> LowerDiagnostic {
+    if payload.is::<UnrepresentableDag>() {
+        return LowerDiagnostic::new(
+            "program uses a form that is not supported by IR evaluation yet; use `chelis build --target c` instead",
+            None,
+            None,
+        );
+    }
+    if let Some(diagnostic) = payload.downcast_ref::<LowerDiagnostic>() {
+        return diagnostic.clone();
+    }
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|value| (*value).to_string())
+        })
+        .unwrap_or_else(|| "internal lowering error".to_string());
+    LowerDiagnostic::new(message, None, None)
+}
+
+fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R, LowerDiagnostic> {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(false));
+        }
+    }
+
+    install_chelis_panic_hook();
+    SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(true));
+    let _guard = Guard;
+    std::panic::catch_unwind(f).map_err(|payload| panic_payload_to_lower_diagnostic(&*payload))
+}
+
 static CHELIS_PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 /// Install a one-time global panic hook that suppresses panic output when the
@@ -46,6 +158,9 @@ pub fn install_chelis_panic_hook() {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             if SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.get()) {
+                return;
+            }
+            if SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.get()) {
                 return;
             }
             prev(info);
@@ -62,9 +177,15 @@ use crate::grad::grad_dag;
 use crate::tier2;
 use crate::vmap;
 
-/// Lower a checked Phase 0e Deep program into a RISC DAG.
+/// Lower a checked Deep program into a RISC DAG.
 pub fn lower_program(program: &CheckedProgram) -> Dag {
-    lower_program_to_library(program).dag
+    try_lower_program(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+}
+
+/// Lower a checked Deep program into a RISC DAG, returning a diagnostic for
+/// forms that are valid Chelis but not supported by IR evaluation.
+pub fn try_lower_program(program: &CheckedProgram) -> Result<Dag, LowerDiagnostic> {
+    try_lower_program_to_library(program).map(|library| library.dag)
 }
 
 /// Phase F carrier: a lowered library DAG plus the metadata needed to
@@ -110,6 +231,16 @@ pub struct LoweredLibrary {
 /// the only difference is that `symbol_table`, `program_defs`,
 /// `program_types`, and `linearity` are also exposed.
 pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
+    try_lower_program_to_library(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+}
+
+pub fn try_lower_program_to_library(
+    program: &CheckedProgram,
+) -> Result<LoweredLibrary, LowerDiagnostic> {
+    catch_lowering(|| lower_program_to_library_inner(program))
+}
+
+fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -130,8 +261,8 @@ pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
     // before this fix; ~20s on Coral).
     for_each_top_level_item(program.exprs(), &mut |expr| {
         if top_level_expr_is_lowered_with_names(expr, program_type_env, &lowered_names) {
-            assert_phase0e_lowerable(expr);
-            assert_phase0e_typed(expr);
+            assert_ir_lowerable(expr);
+            assert_ir_typed(expr);
         }
     });
     log_sub("assertions_loop", &mut sub_t);
@@ -235,12 +366,24 @@ pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
 /// matching the monolithic `lower_program(library + new)` behaviour
 /// byte-for-byte (modulo any irrelevant extra defs that DCE pruned).
 pub fn lower_program_with_context(library: &LoweredLibrary, new_program: &CheckedProgram) -> Dag {
+    try_lower_program_with_context(library, new_program)
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+}
+
+pub fn try_lower_program_with_context(
+    library: &LoweredLibrary,
+    new_program: &CheckedProgram,
+) -> Result<Dag, LowerDiagnostic> {
+    catch_lowering(|| lower_program_with_context_inner(library, new_program))
+}
+
+fn lower_program_with_context_inner(library: &LoweredLibrary, new_program: &CheckedProgram) -> Dag {
     let new_type_env = new_program.type_env();
     let lowered_names = top_level_lowering_map(new_program.exprs(), new_type_env);
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
         if top_level_expr_is_lowered(expr, new_program.exprs(), new_type_env) {
-            assert_phase0e_lowerable(expr);
-            assert_phase0e_typed(expr);
+            assert_ir_lowerable(expr);
+            assert_ir_typed(expr);
         }
     });
 
@@ -308,6 +451,27 @@ pub fn tensor_type_from_deep(expr: &Expr) -> TensorType {
 }
 
 pub fn lower_subexpr_program(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    full_type_env: HashMap<String, Expr>,
+    program_defs: HashMap<String, Expr>,
+) -> Dag {
+    try_lower_subexpr_program(expr, scoped_tensor_types, full_type_env, program_defs)
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+}
+
+pub fn try_lower_subexpr_program(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    full_type_env: HashMap<String, Expr>,
+    program_defs: HashMap<String, Expr>,
+) -> Result<Dag, LowerDiagnostic> {
+    catch_lowering(|| {
+        lower_subexpr_program_inner(expr, scoped_tensor_types, full_type_env, program_defs)
+    })
+}
+
+fn lower_subexpr_program_inner(
     expr: &Expr,
     scoped_tensor_types: HashMap<String, TensorType>,
     full_type_env: HashMap<String, Expr>,
@@ -1256,37 +1420,38 @@ fn if_expr_is_dag_lowerable(list: &List) -> bool {
     cond_ty.precision == Prim::Bool && (cond_ty.dims.is_empty() || cond_ty.dims == result_ty.dims)
 }
 
-fn assert_phase0e_lowerable(expr: &Expr) {
+fn assert_ir_lowerable(expr: &Expr) {
     match expr {
         Expr::List(list, _) => {
             if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
                 && ((tag == "if" && !if_expr_is_dag_lowerable(list))
                     || matches!(tag.as_str(), "match" | "par" | "jit"))
             {
-                panic!(
-                    "`{tag}` is not representable in the Phase 0e RISC DAG; reject it before lowering"
-                );
+                raise_lowering_diagnostic(lower_diagnostic_for_expr(
+                    unsupported_lowering_message(tag),
+                    expr,
+                ));
             }
             for elem in &list.elements {
-                assert_phase0e_lowerable(elem);
+                assert_ir_lowerable(elem);
             }
         }
         Expr::Map(map, _) => {
             for (_, value) in &map.entries {
-                assert_phase0e_lowerable(value);
+                assert_ir_lowerable(value);
             }
         }
         Expr::MetaExpr(inner, _) => {
             for (_, value) in &inner.entries {
-                assert_phase0e_lowerable(value);
+                assert_ir_lowerable(value);
             }
-            assert_phase0e_lowerable(&inner.expr);
+            assert_ir_lowerable(&inner.expr);
         }
         Expr::Atom(_, _) => {}
     }
 }
 
-fn assert_phase0e_typed(expr: &Expr) {
+fn assert_ir_typed(expr: &Expr) {
     match expr {
         Expr::List(list, _) => {
             if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
@@ -1296,24 +1461,27 @@ fn assert_phase0e_typed(expr: &Expr) {
             {
                 let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
                     .replace('\n', " ");
-                panic!(
-                    "shape-sensitive Phase 0e app nodes must carry explicit type metadata before lowering: {rendered}"
-                );
+                raise_lowering_diagnostic(lower_diagnostic_for_expr(
+                    format!(
+                        "shape-sensitive IR app nodes must carry explicit type metadata before lowering: {rendered}"
+                    ),
+                    expr,
+                ));
             }
             for elem in &list.elements {
-                assert_phase0e_typed(elem);
+                assert_ir_typed(elem);
             }
         }
         Expr::Map(map, _) => {
             for (_, value) in &map.entries {
-                assert_phase0e_typed(value);
+                assert_ir_typed(value);
             }
         }
         Expr::MetaExpr(inner, _) => {
             for (_, value) in &inner.entries {
-                assert_phase0e_typed(value);
+                assert_ir_typed(value);
             }
-            assert_phase0e_typed(&inner.expr);
+            assert_ir_typed(&inner.expr);
         }
         Expr::Atom(_, _) => {}
     }
@@ -1404,7 +1572,11 @@ impl LoweredValue {
     fn expect_node(&self, context: &str) -> NodeId {
         match self {
             Self::Node(id) => *id,
-            Self::Tuple(_) => panic!("{context} expected a single tensor value"),
+            Self::Tuple(_) => raise_lowering_error(
+                format!("{context} expected a single tensor value"),
+                None,
+                None,
+            ),
         }
     }
 
@@ -2248,11 +2420,15 @@ impl LowerCtx {
             // during `grad(fn_using_fold)` lowering, where the fn body is
             // inlined into a DAG context that can't represent the HOF.
             if BUILTIN_NAMES.contains(&name.as_str()) {
-                panic!(
-                    "builtin `{name}` is not representable in the DAG as a \
+                raise_lowering_error(
+                    format!(
+                        "builtin `{name}` is not supported by IR evaluation as a \
                      value — if this is the body of a fn passed to `grad`, \
                      the grad pass needs to specialize around the builtin \
                      rather than inlining it"
+                    ),
+                    elems.first().map(Expr::span),
+                    elems.first().and_then(Expr::span_id).map(ToOwned::to_owned),
                 );
             }
             let ty = if explicit_ty == Self::default_type() {
@@ -2529,7 +2705,11 @@ impl LowerCtx {
             .expect_node("grad requires a scalar floating output");
         subctx.dag.add_root(output);
         let grad_result = grad_dag(&subctx.dag, output, &wrt).unwrap_or_else(|| {
-            panic!("`grad(...)` lowering requires a scalar floating forward output")
+            raise_lowering_error(
+                "`grad(...)` lowering requires a scalar floating forward output",
+                Some(body.span()),
+                body.span_id().map(ToOwned::to_owned),
+            )
         });
 
         let arg_map = param_names
@@ -2738,9 +2918,11 @@ impl LowerCtx {
 
         let vmapped = match vmap::vectorize_axis0(&subctx.dag, batch_dim.clone()) {
             Ok(dag) => dag,
-            Err(message) => {
-                panic!("`vmap` lowering failed: {message}");
-            }
+            Err(message) => raise_lowering_error(
+                format!("`vmap` lowering failed: {message}"),
+                Some(body.span()),
+                body.span_id().map(ToOwned::to_owned),
+            ),
         };
 
         let mut arg_map = HashMap::new();
@@ -2892,13 +3074,19 @@ impl LowerCtx {
             .expect_node("vmap(grad(...)) requires a scalar floating output");
         subctx.dag.add_root(output);
         let grad_result = grad_dag(&subctx.dag, output, &wrt).unwrap_or_else(|| {
-            panic!("`vmap(grad(...))` lowering requires a scalar floating forward output")
+            raise_lowering_error(
+                "`vmap(grad(...))` lowering requires a scalar floating forward output",
+                Some(body.span()),
+                body.span_id().map(ToOwned::to_owned),
+            )
         });
         let vmapped = match vmap::vectorize_axis0(&grad_result.dag, batch_dim.clone()) {
             Ok(dag) => dag,
-            Err(message) => {
-                panic!("`vmap(grad(...))` lowering failed: {message}");
-            }
+            Err(message) => raise_lowering_error(
+                format!("`vmap(grad(...))` lowering failed: {message}"),
+                Some(body.span()),
+                body.span_id().map(ToOwned::to_owned),
+            ),
         };
 
         let mut arg_map = HashMap::new();
@@ -4394,9 +4582,13 @@ impl LowerCtx {
     fn lower_tuple_get(&mut self, elems: &[Expr]) -> LoweredValue {
         let tuple = self.lower_expr(&elems[2]);
         let index = self.extract_usize_value(&elems[3]).unwrap_or(0);
-        tuple
-            .tuple_get(index)
-            .unwrap_or_else(|| panic!("tuple-get index {index} out of bounds during lowering"))
+        tuple.tuple_get(index).unwrap_or_else(|| {
+            raise_lowering_error(
+                format!("tuple-get index {index} out of bounds during lowering"),
+                elems.get(3).map(Expr::span),
+                elems.get(3).and_then(Expr::span_id).map(ToOwned::to_owned),
+            )
+        })
     }
 
     /// `(match {} scrutinee (arm {} pattern body) ...)` -- not representable in the Phase 0 RISC DAG.
@@ -4415,12 +4607,22 @@ impl LowerCtx {
             // host lowering.
             std::panic::panic_any(UnrepresentableDag);
         }
-        panic!("`{tag}` is not representable in the Phase 0e RISC DAG")
+        let expr = elems.first();
+        raise_lowering_error(
+            unsupported_lowering_message(tag),
+            expr.map(Expr::span),
+            expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+        )
     }
 
-    /// Unsupported Phase 2 constructs (vmap, jit).
-    fn lower_unsupported(&mut self, tag: &str, _elems: &[Expr]) -> LoweredValue {
-        panic!("`{tag}` is not representable in the Phase 0e RISC DAG")
+    /// Constructs that are valid Chelis but not supported by DAG evaluation.
+    fn lower_unsupported(&mut self, tag: &str, elems: &[Expr]) -> LoweredValue {
+        let expr = elems.first();
+        raise_lowering_error(
+            unsupported_lowering_message(tag),
+            expr.map(Expr::span),
+            expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+        )
     }
 
     fn lower_if_mask(&mut self, cond: NodeId, out_ty: &TensorType) -> NodeId {
@@ -4474,8 +4676,8 @@ mod tests {
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_phase0e_program(&exprs)
-            .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        let checked = chelis_types::check_ir_program(&exprs)
+            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         chelis_types::check_linearity(&checked)
@@ -5321,8 +5523,8 @@ mod regression_tests {
 
     fn parse_and_lower(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_phase0e_program(&exprs)
-            .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        let checked = chelis_types::check_ir_program(&exprs)
+            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         let checked = chelis_types::check_linearity(&checked)
@@ -5341,6 +5543,18 @@ mod regression_tests {
             let _ = ctx.lower_expr(expr);
         }
         ctx.dag
+    }
+
+    fn captured_lower_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(diagnostic) = payload.downcast_ref::<LowerDiagnostic>() {
+            diagnostic.to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else {
+            String::new()
+        }
     }
 
     // Fix 1: Tensor type metadata with flat Deep shape format.
@@ -5519,21 +5733,34 @@ mod regression_tests {
 
     // Fix 4: Unsupported constructs.
     #[test]
-    #[should_panic(expected = "`grad` is not representable in the Phase 0e RISC DAG")]
     fn fix4_grad_is_rejected_before_lowering() {
-        let _ = parse_and_lower_unchecked("(grad {} (var {} f))");
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower_unchecked("(grad {} (var {} f))");
+        })
+        .expect_err("grad should be rejected");
+        assert!(
+            captured_lower_message(err).contains("`grad` is not supported by IR evaluation yet")
+        );
     }
 
     #[test]
-    #[should_panic(expected = "`vmap` is not representable in the Phase 0e RISC DAG")]
     fn fix4_vmap_is_rejected_before_lowering() {
-        let _ = parse_and_lower_unchecked("(vmap {} (var {} f))");
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower_unchecked("(vmap {} (var {} f))");
+        })
+        .expect_err("vmap should be rejected");
+        assert!(
+            captured_lower_message(err).contains("`vmap` is not supported by IR evaluation yet")
+        );
     }
 
     #[test]
-    #[should_panic(expected = "`jit` is not supported by Phase 0e lowering")]
     fn fix4_jit_is_rejected_before_lowering() {
-        let _ = parse_and_lower("(jit {} (var {} f))");
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower("(jit {} (var {} f))");
+        })
+        .expect_err("jit should be rejected");
+        assert!(captured_lower_message(err).contains("`jit` is not supported by IR lowering"));
     }
 
     #[test]
@@ -5642,21 +5869,49 @@ mod regression_tests {
     }
 
     #[test]
-    #[should_panic(expected = "`if` is not representable in the Phase 0e RISC DAG")]
     fn non_float_if_is_rejected_before_lowering() {
-        let _ = parse_and_lower(
-            "(if {type: (t-prim {} bool)} \
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower(
+                "(if {type: (t-prim {} bool)} \
                 (lit {type: (t-prim {} bool)} true) \
                 (lit {type: (t-prim {} bool)} true) \
                 (lit {type: (t-prim {} bool)} false))",
+            );
+        })
+        .expect_err("non-float if should be rejected");
+        assert!(captured_lower_message(err).contains("`if` is not supported by IR evaluation yet"));
+    }
+
+    #[test]
+    fn unsupported_match_is_rejected_before_lowering() {
+        let err = std::panic::catch_unwind(|| {
+            let _ = parse_and_lower_unchecked(
+                "(match {} (var {} x) (arm {} (pat-var {} y) () (var {} y)))",
+            );
+        })
+        .expect_err("match should be rejected");
+        assert!(
+            captured_lower_message(err).contains("`match` is not supported by IR evaluation yet")
         );
     }
 
     #[test]
-    #[should_panic(expected = "`match` is not representable in the Phase 0e RISC DAG")]
-    fn unsupported_match_is_rejected_before_lowering() {
-        let _ = parse_and_lower_unchecked(
-            "(match {} (var {} x) (arm {} (pat-var {} y) () (var {} y)))",
+    fn unsupported_pipe_stage_returns_diagnostic_without_panicking_public_api() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(pipe {} (lit {type: (t-prim {} f32)} 1.0) (grad {} (var {} f)))",
+        )
+        .expect("parse failed");
+        let err =
+            try_lower_subexpr_program(&exprs[0], HashMap::new(), HashMap::new(), HashMap::new())
+                .expect_err("unsupported pipe stage should return diagnostic");
+        let message = err.to_string();
+        assert!(
+            message.contains("pipe stage is not supported by IR evaluation yet"),
+            "unexpected diagnostic: {message}"
+        );
+        assert!(
+            message.contains("chelis build --target c"),
+            "diagnostic should name the build workaround: {message}"
         );
     }
 
@@ -5669,11 +5924,13 @@ mod regression_tests {
         .expect("parse failed");
         let err = std::panic::catch_unwind(|| {
             for expr in &exprs {
-                assert_phase0e_typed(expr);
+                assert_ir_typed(expr);
             }
         })
         .expect_err("missing type metadata should panic during lowering preflight");
-        let message = if let Some(message) = err.downcast_ref::<String>() {
+        let message = if let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() {
+            diagnostic.to_string()
+        } else if let Some(message) = err.downcast_ref::<String>() {
             message.clone()
         } else if let Some(message) = err.downcast_ref::<&str>() {
             (*message).to_string()
@@ -5681,7 +5938,9 @@ mod regression_tests {
             String::new()
         };
         assert!(
-            message.contains("shape-sensitive Phase 0e app nodes must carry explicit type metadata before lowering"),
+            message.contains(
+                "shape-sensitive IR app nodes must carry explicit type metadata before lowering"
+            ),
             "unexpected panic message: {message}"
         );
     }
@@ -5731,7 +5990,7 @@ mod regression_tests {
         };
         let scoped_types = HashMap::from([("input".to_string(), input_ty)]);
         // lower_subexpr_program starts with a fresh LowerCtx (no local_callables).
-        // This must NOT panic with "`grad` is not representable in the Phase 0e RISC DAG".
+        // This must NOT report `grad` as unsupported by IR evaluation.
         let dag = lower_subexpr_program(&app_expr, scoped_types, HashMap::new(), program_defs);
         assert!(
             !dag.is_empty(),

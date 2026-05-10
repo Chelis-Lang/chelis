@@ -1,10 +1,10 @@
-//! Phase C: tests for `check_phase0e_with_context`.
+//! Phase C: tests for `check_ir_with_context`.
 //!
 //! ADT-registry probes are written FIRST per the Phase C plan — naive
 //! inner-before-outer registry stacking is the most likely silent-correctness
 //! bug, so these tests must fail loudly if it is mis-implemented.
 
-use chelis_types::{TypeEnv, build_type_env_from_library, check_phase0e_with_context};
+use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
 
 fn parse(src: &str) -> Vec<chelis_deep::Expr> {
     chelis_deep::parser::parse_str(src).expect("deep parse")
@@ -32,7 +32,7 @@ fn adt_probe_library_option_exhaustive_match_in_new_code() {
              (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} int32)} 0))))",
     );
 
-    check_phase0e_with_context(&ctx, &new_exprs)
+    check_ir_with_context(&ctx, &new_exprs)
         .expect("exhaustive match against library ADT must pass");
 }
 
@@ -51,7 +51,7 @@ fn adt_probe_library_option_non_exhaustive_match_is_rejected() {
              (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))))",
     );
 
-    let res = check_phase0e_with_context(&ctx, &new_exprs);
+    let res = check_ir_with_context(&ctx, &new_exprs);
     let err = res.expect_err("non-exhaustive match against library ADT must be rejected");
     let mentions_missing_none = err.errors.iter().any(|e| {
         format!("{:?}", e.kind).contains("NonExhaustiveMatch") && e.message.contains("MyNone")
@@ -82,7 +82,7 @@ fn adt_probe_new_code_adt_does_not_inherit_library_variants() {
              (arm {} (pat-ctor {} Circle) () (lit {type: (t-prim {} int32)} 1))
              (arm {} (pat-ctor {} Square) () (lit {type: (t-prim {} int32)} 2))))",
     );
-    check_phase0e_with_context(&ctx, &new_ok)
+    check_ir_with_context(&ctx, &new_ok)
         .expect("new ADT exhaustively matched must pass without library variants leaking in");
 
     // Same Shape definition but only Circle arm — must still be non-exhaustive
@@ -94,7 +94,7 @@ fn adt_probe_new_code_adt_does_not_inherit_library_variants() {
            (match {} (var {} v)
              (arm {} (pat-ctor {} Circle) () (lit {type: (t-prim {} int32)} 1))))",
     );
-    let err = check_phase0e_with_context(&ctx, &new_bad)
+    let err = check_ir_with_context(&ctx, &new_bad)
         .expect_err("non-exhaustive new ADT match must be rejected");
     let cites_square = err.errors.iter().any(|e| {
         format!("{:?}", e.kind).contains("NonExhaustiveMatch") && e.message.contains("Square")
@@ -134,12 +134,12 @@ fn with_context_equals_monolithic_for_five_snippets() {
 
     for snippet in snippets {
         let new_exprs = parse(snippet);
-        let with_ctx = check_phase0e_with_context(&ctx, &new_exprs)
+        let with_ctx = check_ir_with_context(&ctx, &new_exprs)
             .unwrap_or_else(|e| panic!("with_context failed on snippet {snippet}: {:?}", e.errors));
 
         let combined_src = format!("{library_src}\n{snippet}");
         let combined = parse(&combined_src);
-        let monolithic = chelis_types::check_phase0e_program(&combined)
+        let monolithic = chelis_types::check_ir_program(&combined)
             .unwrap_or_else(|e| panic!("monolithic failed on combined: {:?}", e.errors));
 
         // The new-code's annotated decls should equal the tail of monolithic
@@ -170,12 +170,12 @@ fn no_leak_between_snippets_against_same_context() {
 
     // Snippet A defines `secret_a`.
     let snippet_a = parse("(def {} secret_a (lit {type: (t-prim {} int32)} 42))");
-    check_phase0e_with_context(&ctx, &snippet_a).expect("snippet A clean");
+    check_ir_with_context(&ctx, &snippet_a).expect("snippet A clean");
 
     // Snippet B references `secret_a`. If A leaked into ctx, this would pass.
     // It must fail with UnboundVariable.
     let snippet_b = parse("(def {} use_b (var {} secret_a))");
-    let err = check_phase0e_with_context(&ctx, &snippet_b)
+    let err = check_ir_with_context(&ctx, &snippet_b)
         .expect_err("snippet A's binding must not leak into ctx");
     let mentions_unbound = err
         .errors
@@ -189,9 +189,9 @@ fn no_leak_between_snippets_against_same_context() {
 }
 
 #[test]
-fn empty_context_matches_check_phase0e_program() {
-    // check_phase0e_with_context with an empty TypeEnv must behave the same
-    // as check_phase0e_program on the same exprs.
+fn empty_context_matches_check_ir_program() {
+    // check_ir_with_context with an empty TypeEnv must behave the same
+    // as check_ir_program on the same exprs.
     let exprs = parse(
         "(deftype {} Foo () (variant {} A) (variant {} B))
          (def {} pick (var {} A))
@@ -202,9 +202,9 @@ fn empty_context_matches_check_phase0e_program() {
     );
 
     let empty_ctx = TypeEnv::empty();
-    let with_ctx = check_phase0e_with_context(&empty_ctx, &exprs)
+    let with_ctx = check_ir_with_context(&empty_ctx, &exprs)
         .expect("empty-context check must succeed on standalone program");
-    let mono = chelis_types::check_phase0e_program(&exprs).expect("monolithic must succeed");
+    let mono = chelis_types::check_ir_program(&exprs).expect("monolithic must succeed");
     assert_eq!(
         with_ctx.annotated_exprs().len(),
         mono.annotated_exprs().len()
@@ -219,13 +219,13 @@ fn type_env_surfaces_library_declared_types() {
     // only contained new-code declared types. Downstream passes (chelis-ir lower,
     // chelis-effects, linearity) read `program.type_env()` to resolve `(var lib)`
     // references; an absent library name returned None and broke composition.
-    // Fix: union library `phase0e_types` into the returned type_env (new-code
+    // Fix: union library `ir_types` into the returned type_env (new-code
     // wins on conflict). This regression test locks the union in.
     let ctx = build_ctx(
         "(def {} double (fn {} (params {} (x {type: (t-prim {} int32)}))
             (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} int32)} 2))))",
     );
-    let checked = check_phase0e_with_context(
+    let checked = check_ir_with_context(
         &ctx,
         &parse("(def {} call (app {} (var {} double) (lit {type: (t-prim {} int32)} 5)))"),
     )
@@ -242,7 +242,7 @@ fn type_env_surfaces_library_declared_types() {
     );
 
     // Cross-check: monolithic on the union has the same key.
-    let mono = chelis_types::check_phase0e_program(&parse(
+    let mono = chelis_types::check_ir_program(&parse(
         "(def {} double (fn {} (params {} (x {type: (t-prim {} int32)}))
             (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} int32)} 2))))
          (def {} call (app {} (var {} double) (lit {type: (t-prim {} int32)} 5)))",
@@ -263,7 +263,7 @@ fn type_env_new_code_shadows_library_on_name_conflict() {
     // and `foo` should resolve to a type_env entry (not panic / not absent).
     let new_exprs =
         parse("(def {} foo (fn {} (params {} (x {type: (t-prim {} int32)})) (var {} x)))");
-    let res = check_phase0e_with_context(&ctx, &new_exprs);
+    let res = check_ir_with_context(&ctx, &new_exprs);
     if let Ok(checked) = res {
         assert!(
             checked.type_env().contains_key("foo"),

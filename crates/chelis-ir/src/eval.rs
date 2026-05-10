@@ -960,8 +960,8 @@ mod tests {
 
     fn lower(src: &str) -> Dag {
         let exprs = parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_phase0e_program(&exprs)
-            .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        let checked = chelis_types::check_ir_program(&exprs)
+            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         let checked = chelis_types::check_linearity(&checked)

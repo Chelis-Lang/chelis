@@ -183,8 +183,8 @@ fn g2_adt_non_exhaustive_match_in_new_code_is_rejected() {
     let in_context = check_in_context(&ctx, bad_snippet);
 
     // Monolithic via the full prepare_eval pipeline (compile_source) —
-    // which runs check_phase0e_program → effects → linearity → lower.
-    // The bare check API only runs Phase 0e, so divergence between the
+    // which runs check_ir_program → effects → linearity → lower.
+    // The bare check API only runs IR check, so divergence between the
     // two would point at WHICH stage owns exhaustivity. The contract:
     // both verdicts must match.
     let formatted = format_library_plus_snippet(&root, bad_snippet);
@@ -676,7 +676,7 @@ fn g1_newcode_inheriting_test_effect_from_library_with_strict_signature_rejected
 
     // Use prepare_eval — that's the monolithic path that runs effects +
     // linearity + lower (compile_source). The bare `check` API only runs
-    // Phase 0e, NOT the effect declared-vs-inferred validator.
+    // IR check, NOT the effect declared-vs-inferred validator.
     let mono_ok = prepare_eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: format_library_plus_snippet(&root, snippet_ok),
@@ -806,7 +806,7 @@ fn g10_newcode_tensor_use_after_consume_through_library_call() {
 
     // Parity: monolithic compile-pipeline (prepare_eval) vs in-context
     // check should agree on whatever the linearity layer decides.
-    // prepare_eval runs the full check_phase0e + effects + linearity +
+    // prepare_eval runs the full check_ir + effects + linearity +
     // lower stack — not the bare `check` API which is Phase-0e-only.
     // Divergence between monolithic and in_context linearity verdicts
     // is the finding.

@@ -849,16 +849,16 @@ Pure compiled additions to `chelis-std`. Nothing here requires a new shell.
       shipped in **Batch 3b** (see `crates/chelis-cli/tests/phase3j_pre_std_batch3b.rs`)
       as **literal concrete-shape** defs — not polymorphic wrappers —
       for the following reasons, each tracked as a non-silent deferral:
-      - `conv2d` requires concrete d-lit dims at Phase 0e lowering time
-        (`validate_phase0e_builtin_symbolic_requirements` in
+      - `conv2d` requires concrete d-lit dims at IR check lowering time
+        (`validate_ir_builtin_symbolic_requirements` in
         `crates/chelis-types/src/infer.rs`); a polymorphic
         `conv2d_forward[batch, in_c, out_c, ...]` wrapper is rejected.
         Batch 3b therefore ships `Std.Nn.Conv.conv1d` (`tensor[1, 4, 1, 16, f32]
         → tensor[1, 8, 1, 14, f32]`) and `Std.Nn.Conv.conv2d_small`
         (`tensor[1, 3, 8, 8, f32] → tensor[1, 8, 6, 6, f32]`). Making
-        these polymorphic remains future work once Phase 0e's concrete-
+        these polymorphic remains future work once IR check's concrete-
         dim requirement is relaxed for builtin conv2d.
-      - Batch 3b additionally relaxed an internal Phase 0e lowering
+      - Batch 3b additionally relaxed an internal IR check lowering
         assertion in `crates/chelis-ir/src/tier2.rs::lower_conv2d`. The
         bottom-up type-annotation writeback leaves the inner `conv2d`
         app's result-type metadata as non-concrete d-vars even when the
@@ -1002,7 +1002,7 @@ tag push. Release history:
       the IR layer (`crates/chelis-ir/src/grad.rs::adv_argmax_on_grad_path_errors_cleanly`,
       `adv_argmin_on_grad_path_errors_cleanly`). The package-mode
       `chelis eval` lowering panics with `` `grad` is not
-      representable in the Phase 0e RISC DAG `` before the gradient
+      representable in the IR check RISC DAG `` before the gradient
       pass runs, so the CLI-level negative pins the typecheck-time
       refusal that `grad` requires a scalar floating output (which
       is what `argmax`/`argmin` violate). Promoting this to the

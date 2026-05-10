@@ -225,7 +225,7 @@ touch_gqa_bcast = gqa_broadcast_kv
 ///
 /// `Std.Tensor.Reduce.argmax` returns a `tensor[b, f32]` (the rank-2
 /// wrapper over the `argmax_reduce` builtin). Wrapping it in a closure
-/// and applying `grad` must not produce a silent zero. The Phase 0e
+/// and applying `grad` must not produce a silent zero. The IR check
 /// type checker rejects this with `grad requires a scalar floating
 /// output`, which is the no-silent-zero handle this test pins.
 ///
@@ -236,7 +236,7 @@ touch_gqa_bcast = gqa_broadcast_kv
 /// `adv_argmin_on_grad_path_errors_cleanly` there. It cannot be
 /// reached from a Surf source program in package mode today because
 /// `lower_compiled_program` panics with `` `grad` is not representable
-/// in the Phase 0e RISC DAG `` before the gradient pass can run; that
+/// in the IR check RISC DAG `` before the gradient pass can run; that
 /// panic is documented in the spec acknowledged-limitations section
 /// for Batch 5. Either way the contract holds: there is no execution
 /// path on which `grad(argmax(...))` produces a wrong gradient.

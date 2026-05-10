@@ -3610,7 +3610,7 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "Phase 0e builtin `layer_norm` requires a concrete normalized axis extent",
+            "IR builtin `layer_norm` requires a concrete normalized axis extent",
         ));
 }
 
@@ -3851,7 +3851,7 @@ def bad(x: tensor[4, f32]): tensor[4, f32] = dup_relu(x)
 }
 
 #[test]
-fn check_reports_match_linearity_without_old_phase0e_rejection() {
+fn check_reports_match_linearity_without_old_ir_rejection() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("match_linearity.ch");
     write_file(
@@ -3875,9 +3875,9 @@ fn check_reports_match_linearity_without_old_phase0e_rejection() {
                 .is_some_and(|message| message.contains("pair"))
     }));
     assert!(!errors.iter().any(|error| {
-        error["message"].as_str().is_some_and(|message| {
-            message.contains("`match` is not supported by Phase 0e lowering")
-        })
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("`match` is not supported by IR lowering"))
     }));
     assert!(json["score"].as_f64().unwrap() < 1.0);
 }

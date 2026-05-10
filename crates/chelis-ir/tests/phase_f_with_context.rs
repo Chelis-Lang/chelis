@@ -18,8 +18,8 @@ use chelis_ir::{
     LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,
 };
 use chelis_types::{
-    CheckedProgram, TypeEnv, build_type_env_from_library, check_linearity, check_phase0e_program,
-    check_phase0e_with_context,
+    CheckedProgram, TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context,
+    check_linearity,
 };
 
 fn parse(src: &str) -> Vec<Expr> {
@@ -31,10 +31,10 @@ fn check_lib(library_src: &str) -> (Vec<Expr>, TypeEnv, CheckedProgram) {
     let env = build_type_env_from_library(&library_exprs).expect("library type-checks clean");
 
     // Build a CheckedProgram for the library by running the standard
-    // monolithic Phase 0e check on the library source itself, then the
+    // monolithic IR check check on the library source itself, then the
     // effect + linearity passes — this is the same pipeline `lower_program`
     // expects.
-    let checked = check_phase0e_program(&library_exprs).expect("library Phase 0e clean");
+    let checked = check_ir_program(&library_exprs).expect("library IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("library effect clean");
     let checked = check_linearity(&checked).expect("library linearity clean");
     (library_exprs, env, checked)
@@ -42,14 +42,14 @@ fn check_lib(library_src: &str) -> (Vec<Expr>, TypeEnv, CheckedProgram) {
 
 fn check_with_ctx(ctx: &TypeEnv, new_src: &str) -> CheckedProgram {
     let new_exprs = parse(new_src);
-    let checked = check_phase0e_with_context(ctx, &new_exprs).expect("new-code Phase 0e clean");
+    let checked = check_ir_with_context(ctx, &new_exprs).expect("new-code IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("new-code effect clean");
     check_linearity(&checked).expect("new-code linearity clean")
 }
 
 fn check_monolithic(combined_src: &str) -> CheckedProgram {
     let exprs = parse(combined_src);
-    let checked = check_phase0e_program(&exprs).expect("monolithic Phase 0e clean");
+    let checked = check_ir_program(&exprs).expect("monolithic IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("monolithic effect clean");
     check_linearity(&checked).expect("monolithic linearity clean")
 }

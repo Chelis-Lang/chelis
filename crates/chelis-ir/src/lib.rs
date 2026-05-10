@@ -28,6 +28,7 @@ pub use host::CompiledProgram;
 pub use load_store_name::{LoadStoreName, LoadStoreNameError};
 pub use lower::{
     LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,
-    lower_subexpr_program, tensor_type_from_deep,
+    lower_subexpr_program, tensor_type_from_deep, try_lower_program, try_lower_program_to_library,
+    try_lower_program_with_context, try_lower_subexpr_program,
 };
 pub use pipeline::grad_then_fuse;

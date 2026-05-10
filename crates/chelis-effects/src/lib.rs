@@ -958,14 +958,14 @@ mod tests {
 
     fn checked(src: &str) -> CheckedProgram {
         let exprs = parse_str(src).unwrap();
-        let checked = chelis_types::check_phase0e_program(&exprs).unwrap();
+        let checked = chelis_types::check_ir_program(&exprs).unwrap();
         check_program(&checked).unwrap()
     }
 
     fn surf_checked(src: &str) -> CheckedProgram {
         let decls = parse_surf(src).expect("surf parse");
         let deep = desugar_program(&decls);
-        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("effect check")
     }
 
@@ -991,7 +991,7 @@ mod tests {
              (def {} y (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
         )
         .unwrap();
-        let checked = chelis_types::check_phase0e_program(&exprs).unwrap();
+        let checked = chelis_types::check_ir_program(&exprs).unwrap();
         let errors = check_program(&checked).unwrap_err();
         assert!(
             errors
@@ -1103,7 +1103,7 @@ buckets = partition(keep, xs)
         )
         .expect("surf parse");
         let deep = desugar_program(&decls);
-        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked).expect_err("partition should propagate Random effect");
         assert!(
             errors
@@ -1147,7 +1147,7 @@ ys = map(step, xs)
         )
         .expect("surf parse");
         let deep = desugar_program(&decls);
-        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked).expect_err("map should propagate Random effect");
         assert!(
             errors
@@ -1291,7 +1291,7 @@ def g() -> unit ! {} = test_assert(true, "leak")
         )
         .expect("surf parse");
         let deep = desugar_program(&decls);
-        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked)
             .expect_err("def with `! {}` that calls test_assert must be rejected");
         assert!(
@@ -1314,7 +1314,7 @@ def g() -> unit ! {} = f()
         )
         .expect("surf parse");
         let deep = desugar_program(&decls);
-        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("transitive caller with `! {}` must be rejected");
         assert!(
@@ -1337,7 +1337,7 @@ def test_ok() -> unit ! {Test} = test_assert(true, "ok")
         )
         .expect("surf parse");
         let deep = desugar_program(&decls);
-        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("declared Test should accept test_assert caller");
     }
 
@@ -1353,7 +1353,7 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
         )
         .expect("surf parse");
         let deep = desugar_program(&decls);
-        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("IO-declared fn must not silently acquire Test");
         assert!(

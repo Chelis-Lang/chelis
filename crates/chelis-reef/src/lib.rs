@@ -5320,7 +5320,7 @@ fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Ex
 fn checked_program_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_types::CheckedProgram, String> {
-    let checked = chelis_types::check_phase0e_program(deep_exprs)
+    let checked = chelis_types::check_ir_program(deep_exprs)
         .map_err(|r| format!("Type errors: {:?}", r.errors))?;
     let checked = chelis_effects::check_program(&checked).map_err(|errors| {
         errors

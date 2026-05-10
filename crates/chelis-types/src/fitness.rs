@@ -4,7 +4,7 @@
 //! is. This is the training signal for AI agents (see spec section 6).
 
 use crate::errors::{CheckError, CheckErrorKind};
-use crate::infer::{InferResult, infer_phase0e_program};
+use crate::infer::{InferResult, infer_ir_program};
 
 /// Weights for each fitness component (spec section 6.1).
 const W_PARSE: f64 = 0.1;
@@ -118,11 +118,11 @@ pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
     FitnessReport::from_infer_result_with_structure(&result, structure)
 }
 
-/// Phase 0e/0h-aware fitness report that treats typed self-loads as valid
+/// IR/0h-aware fitness report that treats typed self-loads as valid
 /// program inputs, matching the executable compiler pipeline.
-pub fn check_phase0e_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
+pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
     let structure = structure_score(exprs);
-    let result = infer_phase0e_program(exprs);
+    let result = infer_ir_program(exprs);
     if result.errors.is_empty() {
         let total_nodes = count_nodes(exprs);
         return FitnessReport {
@@ -143,7 +143,7 @@ pub fn check_phase0e_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
 
     let mut report = FitnessReport::from_infer_result_with_structure(&result, structure);
 
-    // Phase 0e adds executable-pipeline validation after type inference. Ensure
+    // IR adds executable-pipeline validation after type inference. Ensure
     // those failures reduce the fitness score as well, so score 1.0 always means
     // error-free on the executable Phase 0 path.
     let min_untyped = result.errors.len().min(report.total_nodes);
@@ -292,23 +292,23 @@ mod tests {
     }
 
     #[test]
-    fn phase0e_check_accepts_typed_self_loads() {
+    fn ir_check_accepts_typed_self_loads() {
         let exprs = chelis_deep::parser::parse_str(
             "(def {} x (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))",
         )
         .unwrap();
-        let r = check_phase0e_program(&exprs);
+        let r = check_ir_program(&exprs);
         assert!((r.score - 1.0).abs() < 1e-9, "{}", r.score);
         assert!(r.errors.is_empty());
     }
 
     #[test]
-    fn phase0e_check_never_reports_perfect_score_with_errors() {
+    fn ir_check_never_reports_perfect_score_with_errors() {
         let exprs = chelis_deep::parser::parse_str(
             "(def {} f (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
-        let r = check_phase0e_program(&exprs);
+        let r = check_ir_program(&exprs);
         assert!(!r.errors.is_empty(), "{r:?}");
         assert!(r.score < 1.0, "{r:?}");
         assert!(r.untyped_nodes > 0, "{r:?}");

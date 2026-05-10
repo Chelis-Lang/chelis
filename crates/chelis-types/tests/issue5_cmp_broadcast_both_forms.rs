@@ -6,7 +6,7 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::check_phase0e_program;
+use chelis_types::check_ir_program;
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
@@ -25,7 +25,7 @@ def above -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
 def below -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
 "#;
     let deep = surf_to_deep(src);
-    let res = check_phase0e_program(&deep);
+    let res = check_ir_program(&deep);
     match res {
         Ok(_) => {}
         Err(rep) => {
@@ -43,7 +43,7 @@ fn issue5_scalar_first_alone_typechecks_clean() {
 def below -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
 "#;
     let deep = surf_to_deep(src);
-    let res = check_phase0e_program(&deep);
+    let res = check_ir_program(&deep);
     match res {
         Ok(_) => {}
         Err(rep) => {
@@ -61,7 +61,7 @@ fn issue5_tensor_first_alone_typechecks_clean() {
 def above -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
 "#;
     let deep = surf_to_deep(src);
-    let res = check_phase0e_program(&deep);
+    let res = check_ir_program(&deep);
     match res {
         Ok(_) => {}
         Err(rep) => {

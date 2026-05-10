@@ -461,27 +461,26 @@ pub fn scalar_type(precision: Prim) -> TensorType {
 }
 
 fn require_dim(dim: Option<&DimInfo>, context: &str) -> DimInfo {
-    dim.cloned().unwrap_or_else(|| {
-        panic!("{context} requires a statically known axis in Phase 0e lowering")
-    })
+    dim.cloned()
+        .unwrap_or_else(|| panic!("{context} requires a statically known axis in IR lowering"))
 }
 
 fn require_dim_extent(dim: &DimInfo, context: &str) -> usize {
-    // Phase 0e IR lowering assumes dimensions are concrete by this point.
+    // IR lowering assumes dimensions are concrete by this point.
     // Named dimensions are for type-checking consistency; symbolic/runtime-sized
     // lowering is a Phase 1 IR/backend extension.
     match dim {
         DimInfo::Lit(n) => *n,
         DimInfo::Named(_, Some(n)) => *n,
         DimInfo::Named(name, None) => {
-            panic!("{context} requires a concrete extent in Phase 0e lowering, got `{name}`")
+            panic!("{context} requires a concrete extent in IR lowering, got `{name}`")
         }
     }
 }
 
 fn require_axis_size(ty: &TensorType, axis: usize, context: &str) -> usize {
     dim_size(ty, axis).unwrap_or_else(|| {
-        panic!("{context} requires a concrete extent for axis {axis} in Phase 0e lowering")
+        panic!("{context} requires a concrete extent for axis {axis} in IR lowering")
     })
 }
 
@@ -922,7 +921,7 @@ pub fn lower_conv2d(
     let padded_w = w_in_size + (2 * padding);
     if padded_h < kh_size || padded_w < kw_size {
         panic!(
-            "Phase 0e conv2d kernel dims ({kh_size}, {kw_size}) exceed padded input dims ({padded_h}, {padded_w})"
+            "IR conv2d kernel dims ({kh_size}, {kw_size}) exceed padded input dims ({padded_h}, {padded_w})"
         );
     }
     let strided_h = ((padded_h - kh_size) / stride) + 1;
@@ -953,7 +952,7 @@ pub fn lower_conv2d(
     let w_out = DimInfo::Lit(w_out_size);
     if h_out_size != strided_h || w_out_size != strided_w {
         panic!(
-            "Phase 0e conv2d output shape mismatch: expected spatial dims ({strided_h}, {strided_w}), got ({h_out_size}, {w_out_size})"
+            "IR conv2d output shape mismatch: expected spatial dims ({strided_h}, {strided_w}), got ({h_out_size}, {w_out_size})"
         );
     }
 

@@ -22,14 +22,14 @@ use std::collections::BTreeSet;
 use chelis_deep::Expr;
 use chelis_ir::dag::Dag;
 use chelis_ir::lower_program;
-use chelis_types::{check_linearity, check_phase0e_program};
+use chelis_types::{check_ir_program, check_linearity};
 
 /// Build a CheckedProgram from Deep source. Mirrors the pipeline the
-/// real driver runs (Phase 0e check → effects → linearity), so the
+/// real driver runs (IR check check → effects → linearity), so the
 /// resulting `CheckedProgram` is exactly what `lower_program` expects.
 fn check(source: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
-    let checked = check_phase0e_program(&exprs).expect("Phase 0e clean");
+    let checked = check_ir_program(&exprs).expect("IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("effects clean");
     check_linearity(&checked).expect("linearity clean")
 }

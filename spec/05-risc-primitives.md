@@ -179,7 +179,7 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 **Current implementation note:** the type checker currently also accepts a
 `normalize(x)` convenience name.
 It is **not** part of the stable Tier 2 surface yet because its lowering semantics are
-not specified here and there is no corresponding Phase 0e lowering rule.
+not specified here and there is no corresponding IR check lowering rule.
 Do not treat `normalize` as a stable specified built-in until this document and the IR
 lowering are aligned.
 

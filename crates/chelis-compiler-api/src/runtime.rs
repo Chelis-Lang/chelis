@@ -5,7 +5,7 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::lower::{lower_subexpr_program, top_level_lowering_map};
+use chelis_ir::lower::{top_level_lowering_map, try_lower_subexpr_program};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, types::Prim};
 
 use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
@@ -112,7 +112,7 @@ pub(crate) fn evaluate_host_program_filtered(
 ///
 /// Library defs are registered FIRST, then new-code defs, so on a name
 /// collision the new-code def shadows the library def — mirroring the
-/// type-env stacking semantics in `check_phase0e_with_context`.
+/// type-env stacking semantics in `check_ir_with_context`.
 ///
 /// `library_lowered_names` is the optional library-side
 /// lowered-vs-host classification, threaded through so a library def
@@ -1005,23 +1005,18 @@ impl<'a> EvalContext<'a> {
             }
         }
 
-        // Lower under suppress so any unrepresentable form panics
-        // quietly and we surface a clean error string.
-        let lower_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            chelis_ir::lower::with_suppress_unrepresentable_panic(|| {
-                lower_subexpr_program(&app_expr, scoped_types, self.type_env.clone(), program_defs)
-            })
-        }));
+        let lower_result =
+            try_lower_subexpr_program(&app_expr, scoped_types, self.type_env.clone(), program_defs);
         let dag = match lower_result {
             Ok(dag) => dag,
-            Err(_) => {
+            Err(diagnostic) => {
                 let kind_label = match kind {
                     TransformKind::Grad => "grad",
                     TransformKind::Vmap => "vmap",
                 };
                 return Err(format!(
                     "host runtime could not lower `{kind_label}(...)` for evaluation: \
-                     the inner fn body uses a construct the IR DAG does not support"
+                     {diagnostic}"
                 ));
             }
         };
@@ -4245,7 +4240,7 @@ mod tests {
     fn checked_surf(source: &str) -> CheckedProgram {
         let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
-        chelis_types::check_phase0e_program(&exprs).expect("phase0e check")
+        chelis_types::check_ir_program(&exprs).expect("ir check")
     }
 
     #[test]

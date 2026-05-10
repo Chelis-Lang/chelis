@@ -26,8 +26,8 @@ pub fn compile_surf(source: &str) -> Result<PipelineResult, String> {
             .into_exprs();
     let deep_text = chelis_deep::printer::print_canonical(&deep_exprs);
 
-    // 3. Type check (Phase 0e)
-    let checked = chelis_types::check_phase0e_program(&deep_exprs)
+    // 3. Type check
+    let checked = chelis_types::check_ir_program(&deep_exprs)
         .map_err(|r| format!("Type errors: {:?}", r.errors))?;
     let lowered_names = lowered_root_names_from_decls(&decls, checked.type_env());
     let checked = chelis_effects::check_program(&checked).map_err(|errors| {
@@ -46,7 +46,8 @@ pub fn compile_surf(source: &str) -> Result<PipelineResult, String> {
     })?;
 
     // 4. Lower to RISC DAG
-    let dag = chelis_ir::lower::lower_program(&checked);
+    let dag = chelis_ir::lower::try_lower_program(&checked)
+        .map_err(|diagnostic| diagnostic.to_string())?;
 
     if dag.roots().len() != lowered_names.len() {
         return Err(format!(

@@ -1,6 +1,6 @@
 //! S5.0 fixture verification — the wrapped Black-Scholes Deep fixture
 //! must (a) parse cleanly, (b) round-trip through `chelis fmt`, (c)
-//! typecheck via `chelis_types::check_phase0e_program`, and (d) carry
+//! typecheck via `chelis_types::check_ir_program`, and (d) carry
 //! the expected span IDs end-to-end.
 //!
 //! `call_price.dp` (the Octant-emitted equation-only fixture) and
@@ -66,9 +66,9 @@ fn wrapped_fixture_round_trips_through_fmt() {
 }
 
 #[test]
-fn wrapped_fixture_typechecks_phase0e() {
+fn wrapped_fixture_typechecks_ir() {
     let exprs = parse_str_strict(WRAPPED_DP).expect("parse");
-    match chelis_types::check_phase0e_program(&exprs) {
+    match chelis_types::check_ir_program(&exprs) {
         Ok(_) => {}
         Err(report) => {
             let msgs: Vec<String> = report
@@ -77,7 +77,7 @@ fn wrapped_fixture_typechecks_phase0e() {
                 .map(|e| format!("{:?}: {}", e.kind, e.message))
                 .collect();
             panic!(
-                "wrapped Black-Scholes fixture must Phase 0e typecheck; errors:\n  {}",
+                "wrapped Black-Scholes fixture must IR check typecheck; errors:\n  {}",
                 msgs.join("\n  ")
             );
         }

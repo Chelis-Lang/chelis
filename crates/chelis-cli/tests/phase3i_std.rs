@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use chelis_ir::host::lower_compiled_program;
 use chelis_reef::prepare_program_for_file;
 use chelis_surf::desugar::desugar_program;
-use chelis_types::{check_linearity, check_phase0e_program};
+use chelis_types::{check_ir_program, check_linearity};
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
@@ -727,7 +727,7 @@ greedy = generate(toy_model, context, cast(1, int64))
     let prepared = prepare_program_for_file(&app_pkg.join("src/main.ch")).expect("prepare program");
     let prepared = prepared.expect("package mode should prepare");
     let deep = desugar_program(&prepared.decls);
-    let checked = check_phase0e_program(&deep).expect("typecheck");
+    let checked = check_ir_program(&deep).expect("typecheck");
     let checked = chelis_effects::check_program(&checked).expect("effect check");
     let checked = check_linearity(&checked).expect("linearity");
     let compiled = lower_compiled_program(&checked);

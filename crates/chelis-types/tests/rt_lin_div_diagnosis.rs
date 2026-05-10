@@ -12,8 +12,8 @@ use chelis_surf::desugar::desugar_program;
 use chelis_surf::format::format_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::{
-    build_type_env_from_library, check_linearity, check_linearity_with_context,
-    check_phase0e_program, check_phase0e_with_context,
+    build_type_env_from_library, check_ir_program, check_ir_with_context, check_linearity,
+    check_linearity_with_context,
 };
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
@@ -61,16 +61,16 @@ fn pretty_print_program(label: &str, exprs: &[chelis_deep::Expr]) -> String {
 fn diagnosis_path_a_vs_path_b_annotated_exprs() {
     // ----- Path A: direct cache -----
     let library_deep = surf_to_deep(LIBRARY_SRC);
-    let library_checked_a = check_phase0e_program(&library_deep)
-        .unwrap_or_else(|e| panic!("Path A library check_phase0e failed: {:?}", e.errors));
+    let library_checked_a = check_ir_program(&library_deep)
+        .unwrap_or_else(|e| panic!("Path A library check_ir failed: {:?}", e.errors));
     let library_checked_a = check_linearity(&library_checked_a)
         .unwrap_or_else(|e| panic!("Path A library check_linearity failed: {:?}", e));
 
     let ctx_a = build_type_env_from_library(&library_deep)
         .unwrap_or_else(|e| panic!("Path A type-env build failed: {:?}", e));
     let new_deep_a = surf_to_deep(NEW_SRC);
-    let new_checked_a = check_phase0e_with_context(&ctx_a, &new_deep_a)
-        .unwrap_or_else(|e| panic!("Path A new-code check_phase0e failed: {:?}", e.errors));
+    let new_checked_a = check_ir_with_context(&ctx_a, &new_deep_a)
+        .unwrap_or_else(|e| panic!("Path A new-code check_ir failed: {:?}", e.errors));
 
     let lin_a = check_linearity_with_context(&library_checked_a, &new_checked_a);
     println!(
@@ -102,8 +102,8 @@ fn diagnosis_path_a_vs_path_b_annotated_exprs() {
     .expect("macro expand B")
     .into_exprs();
 
-    let library_checked_b = check_phase0e_program(&deep_b)
-        .unwrap_or_else(|e| panic!("Path B check_phase0e failed: {:?}", e.errors));
+    let library_checked_b = check_ir_program(&deep_b)
+        .unwrap_or_else(|e| panic!("Path B check_ir failed: {:?}", e.errors));
     let lin_b = check_linearity(&library_checked_b);
     println!(
         "PATH B (format-reparse) lin verdict: {}",
@@ -144,12 +144,8 @@ fn diagnosis_path_a_vs_path_b_annotated_exprs() {
     // Path B without the surf-format round-trip.
     let mut combined_pre_check: Vec<chelis_deep::Expr> = library_deep.clone();
     combined_pre_check.extend(new_deep_a.clone());
-    let combined_checked = check_phase0e_program(&combined_pre_check).unwrap_or_else(|e| {
-        panic!(
-            "Combined (unformatted) check_phase0e failed: {:?}",
-            e.errors
-        )
-    });
+    let combined_checked = check_ir_program(&combined_pre_check)
+        .unwrap_or_else(|e| panic!("Combined (unformatted) check_ir failed: {:?}", e.errors));
     let lin_combined = check_linearity(&combined_checked);
     println!(
         "COMBINED (no-format) monolithic lin verdict: {}",
@@ -167,26 +163,21 @@ fn diagnosis_path_a_vs_path_b_annotated_exprs() {
 
     // ----- Probe: do prelude ADTs make the difference? -----
     //
-    // Hypothesis: `annotate_phase0e_program` (called from
-    // `check_phase0e_program`) builds with EMPTY ADT registry — no Cons/Nil
+    // Hypothesis: `annotate_ir_program` (called from
+    // `check_ir_program`) builds with EMPTY ADT registry — no Cons/Nil
     // — so `to_tensor([..])` body of linspace fails to resolve, leaving
     // linspace's return type as `t-var _`. The `_with_context` path with a
     // non-empty `TypeEnv` (built via `build_type_env_from_library`, which
     // starts from `TypeEnv::empty()` whose prelude ADTs ARE registered)
     // does resolve it.
     //
-    // Cross-check: run check_phase0e_with_context with TypeEnv::empty() on
+    // Cross-check: run check_ir_with_context with TypeEnv::empty() on
     // the COMBINED program. TypeEnv::empty() has library_def_count == 0,
-    // so it falls back to annotate_phase0e_program — empty ADT registry.
+    // so it falls back to annotate_ir_program — empty ADT registry.
     // Verdict should match Path B / combined_no_format.
     let combined_checked_via_empty_ctx =
-        check_phase0e_with_context(&chelis_types::TypeEnv::empty(), &combined_pre_check)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "Combined via empty ctx check_phase0e failed: {:?}",
-                    e.errors
-                )
-            });
+        check_ir_with_context(&chelis_types::TypeEnv::empty(), &combined_pre_check)
+            .unwrap_or_else(|e| panic!("Combined via empty ctx check_ir failed: {:?}", e.errors));
     let lin_via_empty_ctx = check_linearity(&combined_checked_via_empty_ctx);
     println!(
         "COMBINED via TypeEnv::empty() ctx lin verdict: {}",
@@ -197,24 +188,19 @@ fn diagnosis_path_a_vs_path_b_annotated_exprs() {
     );
 
     // Now the kicker: build a TypeEnv from the library, then run the new
-    // code through check_phase0e_with_context with that NON-EMPTY context.
+    // code through check_ir_with_context with that NON-EMPTY context.
     // (This is exactly Path A's flow.)
     println!(
         "(Path A is the same: built type_env from library, ran new code with non-empty ctx → REJECT.)"
     );
 
-    // Cross-check #2: run check_phase0e_with_context with a NON-EMPTY
+    // Cross-check #2: run check_ir_with_context with a NON-EMPTY
     // type_env (built from library) on the COMBINED program (library
     // duplicated). This isolates whether the `_with_context` annotation
     // branch alone changes the verdict, independent of new-code-only
     // walking.
-    let combined_via_nonempty_ctx = check_phase0e_with_context(&ctx_a, &combined_pre_check)
-        .unwrap_or_else(|e| {
-            panic!(
-                "Combined via non-empty ctx check_phase0e failed: {:?}",
-                e.errors
-            )
-        });
+    let combined_via_nonempty_ctx = check_ir_with_context(&ctx_a, &combined_pre_check)
+        .unwrap_or_else(|e| panic!("Combined via non-empty ctx check_ir failed: {:?}", e.errors));
     let lin_via_nonempty_ctx = check_linearity(&combined_via_nonempty_ctx);
     println!(
         "COMBINED via non-empty (lib) ctx lin verdict: {}",
@@ -224,10 +210,10 @@ fn diagnosis_path_a_vs_path_b_annotated_exprs() {
         }
     );
 
-    // Cross-check #3: run check_phase0e_with_context with a NON-EMPTY
+    // Cross-check #3: run check_ir_with_context with a NON-EMPTY
     // type_env (built from library) on JUST the new code. Same as Path A.
     let new_via_nonempty_ctx =
-        check_phase0e_with_context(&ctx_a, &new_deep_a).expect("new via non-empty ctx clean");
+        check_ir_with_context(&ctx_a, &new_deep_a).expect("new via non-empty ctx clean");
     let lin_new_via_nonempty_ctx_mono = check_linearity(&new_via_nonempty_ctx);
     println!(
         "NEW-only via non-empty (lib) ctx + monolithic lin verdict: {}",

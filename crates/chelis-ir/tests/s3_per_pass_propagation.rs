@@ -917,7 +917,7 @@ fn ad_on_unspanned_forward_dag_does_not_fabricate_spans() {
 fn s3_oracle_lowering_then_optimization_passes() {
     use chelis_deep::Expr;
     use chelis_ir::lower_program;
-    use chelis_types::{check_linearity, check_phase0e_program};
+    use chelis_types::{check_ir_program, check_linearity};
     use std::collections::BTreeSet;
 
     // A small but rich program: tier-2 sub (decomposes), constants
@@ -962,7 +962,7 @@ fn s3_oracle_lowering_then_optimization_passes() {
         "fixture must carry many spans; got {input_spans:?}"
     );
 
-    let checked = check_phase0e_program(&exprs).expect("Phase 0e");
+    let checked = check_ir_program(&exprs).expect("IR check");
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = check_linearity(&checked).expect("linearity");
 

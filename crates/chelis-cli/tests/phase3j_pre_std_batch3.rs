@@ -6,7 +6,7 @@
 //!
 //! Conv wrapper and attention modules are deliberately out of scope for
 //! this batch; see `spec/design/chelis_phase3_plan.md` §3j-pre for the
-//! Phase 0e conv2d concreteness constraint + scalar-broadcast gap.
+//! IR check conv2d concreteness constraint + scalar-broadcast gap.
 //!
 //! The test harness constructs a minimal standalone chelis-std package
 //! containing only the Batch 3 source files (plus the three baseline

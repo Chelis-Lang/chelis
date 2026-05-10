@@ -27,7 +27,7 @@ use chelis_deep::Expr;
 use chelis_ir::host::{
     HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostProgram, lower_compiled_program,
 };
-use chelis_types::{check_linearity, check_phase0e_program};
+use chelis_types::{check_ir_program, check_linearity};
 
 // ── Schema lock test ──────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ fn host_expr_schema_carries_span_id_and_merged_spans() {
 
 fn check(source: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
-    let checked = check_phase0e_program(&exprs).expect("Phase 0e clean");
+    let checked = check_ir_program(&exprs).expect("IR check clean");
     let checked = chelis_effects::check_program(&checked).expect("effects clean");
     check_linearity(&checked).expect("linearity clean")
 }

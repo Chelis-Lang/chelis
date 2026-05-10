@@ -6,6 +6,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-05-10
+
+### Fixed — lowering diagnostics and release test coverage
+
+Chelis lowering now exposes structured diagnostics for valid language forms that
+are not supported by IR evaluation instead of letting internal lowering panics
+escape through user-facing commands. Diagnostics include source offsets or span
+IDs when available and point users at `chelis build --target c` when the C host
+backend is the supported path.
+
+`chelis test` now has regression coverage for pipe stages that must fall back to
+the host runtime, and the release workflow runs the same pipe-stage fixture
+against the built release binary before publishing assets.
+
 ## [0.7.2] — 2026-05-10
 
 ### Fixed — bridge provenance diagnostics

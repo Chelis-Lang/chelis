@@ -118,20 +118,20 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     }
 }
 
-pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
+pub fn check_ir_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
     // Compose: empty outer scope, then check exprs as new code against it.
-    // This keeps a single source of truth for the Phase 0e check pipeline.
-    check_phase0e_with_context(&TypeEnv::empty(), exprs)
+    // This keeps a single source of truth for the IR check pipeline.
+    check_ir_with_context(&TypeEnv::empty(), exprs)
 }
 
 /// Build a stacked outer-scope context from a library decl list. The
-/// library is run through the full Phase 0e pipeline; if any errors are
+/// library is run through the full IR pipeline; if any errors are
 /// found they are returned to the caller (the context cannot be built
 /// from an unchecked library).
 ///
 /// Once built, the returned [`TypeEnv`] can be re-used to type-check
 /// many separate "new code" snippets via
-/// [`check_phase0e_with_context`]. The library state is `Arc`-shared and
+/// [`check_ir_with_context`]. The library state is `Arc`-shared and
 /// never mutated, so concurrent reads are cheap.
 pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
@@ -152,20 +152,20 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
     let empty = TypeEnv::empty();
     let mut state = empty.inner().clone();
 
-    // Library Phase 0e declared-type lookup.
-    let library_phase0e = build_phase0e_type_env(library_exprs);
-    log_sub("build_phase0e_type_env_initial", &mut sub_t);
+    // Library IR declared-type lookup.
+    let library_ir = build_ir_type_env(library_exprs);
+    log_sub("build_ir_type_env_initial", &mut sub_t);
 
-    let mut result = infer_phase0e_program_with_state(
+    let mut result = infer_ir_program_with_state(
         library_exprs,
-        &library_phase0e,
+        &library_ir,
         &mut state,
-        /* combined_phase0e_for_validate = */ &library_phase0e,
+        /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
     );
-    log_sub("infer_phase0e_program_with_state", &mut sub_t);
-    validate_phase0e_program(library_exprs, &library_phase0e, &mut result.errors);
-    log_sub("validate_phase0e_program", &mut sub_t);
+    log_sub("infer_ir_program_with_state", &mut sub_t);
+    validate_ir_program(library_exprs, &library_ir, &mut result.errors);
+    log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
@@ -189,18 +189,18 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
 
     // Drain accumulated errors back into the state's storage; they were
     // empty above so this is a no-op, but the call site is symmetric
-    // with check_phase0e_with_context.
+    // with check_ir_with_context.
     let _ = result.errors.drain(..);
 
-    // Build a richer `phase0e_types` by annotating library exprs against
+    // Build a richer `ir_types` by annotating library exprs against
     // the now-populated state and re-extracting type metadata. The raw
-    // `library_phase0e` (built from un-annotated source) only catches defs
+    // `library_ir` (built from un-annotated source) only catches defs
     // with explicit type annotations; for downstream callers that read
     // `CheckedProgram::type_env()` to resolve cross-context name refs
     // (Phase D effects, Phase E linearity, Phase F lower) we need every
     // library def's inferred function type, not just the explicitly-typed
-    // ones. Mirrors the monolithic `check_phase0e_program` flow which
-    // calls `annotate_phase0e_program` then `build_phase0e_type_env` on
+    // ones. Mirrors the monolithic `check_ir_program` flow which
+    // calls `annotate_ir_program` then `build_ir_type_env` on
     // the annotated result.
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
@@ -209,28 +209,28 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
         })
         .collect();
     log_sub("annotate_library_exprs_outer_loop", &mut sub_t);
-    let library_phase0e_annotated = build_phase0e_type_env(&library_annotated);
-    log_sub("build_phase0e_type_env_from_annotated", &mut sub_t);
+    let library_ir_annotated = build_ir_type_env(&library_annotated);
+    log_sub("build_ir_type_env_from_annotated", &mut sub_t);
 
     Ok(TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
         subst: state.subst,
         adt_reg: state.adt_reg,
-        phase0e_types: library_phase0e_annotated,
+        ir_types: library_ir_annotated,
         library_def_names,
     }))
 }
 
-/// Combined library-build helper: run the Phase 0e pipeline ONCE over the
+/// Combined library-build helper: run the IR pipeline ONCE over the
 /// library and return both the [`TypeEnv`] (for downstream `_with_context`
 /// calls) and a [`CheckedProgram`] equivalent to what
-/// `check_phase0e_with_context(&TypeEnv::empty(), library_exprs)` would
+/// `check_ir_with_context(&TypeEnv::empty(), library_exprs)` would
 /// return.
 ///
 /// This avoids the duplicated work that occurs when callers run
 /// [`build_type_env_from_library`] followed by
-/// `check_phase0e_with_context(empty, library)` — both paths separately
+/// `check_ir_with_context(empty, library)` — both paths separately
 /// run a full HM inference + annotation pass over the same library
 /// exprs. Per `docs/archive/perf/perf_baseline_investigation.md`, the unified path
 /// saves ~16s of duplicated inference + annotation on Coral.
@@ -240,23 +240,23 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
 ///   `HashMap` iteration) to `build_type_env_from_library(library_exprs)`.
 /// - The returned `CheckedProgram` has the same `annotated_exprs()` and
 ///   `type_env()` shapes that
-///   `check_phase0e_with_context(&TypeEnv::empty(), library_exprs)`
+///   `check_ir_with_context(&TypeEnv::empty(), library_exprs)`
 ///   produces — namely, annotated library exprs in source order plus a
-///   `phase0e_types` map keyed on every library def.
+///   `ir_types` map keyed on every library def.
 /// - On any error the same `Err(InferResult)` is returned that the
 ///   sequential calls would have returned.
 ///
 /// Internal sequencing:
-/// 1. Build the per-decl `Phase0eTypeEnv` from un-annotated source.
-/// 2. Run `infer_phase0e_program_with_state` once, populating `state`.
-/// 3. Run all validators (`validate_phase0e_program`,
+/// 1. Build the per-decl `IrTypeEnv` from un-annotated source.
+/// 2. Run `infer_ir_program_with_state` once, populating `state`.
+/// 3. Run all validators (`validate_ir_program`,
 ///    `validate_tensor_precisions_in_program`,
 ///    `suppress_unbound_for_cycle_members`).
 /// 4. Annotate the library exprs once using the populated `state.env`.
-/// 5. Build `library_phase0e_annotated` from the annotated exprs.
-/// 6. Compose the `TypeEnv` from `state` + `library_phase0e_annotated`.
+/// 5. Build `library_ir_annotated` from the annotated exprs.
+/// 6. Compose the `TypeEnv` from `state` + `library_ir_annotated`.
 /// 7. Compose the `CheckedProgram` from the annotated exprs +
-///    `library_phase0e_annotated`.
+///    `library_ir_annotated`.
 pub fn build_compiled_library_context(
     library_exprs: &[deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
@@ -265,16 +265,16 @@ pub fn build_compiled_library_context(
     let empty = TypeEnv::empty();
     let mut state = empty.inner().clone();
 
-    let library_phase0e = build_phase0e_type_env(library_exprs);
+    let library_ir = build_ir_type_env(library_exprs);
 
-    let mut result = infer_phase0e_program_with_state(
+    let mut result = infer_ir_program_with_state(
         library_exprs,
-        &library_phase0e,
+        &library_ir,
         &mut state,
-        /* combined_phase0e_for_validate = */ &library_phase0e,
+        /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
     );
-    validate_phase0e_program(library_exprs, &library_phase0e, &mut result.errors);
+    validate_ir_program(library_exprs, &library_ir, &mut result.errors);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
     if !result.errors.is_empty() {
@@ -294,13 +294,13 @@ pub fn build_compiled_library_context(
 
     // Drain accumulated errors back into the state's storage; they were
     // empty above so this is a no-op, but the call site is symmetric
-    // with check_phase0e_with_context.
+    // with check_ir_with_context.
     let _ = result.errors.drain(..);
 
     // SINGLE annotation pass — feeds both the TypeEnv's
-    // `phase0e_types` AND the returned CheckedProgram's `annotated_exprs`.
+    // `ir_types` AND the returned CheckedProgram's `annotated_exprs`.
     // Previously `build_type_env_from_library` did one annotation here
-    // (~13.8s on Coral) and `check_phase0e_with_context(empty, library)`
+    // (~13.8s on Coral) and `check_ir_with_context(empty, library)`
     // did a separate, redundant inference+annotation pass (~16.8s).
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
@@ -308,23 +308,23 @@ pub fn build_compiled_library_context(
             annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
         })
         .collect();
-    let library_phase0e_annotated = build_phase0e_type_env(&library_annotated);
+    let library_ir_annotated = build_ir_type_env(&library_annotated);
 
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
         subst: state.subst,
         adt_reg: state.adt_reg,
-        phase0e_types: library_phase0e_annotated.clone(),
+        ir_types: library_ir_annotated.clone(),
         library_def_names,
     });
 
     // Build the CheckedProgram with the same `annotated_type_env` shape
-    // that `check_phase0e_with_context(empty, library)` produces. With an
-    // empty outer scope, `context.inner().phase0e_types` is empty, so the
+    // that `check_ir_with_context(empty, library)` produces. With an
+    // empty outer scope, `context.inner().ir_types` is empty, so the
     // union step is a no-op and `annotated_type_env ==
-    // library_phase0e_annotated`.
-    let checked = CheckedProgram::from_parts(library_annotated, library_phase0e_annotated);
+    // library_ir_annotated`.
+    let checked = CheckedProgram::from_parts(library_annotated, library_ir_annotated);
 
     Ok((type_env, checked))
 }
@@ -352,7 +352,7 @@ pub fn build_compiled_library_context(
 ///   APIs need to walk library bodies and will silently mis-handle
 ///   library-effect propagation, library tensor consumption, and library
 ///   IR roots if fed only the new-code annotated decls.
-pub fn check_phase0e_with_context(
+pub fn check_ir_with_context(
     context: &TypeEnv,
     new_exprs: &[deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
@@ -363,7 +363,7 @@ pub fn check_phase0e_with_context(
     let log_sub = |label: &str, t: &mut std::time::Instant| {
         if detail_profile {
             eprintln!(
-                "check_phase0e_sub: {:>8.4}s {}",
+                "check_ir_sub: {:>8.4}s {}",
                 t.elapsed().as_secs_f64(),
                 label
             );
@@ -372,32 +372,32 @@ pub fn check_phase0e_with_context(
     };
     let mut state = context.inner().clone();
 
-    // New-code declared types (Phase 0e) layered on top of library's.
-    let new_phase0e = build_phase0e_type_env(new_exprs);
-    let combined_phase0e: HashMap<String, deep::Expr> = state
-        .phase0e_types
+    // New-code declared types (IR) layered on top of library's.
+    let new_ir = build_ir_type_env(new_exprs);
+    let combined_ir: HashMap<String, deep::Expr> = state
+        .ir_types
         .iter()
-        .chain(new_phase0e.iter())
+        .chain(new_ir.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    log_sub("build_phase0e_and_combine", &mut sub_t);
+    log_sub("build_ir_and_combine", &mut sub_t);
 
     // Library is already validated; only run validate / inference on
-    // new exprs. The Phase 0e env passed to inference is the new-code's
+    // new exprs. The IR env passed to inference is the new-code's
     // own declared types (library schemes are already in state.env).
-    let mut result = infer_phase0e_program_with_state(
+    let mut result = infer_ir_program_with_state(
         new_exprs,
-        &new_phase0e,
+        &new_ir,
         &mut state,
-        &combined_phase0e,
+        &combined_ir,
         /* run_validate_passes_on = */ None,
     );
-    log_sub("infer_phase0e_program_with_state", &mut sub_t);
+    log_sub("infer_ir_program_with_state", &mut sub_t);
     // Run cycle / shape / precision validators on new_exprs only. The
-    // combined Phase 0e env is supplied so `(var libfoo)` references
+    // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
-    validate_phase0e_program(new_exprs, &combined_phase0e, &mut result.errors);
-    log_sub("validate_phase0e_program", &mut sub_t);
+    validate_ir_program(new_exprs, &combined_ir, &mut result.errors);
+    log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(new_exprs, &mut result.errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
     suppress_unbound_for_cycle_members_against_context(
@@ -412,14 +412,14 @@ pub fn check_phase0e_with_context(
 
     // Annotate ONLY the new-code exprs, starting from the library
     // snapshot state so library names resolve during annotation.
-    let annotated_exprs = annotate_phase0e_program_with_context(context, new_exprs);
-    log_sub("annotate_phase0e_program_with_context", &mut sub_t);
+    let annotated_exprs = annotate_ir_program_with_context(context, new_exprs);
+    log_sub("annotate_ir_program_with_context", &mut sub_t);
     // Surface library declared types in the returned type_env so downstream
     // passes (lower, effects, linearity) can resolve `(var libname)` calls
     // from new-code without a separate library lookup. New-code types take
     // precedence on shadow.
-    let mut annotated_type_env = build_phase0e_type_env(&annotated_exprs);
-    for (name, ty) in &context.inner().phase0e_types {
+    let mut annotated_type_env = build_ir_type_env(&annotated_exprs);
+    for (name, ty) in &context.inner().ir_types {
         annotated_type_env
             .entry(name.clone())
             .or_insert_with(|| ty.clone());
@@ -434,8 +434,8 @@ pub fn check_phase0e_with_context(
 pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
     let result = infer_program(exprs);
     if result.errors.is_empty() {
-        let annotated_exprs = annotate_phase0e_program(exprs);
-        let annotated_type_env = build_phase0e_type_env(&annotated_exprs);
+        let annotated_exprs = annotate_ir_program(exprs);
+        let annotated_type_env = build_ir_type_env(&annotated_exprs);
         Ok(CheckedProgram::from_parts(
             annotated_exprs,
             annotated_type_env,
@@ -445,10 +445,10 @@ pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Infer
     }
 }
 
-pub fn infer_phase0e_program(exprs: &[deep::Expr]) -> InferResult {
-    let type_env = build_phase0e_type_env(exprs);
-    let mut result = infer_phase0e_program_with_env(exprs, &type_env);
-    validate_phase0e_program(exprs, &type_env, &mut result.errors);
+pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
+    let type_env = build_ir_type_env(exprs);
+    let mut result = infer_ir_program_with_env(exprs, &type_env);
+    validate_ir_program(exprs, &type_env, &mut result.errors);
     validate_tensor_precisions_in_program(exprs, &mut result.errors);
     suppress_unbound_for_cycle_members(exprs, &mut result.errors);
     result
@@ -523,29 +523,29 @@ fn suppress_unbound_for_cycle_members_against_context(
     });
 }
 
-fn infer_phase0e_program_with_env(exprs: &[deep::Expr], type_env: &Phase0eTypeEnv) -> InferResult {
-    // Backwards-compat wrapper. Callers (like `infer_phase0e_program` and
-    // `check_typed_program` callers) run `validate_phase0e_program`
+fn infer_ir_program_with_env(exprs: &[deep::Expr], type_env: &IrTypeEnv) -> InferResult {
+    // Backwards-compat wrapper. Callers (like `infer_ir_program` and
+    // `check_typed_program` callers) run `validate_ir_program`
     // separately, so we pass `None` here to skip the embedded validate.
     let empty_inner = crate::context::TypeEnv::empty();
     let mut state = empty_inner.inner().clone();
-    infer_phase0e_program_with_state(
+    infer_ir_program_with_state(
         exprs, type_env, &mut state, type_env, /* run_validate_passes_on = */ None,
     )
 }
 
-/// Run the inference / Phase 0e binding / shape-validation passes against
+/// Run the inference / IR binding / shape-validation passes against
 /// `state`, mutating it as it goes. Library state should be supplied by
 /// pre-cloning a snapshot; pass `&[]`-derived state for the monolithic
-/// path. `new_phase0e_types` are bound into `state.env` here; the
-/// `combined_phase0e` is what `validate_phase0e_program` consults so
+/// path. `new_ir_types` are bound into `state.env` here; the
+/// `combined_ir` is what `validate_ir_program` consults so
 /// new-code shape validation can look up declared types of library
 /// references.
-fn infer_phase0e_program_with_state(
+fn infer_ir_program_with_state(
     exprs: &[deep::Expr],
-    new_phase0e_types: &Phase0eTypeEnv,
+    new_ir_types: &IrTypeEnv,
     state: &mut TypeEnvInner,
-    combined_phase0e: &Phase0eTypeEnv,
+    combined_ir: &IrTypeEnv,
     run_validate_passes_on: Option<&[deep::Expr]>,
 ) -> InferResult {
     let mut errors = Vec::new();
@@ -566,7 +566,7 @@ fn infer_phase0e_program_with_state(
         );
     }
 
-    for (name, ty_expr) in new_phase0e_types {
+    for (name, ty_expr) in new_ir_types {
         let ty = deep_type_to_resolved_type(
             ty_expr,
             &mut state.var_gen,
@@ -602,11 +602,7 @@ fn infer_phase0e_program_with_state(
         if let Some(t0) = t0 {
             let elapsed = t0.elapsed();
             let name = top_level_decl_name(expr).unwrap_or("<anon>");
-            eprintln!(
-                "infer_phase0e_decl: {:>8.4}s {}",
-                elapsed.as_secs_f64(),
-                name
-            );
+            eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
         }
     }
 
@@ -622,7 +618,7 @@ fn infer_phase0e_program_with_state(
     }
 
     if let Some(target_exprs) = run_validate_passes_on {
-        validate_phase0e_program(target_exprs, combined_phase0e, &mut errors);
+        validate_ir_program(target_exprs, combined_ir, &mut errors);
     }
 
     InferResult {
@@ -632,17 +628,17 @@ fn infer_phase0e_program_with_state(
     }
 }
 
-type Phase0eTypeEnv = HashMap<String, deep::Expr>;
+type IrTypeEnv = HashMap<String, deep::Expr>;
 
-fn build_phase0e_type_env(exprs: &[deep::Expr]) -> Phase0eTypeEnv {
+fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
     let mut env = HashMap::new();
     for expr in top_level_decl_items(exprs) {
-        collect_phase0e_types(expr, &mut env);
+        collect_ir_types(expr, &mut env);
     }
     env
 }
 
-fn collect_phase0e_types(expr: &deep::Expr, env: &mut Phase0eTypeEnv) {
+fn collect_ir_types(expr: &deep::Expr, env: &mut IrTypeEnv) {
     let deep::Expr::List(list, _) = expr else {
         return;
     };
@@ -660,16 +656,12 @@ fn collect_phase0e_types(expr: &deep::Expr, env: &mut Phase0eTypeEnv) {
     }
 }
 
-fn validate_phase0e_program(
-    exprs: &[deep::Expr],
-    type_env: &Phase0eTypeEnv,
-    errors: &mut Vec<CheckError>,
-) {
+fn validate_ir_program(exprs: &[deep::Expr], type_env: &IrTypeEnv, errors: &mut Vec<CheckError>) {
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     let mut static_env = HashMap::new();
     for expr in top_level_decl_items(exprs) {
-        validate_phase0e_expr(expr, type_env, &mut static_env, errors);
+        validate_ir_expr(expr, type_env, &mut static_env, errors);
     }
 }
 
@@ -1525,9 +1517,9 @@ fn walk_for_tensor_precision(
     }
 }
 
-fn validate_phase0e_expr(
+fn validate_ir_expr(
     expr: &deep::Expr,
-    type_env: &Phase0eTypeEnv,
+    type_env: &IrTypeEnv,
     static_env: &mut HashMap<String, StaticValue>,
     errors: &mut Vec<CheckError>,
 ) -> StaticValue {
@@ -1535,7 +1527,7 @@ fn validate_phase0e_expr(
         deep::Expr::List(list, _) => {
             if get_tag(list) == Some("module") {
                 for elem in list.elements.iter().skip(3) {
-                    validate_phase0e_expr(elem, type_env, static_env, errors);
+                    validate_ir_expr(elem, type_env, static_env, errors);
                 }
                 return StaticValue::Unknown;
             }
@@ -1547,16 +1539,16 @@ fn validate_phase0e_expr(
                 let Some(value_expr) = kids.get(1) else {
                     return StaticValue::Unknown;
                 };
-                let value = validate_phase0e_expr(value_expr, type_env, static_env, errors);
+                let value = validate_ir_expr(value_expr, type_env, static_env, errors);
                 static_env.insert(name.to_string(), value);
                 return StaticValue::Unknown;
             }
             if get_tag(list) == Some("fn") {
-                let scoped_env = extend_phase0e_env_with_fn_params(list, type_env);
+                let scoped_env = extend_ir_env_with_fn_params(list, type_env);
                 let mut scoped_static_env = static_env.clone();
                 bind_fn_params_unknown(list, &mut scoped_static_env);
                 for elem in &list.elements {
-                    validate_phase0e_expr(elem, &scoped_env, &mut scoped_static_env, errors);
+                    validate_ir_expr(elem, &scoped_env, &mut scoped_static_env, errors);
                 }
                 return StaticValue::Unknown;
             }
@@ -1570,7 +1562,7 @@ fn validate_phase0e_expr(
                     let mut index = 0;
                     while index + 1 < bind_children.len() {
                         if let Some(name) = symbol_name(&bind_children[index]) {
-                            let value = validate_phase0e_expr(
+                            let value = validate_ir_expr(
                                 &bind_children[index + 1],
                                 type_env,
                                 &mut scoped_static_env,
@@ -1582,7 +1574,7 @@ fn validate_phase0e_expr(
                     }
                 }
                 if let Some(body) = kids.get(1) {
-                    return validate_phase0e_expr(body, type_env, &mut scoped_static_env, errors);
+                    return validate_ir_expr(body, type_env, &mut scoped_static_env, errors);
                 }
                 return StaticValue::Unknown;
             }
@@ -1590,18 +1582,16 @@ fn validate_phase0e_expr(
                 if matches!(tag, "par" | "jit") {
                     errors.push(CheckError::new(
                         CheckErrorKind::Other,
-                        format!("`{tag}` is not supported by Phase 0e lowering"),
+                        format!("`{tag}` is not supported by IR lowering"),
                         vec!["Remove this construct or defer it to a later phase".to_string()],
                     ));
                 }
 
                 if tag == "app"
-                    && let Some(func_name) = phase0e_builtin_name(list)
-                    && is_phase0e_shape_sensitive_builtin(func_name)
+                    && let Some(func_name) = ir_builtin_name(list)
+                    && is_ir_shape_sensitive_builtin(func_name)
                 {
-                    validate_phase0e_builtin_symbolic_requirements(
-                        list, func_name, type_env, errors,
-                    );
+                    validate_ir_builtin_symbolic_requirements(list, func_name, type_env, errors);
                 }
             }
 
@@ -1624,7 +1614,7 @@ fn validate_phase0e_expr(
                 let kids = children(list);
                 return kids
                     .first()
-                    .map(|inner| validate_phase0e_expr(inner, type_env, static_env, errors))
+                    .map(|inner| validate_ir_expr(inner, type_env, static_env, errors))
                     .unwrap_or(StaticValue::Unknown);
             }
             if get_tag(list) == Some("app") {
@@ -1633,7 +1623,7 @@ fn validate_phase0e_expr(
                 let arg_values = kids
                     .iter()
                     .skip(1)
-                    .map(|arg| validate_phase0e_expr(arg, type_env, static_env, errors))
+                    .map(|arg| validate_ir_expr(arg, type_env, static_env, errors))
                     .collect::<Vec<_>>();
                 if func_name == Some("Cons") && arg_values.len() == 2 {
                     if let StaticValue::List(mut tail) = arg_values[1].clone() {
@@ -1649,21 +1639,21 @@ fn validate_phase0e_expr(
             }
 
             for elem in &list.elements {
-                validate_phase0e_expr(elem, type_env, static_env, errors);
+                validate_ir_expr(elem, type_env, static_env, errors);
             }
             StaticValue::Unknown
         }
         deep::Expr::Map(map, _) => {
             for (_, value) in &map.entries {
-                validate_phase0e_expr(value, type_env, static_env, errors);
+                validate_ir_expr(value, type_env, static_env, errors);
             }
             StaticValue::Unknown
         }
         deep::Expr::MetaExpr(meta, _) => {
             for (_, value) in &meta.entries {
-                validate_phase0e_expr(value, type_env, static_env, errors);
+                validate_ir_expr(value, type_env, static_env, errors);
             }
-            validate_phase0e_expr(&meta.expr, type_env, static_env, errors)
+            validate_ir_expr(&meta.expr, type_env, static_env, errors)
         }
         deep::Expr::Atom(_, _) => literal_static_value(expr),
     }
@@ -2141,10 +2131,10 @@ fn push_static_runtime_error(expr: &deep::Expr, errors: &mut Vec<CheckError>, me
     ));
 }
 
-fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     // Preserve historical behavior: build a fresh annotation state from
     // `builtin_env()` + an EMPTY ADT registry (no prelude registration).
-    // This is asymmetric with `infer_phase0e_program_with_env` (which DOES
+    // This is asymmetric with `infer_ir_program_with_env` (which DOES
     // register prelude ADTs), but downstream tooling — the host pipeline's
     // `expr_type` reader, eval-result root expansion via
     // `extend_root_names_from_value` — depends on this asymmetric type
@@ -2199,7 +2189,7 @@ fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "<anon>".to_string());
             eprintln!(
-                "annotate_phase0e_decl: {:>8.4}s {}",
+                "annotate_ir_decl: {:>8.4}s {}",
                 elapsed.as_secs_f64(),
                 label
             );
@@ -2215,16 +2205,13 @@ fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 /// new-code exprs are returned in the annotated result.
 ///
 /// When the context is empty (`library_def_count() == 0`) this falls
-/// back to [`annotate_phase0e_program`] to preserve the legacy
+/// back to [`annotate_ir_program`] to preserve the legacy
 /// "no-prelude" annotation shape that downstream tooling depends on.
 /// Once a non-empty library context is supplied, the library's prelude
 /// ADTs and decls are visible during annotation.
-fn annotate_phase0e_program_with_context(
-    context: &TypeEnv,
-    exprs: &[deep::Expr],
-) -> Vec<deep::Expr> {
+fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     if context.library_def_count() == 0 {
-        return annotate_phase0e_program(exprs);
+        return annotate_ir_program(exprs);
     }
     let mut state = context.inner().clone();
     let mut declaration_errors = Vec::new();
@@ -2279,7 +2266,7 @@ fn annotate_phase0e_program_with_context(
                 .or_else(|| module_name(expr).map(|m| format!("module:{m}")))
                 .unwrap_or_else(|| "<anon>".to_string());
             eprintln!(
-                "annotate_phase0e_decl: {:>8.4}s {}",
+                "annotate_ir_decl: {:>8.4}s {}",
                 elapsed.as_secs_f64(),
                 label
             );
@@ -2728,7 +2715,7 @@ fn span_of_list(list: &deep::List) -> Span {
         .unwrap_or_else(zero_span)
 }
 
-fn phase0e_builtin_name(list: &deep::List) -> Option<&str> {
+fn ir_builtin_name(list: &deep::List) -> Option<&str> {
     let func_expr = list.elements.get(2)?;
     let func_list = match func_expr {
         deep::Expr::List(list, _) => list,
@@ -2743,7 +2730,7 @@ fn phase0e_builtin_name(list: &deep::List) -> Option<&str> {
     }
 }
 
-fn is_phase0e_shape_sensitive_builtin(name: &str) -> bool {
+fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
     matches!(
         name,
         "matmul"
@@ -2766,7 +2753,7 @@ fn is_phase0e_shape_sensitive_builtin(name: &str) -> bool {
     )
 }
 
-fn expr_type_expr(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> Option<deep::Expr> {
+fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
     match expr {
         deep::Expr::List(list, _) => {
             if let Some(meta) = get_meta(list)
@@ -2786,10 +2773,7 @@ fn expr_type_expr(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> Option<deep::
     }
 }
 
-fn extend_phase0e_env_with_fn_params(
-    fn_list: &deep::List,
-    type_env: &Phase0eTypeEnv,
-) -> Phase0eTypeEnv {
+fn extend_ir_env_with_fn_params(fn_list: &deep::List, type_env: &IrTypeEnv) -> IrTypeEnv {
     let mut scoped = type_env.clone();
     let Some(params_expr) = children(fn_list).first() else {
         return scoped;
@@ -2818,16 +2802,16 @@ fn extend_phase0e_env_with_fn_params(
     scoped
 }
 
-fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> bool {
+fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &IrTypeEnv) -> bool {
     expr_type_expr(expr, type_env)
-        .map(|ty| type_expr_is_phase0e_concrete(&ty))
+        .map(|ty| type_expr_is_ir_concrete(&ty))
         .unwrap_or(false)
 }
 
-fn validate_phase0e_builtin_symbolic_requirements(
+fn validate_ir_builtin_symbolic_requirements(
     list: &deep::List,
     func_name: &str,
-    type_env: &Phase0eTypeEnv,
+    type_env: &IrTypeEnv,
     errors: &mut Vec<CheckError>,
 ) {
     match func_name {
@@ -2835,29 +2819,26 @@ fn validate_phase0e_builtin_symbolic_requirements(
             if !app_result_type_is_concrete(list) {
                 errors.push(CheckError::new(
                     CheckErrorKind::Other,
-                    "Phase 0e builtin `conv2d` requires concrete output tensor dimensions"
-                        .to_string(),
-                    vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
+                    "IR builtin `conv2d` requires concrete output tensor dimensions".to_string(),
+                    vec!["Use concrete d-lit dimensions for IR lowering".to_string()],
                 ));
             }
             for arg in list.elements.iter().skip(3).take(2) {
                 if !expr_tensor_type_is_concrete(arg, type_env) {
                     errors.push(CheckError::new(
                         CheckErrorKind::Other,
-                        "Phase 0e builtin `conv2d` requires concrete tensor argument metadata"
+                        "IR builtin `conv2d` requires concrete tensor argument metadata"
                             .to_string(),
-                        vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
+                        vec!["Use concrete d-lit dimensions for IR lowering".to_string()],
                     ));
                     break;
                 }
             }
         }
-        "mean"
-            if phase0e_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) =>
-        {
+        "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
             errors.push(CheckError::new(
                 CheckErrorKind::Other,
-                "Phase 0e builtin `mean` requires a concrete reduced axis extent".to_string(),
+                "IR builtin `mean` requires a concrete reduced axis extent".to_string(),
                 vec!["Use a concrete d-lit dimension on the reduced axis".to_string()],
             ));
         }
@@ -2873,7 +2854,7 @@ fn validate_phase0e_builtin_symbolic_requirements(
             ) {
                 errors.push(CheckError::new(
                     CheckErrorKind::Other,
-                    "Phase 0e builtin `layer_norm` requires a concrete normalized axis extent"
+                    "IR builtin `layer_norm` requires a concrete normalized axis extent"
                         .to_string(),
                     vec!["Use a concrete d-lit dimension for the final axis".to_string()],
                 ));
@@ -2883,9 +2864,9 @@ fn validate_phase0e_builtin_symbolic_requirements(
     }
 }
 
-fn phase0e_builtin_axis_dim(
+fn ir_builtin_axis_dim(
     list: &deep::List,
-    type_env: &Phase0eTypeEnv,
+    type_env: &IrTypeEnv,
     tensor_arg_index: usize,
     axis_arg_index: usize,
 ) -> Option<DeepDimKind> {
@@ -2904,7 +2885,7 @@ fn phase0e_builtin_axis_dim(
 fn app_result_type_is_concrete(list: &deep::List) -> bool {
     get_meta(list)
         .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
-        .map(|(_, ty)| type_expr_is_phase0e_concrete(ty))
+        .map(|(_, ty)| type_expr_is_ir_concrete(ty))
         .unwrap_or(false)
 }
 
@@ -2948,7 +2929,7 @@ fn tensor_dims_from_type_expr(expr: &deep::Expr) -> Option<Vec<DeepDimKind>> {
     Some(dims)
 }
 
-fn type_expr_is_phase0e_concrete(expr: &deep::Expr) -> bool {
+fn type_expr_is_ir_concrete(expr: &deep::Expr) -> bool {
     match expr {
         deep::Expr::List(list, _) if get_tag(list) == Some("t-prim") => true,
         _ => tensor_dims_from_type_expr(expr)
@@ -8680,7 +8661,7 @@ mod tests {
     fn checked_surf(src: &str) -> CheckedProgram {
         let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
-        check_phase0e_program(&exprs).expect("phase 0e check")
+        check_ir_program(&exprs).expect("IR check")
     }
 
     fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
@@ -8728,7 +8709,7 @@ mod tests {
 
     fn is_shape_sensitive_app(list: &deep::List) -> bool {
         get_tag(list) == Some("app")
-            && phase0e_builtin_name(list).is_some_and(super::is_phase0e_shape_sensitive_builtin)
+            && ir_builtin_name(list).is_some_and(super::is_ir_shape_sensitive_builtin)
     }
 
     fn check_ok(src: &str) {
@@ -9319,7 +9300,7 @@ mod tests {
              (def {} g (grad {} (var {} f)))",
         )
         .unwrap();
-        let checked = check_phase0e_program(&exprs).expect("phase 0e check");
+        let checked = check_ir_program(&exprs).expect("IR check");
         let ty = checked.type_env().get("g").expect("g type");
         assert_eq!(
             chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
@@ -9358,7 +9339,7 @@ mod tests {
                 (grad {} (var {} loss) (lit {type: (t-prim {} int32)} 1)))",
         )
         .unwrap();
-        let checked = check_phase0e_program(&exprs).expect("phase 0e check");
+        let checked = check_ir_program(&exprs).expect("IR check");
         let ty = checked.type_env().get("dw").expect("dw type");
         assert_eq!(
             chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
@@ -9386,7 +9367,7 @@ mod tests {
                         (lit {type: (t-prim {} int32)} 1))))",
         )
         .unwrap();
-        let checked = check_phase0e_program(&exprs).expect("phase 0e check");
+        let checked = check_ir_program(&exprs).expect("IR check");
         let ty = checked.type_env().get("grads").expect("grads type");
         assert_eq!(
             chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
@@ -9979,7 +9960,7 @@ mod tests {
     }
 
     #[test]
-    fn phase0e_literal_dimension_mismatch_surfaces_error() {
+    fn ir_literal_dimension_mismatch_surfaces_error() {
         let decls = chelis_surf::parser::parse_str(
             "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
              def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
@@ -9987,19 +9968,19 @@ mod tests {
         .expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
 
-        let result = infer_phase0e_program(&exprs);
+        let result = infer_ir_program(&exprs);
         assert!(
             result
                 .errors
                 .iter()
                 .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
-            "expected phase0e inference to preserve literal dimension mismatches, got {:?}",
+            "expected ir inference to preserve literal dimension mismatches, got {:?}",
             result.errors
         );
     }
 
     #[test]
-    fn phase0e_rejects_polymorphic_dims_pinned_by_body() {
+    fn ir_rejects_polymorphic_dims_pinned_by_body() {
         let decls = chelis_surf::parser::parse_str(
             "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
              def bad_consumer[m, n](a: tensor[m, n, f32]) -> f32 = want_2x2(a)\n\
@@ -10008,19 +9989,19 @@ mod tests {
         .expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
 
-        let result = infer_phase0e_program(&exprs);
+        let result = infer_ir_program(&exprs);
         assert!(
             result
                 .errors
                 .iter()
                 .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
-            "expected phase0e inference to reject polymorphic dims forced to literals by the body, got {:?}",
+            "expected ir inference to reject polymorphic dims forced to literals by the body, got {:?}",
             result.errors
         );
     }
 
     #[test]
-    fn phase0e_preserves_unresolved_name_errors() {
+    fn ir_preserves_unresolved_name_errors() {
         let decls = chelis_surf::parser::parse_str(
             "def probe(x: f32) -> f32 = sub(x, frobnicate(x))\n\
              def main() -> f32 = probe(cast(1.0, f32))\n",
@@ -10028,26 +10009,26 @@ mod tests {
         .expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
 
-        let result = infer_phase0e_program(&exprs);
+        let result = infer_ir_program(&exprs);
         assert!(
             result
                 .errors
                 .iter()
                 .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable)),
-            "expected phase0e inference to preserve unresolved-name errors, got {:?}",
+            "expected ir inference to preserve unresolved-name errors, got {:?}",
             result.errors
         );
 
-        let report = crate::fitness::check_phase0e_program(&exprs);
+        let report = crate::fitness::check_ir_program(&exprs);
         assert!(
             report.unresolved_names.contains(&"frobnicate".to_string()),
-            "expected phase0e fitness report to include unresolved frobnicate, got {:?}",
+            "expected ir fitness report to include unresolved frobnicate, got {:?}",
             report.unresolved_names
         );
     }
 
     #[test]
-    fn phase0e_resolves_unique_terminal_constructor_names() {
+    fn ir_resolves_unique_terminal_constructor_names() {
         let decls = chelis_surf::parser::parse_str(
             "type KVCache[a] = | KVCache(List[a])\n\
              def keep_cache[p](cache: Option[KVCache[p]]) -> KVCache[p] =\n\
@@ -10059,7 +10040,7 @@ mod tests {
         .expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
 
-        let result = infer_phase0e_program(&exprs);
+        let result = infer_ir_program(&exprs);
         assert!(
             !result
                 .errors
@@ -10193,7 +10174,7 @@ mod tests {
             "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
         )
         .unwrap();
-        let checked = check_phase0e_program(&exprs).expect("checked program");
+        let checked = check_ir_program(&exprs).expect("checked program");
         let text = chelis_deep::printer::print_canonical(checked.annotated_exprs());
         assert!(
             text.contains("(fn {type: (t-fn {} (t-prim {} f32) (t-prim {} f32))}"),
@@ -10209,7 +10190,7 @@ mod tests {
              (def {} c (app {} (var {} add) (var {} a) (var {} b)))",
         )
         .unwrap();
-        let checked = check_phase0e_program(&exprs).expect("checked program");
+        let checked = check_ir_program(&exprs).expect("checked program");
         let text = chelis_deep::printer::print_canonical(checked.annotated_exprs());
         assert!(
             text.contains("(app {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))}"),
@@ -10219,7 +10200,7 @@ mod tests {
     }
 
     #[test]
-    fn phase0e_rejects_symbolic_normalized_axis_for_layer_norm() {
+    fn ir_rejects_symbolic_normalized_axis_for_layer_norm() {
         let exprs = chelis_deep::parser::parse_str(
             "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
              (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
@@ -10227,8 +10208,7 @@ mod tests {
              (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
         )
         .unwrap();
-        let err =
-            check_phase0e_program(&exprs).expect_err("symbolic hidden axis should be rejected");
+        let err = check_ir_program(&exprs).expect_err("symbolic hidden axis should be rejected");
         assert!(
             err.errors
                 .iter()
@@ -10399,7 +10379,7 @@ def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f
 
     #[test]
     fn surf_einsum_rejects_ellipsis_in_3h() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 def bad(
@@ -10424,7 +10404,7 @@ def bad(
 
     #[test]
     fn surf_where_rejects_non_bool_condition_tensor() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 def bad(
@@ -10449,7 +10429,7 @@ def bad(
 
     #[test]
     fn surf_scatter_replace_rejects_unknown_mode() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 def bad(
@@ -10476,7 +10456,7 @@ def bad(
 
     #[test]
     fn surf_einsum_rejects_static_extent_mismatch() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
@@ -10498,7 +10478,7 @@ out = einsum("ij,jk->ik", a, b)
 
     #[test]
     fn surf_scatter_replace_rejects_static_duplicate_indices() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
@@ -10537,7 +10517,7 @@ total = fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), filtered)
 
     #[test]
     fn surf_append_rejects_wrong_element_type() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64)]
@@ -10558,7 +10538,7 @@ bad = append(xs, "oops")
 
     #[test]
     fn surf_filter_rejects_non_bool_callback() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64)]
@@ -10581,7 +10561,7 @@ bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
 
     #[test]
     fn surf_dict_entries_rejects_non_dict_input() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64)]
@@ -10603,7 +10583,7 @@ bad = dict_entries(xs)
 
     #[test]
     fn surf_to_list_rejects_rank2_tensor() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
@@ -10623,7 +10603,7 @@ def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
 
     #[test]
     fn surf_fold_rejects_accumulator_mismatch() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64)]
@@ -10666,30 +10646,30 @@ out = f(to_tensor([1.0, 2.0, 3.0]))
     }
 
     #[test]
-    fn surf_polymorphic_tuple_fold_with_tensor_slot_infers_phase0e() {
-        let result = infer_phase0e_program(&surf_tuple_fold_tensor_slot_program());
+    fn surf_polymorphic_tuple_fold_with_tensor_slot_infers_ir() {
+        let result = infer_ir_program(&surf_tuple_fold_tensor_slot_program());
         assert!(
             result.errors.is_empty(),
-            "phase0e inference should succeed without overflowing: {:?}",
+            "ir inference should succeed without overflowing: {:?}",
             result.errors
         );
     }
 
     #[test]
-    fn surf_polymorphic_tuple_fold_with_tensor_slot_annotates_phase0e() {
+    fn surf_polymorphic_tuple_fold_with_tensor_slot_annotates_ir() {
         let program = surf_tuple_fold_tensor_slot_program();
-        let _ = annotate_phase0e_program(&program);
+        let _ = annotate_ir_program(&program);
     }
 
     #[test]
     fn surf_polymorphic_tuple_fold_with_tensor_slot_type_checks() {
-        let result = check_phase0e_program(&surf_tuple_fold_tensor_slot_program());
+        let result = check_ir_program(&surf_tuple_fold_tensor_slot_program());
         result.expect("polymorphic tuple fold should type check without overflowing");
     }
 
     #[test]
     fn surf_collection_helper_builtins_type_check() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
@@ -10713,7 +10693,7 @@ trimmed = dict_remove(merged, "gamma")
 
     #[test]
     fn surf_take_rejects_non_integer_count() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64), cast(2, int64)]
@@ -10734,7 +10714,7 @@ bad = take(xs, "two")
 
     #[test]
     fn surf_dict_insert_rejects_value_type_mismatch() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
@@ -10757,7 +10737,7 @@ bad = dict_insert(base, "beta", "two")
 
     #[test]
     fn surf_dict_merge_rejects_mismatched_dict_value_types() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 lhs: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
@@ -10782,7 +10762,7 @@ bad = dict_merge(lhs, rhs)
 
     #[test]
     fn surf_scan_rejects_accumulator_mismatch() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64)]
@@ -10804,7 +10784,7 @@ bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(
 
     #[test]
     fn surf_partition_rejects_non_bool_callback() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64)]
@@ -10827,7 +10807,7 @@ bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
 
     #[test]
     fn surf_flat_map_rejects_non_list_callback() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64)]
@@ -10848,7 +10828,7 @@ bad = flat_map(fn (x: int64) -> add(x, cast(1, int64)), xs)
 
     #[test]
     fn surf_flatten_rejects_non_nested_list_input() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64)]
@@ -10869,7 +10849,7 @@ bad = flatten(xs)
 
     #[test]
     fn surf_dict_remove_rejects_mismatched_key_type() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
@@ -10891,7 +10871,7 @@ bad = dict_remove(base, cast(7, int64))
 
     #[test]
     fn surf_chunk_rejects_non_integer_size() {
-        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+        let result = check_ir_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
 xs: List[int64] = [cast(1, int64)]
@@ -10914,17 +10894,17 @@ bad = chunk(xs, "two")
     // Top-level binding cycle detection
     // ------------------------------------------------------------------
 
-    fn phase0e_errors_from_surf(src: &str) -> Vec<CheckError> {
+    fn ir_errors_from_surf(src: &str) -> Vec<CheckError> {
         let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
-        infer_phase0e_program(&exprs).errors
+        infer_ir_program(&exprs).errors
     }
 
     #[test]
     fn nautilus_self_reference_is_allowed() {
         // The single-hop identity `x = (x : tensor[...])` is a pinned Nautilus
         // external-input pattern and must NOT be flagged as a binding cycle.
-        let errors = phase0e_errors_from_surf("x = (x : tensor[4, f32])\n");
+        let errors = ir_errors_from_surf("x = (x : tensor[4, f32])\n");
         assert!(
             !errors
                 .iter()
@@ -10935,7 +10915,7 @@ bad = chunk(xs, "two")
 
     #[test]
     fn two_hop_binding_cycle_is_detected() {
-        let errors = phase0e_errors_from_surf(
+        let errors = ir_errors_from_surf(
             "a = (b : tensor[4, f32])\n\
              b = (a : tensor[4, f32])\n",
         );
@@ -10959,7 +10939,7 @@ bad = chunk(xs, "two")
 
     #[test]
     fn three_hop_binding_cycle_is_detected() {
-        let errors = phase0e_errors_from_surf(
+        let errors = ir_errors_from_surf(
             "a = (b : tensor[4, f32])\n\
              b = (c : tensor[4, f32])\n\
              c = (a : tensor[4, f32])\n",
@@ -10980,7 +10960,7 @@ bad = chunk(xs, "two")
     #[test]
     fn unrelated_defs_do_not_trigger_cycle_false_positive() {
         // Sanity: multiple Nautilus self-references together should still pass.
-        let errors = phase0e_errors_from_surf(
+        let errors = ir_errors_from_surf(
             "x = (x : tensor[4, f32])\n\
              y = (y : tensor[4, f32])\n",
         );

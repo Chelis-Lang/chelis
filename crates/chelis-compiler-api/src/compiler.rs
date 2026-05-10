@@ -108,7 +108,7 @@ pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
 
 pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
     let deep_exprs = deep_exprs_from_source(request.source_kind, &request.source)?;
-    let report = chelis_types::check_phase0e_fitness(&deep_exprs);
+    let report = chelis_types::check_ir_fitness(&deep_exprs);
     Ok(CheckResult {
         score: report.score,
         components: FitnessComponents {
@@ -181,8 +181,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 &func_name,
                 None,
                 compile_result_c(request.target, &func_name, &result),
-                execution_input_specs(&compiled.dag, &result.input_labels),
-                execution_output_specs(&compiled.dag, &result.output_labels),
+                execution_input_specs(&compiled.dag, &result.input_labels)?,
+                execution_output_specs(&compiled.dag, &result.output_labels)?,
                 result.symbolic_dims,
             ))
         }
@@ -233,8 +233,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 &func_name,
                 Some(format!("{func_name}_device")),
                 compile_result_hip(request.target, &func_name, &result),
-                execution_input_specs(&hip_dag, &result.input_labels),
-                execution_output_specs(&hip_dag, &result.output_labels),
+                execution_input_specs(&hip_dag, &result.input_labels)?,
+                execution_output_specs(&hip_dag, &result.output_labels)?,
                 result.symbolic_dims,
             ))
         }
@@ -394,10 +394,12 @@ fn compile_new_source_in_context(
     .into_exprs();
 
     // Phase C: type-check new code against the library type env.
-    let new_checked = chelis_types::check_phase0e_with_context(&context.type_env, &new_deep)
-        .map_err(|report| CompilerError {
-            stage: "check".to_string(),
-            errors: report.errors.iter().map(check_error_diagnostic).collect(),
+    let new_checked =
+        chelis_types::check_ir_with_context(&context.type_env, &new_deep).map_err(|report| {
+            CompilerError {
+                stage: "check".to_string(),
+                errors: report.errors.iter().map(check_error_diagnostic).collect(),
+            }
         })?;
 
     // Phase D: effects checker, library + new.
@@ -427,9 +429,17 @@ fn compile_new_source_in_context(
                 errors: errors.iter().map(check_error_diagnostic).collect(),
             })?;
 
-    // Phase F: lower against the cached library DAG.
+    // Lower against the cached library DAG.
     let composed_dag =
-        chelis_ir::lower::lower_program_with_context(&context.library_dag, &new_checked);
+        chelis_ir::lower::try_lower_program_with_context(&context.library_dag, &new_checked)
+            .map_err(|diagnostic| {
+                stage_error_with_span(
+                    "lower",
+                    diagnostic.to_string(),
+                    "lower_error",
+                    deep_span_to_schema(diagnostic.span),
+                )
+            })?;
 
     // Build the same CompiledSource shape `compile_source` produces, but
     // for the new code only — the library state lives in the composed
@@ -937,11 +947,10 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
         SourceKind::Deep => parse_deep(source)?,
     };
 
-    let checked =
-        chelis_types::check_phase0e_program(&deep_exprs).map_err(|report| CompilerError {
-            stage: "check".to_string(),
-            errors: report.errors.iter().map(check_error_diagnostic).collect(),
-        })?;
+    let checked = chelis_types::check_ir_program(&deep_exprs).map_err(|report| CompilerError {
+        stage: "check".to_string(),
+        errors: report.errors.iter().map(check_error_diagnostic).collect(),
+    })?;
     let checked = chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
         stage: "effects".to_string(),
         errors: errors
@@ -965,7 +974,14 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
     let tensor_root_names =
         root_names_from_checked_exprs(checked.exprs(), checked.type_env(), true);
 
-    let dag = chelis_ir::lower::lower_program(&checked);
+    let dag = chelis_ir::lower::try_lower_program(&checked).map_err(|diagnostic| {
+        stage_error_with_span(
+            "lower",
+            diagnostic.to_string(),
+            "lower_error",
+            deep_span_to_schema(diagnostic.span),
+        )
+    })?;
 
     if !tensor_root_names.is_empty() && dag.roots().len() != tensor_root_names.len() {
         return Err(stage_error(
@@ -1285,7 +1301,7 @@ fn compile_result_hip_host(
     }
 }
 
-fn execution_input_specs(dag: &Dag, labels: &[String]) -> Vec<ExecutionTensorSpec> {
+fn execution_input_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTensorSpec>> {
     let mut load_types = HashMap::<String, TensorType>::new();
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
@@ -1297,15 +1313,19 @@ fn execution_input_specs(dag: &Dag, labels: &[String]) -> Vec<ExecutionTensorSpe
     labels
         .iter()
         .map(|label| {
-            let ty = load_types
-                .get(label)
-                .unwrap_or_else(|| panic!("missing load type for `{label}`"));
-            execution_tensor_spec(label.clone(), ty)
+            let ty = load_types.get(label).ok_or_else(|| {
+                stage_error(
+                    "compile",
+                    format!("generated code referenced input `{label}`, but the lowered IR has no matching load"),
+                    "compile_error",
+                )
+            })?;
+            Ok(execution_tensor_spec(label.clone(), ty))
         })
         .collect()
 }
 
-fn execution_output_specs(dag: &Dag, labels: &[String]) -> Vec<ExecutionTensorSpec> {
+fn execution_output_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTensorSpec>> {
     let nodes = execution_output_nodes(dag);
     labels
         .iter()
@@ -1313,9 +1333,18 @@ fn execution_output_specs(dag: &Dag, labels: &[String]) -> Vec<ExecutionTensorSp
         .map(|(label, node_id)| {
             let ty = &dag
                 .get(node_id)
-                .unwrap_or_else(|| panic!("missing output node {}", node_id.0))
+                .ok_or_else(|| {
+                    stage_error(
+                        "compile",
+                        format!(
+                            "generated code referenced output node {}, but the lowered IR has no matching node",
+                            node_id.0
+                        ),
+                        "compile_error",
+                    )
+                })?
                 .output_type;
-            execution_tensor_spec(label.clone(), ty)
+            Ok(execution_tensor_spec(label.clone(), ty))
         })
         .collect()
 }
@@ -1432,6 +1461,13 @@ fn unknown_name_error(stage: &str, field: &str, name: &str) -> CompilerError {
 
 pub(crate) fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -> CompilerError {
     stage_error_with_span(stage, message, kind, None)
+}
+
+fn deep_span_to_schema(span: Option<chelis_deep::Span>) -> Option<Span> {
+    span.map(|span| Span {
+        offset: span.offset,
+        len: span.len,
+    })
 }
 
 fn stage_error_with_span(

@@ -13,8 +13,7 @@ use chelis_deep::ast::Expr;
 use chelis_effects::{EffectError, EffectErrorKind, check_effects_with_context, check_program};
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 use chelis_types::{
-    CheckedProgram, TypeEnv, build_type_env_from_library, check_phase0e_program,
-    check_phase0e_with_context,
+    CheckedProgram, TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -30,7 +29,7 @@ fn build_library_pair(library_src: &str) -> (TypeEnv, CheckedProgram) {
     let typeenv = build_type_env_from_library(&lib_deep).expect("library type-checks");
     // Run the FULL effects pipeline on the library — same way Phase D's
     // contract requires (the library's effect rows are already validated).
-    let lib_checked = check_phase0e_program(&lib_deep).expect("library Phase 0e");
+    let lib_checked = check_ir_program(&lib_deep).expect("library IR check");
     let lib_with_effects = check_program(&lib_checked).expect("library effects clean");
     (typeenv, lib_with_effects)
 }
@@ -39,7 +38,7 @@ fn build_library_pair(library_src: &str) -> (TypeEnv, CheckedProgram) {
 /// then return it. New-code's `annotated_exprs()` carry only new defs.
 fn build_new_code_checked(typeenv: &TypeEnv, new_src: &str) -> CheckedProgram {
     let new_deep = parse_then_desugar(new_src);
-    check_phase0e_with_context(typeenv, &new_deep).expect("new code type-checks")
+    check_ir_with_context(typeenv, &new_deep).expect("new code type-checks")
 }
 
 // ── Parity tests (5 library+snippet pairs) ───────────────────────────────
@@ -61,7 +60,7 @@ def caller(y: int64) -> int64 = lib_id(y)
 
     // Monolithic equivalent:
     let combined = parse_then_desugar(&format!("{library}\n{snippet}"));
-    let combined_checked = check_phase0e_program(&combined).unwrap();
+    let combined_checked = check_ir_program(&combined).unwrap();
     check_program(&combined_checked).expect("monolithic must also pass");
 }
 
@@ -96,7 +95,7 @@ def caller(y: int64) -> int64 = emit(y)
 
     // Monolithic parity:
     let combined = parse_then_desugar(&format!("{library}\n{snippet}"));
-    let combined_checked = check_phase0e_program(&combined).unwrap();
+    let combined_checked = check_ir_program(&combined).unwrap();
     check_program(&combined_checked).expect("monolithic must also pass");
 }
 
@@ -123,7 +122,7 @@ def my_test() -> unit = lib_check()
     );
 
     let combined = parse_then_desugar(&format!("{library}\n{snippet}"));
-    let combined_checked = check_phase0e_program(&combined).unwrap();
+    let combined_checked = check_ir_program(&combined).unwrap();
     check_program(&combined_checked).expect("monolithic must also pass");
 }
 
@@ -151,7 +150,7 @@ def leak() -> unit ! {} = lib_check()
 
     // Monolithic parity:
     let combined = parse_then_desugar(&format!("{library}\n{snippet}"));
-    let combined_checked = check_phase0e_program(&combined).unwrap();
+    let combined_checked = check_ir_program(&combined).unwrap();
     let mono_errors = check_program(&combined_checked)
         .expect_err("monolithic must also reject !{} that calls Test helper");
     assert_eq!(
@@ -217,7 +216,7 @@ def use_drop(t: tensor[8, f32]) -> unit ! {Test} = {
 
     // Monolithic parity (negative case): same rejection.
     let combined = parse_then_desugar(&format!("{library}\n{snippet_bad}"));
-    let combined_checked = check_phase0e_program(&combined).unwrap();
+    let combined_checked = check_ir_program(&combined).unwrap();
     let mono_errors = check_program(&combined_checked).expect_err("monolithic must also reject");
     assert!(
         mono_errors
@@ -460,7 +459,7 @@ def emit(x: int64) -> int64 = debug(x)
 def caller(y: int64) -> int64 = emit(y)
 "#,
     );
-    let checked = check_phase0e_program(&combined).expect("phase 0e");
+    let checked = check_ir_program(&combined).expect("IR check");
     let with_effects = check_program(&checked).expect("legacy check_program clean");
     let text = chelis_deep::printer::print_canonical(with_effects.annotated_exprs());
     assert!(
