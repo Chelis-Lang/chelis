@@ -145,7 +145,7 @@ validation tooling.
 
 **Current shipped boundary:** the HIP backend work through Phase 1e is in `main`.
 That includes HIP code generation, fusion, device memory planning, segmented and staged
-reduction paths, hipBLAS specialization for contiguous rank-2 `f32` matmul, and the
+reduction paths, hipBLAS-backed specialization for contiguous rank ≥ 2 `f32` matmul, and the
 fixed-workload benchmark oracle with checked-in results. `chelis validate` from 1f is
 now shipped too. The fixed Phase 1e benchmark set (`mnist`, `linreg`,
 `transformer_block`) compiles and runs on both backends, so the intended Phase 1
@@ -187,7 +187,7 @@ and Tide tooling.
 
 - ship segmented reductions with tiny/small/large strategy selection
 - use staged scratch buffers for safe scalar contiguous reductions
-- specialize contiguous rank-2 `f32` matmul patterns to hipBLAS
+- specialize contiguous rank ≥ 2 `f32` matmul patterns to hipBLAS-backed helpers
 - keep irregular flattening/autotuning out of Phase 1d
 
 ### 1e: Benchmarks and Real Models

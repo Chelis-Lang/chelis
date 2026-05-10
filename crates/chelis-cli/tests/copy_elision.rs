@@ -11,52 +11,40 @@
 //!   * Zero `memcpy` calls. The five `copy(x)` markers in Surf are *not*
 //!     lowered as memory copies — they are linearity-discharge markers that
 //!     authorize multi-consumer reads of the same backing buffer.
-//!   * Five `chelis_alloc` calls — one per distinct unary result (a..e). No
-//!     extra allocation per `copy(x)` and no allocation for any of the four
-//!     `add` intermediates (those fuse).
-//!   * Three `parallel for simd` blocks — kernel fusion combines the
-//!     elementwise unary results and the add chain into a small number of
-//!     SIMD-vectorized loops.
+//!   * Four large `chelis_slot*` backing allocations, with the final output
+//!     wrapper reusing a dead intermediate slot. No extra allocation per
+//!     `copy(x)` and no allocation for the four source-level `add`
+//!     intermediates (those fuse).
+//!   * Multiple `parallel for simd` blocks — kernel fusion combines the
+//!     elementwise unary results and the add chain into SIMD-vectorized
+//!     loops without source-level add intermediates.
 //!   * Every fused-kernel input/output pointer carries the C99 `restrict`
 //!     qualifier. This is the linearity → no-aliasing guarantee surfacing in
 //!     the C codegen so the host compiler can vectorize aggressively.
 //!
-//! Net: `copy()` is free at the buffer level. The remaining 5× working
-//! footprint comes from five distinct unary results that all live until the
-//! final reduction reads them. Two passes would shrink that further, neither
-//! of which currently applies to C codegen:
-//!   * Memory planning (spec §5.6). Phase 1c shipped a *GPU* memory planner
-//!     (`crates/chelis-backend-hip/src/memory.rs`) and the roadmap marks 1c
-//!     "Implemented." But the C backend's planner
-//!     (`crates/chelis-backend-c/src/memory.rs`) is still the documented
-//!     "Phase 0: simple allocate-per-node, free-all-at-end strategy." That
-//!     line is the reason this test sees 5 allocs instead of ~2.
-//!   * Fan-in fusion (multi-input reduction body fusion). Not shipped on
-//!     either backend; `crates/chelis-ir/src/fuse.rs:69-88` only fuses
-//!     elementwise chains.
+//! Net: `copy()` is free at the buffer level, and C codegen now reuses
+//! backing slots when liveness proves non-overlap. The remaining 4× helper
+//! footprint is not copy materialization; it is the conservative M2a outcome
+//! for the current out-of-place fused fan-in shape. Shrinking this probe to
+//! 2-3 buffers requires fan-in/in-place fusion beyond the M2a memory planner.
 //!
-//! The cost profile here is "5 unary results unplanned in C codegen," not
-//! "5 copies materialized."
+//! The cost profile here is "four out-of-place buffers for the fused fan-in
+//! shape," not "five copies materialized."
 //!
 //! ## Cost profile (computed from emitted C)
 //!
 //! For the probe shape `tensor[1024, 1024, f32]` (~4 MiB per buffer):
-//!   * 5 result buffers × (1024×1024×4 B) = **20 MiB allocated by helper**.
+//!   * 4 backing slots × (1024×1024×4 B) = **16 MiB allocated by helper**.
 //!   * The input `x` itself is borrowed (not allocated) so it does not
 //!     contribute to the helper's allocation footprint.
-//!   * Under the C backend's Phase-0 free-all-at-end strategy, all 5 buffers
-//!     are simultaneously live until the function returns. Peak working set
-//!     is therefore exactly 20 MiB plus the caller-provided 4 MiB input.
+//!   * Metadata wrappers are still freed at function epilogue, but backing
+//!     slots are reused as soon as planned liveness permits.
 //!
 //! Linear projection to a 2 GiB input (~22300×22300 f32 ≈ 2 GiB):
 //!   * Caller-side: 1 × 2 GiB input.
-//!   * Helper-side: 5 × 2 GiB result buffers = **10 GiB peak working set**.
-//!   * Total RAM with the input: ~12 GiB. This is the empirical answer to
-//!     the third-party "VRAM spike to 12 GB" prediction — yes, it spikes,
-//!     but the cause is "5 unary results unplanned" not "5 copies
-//!     materialized." A memory planner would collapse this to ~2-4 GiB peak
-//!     (only 1-2 unary results need to be live simultaneously since the
-//!     fused final-reduction kernel reads each once).
+//!   * Helper-side: 4 × 2 GiB backing slots = **8 GiB peak working set**.
+//!   * Total RAM with the input: ~10 GiB. A later fan-in/in-place fusion pass
+//!     could collapse this further, but that is not part of M2a.
 
 use std::fs;
 use std::process::Command;
@@ -87,9 +75,8 @@ fn build_copy_elision_c_source() -> String {
 }
 
 /// Sum of bytes allocated by every `chelis_alloc(N, (int[]){...}, CHELIS_<T>)`
-/// call in the C source. This approximates peak working set under the Phase-0
-/// allocate-per-node / free-all-at-end strategy that
-/// `crates/chelis-backend-c/src/memory.rs` ships today.
+/// call in the C source. After M2a this approximates the slot-planned helper
+/// working set because slot backing allocations still use `chelis_alloc`.
 ///
 /// Returns (total_bytes, allocation_count, per_alloc_bytes).
 pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
@@ -157,7 +144,7 @@ pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
 }
 
 #[test]
-fn copy_elision_probe_emits_no_memcpy_and_one_buffer_per_unary_result() {
+fn copy_elision_probe_reuses_c_backend_slots_without_materializing_copies() {
     let source = build_copy_elision_c_source();
 
     let alloc_calls = source.matches("chelis_alloc(").count();
@@ -173,15 +160,18 @@ fn copy_elision_probe_emits_no_memcpy_and_one_buffer_per_unary_result() {
          producing real allocations."
     );
 
-    assert_eq!(
-        alloc_calls, 5,
-        "expected exactly 5 buffer allocations (one per distinct unary \
-         result a..e in fanout/copy_elision_probe.ch). Got {alloc_calls}. \
-         If this changes, either fusion got better (fewer allocs — celebrate \
-         and update the assertion downward) or worse (more allocs — \
-         investigate). The third-party prediction was 5 (one per copy) for \
-         a fail mode; reality is 5 for a different reason (one per unary \
-         result, and the copies themselves contribute zero)."
+    assert!(
+        alloc_calls <= 4,
+        "expected at most 4 C backing-slot allocations for the conservative \
+         M2a planner. Got {alloc_calls}. More means slot reuse regressed; \
+         fewer means fan-in/in-place fusion improved and this assertion can \
+         be tightened."
+    );
+
+    assert!(
+        source.contains("chelis_tensor *t5 = chelis_alloc_view(2, (int[]){ 1024, 1024 }, CHELIS_F32, chelis_slot1->data);"),
+        "expected the final output wrapper to reuse the dead intermediate \
+         slot from t2. This locks real slot reuse, not only aggregate count."
     );
 
     assert!(
@@ -208,52 +198,24 @@ fn copy_elision_probe_emits_no_memcpy_and_one_buffer_per_unary_result() {
          ({mib:.2} MiB). Per-alloc bytes: {per:?}"
     );
 
-    // For tensor[1024, 1024, f32], each result buffer is 4 MiB. Five live
-    // simultaneously under Phase 0 strategy → 20 MiB. We allow a small slack
-    // in case the codegen adds a tiny scalar buffer somewhere; the dominant
-    // term is the 5×4 MiB working set.
-    let expected_min = 5 * 1024 * 1024 * 4; // 20 MiB
-    let expected_max = expected_min + 1024 * 1024; // 21 MiB tolerance
+    // For tensor[1024, 1024, f32], each backing slot is 4 MiB. The M2a
+    // conservative C planner should need at most four such slots for the
+    // current out-of-place fused fan-in shape.
+    let expected_max = 4 * 1024 * 1024 * 4; // 16 MiB
     assert!(
-        total_bytes >= expected_min && total_bytes <= expected_max,
-        "expected peak working set ≈ 20 MiB (5 unary results × 4 MiB), got \
-         {total_bytes} bytes ({mib:.2} MiB). If this drops, memory planning \
-         shipped for C — update the test and the docstring's projection. If \
-         it rises, an extra buffer leaked back in."
+        total_bytes <= expected_max,
+        "expected peak C backing-slot footprint <= 16 MiB (4 slots × 4 MiB), \
+         got {total_bytes} bytes ({mib:.2} MiB). Per-alloc bytes: {per:?}"
     );
 
     // Linear projection: scale input from 4 MiB (1024×1024 f32) to 2 GiB
-    // (~512× larger). Each unary result scales the same way → 5 × 2 GiB =
-    // 10 GiB peak. Total RAM with the borrowed input: ~12 GiB. This is the
-    // empirical answer to the third-party Test 1 prediction.
+    // (~512× larger). Four backing slots scale to 8 GiB helper-side peak.
     let scale_to_2gib = (2_u64 * 1024 * 1024 * 1024) / (1024 * 1024 * 4);
     let projected_2gib_peak_bytes = (total_bytes as u64) * scale_to_2gib;
     let projected_2gib_peak_gib = projected_2gib_peak_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     eprintln!(
-        "Linear projection to 2 GiB input: peak working set ≈ {projected_2gib_peak_gib:.1} GiB \
+        "Linear projection to 2 GiB input: helper-side slot footprint ≈ {projected_2gib_peak_gib:.1} GiB \
          (excludes the 2 GiB input itself). With the borrowed input: ~{:.1} GiB total.",
         projected_2gib_peak_gib + 2.0
-    );
-}
-
-#[test]
-#[ignore = "M2a target behavior: enable when C memory planning lands"]
-fn target_behavior_copy_elision_reuses_c_backend_buffers() {
-    let source = build_copy_elision_c_source();
-    let memcpy_calls = source.matches("memcpy(").count();
-    let (total_bytes, count, per) = measure_alloc_footprint(&source);
-
-    assert_eq!(
-        memcpy_calls, 0,
-        "target behavior still requires copy(x) to stay marker-only"
-    );
-
-    let one_buffer = 1024 * 1024 * 4;
-    let target_max = 3 * one_buffer;
-    assert!(
-        total_bytes <= target_max,
-        "target behavior: C memory planning should reuse non-overlapping \
-         unary buffers. Got {count} allocs and {total_bytes} bytes with \
-         per-alloc bytes {per:?}; expected at most three 4 MiB slots."
     );
 }

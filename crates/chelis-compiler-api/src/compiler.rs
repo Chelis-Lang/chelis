@@ -23,11 +23,11 @@ use crate::schema::{
     EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents, GeneratedFile, GradRequest,
     GradResult, LowerRequest, LowerResult, ParseRequest, ParseResult, SourceKind, Span,
     ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode, WireDeepAtom,
-    WireDeepExpr, WireDeepExprKind, WireDimInfo, WireFusedInput, WireFusedStep, WireFusedStepOp,
-    WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry,
-    WireParam, WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
-    WireRecordTypeField, WireRiscOp, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType,
-    WireUnaryOp, WireVariant, WireVariantFields,
+    WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo, WireFusedInput, WireFusedStep,
+    WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm,
+    WireMetaEntry, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
+    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl, WireSurfExpr,
+    WireSurfTypeExpr, WireTensorType, WireUnaryOp, WireVariant, WireVariantFields,
 };
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -2030,6 +2030,22 @@ fn wire_dim(dim: &DimInfo) -> WireDimInfo {
     }
 }
 
+fn wire_dim_expr(expr: &chelis_ir::dag::DimExpr) -> WireDimExpr {
+    use chelis_ir::dag::DimExpr;
+    match expr {
+        DimExpr::Concrete(value) => WireDimExpr::Concrete { value: *value },
+        DimExpr::Sym(name) => WireDimExpr::Sym { name: name.clone() },
+        DimExpr::Mul(lhs, rhs) => WireDimExpr::Mul {
+            lhs: Box::new(wire_dim_expr(lhs)),
+            rhs: Box::new(wire_dim_expr(rhs)),
+        },
+        DimExpr::Div(lhs, rhs) => WireDimExpr::Div {
+            lhs: Box::new(wire_dim_expr(lhs)),
+            rhs: Box::new(wire_dim_expr(rhs)),
+        },
+    }
+}
+
 fn wire_op(op: &RiscOp) -> WireRiscOp {
     match op {
         RiscOp::Add => WireRiscOp::Add,
@@ -2127,10 +2143,16 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                 })
                 .collect(),
         },
-        RiscOp::BlasMatmul { m, n, k } => WireRiscOp::BlasMatmul {
-            m: *m,
-            n: *n,
-            k: *k,
+        RiscOp::BlasMatmul {
+            batch_dims,
+            m,
+            n,
+            k,
+        } => WireRiscOp::BlasMatmul {
+            batch_dims: batch_dims.iter().map(wire_dim_expr).collect(),
+            m: wire_dim_expr(m),
+            n: wire_dim_expr(n),
+            k: wire_dim_expr(k),
         },
     }
 }

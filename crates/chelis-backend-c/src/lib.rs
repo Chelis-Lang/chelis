@@ -1631,6 +1631,136 @@ int main(void) {{
     }
 
     #[test]
+    fn symbolic_batched_matmul_emits_runtime_blas_loop() {
+        let mut dag = Dag::new();
+        let a_ty = TensorType {
+            dims: vec![
+                DimInfo::Named("batch".to_string(), None),
+                DimInfo::Named("heads".to_string(), None),
+                DimInfo::Named("seq".to_string(), None),
+                DimInfo::Lit(3),
+            ],
+            precision: Prim::F32,
+        };
+        let b_ty = TensorType {
+            dims: vec![
+                DimInfo::Named("batch".to_string(), None),
+                DimInfo::Named("heads".to_string(), None),
+                DimInfo::Lit(3),
+                DimInfo::Lit(2),
+            ],
+            precision: Prim::F32,
+        };
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        dag.add_root(out);
+
+        let result = codegen_with_options(
+            &dag,
+            "test_symbolic_batched_matmul",
+            CodegenOptions {
+                use_blas: true,
+                ..CodegenOptions::default()
+            },
+        );
+        assert!(result.requirements.needs_blas);
+        assert!(result.c_source.contains("int seq = inputs[0]->shape[2];"));
+        assert!(result.c_source.contains("cblas_sgemm"));
+        assert!(result.c_source.contains("_batch_count = (batch * heads);"));
+        assert!(
+            !result
+                .c_source
+                .contains("(int[]){ batch, heads, seq, 3, 2 }"),
+            "specialized batched BLAS must not allocate the dense product"
+        );
+
+        let lines = compile_and_run_input_cases(
+            &dag,
+            "test_symbolic_batched_matmul",
+            CodegenOptions {
+                use_blas: true,
+                ..CodegenOptions::default()
+            },
+            &[vec![
+                TestInput::new(
+                    "a",
+                    &[1, 2, 2, 3],
+                    &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 0.5, 2.0, 3.5, -2.0, 1.0],
+                ),
+                TestInput::new(
+                    "b",
+                    &[1, 2, 3, 2],
+                    &[
+                        1.0, 0.0, -1.0, 2.0, 0.5, 3.0, 2.0, -2.0, 1.0, 1.5, -0.5, 4.0,
+                    ],
+                ),
+            ]],
+        );
+        assert_eq!(
+            lines,
+            vec!["0.500000 13.000000 2.000000 28.000000 -2.500000 10.750000 4.500000 -6.000000"]
+        );
+    }
+
+    #[test]
+    fn noncontiguous_matrix_slice_stays_on_generic_matmul_path() {
+        let mut dag = Dag::new();
+        let base_a = dag.add_node(
+            RiscOp::Load {
+                name: "base_a".into(),
+            },
+            vec![],
+            mat_f32(3, 2),
+            None,
+        );
+        let a_ty = mat_f32(2, 3);
+        let a = dag.add_node(
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![base_a],
+            a_ty.clone(),
+            None,
+        );
+        let b_ty = mat_f32(3, 4);
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        dag.add_root(out);
+
+        let result = codegen_with_options(
+            &dag,
+            "test_noncontiguous_matmul",
+            CodegenOptions {
+                use_blas: true,
+                ..CodegenOptions::default()
+            },
+        );
+        assert!(
+            !result.c_source.contains("cblas_sgemm("),
+            "non-contiguous matrix slices must not bypass IR specialization \
+             through the legacy codegen-time BLAS detector"
+        );
+        assert!(
+            result.c_source.contains("parallel for"),
+            "non-contiguous matmul should remain on the generic reduction path"
+        );
+    }
+
+    #[test]
     fn symbolic_preamble_checks_every_non_canonical_occurrence() {
         let mut dag = Dag::new();
         let symbolic = TensorType {

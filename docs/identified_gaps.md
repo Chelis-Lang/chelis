@@ -1,11 +1,11 @@
 # Chelis Compiler Gaps — Empirical Findings
 
 **Status:** partially closed — Gaps 2 and 6 are closed by M1; the adjacent
-Surf-span finding is closed by M2b; Gap 4's rank ≥ 2 expressibility path is
-closed by M3 with batched BLAS specialization still open. The remaining
+Surf-span finding is closed by M2b; Gap 4's rank ≥ 2 expressibility and
+symbolic/batched BLAS performance paths are closed by M3/M3b. The remaining
 work is explicitly tracked in `docs/gap_synthesis.md` §5 "Remaining Work
-Register": Gap 1/M2a, Gap 3/M4, Gap 4/M3b, Gap 5 implementation, and the
-formal M3 red-team follow-up.
+Register": Gap 3/M4, Gap 5 implementation, HIP strided-batched quality work,
+post-BLAS slot/fusion compounding, and the formal red-team follow-up.
 **Filed:** 2026-05-08
 **Owning phase:** cross-phase (perf + ergonomics)
 
@@ -24,49 +24,48 @@ required pattern-match it depends on; the spec authors know the
 heroics list. This document is the running summary of which heroics
 have shipped and which haven't, as of 2026-05-08.
 
-## Gap 1 — C-backend memory planning is still allocate-per-node
+## Gap 1 — C-backend memory planning — CLOSED by M2a
 
 **Claim qualified:** "`copy(x)` is free; the compiler will reuse buffers."
 
-**Observation:** A function with five `copy(x)` calls feeding five
-distinct unary results allocates five working buffers held alive
-simultaneously. With a 2 GB `x`, peak working memory is ~12 GB even
-though the five unaries could share buffers under a memory planner.
+**Current status:** M2a ports conservative slot planning to the C backend.
+The copy-elision probe now emits four 4 MiB backing slots instead of five
+4 MiB unary-result allocations; the final output wrapper reuses a dead
+intermediate slot. For a 2 GB input this projects to ~8 GiB helper-side
+slot footprint plus the borrowed 2 GiB input, not the prior ~12 GiB total.
 
-**Where it lives:** `crates/chelis-backend-c/src/memory.rs` — the
-module docstring explicitly says: *"Phase 0: simple allocate-per-node,
-free-all-at-end strategy."* The HIP backend has Phase 1c memory
-planning (`crates/chelis-backend-hip/src/memory.rs`), but C codegen
-has not adopted it.
+**Original observation:** A function with five `copy(x)` calls feeding five
+distinct unary results allocated five working buffers held alive
+simultaneously. With a 2 GB `x`, peak working memory was ~12 GB even
+though some buffers could share storage under a memory planner.
+
+**Where it lived:** `crates/chelis-backend-c/src/memory.rs` previously
+implemented only allocate-per-node cleanup. M2a replaces that with a
+slot planner while keeping C-specific ownership rules for borrowed loads,
+metadata views, standalone stores, and output materialization.
 
 **What's not at fault:** `copy(x)` markers themselves produce zero
 buffers and zero `memcpy` calls. The cost is from the unary results
 (`exp(x)`, `log(x)`, `sin(x)`, etc.), each of which allocates its own
 output. Kernel fusion does eliminate the `add`-chain intermediates.
 
-**What would close it:** lift the HIP memory planner's interference-
-graph coloring into a backend-agnostic IR pass, or port it to the C
-backend directly.
+**What closed it:** the direct C-backend port. It intentionally remains
+conservative for symbolic non-equality and out-of-place fused fan-in
+shapes; reducing the copy probe below four slots requires fan-in or
+in-place fusion, not just slot coloring.
 
 **Spec coverage:**
 - `spec/design/phase1c_memory_planning.md` ships the planner *as
   GPU-only by design* — the doc opens with "Phase 1c is a
   codegen/runtime-planning change inside the HIP backend."
-- `crates/chelis-backend-c/src/memory.rs` opening comment is honest:
-  *"Phase 0: simple allocate-per-node, free-all-at-end strategy."*
-- **Not addressed:** no proposal in `spec/design/` plans porting the
-  planner to the C backend or lifting it into a backend-agnostic IR
-  pass. Closure path is implicit (copy the HIP module) but unowned.
+- **Addressed by M2a:** the C backend now has its own slot planner. The
+  planner is C-local rather than backend-agnostic.
 
 **Locked test:** `crates/chelis-cli/tests/copy_elision.rs` —
-`copy_elision_probe_emits_no_memcpy_and_one_buffer_per_unary_result`.
-Asserts 5 allocs, 0 memcpy, ≥2 fused parallel-for-simd, restrict
-present.
-
-**Target test:** the same file also contains ignored test
-`target_behavior_copy_elision_reuses_c_backend_buffers`, which asserts the
-post-M2a target of at most three 4 MiB slots for the 1024×1024 probe:
-`cargo test -p chelis-cli --test copy_elision target_behavior_copy_elision_reuses_c_backend_buffers -- --ignored --nocapture`.
+`copy_elision_probe_reuses_c_backend_slots_without_materializing_copies`.
+Asserts ≤4 backing slots, 0 memcpy, ≥2 fused parallel-for-simd, restrict
+present, and explicit reuse of a dead intermediate slot by the final output
+wrapper.
 
 **Probe corpus:** `examples/illustrative/copy_elision_probe.ch`.
 
@@ -170,7 +169,7 @@ compiled to C and inspected for `cblas_sgemm` calls:
 | `aa = a; bb = b; matmul(aa, bb)` | ✅ | let-bindings inlined in IR |
 | `prod = mul(...); prod_again = prod; sum(prod_again, 1)` | ✅ | inner let-binding inlined |
 | Hand-written `expand+mul+sum` inline | ✅ | produces the same canonical IR |
-| `tensor[m, 16, f32]` (symbolic dim) | ❌ | step 9 above (`dim_size` requires concrete `n`) |
+| `tensor[m, 16, f32]` (symbolic dim) | ✅ | IR-level specialization emits runtime-sized BLAS dimensions from shape bindings |
 | `def my_mm(a, b) = matmul(a, b); def f(a, b) = my_mm(a, b)` | ❌ | detector runs on caller DAG, not helper (Gap 5) |
 
 The structural fragility (`Sum → Mul → (Expand, Expand)` strict
@@ -179,23 +178,19 @@ because the Tier 2 desugarer of `matmul` produces the canonical
 subgraph with no user-reachable nodes between its steps. From Surf
 source, the only easy ways to disable BLAS specialization are:
 
-1. **Symbolic dim anywhere in the matmul shape.** Real-world
-   impact: every matmul in `examples/transformer_block.ch` (the
-   `seq` dim) — sequence-length-polymorphic transformer code
-   currently never hits BLAS in the C backend.
-2. **Wrapping matmul in a user-level `def`** called from another
+1. **Wrapping matmul in a user-level `def`** called from another
    `def`. The helper is emitted as a separate C function; the
    detector runs on the caller's DAG which only sees the call.
    Real-world impact: Coral / Nautilus / Octant abstractions over
    `matmul` lose specialization (Gap 5).
-3. **Interposing a non-identity node between Expand and Mul (or Mul
+2. **Interposing a non-identity node between Expand and Mul (or Mul
    and Sum) at the IR level.** Identity casts, identity reshapes, and
    identity permutes are now removed by the M1 closed-list cleanup.
    Other interposed nodes still intentionally block specialization.
 
 The original no-op brittleness is closed for the M1 no-op list. The
-remaining miss cases are symbolic dimensions (Gap 4/M3b scope) and
-user-`def` boundaries (Gap 5 workstream).
+remaining miss cases are non-identity structural perturbations,
+non-contiguous matrix slices, and user-`def` boundaries (Gap 5 workstream).
 
 The structurally-better fix shipped in M1: BLAS detection moved into
 the IR specialization substrate, paired with post-specialization DCE.
@@ -268,16 +263,18 @@ probe.
 **Probe corpus:** `examples/illustrative/moe_gather_duplicate_indices.ch`
 (single MoE-style routing block with deliberately duplicated indices).
 
-## Gap 4 — `matmul` is rank-2 only; canonical heads-as-dim MHA not expressible — PARTIALLY CLOSED by M3
+## Gap 4 — `matmul` is rank-2 only; canonical heads-as-dim MHA not expressible — CLOSED by M3/M3b
 
 **Claim qualified:** "Multi-head attention expresses naturally as a
 heads dimension, with batched matmul broadcasting over leading axes."
 
 **Current status:** M3 lifted `matmul` to rank ≥ 2 at the type checker
-and Tier 2 lowering layers. Batched matmul now broadcasts over leading
-axes and lowers through the generic `expand + mul + sum` path. The
-remaining Gap 4 performance follow-up is batched BLAS specialization:
-the C/HIP fast paths still target statically concrete rank-2 matmul only.
+and Tier 2 lowering layers. M3b extends the IR-level BLAS specializer to
+symbolic and batched matmul when the operands have contiguous trailing
+matrix slices. The C backend emits runtime-sized `cblas_sgemm` calls,
+looping over batch slices for rank ≥ 3. The HIP backend emits through a
+batched hipBLAS helper loop. A quality follow-up remains to use
+`hipblasSgemmStridedBatched` directly for uniformly strided HIP batches.
 
 **Original observation:** Chelis's `matmul` was hard rank-2 at the
 type-checker level. PyTorch's canonical MHA form
@@ -305,20 +302,17 @@ wv_i / wo_i` and an explicit `matmul(copy(x), wq_i)` — see
 `examples/transformer_block.ch` (4 heads) and
 `examples/illustrative/mha_two_heads_unrolled.ch` (2 heads).
 
-**What closed the expressibility gap:** generalizing `lower_matmul` and
-the matmul type rule to accept rank ≥ 2, broadcasting over leading axes
-(the natural `... + matrix-pair` shape rule). What remains is extending
-the BLAS specializer to recognize statically concrete batched-GEMM
-patterns.
+**What closed it:** generalizing `lower_matmul` and the matmul type rule
+to accept rank ≥ 2, broadcasting over leading axes (the natural `... +
+matrix-pair` shape rule), then extending the IR specializer and C/HIP
+emitters to carry runtime `DimExpr` sizes into BLAS calls.
 
 **Spec coverage:**
-- `spec/design/chelis_canonical_reference.md:438-443` explicitly
-  documents the perf gap: "the existing HIP rank-2 BLAS fast path
-  does not yet upgrade vmapped rank-3 matmul into a batched BLAS
-  call."
-- `spec/design/phase1d_flattening.md:39` confirms the rank-2
-  restriction is *intentional* in the hipBLAS specializer: "Only
-  statically contiguous rank-2 f32 operands take the hipBLAS path."
+- `spec/design/chelis_canonical_reference.md:438-443` now documents
+  runtime-sized symbolic/batched BLAS as shipped behavior, while naming
+  the HIP strided-batched API as a quality follow-up.
+- `spec/design/phase1d_flattening.md:39` now scopes the hipBLAS path to
+  contiguous matrix slices rather than only rank-2 operands.
 - `spec/design/chelis_phase2_plan.md:561` notes batched matmul
   remains correct via generic expand+mul+sum decomposition (i.e.,
   the rank-3+ case works numerically, just slowly).
@@ -329,10 +323,10 @@ patterns.
 - **Addressed by M3:** `matmul` itself now accepts rank ≥ 2 and
   broadcasts leading axes for ergonomic parity with PyTorch-style
   batched matmul.
-- **Still open:** batched matmul remains on the generic lowering path.
-  Any operand/result dimension needed for a future batched BLAS loop
-  bound or stride that is not `Lit(n)` or `Named(_, Some(n))` must fall
-  through to the generic path.
+- **Addressed by M3b:** symbolic and batched matmul specialize to
+  runtime-sized BLAS when trailing matrix slices are contiguous. The
+  C backend loops over batch slices; HIP uses a helper loop over
+  hipBLAS calls pending a strided-batched optimization.
 
 **Probe corpus:**
 - `examples/illustrative/mha_single_head.ch` — single-head reference,
@@ -341,7 +335,8 @@ patterns.
   unrolling, the corpus-supported alternative to canonical
   heads-as-dim.
 - `examples/illustrative/mha_heads_as_dim.ch` — canonical heads-as-dim
-  batched matmul accepted by the M3 type rule and generic lowering.
+  batched matmul accepted by the M3 type rule and specialized by M3b
+  when the emitted matrix slices are contiguous.
 - `examples/illustrative/mha_slice_combined_qkv.ch` — combined-QKV
   with `shrink(&qkv)` borrows demonstrating linearity allows the
   zero-copy slicing pattern.
@@ -441,10 +436,11 @@ kernel anyway.
 | 2048 × 2048 × 2048 (f32) | **32 GiB** | 16 MiB |
 | 1024 × 4096 × 1024 (f32, FFN) | **16 GiB** | 4 MiB |
 
-In `examples/transformer_block.ch`, this is the dominant
-working-set cost — ~3 MiB per `seq` token, almost entirely from
-dead `Mul` intermediates that BLAS hits would have eliminated in
-any normal compiler pipeline.
+In `examples/transformer_block.ch`, M3b now lets symbolic `seq` matmuls
+hit BLAS. The measured `seq = 2048` helper-side projection drops from
+the prior M2a ~6.3 GiB state to ~1.06 GiB. The remaining dominant cost is
+vanilla attention's real `[seq, seq]` score/probability buffers, not dead
+generic matmul products.
 
 **What closed it:** option (a). BLAS detection now runs as an IR
 replacement pass followed by DCE, which prunes the orphan `Mul` and
@@ -466,8 +462,9 @@ only) while keeping the user-`def` specialization miss locked for Gap 5.
 
 **Probe corpus:** any matmul-heavy program. The
 `mha_two_heads_unrolled.ch` and `transformer_block.ch` examples
-amplify the cost dramatically because every per-head matmul pays
-the dead-`Mul` tax.
+amplify the cost dramatically when their matmuls miss specialization.
+Rank-2, symbolic, and batched BLAS-hit matmuls no longer pay the
+dead-`Mul` tax.
 
 **Tracked in:**
 `spec/upstream-bugs/dead-mul-after-blas-specialization.md`.
@@ -490,7 +487,10 @@ the existing fallback behavior for tests and synthetic producers.
 **Locked test:** `crates/chelis-cli/tests/traceability_paradox.rs` —
 `transformer_block_traceability_state_is_locked`. Asserts that emitted
 span comments include `surf:<start>..<end>` byte-range IDs and are no
-longer all `__synthesized_*` markers.
+longer all `__synthesized_*` markers. The same test also locks the
+current symbolic/batched-BLAS transformer allocation profile so future
+attention fusion or backend-quality changes must update the cost profile
+deliberately.
 
 **Spec coverage:**
 - `spec/design/chelis_span_survival.md:64-72` defines the

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DagNode, DimExpr, NodeId, RiscOp, TensorType};
 
 /// Run the closed-list no-op cleanup plus backend specialization, then DCE.
 pub fn specialize_for_blas(dag: &Dag) -> Dag {
@@ -96,9 +96,10 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
             let b = id_map[&info.b];
             let new_id = out.add_node(
                 RiscOp::BlasMatmul {
-                    m: info.m,
-                    n: info.n,
-                    k: info.k,
+                    batch_dims: info.batch_dims.clone(),
+                    m: info.m.clone(),
+                    n: info.n.clone(),
+                    k: info.k.clone(),
                 },
                 vec![a, b],
                 node.output_type.clone(),
@@ -141,9 +142,10 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
 struct MatmulInfo {
     a: NodeId,
     b: NodeId,
-    m: usize,
-    n: usize,
-    k: usize,
+    batch_dims: Vec<DimExpr>,
+    m: DimExpr,
+    n: DimExpr,
+    k: DimExpr,
     mul: NodeId,
     expand_a: NodeId,
     expand_b: NodeId,
@@ -151,11 +153,15 @@ struct MatmulInfo {
 
 fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
-    let axis = match &sum_node.op {
+    let sum_axis = match &sum_node.op {
         RiscOp::Sum { axis } => *axis,
         _ => return None,
     };
-    if axis != 1 || sum_node.inputs.len() != 1 {
+    if sum_node.inputs.len() != 1 || sum_node.output_type.dims.len() < 2 {
+        return None;
+    }
+    let lead_len = sum_node.output_type.dims.len() - 2;
+    if sum_axis != lead_len + 1 {
         return None;
     }
     let mul_id = sum_node.inputs[0];
@@ -167,25 +173,51 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let expand_b_id = mul_node.inputs[1];
     let expand_a = dag.get(expand_a_id)?;
     let expand_b = dag.get(expand_b_id)?;
-    if !matches!(expand_a.op, RiscOp::Expand { .. })
-        || !matches!(expand_b.op, RiscOp::Expand { .. })
-        || expand_a.inputs.len() != 1
-        || expand_b.inputs.len() != 1
-    {
+    let RiscOp::Expand { axis: axis_a, .. } = expand_a.op else {
+        return None;
+    };
+    let RiscOp::Expand { axis: axis_b, .. } = expand_b.op else {
+        return None;
+    };
+    if axis_a != lead_len + 2 || axis_b != lead_len {
+        return None;
+    }
+    if expand_a.inputs.len() != 1 || expand_b.inputs.len() != 1 {
         return None;
     }
 
     let a = expand_a.inputs[0];
     let b = expand_b.inputs[0];
-    if !node_is_statically_contiguous(dag, a) || !node_is_statically_contiguous(dag, b) {
+    if !node_has_contiguous_matrix_slices(dag, a, 2)
+        || !node_has_contiguous_matrix_slices(dag, b, 2)
+    {
         return None;
     }
     let a_ty = &dag.get(a)?.output_type;
     let b_ty = &dag.get(b)?.output_type;
-    let (m, n, k) = matmul_dims(a_ty, b_ty)?;
+    let batch_dims = sum_node.output_type.dims[..lead_len]
+        .iter()
+        .map(DimExpr::from)
+        .collect::<Vec<_>>();
+    let (m, n, k) = matmul_dims(a_ty, b_ty, &batch_dims)?;
+    let out_dims = sum_node
+        .output_type
+        .dims
+        .iter()
+        .map(DimExpr::from)
+        .collect::<Vec<_>>();
+    let expected_out = batch_dims
+        .iter()
+        .cloned()
+        .chain([m.clone(), n.clone()])
+        .collect::<Vec<_>>();
+    if out_dims != expected_out {
+        return None;
+    }
     Some(MatmulInfo {
         a,
         b,
+        batch_dims,
         m,
         n,
         k,
@@ -195,26 +227,27 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     })
 }
 
-fn matmul_dims(a_ty: &TensorType, b_ty: &TensorType) -> Option<(usize, usize, usize)> {
-    if a_ty.dims.len() != 2 || b_ty.dims.len() != 2 {
+fn matmul_dims(
+    a_ty: &TensorType,
+    b_ty: &TensorType,
+    batch_dims: &[DimExpr],
+) -> Option<(DimExpr, DimExpr, DimExpr)> {
+    if a_ty.dims.len() != batch_dims.len() + 2 || b_ty.dims.len() != batch_dims.len() + 2 {
         return None;
     }
-    let m = dim_size(&a_ty.dims[0])?;
-    let k_a = dim_size(&a_ty.dims[1])?;
-    let k_b = dim_size(&b_ty.dims[0])?;
-    let n = dim_size(&b_ty.dims[1])?;
+    let a_dims = a_ty.dims.iter().map(DimExpr::from).collect::<Vec<_>>();
+    let b_dims = b_ty.dims.iter().map(DimExpr::from).collect::<Vec<_>>();
+    if &a_dims[..batch_dims.len()] != batch_dims || &b_dims[..batch_dims.len()] != batch_dims {
+        return None;
+    }
+    let m = a_dims[a_dims.len() - 2].clone();
+    let k_a = a_dims[a_dims.len() - 1].clone();
+    let k_b = b_dims[b_dims.len() - 2].clone();
+    let n = b_dims[b_dims.len() - 1].clone();
     if k_a == k_b { Some((m, n, k_a)) } else { None }
 }
 
-fn dim_size(dim: &DimInfo) -> Option<usize> {
-    match dim {
-        DimInfo::Lit(n) => Some(*n),
-        DimInfo::Named(_, Some(n)) => Some(*n),
-        DimInfo::Named(_, None) => None,
-    }
-}
-
-fn node_is_statically_contiguous(dag: &Dag, id: NodeId) -> bool {
+fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) -> bool {
     let Some(node) = dag.get(id) else {
         return false;
     };
@@ -252,9 +285,17 @@ fn node_is_statically_contiguous(dag: &Dag, id: NodeId) -> bool {
             .inputs
             .first()
             .copied()
-            .is_some_and(|input| node_is_statically_contiguous(dag, input)),
+            .is_some_and(|input| node_has_contiguous_matrix_slices(dag, input, matrix_rank)),
+        RiscOp::Expand { axis, .. } => {
+            let rank = node.output_type.dims.len();
+            *axis < rank.saturating_sub(matrix_rank)
+                && node
+                    .inputs
+                    .first()
+                    .copied()
+                    .is_some_and(|input| node_has_contiguous_matrix_slices(dag, input, matrix_rank))
+        }
         RiscOp::Permute { .. }
-        | RiscOp::Expand { .. }
         | RiscOp::Stride { .. }
         | RiscOp::Pad { .. }
         | RiscOp::Shrink { .. } => false,
@@ -284,7 +325,7 @@ fn append_node_provenance(out: &mut Dag, target: NodeId, source: &DagNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{Dag, DimExpr, TensorType};
+    use crate::dag::{Dag, DimExpr, DimInfo, TensorType};
     use chelis_types::types::Prim;
 
     fn mat(r: usize, c: usize) -> TensorType {
@@ -317,6 +358,18 @@ mod tests {
                 DimInfo::Named(a.to_string(), None),
                 DimInfo::Named(b.to_string(), None),
                 DimInfo::Named(c.to_string(), None),
+            ],
+            precision: Prim::F32,
+        }
+    }
+
+    fn symbolic_t4(a: &str, b: &str, c: &str, d: &str) -> TensorType {
+        TensorType {
+            dims: vec![
+                DimInfo::Named(a.to_string(), None),
+                DimInfo::Named(b.to_string(), None),
+                DimInfo::Named(c.to_string(), None),
+                DimInfo::Named(d.to_string(), None),
             ],
             precision: Prim::F32,
         }
@@ -366,11 +419,20 @@ mod tests {
         dag.add_root(sum);
 
         let out = specialize_for_blas(&dag);
-        assert!(
-            out.nodes()
-                .iter()
-                .any(|node| { matches!(node.op, RiscOp::BlasMatmul { m: 2, n: 4, k: 3 }) })
-        );
+        assert!(out.nodes().iter().any(|node| {
+            matches!(
+                &node.op,
+                RiscOp::BlasMatmul {
+                    batch_dims,
+                    m,
+                    n,
+                    k,
+                } if batch_dims.is_empty()
+                    && *m == DimExpr::Concrete(2)
+                    && *n == DimExpr::Concrete(4)
+                    && *k == DimExpr::Concrete(3)
+            )
+        }));
         assert!(
             !out.nodes()
                 .iter()
@@ -379,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_matmul_stays_on_generic_path() {
+    fn symbolic_matmul_specializes_to_runtime_dim_blas() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::Load { name: "a".into() },
@@ -421,17 +483,25 @@ mod tests {
         dag.add_root(sum);
 
         let out = specialize_for_blas(&dag);
+        assert!(out.nodes().iter().any(|node| {
+            matches!(
+                &node.op,
+                RiscOp::BlasMatmul {
+                    batch_dims,
+                    m,
+                    n,
+                    k,
+                } if batch_dims.is_empty()
+                    && *m == DimExpr::Sym("m".into())
+                    && *n == DimExpr::Sym("n".into())
+                    && *k == DimExpr::Sym("k".into())
+            )
+        }));
         assert!(
             !out.nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
-            "symbolic dimensions must not specialize until a dynamic-stride BLAS path exists"
-        );
-        assert!(
-            out.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "generic symbolic matmul should keep the RISC product node"
+                .any(|node| matches!(node.op, RiscOp::Mul | RiscOp::Expand { .. })),
+            "symbolic BLAS specialization should DCE the dense product path"
         );
     }
 
@@ -474,6 +544,50 @@ mod tests {
                 .iter()
                 .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
             "non-contiguous matmul operands must stay on the generic path"
+        );
+    }
+
+    #[test]
+    fn rank4_symbolic_batched_matmul_specializes() {
+        let mut dag = Dag::new();
+        let a_ty = symbolic_t4("batch", "heads", "seq", "dim");
+        let b_ty = symbolic_t4("batch", "heads", "dim", "seq");
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        let out = crate::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        dag.add_root(out);
+
+        let specialized = specialize_for_blas(&dag);
+        assert!(specialized.nodes().iter().any(|node| {
+            matches!(
+                &node.op,
+                RiscOp::BlasMatmul {
+                    batch_dims,
+                    m,
+                    n,
+                    k,
+                } if batch_dims == &vec![DimExpr::Sym("batch".into()), DimExpr::Sym("heads".into())]
+                    && *m == DimExpr::Sym("seq".into())
+                    && *n == DimExpr::Sym("seq".into())
+                    && *k == DimExpr::Sym("dim".into())
+            )
+        }));
+        assert!(
+            !specialized
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Mul | RiscOp::Expand { .. })),
+            "batched BLAS specialization must remove the dense [..., m, k, n] product"
         );
     }
 }

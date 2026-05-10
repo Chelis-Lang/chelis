@@ -70,12 +70,12 @@ bytes. Concrete examples:
 | 1024 × 4096 × 1024 (f32, FFN) | 16 GiB | 4 MiB |
 
 For the 4-head MHA + FFN block in
-`examples/transformer_block.ch`, this is the dominant working-set
-cost: roughly 3 MiB per `seq` token (per
-`crates/chelis-cli/tests/traceability_paradox.rs` cost-profile
-analysis). At `seq = 2048` the working set is ~14.6 GiB, the
-majority of which is dead `Mul` intermediates that BLAS hits would
-have eliminated in any normal compiler pipeline.
+`examples/transformer_block.ch`, M3b extends this closure to symbolic
+and batched matmul. The `seq = 2048` helper-side projection drops from
+the prior M2a ~6.3 GiB state to ~1.06 GiB because the generated C emits
+runtime-sized `cblas_sgemm` calls instead of dense generic matmul product
+buffers. The remaining dominant cost is vanilla attention's real
+`[seq, seq]` score/probability state.
 
 The compute waste is also non-trivial: the `parallel for simd`
 loop runs `m * k * n` multiplies for every BLAS-hit matmul, in

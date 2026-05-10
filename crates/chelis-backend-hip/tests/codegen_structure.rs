@@ -41,6 +41,18 @@ fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
     }
 }
 
+fn tensor4_f32(a: usize, b: usize, c: usize, d: usize) -> TensorType {
+    TensorType {
+        dims: vec![
+            DimInfo::Lit(a),
+            DimInfo::Lit(b),
+            DimInfo::Lit(c),
+            DimInfo::Lit(d),
+        ],
+        precision: Prim::F32,
+    }
+}
+
 fn write_temp_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, contents).expect("write temp file");
@@ -975,6 +987,33 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
     assert!(
         result.link_flags.iter().any(|flag| flag == "-lhipblas"),
         "hipBLAS specialization must surface the extra link flag"
+    );
+}
+
+#[test]
+fn s15_batched_matmul_emits_hipblas_batched_helper_and_link_flag() {
+    let mut dag = Dag::new();
+    let a_ty = tensor4_f32(2, 3, 4, 5);
+    let b_ty = tensor4_f32(2, 3, 5, 6);
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], a_ty.clone(), None);
+    let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], b_ty.clone(), None);
+    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+    dag.add_root(out);
+    let result = codegen_hip(&dag, "test_hipblas_batched_matmul");
+
+    assert!(
+        result
+            .c_source
+            .contains("chelis_hipblas_sgemm_batched_row_major"),
+        "rank-4 batched matmul should lower to the hipBLAS batched helper"
+    );
+    assert!(
+        !result.c_source.contains("kernel_sum_ax3"),
+        "batched BLAS specialization should remove the generic contraction reduction"
+    );
+    assert!(
+        result.link_flags.iter().any(|flag| flag == "-lhipblas"),
+        "batched hipBLAS specialization must surface the extra link flag"
     );
 }
 

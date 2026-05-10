@@ -437,10 +437,11 @@ helper.
 
 Current 2d performance boundary:
 
-- batched `matmul` is correct on both backends but stays in the generic
-  `expand -> mul -> sum` decomposition
-- the existing HIP rank-2 BLAS fast path does not yet upgrade vmapped rank-3 matmul into
-  a batched BLAS call
+- batched `matmul` is correct on both backends and specializes to runtime-sized BLAS when
+  the operands have contiguous trailing matrix slices
+- the C backend emits a host loop over `cblas_sgemm` for batched matmul; HIP currently
+  uses a helper loop over hipBLAS calls, with direct `hipblasSgemmStridedBatched` dispatch
+  left as a backend-quality follow-up for uniformly strided batch layouts
 
 ---
 
