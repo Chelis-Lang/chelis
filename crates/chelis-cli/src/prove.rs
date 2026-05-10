@@ -73,6 +73,7 @@ struct DeepProperty {
     name: String,
     source: PathBuf,
     source_kind: String,
+    source_id: Option<String>,
     params: Vec<Param>,
     preconditions: Vec<DeepExpr>,
     body: DeepExpr,
@@ -943,6 +944,7 @@ fn discover_deep_properties_expr(
                 name: name.to_string(),
                 source: path.to_path_buf(),
                 source_kind,
+                source_id: deep_string_meta(meta, "property_source_id").map(ToString::to_string),
                 params,
                 preconditions: deep_property_preconditions(meta).unwrap_or_default(),
                 body: deep_fn_body(fn_expr)
@@ -1011,6 +1013,10 @@ fn deep_int_meta(meta: &MetaMap, key: &str) -> Option<usize> {
         Some(value) if value >= 0 => Some(value as usize),
         _ => None,
     }
+}
+
+fn deep_string_meta<'a>(meta: &'a MetaMap, key: &str) -> Option<&'a str> {
+    deep_meta_value(meta, key).and_then(string_value)
 }
 
 fn deep_int_value(expr: &DeepExpr) -> Option<i64> {
@@ -1399,11 +1405,25 @@ fn emit_deep_record(
     } else {
         match status {
             "passed" => println!("property: {} -- {samples}/{samples} passed", property.name),
-            "failed" => println!(
-                "property failure: {}\n  --> {}",
-                property.name,
-                property.source.display()
-            ),
+            "failed" => {
+                if let Some(source) = bridge_source_details(property, options) {
+                    println!(
+                        "property failure: {}\n  --> {}:{}:{} {}\n  | {}",
+                        property.name,
+                        source.file,
+                        source.line,
+                        source.column,
+                        source.id,
+                        source.text
+                    );
+                } else {
+                    println!(
+                        "property failure: {}\n  --> {}",
+                        property.name,
+                        property.source.display()
+                    );
+                }
+            }
             "unsupported" => println!(
                 "property unsupported: {}: {}",
                 property.name,
@@ -1429,7 +1449,14 @@ fn emit_deep_error(options: &ProveOptions<'_>, property: &DeepProperty, message:
             })
         );
     } else {
-        println!("property error: {}: {message}", property.name);
+        if let Some(source) = bridge_source_details(property, options) {
+            println!(
+                "property error: {}: {message}\n  --> {}:{}:{} {}\n  | {}",
+                property.name, source.file, source.line, source.column, source.id, source.text
+            );
+        } else {
+            println!("property error: {}: {message}", property.name);
+        }
     }
 }
 
@@ -1462,9 +1489,60 @@ fn source_json_deep(property: &DeepProperty, options: &ProveOptions<'_>) -> serd
         .spans
         .map(Path::to_path_buf)
         .or_else(|| sibling_spans_path(&property.source));
-    json!({
+    let mut value = json!({
         "kind": "bridge:c-earchin",
         "spans": spans.map(|path| path.display().to_string()),
+    });
+    if let Some(source) = bridge_source_details(property, options) {
+        value["requirement"] = json!({
+            "id": source.id,
+            "file": source.file,
+            "line": source.line,
+            "column": source.column,
+            "text": source.text,
+        });
+    }
+    value
+}
+
+#[derive(Debug, Clone)]
+struct BridgeSourceDetails {
+    id: String,
+    file: String,
+    line: usize,
+    column: usize,
+    text: String,
+}
+
+fn bridge_source_details(
+    property: &DeepProperty,
+    options: &ProveOptions<'_>,
+) -> Option<BridgeSourceDetails> {
+    if property.source_kind != "bridge:c-earchin" {
+        return None;
+    }
+    let spans_path = options
+        .spans
+        .map(Path::to_path_buf)
+        .or_else(|| sibling_spans_path(&property.source))?;
+    let source = fs::read_to_string(spans_path).ok()?;
+    let manifest = serde_json::from_str::<serde_json::Value>(&source).ok()?;
+    let entry = manifest.get("spans")?.as_array()?.iter().find(|entry| {
+        let ears_id = entry.get("ears_id").and_then(|value| value.as_str());
+        let deep_node_id = entry.get("deep_node_id").and_then(|value| value.as_str());
+        property
+            .source_id
+            .as_deref()
+            .is_some_and(|id| ears_id == Some(id))
+            || deep_node_id == Some(property.name.as_str())
+    })?;
+    let ears = entry.get("ears")?;
+    Some(BridgeSourceDetails {
+        id: entry.get("ears_id")?.as_str()?.to_string(),
+        file: entry.get("ears_file")?.as_str()?.to_string(),
+        line: ears.get("start_line")?.as_u64()? as usize,
+        column: ears.get("start_column")?.as_u64()? as usize,
+        text: entry.get("ears_text")?.as_str()?.to_string(),
     })
 }
 

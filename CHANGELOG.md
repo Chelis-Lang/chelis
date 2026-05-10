@@ -6,6 +6,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-05-10
+
+### Fixed — bridge provenance diagnostics
+
+`chelis prove` now resolves c-earchin `.spans.json` manifests for Deep bridge
+properties. Human failure/error diagnostics show the originating EARS file,
+line, column, requirement ID, and requirement text; JSON output includes the
+same data under `source.requirement`.
+
 ## [0.7.1] — 2026-05-10
 
 ### Added — first-class Surf properties and `chelis prove`

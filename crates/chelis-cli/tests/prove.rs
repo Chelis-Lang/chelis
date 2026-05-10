@@ -448,6 +448,95 @@ fn spans_override_requires_single_explicit_deep_file() {
 }
 
 #[test]
+fn bridge_failure_resolves_spans_manifest_to_ears_source() {
+    let dir = tempdir().expect("tempdir");
+    let deep = dir.path().join("options.dp");
+    let spans = dir.path().join("options.spans.json");
+    std::fs::write(
+        &deep,
+        r#"
+(def {chelis_role: "property",
+      property_source_kind: "bridge:c-earchin",
+      property_source_id: "FIN-003",
+      property_quantifiers: (params {}),
+      property_preconditions: (tuple {})}
+  req_FIN_003
+  (fn {} (params {}) (lit {type: (t-prim {} bool)} false)))
+"#,
+    )
+    .expect("write deep");
+    std::fs::write(
+        &spans,
+        r#"
+{
+  "source": "references/finance_options/options_rules.ears",
+  "source_hash": "sha256:test",
+  "spans": [
+    {
+      "deep_node_id": "req_FIN_003",
+      "deep_path": "module.def[2]",
+      "ears_id": "FIN-003",
+      "ears_file": "references/finance_options/options_rules.ears",
+      "ears_text": "WHILE the exchange is open, the portfolio delta shall be at most the limit.",
+      "ears": {
+        "start_byte": 143,
+        "end_byte": 224,
+        "start_line": 3,
+        "start_column": 1,
+        "end_line": 3,
+        "end_column": 81
+      },
+      "clauses": []
+    }
+  ]
+}
+"#,
+    )
+    .expect("write spans");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            deep.to_str().unwrap(),
+            "--spans",
+            spans.to_str().unwrap(),
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "references/finance_options/options_rules.ears:3:1 FIN-003",
+        ))
+        .stdout(predicate::str::contains(
+            "WHILE the exchange is open, the portfolio delta shall be at most the limit.",
+        ));
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            deep.to_str().unwrap(),
+            "--spans",
+            spans.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(output.status.code(), Some(1));
+    let records = String::from_utf8(output.stdout)
+        .expect("utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("json line"))
+        .collect::<Vec<_>>();
+    assert_eq!(records[0]["source"]["requirement"]["id"], "FIN-003");
+    assert_eq!(records[0]["source"]["requirement"]["line"], 3);
+    assert_eq!(
+        records[0]["source"]["requirement"]["text"],
+        "WHILE the exchange is open, the portfolio delta shall be at most the limit."
+    );
+}
+
+#[test]
 fn prove_accepts_dotted_deep_symbols_for_bridge_references() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bridge.dp");
