@@ -150,3 +150,102 @@ fn eval_file_runs_gate_but_eval_expr_does_not() {
         .assert()
         .stderr(predicates::str::contains("not canonically formatted").not());
 }
+
+/// `chelis validate --surf` also runs the style gate before validation.
+#[test]
+fn validate_surf_fails_on_non_canonical_source() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("noncanonical.ch");
+    fs::write(&path, "def foo() -> i32 = 1   \n").unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--surf", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not canonically formatted"));
+}
+
+/// `chelis validate --deep` runs Deep lint rules through the same gate.
+#[test]
+fn validate_deep_fails_on_deep_lint_violation() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bad_symbol.dp");
+    fs::write(&path, "(def {} my-func (params {}) (lit {} 1))\n").unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("deep-user-symbol-charset"));
+}
+
+/// The validate gate can be bypassed with the same emergency flag.
+#[test]
+fn validate_deep_bypass_emits_warning_on_stderr() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bad_symbol.dp");
+    fs::write(&path, "(def {} my-func (params {}) (lit {} 1))\n").unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "validate",
+            "--deep",
+            path.to_str().unwrap(),
+            "--allow-style-violations",
+        ])
+        .assert()
+        .stderr(predicates::str::contains("style gate bypassed"));
+}
+
+/// Deep lint directives are comments in source but are ignored for the
+/// canonical-format comparison so they can suppress style-gate lint
+/// diagnostics without creating a formatting failure.
+#[test]
+fn validate_deep_allows_lint_directive_without_format_failure() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("allowed_dash.dp");
+    let dash = '\u{2014}';
+    fs::write(
+        &path,
+        format!(
+            "; chelis-lint: allow no-em-dash-in-public-strings\n(def {{}} message (params {{}}) (lit {{}} \"one {dash} two\"))\n"
+        ),
+    )
+    .unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("not canonically formatted").not());
+}
+
+/// Deep lint directive stripping must not normalize unrelated bytes;
+/// missing final newlines remain a formatting failure.
+#[test]
+fn validate_deep_still_rejects_missing_final_newline_after_directive_stripping() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("no_newline.dp");
+    fs::write(&path, "(def {} value (params {}) (lit {} 1))").unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not canonically formatted"));
+}
+
+/// Deep lint directive stripping must preserve line endings on retained
+/// source lines, so CRLF input does not pass the canonical LF gate.
+#[test]
+fn validate_deep_still_rejects_crlf_after_directive_stripping() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("crlf.dp");
+    fs::write(&path, "(def {} value (params {}) (lit {} 1))\r\n").unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not canonically formatted"));
+}

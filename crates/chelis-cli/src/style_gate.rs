@@ -131,7 +131,8 @@ pub fn run_gate(file: &Path, source: &str) -> GateOutcome {
 fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     let canonical = if ext == "dp" {
-        match chelis_deep::parser::parse_str_strict(source) {
+        let format_source = strip_deep_lint_directive_lines(source);
+        match chelis_deep::parser::parse_str_strict(&format_source) {
             Ok(exprs) => chelis_deep::printer::print_canonical(&exprs),
             // If the file doesn't parse, the regular compile path will
             // surface that error with a better message; we don't
@@ -144,13 +145,28 @@ fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
             Err(_) => return None,
         }
     };
-    if canonical == source {
+    let compare_source = if ext == "dp" {
+        strip_deep_lint_directive_lines(source)
+    } else {
+        source.to_string()
+    };
+    if canonical == compare_source {
         None
     } else {
         Some(FmtDiff {
             path: file.to_path_buf(),
         })
     }
+}
+
+pub fn strip_deep_lint_directive_lines(source: &str) -> String {
+    source
+        .split_inclusive('\n')
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !(trimmed.starts_with(';') && trimmed.contains("chelis-lint:"))
+        })
+        .collect()
 }
 
 fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {

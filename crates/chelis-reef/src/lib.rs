@@ -4241,7 +4241,17 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
     let mut tar_bytes = Vec::new();
     {
         let mut builder = Builder::new(&mut tar_bytes);
-        for rel in ["reef.toml", "reef.lock"] {
+        let metadata_files: &[&str] = if manifest.package.name == CHELIS_STD_PACKAGE_NAME {
+            // chelis-std is the bundled runtime and therefore has a
+            // self-referential lock entry. Including reef.lock in its own
+            // archive makes the archive hash depend on the previous bundle
+            // hash and prevents the committed lock from reaching a fixed
+            // point. Downstream shells still pack reef.lock normally.
+            &["reef.toml"]
+        } else {
+            &["reef.toml", "reef.lock"]
+        };
+        for rel in metadata_files {
             let path = root.join(rel);
             if path.exists() {
                 builder
@@ -5401,6 +5411,27 @@ mod tests {
              bump both together",
             BUNDLED_CHELIS_STD_VERSION, manifest.package.version,
         );
+    }
+
+    #[test]
+    fn bundled_chelis_std_lock_hashes_match_embedded_artifacts() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let lock_path = here.join("../../packages/chelis-std/reef.lock");
+        let text = fs::read_to_string(&lock_path).unwrap_or_else(|e| {
+            panic!(
+                "could not read {}: {e}: \
+                 chelis-std lock hash sync test cannot run",
+                lock_path.display()
+            )
+        });
+        let lock: ReefLock = toml::from_str(&text).expect("packages/chelis-std/reef.lock parses");
+        let dep = lock
+            .dependencies
+            .iter()
+            .find(|dep| dep.name == CHELIS_STD_PACKAGE_NAME)
+            .expect("chelis-std lock must record bundled runtime dependency");
+        assert_eq!(dep.archive_sha256, chelis_std_bundle::archive_sha256());
+        assert_eq!(dep.shell_sha256, chelis_std_bundle::shell_sha256());
     }
 
     /// Negative parity for the version sync: a soft-verify mismatch must

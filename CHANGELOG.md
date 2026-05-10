@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-05-10
+
 ### Added - lint auto-fix and cleanup rules
 
 `chelis lint` now supports `--fix`, `--rules`, and `--list`. The lint

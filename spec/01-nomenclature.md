@@ -927,6 +927,15 @@ section of this spec. Advisory rules do not need path-glob exceptions
 for existing corpus entries unless they are promoted into the blocking
 registry later.
 
+Inline source directives use the language's line-comment syntax:
+`// chelis-lint: allow <rule>` or `// chelis-lint: keep <rule>` in
+Surf/Rust-like files, `# chelis-lint: ...` in Python, and
+`; chelis-lint: ...` in Deep. A directive suppresses or keeps the
+diagnostic on the same line or the immediately following line. Deep
+lint directive comments are ignored by the built-in style gate's
+canonical-format comparison so the directive can suppress a lint
+diagnostic without creating a formatting failure.
+
 ---
 
 ## 12. Enforcement

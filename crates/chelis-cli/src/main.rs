@@ -663,7 +663,8 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
     };
     let synthetic_name = file.file_stem().and_then(|stem| stem.to_str());
     if ext == "dp" {
-        let deep_exprs = chelis_deep::parser::parse_str_strict(&source)?;
+        let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
+        let deep_exprs = chelis_deep::parser::parse_str_strict(&deep_source)?;
         let surf = chelis_surf::decompile::decompile_program_with_context(
             &deep_exprs,
             &options,
@@ -915,7 +916,8 @@ fn copy_cost_for_file(
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext == "dp" {
         let source = fs::read_to_string(file)?;
-        let deep_exprs = chelis_deep::parser::parse_str_strict(&source)
+        let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
+        let deep_exprs = chelis_deep::parser::parse_str_strict(&deep_source)
             .map_err(|err| format!("Deep parse error: {err}"))?;
         let checked =
             checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
@@ -1292,15 +1294,22 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
     if style_gate::disabled_by_env() {
         return;
     }
-    let parent = file.parent().unwrap_or_else(|| Path::new("."));
+    let parent = file
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let rules = chelis_lint::registry::non_blocking_rules();
     let raw = match chelis_lint::lint(parent, &rules) {
         Ok(violations) => violations,
         Err(_) => return,
     };
+    let target_file = fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     let mine = raw
         .into_iter()
-        .filter(|violation| violation.path == file)
+        .filter(|violation| {
+            fs::canonicalize(&violation.path).unwrap_or_else(|_| violation.path.clone())
+                == target_file
+        })
         .collect::<Vec<_>>();
     let exceptions_list = style_gate::exceptions();
     for violation in chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, parent) {
@@ -1692,7 +1701,8 @@ fn cmd_build_deep(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
-    let deep_exprs = chelis_deep::parser::parse_str_strict(&source)
+    let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
+    let deep_exprs = chelis_deep::parser::parse_str_strict(&deep_source)
         .map_err(|err| format!("Deep parse error: {err}"))?;
 
     // Deep ingestion has no separate "entry decls" concept — the whole
@@ -4004,7 +4014,10 @@ fn cmd_validate(
 
     let result = match mode {
         "surf" => chelis_validate::validate_surf(&source),
-        "deep" => chelis_validate::validate_deep(&source),
+        "deep" => {
+            let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
+            chelis_validate::validate_deep(&deep_source)
+        }
         "desugar" => chelis_validate::validate_desugared(&source),
         _ => unreachable!("validated above"),
     };
@@ -5092,6 +5105,11 @@ fn apply_lint_fixes(
                 let Some(rule) = rules.iter().find(|rule| rule.id() == violation.rule_id) else {
                     continue;
                 };
+                if violation.line.is_some_and(|line| {
+                    chelis_lint::inline_keeps(&source, surface, line, violation.rule_id.as_str())
+                }) {
+                    continue;
+                }
                 if let Some(replacement) = rule.fix(&ctx, violation) {
                     replacements.push(replacement);
                 }
@@ -5152,5 +5170,10 @@ fn fix_available_for_violation(
         source: Some(&source),
         surface,
     };
+    if violation.line.is_some_and(|line| {
+        chelis_lint::inline_keeps(&source, surface, line, violation.rule_id.as_str())
+    }) {
+        return false;
+    }
     rule.fix(&ctx, violation).is_some()
 }
