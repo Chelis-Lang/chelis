@@ -81,7 +81,7 @@ fn chelis_std_dist() -> (PathBuf, PathBuf) {
     let shell = dist.join("chelis-std-0.3.0.chb");
     assert!(
         archive.exists() && shell.exists(),
-        "prebuilt chelis-std artifacts missing under {} — \
+        "prebuilt chelis-std artifacts missing under {}: \
          run `chelis reef build` in packages/chelis-std/ first",
         dist.display()
     );

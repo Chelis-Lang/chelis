@@ -124,7 +124,7 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                                 kind: WarningKind::UnknownTag,
                                 offset: span.offset,
                                 message: format!(
-                                    "unknown tag '{tag}' — not in the 61-tag vocabulary"
+                                    "unknown tag '{tag}'. Not in the 61-tag vocabulary"
                                 ),
                             });
                         } else {

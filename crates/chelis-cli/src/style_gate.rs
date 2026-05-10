@@ -155,16 +155,15 @@ fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
 
 fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {
     let rules = chelis_lint::registry::all_rules();
-    // Lint the file's parent directory and filter to violations that
-    // belong to this file. The walker requires a directory root.
+    // Lint the file directly. `WalkDir` accepts file roots, and this avoids
+    // path-shape mismatches between `message.ch` and `./message.ch`.
     let parent = file.parent().unwrap_or_else(|| Path::new("."));
-    let raw = match chelis_lint::lint(parent, &rules) {
+    let raw = match chelis_lint::lint(file, &rules) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
-    let mine: Vec<Violation> = raw.into_iter().filter(|v| v.path == file).collect();
     let exceptions_list = exceptions();
-    chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, parent)
+    chelis_lint::exceptions::apply_exceptions(&raw, &exceptions_list, parent)
 }
 
 fn format_outcome(file: &Path, outcome: &GateOutcome) -> String {

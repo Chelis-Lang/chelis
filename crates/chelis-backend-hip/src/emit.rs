@@ -950,10 +950,10 @@ impl HipEmitter {
                 self.emit_expand(id, *axis, size, &node.inputs, &node.output_type);
             }
             RiscOp::Pad { .. } => {
-                todo!("Pad on GPU requires a kernel — deferred to Phase 1a iteration 2")
+                todo!("Pad on GPU requires a kernel. Deferred to Phase 1a iteration 2")
             }
             RiscOp::Shrink { .. } => {
-                todo!("Shrink on GPU requires a kernel — deferred to Phase 1a iteration 2")
+                todo!("Shrink on GPU requires a kernel. Deferred to Phase 1a iteration 2")
             }
             RiscOp::Stride { strides } => {
                 self.emit_stride(id, strides, &node.inputs, &node.output_type);

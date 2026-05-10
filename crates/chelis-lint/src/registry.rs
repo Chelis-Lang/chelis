@@ -19,13 +19,27 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(rules::surf_value_snake_case::SurfValueSnakeCase),
         Box::new(rules::surf_test_name_prefix::SurfTestNamePrefix),
         Box::new(rules::surf_def_arrow_form::SurfDefArrowForm),
+        Box::new(rules::no_em_dash_in_public_strings::NoEmDashInPublicStrings),
     ]
 }
 
-/// Return warning-only rules. These are user-facing lint advisories, but they
-/// are intentionally excluded from the blocking style-gate registry.
+/// Return non-blocking user-facing rules. They run in the standalone lint
+/// command and selected user-facing warnings, but are excluded from the
+/// blocking style gate.
+pub fn non_blocking_rules() -> Vec<Box<dyn Rule>> {
+    vec![
+        Box::new(rules::redundant_linearity_call::RedundantLinearityCall),
+        Box::new(rules::prefer_pipe_operator::PreferPipeOperator),
+    ]
+}
+
+/// Backward-compatible name used by older call sites.
 pub fn advisory_rules() -> Vec<Box<dyn Rule>> {
-    vec![Box::new(
-        rules::redundant_linearity_call::RedundantLinearityCall,
-    )]
+    non_blocking_rules()
+}
+
+pub fn selectable_rules() -> Vec<Box<dyn Rule>> {
+    let mut rules = all_rules();
+    rules.extend(non_blocking_rules());
+    rules
 }

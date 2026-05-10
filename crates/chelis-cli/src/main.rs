@@ -314,9 +314,18 @@ enum Command {
         /// Exit nonzero on any violation (CI use).
         #[arg(long)]
         check: bool,
+        /// Apply all available non-overlapping fixes in-place.
+        #[arg(long)]
+        fix: bool,
+        /// List registered rules and exit.
+        #[arg(long)]
+        list: bool,
         /// Run only the rule with this id.
         #[arg(long)]
         rule: Option<String>,
+        /// Run only the comma-separated set of rules.
+        #[arg(long)]
+        rules: Option<String>,
     },
     /// Internal: run the tests in a single file and emit NDJSON on stdout.
     /// Invoked by `chelis test` as a subprocess per file so a crash in one
@@ -579,8 +588,14 @@ fn main() {
                 std::process::exit(3);
             }
         },
-        Some(Command::Lint { paths, check, rule }) => match cmd_lint(paths, check, rule.as_deref())
-        {
+        Some(Command::Lint {
+            paths,
+            check,
+            fix,
+            list,
+            rule,
+            rules,
+        }) => match cmd_lint(paths, check, fix, list, rule.as_deref(), rules.as_deref()) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 eprintln!("error: {err}");
@@ -1268,7 +1283,7 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
         return;
     }
     let parent = file.parent().unwrap_or_else(|| Path::new("."));
-    let rules = chelis_lint::registry::advisory_rules();
+    let rules = chelis_lint::registry::non_blocking_rules();
     let raw = match chelis_lint::lint(parent, &rules) {
         Ok(violations) => violations,
         Err(_) => return,
@@ -1535,14 +1550,14 @@ fn cmd_build(
                 let unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
                 if !unresolved.is_empty() {
                     return Err(format!(
-                        "`chelis build --target c` can't lower these defs — their body \
+                        "`chelis build --target c` can't lower these defs. Their body \
                          applies/binds `grad` (or `vmap`) in a position the host lane \
                          can't resolve (inline `grad(f)(x)` or `g = grad(f); g(x)`). \
                          Workaround that compiles today: make the function you want to \
                          differentiate a parameter of the enclosing def, then call \
                          `grad(local, wrt=(arg))(arg)` where `local` is a locally-bound \
                          fn that uses the parameter; and make sure that function uses \
-                         only pure tensor ops (sum, add, mul, einsum, etc.) — `grad` \
+                         only pure tensor ops (sum, add, mul, einsum, etc.): `grad` \
                          through host-lane `fold`/`map` is not currently supported, \
                          rewrite to `tensor_to_scalar(sum(mul(v, v), 0))` or `einsum`. \
                          See `build_c_tensor_grad_local_wrapper_over_function_param_builds` \
@@ -1765,7 +1780,7 @@ fn cmd_build_deep(
                 let unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
                 if !unresolved.is_empty() {
                     return Err(format!(
-                        "`chelis build --deep --target c` can't lower these defs — \
+                        "`chelis build --deep --target c` can't lower these defs: \
                          they apply/bind `grad` (or `vmap`) in a position the host \
                          lane can't resolve. Affected defs: {}",
                         unresolved.join(", ")
@@ -1973,7 +1988,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                                 path,
                             } => {
                                 println!(
-                                    "Skipped path dep {name} {version} (path = {path}) — \
+                                    "Skipped path dep {name} {version} (path = {path}): \
                                      resolved at build time, not via remote fetch"
                                 );
                             }
@@ -1984,7 +1999,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                             } => {
                                 println!(
                                     "Skipped bundled runtime {name} {version} \
-                                     (compiler version {compiler_version}) — \
+                                     (compiler version {compiler_version}): \
                                      ships with the compiler, not fetched"
                                 );
                             }
@@ -2162,7 +2177,7 @@ fn cmd_test(
 
     if !target.exists() {
         return Err(format!(
-            "path `{}` does not exist — pass a tests directory or a single .ch file",
+            "path `{}` does not exist. Pass a tests directory or a single .ch file",
             target.display()
         ));
     }
@@ -2433,7 +2448,7 @@ fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
     if target.is_file() {
         if target.extension().and_then(|e| e.to_str()) != Some("ch") {
             return Err(format!(
-                "`{}` is not a .ch file — `chelis test` only accepts Chelis source",
+                "`{}` is not a .ch file: `chelis test` only accepts Chelis source",
                 target.display()
             ));
         }
@@ -2528,7 +2543,7 @@ fn worker_signal_str(_status: &std::process::ExitStatus) -> String {
 ///     of both worlds or false-positives on commented code.
 ///
 /// The marker text is part of the contract: regression tests assert on it.
-const FILTER_INACTIVE_MARKER: &str = "(filter inactive — file-level error) ";
+const FILTER_INACTIVE_MARKER: &str = "(filter inactive. File-level error) ";
 
 /// Tag the message of a file-level synthetic row to make it clear, under
 /// `--filter`, that the row isn't filter-matched. Idempotent: re-tagging an
@@ -3246,7 +3261,7 @@ fn enumerate_test_fns(
         // can fix the file instead of guessing which body ran (RT3 H3).
         if seen.insert(name.clone(), true).is_some() {
             return EnumerationOutcome::Error(format!(
-                "duplicate test definition `{name}` — each `def test_*()` in a test file must have a unique name"
+                "duplicate test definition `{name}`. Each `def test_*()` in a test file must have a unique name"
             ));
         }
         let key = format!("{rel_display}::{name}");
@@ -3548,7 +3563,7 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                      plus loaded int32/int64 tensors when they are consumed as sparse indices; \
                      node {} carries precision `{}`. \
                      The HIP backend is single-entry and doesn't route through a \
-                     host-lane wrapper — rewrite the program to use f32 tensors or \
+                     host-lane wrapper. Rewrite the program to use f32 tensors or \
                      build it with `--target c` instead.",
                     node.id.0,
                     other.name()
@@ -4632,22 +4647,54 @@ fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<Stri
 fn cmd_lint(
     paths: Vec<PathBuf>,
     check: bool,
+    fix: bool,
+    list: bool,
     rule_filter: Option<&str>,
+    rules_filter: Option<&str>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
+    if rule_filter.is_some() && rules_filter.is_some() {
+        return Err("use either --rule or --rules, not both".into());
+    }
+    let mut rules = chelis_lint::registry::selectable_rules();
+    if list {
+        for rule in &rules {
+            println!(
+                "{}\t{}\t{}\t{}",
+                rule.id(),
+                rule.severity().as_str(),
+                rule.spec_ref(),
+                rule.summary()
+            );
+        }
+        return Ok(0);
+    }
+    if let Some(id) = rule_filter {
+        rules.retain(|r| r.id() == id);
+        if rules.is_empty() {
+            return Err(format!("no rule with id '{id}'").into());
+        }
+    }
+    if let Some(ids) = rules_filter {
+        let selected: HashSet<&str> = ids
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .collect();
+        if selected.is_empty() {
+            return Err("--rules requires at least one rule id".into());
+        }
+        rules.retain(|r| selected.contains(r.id()));
+        let found: HashSet<&str> = rules.iter().map(|r| r.id()).collect();
+        let missing: Vec<&str> = selected.difference(&found).copied().collect();
+        if !missing.is_empty() {
+            return Err(format!("no rule with id(s) '{}'", missing.join(",")).into());
+        }
+    }
     let targets = if paths.is_empty() {
         vec![PathBuf::from(".")]
     } else {
         paths
     };
-    let mut rules = chelis_lint::registry::all_rules();
-    let mut advisory_rules = chelis_lint::registry::advisory_rules();
-    if let Some(id) = rule_filter {
-        rules.retain(|r| r.id() == id);
-        advisory_rules.retain(|r| r.id() == id);
-        if rules.is_empty() && advisory_rules.is_empty() {
-            return Err(format!("no rule with id '{id}'").into());
-        }
-    }
     // The exception list is sourced from `style_gate::exceptions()` so
     // the standalone `chelis lint` subcommand and the build-time style
     // gate filter against one shared registry. Rule-internal allowlists
@@ -4655,20 +4702,147 @@ fn cmd_lint(
     // common naming carve-outs; path-glob entries with §-cross-refs go
     // here.
     let exceptions: Vec<chelis_lint::Exception> = style_gate::exceptions();
-    let mut total = 0usize;
+    let mut blocking_total = 0usize;
     for target in &targets {
+        if fix {
+            let applied = apply_lint_fixes(target, &rules, &exceptions)?;
+            if applied > 0 {
+                println!(
+                    "fixed {} replacement(s) under {}",
+                    applied,
+                    target.display()
+                );
+            }
+        }
         let raw_violations = chelis_lint::lint(target, &rules)?;
         let kept = chelis_lint::exceptions::apply_exceptions(&raw_violations, &exceptions, target);
         for v in &kept {
-            println!("{v}");
+            let severity = rule_severity(&rules, &v.rule_id);
+            let suffix = if fix_available_for_violation(target, &rules, v) {
+                " [fix]"
+            } else {
+                ""
+            };
+            match severity {
+                chelis_lint::Severity::Error => println!("{v}{suffix}"),
+                chelis_lint::Severity::Warning => println!("warning: {v}{suffix}"),
+                chelis_lint::Severity::Advisory => println!("advisory: {v}{suffix}"),
+            }
+            if severity.blocks_check() {
+                blocking_total += 1;
+            }
         }
-        let raw_advisories = chelis_lint::lint(target, &advisory_rules)?;
-        let kept_advisories =
-            chelis_lint::exceptions::apply_exceptions(&raw_advisories, &exceptions, target);
-        for v in &kept_advisories {
-            println!("warning: {v}");
-        }
-        total += kept.len();
     }
-    if check && total > 0 { Ok(1) } else { Ok(0) }
+    if check && blocking_total > 0 {
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+fn rule_severity(rules: &[Box<dyn chelis_lint::Rule>], id: &str) -> chelis_lint::Severity {
+    rules
+        .iter()
+        .find(|rule| rule.id() == id)
+        .map(|rule| rule.severity())
+        .unwrap_or(chelis_lint::Severity::Error)
+}
+
+fn apply_lint_fixes(
+    target: &Path,
+    rules: &[Box<dyn chelis_lint::Rule>],
+    exceptions: &[chelis_lint::Exception],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut total = 0usize;
+    for _ in 0..5 {
+        let raw = chelis_lint::lint(target, rules)?;
+        let kept = chelis_lint::exceptions::apply_exceptions(&raw, exceptions, target);
+        let mut by_path: BTreeMap<PathBuf, Vec<chelis_lint::Violation>> = BTreeMap::new();
+        for violation in kept {
+            by_path
+                .entry(violation.path.clone())
+                .or_default()
+                .push(violation);
+        }
+        let mut pass_total = 0usize;
+        for (path, violations) in by_path {
+            let source = match fs::read_to_string(&path) {
+                Ok(source) => source,
+                Err(_) => continue,
+            };
+            let Some(surface) = chelis_lint::Surface::classify(&path, false) else {
+                continue;
+            };
+            let ctx = chelis_lint::Context {
+                root: target,
+                path: &path,
+                source: Some(&source),
+                surface,
+            };
+            let mut replacements = Vec::new();
+            for violation in &violations {
+                let Some(rule) = rules.iter().find(|rule| rule.id() == violation.rule_id) else {
+                    continue;
+                };
+                if let Some(replacement) = rule.fix(&ctx, violation) {
+                    replacements.push(replacement);
+                }
+            }
+            replacements.sort_by_key(|replacement| {
+                (
+                    replacement.end.saturating_sub(replacement.start),
+                    replacement.start,
+                )
+            });
+            let mut filtered: Vec<chelis_lint::Replacement> = Vec::new();
+            for replacement in replacements {
+                if replacement.start > replacement.end
+                    || filtered
+                        .iter()
+                        .any(|kept| replacement.start < kept.end && kept.start < replacement.end)
+                {
+                    continue;
+                }
+                filtered.push(replacement);
+            }
+            if filtered.is_empty() {
+                continue;
+            }
+            filtered.sort_by_key(|replacement| replacement.start);
+            let mut edited = source;
+            for replacement in filtered.iter().rev() {
+                edited.replace_range(replacement.start..replacement.end, &replacement.text);
+            }
+            fs::write(&path, edited)?;
+            pass_total += filtered.len();
+        }
+        total += pass_total;
+        if pass_total == 0 {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+fn fix_available_for_violation(
+    target: &Path,
+    rules: &[Box<dyn chelis_lint::Rule>],
+    violation: &chelis_lint::Violation,
+) -> bool {
+    let Some(rule) = rules.iter().find(|rule| rule.id() == violation.rule_id) else {
+        return false;
+    };
+    let Ok(source) = fs::read_to_string(&violation.path) else {
+        return false;
+    };
+    let Some(surface) = chelis_lint::Surface::classify(&violation.path, false) else {
+        return false;
+    };
+    let ctx = chelis_lint::Context {
+        root: target,
+        path: &violation.path,
+        source: Some(&source),
+        surface,
+    };
+    rule.fix(&ctx, violation).is_some()
 }

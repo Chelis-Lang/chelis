@@ -10,8 +10,8 @@ it:
     AGENTS.md
 
 Both lowercase (`nautilus`) and capitalized (`Nautilus`) forms are
-swapped. Every other file — license, gitignore, CI workflow, agent-skill
-copies, command wrappers — is copied verbatim. The `.git/` directory is
+swapped. Every other file. License, gitignore, CI workflow, agent-skill
+copies, command wrappers. Is copied verbatim. The `.git/` directory is
 excluded. `spec/phase*.md` files are also excluded: each shell owns its
 own phase spec and must write it fresh rather than inheriting the
 source shell's.

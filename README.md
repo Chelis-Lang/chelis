@@ -54,10 +54,11 @@ regressions.
 
 `chelis build`, `chelis check`, `chelis validate`, and `chelis eval --file`
 each enforce a built-in **style gate** (`chelis fmt --check` plus the
-full `chelis lint` rule set) on the input file before the front-end
-runs. Style failures fail the command. Run `chelis fmt --inplace
+blocking `chelis lint` rule set) on the input file before the
+front-end runs. Style failures fail the command; advisory lint warnings
+such as `redundant-linearity-call` do not. Run `chelis fmt --inplace
 path/to/file.ch` to canonicalize, or pass `--allow-style-violations`
-to bypass for emergency builds (CI must not). See
+to bypass only the style gate for emergency builds (CI must not). See
 [`docs/book/src/cli.md`](docs/book/src/cli.md) for the full contract.
 
 For real downstream proof against Nautilus without going through release

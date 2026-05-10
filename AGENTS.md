@@ -181,9 +181,11 @@ do not assume `rocm-smi` is installed.
 
 `chelis build`, `chelis check`, `chelis validate`, and
 `chelis eval --file` invoke `chelis fmt --check` and the full
-`chelis lint` rule set on the input file before the front-end
-pipeline runs. Style failures block the build by default and emit a
-one-issue-per-line diagnostic to stderr.
+blocking `chelis lint` rule set on the input file before the
+front-end pipeline runs. Style failures block the build by default and
+emit a one-issue-per-line diagnostic to stderr. Advisory lint warnings
+report valid-but-non-preferred source and do not fail `lint --check` or
+the built-in gate.
 
 - Authoritative source of truth: `spec/01-nomenclature.md` (the rule
   spec) and `crates/chelis-lint/src/rules/` (the executable
@@ -191,7 +193,9 @@ one-issue-per-line diagnostic to stderr.
   `.ch` and `chelis_deep::printer` for `.dp`.
 - Override flag: `--allow-style-violations` bypasses the gate with a
   stderr warning. Use only for emergency local builds and one-off
-  migrations. CI must not pass it.
+  migrations. CI must not pass it. The flag bypasses only the style
+  gate, not parse, type, effect, validation, evaluation, or backend
+  errors.
 - Test override env var: `CHELIS_STYLE_GATE_DISABLE=1` disables the
   gate process-wide. Reserved for the integration-test corpus that
   synthesizes ad-hoc Surf to exercise type/effect/linearity behavior;
@@ -214,11 +218,18 @@ When writing or rewriting Surf in this repository:
 - do not annotate intermediate expressions when inference already determines the type
 - keep meaningful intermediates like `h1`, `logits`, `probs`, and `loss`
 - combine short tensor operations when the composed expression is clearer than over-decomposed single-op bindings
+- pipe stages use first-argument insertion: `x |> f(y)` means
+  `f(x, y)`. Use `x |> fn (v) -> f(y, v)` when the piped value belongs
+  in a later argument position.
 - treat decompiler-generated verbose load chains and checker-inserted ascriptions as debug output, not example style
 - user code typically writes neither explicit `&` nor explicit `copy()` for fan-out
   into read-only primitives; auto-borrow handles it. Write `&x` when an exported
   API or dense signature benefits from clarity. Write `copy(x)` only when forking
   ownership for downstream consumption.
+- existing fixtures and migration baselines may keep explicit `copy()`
+  or `drop()` calls when they prove compatibility or preserve baseline
+  evidence. `redundant-linearity-call` is advisory and should not be
+  papered over with blocking-rule exceptions.
 - lowered IR now carries compiler-inserted `Copy` and `Drop` nodes for implicit
   linearity. If auto-copy/auto-drop produces unexpected IR, treat it as a
   structural blocker and escalate against `spec/design/implicit_linearity.md`

@@ -316,7 +316,7 @@ fn truncated_file_is_rejected_not_silently_loaded() {
             // requirement is NEVER `Ok(Some(_))` — that would silently use
             // the partial bytes.
         }
-        Ok(Some(_)) => panic!("torn-write must NOT silently load — got Ok(Some(_))"),
+        Ok(Some(_)) => panic!("torn-write must NOT silently load. Got Ok(Some(_))"),
         Err(other) => panic!("unexpected error variant: {other:?}"),
     }
 }
@@ -331,7 +331,7 @@ fn empty_file_is_rejected_as_corrupt() {
     let outcome = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root);
     match outcome {
         Err(CacheError::Corrupt(_)) => { /* expected */ }
-        Ok(None) => panic!("empty file must NOT be reported as a clean miss — torn-write hazard"),
+        Ok(None) => panic!("empty file must NOT be reported as a clean miss. Torn-write hazard"),
         Ok(Some(_)) => panic!("empty file must NEVER decode to Some(_)"),
         Err(other) => panic!("unexpected error: {other:?}"),
     }

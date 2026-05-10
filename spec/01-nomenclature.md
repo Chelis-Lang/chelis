@@ -9,15 +9,16 @@ The conventions documented here fall into three categories:
 
 1. **Hard language constraints** (§1). Enforced by the parser, resolver,
    or backend. Immovable; not subject to style choice.
-2. **Settled conventions** (§§2–9). Project-wide rules. Consistent
+2. **Settled conventions** (§§2–10). Project-wide rules. Consistent
    across the ecosystem. Enforced by the `chelis lint` tool.
 3. **Resolved decisions** (§11). Architectural questions surfaced
    during the May 2026 ecosystem naming pass and now closed. Recorded
    with their resolution so the rationale is visible.
 
 A standalone lint tool (`chelis lint`) verifies adherence to the
-settled conventions in §§2–9. CI runs it as a gate on every PR. Any
-deviation that isn't a hard language constraint is a lint failure.
+settled conventions in §§2–10. CI runs it as a gate on every PR.
+Blocking rule deviations are lint failures; advisory rules report
+valid-but-non-preferred source without failing the gate.
 
 ---
 
@@ -291,6 +292,35 @@ function-result type), and it matches the Surf Style Guide bullet in
 `AGENTS.md` / `CLAUDE.md`. The lint rule `surf-def-arrow-form` enforces
 this; `chelis fmt` rewrites colon-form decls to arrow-form on next
 canonicalization.
+
+### 3.6 Pipe-first composition and first-argument stages
+
+**Rule:** Pipe stages use first-argument insertion. In Surf,
+`x |> f(y, z)` means `f(x, y, z)`, not `f(y, z, x)`.
+
+```chelis
+x |> normalize |> add(bias) |> relu
+```
+
+desugars as if written:
+
+```chelis
+relu(add(normalize(x), bias))
+```
+
+A bare stage (`x |> f`) passes the piped value as the only argument to
+`f`. A call stage (`x |> f(y, z)`) inserts the piped value before the
+written arguments. If a later argument position is intended, write an
+explicit lambda:
+
+```chelis
+x |> fn (v) -> f(y, v)
+```
+
+The decompiler may compact a lambda stage back to call-stage sugar only
+when the carried value is the first argument of the call. Naming rules
+that refer to a function's principal or first argument, including the
+type-suffix rule in §7.2, use this same interpretation for pipe stages.
 
 ---
 
@@ -688,6 +718,28 @@ itself, not by this spec, and are exempt from the kebab-case rule:
 The exemption is for exactly these two filenames. Other uppercase
 files inside an mdBook source tree are still violations of §8.5.
 
+### 8.6 Public prose punctuation
+
+New public strings should avoid em dashes. Prefer one of these fixes
+when cleaning existing text:
+
+- split the sentence into two sentences
+- use a colon before an explanation
+- use parentheses for a true aside
+- use a comma or semicolon when the grammar calls for one
+- use ASCII ` - ` only for a deliberately parenthetical break
+
+The blocking `no-em-dash-in-public-strings` rule enforces this for
+Surf, Deep, Rust, and Python string literals that are likely to reach
+users as diagnostics, docstrings, or public output. The v1 fixer is
+deliberately narrow: `a — b` becomes `a. B`; paired parenthetical
+dashes become commas; whitespace-asymmetric cases require manual
+review. Markdown prose enforcement is queued until the active doc
+corpus is cleaned. Do not add lint exceptions merely to preserve an em
+dash in current-state docs. This rule does not prohibit syntax or
+notation that is semantically meaningful in a spec, such as `->`, `|>`,
+section references, or mathematical symbols.
+
 ---
 
 ## 9. Project-cutting conventions
@@ -856,15 +908,36 @@ The two alternatives considered:
 - Rename the lib name to break the Rust standard (not actually
   possible without hacks). Rejected.
 
+### 11.3 Allow vs keep semantics — resolved: distinct lint meanings
+
+**Status:** closed.
+
+The Surf/Deep lint cleanup uses two different terms intentionally:
+
+- **Allow** means the construct is accepted as normal project style.
+  The lint should not report it, and no migration pressure exists.
+- **Keep** means checked-in source may remain as-is for compatibility,
+  fixture coverage, or baseline preservation, but the construct is not
+  preferred style for new human-authored source. A keep decision may
+  still produce an advisory warning.
+
+Keep decisions are not blocking-rule exceptions. Blocking-rule
+exceptions still require an explicit rule id and a cross-reference to a
+section of this spec. Advisory rules do not need path-glob exceptions
+for existing corpus entries unless they are promoted into the blocking
+registry later.
+
 ---
 
 ## 12. Enforcement
 
 The `chelis lint` tool reads source files and reports violations of
 the settled conventions in §§2–10 with `file:line` references, plus
-the Deep user-symbol rule from §1.5 / §11.1 and the def-arrow-form
-rule from §3.5. The lint runs both as a standalone CI gate AND as an
-implicit per-build gate: `chelis build`, `chelis check`,
+the Deep user-symbol rule from §1.5 / §11.1, the def-arrow-form rule
+from §3.5, and the pipe-stage interpretation from §3.6 where a rule
+needs to reason about the principal argument. Blocking lint rules run
+both as a standalone CI gate and as an implicit per-build gate:
+`chelis build`, `chelis check`,
 `chelis validate`, and `chelis eval --file` invoke `chelis fmt --check`
 plus the relevant `chelis lint` rules on the input file before
 running the front-end pipeline. Violations are blocking unless
@@ -893,14 +966,34 @@ use:
   the integration-test corpus (tests that synthesize ad-hoc Surf to
   exercise type/effect/linearity behavior independently of style).
 
-Advisory rules may be registered outside the blocking style-gate rule
-set. `redundant-linearity-call` is advisory: `chelis lint` reports
-explicit `copy()` and `drop()` source calls as warnings because
-implicit linearity inserts equivalent IR nodes, and `chelis check`
-prints the same warnings on user-facing runs. These warnings do not
-make `chelis lint --check` fail and are suppressed when
-`CHELIS_STYLE_GATE_DISABLE=1` disables the fixture/test compilation
-gate.
+Severity behavior is part of the CLI contract:
+
+| Severity | Source | User-facing output | Exit behavior |
+|----------|--------|--------------------|---------------|
+| Blocking violation | `registry::all_rules()` and formatter check | `path:line:col: rule_id (§ref): message`, or a formatter diagnostic | `chelis lint --check` exits nonzero; the built-in style gate blocks unless `--allow-style-violations` is passed |
+| Warning/advisory | `registry::non_blocking_rules()` | prefixed with `warning:` or `advisory:` | never contributes to `chelis lint --check` failure; excluded from the built-in style gate |
+
+`--allow-style-violations` bypasses only the built-in style gate. It
+does not make parse, type, effect, validation, evaluation, or backend
+errors non-fatal. Advisory warnings may still print on user-facing
+commands after the gate is bypassed. `CHELIS_STYLE_GATE_DISABLE=1`
+suppresses the gate and the fixture/test advisory pass and remains
+reserved for tests.
+
+`redundant-linearity-call` is advisory: `chelis lint` reports explicit
+`copy()` and `drop()` source calls as warnings because implicit
+linearity inserts equivalent IR nodes, and `chelis check` prints the
+same warnings on user-facing runs. These warnings do not make
+`chelis lint --check` fail.
+
+Existing-corpus keep policy for `redundant-linearity-call`: checked-in
+fixtures, migration examples, and baseline files may keep explicit
+`copy()` or `drop()` when the call documents compatibility, preserves a
+before/after baseline, or exercises legacy source behavior. New or
+rewritten human-facing examples should use implicit linearity unless
+the example is specifically teaching or testing the explicit forms. A
+future promotion from advisory to blocking requires a separate cleanup
+plan and updated docs before the registry changes.
 
 Exception entries inside the lint must carry a rule-id cross-reference
 to a section of this document, not free-form prose. The schema:
@@ -917,6 +1010,23 @@ struct Exception {
 are build-time errors. This discipline closes the loophole that lets
 post-hoc justifications accrete in the lint config: every waiver has
 to point at a documented rule that explicitly carves out the case.
+
+### 12.1 Future rule queue
+
+The following rules are intentionally queued, not currently part of
+the blocking registry:
+
+- Markdown prose punctuation: extend `no-em-dash-in-public-strings`
+  from source string literals to active docs after existing current
+  docs have been cleaned. Fixes should rewrite prose, not add path
+  exceptions.
+- `redundant-linearity-call` promotion review: decide after the
+  implicit-linearity migration corpus is stable whether advisory
+  warnings should remain permanent or become blocking for new source.
+- Pipe-stage shape checks: if future syntax or decompiler work creates
+  ambiguity around `x |> f(y)`, add coverage that preserves the
+  first-argument semantics in §3.6 rather than accepting last-argument
+  insertion.
 
 ---
 

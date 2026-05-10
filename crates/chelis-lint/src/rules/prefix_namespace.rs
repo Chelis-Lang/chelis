@@ -121,7 +121,7 @@ impl Rule for PrefixNamespace {
                     line: Some(*line),
                     col: None,
                     message: format!(
-                        "function `{func_name}` uses prefix `{prefix}_` shared by {} other def(s) in `{module_path}`, but `{prefix}` does not match the module's domain shorthand ({allowed_hint}) — closer-read needed: either drop the prefix per §7.1 or document the prefix as a model/algorithm sub-namespace per §7.1.1",
+                        "function `{func_name}` uses prefix `{prefix}_` shared by {} other def(s) in `{module_path}`, but `{prefix}` does not match the module's domain shorthand ({allowed_hint}). Closer-read needed: either drop the prefix per §7.1 or document the prefix as a model/algorithm sub-namespace per §7.1.1",
                         group_size - 1
                     ),
                 });

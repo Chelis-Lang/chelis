@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(
             shell.archive_sha256,
             archive_sha256(),
-            "embedded shell's archive_sha256 must match the embedded archive bytes — \
+            "embedded shell's archive_sha256 must match the embedded archive bytes: \
              rerun scripts/regenerate_chelis_std_bundle.py and commit the result"
         );
     }

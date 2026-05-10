@@ -154,7 +154,7 @@ fn with_context_equals_monolithic_for_five_snippets() {
         assert_eq!(
             with_ctx.annotated_exprs().len(),
             monolithic_tail.len(),
-            "annotated decl count differs for snippet `{snippet}` — \
+            "annotated decl count differs for snippet `{snippet}`: \
              with-context returned {} decls, monolithic tail had {}",
             with_ctx.annotated_exprs().len(),
             monolithic_tail.len(),

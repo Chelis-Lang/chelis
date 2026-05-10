@@ -137,7 +137,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 tokens.push(tok);
             }
             b'-' => {
-                // '-' not followed by digit — treat as start of symbol (e.g., `->`)
+                // '-' not followed by digit. Treat as start of symbol (e.g., `->`)
                 while i < bytes.len() && is_symbol_char(bytes[i]) {
                     i += 1;
                 }

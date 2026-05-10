@@ -2856,7 +2856,7 @@ mod tests {
                     "error must say 'non-differentiable'; got: {msg}"
                 );
             }
-            Ok(_) => panic!("floor must be rejected by grad_dag_checked — got Ok"),
+            Ok(_) => panic!("floor must be rejected by grad_dag_checked. Got Ok"),
         }
     }
 
@@ -2874,7 +2874,7 @@ mod tests {
                     "error must say 'non-differentiable'; got: {msg}"
                 );
             }
-            Ok(_) => panic!("ceil must be rejected by grad_dag_checked — got Ok"),
+            Ok(_) => panic!("ceil must be rejected by grad_dag_checked. Got Ok"),
         }
     }
 

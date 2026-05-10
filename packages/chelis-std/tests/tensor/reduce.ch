@@ -29,7 +29,7 @@ def test_min_handles_negatives() -> unit ! { Test } = {
 def test_argmax_tie_break_pins_current_behavior() -> unit ! { Test } = {
   mat = pad_sequences_to([[cast(2.0, f32), cast(2.0, f32), cast(2.0, f32)]], cast(3, int64), cast(0.0, f32))
   out = argmax(mat, cast(1, int32))
-  assert_close_tensor(out, to_tensor([0.0]), cast(0.0, f32), "argmax tie-break (current behavior, NOT spec — pins first-index until tie-break rule is documented)")
+  assert_close_tensor(out, to_tensor([0.0]), cast(0.0, f32), "argmax tie-break (current behavior, NOT spec. Pins first-index until tie-break rule is documented)")
 }
 def test_prod_singleton_returns_element() -> unit ! { Test } = {
   mat = pad_sequences_to([[cast(7.0, f32)]], cast(1, int64), cast(0.0, f32))

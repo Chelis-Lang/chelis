@@ -782,7 +782,7 @@ fn oracle_per_shell_atomicity_preserved() {
     );
     assert!(
         index["packages"]["PA"].is_null() || !index["packages"]["PA"].is_array(),
-        "PA must NOT be in the index — it was not attempted: {index}"
+        "PA must NOT be in the index. It was not attempted: {index}"
     );
 
     // Order recording: PC happened, PB happened (it reaches the

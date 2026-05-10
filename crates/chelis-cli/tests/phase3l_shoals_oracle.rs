@@ -63,7 +63,7 @@ fn skip_if_no_shoals() -> Option<PathBuf> {
         Some(p) => Some(p),
         None => {
             eprintln!(
-                "phase3l_shoals_oracle: skipped — Shoals checkout not found. \
+                "phase3l_shoals_oracle: skipped. Shoals checkout not found. \
                  Set CHELIS_SHOALS_PATH or place shoals/ as a sibling of the \
                  chelis monorepo root."
             );
@@ -209,7 +209,7 @@ fn phase3l_shoals_oracle_grad_greeks_match_analytic() {
         .stdout(predicate::str::contains("\"score\": 1"));
 
     eprintln!(
-        "phase3l_shoals_oracle_grad_greeks_match_analytic: runtime-skipped — \
+        "phase3l_shoals_oracle_grad_greeks_match_analytic: runtime-skipped: \
          Shoals grad-derived Greek properties lower/type-check clean, but the \
          full pricing body is not yet executable by host-runtime `grad`."
     );

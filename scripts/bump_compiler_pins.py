@@ -7,7 +7,7 @@ changes, three categories of files must change with it:
 1. Test fixtures with hardcoded `compiler = "=X.Y.Z"` strings. These are
    already auto-synced via `chelis_compiler_api::COMPILER_VERSION`
    (which uses `env!("CARGO_PKG_VERSION")` at compile time). This script
-   does NOT touch them — the auto-sync handles the work.
+   does NOT touch them. The auto-sync handles the work.
 
 2. Real `.toml` files that ship in the repo and must hand-pin a compiler
    version. The integration tests installs `chelis-std` from
@@ -240,7 +240,7 @@ def main(argv: list[str]) -> int:
         print(ch.render())
 
     if args.no_rebuild_dist:
-        print("(skipped chelis-std dist rebuild — pass without --no-rebuild-dist to regenerate)")
+        print("(skipped chelis-std dist rebuild. Pass without --no-rebuild-dist to regenerate)")
     else:
         rebuild_chelis_std_dist(args.dry_run)
 

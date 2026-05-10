@@ -152,13 +152,13 @@ impl Rule for TypeSuffixPolicy {
                             + 1;
                         let reason = if first_arg_is_container {
                             format!(
-                                "first argument type (`{}`) is a container — the `{}` suffix is being used for dispatch form, which §7.2 prohibits (use `_col` for column-form variants or move to a container-specific module)",
+                                "first argument type (`{}`) is a container. The `{}` suffix is being used for dispatch form, which §7.2 prohibits (use `_col` for column-form variants or move to a container-specific module)",
                                 first_arg_type.trim(),
                                 suffix.name
                             )
                         } else {
                             format!(
-                                "neither first argument type (`{}`) nor return type ({}) mentions the matching element type — `{}` suffix doesn't describe the signature",
+                                "neither first argument type (`{}`) nor return type ({}) mentions the matching element type: `{}` suffix doesn't describe the signature",
                                 first_arg_type.trim(),
                                 return_type
                                     .as_deref()

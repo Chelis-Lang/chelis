@@ -48,7 +48,7 @@ def chelis_eval_erf(pkg_root: Path, x: float) -> float:
     erf_approx(x) and prints the result. We run from the pseudo_nautilus
     package root so the module resolver can see src/special.ch via reef.toml.
 
-    The probe file has to live under src/ — `chelis eval --file` rejects
+    The probe file has to live under src/: `chelis eval --file` rejects
     paths outside the declared source directory. We drop it as
     src/_parity_probe.ch, run eval, then unlink; chelis build output caches
     and reef.lock tolerate a new sibling just fine.

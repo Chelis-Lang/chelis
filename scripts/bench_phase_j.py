@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase J — bench harness for the Compiled Artifact Caching plan.
+"""Phase J. Bench harness for the Compiled Artifact Caching plan.
 
 Runs the headline `chelis test`/`chelis eval`/`chelis check` benchmarks
 against the real Coral checkout (and chelis-std self-test corpus) using a

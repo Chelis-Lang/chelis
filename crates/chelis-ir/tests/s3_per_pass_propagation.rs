@@ -995,7 +995,7 @@ fn s3_oracle_lowering_then_optimization_passes() {
             assert!(
                 !node.merged_spans.is_empty(),
                 "S3 oracle: synthesized marker `{s}` on node {:?} has empty merged_spans \
-                 (audit invariant violated — markers must always carry a forward span alongside)",
+                 (audit invariant violated. Markers must always carry a forward span alongside)",
                 node.id
             );
         }
