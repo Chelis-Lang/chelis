@@ -37,7 +37,8 @@ AD -> closed-list no-op cleanup -> BLAS/gather/scatter recognizers
 ```
 
 AD must see the ordinary RISC decomposition. Codegen must see the specialized
-node after DCE has removed dense intermediates.
+node after DCE has removed dense intermediates. The source-level invariant is
+locked by `chelis_ir::specialize::SPECIALIZATION_PIPELINE_ORDER`.
 
 ## Gather Contract
 
@@ -86,7 +87,11 @@ rule and is not the semantics of `ScatterAdd`.
 - Current branch acceptance: verifier and C emitted-code tests reject or avoid
   dtype-unsafe sparse paths by requiring integer indices and typed payload
   access.
-- Target acceptance: a generated-code fixture for an embedding lookup with
-  `V=50000`, `D=1024`, `N=128` asserts no dense `[N,V,D]` allocation appears.
-- Target acceptance: C and HIP sparse paths agree with the evaluator on small
+- Current branch acceptance: generated C for first-class `Gather` and
+  duplicate-index `ScatterAdd` compiles and agrees with the expected numeric
+  output on a small concrete fixture.
+- Current branch acceptance: a C generated-code fixture for an embedding lookup
+  with `V=50000`, `D=1024`, `N=128` asserts no dense `[N,V,D]` allocation
+  appears.
+- Target acceptance: HIP sparse paths agree with the evaluator on small
   concrete examples.

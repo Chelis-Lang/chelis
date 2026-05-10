@@ -26,7 +26,20 @@ Current `.chb` expectations:
 The project should not publish fake low-level `.chb` layout guarantees while the
 implementation is still expected to evolve.
 
-## 3. Related Serialization Work
+## 3. Compiler API Wire Compatibility
+
+The compiler API wire models in `crates/chelis-compiler-api/src/schema.rs` are
+the current machine-facing JSON surface. During this pre-release period, adding
+new tagged variants such as `WireRiscOp::Gather` or
+`WireRiscOp::ScatterAdd` is an additive schema change. Producers may emit the
+new variant after the owning compiler behavior lands.
+
+Consumers should tolerate unknown additive variants where possible and report a
+clear unsupported-variant diagnostic rather than failing only because the enum
+grew. Consumers that intentionally pattern-match exhaustively must treat the
+wire schema as version-coupled to the compiler crate they were built with.
+
+## 4. Related Serialization Work
 
 Future serialization work may include:
 

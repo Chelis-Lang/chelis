@@ -197,16 +197,24 @@ The structurally-better fix shipped in M1: BLAS detection moved into
 the IR specialization substrate, paired with post-specialization DCE.
 Gap 2 and Gap 6 close together under this approach.
 
-## Gap 3 — `gather` lowering not wired; OOM trap conditional
+## Gap 3 — Surf `gather` lowering / sparse recognizer not wired; OOM trap conditional
 
 **Claim qualified:** "`gather` decomposes via `one_hot + expand + mul + sum`
 (spec §3.5) so AD flows correctly through it."
 
-**Observation:** The decomposition is **not yet wired** in the
-implementation. `gather` is a host-only Tier 2 builtin
-(`crates/chelis-ir/src/host.rs:4640`) — programs that use `gather`
-take the host runtime path entirely, and `grad` over a function
-containing `gather` refuses (fail-closed, not silent-drop).
+**Current status:** the current branch ships the first sparse IR slice:
+`RiscOp::Gather { axis }` and `RiscOp::ScatterAdd { axis }` have verifier,
+evaluator, AD, C codegen, and compiler-API wire coverage. Duplicate-index
+gradients accumulate through `ScatterAdd`, and generated C for first-class
+sparse nodes has both bounded-memory structural coverage and a compile/run
+numeric oracle.
+
+**Remaining observation:** Surf-level `gather` is still not lowered through
+the §3.5 dense decomposition, and the shared specialization substrate still
+does not recognize the dense `one_hot + expand + mul + sum` tree and replace
+it with sparse nodes before codegen. Programs that use Surf/host `gather`
+therefore still take the host/runtime path for that surface. The OOM trap is
+still real if the dense lowering ships without the recognizer.
 
 **Why this is a gap:** the spec promises §3.5 lowering. When that
 lowering ships:
@@ -223,9 +231,9 @@ scatter-recognition pattern matcher that turns the dense
 `reshape+expand+mul+sum` shape back into a sparse scatter-add kernel.
 Shipping the lowering without the recognizer arms the OOM trap.
 
-**Where the recognizer would live:** new `detect_gather_pattern` in
-either backend `blas.rs` or in `crates/chelis-ir/src/optimize.rs`. No
-such function exists today.
+**Where the recognizer would live:** the shared IR specialization substrate
+(`crates/chelis-ir/src/specialize.rs`), reusing the pass order that already
+handles BLAS before DCE/codegen. No dense gather recognizer exists today.
 
 **Spec coverage:**
 - `spec/05-risc-primitives.md` §3.5 documents the lowering shape
@@ -235,15 +243,11 @@ such function exists today.
 - `spec/design/chelis_phase3_plan.md` Phase 3h scope adds gather /
   scatter as core primitives and ships `Std.Nn.Embedding` as the
   named user-facing surface.
-- **Roadmap status conflict:** `spec/12-roadmap.md` marks Phase 3h
-  *shipped*, but empirically `gather` is host-only with no AD
-  adjoint — meaning 3h shipped the *primitive* (forward-only host
-  evaluation) without shipping the §3.5 RISC lowering OR the
-  scatter-recognition pattern that would close the OOM trap. The
-  Phase 3h doc says "extend the type/checking/lowering/backend docs
-  and implementation for the new tensor primitives" but does not
-  call out the recognizer requirement explicitly.
-- **Not addressed:** the joint requirement that the §3.5 lowering
+- **Roadmap status conflict partially reduced:** first-class sparse IR and
+  C codegen now exist, but Phase 3h still should not be considered complete
+  for Surf-level differentiable `gather` until §3.5 lowering and the dense
+  recognizer ship together.
+- **Not fully addressed:** the joint requirement that the Surf §3.5 lowering
   must ship paired with a scatter recognizer.
 
 **Locked test:** `crates/chelis-ir/tests/grad_gather_contract.rs` —
@@ -253,13 +257,12 @@ gradient `[3, 3, 0, 0]` for an all-zero indices stress case. The test
 proves the AD side will be correct by construction whenever §3.5
 ships; it does not prove the OOM trap is closed.
 
-**Required M4 oracle:** closure must add emitted-code inspection for both
-C and HIP that proves embedding/MoE-shaped gather/scatter does not allocate
-the dense `[N, V, D]` one-hot materialization. The test should check for the
-bounded sparse kernel path and for absence of any allocation whose shape is
-the full token-by-vocabulary-by-feature product; small fixture sizes are
-acceptable because the assertion is structural, not a large-memory runtime
-probe.
+**Required remaining M4 oracle:** closure must add the dense §3.5 recognizer
+and HIP sparse codegen, then prove both C and HIP build output for
+embedding/MoE-shaped Surf lowering do not allocate the dense `[N, V, D]`
+one-hot materialization. The C first-class sparse node path already has
+bounded emitted-code and small compile/run numerical coverage; the remaining
+oracle is about the Surf lowering/recognizer path and HIP parity.
 
 **Probe corpus:** `examples/illustrative/moe_gather_duplicate_indices.ch`
 (single MoE-style routing block with deliberately duplicated indices).
@@ -341,31 +344,35 @@ emitters to carry runtime `DimExpr` sizes into BLAS calls.
   with `shrink(&qkv)` borrows demonstrating linearity allows the
   zero-copy slicing pattern.
 
-## Gap 5 — Cross-function pattern matching / inlining
+## Gap 5 — Cross-function pattern matching / inlining — first C BLAS slice shipped
 
 **Claim qualified:** "AD flows through Coral / Nautilus / Octant /
 Shoals because everything compiles to the same RISC primitive set."
 
-**Observation:** The same logical matmul (8×16 @ 16×4) compiled four
-ways:
+**Current status:** simple pure C user-defined matmul helpers now recover the
+BLAS path through compiler-derived host summaries and helper-body
+specialization. The same logical matmul (8×16 @ 16×4) now compiles as:
 
 | Form | `cblas_sgemm`? |
 |---|---|
 | `f(a, b) = matmul(a, b)` | ✅ |
 | `f(a, b) = { ae = expand(a, ...); be = expand(b, ...); sum(mul(ae, be), 1) }` | ✅ |
-| `def my_mm(a, b) = matmul(a, b); def f(a, b) = my_mm(a, b)` | ❌ |
-| `def my_mm(a, b) = { expand+mul+sum }; def f(a, b) = my_mm(a, b)` | ❌ |
+| `def my_mm(a, b) = matmul(a, b); def f(a, b) = my_mm(a, b)` | ✅ |
+| `def my_mm(a, b) = { expand+mul+sum }; def f(a, b) = my_mm(a, b)` | ✅ |
 
 **The bridge that works:** the IR optimizer treats inline
 hand-written `expand+mul+sum` identically to a Tier 2 desugared
 matmul. The semantic gap is bridged for inline code.
 
-**The bridge that doesn't:** wrapping the math in a separate user
-`def` causes the compiler to emit a separate C function
-(`my_mm__tensor_0(inputs, n_in, outputs, n_out)`), and the BLAS
-detector keys off the *caller* DAG, not the helper. Library-level
-abstractions sitting behind a function-call boundary lose BLAS /
-cuDNN / scatter specialization.
+**The bridge that now works for the first C BLAS slice:** wrapping the math
+in a simple pure user `def` no longer loses BLAS in C. The generated helper
+surface is still emitted for debugging/non-specialized paths, but eligible
+calls can emit the specialized BLAS path without relying on clang/gcc LTO.
+
+**The bridge that still doesn't:** this is not yet a general user-library
+specialization system. HIP summary consumption, gather/scatter summaries,
+summary-derived-but-callsite-rejected diagnostics, and broader helper shapes
+remain follow-up work.
 
 **Why this matters for the cross-library AD claim:** a Coral
 `groupby + sum`, a Nautilus `simpsons_rule_integral`, or an Octant
@@ -378,10 +385,9 @@ AD adjoints over opaque nalgebra calls
 `spec/design/chelis_project_plan.md:557-562`) — but the user-level
 broader concession isn't documented.
 
-**What would close it:** the M5 follow-up workstream chooses path (b):
-verified BLAS-equivalent function summaries plus callsite specialization.
-Whole-program inlining remains an implementation technique for small
-helpers, not the design contract.
+**What remains to close it fully:** broaden the M5 summary workstream beyond
+the shipped C BLAS helper slice. Whole-program inlining remains an
+implementation technique for small helpers, not the design contract.
 
 **Spec coverage:**
 - `spec/design/chelis_canonical_reference.md:463-464` now frames the
@@ -397,13 +403,16 @@ helpers, not the design contract.
   inlining mechanism — `inline_top_level_host_call` for HOF
   specialization (e.g. `grad(local_fn)(theta)`), which is how AD
   through user-defined wrapper functions stays correct.
-- **Addressed by M5 docs, not implemented:** the workstream doc anchors
-  acceptance to `cross_library_semantic_gap.rs`: the two user-def cases
-  must flip from BLAS misses to generated-C BLAS hits.
+- **Addressed by this branch for C BLAS helpers:** `cross_library_semantic_gap.rs`
+  now proves direct, inline, user-def, and nested user-def matmul forms hit
+  generated-C BLAS.
+- **Not fully addressed:** HIP summary consumption, gather/scatter summaries,
+  negative diagnostics for rejected summarized callsites, and broader helper
+  compositions.
 
 **Locked test:** `crates/chelis-cli/tests/cross_library_semantic_gap.rs`
-— `semantic_gap_inline_vs_user_def`. Asserts BLAS hits for the two
-inline forms and misses for the two user-`def` forms.
+asserts BLAS hits for the direct, inline, user-`def`, and nested user-`def`
+forms.
 
 ## Gap 6 — BLAS-specialized matmul still allocates and computes the dead `Mul` intermediate — CLOSED by M1
 

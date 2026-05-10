@@ -14,14 +14,12 @@
 //! wrote a naive backward and silently dropped 99/100 of the batch" bug class
 //! that motivated the linearity feature in the first place.
 //!
-//! The test is independent of whether `gather` ever becomes a RiscOp variant.
-//! Today gather is a host-only Tier 2 builtin (no `RiscOp::Gather`,
-//! see `crates/chelis-ir/src/host.rs:4640`), so a
-//! Surf program containing `gather` cannot reach `grad_dag_checked` at all —
-//! it takes the host runtime path before the IR is built. If a future commit
-//! either (a) wires the §3.5 lowering or (b) adds a hand-rolled `RiscOp::Gather`
-//! adjoint, this test must continue to pass — failing here means duplicate-
-//! index gradients are being silently dropped.
+//! The hand-built §3.5 decomposition test is independent of whether Surf-level
+//! `gather` reaches IR directly. This branch also adds a first-class
+//! `RiscOp::Gather` / `RiscOp::ScatterAdd` slice and verifies that its adjoint
+//! preserves duplicate-index accumulation. Surf `gather` is still host-lane
+//! unless a future change wires the dense lowering and sparse recognizer
+//! together; that future path must keep these duplicate-index assertions green.
 //!
 //! Implementation note on `Expand`: Chelis's `RiscOp::Expand` adjoint
 //! (`grad.rs`) wires only the rank-increasing form (insert a new axis), not

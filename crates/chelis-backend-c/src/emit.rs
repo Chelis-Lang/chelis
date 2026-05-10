@@ -3409,6 +3409,46 @@ mod tests {
     }
 
     #[test]
+    fn sparse_gather_embedding_probe_does_not_allocate_dense_one_hot_product() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_ty(&[50000, 1024], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_ty(&[128], Prim::Int32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![values, indices],
+            tensor_ty(&[128, 1024], Prim::F32),
+            None,
+        );
+
+        let c = CEmitter::emit_dag(&dag, "embedding_probe");
+
+        assert!(c.contains("chelis_alloc(2, (int[]){ 128, 1024 }, CHELIS_F32);"));
+        assert!(
+            !c.contains("(int[]){ 128, 50000, 1024 }"),
+            "sparse gather codegen must not allocate the dense [N,V,D] one-hot/product tensor"
+        );
+        assert!(
+            !c.contains("128 * 50000 * 1024"),
+            "sparse gather codegen must not compute dense embedding volume"
+        );
+        assert!(c.contains("int t2_g = (int)t2_indices_data[t2_i];"));
+    }
+
+    #[test]
     #[should_panic(expected = "C backend sparse gather requires int32/int64 indices")]
     fn sparse_gather_rejects_float_indices_at_emit_boundary() {
         let mut dag = Dag::new();

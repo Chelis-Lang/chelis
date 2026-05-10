@@ -176,6 +176,13 @@ mod tests {
         }
     }
 
+    fn tensor_ty(dims: &[usize], precision: Prim) -> TensorType {
+        TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision,
+        }
+    }
+
     fn runtime_header_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_runtime.h")
     }
@@ -355,6 +362,7 @@ mod tests {
             dag: helper_dag,
             inputs: vec![],
             output: scalar_f32(),
+            specialization: None,
         };
 
         let func = HostFunction {
@@ -368,6 +376,7 @@ mod tests {
             // but the helper must still be emitted into the file.
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            specialization: None,
         };
 
         let program = HostProgram {
@@ -452,6 +461,7 @@ mod tests {
                 },
             ],
             output: out_ty,
+            specialization: None,
         };
         let func = HostFunction {
             name: "my_fn".to_string(),
@@ -462,6 +472,7 @@ mod tests {
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            specialization: None,
         };
         let program = HostProgram {
             globals: vec![],
@@ -1486,6 +1497,162 @@ int main(void) {{
         dag.add_node(RiscOp::Sum { axis: 0 }, vec![permuted], vec_f32(2), None);
         let out = compile_and_run(&dag, "test_permute");
         assert_floats_eq(&out, &[6.0, 6.0]);
+    }
+
+    #[test]
+    fn numerical_sparse_gather_and_scatter_add_with_duplicate_indices() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_ty(&[4, 2], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_ty(&[3], Prim::Int32),
+            None,
+        );
+        let gathered = dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![values, indices],
+            tensor_ty(&[3, 2], Prim::F32),
+            None,
+        );
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            tensor_ty(&[4, 2], Prim::F32),
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            tensor_ty(&[3, 2], Prim::F32),
+            None,
+        );
+        let scattered = dag.add_node(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            tensor_ty(&[4, 2], Prim::F32),
+            None,
+        );
+        dag.add_root(gathered);
+        dag.add_root(scattered);
+
+        let result = codegen(&dag, "test_sparse");
+        let tmp = tempfile::tempdir().unwrap();
+        copy_runtime_artifacts(tmp.path());
+        write_temp_file(tmp.path(), "model.c", &result.c_source);
+        let mut input_lines = Vec::new();
+        input_lines.push(format!(
+            "chelis_tensor *inputs[{}] = {{0}};",
+            result.input_labels.len()
+        ));
+        for (slot, label) in result.input_labels.iter().enumerate() {
+            match label.as_str() {
+                "values" => input_lines.push(
+                    r#"int shape_values[2] = { 4, 2 };
+    chelis_tensor *values = chelis_alloc(2, shape_values, CHELIS_F32);
+    float values_data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    for (int i = 0; i < 8; i++) values->data[i] = values_data[i];
+    inputs[SLOT] = values;"#
+                        .replace("SLOT", &slot.to_string()),
+                ),
+                "indices" => input_lines.push(
+                    r#"int shape_indices[1] = { 3 };
+    chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_I32);
+    int32_t *indices_data = (int32_t*)indices->data;
+    indices_data[0] = 0; indices_data[1] = 2; indices_data[2] = 0;
+    inputs[SLOT] = indices;"#
+                        .replace("SLOT", &slot.to_string()),
+                ),
+                "target" => input_lines.push(
+                    r#"int shape_target[2] = { 4, 2 };
+    chelis_tensor *target = chelis_alloc(2, shape_target, CHELIS_F32);
+    inputs[SLOT] = target;"#
+                        .replace("SLOT", &slot.to_string()),
+                ),
+                "updates" => input_lines.push(
+                    r#"int shape_updates[2] = { 3, 2 };
+    chelis_tensor *updates = chelis_alloc(2, shape_updates, CHELIS_F32);
+    float updates_data[6] = { 1, 10, 2, 20, 3, 30 };
+    for (int i = 0; i < 6; i++) updates->data[i] = updates_data[i];
+    inputs[SLOT] = updates;"#
+                        .replace("SLOT", &slot.to_string()),
+                ),
+                other => panic!("unexpected input label {other}"),
+            }
+        }
+        let main_c = format!(
+            r#"
+#include "chelis_runtime.h"
+void test_sparse(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+int main(void) {{
+    {inputs}
+    chelis_tensor *outputs[2] = {{0}};
+    test_sparse(inputs, {n_in}, outputs, 2);
+    for (int i = 0; i < outputs[0]->size; i++) {{
+        if (i > 0) printf(" ");
+        printf("%.6f", outputs[0]->data[i]);
+    }}
+    printf(" |");
+    for (int i = 0; i < outputs[1]->size; i++) {{
+        if (i > 0) printf(" ");
+        printf("%.6f", outputs[1]->data[i]);
+    }}
+    printf("\n");
+    for (int i = 0; i < {n_in}; i++) chelis_free(inputs[i]);
+    chelis_free(outputs[0]);
+    chelis_free(outputs[1]);
+    return 0;
+}}
+"#,
+            inputs = input_lines.join("\n    "),
+            n_in = result.input_labels.len()
+        );
+        write_temp_file(tmp.path(), "main.c", &main_c);
+        let bin_path = tmp.path().join("test_sparse");
+        let toolchain = test_toolchain(result.requirements);
+        let mut compile_cmd = Command::new(&toolchain.compiler);
+        apply_c_test_flags(&mut compile_cmd);
+        compile_cmd.args(["-O2"]);
+        compile_cmd.args(&toolchain.compile_flags);
+        compile_cmd.arg(tmp.path().join("main.c").to_str().unwrap());
+        compile_cmd.arg(tmp.path().join("model.c").to_str().unwrap());
+        add_runtime_link(&mut compile_cmd, tmp.path());
+        compile_cmd.args(&toolchain.link_flags);
+        compile_cmd.arg("-o");
+        compile_cmd.arg(bin_path.to_str().unwrap());
+        let compile = compile_cmd.output().unwrap();
+        assert!(
+            compile.status.success(),
+            "gcc failed:\nstderr: {}\nC source:\n{}",
+            String::from_utf8_lossy(&compile.stderr),
+            result.c_source
+        );
+        let run = Command::new(bin_path).output().unwrap();
+        assert!(
+            run.status.success(),
+            "binary failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(run.stdout).unwrap().trim(),
+            "1.000000 2.000000 5.000000 6.000000 1.000000 2.000000 |4.000000 40.000000 0.000000 0.000000 2.000000 20.000000 0.000000 0.000000"
+        );
     }
 
     #[test]
@@ -2678,6 +2845,7 @@ int main(void) {{
             dag: helper_dag,
             inputs: vec![],
             output: scalar_f32(),
+            specialization: None,
         };
 
         let func = HostFunction {
@@ -2689,6 +2857,7 @@ int main(void) {{
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            specialization: None,
         };
 
         // Adding a global binding triggers internal_linkage=true.
@@ -2744,6 +2913,7 @@ int main(void) {{
             dag: helper_dag,
             inputs: vec![],
             output: scalar_f32(),
+            specialization: None,
         };
 
         let func = HostFunction {
@@ -2755,6 +2925,7 @@ int main(void) {{
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            specialization: None,
         };
 
         // No globals → external linkage for functions (library mode)

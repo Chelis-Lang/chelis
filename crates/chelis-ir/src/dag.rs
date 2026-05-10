@@ -55,6 +55,11 @@ pub enum DimExpr {
 /// The key is intentionally weaker than algebraic simplification: multiplication
 /// is flattened and sorted, constants are folded, and division stays structural
 /// unless it can be evaluated exactly or the denominator is one.
+///
+/// Symbols compare by their stored names. `DimExpr` currently carries no binder
+/// identity or property scope, so this key does not alpha-rename symbolic dims.
+/// A future scoped alpha-renaming path must take explicit same-binder aliases as
+/// input instead of inferring equivalence from expression shape alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DimExprKey {
     Concrete(usize),
@@ -865,6 +870,30 @@ mod tests {
         );
 
         assert_eq!(expr.normalized_key(), equivalent.normalized_key());
+    }
+
+    #[test]
+    fn dim_expr_normalized_key_does_not_alpha_rename_unrelated_symbols() {
+        assert_ne!(
+            DimExpr::Sym("n".into()).normalized_key(),
+            DimExpr::Sym("m".into()).normalized_key()
+        );
+
+        let first = DimExpr::Mul(
+            Box::new(DimExpr::Sym("m".into())),
+            Box::new(DimExpr::Sym("n".into())),
+        );
+        let alpha_renamed_shape = DimExpr::Mul(
+            Box::new(DimExpr::Sym("x".into())),
+            Box::new(DimExpr::Sym("y".into())),
+        );
+
+        assert_ne!(
+            first.normalized_key(),
+            alpha_renamed_shape.normalized_key(),
+            "plain DimExpr symbols have no binder identity, so same-shaped \
+             symbolic products are not equivalent under alpha-renaming"
+        );
     }
 
     #[test]

@@ -117,12 +117,14 @@ Same logical 8×16 @ 16×4 matmul, four code paths:
 |---|:---:|---|---|
 | `f(a, b) = matmul(a, b)` | ✅ | 128 | ~100% (sgemm) |
 | `f(a, b) = { ae=expand(a,...); be=expand(b,...); sum(mul(ae,be), 1) }` | ✅ | 128 | same |
-| `def my_mm = matmul; def f = my_mm` | ❌ | 2176 (Mul allocated either way) | ~1-2% (scalar reduction) |
-| `def my_mm = expand+mul+sum; def f = my_mm` | ❌ | 0 (host lane) | host-lane scalar |
+| `def my_mm = matmul; def f = my_mm` | ✅ | 128 | same C BLAS path for simple wrappers |
+| `def my_mm = expand+mul+sum; def f = my_mm` | ✅ | 128 | same C BLAS path for simple wrappers |
 
-M1 makes inline BLAS-hit matmul result-only in memory. The remaining Gap 5
-cost is the function-boundary specialization miss: user-`def` wrappers still
-lose BLAS dispatch and take the scalar-reduction fallback.
+M1 makes inline BLAS-hit matmul result-only in memory. The current branch also
+closes the first Gap 5 executable slice for simple C user-`def` wrappers:
+helper summaries and helper-body specialization recover the BLAS path without
+clang LTO. The remaining Gap 5 work is broader summary coverage, negative
+diagnostics, HIP summary consumption, and non-BLAS recognizer summaries.
 
 ### Specialization dispatch reality
 
@@ -184,10 +186,10 @@ after the M1/M2b/M3/M5 documentation batch.
 
 | ID | Tracks | Required closure | Current executable anchor |
 |---|---|---|---|
-| **M4** | Gap 3, gather/scatter lowering | Ship §3.5 gather lowering together with sparse gather/scatter recognition so embedding/MoE-shaped programs do not allocate dense `[N, V, D]` intermediates. | `crates/chelis-ir/tests/grad_gather_contract.rs` locks duplicate-index AD; emitted C/HIP structural tests for bounded sparse kernels still need to be added. |
-| **M5-impl** | Gap 5, cross-function specialization | Implement verified BLAS-equivalent helper summaries and callsite emission rules from `spec/design/cross_function_specialization.md`. | `crates/chelis-cli/tests/cross_library_semantic_gap.rs::target_behavior_user_def_matmul_helpers_hit_blas` is ignored until this lands. |
-| **Perf-F1** | HIP batched matmul implementation quality | Replace the current HIP batched helper loop over `hipblasSgemm` with `hipblasSgemmStridedBatched` when the batch layout is uniformly strided, retaining the helper loop for broadcasted/non-uniform leading strides. | Current default coverage proves helper-loop emission and GPU correctness; a future structural test should require the strided-batched API on uniform layouts. |
-| **Perf-F2** | Post-BLAS allocator/fusion compounding | Normalize equivalent symbolic shape expressions for slot reuse and add in-place elementwise/fan-in fusion where aliasing permits. | No target tests yet; these are explicitly second-order behind symbolic/batched BLAS. |
+| **M4** | Gap 3, gather/scatter lowering | Ship §3.5 gather lowering together with sparse gather/scatter recognition so embedding/MoE-shaped programs do not allocate dense `[N, V, D]` intermediates. | `crates/chelis-ir/tests/grad_gather_contract.rs` locks duplicate-index AD; first-class C sparse codegen has bounded emitted-code coverage, but the §3.5 recognizer and HIP sparse kernels remain open. |
+| **M5-follow-up** | Gap 5, cross-function specialization | Broaden verified summaries beyond simple C BLAS helpers, add rejected-callsite diagnostics, and carry summary consumption into HIP. | `crates/chelis-cli/tests/cross_library_semantic_gap.rs` now proves direct, inline, user-def, and nested user-def C BLAS hits. Remaining work needs new negative and HIP tests. |
+| **Perf-F1** | HIP batched matmul implementation quality | Benchmark and tune the `hipblasSgemmStridedBatched` path, retaining the helper loop for broadcasted/non-uniform leading strides. | Default structural coverage requires the strided-batched API on uniform layouts; the HIP manual GPU gate covers numerical agreement. |
+| **Perf-F2** | Post-BLAS allocator/fusion compounding | Normalize equivalent symbolic shape expressions for slot reuse and add in-place elementwise/fan-in fusion where aliasing permits. | DimExpr normalization v1 now has target tests for product/identity canonicalization and negative tests that unrelated symbols are not alpha-renamed. Scoped same-property `forall` / binder-equivalent aliases remain future work until binder identity is available. |
 
 Fresh-context red-team status for M3/M3b: run 2026-05-10. The red-team
 pass found one medium issue: the legacy C codegen-time BLAS detector could

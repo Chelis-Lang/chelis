@@ -628,6 +628,32 @@ mod tests {
     }
 
     #[test]
+    fn planner_does_not_alpha_rename_unrelated_symbolic_capacity() {
+        let mn = tensor_f32(vec![
+            DimInfo::Named("m".into(), None),
+            DimInfo::Named("n".into(), None),
+        ]);
+        let xy = tensor_f32(vec![
+            DimInfo::Named("x".into(), None),
+            DimInfo::Named("y".into(), None),
+        ]);
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mn.clone(), None);
+        let b = dag.add_node(RiscOp::Neg, vec![a], mn, None);
+        let c = dag.add_node(RiscOp::Neg, vec![b], xy, None);
+        dag.add_root(c);
+
+        let plan = build_plan(&dag, &[c]);
+        assert_eq!(
+            plan.slots().len(),
+            3,
+            "same-shaped symbolic products are not equivalent without \
+             explicit binder identity"
+        );
+        assert_ne!(plan.node_kind(a), plan.node_kind(c));
+    }
+
+    #[test]
     fn capacity_fits_concrete_larger_and_rejects_distinct_symbolic_keys() {
         let slot = DimExpr::Concrete(8);
         let req = DimExpr::Concrete(4);

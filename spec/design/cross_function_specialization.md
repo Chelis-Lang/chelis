@@ -12,10 +12,12 @@ shape is visible in the function currently being emitted:
 - direct `matmul(a, b)`
 - inline hand-written `expand -> mul -> sum`
 
-The same computation misses BLAS when it is hidden behind a user-defined helper called
-from another user function. The helper is emitted as a separate generated C function,
-and the BLAS detector runs on the caller's per-function DAG rather than on a verified
-callee summary.
+Before the first C helper-summary slice, the same computation missed BLAS when it was
+hidden behind a user-defined helper called from another user function. The helper was
+emitted as a separate generated C function, and the BLAS detector ran on the caller's
+per-function DAG rather than on a verified callee summary. The remaining problem is
+broadening that narrow C path to HIP, gather/scatter summaries, richer helper shapes,
+and explicit rejection diagnostics.
 
 clang LTO is only a workaround. It can inline generated C helpers and improve ordinary
 native optimization, but it cannot make Chelis select `cblas_sgemm`, hipBLAS, or future
@@ -112,10 +114,11 @@ AD -> closed-list no-op cleanup -> BLAS/gather/scatter recognizers
 
 ## Callsite Emission Rules
 
-The rules in this section are the full summary-table target. The current branch
-ships the first C path by specializing emitted tensor-helper DAG bodies; it does
-not yet attach persistent summary metadata to the call graph or bypass the
-helper at the caller.
+The current branch ships the first C summary path for BLAS-equivalent tensor
+helpers and simple pure top-level wrappers. Summary metadata is derived from the
+helper DAG, propagated through wrappers that only pass tensor parameters through,
+and consumed by C host emission. The generated helper function is still emitted
+so non-specialized callers and debugging paths remain available.
 
 When a call to a verified BLAS-equivalent helper is encountered, the caller's backend
 emission behaves as if the canonical operation appeared directly at the callsite.
@@ -154,7 +157,8 @@ and the first user-defined helper closure:
 - `user_def_matmul_helpers_hit_blas` proves `user_def_builtin` and `user_def_manual`
   emit at least one `cblas_sgemm` or `chelis_blas_matmul`
 - `user_def_matmul_helpers_hit_blas` also proves the generated helper body remains
-  emitted and called, so the test does not pass by deleting the helper surface
+  emitted, so the test does not pass by deleting the helper surface. Specialized
+  callsites may bypass that helper body; they do not emit a runtime fallback branch.
 - assertions are based on generated Chelis C before invoking clang, gcc, or LTO
 
 Manual acceptance command:
@@ -165,12 +169,11 @@ cargo test -p chelis-cli --test cross_library_semantic_gap -- --nocapture
 
 Expected success condition: all four semantically equivalent matmul forms report BLAS
 hits in the generated C, and the user-defined cases no longer rely on clang LTO to
-recover performance. This is the current helper-body specialization gate, not the full
-summary-table callsite-bypass gate.
+recover performance.
 
-Current implementation note: the first shipped C path specializes emitted tensor-helper
-DAGs using the existing BLAS recognizer, which makes user-defined matmul helpers hit
-BLAS while preserving helper emission. A complete summary-table implementation still
-needs to move the proof metadata into the call graph so eligible callsites can emit the
-specialized form directly and surface BLAS link requirements from host-program codegen
-without source-string inference.
+Current implementation note: the shipped C path combines helper-body BLAS
+specialization with compiler-derived host summaries for simple wrappers. Remaining
+work is to broaden the summary verifier, add explicit negative diagnostics for
+summary-derived-but-callsite-rejected cases, carry the same summary consumption into
+HIP, and surface BLAS link requirements from structured host-program metadata instead
+of source-string inference.

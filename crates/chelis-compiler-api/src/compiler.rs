@@ -224,8 +224,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             };
             hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
             reject_unsized_named_dims(&hip_dag, "hip")?;
-            reject_unsupported_hip_ops(&hip_dag)?;
             let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
+            reject_unsupported_hip_ops(&specialized)?;
             let fused = chelis_ir::fuse::fuse(&specialized);
             let result = chelis_backend_hip::codegen_hip(&fused, &func_name);
             Ok(compiled_execution_artifact(
@@ -1451,7 +1451,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                 return Err(stage_error(
                     "compile",
                     format!(
-                        "`chelis build --target hip` does not yet support sparse gather/scatter; lowered node {} requires it",
+                        "`chelis build --target hip` cannot compile lowered node {}: \
+                         HIP sparse gather/scatter kernels are not implemented. \
+                         ScatterAdd additionally needs duplicate-index accumulation/atomic semantics. \
+                         Use the C backend (`--target c`) for sparse gather/scatter on this branch.",
                         node.id.0
                     ),
                     "unsupported_feature",
@@ -2259,6 +2262,49 @@ mod tests {
         )
         .expect("write lib copy module");
         (dir, root)
+    }
+
+    fn tensor_type(dims: Vec<usize>, precision: chelis_types::types::Prim) -> TensorType {
+        TensorType {
+            dims: dims.into_iter().map(DimInfo::Lit).collect(),
+            precision,
+        }
+    }
+
+    #[test]
+    fn hip_sparse_rejection_names_kernel_and_atomic_blockers() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::Int64),
+            None,
+        );
+        let gather = dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![values, indices],
+            tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_root(gather);
+
+        let err = reject_unsupported_hip_ops(&dag).expect_err("HIP should reject sparse gather");
+        let message = &err.errors[0].message;
+        assert!(message.contains("HIP sparse gather/scatter kernels are not implemented"));
+        assert!(message.contains(
+            "ScatterAdd additionally needs duplicate-index accumulation/atomic semantics"
+        ));
+        assert!(message.contains("C backend (`--target c`)"));
     }
 
     #[test]

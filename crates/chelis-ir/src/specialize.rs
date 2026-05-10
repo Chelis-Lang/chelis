@@ -8,6 +8,21 @@ use std::collections::HashMap;
 
 use crate::dag::{Dag, DagNode, DimExpr, NodeId, RiscOp, TensorType};
 
+/// Compiler pipeline ordering around backend specialization.
+///
+/// This is intentionally represented as code, not only prose, because gather /
+/// scatter recognizers, cross-function specialization, and future in-place
+/// rewrites all depend on the same ordering contract.
+pub const SPECIALIZATION_PIPELINE_ORDER: &[&str] = &[
+    "ad",
+    "no_op_cleanup",
+    "blas_gather_scatter_recognizers",
+    "cross_function_specialization",
+    "dce",
+    "in_place_fusion",
+    "codegen",
+];
+
 /// Run the closed-list no-op cleanup plus backend specialization, then DCE.
 pub fn specialize_for_blas(dag: &Dag) -> Dag {
     let cleaned = eliminate_closed_list_noops(dag);
@@ -344,6 +359,22 @@ mod tests {
             dims: vec![DimInfo::Lit(a), DimInfo::Lit(b), DimInfo::Lit(c)],
             precision: Prim::F32,
         }
+    }
+
+    #[test]
+    fn specialization_pipeline_order_is_pinned() {
+        assert_eq!(
+            SPECIALIZATION_PIPELINE_ORDER,
+            &[
+                "ad",
+                "no_op_cleanup",
+                "blas_gather_scatter_recognizers",
+                "cross_function_specialization",
+                "dce",
+                "in_place_fusion",
+                "codegen",
+            ]
+        );
     }
 
     fn symbolic_mat(r: &str, c: &str) -> TensorType {

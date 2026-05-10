@@ -1595,8 +1595,8 @@ fn cmd_build(
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
-                reject_unsupported_hip_ops(&hip_dag)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
+                reject_unsupported_hip_ops(&specialized)?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
@@ -1810,8 +1810,8 @@ fn cmd_build_deep(
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
-                reject_unsupported_hip_ops(&hip_dag)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
+                reject_unsupported_hip_ops(&specialized)?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
@@ -3429,6 +3429,16 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
             chelis_ir::dag::RiscOp::Shrink { .. } => {
                 return Err(format!(
                     "`chelis build --target hip` does not yet support `shrink`; lowered node {} requires it",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::Gather { .. } | chelis_ir::dag::RiscOp::ScatterAdd { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` cannot compile lowered node {}: \
+                     HIP sparse gather/scatter kernels are not implemented. \
+                     ScatterAdd additionally needs duplicate-index accumulation/atomic semantics. \
+                     Use the C backend (`--target c`) for sparse gather/scatter on this branch.",
                     node.id.0
                 )
                 .into());

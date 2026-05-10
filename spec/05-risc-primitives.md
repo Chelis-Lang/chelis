@@ -183,9 +183,10 @@ not specified here and there is no corresponding IR check lowering rule.
 Do not treat `normalize` as a stable specified built-in until this document and the IR
 lowering are aligned.
 
-### 3.5 Lowering Helpers (NOT Tier 1 or Tier 2)
+### 3.5 Lowering Helpers And Sparse Implementation Nodes
 
-The following names appear in lowering narratives (§4) as pseudocode or pattern-matched operations. They are NOT RISC primitives and NOT Tier 2 built-ins. They decompose into Tier 1 primitives:
+The following names appear in lowering narratives (§4) as pseudocode or
+pattern-matched operations. Most decompose into Tier 1 primitives:
 
 | Helper | Decomposes to |
 |---|---|
@@ -195,6 +196,14 @@ The following names appear in lowering narratives (§4) as pseudocode or pattern
 | `gather(x, idx, axis)` | one-hot encoding via `reshape`, `expand`, `mul`, `sum` |
 | `im2col(x, kh, kw, ...)` | `stride`, `pad`, `reshape`, `permute` |
 | `where(cond, a, b)` | `add(mul(cond, a), mul(neg(cond), b))` assuming bool 0/1 |
+
+Implementation note: the compiler now also has first-class specialized sparse
+IR nodes `RiscOp::Gather { axis }` and `RiscOp::ScatterAdd { axis }`, with
+evaluator, verifier, AD, C backend, and wire-schema support. These nodes are
+implementation targets for sparse recognition; Surf-level `gather` is not yet
+lowered through the dense §3.5 decomposition plus recognizer. Do not treat this
+as closure of the full §3.5 lowering contract until the recognizer prevents
+dense `[N,V,D]` materialization before codegen.
 
 ---
 
@@ -246,7 +255,10 @@ Lowering:
 3. result    = neg(gathered)                     ;; negate
 ```
 
-Note: `gather` is not a RISC primitive. It decomposes further into combinations of `reshape`, `expand`, `mul`, and `sum` using one-hot encoding. The compiler may special-case this pattern for efficiency.
+Note: Surf-level `gather` is specified to decompose further into combinations of
+`reshape`, `expand`, `mul`, and `sum` using one-hot encoding. The compiler may
+special-case this pattern for efficiency by replacing it with the specialized
+`RiscOp::Gather` / `RiscOp::ScatterAdd` sparse nodes before codegen.
 
 ### 4.4 Layer Normalization
 

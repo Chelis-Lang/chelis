@@ -926,3 +926,25 @@ pub enum WireRiscOp {
 fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sparse_wire_risc_ops_round_trip_as_additive_variants() {
+        let gather = serde_json::to_string(&WireRiscOp::Gather { axis: 1 }).unwrap();
+        assert_eq!(gather, r#"{"kind":"gather","axis":1}"#);
+        match serde_json::from_str::<WireRiscOp>(&gather).unwrap() {
+            WireRiscOp::Gather { axis } => assert_eq!(axis, 1),
+            other => panic!("expected gather wire op, got {other:?}"),
+        }
+
+        let scatter = serde_json::to_string(&WireRiscOp::ScatterAdd { axis: 0 }).unwrap();
+        assert_eq!(scatter, r#"{"kind":"scatter_add","axis":0}"#);
+        match serde_json::from_str::<WireRiscOp>(&scatter).unwrap() {
+            WireRiscOp::ScatterAdd { axis } => assert_eq!(axis, 0),
+            other => panic!("expected scatter_add wire op, got {other:?}"),
+        }
+    }
+}

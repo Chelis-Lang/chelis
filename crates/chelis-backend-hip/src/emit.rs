@@ -956,7 +956,11 @@ impl HipEmitter {
                 );
             }
             RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } => {
-                panic!("HIP backend: sparse gather/scatter specialization is not yet implemented")
+                panic!(
+                    "HIP backend: sparse gather/scatter kernels are not implemented; \
+                     ScatterAdd additionally needs duplicate-index accumulation/atomic semantics. \
+                     Use the C backend for sparse gather/scatter on this branch."
+                )
             }
         }
     }
@@ -2129,6 +2133,13 @@ mod tests {
         }
     }
 
+    fn mat_f32(rows: usize, cols: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+            precision: Prim::F32,
+        }
+    }
+
     fn fused_mul_reusable_input_dag() -> Dag {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
@@ -2140,6 +2151,58 @@ mod tests {
         let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
         dag.set_reusable_input(fused, x);
         dag
+    }
+
+    #[test]
+    fn sparse_scatter_add_panic_names_hip_kernel_and_atomic_blockers() {
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            mat_f32(3, 2),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            mat_f32(4, 2),
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            mat_f32(3, 2),
+            None,
+        );
+        dag.add_root(out);
+
+        let panic = match std::panic::catch_unwind(|| HipEmitter::emit_dag(&dag, "test_sparse")) {
+            Ok(_) => panic!("HIP emitter should reject sparse scatter_add"),
+            Err(panic) => panic,
+        };
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("panic payload should be string-like");
+
+        assert!(message.contains("HIP backend: sparse gather/scatter kernels are not implemented"));
+        assert!(message.contains(
+            "ScatterAdd additionally needs duplicate-index accumulation/atomic semantics"
+        ));
+        assert!(message.contains("C backend"));
     }
 
     #[test]
