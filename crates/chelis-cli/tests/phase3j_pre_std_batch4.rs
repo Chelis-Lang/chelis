@@ -248,7 +248,7 @@ fn phase3j_pre_batch4_kl_divergence_rejects_shape_mismatch() {
         r#"module Demo.Main
 import Std.Loss.KlDiv (kl_divergence)
 
--- p has 2 elements, q has 3 — type checker should reject on the dim var
+-- p has 2 elements, q has 3. Type checker should reject on the dim var
 -- once the concrete sizes are pinned via an annotated cast.
 def two_elem(xs: List[f32]) -> tensor[2, f32] = to_tensor(xs)
 def three_elem(xs: List[f32]) -> tensor[3, f32] = to_tensor(xs)

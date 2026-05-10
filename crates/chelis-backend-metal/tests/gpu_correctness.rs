@@ -315,7 +315,7 @@ fn assert_close(actual: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f32, la
     assert_eq!(
         actual.len(),
         expected.len(),
-        "{label}: length mismatch — actual={actual:?} expected={expected:?}"
+        "{label}: length mismatch. Actual={actual:?} expected={expected:?}"
     );
     for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
         let abs_err = (a - e).abs();
@@ -323,7 +323,7 @@ fn assert_close(actual: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f32, la
         let rel_err = abs_err / scale;
         if abs_err > abs_tol && rel_err > rel_tol {
             panic!(
-                "{label}: index {i} mismatch — actual={a} expected={e} \
+                "{label}: index {i} mismatch. Actual={a} expected={e} \
                  abs_err={abs_err} rel_err={rel_err} (tol abs={abs_tol} rel={rel_tol})"
             );
         }

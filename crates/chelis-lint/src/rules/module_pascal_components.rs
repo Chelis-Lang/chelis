@@ -40,7 +40,7 @@ impl Rule for ModulePascalComponents {
                         line: Some(decl.line),
                         col: None,
                         message: format!(
-                            "module component `{component}` {reason} — rewrite per-word PascalCase per §6.3, or add to the recognized-single-word allowlist with a §6.3 cross-ref",
+                            "module component `{component}` {reason}. Rewrite per-word PascalCase per §6.3, or add to the recognized-single-word allowlist with a §6.3 cross-ref",
                         ),
                     });
                 }

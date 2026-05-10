@@ -353,7 +353,7 @@ impl PreparedReefGraph {
                 LoadedSourceKind::LocalRegistry => {
                     return Err(format!(
                         "source_digests for LocalRegistry package `{}` v{} not yet implemented \
-                         (TODO phase-I — needs LoadedPackage to retain cache root)",
+                         (TODO phase-I. Needs LoadedPackage to retain cache root)",
                         package.id.name, package.id.version
                     ));
                 }
@@ -681,7 +681,7 @@ pub fn prepare_program_for_eval_file(
 pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, String> {
     let Some(root) = find_package_root_for_dir(context_dir)? else {
         return Err(format!(
-            "no reef.toml found in `{}` or any parent up to $HOME — \
+            "no reef.toml found in `{}` or any parent up to $HOME: \
              pass a path inside a reef package, run from inside one, or \
              set --project-root",
             context_dir.display()
@@ -1057,12 +1057,12 @@ impl std::fmt::Display for GitHubFetchError {
             ),
             Self::AuthRejected { url, status } => write!(
                 f,
-                "GitHub rejected the token (HTTP {status}) when fetching {url} — \
+                "GitHub rejected the token (HTTP {status}) when fetching {url}: \
                  the token may be invalid or missing repo scope"
             ),
             Self::ReleaseAssetNotFound { url, asset_name } => write!(
                 f,
-                "release asset `{asset_name}` not found at {url} (HTTP 404) — \
+                "release asset `{asset_name}` not found at {url} (HTTP 404): \
                  verify the release tag exists and that the asset is attached to it"
             ),
             Self::RateLimited { url, retry_after } => match retry_after {
@@ -1393,7 +1393,7 @@ pub fn install_validated_artifact_pair(
     let shell = read_shell(shell_path).map_err(|e| e.to_string())?;
     if shell.archive_sha256 != archive_sha256 {
         return Err(format!(
-            "prebuilt shell {} disagrees with archive {} on archive_sha256 — \
+            "prebuilt shell {} disagrees with archive {} on archive_sha256: \
              the dist/ tree is stale; run `chelis reef build` in the monorepo",
             shell_path.display(),
             archive_path.display()
@@ -1487,7 +1487,7 @@ pub fn install_from_monorepo(
     let packages_dir = monorepo_root.join("packages");
     if !packages_dir.is_dir() {
         return Err(format!(
-            "{} does not contain a `packages/` directory — \
+            "{} does not contain a `packages/` directory: \
              expected a chelis monorepo layout",
             monorepo_root.display()
         ));
@@ -1574,7 +1574,7 @@ pub fn install_from_monorepo(
         let dist_dir = pkg_root.join("dist");
         if !dist_dir.is_dir() {
             return Err(format!(
-                "package `{name}` has no dist/ directory at {} — \
+                "package `{name}` has no dist/ directory at {}: \
                  run `chelis reef build` in the monorepo first",
                 dist_dir.display()
             ));
@@ -1583,14 +1583,14 @@ pub fn install_from_monorepo(
         let shell_src = dist_dir.join(format!("{name}-{version}.chb"));
         if !archive_src.exists() {
             return Err(format!(
-                "missing prebuilt archive {} — \
+                "missing prebuilt archive {}: \
                  run `chelis reef build` in the monorepo first",
                 archive_src.display()
             ));
         }
         if !shell_src.exists() {
             return Err(format!(
-                "missing prebuilt shell {} — \
+                "missing prebuilt shell {}: \
                  run `chelis reef build` in the monorepo first",
                 shell_src.display()
             ));
@@ -2145,7 +2145,7 @@ impl std::fmt::Display for LockfileInstallError {
         match self {
             Self::NotFound { path } => write!(
                 f,
-                "no lockfile found at {} — run `chelis reef build` first to generate one",
+                "no lockfile found at {}. Run `chelis reef build` first to generate one",
                 path.display()
             ),
             Self::Malformed { path, message } => {
@@ -2252,12 +2252,12 @@ impl std::fmt::Display for BootstrapError {
             }
             Self::MissingDependency { dependent, missing } => write!(
                 f,
-                "shell `{dependent}` depends on `{missing}` but `{missing}` is not in the bootstrap input list — \
+                "shell `{dependent}` depends on `{missing}` but `{missing}` is not in the bootstrap input list: \
                  add an explicit `<org>/{missing}@<tag>` entry to the bootstrap arguments"
             ),
             Self::DuplicateVersion { package, versions } => write!(
                 f,
-                "package `{package}` appears at multiple versions in the bootstrap input list: [{}] — pick one",
+                "package `{package}` appears at multiple versions in the bootstrap input list: [{}]. Pick one",
                 versions.join(", ")
             ),
             Self::RuntimeNotABootstrapTarget {
@@ -2268,11 +2268,11 @@ impl std::fmt::Display for BootstrapError {
                 "`chelis-std` is the language runtime; it ships with the compiler and is not \
                  installed via `reef install --bootstrap` (requested `{requested_version}`, \
                  compiler bundles `{bundled_version}`). Drop `chelis-std` from the bootstrap \
-                 input list — programs depend on the runtime implicitly."
+                 input list. Programs depend on the runtime implicitly."
             ),
             Self::NothingToInstall => write!(
                 f,
-                "bootstrap input list is empty and the built-in default list is empty too — nothing to install"
+                "bootstrap input list is empty and the built-in default list is empty too. Nothing to install"
             ),
             Self::Fetch(e) => write!(f, "fetch failed during bootstrap: {e}"),
             Self::ManifestRead { spec, message } => write!(
@@ -2806,7 +2806,7 @@ pub fn install_bootstrap(
                 None => {
                     return Err(BootstrapError::Validation {
                         message: format!(
-                            "shell `{}/{}@{}` declares dependency `{}` without a version pin — \
+                            "shell `{}/{}@{}` declares dependency `{}` without a version pin: \
                              reef bootstrap requires exact version pins on every dependency",
                             spec.org, spec.repo, spec.tag, dep_name
                         ),
@@ -5381,7 +5381,7 @@ mod tests {
         let manifest_path = here.join("../../packages/chelis-std/reef.toml");
         let text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
             panic!(
-                "could not read {}: {e} — \
+                "could not read {}: {e}: \
                  BUNDLED_CHELIS_STD_VERSION sync test cannot run without \
                  the chelis-std reef.toml; if the file moved, update the \
                  path in this test",
@@ -5611,7 +5611,7 @@ path = "./mylib"
 
         assert!(
             elapsed < Duration::from_secs(1),
-            "fast path took {elapsed:?} — expected < 1s"
+            "fast path took {elapsed:?}. Expected < 1s"
         );
         let program = result
             .expect("prepare_program_for_eval_file should succeed")
@@ -5747,7 +5747,7 @@ some-registry-lib = {{ version = "0.1.0" }}
         // Must return immediately (< 500ms), not hang.
         assert!(
             elapsed < Duration::from_millis(500),
-            "no-package-root eval took {elapsed:?} — should return immediately"
+            "no-package-root eval took {elapsed:?}. Should return immediately"
         );
 
         // Must return Ok(None): no package root found, no resolution attempted.
@@ -5924,7 +5924,7 @@ path = "./nonexistent_dep"
         // Must fail fast with a clean error — not hang.
         assert!(
             elapsed < Duration::from_secs(2),
-            "missing-path-dep fast path took {elapsed:?} — should fail quickly"
+            "missing-path-dep fast path took {elapsed:?}. Should fail quickly"
         );
         assert!(
             result.is_err(),
@@ -6060,7 +6060,7 @@ path = "./mylib"
     }
 
     /// Diagnostic perf check (plan: "skip the timing assertion if it becomes
-    /// flaky — the correctness test is required, the perf test is diagnostic").
+    /// flaky. The correctness test is required, the perf test is diagnostic").
     ///
     /// We do NOT gate the suite on a hard 2x multiplier because on a small
     /// path-dep fixture both paths are sub-millisecond and noise dominates.

@@ -41,6 +41,9 @@ hand-maintained copies.
   them.
 - When a new doc duplicates an existing active doc, merge or delete rather than keeping
   parallel canon.
+- Avoid introducing em dashes in new active-doc prose. When cleaning
+  one up, prefer a sentence split, colon, parentheses, comma,
+  semicolon, or ASCII ` - ` where that is the clearest punctuation.
 
 ## Code and Spec Changes
 
@@ -53,8 +56,10 @@ hand-maintained copies.
 
 `chelis build`, `chelis check`, `chelis validate`, and
 `chelis eval --file` enforce `chelis fmt --check` and `chelis lint --check`
-on the input file before the front-end pipeline runs. Style failures
-block the build by default. Before opening a PR:
+on the input file before the front-end pipeline runs. Blocking style
+failures block the build by default. Advisory lint warnings report
+valid-but-non-preferred source and do not fail `lint --check` or the
+built-in gate. Before opening a PR:
 
 1. Run `chelis fmt --inplace path/to/file.ch` (or `.dp`) on every file
    you touched, or rely on your editor formatter.
@@ -62,10 +67,19 @@ block the build by default. Before opening a PR:
 3. Re-run `chelis check` and `chelis build` on the affected entry point.
 
 The escape hatch `--allow-style-violations` exists for local emergency
-builds and migrations. CI must not pass it. The
+builds and migrations. It bypasses only the style gate, not parse,
+type, effect, validation, evaluation, or backend errors. CI must not
+pass it. The
 `CHELIS_STYLE_GATE_DISABLE=1` environment variable bypasses the gate
 entirely; it is reserved for the integration-test corpus and is not
 appropriate for production builds.
+
+For lint triage, distinguish **allow** from **keep**. Allow means the
+form is accepted project style and should not be reported. Keep means
+existing checked-in source may remain for compatibility or baseline
+evidence, while new human-facing source should use the preferred form.
+`redundant-linearity-call` is currently a keep-style advisory warning
+for explicit `copy()` and `drop()` calls.
 
 The style guide that the gate enforces lives in
 `spec/01-nomenclature.md`. The lint rules that codify it live under

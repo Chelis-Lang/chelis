@@ -27,7 +27,7 @@ Exit codes:
 
 The script is intentionally idempotent: re-running with no source
 changes produces no diff. The committed artifacts ARE the source of
-truth — the build.rs in chelis-std-bundle does not regenerate them.
+truth. The build.rs in chelis-std-bundle does not regenerate them.
 """
 
 from __future__ import annotations

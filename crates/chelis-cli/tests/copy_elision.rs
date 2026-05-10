@@ -147,7 +147,7 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
 
     assert_eq!(
         memcpy_calls, 0,
-        "expected zero memcpy calls — `copy(x)` materializes through tensor \
+        "expected zero memcpy calls: `copy(x)` materializes through tensor \
          realization loops, not raw byte copies. Got {memcpy_calls}."
     );
 
@@ -168,7 +168,7 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
 
     assert!(
         restrict_qualifiers > 0,
-        "expected `restrict` qualifiers on fused-kernel pointers — this is \
+        "expected `restrict` qualifiers on fused-kernel pointers. This is \
          the linearity → no-aliasing guarantee surfacing in C codegen. Got \
          {restrict_qualifiers}. If this drops to zero the C compiler loses \
          the alias-free promise and vectorization quality regresses."

@@ -114,7 +114,7 @@ fn chelis_std_self_test_corpus_passes_under_chelis_test() {
         passed >= MIN_PASSED,
         "chelis-std self-test corpus reported only {passed} passing tests; the floor is \
          {MIN_PASSED}. Either tests were silently dropped from \
-         packages/chelis-std/tests/ or the corpus shrank — investigate before lowering \
+         packages/chelis-std/tests/ or the corpus shrank. Investigate before lowering \
          the floor. Summary line: {summary_line:?}"
     );
 

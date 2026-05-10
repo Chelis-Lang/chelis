@@ -2594,7 +2594,7 @@ impl LowerCtx {
                 raise_lowering_error(
                     format!(
                         "builtin `{name}` is not supported by IR evaluation as a \
-                     value — if this is the body of a fn passed to `grad`, \
+                     value. If this is the body of a fn passed to `grad`, \
                      the grad pass needs to specialize around the builtin \
                      rather than inlining it"
                     ),

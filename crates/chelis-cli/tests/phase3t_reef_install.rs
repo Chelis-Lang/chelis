@@ -44,7 +44,7 @@ fn dist_artifacts_present() -> bool {
 fn reef_install_from_monorepo_populates_registry_and_unblocks_check() {
     assert!(
         dist_artifacts_present(),
-        "packages/chelis-std/dist/ artifacts missing — \
+        "packages/chelis-std/dist/ artifacts missing: \
          this test relies on the prebuilt chelis-std artifacts \
          that ship in the monorepo. Run `chelis reef build` in \
          packages/chelis-std/ to regenerate them."

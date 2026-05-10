@@ -174,7 +174,7 @@ def test_ok() -> unit = test_assert(true, "sibling still runs")
         assert!(
             crash_row.contains("SIGABRT (6)"),
             "signal-killed crash.ch row should name the signal as 'SIGABRT (6)' \
-             (RT-A3 MEDIUM B2 — drop signal number was the symptom); \
+             (RT-A3 MEDIUM B2. Drop signal number was the symptom); \
              got: {crash_row}\nfull stdout=\n{stdout}"
         );
     }
@@ -243,7 +243,7 @@ def test_ok() -> unit = test_assert(true, "should still run")
     );
     assert!(
         stdout.contains("test_ok") && stdout.contains("PASS"),
-        "test_ok PASS missing — gate may be broken:\nstdout={stdout}"
+        "test_ok PASS missing. Gate may be broken:\nstdout={stdout}"
     );
     assert!(
         stdout.contains("1 passed, 0 failed"),
@@ -398,9 +398,9 @@ this is not valid chelis syntax at all !!
         "broken.ch <file> row should FAIL; got: {broken_row}\nfull stdout=\n{stdout}"
     );
     assert!(
-        broken_row.contains("(filter inactive — file-level error)"),
+        broken_row.contains("(filter inactive. File-level error)"),
         "broken.ch <file> row should carry the filter-inactive marker under \
-         --filter (issue #44 — Option 2 chosen over silent suppression); \
+         --filter (issue #44. Option 2 chosen over silent suppression); \
          got: {broken_row}\nfull stdout=\n{stdout}"
     );
     // Confirm the original error reason is still in the message — the tag
@@ -512,7 +512,7 @@ def test_three() -> unit = test_assert(true, "third never runs because worker ab
     );
 
     let one = row_for_test_in_file(&stdout, "tests/many.ch", "test_one").unwrap_or_else(|| {
-        panic!("test_one row missing — streaming did not preserve pre-crash rows.\nstdout={stdout}")
+        panic!("test_one row missing. Streaming did not preserve pre-crash rows.\nstdout={stdout}")
     });
     assert!(
         one.contains("PASS"),
@@ -520,7 +520,7 @@ def test_three() -> unit = test_assert(true, "third never runs because worker ab
     );
 
     let two = row_for_test_in_file(&stdout, "tests/many.ch", "test_two")
-        .unwrap_or_else(|| panic!("test_two row missing — streaming did not preserve the row before the abort.\nstdout={stdout}"));
+        .unwrap_or_else(|| panic!("test_two row missing. Streaming did not preserve the row before the abort.\nstdout={stdout}"));
     assert!(
         two.contains("PASS"),
         "test_two row should be PASS (emitted just before worker_aborted abort); got: {two}\nfull stdout=\n{stdout}"

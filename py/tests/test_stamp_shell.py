@@ -93,7 +93,7 @@ class TestStampShell:
     def test_excludes_phase_spec_files(self, tmp_path: Path):
         src = _make_fake_nautilus(tmp_path)
         (src / "spec").mkdir()
-        (src / "spec" / "phase3j.md").write_text("# Phase 3j — Nautilus\nnautilus body\n")
+        (src / "spec" / "phase3j.md").write_text("# Phase 3j. Nautilus\nnautilus body\n")
         (src / "spec" / "shared_notes.md").write_text("not a phase file\n")
         dst = tmp_path / "coral"
         stamp_shell(src, dst, "nautilus", "coral")

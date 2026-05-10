@@ -270,7 +270,7 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
         s.allocs >= 3,
         "softmax §4.2 lowering should still produce multiple backing slots \
          under C memory planning. Got {}. If this drops to one and the loop \
-         evidence changes, a softmax-fusion pass shipped — update.",
+         evidence changes, a softmax-fusion pass shipped. Update.",
         s.allocs
     );
 
@@ -292,7 +292,7 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
         sc.runtime_call,
         "scatter must lower to a chelis_tensor_scatter() runtime call \
          (the only generic dispatch path today). If this changes, a \
-         specialised scatter pattern matcher shipped — update the test."
+         specialised scatter pattern matcher shipped. Update the test."
     );
     assert_eq!(
         sc.sgemm_calls, 0,

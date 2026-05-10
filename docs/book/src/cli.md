@@ -24,7 +24,7 @@ the front-end pipeline runs. The gate is two checks in one:
 1. **Formatter check** — the file must be byte-identical to its
    canonical re-print (the same comparison `chelis fmt --check` does).
 2. **Lint check** — the file must pass every `chelis lint` rule that
-   applies to its surface.
+   applies to its surface in the blocking rule registry.
 
 A failure prints a one-line-per-issue diagnostic to stderr and exits
 non-zero. The error message tells you exactly what to run:
@@ -39,6 +39,10 @@ The gate runs only on the user-supplied source. Reef-imported library
 decls are not re-checked here — they were already gated when the
 package was published.
 
+Advisory lint rules are not part of the style gate. They may print as
+warnings on user-facing commands, but they do not block `build`,
+`check`, `validate`, `eval --file`, or `lint --check`.
+
 ### Bypass flags
 
 | Surface | Bypass | When to use |
@@ -48,6 +52,28 @@ package was published.
 
 `chelis eval EXPR` (the inline-expression form) is unaffected — there
 is no on-disk source to canonicalize, so the gate does not apply.
+
+`--allow-style-violations` bypasses only the style gate. It does not
+turn parse, type, effect, validation, evaluation, or backend errors into
+warnings.
+
+### Severity behavior
+
+| Severity | Example | Output | Exit behavior |
+|---|---|---|---|
+| Blocking violation | non-canonical formatting, `surf-value-snake-case`, `no-em-dash-in-public-strings` | one issue per line | `lint --check` exits non-zero; built-in style gate blocks unless bypassed |
+| Warning/advisory | `redundant-linearity-call`, `prefer-pipe-operator` | prefixed with `warning:` or `advisory:` | never makes `lint --check` fail and is excluded from the built-in style gate |
+
+`redundant-linearity-call` warns on explicit `copy()` and `drop()`
+calls. Existing fixtures and migration baselines may keep those calls
+when they prove compatibility or preserve before/after evidence. New
+human-facing examples should use implicit linearity unless the explicit
+form is the subject of the example.
+
+`chelis lint --fix <path>` applies available source rewrites in-place.
+`chelis lint --rules a,b <path>` runs a comma-separated subset, and
+`chelis lint --list` prints the registered rules, severities, spec
+references, and summaries.
 
 ## Typical Loop
 
@@ -98,7 +124,8 @@ property unsupported by the v1 generator, and `3` setup/input/config error.
 - `build` emits source and runtime artifacts; it does not invoke
   `gcc` or `hipcc` for you.
 - `lint` prints `path:line:col: rule_id (§spec_ref): message`; with
-  `--check` it exits non-zero on any violation.
+  `--check` it exits non-zero on any blocking violation. Advisory
+  warnings are prefixed with `warning:` and do not affect the exit code.
 
 ## Shell Author Checklist
 
@@ -107,6 +134,8 @@ property unsupported by the v1 generator, and `3` setup/input/config error.
 - Run `chelis fmt --inplace` before persisting generated `.ch` or `.dp` files.
 - Run `chelis check` on every generated entry point before publishing a shell artifact.
 - Treat `--allow-style-violations` as a local escape hatch, not part of a package build.
+- In pipe-stage Surf, `x |> f(y)` means `f(x, y)`. Use
+  `x |> fn (v) -> f(y, v)` when the piped value belongs later.
 
 For exact CLI semantics, use the numbered specs plus the CLI
 integration tests in the repo (notably

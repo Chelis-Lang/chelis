@@ -2,7 +2,7 @@
 """macOS smoke test for `chelis build --target metal`.
 
 Drives two fixed-shape elementwise programs through the Metal backend
-— a Surf source and a span-attributed Deep source — then runs
+A Surf source and a span-attributed Deep source. Then runs
 `clang++ -fobjc-arc -framework Metal -framework Foundation` against
 each emitted `.mm` to prove that:
 

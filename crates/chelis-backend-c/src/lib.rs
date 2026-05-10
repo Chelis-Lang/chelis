@@ -3004,7 +3004,7 @@ int main(void) {{
         let abs_occurrences: Vec<_> = src.match_indices("absf(").collect();
         for (pos, _) in &abs_occurrences {
             if *pos == 0 || src.as_bytes()[pos - 1] != b'f' {
-                panic!("found bare `absf(` at position {pos} — should be `fabsf(`;\n{src}");
+                panic!("found bare `absf(` at position {pos}. Should be `fabsf(`;\n{src}");
             }
         }
         assert!(absf_count >= 1, "no `fabsf(` in output:\n{src}");

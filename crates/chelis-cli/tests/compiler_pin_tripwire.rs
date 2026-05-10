@@ -96,7 +96,7 @@ fn real_toml_compiler_pins_match_workspace_version() {
              Fix: run `python3 scripts/bump_compiler_pins.py <new-version>` \
              from the repo root. That script updates Cargo.toml, all real \
              `.toml` files listed above, and rebuilds packages/chelis-std/dist/. \
-             It is the canonical release-bump entry point — the test \
+             It is the canonical release-bump entry point. The test \
              auto-sync only covers test fixtures, not these on-disk files.\n",
         );
         panic!("{msg}");

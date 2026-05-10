@@ -57,6 +57,37 @@ impl fmt::Display for Violation {
     }
 }
 
+/// How strongly a rule participates in user-facing and CI surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+    Advisory,
+}
+
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Advisory => "advisory",
+        }
+    }
+
+    pub fn blocks_check(self) -> bool {
+        matches!(self, Severity::Error)
+    }
+}
+
+/// A byte-range source replacement produced by a fixable rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replacement {
+    pub path: PathBuf,
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+}
+
 /// Inputs a [`Rule`] sees when checking one file or directory entry.
 pub struct Context<'a> {
     /// Repository root the lint was invoked against. Used to compute paths
@@ -89,8 +120,19 @@ pub trait Rule: Send + Sync {
     /// One-line summary, shown by `chelis lint --explain <id>`.
     fn summary(&self) -> &str;
 
+    /// Severity for CLI reporting and build-gate behavior.
+    fn severity(&self) -> Severity {
+        Severity::Error
+    }
+
     /// Run the check. Return zero or more violations.
     fn check(&self, ctx: &Context<'_>) -> Vec<Violation>;
+
+    /// Return an auto-fix for `violation`, when this occurrence is safely
+    /// fixable. Rules should return `None` when a `keep` annotation applies.
+    fn fix(&self, _ctx: &Context<'_>, _violation: &Violation) -> Option<Replacement> {
+        None
+    }
 }
 
 /// A lint exception. Every entry must cross-reference a section of
@@ -135,7 +177,11 @@ pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, Lint
             if !rule.applies_to().contains(&surface) {
                 continue;
             }
-            violations.extend(rule.check(&ctx));
+            violations.extend(
+                rule.check(&ctx)
+                    .into_iter()
+                    .filter(|v| !inline_allows(source.as_deref(), v)),
+            );
         }
     }
     violations.sort_by(|a, b| {
@@ -145,6 +191,77 @@ pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, Lint
             .then(a.rule_id.cmp(&b.rule_id))
     });
     Ok(violations)
+}
+
+fn inline_allows(source: Option<&str>, violation: &Violation) -> bool {
+    let Some(source) = source else {
+        return false;
+    };
+    let rule = violation.rule_id.as_str();
+    if file_level_allows(source, rule) {
+        return true;
+    }
+    let Some(line_no) = violation.line else {
+        return false;
+    };
+    let lines: Vec<&str> = source.lines().collect();
+    let current = lines.get(line_no.saturating_sub(1)).copied().unwrap_or("");
+    let previous = line_no
+        .checked_sub(2)
+        .and_then(|idx| lines.get(idx))
+        .copied()
+        .unwrap_or("");
+    inline_line_allows(current, rule) || inline_line_allows(previous, rule)
+}
+
+fn inline_line_allows(line: &str, rule: &str) -> bool {
+    let Some(directive) = lint_directive(line) else {
+        return false;
+    };
+    let directive = directive.trim();
+    directive
+        .strip_prefix("allow")
+        .map(|rest| rest.split_whitespace().any(|name| name == rule))
+        .unwrap_or(false)
+}
+
+fn file_level_allows(source: &str, rule: &str) -> bool {
+    let allow = format!("#[allow({rule})]");
+    source.lines().any(|line| line.trim() == allow)
+}
+
+pub(crate) fn lint_directive(line: &str) -> Option<&str> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut cursor = 0usize;
+    while cursor < line.len() {
+        let ch = line[cursor..].chars().next()?;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else {
+                match ch {
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+            }
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if line[cursor..].starts_with("//") || line[cursor..].starts_with('#') {
+            return line[cursor..]
+                .split_once("chelis-lint:")
+                .map(|(_, directive)| directive);
+        }
+        cursor += ch.len_utf8();
+    }
+    None
 }
 
 /// Errors that can occur during a lint run.

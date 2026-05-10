@@ -835,7 +835,7 @@ fn detect_trivial_non_terminating_fns(exprs: &[deep::Expr], errors: &mut Vec<Che
             errors.push(CheckError::new(
                 CheckErrorKind::CycleDetected,
                 format!(
-                    "def `{name}` is trivially non-terminating — every tail position \
+                    "def `{name}` is trivially non-terminating. Every tail position \
                      calls back into the same recursion group `{name}` with no base case; \
                      add an `if`/`match` exit that returns without recursing"
                 ),
@@ -8306,7 +8306,7 @@ fn infer_fn(
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "polymorphic dim variable forced to concrete Lit({n}) by function body — \
+                    "polymorphic dim variable forced to concrete Lit({n}) by function body: \
                      declared dim parameters must remain polymorphic"
                 ),
                 vec![

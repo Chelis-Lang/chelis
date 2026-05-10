@@ -26,13 +26,13 @@
 //!
 //! ## Verbatim-preservation contract
 //!
-//! The contract for a clean span ID — every code point allowed by the
-//! spec — is **verbatim preservation**. Audit invariant: the `// span:
+//! The contract for a clean span ID. Every code point allowed by the
+//! spec. Is **verbatim preservation**. Audit invariant: the `// span:
 //! <id>` text in generated C / HIP / Metal source is byte-identical to the
 //! span ID a customer sees in the upstream `.spans.json` sidecar for any
 //! well-behaved input. [`sanitize_for_comment`] returns `Cow::Borrowed`
 //! in that case, both as a zero-copy fast path and as an enforcement of
-//! the invariant — clean spans are not rewritten.
+//! the invariant. Clean spans are not rewritten.
 //!
 //! For forbidden code points, each is replaced with its canonical
 //! backslash-escape (`\n` for U+000A LF, `\r` for U+000D CR, `\0` for
@@ -86,12 +86,12 @@ fn escape_forbidden(b: u8) -> String {
 /// producer-supplied string (span IDs, IR identifier-derived names, type
 /// names, anything else flowing through from upstream) should route the
 /// interpolated value through this function first. The contract is
-/// agnostic to the source field — the parameter name `s` (formerly
+/// agnostic to the source field. The parameter name `s` (formerly
 /// `span`) reflects the broadened scope per
 /// `spec/upstream-bugs/producer-string-sanitization.md`.
 ///
 /// Returns `Cow::Borrowed(s)` (zero-copy) when `s` contains no
-/// forbidden code points — this is the common case (well-formed Deep
+/// forbidden code points. This is the common case (well-formed Deep
 /// input cannot carry forbidden code points, since the parser rejects
 /// them per `spec/03-deep-syntax.md` §1.1.1, and `LoadStoreName` enforces
 /// the same constraint at construction). The borrowed case also locks

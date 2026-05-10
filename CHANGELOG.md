@@ -6,6 +6,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added - lint auto-fix and cleanup rules
+
+`chelis lint` now supports `--fix`, `--rules`, and `--list`. The lint
+engine records rule severity, applies non-overlapping source fixes
+in-place, and distinguishes `chelis-lint: allow` from
+`chelis-lint: keep`: allow suppresses diagnostics and fixes, while
+keep preserves the source but can still warn.
+
+The first fixable cleanup rules are `redundant-linearity-call` and
+`prefer-pipe-operator`. Public string literals are now checked by the
+blocking `no-em-dash-in-public-strings` rule; the initial rollout
+cleaned existing source strings while leaving Markdown-prose
+enforcement queued for a later doc-corpus pass.
+
 ## [0.7.3] — 2026-05-10
 
 ### Fixed — lowering diagnostics and release test coverage

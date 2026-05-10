@@ -45,6 +45,45 @@ fn check_fails_on_lint_violation() {
         .stderr(predicates::str::contains("surf-value-snake-case"));
 }
 
+/// Blocking lint rules added to the registry also participate in the
+/// built-in style gate.
+#[test]
+fn check_fails_on_no_em_dash_public_string() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("message.ch");
+    let dash = '\u{2014}';
+    let src = format!("def message() -> string = \"one {dash} two\"\n");
+    let decls = chelis_surf::parser::parse_str(&src).expect("parses");
+    let canonical = chelis_surf::format::format_program(&decls);
+    fs::write(&path, &canonical).unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no-em-dash-in-public-strings"));
+}
+
+/// Relative bare filenames must still match violations returned by
+/// the lint walker, which reports paths rooted at `./`.
+#[test]
+fn check_relative_bare_filename_fails_on_lint_violation() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("message.ch");
+    let dash = '\u{2014}';
+    let src = format!("def message() -> string = \"one {dash} two\"\n");
+    let decls = chelis_surf::parser::parse_str(&src).expect("parses");
+    let canonical = chelis_surf::format::format_program(&decls);
+    fs::write(&path, &canonical).unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(dir.path())
+        .args(["check", "message.ch"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no-em-dash-in-public-strings"));
+}
+
 /// `--allow-style-violations` lets a non-canonical build through with a
 /// stderr warning.
 #[test]

@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn flags_user_defined_hyphenated_symbol() {
-        // A user-defined function name with a hyphen — would result from
+        // A user-defined function name with a hyphen. Would result from
         // a buggy Deep emitter, since Surf can't produce one.
         let src = "(def {} my-func (params {} x) (var {} x))\n";
         let v = run(src);

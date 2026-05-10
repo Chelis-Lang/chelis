@@ -308,7 +308,7 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
 
     assert_eq!(
         baseline_named, result_named,
-        "Phase G' — eval_in_context must resolve library string-call \
+        "Phase G'. Eval_in_context must resolve library string-call \
          through host-runtime top_level_defs, matching the monolithic baseline"
     );
 }
@@ -359,7 +359,7 @@ fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
 
     assert_eq!(
         baseline_named, post_named,
-        "Phase G' — round-tripped CompiledContext must still resolve library calls"
+        "Phase G'. Round-tripped CompiledContext must still resolve library calls"
     );
 }
 
@@ -503,7 +503,7 @@ fn microbench_in_context_is_at_least_10x_faster_than_prepare_eval_for_50_snippet
 
     let speedup = baseline_elapsed.as_secs_f64() / in_context_elapsed.as_secs_f64().max(1e-9);
     eprintln!(
-        "phase-G microbench: 50 snippets — baseline {} ms, in-context {} ms, speedup {:.2}x",
+        "phase-G microbench: 50 snippets. Baseline {} ms, in-context {} ms, speedup {:.2}x",
         baseline_elapsed.as_millis(),
         in_context_elapsed.as_millis(),
         speedup,

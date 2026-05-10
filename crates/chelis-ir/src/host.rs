@@ -226,7 +226,7 @@ impl HostExpr {
     ///   * `merged_spans` already contains `span`.
     ///
     /// Used by the host-side N→1 lowering collapse rule (§2.3 host-side
-    /// table, rule "Lowering — body collapses to existing HostExpr"): when
+    /// table, rule "Lowering. Body collapses to existing HostExpr"): when
     /// a parent Deep expr lowers to an already-constructed inner HostExpr
     /// (e.g. `(realize ...)`, `(handle-effect ... body)`, `(lit ...)` whose
     /// child is the canonical node), the parent's `span_id` appends here so
@@ -628,7 +628,7 @@ fn lower_host_program(
         // than `call(…)` undefined-symbol.
         if let Some(mut function) = lower_host_function(name, body, ty_expr, program) {
             // N→1 lowering collapse per `spec/design/chelis_span_survival.md`
-            // §2.3 host-side table, rule "Lowering — top-level def collapses
+            // §2.3 host-side table, rule "Lowering. Top-level def collapses
             // to fn body": when a `(def {span: a} name (fn ... body))` lowers
             // to a HostFunction whose `body` is the lowered fn body, the
             // def's `span_id` appends to the body node's `merged_spans` so
@@ -661,7 +661,7 @@ fn lower_host_program(
                 &mut host.global_tensor_helpers,
             );
             // N→1 lowering collapse per `spec/design/chelis_span_survival.md`
-            // §2.3 host-side table, rule "Lowering — top-level def collapses
+            // §2.3 host-side table, rule "Lowering. Top-level def collapses
             // to body": when a `(def {span: a} name body)` lowers to a
             // HostBinding whose `value` is the body's HostExpr, the def's
             // own `span_id` (sourced from the def's `meta["span"]`) appends
@@ -1030,7 +1030,7 @@ fn lower_host_function(
         lower_host_expr(&body_expr, program, &scope, &mut tensor_helpers)
     };
     // Per `spec/design/chelis_span_survival.md` §2.3 host-side table, the
-    // "Tensor-helper extraction" and "Lowering — fn-body" rules: every
+    // "Tensor-helper extraction" and "Lowering. Fn-body" rules: every
     // input Deep span must surface as `span_id` or in `merged_spans` on at
     // least one HostExpr node. Two paths above bypass the
     // `lower_host_expr` wrapper's region-corresponding stamping:
