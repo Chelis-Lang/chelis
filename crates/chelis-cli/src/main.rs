@@ -6,6 +6,7 @@ mod style_gate;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
+use chelis_types::types::{Dim, Type};
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
@@ -189,10 +190,20 @@ enum Command {
     /// Pass `--allow-style-violations` to bypass the gate (CI must not).
     Check {
         file: PathBuf,
+        /// Include signature-inference metadata in the JSON report.
+        #[arg(long, action = ArgAction::SetTrue)]
+        show_inferred: bool,
         /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
+    },
+    /// Report lowered IR copy cost
+    Cost {
+        file: PathBuf,
+        /// Emit JSON instead of human-readable text
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
     },
     /// Validate syntax against executable grammar tooling
     #[command(group(
@@ -489,8 +500,10 @@ fn main() {
         }) => cmd_eval(file.as_deref(), expr.as_deref(), allow_style_violations),
         Some(Command::Check {
             file,
+            show_inferred,
             allow_style_violations,
-        }) => cmd_check(&file, allow_style_violations),
+        }) => cmd_check(&file, show_inferred, allow_style_violations),
+        Some(Command::Cost { file, json }) => cmd_cost(&file, json),
         Some(Command::Validate {
             surf,
             deep,
@@ -861,8 +874,190 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
     }
 }
 
+fn cmd_cost(file: &Path, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let summary = copy_cost_for_file(file)?;
+    if json {
+        println!("{}", copy_cost_json(file, &summary));
+    } else {
+        print!("{}", copy_cost_human(file, &summary));
+    }
+    Ok(())
+}
+
+fn copy_cost_for_file(
+    file: &Path,
+) -> Result<chelis_ir::analysis::CopyCostSummary, Box<dyn std::error::Error>> {
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext == "dp" {
+        let source = fs::read_to_string(file)?;
+        let deep_exprs = chelis_deep::parser::parse_str_strict(&source)
+            .map_err(|err| format!("Deep parse error: {err}"))?;
+        let checked =
+            checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
+        return copy_cost_for_checked(&checked, &deep_exprs, &deep_exprs);
+    }
+
+    let (decls, entry_decls) = load_check_build_decls(file)?;
+    let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+    let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
+    let checked =
+        checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
+    copy_cost_for_checked(&checked, &deep_exprs, &entry_deep_exprs)
+}
+
+fn copy_cost_for_checked(
+    checked: &chelis_types::CheckedProgram,
+    program_exprs: &[DeepExpr],
+    entry_exprs: &[DeepExpr],
+) -> Result<chelis_ir::analysis::CopyCostSummary, Box<dyn std::error::Error>> {
+    let mut entry_names = Vec::new();
+    for expr in entry_exprs {
+        if let Some(name) = deep_top_level_expr_name(expr) {
+            entry_names.push(name.to_string());
+        }
+    }
+    if entry_names.is_empty() {
+        for expr in program_exprs {
+            if let Some(name) = deep_top_level_expr_name(expr) {
+                entry_names.push(name.to_string());
+            }
+        }
+    }
+    let mut functions = Vec::new();
+    for name in &entry_names {
+        if let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, name) {
+            let roots = dag.roots().to_vec();
+            if roots.is_empty() {
+                continue;
+            }
+            let summary = chelis_ir::analysis::analyze_copy_costs_for_roots(
+                &dag,
+                &[(display_root_name(name), roots)],
+            );
+            functions.extend(summary.functions);
+        }
+    }
+
+    if functions.is_empty() {
+        let dag = chelis_ir::lower::try_lower_program(checked)
+            .map_err(|diagnostic| boxed_string_error(diagnostic.to_string()))?;
+        let all_names = lowered_root_names_from_exprs(program_exprs, checked.type_env());
+        let selected_names =
+            lowered_root_names_from_selected_exprs(entry_exprs, program_exprs, checked.type_env());
+        let selected_names = if selected_names.is_empty() {
+            all_names.clone()
+        } else {
+            selected_names
+        };
+        let roots = all_names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                selected_names
+                    .iter()
+                    .any(|selected| selected == name)
+                    .then(|| {
+                        dag.roots()
+                            .get(index)
+                            .copied()
+                            .map(|root| (name.clone(), vec![root]))
+                    })
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        return Ok(chelis_ir::analysis::analyze_copy_costs_for_roots(
+            &dag, &roots,
+        ));
+    }
+
+    Ok(summarize_copy_cost_functions(functions))
+}
+
+fn summarize_copy_cost_functions(
+    functions: Vec<chelis_ir::analysis::FunctionCopyCost>,
+) -> chelis_ir::analysis::CopyCostSummary {
+    let total_copy_count = functions.iter().map(|function| function.copy_count).sum();
+    let total_bytes_copied = functions.iter().try_fold(0usize, |acc, function| {
+        function.bytes_copied.map(|bytes| acc.saturating_add(bytes))
+    });
+    let formula_terms = functions
+        .iter()
+        .filter_map(|function| function.byte_formula.as_ref())
+        .filter(|formula| !formula.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    let total_byte_formula = (!formula_terms.is_empty()).then(|| formula_terms.join(" + "));
+    chelis_ir::analysis::CopyCostSummary {
+        functions,
+        total_copy_count,
+        total_bytes_copied,
+        total_byte_formula,
+    }
+}
+
+fn copy_cost_json(
+    file: &Path,
+    summary: &chelis_ir::analysis::CopyCostSummary,
+) -> serde_json::Value {
+    let functions = summary
+        .functions
+        .iter()
+        .map(|function| {
+            let mut object = serde_json::Map::new();
+            object.insert("name".to_string(), serde_json::json!(function.name));
+            object.insert(
+                "copy_count".to_string(),
+                serde_json::json!(function.copy_count),
+            );
+            if let Some(bytes) = function.bytes_copied {
+                object.insert("bytes_copied".to_string(), serde_json::json!(bytes));
+            }
+            serde_json::Value::Object(object)
+        })
+        .collect::<Vec<_>>();
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "file".to_string(),
+        serde_json::json!(file.display().to_string()),
+    );
+    object.insert("functions".to_string(), serde_json::Value::Array(functions));
+    object.insert(
+        "total_copy_count".to_string(),
+        serde_json::json!(summary.total_copy_count),
+    );
+    if let Some(bytes) = summary.total_bytes_copied {
+        object.insert("total_bytes_copied".to_string(), serde_json::json!(bytes));
+    }
+    serde_json::Value::Object(object)
+}
+
+fn copy_cost_human(file: &Path, summary: &chelis_ir::analysis::CopyCostSummary) -> String {
+    let mut out = format!("file: {}\n", file.display());
+    for function in &summary.functions {
+        out.push_str(&format!(
+            "{}: copy_count={}",
+            function.name, function.copy_count
+        ));
+        if let Some(bytes) = function.bytes_copied {
+            out.push_str(&format!(", bytes_copied={bytes}"));
+        } else if let Some(formula) = function.byte_formula.as_ref() {
+            out.push_str(&format!(", bytes_copied={formula}"));
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!("total_copy_count={}", summary.total_copy_count));
+    if let Some(bytes) = summary.total_bytes_copied {
+        out.push_str(&format!(", total_bytes_copied={bytes}"));
+    } else if let Some(formula) = summary.total_byte_formula.as_ref() {
+        out.push_str(&format!(", total_bytes_copied={formula}"));
+    }
+    out.push('\n');
+    out
+}
+
 fn cmd_check(
     target: &Path,
+    show_inferred: bool,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Bucket 6b: when given a directory, walk it and run the per-file
@@ -881,7 +1076,7 @@ fn cmd_check(
         let mut had_error = false;
         let mut entries: Vec<String> = Vec::with_capacity(files.len());
         for file in &files {
-            match cmd_check_one(file, allow_style_violations) {
+            match cmd_check_one(file, show_inferred, allow_style_violations) {
                 Ok(json) => {
                     let rel = file.strip_prefix(target).unwrap_or(file).display();
                     entries.push(format!(
@@ -907,7 +1102,7 @@ fn cmd_check(
         return Ok(());
     }
 
-    let json = cmd_check_one(target, allow_style_violations)?;
+    let json = cmd_check_one(target, show_inferred, allow_style_violations)?;
     println!("{json}");
     Ok(())
 }
@@ -954,16 +1149,28 @@ fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
 
 fn cmd_check_one(
     file: &Path,
+    show_inferred: bool,
     allow_style_violations: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     if let Ok(source) = fs::read_to_string(file) {
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
+        emit_advisory_lint_warnings_for_file(file);
     }
     let (decls, _) = load_check_build_decls(file)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let mut report = chelis_types::check_ir_fitness(&deep_exprs);
-    let (effect_errors, linearity_errors) = match chelis_types::check_typed_program(&deep_exprs) {
-        Ok(checked) => match chelis_effects::check_program(&checked) {
+    let typed_program = chelis_types::check_typed_program(&deep_exprs);
+    let inferred_signatures_json = if show_inferred {
+        typed_program
+            .as_ref()
+            .ok()
+            .map(format_inferred_signatures_json)
+            .unwrap_or_else(|| "[]".to_string())
+    } else {
+        String::new()
+    };
+    let (effect_errors, linearity_errors) = match &typed_program {
+        Ok(checked) => match chelis_effects::check_program(checked) {
             Ok(checked) => (
                 Vec::new(),
                 chelis_types::check_linearity(&checked)
@@ -1033,7 +1240,7 @@ fn cmd_check_one(
             "  \"typed_nodes\": {},\n",
             "  \"untyped_nodes\": {},\n",
             "  \"total_nodes\": {},\n",
-            "  \"unresolved_names\": {},\n",
+            "  \"unresolved_names\": {}{}\n",
             "  \"errors\": [{}]\n",
             "}}"
         ),
@@ -1046,9 +1253,103 @@ fn cmd_check_one(
         report.untyped_nodes,
         report.total_nodes,
         serde_json::to_string(&report.unresolved_names)?,
+        if show_inferred {
+            format!(",\n  \"inferred_signatures\": {inferred_signatures_json},")
+        } else {
+            ",".to_string()
+        },
         errors_json.join(","),
     );
     Ok(json)
+}
+
+fn emit_advisory_lint_warnings_for_file(file: &Path) {
+    if style_gate::disabled_by_env() {
+        return;
+    }
+    let parent = file.parent().unwrap_or_else(|| Path::new("."));
+    let rules = chelis_lint::registry::advisory_rules();
+    let raw = match chelis_lint::lint(parent, &rules) {
+        Ok(violations) => violations,
+        Err(_) => return,
+    };
+    let mine = raw
+        .into_iter()
+        .filter(|violation| violation.path == file)
+        .collect::<Vec<_>>();
+    let exceptions_list = style_gate::exceptions();
+    for violation in chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, parent) {
+        eprintln!("warning: {violation}");
+    }
+}
+
+fn format_inferred_signatures_json(checked: &chelis_types::CheckedProgram) -> String {
+    let entries: Vec<serde_json::Value> = checked
+        .signature_inference()
+        .functions
+        .values()
+        .map(|func| {
+            let params: Vec<serde_json::Value> = func
+                .params
+                .iter()
+                .map(|param| {
+                    serde_json::json!({
+                        "index": param.index,
+                        "name": param.name,
+                        "written": param.written,
+                        "inferred_read_only": param.inferred_read_only,
+                        "checked_type": format_cli_type(&param.checked_type),
+                        "display_type": format_cli_type(&param.display_type),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "function": func.name,
+                "recursive_cycle": func.recursive_cycle,
+                "checked_signature": format_cli_type(&func.checked_signature),
+                "display_signature": format_cli_type(&func.display_signature),
+                "params": params,
+            })
+        })
+        .collect();
+    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn format_cli_type(ty: &Type) -> String {
+    match ty {
+        Type::Prim(prim) => prim.name().to_string(),
+        Type::Fn(args, ret) => {
+            let args = args.iter().map(format_cli_type).collect::<Vec<_>>();
+            format!("({}) -> {}", args.join(", "), format_cli_type(ret))
+        }
+        Type::Ref(inner) => format!("&{}", format_cli_type(inner)),
+        Type::Tensor(dims, prim) => {
+            let mut parts = dims.iter().map(format_cli_dim).collect::<Vec<_>>();
+            parts.push(prim.name().to_string());
+            format!("tensor[{}]", parts.join(", "))
+        }
+        Type::Adt(name, args) if args.is_empty() => name.clone(),
+        Type::Adt(name, args) => {
+            let args = args.iter().map(format_cli_type).collect::<Vec<_>>();
+            format!("{name}[{}]", args.join(", "))
+        }
+        Type::Var(var) => format!("?{}", var.0),
+        Type::Tuple(types) => {
+            let types = types.iter().map(format_cli_type).collect::<Vec<_>>();
+            format!("({})", types.join(", "))
+        }
+        Type::Unit => "unit".to_string(),
+        Type::Error => "<error>".to_string(),
+    }
+}
+
+fn format_cli_dim(dim: &Dim) -> String {
+    match dim {
+        Dim::Name(name) => name.clone(),
+        Dim::Var(var) => format!("d{}", var.0),
+        Dim::Lit(value) => value.to_string(),
+        Dim::Wildcard => "*".to_string(),
+    }
 }
 
 /// Bucket-5 closure: `with seed(...)` no longer blocks `chelis build`.
@@ -1215,7 +1516,9 @@ fn cmd_build(
             }
         })
         .collect::<Vec<_>>();
-    dag.set_roots(selected);
+    if !entry_root_names.is_empty() {
+        dag.set_roots(selected);
+    }
     dag = chelis_ir::optimize::dead_code_eliminate(&dag);
     let func_name = file
         .file_stem()
@@ -1443,7 +1746,9 @@ fn cmd_build_deep(
             }
         })
         .collect::<Vec<_>>();
-    dag.set_roots(selected);
+    if !entry_root_names.is_empty() {
+        dag.set_roots(selected);
+    }
     dag = chelis_ir::optimize::dead_code_eliminate(&dag);
     let func_name = file
         .file_stem()
@@ -4216,9 +4521,11 @@ fn cmd_lint(
         paths
     };
     let mut rules = chelis_lint::registry::all_rules();
+    let mut advisory_rules = chelis_lint::registry::advisory_rules();
     if let Some(id) = rule_filter {
         rules.retain(|r| r.id() == id);
-        if rules.is_empty() {
+        advisory_rules.retain(|r| r.id() == id);
+        if rules.is_empty() && advisory_rules.is_empty() {
             return Err(format!("no rule with id '{id}'").into());
         }
     }
@@ -4235,6 +4542,12 @@ fn cmd_lint(
         let kept = chelis_lint::exceptions::apply_exceptions(&raw_violations, &exceptions, target);
         for v in &kept {
             println!("{v}");
+        }
+        let raw_advisories = chelis_lint::lint(target, &advisory_rules)?;
+        let kept_advisories =
+            chelis_lint::exceptions::apply_exceptions(&raw_advisories, &exceptions, target);
+        for v in &kept_advisories {
+            println!("warning: {v}");
         }
         total += kept.len();
     }

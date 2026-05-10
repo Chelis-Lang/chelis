@@ -9,14 +9,5 @@ def forward(x: tensor[seq, 256, f32], wq: tensor[256, 64, f32], wk: tensor[256, 
   hidden = matmul(norm1, ff1) |> relu |> matmul(ff2)
   residual = add(norm1, hidden)
   out = layer_norm(residual, gamma2, beta2)
-  _ = drop(q)
-  _ = drop(k)
-  _ = drop(v)
-  _ = drop(scores)
-  _ = drop(probs)
-  _ = drop(attn)
-  _ = drop(norm1)
-  _ = drop(hidden)
-  _ = drop(residual)
   out
 }

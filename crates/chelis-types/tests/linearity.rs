@@ -126,10 +126,10 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 }
 
 #[test]
-fn borrowed_but_never_consumed_is_reported_separately() {
-    let errors = check_surf(
+fn borrowed_but_never_consumed_is_auto_dropped() {
+    check_surf(
         r#"
-def bad(): tensor[4, f32] =
+def ok(): tensor[4, f32] =
   {
     x: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0])
     y: tensor[4, f32] = relu(x)
@@ -137,13 +137,7 @@ def bad(): tensor[4, f32] =
   }
 "#,
     )
-    .expect_err("no implicit drop: borrowed values still need an owned consume");
-
-    assert!(errors.iter().any(|error| {
-        matches!(error.kind, CheckErrorKind::UnconsumedLinear)
-            && error.message.contains("borrowed by")
-            && error.message.contains("scope ends without consuming")
-    }));
+    .expect("implicit drop handles borrowed local owners at scope end");
 }
 
 #[test]

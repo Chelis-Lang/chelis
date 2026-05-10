@@ -900,6 +900,8 @@ pub enum WireRiscOp {
     Store {
         name: String,
     },
+    Copy,
+    Drop,
     Realize,
     Cast {
         new_precision: String,

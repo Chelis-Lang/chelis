@@ -131,6 +131,156 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+fn run_cost_json(path: &Path) -> Value {
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args(["cost", path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("chelis cost --json should run");
+    assert!(
+        output.status.success(),
+        "chelis cost --json failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("cost output should be json")
+}
+
+#[test]
+fn cost_json_counts_lowered_copy_nodes_and_concrete_bytes() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("copy_cost.ch");
+    write_file(
+        &path,
+        "def double_it(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = add(copy(x), x)\n",
+    );
+
+    let json = run_cost_json(&path);
+
+    assert_eq!(json["file"], path.display().to_string());
+    assert_eq!(json["total_copy_count"], 1);
+    assert_eq!(json["total_bytes_copied"], 24);
+    let functions = json["functions"].as_array().expect("functions array");
+    assert_eq!(functions.len(), 1, "{json}");
+    assert_eq!(functions[0]["name"], "double_it");
+    assert_eq!(functions[0]["copy_count"], 1);
+    assert_eq!(functions[0]["bytes_copied"], 24);
+}
+
+#[test]
+fn cost_json_counts_implicit_copy_from_consuming_fanout() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("implicit_copy_cost.ch");
+    write_file(
+        &path,
+        "def consume(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = realize(x)\n\
+         def double_it(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = add(consume(x), consume(x))\n",
+    );
+
+    let json = run_cost_json(&path);
+
+    assert_eq!(json["total_copy_count"], 1);
+    assert_eq!(json["total_bytes_copied"], 24);
+    let functions = json["functions"].as_array().expect("functions array");
+    let double_it = functions
+        .iter()
+        .find(|function| function["name"] == "double_it")
+        .expect("double_it summary");
+    assert_eq!(double_it["copy_count"], 1);
+    assert_eq!(double_it["bytes_copied"], 24);
+}
+
+#[test]
+fn cost_json_counts_explicit_and_inserted_copy_nodes_once_each() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("mixed_copy_cost.ch");
+    write_file(
+        &path,
+        "def consume(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = realize(x)\n\
+         def explicit_one(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = add(copy(x), x)\n\
+         def implicit_one(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = add(consume(x), consume(x))\n",
+    );
+
+    let json = run_cost_json(&path);
+
+    assert_eq!(json["total_copy_count"], 2);
+    assert_eq!(json["total_bytes_copied"], 48);
+    let functions = json["functions"].as_array().expect("functions array");
+    let explicit_one = functions
+        .iter()
+        .find(|function| function["name"] == "explicit_one")
+        .expect("explicit_one summary");
+    let implicit_one = functions
+        .iter()
+        .find(|function| function["name"] == "implicit_one")
+        .expect("implicit_one summary");
+    assert_eq!(explicit_one["copy_count"], 1);
+    assert_eq!(implicit_one["copy_count"], 1);
+}
+
+#[test]
+fn cost_json_omits_bytes_for_symbolic_copy_shapes() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_copy_cost.ch");
+    write_file(
+        &path,
+        "def double_it[batch](x: tensor[batch, f32]) -> tensor[batch, f32] = add(copy(x), x)\n",
+    );
+
+    let json = run_cost_json(&path);
+
+    assert_eq!(json["total_copy_count"], 1);
+    assert!(
+        json.get("total_bytes_copied").is_none(),
+        "symbolic total bytes must be omitted: {json}"
+    );
+    let function = &json["functions"].as_array().expect("functions array")[0];
+    assert_eq!(function["copy_count"], 1);
+    assert!(
+        function.get("bytes_copied").is_none(),
+        "symbolic function bytes must be omitted: {json}"
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args(["cost", path.to_str().unwrap()])
+        .output()
+        .expect("chelis cost should run");
+    assert!(
+        output.status.success(),
+        "chelis cost failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("copy_count=1"), "{stdout}");
+    assert!(stdout.contains("bytes_copied=batch * 4"), "{stdout}");
+}
+
+#[test]
+fn cost_json_fixture_baseline_matches_documented_examples() {
+    let baseline_path = example_path("../../docs/copy_drop_fixture_fitness_baseline.json");
+    let baseline: Value =
+        serde_json::from_str(&fs::read_to_string(&baseline_path).expect("read baseline"))
+            .expect("baseline json");
+    let examples = baseline["examples"].as_array().expect("examples array");
+
+    for example in examples {
+        let file = example["file"].as_str().expect("example file");
+        let path = example_path(&format!("../../{file}"));
+        let json = run_cost_json(&path);
+
+        assert_eq!(
+            json["total_copy_count"], example["total_copy_count"],
+            "copy-count baseline mismatch for {file}"
+        );
+        assert_eq!(
+            json["total_bytes_copied"], example["total_bytes_copied"],
+            "bytes-copied baseline mismatch for {file}"
+        );
+    }
+}
+
 fn generated_source_needs_blas(out_dir: &Path, sources: &[&str]) -> bool {
     sources.iter().any(|source| {
         fs::read_to_string(out_dir.join(source))
@@ -274,6 +424,55 @@ fn run_json_check(path: &Path) -> Value {
         .stdout
         .clone();
     serde_json::from_slice(&output).expect("check output should be json")
+}
+
+fn run_json_check_show_inferred(path: &Path) -> Value {
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap(), "--show-inferred"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).expect("check --show-inferred output should be json")
+}
+
+#[test]
+fn check_default_output_omits_signature_inference_metadata() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("readonly.ch");
+    write_file(&path, "def readonly(x, y: tensor[4, f32]) = add(x, y)\n");
+
+    let json = run_json_check(&path);
+    assert!(
+        json.get("inferred_signatures").is_none(),
+        "default check output must stay unchanged, got {json}"
+    );
+}
+
+#[test]
+fn check_show_inferred_prints_signature_inference_metadata() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("readonly.ch");
+    write_file(&path, "def readonly(x, y: tensor[4, f32]) = add(x, y)\n");
+
+    let json = run_json_check_show_inferred(&path);
+    let signatures = json["inferred_signatures"]
+        .as_array()
+        .expect("inferred_signatures array");
+    let readonly = signatures
+        .iter()
+        .find(|entry| entry["function"] == "readonly")
+        .expect("readonly signature metadata");
+    assert_eq!(
+        readonly["display_signature"],
+        "(&tensor[4, f32], tensor[4, f32]) -> tensor[4, f32]"
+    );
+    assert_eq!(readonly["params"][0]["name"], "x");
+    assert_eq!(readonly["params"][0]["inferred_read_only"], true);
+    assert_eq!(readonly["params"][0]["written"], false);
 }
 
 fn runtime_library_path() -> PathBuf {
@@ -4874,6 +5073,28 @@ fn check_directory_walks_ch_files_and_aggregates_json() {
         !names.iter().any(|n| n.ends_with("README.md")),
         "non-.ch files must be skipped: {names:?}"
     );
+}
+
+#[test]
+fn lint_reports_redundant_linearity_call_as_warning_only() {
+    let dir = tempdir().expect("tempdir");
+    write_file(
+        &dir.path().join("redundant.ch"),
+        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
+         result = drop(keep(to_tensor([1.0, 2.0])))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--check", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("warning:")
+                .and(predicate::str::contains("redundant-linearity-call"))
+                .and(predicate::str::contains("`copy()`"))
+                .and(predicate::str::contains("`drop()`")),
+        );
 }
 
 /// Bucket 6b: empty directory is a legitimate state (fresh project,

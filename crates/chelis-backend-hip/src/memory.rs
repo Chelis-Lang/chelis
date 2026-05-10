@@ -18,6 +18,7 @@ pub enum NodeMemoryKind {
     RepeatedLoadAlias { canonical_load: NodeId },
     SlotBacked { slot: usize },
     MetadataView { source: NodeId },
+    TerminalDrop { source: NodeId },
     StoreAlias { source: NodeId },
     Skipped,
 }
@@ -86,7 +87,10 @@ impl MemoryPlan {
     pub fn emit_cleanup(&self) -> Vec<String> {
         let mut lines = Vec::new();
         for (idx, kind) in self.node_kinds.iter().enumerate() {
-            if matches!(kind, NodeMemoryKind::Skipped) {
+            if matches!(
+                kind,
+                NodeMemoryKind::TerminalDrop { .. } | NodeMemoryKind::Skipped
+            ) {
                 continue;
             }
             lines.push(format!("    chelis_gpu_free_view(d_t{idx});"));
@@ -124,6 +128,9 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::Stride { .. } => NodeMemoryKind::MetadataView {
                     source: node.inputs[0],
                 },
+                RiscOp::Drop => NodeMemoryKind::TerminalDrop {
+                    source: node.inputs[0],
+                },
                 RiscOp::Store { .. } => NodeMemoryKind::StoreAlias {
                     source: node.inputs[0],
                 },
@@ -145,6 +152,7 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::Ceil
                 | RiscOp::UniformLike { .. }
                 | RiscOp::Dropout { .. }
+                | RiscOp::Copy
                 | RiscOp::Sum { .. }
                 | RiscOp::MaxReduce { .. }
                 | RiscOp::MinReduce { .. }
@@ -174,6 +182,7 @@ fn compute_owner_map(dag: &Dag, node_kinds: &[NodeMemoryKind]) -> Vec<Option<Nod
             NodeMemoryKind::MetadataView { source } | NodeMemoryKind::StoreAlias { source } => {
                 owners[source.0]
             }
+            NodeMemoryKind::TerminalDrop { .. } => None,
             NodeMemoryKind::Skipped => None,
         };
     }
@@ -220,6 +229,13 @@ fn owner_requirements(
                     dag.get(fused_input)
                         .map(|fused_node| fused_node.inputs.clone())
                         .unwrap_or_default()
+                } else {
+                    node.inputs.clone()
+                }
+            }
+            RiscOp::Drop => {
+                if let NodeMemoryKind::TerminalDrop { source } = node_kinds[node.id.0] {
+                    vec![source]
                 } else {
                     node.inputs.clone()
                 }
@@ -472,6 +488,33 @@ mod tests {
 
         assert_eq!(lines[0], "    chelis_gpu_free_view(d_t0);");
         assert_eq!(lines[1], "    chelis_gpu_free(chelis_slot0);");
+    }
+
+    #[test]
+    fn terminal_drop_closes_slot_lifetime_for_reuse() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let drop = dag.add_node(RiscOp::Drop, vec![a], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        dag.add_root(b);
+
+        let plan = build_plan(&dag, &[b]);
+        assert_eq!(
+            plan.node_kind(drop),
+            &NodeMemoryKind::TerminalDrop { source: a }
+        );
+        assert_eq!(
+            plan.node_kind(a),
+            plan.node_kind(b),
+            "Drop must make a's slot available before b is born"
+        );
+        assert!(
+            !plan
+                .emit_cleanup()
+                .iter()
+                .any(|line| line.contains(&format!("d_t{}", drop.0))),
+            "Drop is terminal metadata and must not allocate a wrapper"
+        );
     }
 
     #[test]

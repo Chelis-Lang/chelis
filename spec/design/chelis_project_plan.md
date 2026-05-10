@@ -258,14 +258,15 @@ parallel with the type-system track once 2e has enough compiler API surface.
 
 - tensor linearity
 - borrowing for read-only access
-- explicit copy points
+- explicit and compiler-inserted copy/drop points
 - compiler-enabled safe buffer reuse
 
 **Phase 2b starting point:** begin with lightweight uniqueness / alias tracking rather
-than a full Rust-style ownership-and-lifetimes model. Chelis's fixed tensor primitive
-surface and DAG-based execution may allow the simpler rule of thumb that a tensor
-consumed by an op is dead unless it is explicitly `copy()`'d. Treat heavier borrowing
-machinery as an escalation only if the lightweight model proves insufficient.
+than a full Rust-style ownership-and-lifetimes model. The active `copy-drop` model is
+specified in `spec/design/implicit_linearity.md`: source-level consuming fan-out is
+made explicit with lowered `RiscOp::Copy` nodes, and unconsumed owners are closed with
+lowered `RiscOp::Drop` nodes. Treat heavier borrowing machinery as an escalation only
+if the lightweight model proves insufficient.
 
 **GPU AD refinement note:** a later AD refinement can add recomputation-oriented backward
 generation for GPU workloads, where replaying cheap forward work is often better than

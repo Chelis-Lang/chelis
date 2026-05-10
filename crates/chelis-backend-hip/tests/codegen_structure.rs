@@ -421,6 +421,32 @@ fn s5_realize_materializes_with_kernel_not_view() {
     );
 }
 
+#[test]
+fn s5_copy_materializes_and_drop_emits_no_kernel_or_wrapper() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let copy = dag.add_node(RiscOp::Copy, vec![x], vec_f32(6), None);
+    dag.add_node(RiscOp::Drop, vec![x], vec_f32(6), None);
+    dag.add_root(copy);
+
+    let result = codegen_hip(&dag, "test_copy_drop");
+    let host = host_entry_source(&result.c_source, "test_copy_drop");
+
+    assert!(
+        result.c_source.contains("kernel_cast"),
+        "Copy must materialize through a copy-style kernel launch"
+    );
+    assert_eq!(
+        host.matches("chelis_launch_kernel").count(),
+        1,
+        "Only Copy should launch; Drop must be non-computational:\n{host}"
+    );
+    assert!(
+        !host.contains("d_t2"),
+        "Drop should not allocate or free a device tensor wrapper:\n{host}"
+    );
+}
+
 // ===========================================================================
 // S6: Kernel launch uses correct grid/block (ceil(size/256))
 // ===========================================================================

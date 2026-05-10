@@ -16,7 +16,6 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{
     build_type_env_from_library, check_ir_program, check_ir_with_context, check_linearity,
     check_linearity_with_context, check_typed_program,
@@ -58,10 +57,6 @@ fn check_monolithic_combined(
     let checked = check_typed_program(&combined_deep)
         .unwrap_or_else(|e| panic!("monolithic IR check failed: {:?}", e.errors));
     check_linearity(&checked).map(|_| ())
-}
-
-fn err_kinds(errors: &[CheckError]) -> Vec<CheckErrorKind> {
-    errors.iter().map(|e| e.kind.clone()).collect()
 }
 
 // ── Subtle requirement #1: library tensor params don't consume new-code ──
@@ -107,10 +102,11 @@ def caller(my_x: tensor[4, f32], my_w: tensor[4, f32]): tensor[4, f32] =
 }
 
 #[test]
-fn new_code_double_consumption_still_flagged_with_context() {
-    // Same library, but new code consumes `my_x` twice — once by relu,
-    // once by the library call. Must reject with UseAfterConsume just
-    // like the monolithic check would.
+fn new_code_consuming_fanout_is_accepted_with_context() {
+    // Same library, but new code consumes `my_x` twice — once by realize,
+    // once by the library call. The implicit linearity model treats this as
+    // source fan-out and inserts an IR Copy during lowering, so the
+    // with-context checker must agree with the monolithic checker.
     let library_src = r#"
 def lib_id(t: tensor[4, f32]): tensor[4, f32] = t
 "#;
@@ -122,14 +118,14 @@ def bad(my_x: tensor[4, f32]): tensor[4, f32] =
   }
 "#;
 
-    let errors = check_new_with_context(library_src, new_src)
-        .expect_err("double-consume in new code must still be flagged");
+    let with_ctx = check_new_with_context(library_src, new_src);
+    let mono = check_monolithic_combined(library_src, new_src);
+
+    assert_eq!(with_ctx.is_ok(), mono.is_ok());
     assert!(
-        err_kinds(&errors)
-            .iter()
-            .any(|k| matches!(k, CheckErrorKind::UseAfterConsume)),
-        "expected UseAfterConsume, got: {:?}",
-        errors
+        with_ctx.is_ok(),
+        "source-level consuming fan-out is auto-copied: {:?}",
+        with_ctx.err()
     );
 }
 
@@ -152,16 +148,17 @@ def use_lib(my_x: tensor[4, f32]): tensor[4, f32] =
 
 #[test]
 fn no_leak_between_snippets_against_same_library() {
-    // Snippet A is a deliberately bad program (double-consume). After
-    // running it, snippet B (clean) must still succeed. This exercises
-    // function-purity: no shared mutable checker state.
+    // Snippet A uses consuming fan-out, which is valid in the implicit
+    // linearity model. After running it, snippet B must still succeed. This
+    // exercises function-purity: no shared mutable checker state.
     let library_program =
         check_library_with_linearity("def lib_id(t: tensor[4, f32]): tensor[4, f32] = t");
 
     let lib_deep = surf_to_deep("def lib_id(t: tensor[4, f32]): tensor[4, f32] = t");
     let ctx = build_type_env_from_library(&lib_deep).expect("ctx OK");
 
-    // Snippet A: double-consume — rejected.
+    // Snippet A: consuming fan-out — accepted and handled later by Copy
+    // insertion during lowering.
     let bad_deep = surf_to_deep(
         r#"
 def bad(my_x: tensor[4, f32]): tensor[4, f32] =
@@ -172,8 +169,12 @@ def bad(my_x: tensor[4, f32]): tensor[4, f32] =
 "#,
     );
     let bad_checked = check_ir_with_context(&ctx, &bad_deep).expect("IR check clean");
-    let bad_res = check_linearity_with_context(&library_program, &bad_checked);
-    assert!(bad_res.is_err(), "bad snippet must be rejected");
+    let fanout_res = check_linearity_with_context(&library_program, &bad_checked);
+    assert!(
+        fanout_res.is_ok(),
+        "source fan-out snippet must be accepted: {:?}",
+        fanout_res.err()
+    );
 
     // Snippet B: clean — must still succeed despite snippet A's failure.
     let good_deep = surf_to_deep("def good(my_x: tensor[4, f32]): tensor[4, f32] = lib_id(my_x)");
@@ -211,7 +212,7 @@ def caller(my_x: tensor[4, f32]): tensor[4, f32] =
 }
 
 #[test]
-fn parity_pair_two_double_consume_rejected() {
+fn parity_pair_two_consuming_fanout_accepted() {
     let library_src = "def lib_id(t: tensor[4, f32]): tensor[4, f32] = t";
     let new_src = r#"
 def bad(my_x: tensor[4, f32]): tensor[4, f32] =
@@ -224,21 +225,11 @@ def bad(my_x: tensor[4, f32]): tensor[4, f32] =
     let with_ctx = check_new_with_context(library_src, new_src);
     let mono = check_monolithic_combined(library_src, new_src);
 
-    assert!(with_ctx.is_err());
-    assert!(mono.is_err());
-
-    // Both must surface a UseAfterConsume.
-    let ctx_kinds = err_kinds(with_ctx.as_ref().err().unwrap());
-    let mono_kinds = err_kinds(mono.as_ref().err().unwrap());
+    assert_eq!(with_ctx.is_ok(), mono.is_ok());
     assert!(
-        ctx_kinds
-            .iter()
-            .any(|k| matches!(k, CheckErrorKind::UseAfterConsume))
-    );
-    assert!(
-        mono_kinds
-            .iter()
-            .any(|k| matches!(k, CheckErrorKind::UseAfterConsume))
+        with_ctx.is_ok(),
+        "consuming fan-out is legal before lowering inserts Copy: {:?}",
+        with_ctx.err()
     );
 }
 
@@ -269,7 +260,7 @@ def caller(my_x: tensor[4, f32]): tensor[4, f32] =
 
 #[test]
 fn parity_pair_four_copy_allows_reuse() {
-    // Reuse of `my_x` after a consuming call requires `copy`. Same
+    // Explicit `copy` remains valid under the implicit model. Same
     // semantics with or without context.
     let library_src = "def lib_consume(t: tensor[4, f32]): tensor[4, f32] = realize(t)";
     let new_src = r#"

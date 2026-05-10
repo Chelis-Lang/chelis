@@ -597,7 +597,9 @@ where
                 None if strict_loads => return Err(format!("missing required input `{name}`")),
                 None => default_value(&node.output_type),
             },
-            RiscOp::Store { .. } | RiscOp::Realize => values[&node.inputs[0]].clone(),
+            RiscOp::Store { .. } | RiscOp::Copy | RiscOp::Drop | RiscOp::Realize => {
+                values[&node.inputs[0]].clone()
+            }
             RiscOp::Add => binary_map(
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
@@ -782,6 +784,7 @@ where
     if roots.is_empty() {
         return eval_tensor_internal(dag, None, false, load_input);
     }
+    reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
     eval_tensor_internal(dag, Some(&live), false, load_input)
 }
@@ -797,8 +800,23 @@ where
     if roots.is_empty() {
         return eval_tensor_internal(dag, None, true, load_input);
     }
+    reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
     eval_tensor_internal(dag, Some(&live), true, load_input)
+}
+
+fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
+    for root in roots {
+        if let Some(node) = dag.get(*root)
+            && matches!(node.op, RiscOp::Drop)
+        {
+            return Err(format!(
+                "drop at node {} is terminal and cannot be evaluated as a root",
+                root.0
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn eval_tensor(
@@ -982,7 +1000,7 @@ mod tests {
             TensorValue::from_vec(vec![3], vec![-2.0, 0.5, 4.0]),
         );
         let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(&NodeId(dag.len() - 1)).unwrap();
+        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(*last, TensorValue::from_vec(vec![3], vec![0.0, 0.5, 4.0]));
     }
 
@@ -1006,7 +1024,7 @@ mod tests {
             TensorValue::from_vec(vec![3, 2], vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
         );
         let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(&NodeId(dag.len() - 1)).unwrap();
+        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![2, 2], vec![58.0, 64.0, 139.0, 154.0])
@@ -1028,7 +1046,7 @@ mod tests {
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
         );
         let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(&NodeId(dag.len() - 1)).unwrap();
+        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         let expected = [0.09003057, 0.24472847, 0.66524096];
         for (actual, target) in last.data.iter().zip(expected.iter()) {
             assert!((actual - target).abs() < 1e-5);
@@ -1060,7 +1078,7 @@ mod tests {
             TensorValue::from_vec(vec![2], vec![0.5, -0.5]),
         );
         let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(&NodeId(dag.len() - 1)).unwrap();
+        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         let expected = [-0.49998, 0.99997, -0.499995, 0.99998875];
         for (actual, target) in last.data.iter().zip(expected.iter()) {
             assert!((actual - target).abs() < 2e-4, "{actual} vs {target}");
@@ -1087,7 +1105,7 @@ mod tests {
             TensorValue::from_vec(vec![1, 1, 1, 1], vec![2.0]),
         );
         let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(&NodeId(dag.len() - 1)).unwrap();
+        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![2.0, 4.0, 6.0, 8.0])
@@ -1117,7 +1135,7 @@ mod tests {
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![1.0, 1.0, 1.0, 1.0]),
         );
         let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(&NodeId(dag.len() - 1)).unwrap();
+        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![12.0, 16.0, 24.0, 28.0])
@@ -1136,8 +1154,8 @@ mod tests {
         let dag = lower(src);
         let vals_a = eval_tensor(&dag, &HashMap::new()).unwrap();
         let vals_b = eval_tensor(&dag, &HashMap::new()).unwrap();
-        let out_a = vals_a.get(&NodeId(dag.len() - 1)).unwrap();
-        let out_b = vals_b.get(&NodeId(dag.len() - 1)).unwrap();
+        let out_a = vals_a.get(dag.roots().last().expect("DAG root")).unwrap();
+        let out_b = vals_b.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(out_a, out_b);
         assert!(out_a.data.contains(&0.0));
         assert!(out_a.data.iter().any(|value| *value > 0.0));

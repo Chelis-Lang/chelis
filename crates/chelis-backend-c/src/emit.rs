@@ -280,6 +280,8 @@ impl CEmitter {
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before C code generation")
             }
+            RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
+            RiscOp::Drop => {}
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -2408,6 +2410,24 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("acc +="));
         assert!(c.contains("for (int __reduce_i"));
+    }
+
+    #[test]
+    fn copy_materializes_and_drop_emits_no_wrapper() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let copy = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+        dag.add_node(RiscOp::Drop, vec![x], vec_f32(4), None);
+        dag.add_root(copy);
+
+        let c = CEmitter::emit_dag(&dag, "test_copy_drop");
+
+        assert!(c.contains("chelis_tensor *t1"));
+        assert!(c.contains("((float*)t1->data)[i] = ((float*)t0->data)[idx];"));
+        assert!(
+            !c.contains("t2"),
+            "Drop should not emit a tensor wrapper or compute statement:\n{c}"
+        );
     }
 
     #[test]

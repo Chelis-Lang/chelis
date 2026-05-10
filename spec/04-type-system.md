@@ -579,14 +579,15 @@ the active Phase 2a extension points.
 
 ---
 
-## 8. Linearity (Phase 2b)
+## 8. Linearity (Phase 2b, Superseded By Implicit Linearity)
 
 ### 8.1 Model
 
 Phase 2b uses lightweight uniqueness, not a Rust-style ownership-and-lifetimes
 system. Tensor values are owned by default, but read-only calls borrow their tensor
 arguments. A consuming use makes the binding dead; a borrow leaves the owned binding
-live and still requiring one eventual consume inside its local scope.
+live. The `copy-drop` model in `spec/design/implicit_linearity.md` supersedes the old
+requirement that every local owner write an explicit final consume.
 
 ### 8.2 Type Representation
 
@@ -604,10 +605,11 @@ The shipped Phase 2b user surface is type- and expression-based:
 - `&x` is an optional explicit borrow expression, represented as `(borrow {} x)`
 - passing owned `T` where `&T` is expected auto-borrows; this rule also applies to pipe stages
 - passing `&T` where owned `T` is expected is a type error unless the program writes `copy(x)`
-- `copy(x)` accepts either owned `T` or borrowed `&T` and yields a fresh owned value
+- `copy(x)` accepts either owned `T` or borrowed `&T` and yields a fresh owned value;
+  explicit and compiler-inserted copies lower to `RiscOp::Copy`
 - borrows cannot be stored in aggregates, returned, or captured by closures
-- borrow types are erased before IR and backend lowering; AD and `vmap` operate on the
-  existing owned IR after checking
+- borrow types are erased before IR and backend lowering; implicit linearity then
+  inserts explicit `RiscOp::Copy` and `RiscOp::Drop` nodes
 
 Linearity is checked after effect inference, before lowering:
 
@@ -619,20 +621,20 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
 
 ### 8.3 Static Rules
 
-- A local owned linear binding must be consumed exactly once on every path through its
-  scope. Borrow sites do not count as consumes.
+- A local owned linear binding must have exactly one terminal path in lowered IR:
+  either a consuming use or an inserted `Drop`. Borrow sites do not count as consumes.
 - Function parameters are ownership-transfer boundaries: an owned parameter may be
   borrowed throughout the function body and then leave the function scope without an
   implicit local `drop` expression.
-- A local value that was borrowed but never consumed is diagnosed separately from a
-  completely unused value. The diagnostic points at the borrow sites and says the
-  scope ends without consuming the owner; fixes are a final owned use, `realize`, or
-  explicit `drop`.
+- A local value that was borrowed but never consumed receives an inserted end-of-scope
+  `Drop` in lowered IR. This is not a user-facing type error.
 - `copy(x)` reads `x` without consuming it and yields a fresh tensor value.
-- `drop(x)` is an explicit consume. Chelis does not have implicit local drop.
+- `drop(x)` is an explicit consume. The compiler also inserts implicit end-of-scope
+  drops for locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
 - Creating a closure that captures a tensor consumes that outer binding at closure
   creation time.
-- Diagnostics report the consume site and suggest inserting `copy(...)` when reuse was
-  intended.
+- Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
+  invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
+  cyclic consume cases outside the v1 inference scope.

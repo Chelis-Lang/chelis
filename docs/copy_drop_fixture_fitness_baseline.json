@@ -1,0 +1,36 @@
+{
+  "generated_for": "copy-drop implicit linearity integration",
+  "date": "2026-05-10",
+  "command": "chelis cost <example> --json",
+  "notes": [
+    "Executable examples were migrated away from explicit linearity-only copy/drop ceremony where the implicit model can express the same program.",
+    "The migrated executable examples below currently produce no IR Copy nodes; future fixture regressions can diff this file programmatically."
+  ],
+  "examples": [
+    {
+      "file": "examples/hello_tensor.ch",
+      "total_copy_count": 0,
+      "total_bytes_copied": 0
+    },
+    {
+      "file": "examples/linreg.ch",
+      "total_copy_count": 0,
+      "total_bytes_copied": 0
+    },
+    {
+      "file": "examples/mnist.ch",
+      "total_copy_count": 0,
+      "total_bytes_copied": 0
+    },
+    {
+      "file": "examples/transformer_block.ch",
+      "total_copy_count": 0,
+      "total_bytes_copied": 0
+    },
+    {
+      "file": "examples/tensor_structural_ops.ch",
+      "total_copy_count": 0,
+      "total_bytes_copied": 0
+    }
+  ]
+}

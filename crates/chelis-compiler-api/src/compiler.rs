@@ -394,13 +394,15 @@ fn compile_new_source_in_context(
     .into_exprs();
 
     // Phase C: type-check new code against the library type env.
-    let new_checked =
-        chelis_types::check_ir_with_context(&context.type_env, &new_deep).map_err(|report| {
-            CompilerError {
-                stage: "check".to_string(),
-                errors: report.errors.iter().map(check_error_diagnostic).collect(),
-            }
-        })?;
+    let new_checked = chelis_types::check_ir_with_signature_context(
+        &context.type_env,
+        context.library_checked.signature_inference(),
+        &new_deep,
+    )
+    .map_err(|report| CompilerError {
+        stage: "check".to_string(),
+        errors: report.errors.iter().map(check_error_diagnostic).collect(),
+    })?;
 
     // Phase D: effects checker, library + new.
     let new_checked =
@@ -2139,6 +2141,8 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Store { name } => WireRiscOp::Store {
             name: name.as_str().to_string(),
         },
+        RiscOp::Copy => WireRiscOp::Copy,
+        RiscOp::Drop => WireRiscOp::Drop,
         RiscOp::Realize => WireRiscOp::Realize,
         RiscOp::Cast { new_precision } => WireRiscOp::Cast {
             new_precision: new_precision.name().to_string(),
@@ -2198,6 +2202,52 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
 mod tests {
     use super::*;
     use crate::schema::ExecutionValue;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn copy_drop_context_fixture() -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("myapp");
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib src");
+        fs::write(
+            root.join("reef.toml"),
+            format!(
+                "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n",
+                crate::COMPILER_VERSION
+            ),
+        )
+        .expect("write app reef.toml");
+        fs::write(
+            root.join("reef.lock"),
+            format!(
+                "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+                crate::COMPILER_VERSION
+            ),
+        )
+        .expect("write app reef.lock");
+        fs::write(
+            root.join("src/main.ch"),
+            "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        )
+        .expect("write app main");
+        fs::write(
+            root.join("mylib/reef.toml"),
+            format!(
+                "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Mylib\"\n",
+                crate::COMPILER_VERSION
+            ),
+        )
+        .expect("write lib reef.toml");
+        fs::write(
+            root.join("mylib/src/copy.ch"),
+            "module Mylib.Copy\nexport (consume)\n\n\
+             def consume(x: tensor[2, f32]) -> tensor[2, f32] = realize(x)\n",
+        )
+        .expect("write lib copy module");
+        (dir, root)
+    }
 
     #[test]
     fn compile_source_keeps_all_lowered_tensor_roots() {
@@ -2242,6 +2292,47 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
             vec!["logits".to_string()]
         );
         assert_eq!(compiled.dag.roots().len(), 1);
+    }
+
+    #[test]
+    fn compile_new_source_in_context_matches_monolithic_copy_insertion() {
+        let monolithic = compile_source(
+            SourceKind::Surf,
+            r#"
+def consume(x: tensor[2, f32]) -> tensor[2, f32] = realize(x)
+
+def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
+"#,
+        )
+        .expect("monolithic compile");
+        let monolithic_root = monolithic.named_roots["out"];
+        let monolithic_summary = chelis_ir::analysis::analyze_function_copy_cost(
+            &monolithic.dag,
+            "out",
+            monolithic_root,
+        );
+
+        let (_dir, root) = copy_drop_context_fixture();
+        let context = crate::compile_reef_context(Path::new("/tmp/copy-drop"), &root)
+            .expect("compile context");
+        let compiled = compile_new_source_in_context(
+            &context,
+            "module App.Eval\nimport Mylib.Copy (consume)\n\n\
+             def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))\n",
+        )
+        .expect("compile new source in context");
+        let context_root = compiled.named_roots["out"];
+        let context_summary =
+            chelis_ir::analysis::analyze_function_copy_cost(&compiled.dag, "out", context_root);
+
+        assert_eq!(monolithic_summary.copy_count, 1);
+        assert_eq!(context_summary.copy_count, monolithic_summary.copy_count);
+        assert!(compiled.dag.roots().iter().all(|root| {
+            !matches!(
+                compiled.dag.get(*root).map(|node| &node.op),
+                Some(chelis_ir::dag::RiscOp::Drop)
+            )
+        }));
     }
 
     #[test]

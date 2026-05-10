@@ -26,7 +26,7 @@ have shipped and which haven't, as of 2026-05-08.
 
 ## Gap 1 — C-backend memory planning — CLOSED by M2a
 
-**Claim qualified:** "`copy(x)` is free; the compiler will reuse buffers."
+**Claim qualified:** "linearity markers should not force avoidable peak memory."
 
 **Current status:** M2a ports conservative slot planning to the C backend.
 The copy-elision probe now emits four 4 MiB backing slots instead of five
@@ -44,10 +44,11 @@ implemented only allocate-per-node cleanup. M2a replaces that with a
 slot planner while keeping C-specific ownership rules for borrowed loads,
 metadata views, standalone stores, and output materialization.
 
-**What's not at fault:** `copy(x)` markers themselves produce zero
-buffers and zero `memcpy` calls. The cost is from the unary results
-(`exp(x)`, `log(x)`, `sin(x)`, etc.), each of which allocates its own
-output. Kernel fusion does eliminate the `add`-chain intermediates.
+**Current copy-drop update:** `copy(x)` now lowers to an explicit
+`RiscOp::Copy`, so it is visible to IR walkers, `chelis cost`, and the
+memory-cost fitness signal. The C backend still emits zero raw `memcpy`
+calls for the probe; explicit copies materialize through tensor
+realization loops and participate in slot planning.
 
 **What closed it:** the direct C-backend port. It intentionally remains
 conservative for symbolic non-equality and out-of-place fused fan-in
@@ -164,7 +165,7 @@ compiled to C and inspected for `cblas_sgemm` calls:
 | `cast(matmul(a, b), f32)` | ✅ | cast wraps the Sum, doesn't intrude on the subgraph |
 | `matmul(cast(a, f32), b)` | ✅ | cast wraps the Expand input; pattern below Sum still matches |
 | `add(matmul(a, b), z)` | ✅ | add wraps after the Sum |
-| `copy(matmul(a, b))` | ✅ | `copy` is a linearity marker, no IR node |
+| `copy(matmul(a, b))` | ✅ | `copy` wraps the specialized node as an explicit `RiscOp::Copy` |
 | `realize(matmul(a, b))` | ✅ | realize wraps after the Sum |
 | `aa = a; bb = b; matmul(aa, bb)` | ✅ | let-bindings inlined in IR |
 | `prod = mul(...); prod_again = prod; sum(prod_again, 1)` | ✅ | inner let-binding inlined |
@@ -296,11 +297,10 @@ if lhs_dims.len() != 2 || rhs_dims.len() != 2 {
 }
 ```
 
-**Former workaround in current corpus:** multi-head attention is written as
-N per-head unrolled blocks, each with its own rank-2 `wq_i / wk_i /
-wv_i / wo_i` and an explicit `matmul(copy(x), wq_i)` — see
-`examples/transformer_block.ch` (4 heads) and
-`examples/illustrative/mha_two_heads_unrolled.ch` (2 heads).
+**Former workaround in archived/illustrative corpus:** multi-head attention was
+written as N per-head unrolled blocks, each with its own rank-2 `wq_i / wk_i /
+wv_i / wo_i` and explicit copy fan-out. The executable
+`examples/transformer_block.ch` now relies on implicit copy/drop insertion.
 
 **What closed it:** generalizing `lower_matmul` and the matmul type rule
 to accept rank ≥ 2, broadcasting over leading axes (the natural `... +

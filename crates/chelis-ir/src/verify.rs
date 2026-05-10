@@ -210,6 +210,8 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Ceil
             | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
+            | RiscOp::Copy
+            | RiscOp::Drop
             | RiscOp::Realize
             | RiscOp::Sum { .. }
             | RiscOp::MaxReduce { .. }
@@ -665,11 +667,26 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             ));
         }
 
+        if matches!(node.op, RiscOp::Drop) {
+            if dag.is_root(node.id) {
+                errors.push(format!(
+                    "drop at node {} is terminal and cannot be a DAG root",
+                    node.id.0
+                ));
+            }
+            if consumers[node.id.0] != 0 {
+                errors.push(format!(
+                    "drop at node {} is terminal and cannot be consumed",
+                    node.id.0
+                ));
+            }
+        }
+
         let is_implicit_root = dag.roots().is_empty() && node.id.0 + 1 == dag.len();
         if !dag.is_root(node.id)
             && !is_implicit_root
             && consumers[node.id.0] == 0
-            && !matches!(node.op, RiscOp::Store { .. })
+            && !matches!(node.op, RiscOp::Store { .. } | RiscOp::Drop)
         {
             errors.push(format!(
                 "node {} is dangling: it has no consumers and is not a DAG root",
@@ -745,6 +762,51 @@ mod tests {
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn drop_root_is_rejected() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let drop = dag.add_node(RiscOp::Drop, vec![a], scalar_f32(), None);
+        dag.add_root(drop);
+        let errs = verify(&dag);
+        assert!(
+            errs.iter().any(|e| e.contains("cannot be a DAG root")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn consumed_drop_is_rejected() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let drop = dag.add_node(RiscOp::Drop, vec![a], scalar_f32(), None);
+        dag.add_node(RiscOp::Neg, vec![drop], scalar_f32(), None);
+        let errs = verify(&dag);
+        assert!(
+            errs.iter().any(|e| e.contains("cannot be consumed")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn copy_and_drop_require_one_input() {
+        let mut copy_dag = Dag::new();
+        copy_dag.add_node(RiscOp::Copy, vec![], scalar_f32(), None);
+        let copy_errs = verify(&copy_dag);
+        assert!(
+            copy_errs.iter().any(|e| e.contains("unary op")),
+            "{copy_errs:?}"
+        );
+
+        let mut drop_dag = Dag::new();
+        drop_dag.add_node(RiscOp::Drop, vec![], scalar_f32(), None);
+        let drop_errs = verify(&drop_dag);
+        assert!(
+            drop_errs.iter().any(|e| e.contains("unary op")),
+            "{drop_errs:?}"
+        );
     }
 
     #[test]

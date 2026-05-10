@@ -579,20 +579,30 @@ impl Checker {
         }
         match scope.top(name) {
             Some(BindingState::Live { .. }) => scope.consume(name, site),
-            Some(BindingState::Consumed(consumed_at)) => self.errors.push(CheckError::new(
-                CheckErrorKind::UseAfterConsume,
-                with_macro_provenance(
-                    expr,
-                    format!(
-                        "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
-                        consumed_at.description,
-                        expr.span().offset
+            Some(BindingState::Consumed(consumed_at))
+                if consumed_at.description.contains("closure capture")
+                    || consumed_at.description.contains("match scrutinee") =>
+            {
+                self.errors.push(CheckError::new(
+                    CheckErrorKind::UseAfterConsume,
+                    with_macro_provenance(
+                        expr,
+                        format!(
+                            "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
+                            consumed_at.description,
+                            expr.span().offset
+                        ),
                     ),
-                ),
-                vec![format!(
-                    "Insert `copy({name})` before the first consuming use if you need to reuse it"
-                )],
-            )),
+                    vec![format!(
+                        "Structural ownership consumes cannot be auto-copied; move the later use before the consume or copy before the structural consume"
+                    )],
+                ));
+            }
+            Some(BindingState::Consumed(_)) => {
+                // The implicit-linearity pass will insert a Copy for consuming
+                // fan-out. Borrow-after-consume remains an error through
+                // `read_or_error`.
+            }
             None => {}
         }
     }
@@ -662,20 +672,8 @@ impl Checker {
         if allow_param_boundary_drop {
             return;
         }
-        let borrowed = if borrow_sites.is_empty() {
-            "never borrowed".to_string()
-        } else {
-            format!("borrowed by {}", borrow_sites.join(", "))
-        };
-        self.errors.push(CheckError::new(
-            CheckErrorKind::UnconsumedLinear,
-            format!(
-                "owned value `{name}` was {borrowed}; scope ends without consuming it at offset {end_offset}"
-            ),
-            vec![
-                format!("Add a final owned use of `{name}`, call `realize({name})`, or call `drop({name})`"),
-            ],
-        ));
+        let _ = (borrow_sites, end_offset);
+        // Unconsumed locals are handled by inserted Drop nodes in lowered IR.
     }
 
     fn expr_type<'a>(&'a self, expr: &'a Expr, scope: &'a LinearScope) -> Option<&'a Expr> {
