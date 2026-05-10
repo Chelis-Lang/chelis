@@ -491,6 +491,33 @@ mod tests {
     }
 
     #[test]
+    fn terminal_drop_closes_slot_lifetime_for_reuse() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let drop = dag.add_node(RiscOp::Drop, vec![a], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        dag.add_root(b);
+
+        let plan = build_plan(&dag, &[b]);
+        assert_eq!(
+            plan.node_kind(drop),
+            &NodeMemoryKind::TerminalDrop { source: a }
+        );
+        assert_eq!(
+            plan.node_kind(a),
+            plan.node_kind(b),
+            "Drop must make a's slot available before b is born"
+        );
+        assert!(
+            !plan
+                .emit_cleanup()
+                .iter()
+                .any(|line| line.contains(&format!("d_t{}", drop.0))),
+            "Drop is terminal metadata and must not allocate a wrapper"
+        );
+    }
+
+    #[test]
     fn planner_reuses_identical_symbolic_slots() {
         let mut dag = Dag::new();
         let symbolic = TensorType {

@@ -523,6 +523,23 @@ fn g2_neg_gpu_matches_cpu() {
 
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g2_copy_materializes_and_terminal_drop_matches_cpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let copied = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+    dag.add_node(RiscOp::Drop, vec![x], vec_f32(4), None);
+    let out = dag.add_node(RiscOp::Neg, vec![copied], vec_f32(4), None);
+    dag.add_root(out);
+
+    assert_gpu_matches_eval(
+        &dag,
+        "g2_copy_drop",
+        &[TestInput::new("x", &[4], &[1.0, -2.0, 3.5, -4.5])],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g2_exp_gpu_matches_cpu() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);

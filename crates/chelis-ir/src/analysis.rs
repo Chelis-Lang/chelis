@@ -190,8 +190,8 @@ mod tests {
         let ty = tensor(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32);
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
         let copy = dag.add_node(RiscOp::Copy, vec![x], ty.clone(), None);
-        let drop = dag.add_node(RiscOp::Drop, vec![copy], ty.clone(), None);
-        let out = dag.add_node(RiscOp::Neg, vec![drop], ty, None);
+        let out = dag.add_node(RiscOp::Neg, vec![copy], ty.clone(), None);
+        dag.add_node(RiscOp::Drop, vec![x], ty, None);
         dag.add_root(out);
 
         let summary = analyze_copy_costs(&dag, &[("main".to_string(), out)]);

@@ -791,6 +791,25 @@ mod tests {
     }
 
     #[test]
+    fn copy_and_drop_require_one_input() {
+        let mut copy_dag = Dag::new();
+        copy_dag.add_node(RiscOp::Copy, vec![], scalar_f32(), None);
+        let copy_errs = verify(&copy_dag);
+        assert!(
+            copy_errs.iter().any(|e| e.contains("unary op")),
+            "{copy_errs:?}"
+        );
+
+        let mut drop_dag = Dag::new();
+        drop_dag.add_node(RiscOp::Drop, vec![], scalar_f32(), None);
+        let drop_errs = verify(&drop_dag);
+        assert!(
+            drop_errs.iter().any(|e| e.contains("unary op")),
+            "{drop_errs:?}"
+        );
+    }
+
+    #[test]
     fn bad_input_reference() {
         let mut dag = Dag::new();
         // Manually create a node that references a future node (impossible via normal API,

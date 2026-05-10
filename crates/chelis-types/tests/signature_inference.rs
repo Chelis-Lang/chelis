@@ -106,6 +106,32 @@ def caller(a, b: tensor[4, f32]) = {
 }
 
 #[test]
+fn later_helper_does_not_retroactively_make_earlier_unconstrained_call_read_only() {
+    let checked = checked_surf(
+        r#"
+def caller(a, b: tensor[4, f32]) = {
+  z: tensor[4, f32] = helper(a, b)
+  add(a, z)
+}
+def helper(x, y: tensor[4, f32]) = add(x, y)
+"#,
+    );
+
+    let helper = checked
+        .signature_inference()
+        .functions
+        .get("helper")
+        .expect("helper metadata");
+    let caller = checked
+        .signature_inference()
+        .functions
+        .get("caller")
+        .expect("caller metadata");
+    assert!(helper.params[0].inferred_read_only);
+    assert!(!caller.params[0].inferred_read_only);
+}
+
+#[test]
 fn recursive_cycle_member_does_not_infer_read_only_param() {
     let checked = checked_surf(
         r#"
@@ -122,6 +148,34 @@ def recur(x, y: tensor[4, f32], n: int32) =
     assert!(recur.recursive_cycle);
     assert!(!recur.params[0].written);
     assert!(!recur.params[0].inferred_read_only);
+}
+
+#[test]
+fn mutual_recursive_cycle_members_do_not_infer_read_only_params() {
+    let checked = checked_surf(
+        r#"
+def ping(x, y: tensor[4, f32], n: int32) =
+  if eq(n, 0) then add(x, y) else pong(x, y, sub(n, 1))
+
+def pong(x, y: tensor[4, f32], n: int32) =
+  if eq(n, 0) then add(x, y) else ping(x, y, sub(n, 1))
+"#,
+    );
+
+    let ping = checked
+        .signature_inference()
+        .functions
+        .get("ping")
+        .expect("ping metadata");
+    let pong = checked
+        .signature_inference()
+        .functions
+        .get("pong")
+        .expect("pong metadata");
+    assert!(ping.recursive_cycle);
+    assert!(pong.recursive_cycle);
+    assert!(!ping.params[0].inferred_read_only);
+    assert!(!pong.params[0].inferred_read_only);
 }
 
 #[test]

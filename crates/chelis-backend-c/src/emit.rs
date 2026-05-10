@@ -2413,6 +2413,24 @@ mod tests {
     }
 
     #[test]
+    fn copy_materializes_and_drop_emits_no_wrapper() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let copy = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+        dag.add_node(RiscOp::Drop, vec![x], vec_f32(4), None);
+        dag.add_root(copy);
+
+        let c = CEmitter::emit_dag(&dag, "test_copy_drop");
+
+        assert!(c.contains("chelis_tensor *t1"));
+        assert!(c.contains("((float*)t1->data)[i] = ((float*)t0->data)[idx];"));
+        assert!(
+            !c.contains("t2"),
+            "Drop should not emit a tensor wrapper or compute statement:\n{c}"
+        );
+    }
+
+    #[test]
     fn max_reduce_emits_fmaxf() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
