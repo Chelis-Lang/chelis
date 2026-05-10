@@ -6,7 +6,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.7.0] — 2026-05-09
+## [0.7.1] — 2026-05-10
 
 ### Added — first-class Surf properties and `chelis prove`
 
