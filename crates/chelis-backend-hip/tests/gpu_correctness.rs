@@ -1317,6 +1317,73 @@ fn g15_hipblas_batched_matmul_matches_eval() {
 }
 
 #[test]
+#[ignore = "manual gate: requires HIP-capable GPU, hipcc, and hipBLAS"]
+fn g15_hipblas_strided_batched_symbolic_batch_matches_eval() {
+    let mut dag = Dag::new();
+    let a_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Lit(2),
+            DimInfo::Lit(3),
+        ],
+        precision: Prim::F32,
+    };
+    let b_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Lit(3),
+            DimInfo::Lit(2),
+        ],
+        precision: Prim::F32,
+    };
+    let out_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Lit(2),
+            DimInfo::Lit(2),
+        ],
+        precision: Prim::F32,
+    };
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
+    let out = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![chelis_ir::dag::DimExpr::Sym("batch".into())],
+            m: chelis_ir::dag::DimExpr::Concrete(2),
+            n: chelis_ir::dag::DimExpr::Concrete(2),
+            k: chelis_ir::dag::DimExpr::Concrete(3),
+        },
+        vec![a, b],
+        out_ty,
+        None,
+    );
+    dag.add_root(out);
+
+    assert_gpu_matches_eval(
+        &dag,
+        "g15_hipblas_strided_batched_symbolic_batch",
+        &[
+            TestInput::new(
+                "a",
+                &[3, 2, 3],
+                &[
+                    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 0.5, 2.0, 3.5, -2.0, 1.0, 0.0, 1.0, -3.0,
+                    2.0, 4.0, -1.0,
+                ],
+            ),
+            TestInput::new(
+                "b",
+                &[3, 3, 2],
+                &[
+                    1.0, 0.0, -1.0, 2.0, 0.5, 3.0, 2.0, -2.0, 1.0, 1.5, -0.5, 4.0, 3.0, 1.0, 0.0,
+                    -1.0, 2.0, 2.5,
+                ],
+            ),
+        ],
+    );
+}
+
+#[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g15_noncontiguous_matmul_fallback_matches_eval() {
     let mut dag = Dag::new();

@@ -51,6 +51,7 @@ impl CEmitter {
     ) -> String {
         Self::validate_supported_precisions(dag);
         Self::validate_load_abi(dag);
+        Self::validate_sparse_contracts(dag);
         // Some Surf signatures surface anonymous (Named("", None)) axes into
         // the lowered DAG (e.g. a rank-1 tensor parameter whose dim has no
         // declared name). These would emit `int  = inputs[0]->shape[0];` and
@@ -389,6 +390,12 @@ impl CEmitter {
                     &node.output_type,
                 );
             }
+            RiscOp::Gather { axis } => {
+                self.emit_sparse_gather(id, *axis, &node.inputs, &node.output_type, dag);
+            }
+            RiscOp::ScatterAdd { axis } => {
+                self.emit_sparse_scatter_add(id, *axis, &node.inputs, &node.output_type, dag);
+            }
         }
     }
 
@@ -534,6 +541,57 @@ impl CEmitter {
                 } else {
                     seen.insert(name.as_str().to_string(), node.output_type.clone());
                 }
+            }
+        }
+    }
+
+    fn validate_sparse_contracts(dag: &Dag) {
+        for node in dag.nodes() {
+            match &node.op {
+                RiscOp::Gather { .. } => {
+                    if node.inputs.len() != 2 {
+                        continue;
+                    }
+                    let values_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                    let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                    if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+                        panic!(
+                            "C backend sparse gather requires int32/int64 indices, got {} at node {}",
+                            indices_ty.precision.name(),
+                            node.id.0
+                        );
+                    }
+                    if node.output_type.precision != values_ty.precision {
+                        panic!(
+                            "C backend sparse gather output precision must match values at node {}",
+                            node.id.0
+                        );
+                    }
+                }
+                RiscOp::ScatterAdd { .. } => {
+                    if node.inputs.len() != 3 {
+                        continue;
+                    }
+                    let target_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                    let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                    let updates_ty = &dag.get(node.inputs[2]).unwrap().output_type;
+                    if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+                        panic!(
+                            "C backend sparse scatter_add requires int32/int64 indices, got {} at node {}",
+                            indices_ty.precision.name(),
+                            node.id.0
+                        );
+                    }
+                    if updates_ty.precision != target_ty.precision
+                        || node.output_type.precision != target_ty.precision
+                    {
+                        panic!(
+                            "C backend sparse scatter_add target, update, and output precision must match at node {}",
+                            node.id.0
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -727,6 +785,10 @@ impl CEmitter {
             Prim::Int64 => "int64_t",
             _ => "float",
         }
+    }
+
+    fn elem_size_expr(ty: &TensorType) -> String {
+        format!("sizeof({})", Self::elem_type(ty))
     }
 
     /// Returns true when the tensor's element type is `double`, requiring
@@ -1579,6 +1641,178 @@ impl CEmitter {
         self.line(&format!("if (t{id}_b != t{b}) chelis_free(t{id}_b);"));
     }
 
+    fn dim_product_expr(dims: &[DimInfo]) -> String {
+        dims.iter()
+            .map(Self::emit_dim_info)
+            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
+            .unwrap_or_else(|| "1".to_string())
+    }
+
+    fn emit_sparse_gather(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let values = inputs[0].0;
+        let indices = inputs[1].0;
+        let values_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        let value_et = Self::elem_type(values_ty);
+        let index_et = Self::elem_type(indices_ty);
+        let before = Self::dim_product_expr(&values_ty.dims[..axis]);
+        let axis_size = Self::emit_dim_info(&values_ty.dims[axis]);
+        let after = Self::dim_product_expr(&values_ty.dims[axis + 1..]);
+        self.line(&format!(
+            "chelis_tensor *t{id}_values = chelis_contiguous(t{values});"
+        ));
+        self.line(&format!(
+            "chelis_tensor *t{id}_indices = chelis_contiguous(t{indices});"
+        ));
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "const {value_et} *t{id}_values_data = (const {value_et}*)t{id}_values->data;"
+        ));
+        self.line(&format!(
+            "const {index_et} *t{id}_indices_data = (const {index_et}*)t{id}_indices->data;"
+        ));
+        self.line(&format!(
+            "{value_et} *t{id}_out_data = ({value_et}*)t{id}->data;"
+        ));
+        self.line(&format!("int t{id}_before = {before};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_after = {after};"));
+        self.line(&format!("int t{id}_index_count = t{id}_indices->size;"));
+        self.line(&format!(
+            "for (int t{id}_b = 0; t{id}_b < t{id}_before; t{id}_b++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "for (int t{id}_i = 0; t{id}_i < t{id}_index_count; t{id}_i++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("int t{id}_g = (int)t{id}_indices_data[t{id}_i];"));
+        self.line(&format!(
+            "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
+        ));
+        self.line(&format!(
+            "for (int t{id}_d = 0; t{id}_d < t{id}_after; t{id}_d++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "int t{id}_out = ((t{id}_b * t{id}_index_count + t{id}_i) * t{id}_after) + t{id}_d;"
+        ));
+        self.line(&format!(
+            "int t{id}_src = ((t{id}_b * t{id}_axis_size + t{id}_g) * t{id}_after) + t{id}_d;"
+        ));
+        self.line(&format!(
+            "t{id}_out_data[t{id}_out] = t{id}_values_data[t{id}_src];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "if (t{id}_values != t{values}) chelis_free(t{id}_values);"
+        ));
+        self.line(&format!(
+            "if (t{id}_indices != t{indices}) chelis_free(t{id}_indices);"
+        ));
+    }
+
+    fn emit_sparse_scatter_add(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let target = inputs[0].0;
+        let indices = inputs[1].0;
+        let updates = inputs[2].0;
+        let target_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
+        let target_et = Self::elem_type(target_ty);
+        let index_et = Self::elem_type(indices_ty);
+        let update_et = Self::elem_type(updates_ty);
+        let target_elem_size = Self::elem_size_expr(target_ty);
+        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
+        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
+        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
+        self.line(&format!(
+            "chelis_tensor *t{id}_target = chelis_contiguous(t{target});"
+        ));
+        self.line(&format!(
+            "chelis_tensor *t{id}_indices = chelis_contiguous(t{indices});"
+        ));
+        self.line(&format!(
+            "chelis_tensor *t{id}_updates = chelis_contiguous(t{updates});"
+        ));
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "const {index_et} *t{id}_indices_data = (const {index_et}*)t{id}_indices->data;"
+        ));
+        self.line(&format!(
+            "const {update_et} *t{id}_updates_data = (const {update_et}*)t{id}_updates->data;"
+        ));
+        self.line(&format!(
+            "{target_et} *t{id}_out_data = ({target_et}*)t{id}->data;"
+        ));
+        self.line(&format!(
+            "memcpy(t{id}->data, t{id}_target->data, (size_t)t{id}->size * {target_elem_size});"
+        ));
+        self.line(&format!("int t{id}_before = {before};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_after = {after};"));
+        self.line(&format!("int t{id}_index_count = t{id}_indices->size;"));
+        self.line(&format!(
+            "for (int t{id}_b = 0; t{id}_b < t{id}_before; t{id}_b++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "for (int t{id}_i = 0; t{id}_i < t{id}_index_count; t{id}_i++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("int t{id}_g = (int)t{id}_indices_data[t{id}_i];"));
+        self.line(&format!(
+            "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
+        ));
+        self.line(&format!(
+            "for (int t{id}_d = 0; t{id}_d < t{id}_after; t{id}_d++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "int t{id}_src = ((t{id}_b * t{id}_index_count + t{id}_i) * t{id}_after) + t{id}_d;"
+        ));
+        self.line(&format!(
+            "int t{id}_out = ((t{id}_b * t{id}_axis_size + t{id}_g) * t{id}_after) + t{id}_d;"
+        ));
+        self.line(&format!(
+            "t{id}_out_data[t{id}_out] += t{id}_updates_data[t{id}_src];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "if (t{id}_target != t{target}) chelis_free(t{id}_target);"
+        ));
+        self.line(&format!(
+            "if (t{id}_indices != t{indices}) chelis_free(t{id}_indices);"
+        ));
+        self.line(&format!(
+            "if (t{id}_updates != t{updates}) chelis_free(t{id}_updates);"
+        ));
+    }
+
     // ---- Reduce sum ----
     fn emit_reduce_sum(
         &mut self,
@@ -2304,6 +2538,13 @@ mod tests {
         TensorType {
             dims: vec![DimInfo::Lit(n)],
             precision: Prim::F32,
+        }
+    }
+
+    fn tensor_ty(dims: &[usize], precision: Prim) -> TensorType {
+        TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision,
         }
     }
 
@@ -3108,6 +3349,178 @@ mod tests {
             c.contains("chelis_flat_to_indices"),
             "fused slow path must still be present"
         );
+    }
+
+    #[test]
+    fn current_fused_reusable_input_keeps_non_in_place_restrict_shape() {
+        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        dag.set_reusable_input(fused, x);
+
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(c.contains("float* restrict __out_2 = t2->data;"));
+        assert!(c.contains("const float* restrict __ext0_2 = t0->data;"));
+        assert!(c.contains("const float* restrict __ext1_2 = t1->data;"));
+        assert!(
+            !c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t0->data);"),
+            "current C fused codegen must not silently claim in-place aliasing"
+        );
+    }
+
+    #[test]
+    fn sparse_gather_uses_typed_indices_and_payload_pointers() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_ty(&[4, 2], Prim::F64),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            tensor_ty(&[3], Prim::Int32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![values, indices],
+            tensor_ty(&[3, 2], Prim::F64),
+            None,
+        );
+
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(c.contains("const double *t2_values_data = (const double*)t2_values->data;"));
+        assert!(c.contains("const int32_t *t2_indices_data = (const int32_t*)t2_indices->data;"));
+        assert!(c.contains("double *t2_out_data = (double*)t2->data;"));
+        assert!(c.contains("int t2_g = (int)t2_indices_data[t2_i];"));
+        assert!(c.contains("t2_out_data[t2_out] = t2_values_data[t2_src];"));
+    }
+
+    #[test]
+    #[should_panic(expected = "C backend sparse gather requires int32/int64 indices")]
+    fn sparse_gather_rejects_float_indices_at_emit_boundary() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_ty(&[4, 2], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(3), None);
+        dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![values, indices],
+            tensor_ty(&[3, 2], Prim::F32),
+            None,
+        );
+
+        let _ = CEmitter::emit_dag(&dag, "test_fn");
+    }
+
+    #[test]
+    fn sparse_scatter_add_uses_typed_indices_payload_and_copy_size() {
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            tensor_ty(&[4, 2], Prim::F64),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            tensor_ty(&[3], Prim::Int64),
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Const { value: 1.0 },
+            vec![],
+            tensor_ty(&[3, 2], Prim::F64),
+            None,
+        );
+        dag.add_node(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            tensor_ty(&[4, 2], Prim::F64),
+            None,
+        );
+
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(c.contains("const int64_t *t3_indices_data = (const int64_t*)t3_indices->data;"));
+        assert!(c.contains("const double *t3_updates_data = (const double*)t3_updates->data;"));
+        assert!(c.contains("double *t3_out_data = (double*)t3->data;"));
+        assert!(
+            c.contains("memcpy(t3->data, t3_target->data, (size_t)t3->size * sizeof(double));")
+        );
+        assert!(c.contains("t3_out_data[t3_out] += t3_updates_data[t3_src];"));
+    }
+
+    #[test]
+    #[should_panic(expected = "C backend sparse scatter_add requires int32/int64 indices")]
+    fn sparse_scatter_add_rejects_float_indices_at_emit_boundary() {
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            tensor_ty(&[4, 2], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(3), None);
+        let updates = dag.add_node(
+            RiscOp::Const { value: 1.0 },
+            vec![],
+            tensor_ty(&[3, 2], Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            tensor_ty(&[4, 2], Prim::F32),
+            None,
+        );
+
+        let _ = CEmitter::emit_dag(&dag, "test_fn");
+    }
+
+    #[test]
+    #[ignore = "target behavior: enable when C fused in-place codegen aliases reusable_input"]
+    fn target_fused_in_place_restrict_shape_aliases_only_reusable_input() {
+        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        dag.set_reusable_input(fused, x);
+
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t0->data);"));
+        assert!(!c.contains("float* restrict __out_2 = t2->data;"));
+        assert!(!c.contains("const float* restrict __ext0_2 = t0->data;"));
+        assert!(c.contains("const float* restrict __ext1_2 = t1->data;"));
     }
 
     // ---- New scalar builtin C emission tests ----

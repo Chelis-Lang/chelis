@@ -50,6 +50,19 @@ pub enum DimExpr {
     Div(Box<DimExpr>, Box<DimExpr>),
 }
 
+/// Canonical key for conservative dimension-expression equality.
+///
+/// The key is intentionally weaker than algebraic simplification: multiplication
+/// is flattened and sorted, constants are folded, and division stays structural
+/// unless it can be evaluated exactly or the denominator is one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DimExprKey {
+    Concrete(usize),
+    Sym(String),
+    Mul(Vec<DimExprKey>),
+    Div(Box<DimExprKey>, Box<DimExprKey>),
+}
+
 impl DimExpr {
     pub fn evaluate(&self, bindings: &HashMap<String, usize>) -> Result<usize, String> {
         match self {
@@ -132,6 +145,61 @@ impl DimExpr {
                 Box::new(rhs.bind(bindings)?),
             )),
         }
+    }
+
+    pub fn normalized_key(&self) -> DimExprKey {
+        match self {
+            Self::Concrete(value) => DimExprKey::Concrete(*value),
+            Self::Sym(name) => DimExprKey::Sym(name.clone()),
+            Self::Mul(lhs, rhs) => {
+                normalize_dim_product([lhs.normalized_key(), rhs.normalized_key()])
+            }
+            Self::Div(lhs, rhs) => {
+                let lhs = lhs.normalized_key();
+                let rhs = rhs.normalized_key();
+                match (&lhs, &rhs) {
+                    (DimExprKey::Concrete(lhs), DimExprKey::Concrete(rhs))
+                        if *rhs != 0 && lhs % rhs == 0 =>
+                    {
+                        DimExprKey::Concrete(lhs / rhs)
+                    }
+                    (_, DimExprKey::Concrete(1)) => lhs,
+                    _ => DimExprKey::Div(Box::new(lhs), Box::new(rhs)),
+                }
+            }
+        }
+    }
+}
+
+fn normalize_dim_product(factors: impl IntoIterator<Item = DimExprKey>) -> DimExprKey {
+    let mut concrete = 1usize;
+    let mut symbolic = Vec::new();
+    for factor in factors {
+        match factor {
+            DimExprKey::Concrete(0) => return DimExprKey::Concrete(0),
+            DimExprKey::Concrete(value) => concrete *= value,
+            DimExprKey::Mul(nested) => {
+                for nested_factor in nested {
+                    match nested_factor {
+                        DimExprKey::Concrete(0) => return DimExprKey::Concrete(0),
+                        DimExprKey::Concrete(value) => concrete *= value,
+                        other => symbolic.push(other),
+                    }
+                }
+            }
+            other => symbolic.push(other),
+        }
+    }
+
+    if concrete != 1 {
+        symbolic.push(DimExprKey::Concrete(concrete));
+    }
+    symbolic.sort();
+
+    match symbolic.len() {
+        0 => DimExprKey::Concrete(1),
+        1 => symbolic.pop().expect("one symbolic factor"),
+        _ => DimExprKey::Mul(symbolic),
     }
 }
 
@@ -325,6 +393,18 @@ pub enum RiscOp {
         m: DimExpr,
         n: DimExpr,
         k: DimExpr,
+    },
+
+    /// Sparse gather recognized from the Section 3.5 one-hot lowering after
+    /// AD has run. Inputs are `values, indices`.
+    Gather {
+        axis: usize,
+    },
+
+    /// Sparse scatter-add used by gather's adjoint. Inputs are
+    /// `target, indices, updates`; duplicate indices accumulate.
+    ScatterAdd {
+        axis: usize,
     },
 }
 
@@ -748,6 +828,71 @@ mod tests {
         assert_eq!(dag.len(), 3);
         let node = dag.get(c).unwrap();
         assert_eq!(node.inputs, vec![NodeId(0), NodeId(1)]);
+    }
+
+    #[test]
+    fn dim_expr_normalized_key_canonicalizes_mul_order_and_associativity() {
+        let lhs = DimExpr::Mul(
+            Box::new(DimExpr::Sym("batch".into())),
+            Box::new(DimExpr::Mul(
+                Box::new(DimExpr::Concrete(4)),
+                Box::new(DimExpr::Sym("hidden".into())),
+            )),
+        );
+        let rhs = DimExpr::Mul(
+            Box::new(DimExpr::Sym("hidden".into())),
+            Box::new(DimExpr::Mul(
+                Box::new(DimExpr::Sym("batch".into())),
+                Box::new(DimExpr::Concrete(4)),
+            )),
+        );
+
+        assert_eq!(lhs.normalized_key(), rhs.normalized_key());
+    }
+
+    #[test]
+    fn dim_expr_normalized_key_folds_mul_constants_and_identity() {
+        let expr = DimExpr::Mul(
+            Box::new(DimExpr::Concrete(2)),
+            Box::new(DimExpr::Mul(
+                Box::new(DimExpr::Sym("n".into())),
+                Box::new(DimExpr::Concrete(1)),
+            )),
+        );
+        let equivalent = DimExpr::Mul(
+            Box::new(DimExpr::Sym("n".into())),
+            Box::new(DimExpr::Concrete(2)),
+        );
+
+        assert_eq!(expr.normalized_key(), equivalent.normalized_key());
+    }
+
+    #[test]
+    fn dim_expr_normalized_key_handles_div_conservatively() {
+        let exact = DimExpr::Div(
+            Box::new(DimExpr::Concrete(12)),
+            Box::new(DimExpr::Concrete(3)),
+        );
+        assert_eq!(exact.normalized_key(), DimExprKey::Concrete(4));
+
+        let identity = DimExpr::Div(
+            Box::new(DimExpr::Sym("n".into())),
+            Box::new(DimExpr::Concrete(1)),
+        );
+        assert_eq!(identity.normalized_key(), DimExprKey::Sym("n".into()));
+
+        let quotient = DimExpr::Div(
+            Box::new(DimExpr::Mul(
+                Box::new(DimExpr::Sym("n".into())),
+                Box::new(DimExpr::Concrete(4)),
+            )),
+            Box::new(DimExpr::Concrete(2)),
+        );
+        let product = DimExpr::Mul(
+            Box::new(DimExpr::Sym("n".into())),
+            Box::new(DimExpr::Concrete(2)),
+        );
+        assert_ne!(quotient.normalized_key(), product.normalized_key());
     }
 
     #[test]

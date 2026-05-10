@@ -43,6 +43,13 @@ fn t(dims: Vec<usize>) -> TensorType {
     }
 }
 
+fn t_i32(dims: Vec<usize>) -> TensorType {
+    TensorType {
+        dims: dims.into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::Int32,
+    }
+}
+
 #[test]
 fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     let mut dag = Dag::new();
@@ -148,6 +155,62 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
             (dtable.data[i] - want).abs() < 1e-6,
             "duplicate-index grad table[{i}]: expected {want}, got {} \
              (silent-drop bug? see crate-level docs)",
+            dtable.data[i]
+        );
+    }
+}
+
+#[test]
+fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
+    let mut dag = Dag::new();
+    let table = dag.add_node(
+        RiscOp::Load {
+            name: "table".into(),
+        },
+        vec![],
+        t(vec![2, 2]),
+        None,
+    );
+    let indices = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], t_i32(vec![3]), None);
+    let gathered = dag.add_node(
+        RiscOp::Gather { axis: 0 },
+        vec![table, indices],
+        t(vec![3, 2]),
+        None,
+    );
+    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![gathered], t(vec![2]), None);
+    let s2 = dag.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![s1],
+        TensorType::scalar_f32(),
+        None,
+    );
+
+    let fwd_errs = chelis_ir::verify::verify(&dag);
+    assert!(
+        fwd_errs.is_empty(),
+        "first-class gather verification errors: {fwd_errs:?}"
+    );
+
+    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    inputs.insert(
+        "table".to_string(),
+        TensorValue {
+            data: vec![1.0, 2.0, 3.0, 4.0],
+            shape: vec![2, 2],
+        },
+    );
+    let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad through gather must succeed");
+    let grad_node = grad.grad_nodes[&table];
+    let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("backward eval");
+    let dtable = &vals[&grad_node];
+
+    assert_eq!(dtable.shape, vec![2, 2]);
+    let expected = [3.0, 3.0, 0.0, 0.0];
+    for (i, want) in expected.iter().enumerate() {
+        assert!(
+            (dtable.data[i] - want).abs() < 1e-6,
+            "first-class gather grad table[{i}]: expected {want}, got {}",
             dtable.data[i]
         );
     }

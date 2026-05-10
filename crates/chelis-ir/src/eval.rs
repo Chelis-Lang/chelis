@@ -343,6 +343,73 @@ fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue) -> TensorValue {
     }
 }
 
+fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> TensorValue {
+    assert!(axis < values.shape.len());
+    let index_rank = indices.shape.len();
+    let mut out_shape = Vec::with_capacity(values.shape.len() - 1 + index_rank);
+    out_shape.extend_from_slice(&values.shape[..axis]);
+    out_shape.extend_from_slice(&indices.shape);
+    out_shape.extend_from_slice(&values.shape[axis + 1..]);
+    let mut data = vec![0.0; numel(&out_shape)];
+    for (out_linear, out_slot) in data.iter_mut().enumerate() {
+        let out_index = linear_to_index(out_linear, &out_shape);
+        let mut idx_index = Vec::with_capacity(index_rank);
+        for pos in 0..index_rank {
+            idx_index.push(out_index[axis + pos]);
+        }
+        let gathered = indices.data[index_to_linear(&idx_index, &indices.shape)] as isize;
+        assert!(
+            gathered >= 0 && (gathered as usize) < values.shape[axis],
+            "gather index {gathered} out of bounds for axis {axis}"
+        );
+        let mut value_index = Vec::with_capacity(values.shape.len());
+        value_index.extend_from_slice(&out_index[..axis]);
+        value_index.push(gathered as usize);
+        value_index.extend_from_slice(&out_index[axis + index_rank..]);
+        *out_slot = values.data[index_to_linear(&value_index, &values.shape)];
+    }
+    TensorValue {
+        data,
+        shape: out_shape,
+    }
+}
+
+fn scatter_add(
+    target: &TensorValue,
+    indices: &TensorValue,
+    updates: &TensorValue,
+    axis: usize,
+) -> TensorValue {
+    assert!(axis < target.shape.len());
+    let index_rank = indices.shape.len();
+    let mut expected_updates = Vec::with_capacity(target.shape.len() - 1 + index_rank);
+    expected_updates.extend_from_slice(&target.shape[..axis]);
+    expected_updates.extend_from_slice(&indices.shape);
+    expected_updates.extend_from_slice(&target.shape[axis + 1..]);
+    assert_eq!(updates.shape, expected_updates);
+
+    let mut out = target.clone();
+    for update_linear in 0..updates.data.len() {
+        let update_index = linear_to_index(update_linear, &updates.shape);
+        let mut idx_index = Vec::with_capacity(index_rank);
+        for pos in 0..index_rank {
+            idx_index.push(update_index[axis + pos]);
+        }
+        let gathered = indices.data[index_to_linear(&idx_index, &indices.shape)] as isize;
+        assert!(
+            gathered >= 0 && (gathered as usize) < target.shape[axis],
+            "scatter_add index {gathered} out of bounds for axis {axis}"
+        );
+        let mut target_index = Vec::with_capacity(target.shape.len());
+        target_index.extend_from_slice(&update_index[..axis]);
+        target_index.push(gathered as usize);
+        target_index.extend_from_slice(&update_index[axis + index_rank..]);
+        let target_linear = index_to_linear(&target_index, &target.shape);
+        out.data[target_linear] += updates.data[update_linear];
+    }
+    out
+}
+
 fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f64) -> TensorValue {
     assert!(axis < input.shape.len());
     let mut out_shape = input.shape.clone();
@@ -749,6 +816,15 @@ where
                     batched_matmul(lhs, rhs)
                 }
             }
+            RiscOp::Gather { axis } => {
+                gather(&values[&node.inputs[0]], &values[&node.inputs[1]], *axis)
+            }
+            RiscOp::ScatterAdd { axis } => scatter_add(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                &values[&node.inputs[2]],
+                *axis,
+            ),
         };
         values.insert(node.id, value);
     }

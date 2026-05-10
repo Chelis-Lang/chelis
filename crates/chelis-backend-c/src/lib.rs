@@ -93,12 +93,15 @@ pub fn codegen_host_program(
 ) -> CodegenResult {
     let c_source = host_emit::emit_host_program(program, func_name);
     let h_header = host_emit::emit_host_header(program, func_name);
+    let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
+        || c_source.contains("cblas_sgemm(")
+        || c_source.contains("chelis_blas_matmul");
     CodegenResult {
         c_source,
         h_header,
         requirements: toolchain::CodegenRequirements {
             wants_openmp: true,
-            needs_blas: false,
+            needs_blas,
         },
         input_labels: Vec::new(),
         output_labels: Vec::new(),
@@ -396,6 +399,82 @@ mod tests {
             src.contains(" my_fn("),
             "exported entry function my_fn must have an external-linkage definition;\ngenerated source:\n{}",
             src
+        );
+    }
+
+    #[test]
+    fn host_program_tensor_helper_blas_sets_toolchain_requirement() {
+        use chelis_ir::host::{
+            HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostTensorHelper,
+            HostTensorInput, HostType,
+        };
+
+        let a_ty = mat_f32(2, 3);
+        let b_ty = mat_f32(3, 4);
+        let out_ty = mat_f32(2, 4);
+        let mut helper_dag = Dag::new();
+        let a = helper_dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = helper_dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        let out = helper_dag.add_node(
+            RiscOp::BlasMatmul {
+                batch_dims: vec![],
+                m: chelis_ir::dag::DimExpr::Concrete(2),
+                n: chelis_ir::dag::DimExpr::Concrete(4),
+                k: chelis_ir::dag::DimExpr::Concrete(3),
+            },
+            vec![a, b],
+            out_ty.clone(),
+            None,
+        );
+        helper_dag.add_root(out);
+
+        let helper = HostTensorHelper {
+            name: "blas_helper".to_string(),
+            dag: helper_dag,
+            inputs: vec![
+                HostTensorInput {
+                    name: "a".to_string(),
+                    ty: a_ty,
+                },
+                HostTensorInput {
+                    name: "b".to_string(),
+                    ty: b_ty,
+                },
+            ],
+            output: out_ty,
+        };
+        let func = HostFunction {
+            name: "my_fn".to_string(),
+            params: vec![HostParam {
+                name: "x".to_string(),
+                ty: HostType::Float64,
+            }],
+            ret_ty: HostType::Float64,
+            body: HostExpr::new(HostExprKind::Float(0.0)),
+            tensor_helpers: vec![helper],
+        };
+        let program = HostProgram {
+            globals: vec![],
+            global_tensor_helpers: vec![],
+            functions: vec![func],
+        };
+
+        let result = codegen_host_program(&program, "my_prog");
+        assert!(result.c_source.contains("#include \"chelis_blas.h\""));
+        assert!(result.c_source.contains("cblas_sgemm("));
+        assert!(
+            result.requirements.needs_blas,
+            "host-program codegen must surface BLAS link requirements when a tensor helper specializes"
         );
     }
 

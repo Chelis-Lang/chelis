@@ -38,6 +38,26 @@ extern hipblasStatus_t hipblasSgemm(
     float *C,
     int ldc
 );
+extern hipblasStatus_t hipblasSgemmStridedBatched(
+    hipblasHandle_t handle,
+    hipblasOperation_t transa,
+    hipblasOperation_t transb,
+    int m,
+    int n,
+    int k,
+    const float *alpha,
+    const float *A,
+    int lda,
+    long long strideA,
+    const float *B,
+    int ldb,
+    long long strideB,
+    const float *beta,
+    float *C,
+    int ldc,
+    long long strideC,
+    int batchCount
+);
 #endif
 
 /* Re-use the CPU tensor struct for host-side data. */
@@ -277,6 +297,53 @@ static inline void chelis_hipblas_sgemm_batched_row_major(
             n
         ));
     }
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
+}
+
+static inline void chelis_hipblas_sgemm_strided_batched_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k,
+    int batch_count,
+    long long a_batch_stride,
+    long long b_batch_stride,
+    long long out_batch_stride
+) {
+    if (!chelis_gpu_matrix_slices_contiguous(a, k)
+        || !chelis_gpu_matrix_slices_contiguous(b, n)
+        || !chelis_gpu_matrix_slices_contiguous(out, n)) {
+        fprintf(stderr, "chelis_hipblas_sgemm_strided_batched_row_major: matrix slices must be contiguous\n");
+        abort();
+    }
+
+    hipblasHandle_t handle;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    /* hipBLAS is column-major by default. Swap A/B and m/n to preserve row-major semantics. */
+    CHELIS_HIPBLAS_CHECK(hipblasSgemmStridedBatched(
+        handle,
+        HIPBLAS_OP_N,
+        HIPBLAS_OP_N,
+        n,
+        m,
+        k,
+        &alpha,
+        b->data,
+        n,
+        b_batch_stride,
+        a->data,
+        k,
+        a_batch_stride,
+        &beta,
+        out->data,
+        n,
+        out_batch_stride,
+        batch_count
+    ));
     CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
 }
 

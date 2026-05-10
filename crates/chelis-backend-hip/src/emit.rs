@@ -54,6 +54,13 @@ struct MatmulEmitSpec {
     k: DimExpr,
 }
 
+struct StridedBatchedMatmulPlan {
+    batch_count_expr: String,
+    a_batch_stride: usize,
+    b_batch_stride: usize,
+    out_batch_stride: usize,
+}
+
 impl HipEmitter {
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(dag: &Dag, func_name: &str) -> (String, PeakDeviceBytesBreakdown) {
@@ -685,7 +692,9 @@ impl HipEmitter {
             | RiscOp::Pad { .. }
             | RiscOp::Shrink { .. }
             | RiscOp::Stride { .. }
-            | RiscOp::BlasMatmul { .. } => None,
+            | RiscOp::BlasMatmul { .. }
+            | RiscOp::Gather { .. }
+            | RiscOp::ScatterAdd { .. } => None,
             RiscOp::FusedElem { .. } => Some(format!("kernel_fused_{}", node.id.0)),
         }
     }
@@ -943,7 +952,11 @@ impl HipEmitter {
                         k: k.clone(),
                     },
                     &node.output_type,
+                    dag,
                 );
+            }
+            RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } => {
+                panic!("HIP backend: sparse gather/scatter specialization is not yet implemented")
             }
         }
     }
@@ -1291,6 +1304,7 @@ impl HipEmitter {
                     k: DimExpr::Concrete(matmul.k),
                 },
                 ty,
+                dag,
             );
             return;
         }
@@ -1395,7 +1409,7 @@ impl HipEmitter {
     }
 
     #[allow(dead_code)]
-    fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
+    fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType, dag: &Dag) {
         let a = spec.a.0;
         let b = spec.b.0;
         let m_expr = Self::emit_dim_expr(&spec.m);
@@ -1405,6 +1419,14 @@ impl HipEmitter {
         if spec.batch_dims.is_empty() {
             self.line(&format!(
                 "chelis_hipblas_sgemm_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
+            ));
+        } else if let Some(plan) = Self::strided_batched_hipblas_plan(dag, spec, ty) {
+            self.line(&format!(
+                "chelis_hipblas_sgemm_strided_batched_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, {batch_count}, {a_stride}LL, {b_stride}LL, {out_stride}LL);",
+                batch_count = plan.batch_count_expr,
+                a_stride = plan.a_batch_stride,
+                b_stride = plan.b_batch_stride,
+                out_stride = plan.out_batch_stride,
             ));
         } else {
             self.line(&format!(
@@ -1725,6 +1747,93 @@ impl HipEmitter {
             && Self::node_is_statically_contiguous(dag, info.b)
     }
 
+    fn strided_batched_hipblas_plan(
+        dag: &Dag,
+        spec: &MatmulEmitSpec,
+        ty: &TensorType,
+    ) -> Option<StridedBatchedMatmulPlan> {
+        if spec.batch_dims.is_empty()
+            || ty.precision != Prim::F32
+            || !spec.batch_dims.iter().all(Self::is_simple_runtime_dim)
+        {
+            return None;
+        }
+
+        let m = spec.m.as_concrete()?;
+        let n = spec.n.as_concrete()?;
+        let k = spec.k.as_concrete()?;
+        let batch_rank = spec.batch_dims.len();
+        if ty.dims.len() != batch_rank + 2 {
+            return None;
+        }
+
+        let a_node = dag.get(spec.a)?;
+        let b_node = dag.get(spec.b)?;
+        if a_node.output_type.precision != Prim::F32
+            || b_node.output_type.precision != Prim::F32
+            || a_node.output_type.dims.len() != batch_rank + 2
+            || b_node.output_type.dims.len() != batch_rank + 2
+            || !Self::node_is_statically_contiguous(dag, spec.a)
+            || !Self::node_is_statically_contiguous(dag, spec.b)
+        {
+            return None;
+        }
+
+        let expected_out = spec
+            .batch_dims
+            .iter()
+            .cloned()
+            .chain([spec.m.clone(), spec.n.clone()])
+            .collect::<Vec<_>>();
+        let expected_a = spec
+            .batch_dims
+            .iter()
+            .cloned()
+            .chain([spec.m.clone(), spec.k.clone()])
+            .collect::<Vec<_>>();
+        let expected_b = spec
+            .batch_dims
+            .iter()
+            .cloned()
+            .chain([spec.k.clone(), spec.n.clone()])
+            .collect::<Vec<_>>();
+        let out_dims = ty.dims.iter().map(DimExpr::from).collect::<Vec<_>>();
+        let a_dims = a_node
+            .output_type
+            .dims
+            .iter()
+            .map(DimExpr::from)
+            .collect::<Vec<_>>();
+        let b_dims = b_node
+            .output_type
+            .dims
+            .iter()
+            .map(DimExpr::from)
+            .collect::<Vec<_>>();
+        if out_dims != expected_out || a_dims != expected_a || b_dims != expected_b {
+            return None;
+        }
+
+        Some(StridedBatchedMatmulPlan {
+            batch_count_expr: Self::batch_count_expr(&spec.batch_dims),
+            a_batch_stride: m * k,
+            b_batch_stride: k * n,
+            out_batch_stride: m * n,
+        })
+    }
+
+    fn is_simple_runtime_dim(expr: &DimExpr) -> bool {
+        matches!(expr, DimExpr::Concrete(_) | DimExpr::Sym(_))
+    }
+
+    fn batch_count_expr(batch_dims: &[DimExpr]) -> String {
+        batch_dims
+            .iter()
+            .map(Self::emit_dim_expr)
+            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
+            .unwrap_or_else(|| "1".to_string())
+    }
+
     #[allow(dead_code)]
     fn supports_staged_scalar_reduction(
         node: &DagNode,
@@ -1771,7 +1880,9 @@ impl HipEmitter {
             | RiscOp::Realize
             | RiscOp::Cast { .. }
             | RiscOp::FusedElem { .. }
-            | RiscOp::BlasMatmul { .. } => true,
+            | RiscOp::BlasMatmul { .. }
+            | RiscOp::Gather { .. }
+            | RiscOp::ScatterAdd { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }
@@ -2003,5 +2114,58 @@ impl HipEmitter {
             .enumerate()
             .map(|(slot, label)| (label, slot))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+
+    fn vec_f32(n: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn fused_mul_reusable_input_dag() -> Dag {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        dag.set_reusable_input(fused, x);
+        dag
+    }
+
+    #[test]
+    fn current_fused_reusable_input_does_not_emit_hip_restrict_shape() {
+        let dag = fused_mul_reusable_input_dag();
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
+        assert!(hip.contains("const float *ext0"));
+        assert!(hip.contains("const float *ext1"));
+        assert!(hip.contains("float *out"));
+        assert!(
+            !hip.contains("__restrict__"),
+            "current HIP fused kernels do not yet express in-place restrict shape"
+        );
+    }
+
+    #[test]
+    #[ignore = "target behavior: enable when HIP fused in-place codegen aliases reusable_input"]
+    fn target_fused_in_place_hip_restrict_shape_preserves_non_aliased_inputs() {
+        let dag = fused_mul_reusable_input_dag();
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
+        assert!(!hip.contains("const float *__restrict__ ext0"));
+        assert!(!hip.contains("float *__restrict__ out"));
+        assert!(hip.contains("const float *__restrict__ ext1"));
     }
 }

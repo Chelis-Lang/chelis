@@ -16,7 +16,7 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     // `#include "chelis_math.h"` and the resulting `main.c` calls vvexpf with
     // no declaration in scope.
     let mut body: Vec<String> = Vec::new();
-    let mut needs_math_header = false;
+    let mut helper_requirements = HelperRequirements::default();
     append_tensor_reshape_helper(&mut body);
     body.push(String::new());
     append_tensor_print_helper(&mut body);
@@ -40,26 +40,22 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     }
 
     for (index, helper) in program.global_tensor_helpers.iter().enumerate() {
-        if append_helper(
+        helper_requirements.merge(append_helper(
             &mut body,
             helper,
             &format!("{program_name}__global__tensor_{index}"),
-        ) {
-            needs_math_header = true;
-        }
+        ));
     }
     for function in &program.functions {
         for (index, helper) in function.tensor_helpers.iter().enumerate() {
             let function_name = emitted_names
                 .get(&function.name)
                 .expect("host function emitted name");
-            if append_helper(
+            helper_requirements.merge(append_helper(
                 &mut body,
                 helper,
                 &format!("{function_name}__tensor_{index}"),
-            ) {
-                needs_math_header = true;
-            }
+            ));
         }
     }
 
@@ -85,7 +81,10 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
         "#include <assert.h>".to_string(),
         "#include <math.h>".to_string(),
     ];
-    if needs_math_header {
+    if helper_requirements.needs_blas_header {
+        out.push("#include \"chelis_blas.h\"".to_string());
+    }
+    if helper_requirements.needs_math_header {
         out.push("#include \"chelis_math.h\"".to_string());
     }
     out.push(String::new());
@@ -290,10 +289,27 @@ fn emit_host_header_with_linkage(
         .join("\n")
 }
 
-/// Append a tensor helper to `out` and return `true` if the inner emitter
-/// included `chelis_math.h`.  The caller propagates that signal to the host
-/// preamble so the math header is emitted exactly once at file scope.
-fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: &str) -> bool {
+#[derive(Debug, Clone, Copy, Default)]
+struct HelperRequirements {
+    needs_blas_header: bool,
+    needs_math_header: bool,
+}
+
+impl HelperRequirements {
+    fn merge(&mut self, other: Self) {
+        self.needs_blas_header |= other.needs_blas_header;
+        self.needs_math_header |= other.needs_math_header;
+    }
+}
+
+/// Append a tensor helper to `out` and return the runtime headers required by
+/// the inner emitter. The caller propagates these headers to the host preamble
+/// so each one is emitted exactly once at file scope.
+fn append_helper(
+    out: &mut Vec<String>,
+    helper: &HostTensorHelper,
+    helper_name: &str,
+) -> HelperRequirements {
     if let Some((_input_name, _input_ty)) = identity_helper_input(helper) {
         out.push(format!(
             "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
@@ -304,17 +320,23 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
-        return false;
+        return HelperRequirements::default();
     }
 
     // Tensor helpers are TU-internal: they are only called from within this
     // generated `.c` file and must never be exported symbols.  `static_entry`
     // ensures the kernel function itself gets `static` linkage so that when
     // compiled with `-shared -fPIC` the symbol is not exported via PLT.
+    let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
+    let uses_blas = specialized
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
     let helper_src = CEmitter::emit_dag_with_options(
-        &helper.dag,
+        &specialized,
         helper_name,
         crate::CodegenOptions {
+            use_blas: uses_blas,
             static_entry: true,
             ..crate::CodegenOptions::default()
         },
@@ -326,15 +348,14 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
     // redefinition. We filter the prelude out here and rely on
     // `emit_host_program` to emit exactly one copy at file scope.
     let mut skipping_uniform_prelude = false;
-    let mut needs_math_header = false;
+    let mut requirements = HelperRequirements::default();
     for line in helper_src.lines() {
         if line.starts_with("#include ") {
-            // Track whether the inner emitter pulled in chelis_math.h so the
-            // host preamble can re-emit it once.  Otherwise vForce intrinsics
-            // such as vvexpf/vvlogf reach the compiler with no declaration in
-            // scope.
+            if line.contains("\"chelis_blas.h\"") {
+                requirements.needs_blas_header = true;
+            }
             if line.contains("\"chelis_math.h\"") {
-                needs_math_header = true;
+                requirements.needs_math_header = true;
             }
             continue;
         }
@@ -354,7 +375,7 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
         out.push(line.to_string());
     }
     out.push(String::new());
-    needs_math_header
+    requirements
 }
 
 fn identity_helper_input(

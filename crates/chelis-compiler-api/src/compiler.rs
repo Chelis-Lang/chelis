@@ -1447,6 +1447,16 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     "unsupported_feature",
                 ));
             }
+            RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support sparse gather/scatter; lowered node {} requires it",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
             _ => {}
         }
     }
@@ -2194,6 +2204,8 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             n: wire_dim_expr(n),
             k: wire_dim_expr(k),
         },
+        RiscOp::Gather { axis } => WireRiscOp::Gather { axis: *axis },
+        RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd { axis: *axis },
     }
 }
 

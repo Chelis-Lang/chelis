@@ -915,6 +915,12 @@ pub enum WireRiscOp {
         n: WireDimExpr,
         k: WireDimExpr,
     },
+    Gather {
+        axis: usize,
+    },
+    ScatterAdd {
+        axis: usize,
+    },
 }
 
 fn default_true() -> bool {
