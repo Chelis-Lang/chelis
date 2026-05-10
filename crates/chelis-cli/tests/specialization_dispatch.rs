@@ -232,7 +232,7 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
     eprintln!("Verdict per row:");
     eprintln!("  matmul     -> SPECIALISED via cblas_sgemm (the cuBLAS analogue)");
     eprintln!("  softmax    -> generic Tier 2 lowering, multiple kernels, no fused softmax");
-    eprintln!("  layer_norm -> generic Tier 2 lowering, ~10 buffers, no fused layernorm");
+    eprintln!("  layer_norm -> generic Tier 2 lowering, several backing slots, no fused layernorm");
     eprintln!(
         "  scatter    -> single chelis_tensor_scatter() runtime call (no parallel-radix-sort)"
     );
@@ -259,10 +259,10 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
         s.sgemm_calls
     );
     assert!(
-        s.allocs >= 4,
-        "softmax §4.2 lowering should produce at least 4 buffer allocations \
-         (max_reduce, exp, sum, div outputs). Got {}. If this drops, a \
-         softmax-fusion pass shipped — celebrate and update.",
+        s.allocs >= 3,
+        "softmax §4.2 lowering should still produce multiple backing slots \
+         under C memory planning. Got {}. If this drops to one and the loop \
+         evidence changes, a softmax-fusion pass shipped — update.",
         s.allocs
     );
 
@@ -273,10 +273,10 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
         l.sgemm_calls
     );
     assert!(
-        l.allocs >= 10,
-        "layer_norm §4.4 lowering should produce at least 10 buffer \
-         allocations (mean, centered, var, sqrt, gamma_exp, beta_exp, \
-         normed, scaled, output). Got {}.",
+        l.allocs >= 6,
+        "layer_norm §4.4 lowering should still produce several backing slots \
+         under C memory planning (mean/variance/normalization stages are not \
+         fused into one specialized kernel). Got {}.",
         l.allocs
     );
 

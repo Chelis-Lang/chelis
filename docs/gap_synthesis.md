@@ -47,7 +47,7 @@ qualifies; the rest are unfinished implementation work.
 
 | Gap | Effort | Fundamental? | Notes |
 |---|---|:---:|---|
-| **1** — C memory planner | ~1 week | No | Port HIP's interference-graph coloring (`crates/chelis-backend-hip/src/memory.rs`) to C. Greedy and well-understood. |
+| **1** — C memory planner | closed by M2a | No | C codegen now uses conservative backing-slot planning with C ownership rules. |
 | **2** — Pattern matcher brittleness | closed by M1 | No | BLAS detection moved into `chelis_ir::specialize`; identity casts/reshapes/permutes are cleaned before replacement. |
 | **3** — Gather lowering | ~1 month | Medium | Two coupled changes: §3.5 RISC lowering + scatter-recognition pattern matcher. Must ship together or arm the OOM trap. |
 | **4** — Rank-2 matmul | partially closed by M3 | Medium-high | Type rule + generic `lower_matmul` now accept rank ≥ 2. Batched BLAS specialization remains open. |
@@ -67,12 +67,14 @@ prints the cost-profile section.
 
 | Input size | Peak working set | What's allocated |
 |---|---|---|
-| 1024×1024 f32 (4 MiB) | **20 MiB** | 5 × 4 MiB unary results, all simultaneously live until the final reduction reads them |
-| 2 GiB (linear projection) | **10 GiB peak helper-side**, ~12 GiB total RAM | 5 × 2 GiB unary results + the 2 GiB caller input |
+| 1024×1024 f32 (4 MiB) | **16 MiB helper-side** | 4 × 4 MiB backing slots; final output wrapper reuses the dead `neg(x)` intermediate slot |
+| 2 GiB (linear projection) | **8 GiB peak helper-side**, ~10 GiB total RAM | 4 × 2 GiB backing slots + the 2 GiB caller input |
 
-Closing Gap 1 (memory planner for C) collapses the peak from "5
-simultaneously live" to ~2-3 (the planner colors non-overlapping
-intervals); closing fan-in fusion as well drops it to 1.
+M2a closes the allocate-per-node gap by coloring non-overlapping
+intervals in C codegen. The remaining gap between four slots and the
+theoretical two/three-slot fan-in schedule is out of scope for memory
+planning alone: it requires fan-in or in-place fusion while preserving
+the current `restrict`-based C kernels.
 
 ### `transformer_block.ch` — 4-head MHA + FFN
 
@@ -82,27 +84,29 @@ The working set is a polynomial in `seq`:
 
 ```
 const ............          0 bytes
-linear * seq .....    3,178,576 bytes/seq
-quadratic * seq² .        2,096 bytes/seq²
+linear * seq .....    2,244,364 bytes/seq
+quadratic * seq² .          520 bytes/seq²
 ```
 
 | seq | peak | dominant term |
 |---|---|---|
-| 128 | 421 MiB | linear (3-D `Mul` intermediates from every Tier-2-lowered matmul) |
-| 512 | 2.1 GiB | linear |
-| **2048** | **14.6 GiB** | linear |
-| 4096 | 46.0 GiB | linear, with quadratic catching up |
+| 128 | 282 MiB | linear (slot-planned generic matmul / activation intermediates) |
+| 512 | 1.2 GiB | linear |
+| **2048** | **6.3 GiB** | linear |
+| 4096 | 16.7 GiB | linear, with quadratic catching up |
 
 Decomposition at seq=2048:
-- 6.5 GiB linear-in-seq — almost entirely 12× QKV `[seq, 256, 64]` Mul
-  intermediates plus 2× FFN `[seq, 1024, 256]` Mul intermediates
-- 8.8 GiB quadratic-in-seq — attention-score and probs@V Mul
-  intermediates
+- 4.4 GiB linear-in-seq — slot-planned Q/K/V/O, residual/LN, and FFN
+  intermediates. Symbolic-dim matmuls still miss BLAS and use generic
+  lowering, but non-overlapping buffers now share slots.
+- 2.1 GiB quadratic-in-seq — attention-score and probs@V buffers that
+  remain live under vanilla attention lowering.
 
 **M1 closed Gap 6 for concrete rank-2 BLAS-hit matmul** by replacing
 recognized matmul subgraphs before DCE/fusion. The transformer corpus
 still shows the old symbolic-dim working set until Gap 4/M3b addresses
-symbolic and batched matmul specialization.
+symbolic and batched matmul specialization, but M2a has reduced the
+C helper-side allocation footprint by reusing non-overlapping slots.
 
 If Gap 4 also closes (batched matmul) so that BLAS specialization
 fires on the per-head matmuls, drops further. If FlashAttention-style
@@ -154,10 +158,9 @@ detection out of codegen and into `chelis_ir::specialize`. It closes
 Gaps 2 + 6 for rank-2 concrete matmul and sets up the substrate for
 future recognizers (softmax, layer_norm, attention, gather→scatter).
 
-**Phase β (~1 month, parallel to α):** Port HIP memory planner to C
-(Gap 1). The adjacent Surf-span plumbing item has been closed by M2b:
-desugared Deep now receives `surf:<start>..<end>` metadata for parsed
-Surf expression bodies.
+**Phase β (closed by M2a/M2b):** The C backend now has conservative
+slot-based memory planning, and desugared Deep now receives
+`surf:<start>..<end>` metadata for parsed Surf expression bodies.
 
 **Phase γ (partially closed by M3):** `matmul` now accepts rank ≥ 2
 and `lower_matmul` emits the generic batched `expand + mul + sum`
@@ -188,7 +191,6 @@ after the M1/M2b/M3/M5 documentation batch.
 
 | ID | Tracks | Required closure | Current executable anchor |
 |---|---|---|---|
-| **M2a** | Gap 1, C-backend memory planning | Port or lift HIP-style slot planning into the C backend while preserving C ownership rules for borrowed loads, non-contiguous reshape, stores, and output materialization. | `crates/chelis-cli/tests/copy_elision.rs::target_behavior_copy_elision_reuses_c_backend_buffers` is ignored until this lands. |
 | **M3b** | Gap 4 performance follow-up | Add batched BLAS specialization for rank ≥ 3 matmul where every loop-bound/stride dimension is statically known. Symbolic dimensions must continue to fall through to generic lowering. | `crates/chelis-ir/src/specialize.rs::symbolic_matmul_stays_on_generic_path` locks the negative side; a positive batched-BLAS test still needs to be added with the implementation. |
 | **M4** | Gap 3, gather/scatter lowering | Ship §3.5 gather lowering together with sparse gather/scatter recognition so embedding/MoE-shaped programs do not allocate dense `[N, V, D]` intermediates. | `crates/chelis-ir/tests/grad_gather_contract.rs` locks duplicate-index AD; emitted C/HIP structural tests for bounded sparse kernels still need to be added. |
 | **M5-impl** | Gap 5, cross-function specialization | Implement verified BLAS-equivalent helper summaries and callsite emission rules from `spec/design/cross_function_specialization.md`. | `crates/chelis-cli/tests/cross_library_semantic_gap.rs::target_behavior_user_def_matmul_helpers_hit_blas` is ignored until this lands. |

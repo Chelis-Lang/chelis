@@ -70,12 +70,12 @@ bytes. Concrete examples:
 | 1024 × 4096 × 1024 (f32, FFN) | 16 GiB | 4 MiB |
 
 For the 4-head MHA + FFN block in
-`examples/transformer_block.ch`, this is the dominant working-set
-cost: roughly 3 MiB per `seq` token (per
-`crates/chelis-cli/tests/traceability_paradox.rs` cost-profile
-analysis). At `seq = 2048` the working set is ~14.6 GiB, the
-majority of which is dead `Mul` intermediates that BLAS hits would
-have eliminated in any normal compiler pipeline.
+`examples/transformer_block.ch`, symbolic `seq` still prevents BLAS
+specialization, so generic matmul lowering remains a dominant
+working-set cost. M2a slot planning reduces the `seq = 2048`
+helper-side projection from the original ~14.6 GiB to ~6.3 GiB, but
+the live generic-matmul intermediates remain until symbolic/batched
+specialization closes.
 
 The compute waste is also non-trivial: the `parallel for simd`
 loop runs `m * k * n` multiplies for every BLAS-hit matmul, in

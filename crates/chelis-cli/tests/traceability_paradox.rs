@@ -10,8 +10,8 @@
 //! recorded measurements are: number of span comments, share that are
 //! synthesized markers vs Surf parser byte-range spans, number of fused
 //! kernels, number of BLAS specializations actually fired, and the buffer
-//! allocation footprint in bytes (peak working set under the C backend's
-//! Phase-0 allocate-per-node strategy).
+//! allocation footprint in bytes (peak helper-side slot footprint under the
+//! C backend's M2a slot planner).
 //!
 //! Findings (locked here as assertions):
 //!   * Emitted `// span:` lines include Surf parser byte-range IDs of the
@@ -29,23 +29,23 @@
 //!
 //! ## Cost profile (computed from emitted C, parameterised by `seq`)
 //!
-//! Empirically the working set is a polynomial in `seq` whose coefficients
-//! are read directly off `chelis_alloc(N, (int[]){...})` calls:
+//! Empirically the helper-side slot footprint is a polynomial in `seq` whose
+//! coefficients are read directly off `chelis_alloc(N, (int[]){...})` calls:
 //!
 //! | term | bytes | dominant source |
 //! |---|---|---|
-//! | `c2` (× seq²) | ~2 KiB | 4-head `[seq, 64, seq]` score Mul intermediates (1024 B), 4-head `[seq, seq, 64]` probs@v Mul intermediates (1024 B), `[seq, seq]` score+softmax buffers (~32 B) |
-//! | `c1` (× seq) | **~3.18 MiB** | the 3-D `Mul` intermediates produced by every Tier-2-lowered matmul: 12× QKV `[seq, 256, 64]` (786 KiB/seq) + FFN1 `[seq, 256, 1024]` (1.0 MiB/seq) + FFN2 `[seq, 1024, 256]` (1.0 MiB/seq) + head-output projections (~64 KiB/seq) |
+//! | `c2` (× seq²) | 520 B | slot-planned attention score/probs buffers that remain live together |
+//! | `c1` (× seq) | **~2.14 MiB** | slot-planned Q/K/V/O, residual/LN, and FFN intermediates; symbolic-dim matmuls still use generic `expand + mul + sum` lowering |
 //! | `c0` | 0 | none — every allocation has at least one `seq` factor |
 //!
 //! Projected peak working set:
 //!
 //! | seq | peak | dominant term |
 //! |---|---|---|
-//! | 128 | 421 MiB | `c1 × seq` (Mul intermediates) |
-//! | 512 | 2.1 GiB | `c1 × seq` |
-//! | 2048 | **14.6 GiB** | `c1 × seq` |
-//! | 4096 | 46.0 GiB | `c1 × seq` (`c2 × seq²` starts catching up) |
+//! | 128 | 282 MiB | `c1 × seq` |
+//! | 512 | 1.2 GiB | `c1 × seq` |
+//! | 2048 | **6.3 GiB** | `c1 × seq` |
+//! | 4096 | 16.7 GiB | `c1 × seq` (`c2 × seq²` starts catching up) |
 //!
 //! **Why this is so high:** every matmul lowers via Tier 2 to
 //! `expand → mul → sum`. The `Mul` step materializes a 3-D
@@ -53,16 +53,16 @@
 //! contraction. Normally the BLAS detector recognises the
 //! `Sum → Mul → (Expand, Expand)` shape and replaces the materialised
 //! `Mul` with a direct `cblas_sgemm` call (no 3-D intermediate). But the
-//! detector requires concrete dim literals (`crates/chelis-backend-c/src/
-//! blas.rs:90-95`) and `seq` is symbolic, so detection misses for every
-//! matmul in this file. The result is roughly a 10× working-set
-//! amplification compared to the post-BLAS path.
+//! detector remains scoped to statically known dims and `seq` is symbolic, so
+//! detection misses for every matmul in this file. M2a's C memory planner
+//! reuses non-overlapping buffers, but it cannot eliminate the live 3-D Mul
+//! intermediates themselves.
 //!
-//! Two passes would close this:
-//!   1. Generalise the BLAS detector to symbolic-dim matmul (Gap 4 in
-//!      `docs/identified_gaps.md`).
-//!   2. Ship the C-backend memory planner so non-overlapping `Mul`
-//!      intermediates can share buffers (Gap 1).
+//! Two follow-on passes would shrink this further:
+//!   1. Generalise specialization to symbolic-dim or runtime-strided matmul
+//!      where safe (Gap 4/M3b follow-up in `docs/identified_gaps.md`).
+//!   2. Fuse attention score/probs materialisation in a FlashAttention-style
+//!      pass (not on the roadmap today).
 //!
 //! Even with both, vanilla attention is `seq`-quadratic in the score
 //! buffers — FlashAttention-style fusion (not on the roadmap today)
@@ -190,6 +190,7 @@ fn transformer_block_traceability_state_is_locked() {
         .count();
     let fused_kernels = source.matches("parallel for simd").count();
     let allocations = source.matches("chelis_alloc(").count();
+    let slot_allocations = source.matches("chelis_tensor *chelis_slot").count();
     let blas_calls = source.matches("cblas_sgemm").count()
         + source.matches("chelis_blas_matmul").count()
         + source.matches("chelis_blas_sgemm").count();
@@ -215,10 +216,18 @@ fn transformer_block_traceability_state_is_locked() {
         "expected at least 10 fused parallel-for-simd kernels for a 4-head \
          MHA+FFN block; got {fused_kernels}"
     );
-    assert!(
-        allocations >= 44,
-        "expected many intermediate buffer allocations for a 4-head MHA \
-         (per-head Q/K/V/O + softmax + residual + FFN); got {allocations}"
+    assert_eq!(
+        allocations, slot_allocations,
+        "expected every backing allocation in the C backend to be a planned \
+         chelis_slot after M2a; got {allocations} chelis_alloc calls and \
+         {slot_allocations} slot declarations"
+    );
+    assert_eq!(
+        slot_allocations, 20,
+        "expected the current M2a slot plan for transformer_block.ch to use \
+         20 backing slots. If this drops, memory planning/fusion improved and \
+         the cost profile in this test should be updated; if it rises, slot \
+         reuse regressed."
     );
     assert_eq!(
         blas_calls, 0,

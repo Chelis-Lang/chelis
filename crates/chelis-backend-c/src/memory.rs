@@ -1,111 +1,438 @@
 //! Memory planning for generated C code.
 //!
-//! Phase 0: simple allocate-per-node, free-all-at-end strategy.
+//! M2a adds conservative slot planning to the C backend:
+//! - caller loads are borrowed and never freed here
+//! - materialized nodes get reusable backing slots plus per-node metadata views
+//! - movement nodes are metadata views over their source owner
+//! - stores remain standalone owned outputs
+//! - cleanup frees metadata wrappers before backing slots
 
-use chelis_ir::dag::{Dag, NodeId, RiscOp};
+use std::collections::{HashMap, HashSet};
 
-/// Returns true if the node is borrowed from the caller and must never be freed here.
-fn is_borrowed(op: &RiscOp) -> bool {
-    matches!(op, RiscOp::Load { .. })
+use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_types::types::Prim;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeMemoryKind {
+    BorrowedLoad,
+    SlotBacked { slot: usize },
+    MetadataView { source: NodeId },
+    StandaloneStore { source: NodeId },
+    Skipped,
 }
 
-/// Emit `chelis_free()` calls for all nodes except the specified output nodes.
-/// Phase 0f uses allocate-per-node and frees everything at function end.
-/// The runtime tracks ownership, so aliasing views can be freed directly.
-pub fn emit_cleanup(dag: &Dag, output_ids: &[NodeId]) -> Vec<String> {
-    emit_cleanup_with_skip(dag, output_ids, &[])
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotPlan {
+    pub id: usize,
+    pub dtype: Prim,
+    pub capacity_elems: DimExpr,
+    pub first_owner: NodeId,
+    pub last_use_index: usize,
 }
 
-/// Like [`emit_cleanup`] but also skips the given node IDs (never-allocated nodes).
-pub fn emit_cleanup_with_skip(
-    dag: &Dag,
-    output_ids: &[NodeId],
-    skip_ids: &[NodeId],
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    for n in dag.nodes() {
-        if output_ids.contains(&n.id) {
-            continue;
-        }
-        if skip_ids.contains(&n.id) {
-            continue;
-        }
-        if is_borrowed(&n.op) {
-            continue;
-        }
-        lines.push(format!("    chelis_free(t{});", n.id.0));
+#[derive(Debug, Clone)]
+pub struct MemoryPlan {
+    node_kinds: Vec<NodeMemoryKind>,
+    slots: Vec<SlotPlan>,
+}
+
+#[derive(Debug, Clone)]
+struct OwnerRequirement {
+    owner: NodeId,
+    birth_index: usize,
+    last_use_index: usize,
+    capacity_elems: DimExpr,
+    dtype: Prim,
+}
+
+impl MemoryPlan {
+    pub fn build(dag: &Dag, output_ids: &[NodeId], skipped: &HashSet<NodeId>) -> Self {
+        let mut node_kinds = classify_nodes(dag, skipped);
+        let owner_of = compute_owner_map(dag, &node_kinds);
+        let requirements = owner_requirements(dag, &node_kinds, &owner_of, output_ids);
+        let slots = assign_slots(&requirements, &mut node_kinds);
+        Self { node_kinds, slots }
     }
-    lines
+
+    pub fn node_kind(&self, id: NodeId) -> &NodeMemoryKind {
+        &self.node_kinds[id.0]
+    }
+
+    pub fn slot(&self, id: usize) -> &SlotPlan {
+        &self.slots[id]
+    }
+
+    pub fn slots(&self) -> &[SlotPlan] {
+        &self.slots
+    }
+
+    pub fn emit_cleanup(&self, output_ids: &[NodeId]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (idx, kind) in self.node_kinds.iter().enumerate() {
+            let id = NodeId(idx);
+            if output_ids.contains(&id)
+                || matches!(kind, NodeMemoryKind::BorrowedLoad | NodeMemoryKind::Skipped)
+            {
+                continue;
+            }
+            lines.push(format!("    chelis_free(t{idx});"));
+        }
+        for slot in &self.slots {
+            lines.push(format!("    chelis_free(chelis_slot{});", slot.id));
+        }
+        lines
+    }
+}
+
+fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
+    let mut kinds = Vec::with_capacity(dag.len());
+    for node in dag.nodes() {
+        let kind = if skipped.contains(&node.id) {
+            NodeMemoryKind::Skipped
+        } else {
+            match &node.op {
+                RiscOp::Load { .. } => NodeMemoryKind::BorrowedLoad,
+                RiscOp::Reshape { .. }
+                | RiscOp::Permute { .. }
+                | RiscOp::Expand { .. }
+                | RiscOp::Stride { .. } => NodeMemoryKind::MetadataView {
+                    source: node.inputs[0],
+                },
+                RiscOp::Store { .. } => NodeMemoryKind::StandaloneStore {
+                    source: node.inputs[0],
+                },
+                RiscOp::Const { .. }
+                | RiscOp::Add
+                | RiscOp::Mul
+                | RiscOp::CmpLt
+                | RiscOp::MaxElem
+                | RiscOp::Neg
+                | RiscOp::Exp
+                | RiscOp::Log
+                | RiscOp::Sin
+                | RiscOp::Sqrt
+                | RiscOp::Cos
+                | RiscOp::Tan
+                | RiscOp::Atan
+                | RiscOp::Abs
+                | RiscOp::Floor
+                | RiscOp::Ceil
+                | RiscOp::UniformLike { .. }
+                | RiscOp::Dropout { .. }
+                | RiscOp::Sum { .. }
+                | RiscOp::MaxReduce { .. }
+                | RiscOp::MinReduce { .. }
+                | RiscOp::ProdReduce { .. }
+                | RiscOp::Argmax { .. }
+                | RiscOp::Argmin { .. }
+                | RiscOp::Realize
+                | RiscOp::Cast { .. }
+                | RiscOp::FusedElem { .. }
+                | RiscOp::Pad { .. }
+                | RiscOp::Shrink { .. }
+                | RiscOp::BlasMatmul { .. } => NodeMemoryKind::SlotBacked { slot: usize::MAX },
+            }
+        };
+        kinds.push(kind);
+    }
+    kinds
+}
+
+fn compute_owner_map(dag: &Dag, node_kinds: &[NodeMemoryKind]) -> Vec<Option<NodeId>> {
+    let mut owners = vec![None; dag.len()];
+    for node in dag.nodes() {
+        owners[node.id.0] = match &node_kinds[node.id.0] {
+            NodeMemoryKind::SlotBacked { .. } => Some(node.id),
+            NodeMemoryKind::BorrowedLoad => None,
+            NodeMemoryKind::MetadataView { source }
+            | NodeMemoryKind::StandaloneStore { source } => owners[source.0],
+            NodeMemoryKind::Skipped => None,
+        };
+    }
+    owners
+}
+
+fn owner_requirements(
+    dag: &Dag,
+    node_kinds: &[NodeMemoryKind],
+    owner_of: &[Option<NodeId>],
+    output_ids: &[NodeId],
+) -> Vec<OwnerRequirement> {
+    let epilogue_index = dag.len();
+    let mut by_owner = HashMap::<NodeId, OwnerRequirement>::new();
+
+    for node in dag.nodes() {
+        if matches!(node_kinds[node.id.0], NodeMemoryKind::SlotBacked { .. }) {
+            by_owner.insert(
+                node.id,
+                OwnerRequirement {
+                    owner: node.id,
+                    birth_index: node.id.0,
+                    last_use_index: node.id.0,
+                    capacity_elems: logical_elements(&node.output_type),
+                    dtype: node.output_type.precision,
+                },
+            );
+        }
+    }
+
+    for node in dag.nodes() {
+        if matches!(node_kinds[node.id.0], NodeMemoryKind::Skipped) {
+            continue;
+        }
+        let effective_inputs: Vec<NodeId> = match &node.op {
+            RiscOp::Sum { .. } | RiscOp::MaxReduce { .. } => {
+                if let Some(fused_input) = node.inputs.first().copied()
+                    && matches!(node_kinds[fused_input.0], NodeMemoryKind::Skipped)
+                {
+                    dag.get(fused_input)
+                        .map(|fused_node| fused_node.inputs.clone())
+                        .unwrap_or_default()
+                } else {
+                    node.inputs.clone()
+                }
+            }
+            _ => node.inputs.clone(),
+        };
+        for input in effective_inputs {
+            if let Some(owner) = owner_of[input.0]
+                && let Some(req) = by_owner.get_mut(&owner)
+            {
+                req.last_use_index = req.last_use_index.max(node.id.0);
+            }
+        }
+    }
+
+    for &output_id in output_ids {
+        let output_node = dag.get(output_id).expect("output id must exist");
+        if matches!(output_node.op, RiscOp::Load { .. } | RiscOp::Store { .. }) {
+            continue;
+        }
+        if let Some(owner) = owner_of[output_id.0]
+            && let Some(req) = by_owner.get_mut(&owner)
+        {
+            req.last_use_index = epilogue_index;
+        }
+    }
+
+    let mut ordered = by_owner.into_values().collect::<Vec<_>>();
+    ordered.sort_by_key(|req| req.birth_index);
+    ordered
+}
+
+fn assign_slots(
+    requirements: &[OwnerRequirement],
+    node_kinds: &mut [NodeMemoryKind],
+) -> Vec<SlotPlan> {
+    let mut slots = Vec::<SlotPlan>::new();
+    let mut availability = Vec::<usize>::new();
+    let mut owner_to_slot = HashMap::<NodeId, usize>::new();
+
+    for req in requirements {
+        let reused = slots.iter().enumerate().find_map(|(slot_id, slot)| {
+            let reusable = slot.dtype == req.dtype
+                && availability[slot_id] < req.birth_index
+                && capacity_fits(&slot.capacity_elems, &req.capacity_elems);
+            reusable.then_some(slot_id)
+        });
+
+        let slot_id = reused.unwrap_or_else(|| {
+            let slot_id = slots.len();
+            slots.push(SlotPlan {
+                id: slot_id,
+                dtype: req.dtype,
+                capacity_elems: req.capacity_elems.clone(),
+                first_owner: req.owner,
+                last_use_index: req.last_use_index,
+            });
+            availability.push(usize::MIN);
+            slot_id
+        });
+
+        availability[slot_id] = req.last_use_index;
+        slots[slot_id].last_use_index = slots[slot_id].last_use_index.max(req.last_use_index);
+        owner_to_slot.insert(req.owner, slot_id);
+    }
+
+    for (idx, kind) in node_kinds.iter_mut().enumerate() {
+        if let NodeMemoryKind::SlotBacked { slot } = kind {
+            *slot = owner_to_slot[&NodeId(idx)];
+        }
+    }
+
+    slots
+}
+
+fn capacity_fits(slot: &DimExpr, req: &DimExpr) -> bool {
+    match (slot.as_concrete(), req.as_concrete()) {
+        (Some(slot_elems), Some(req_elems)) => slot_elems >= req_elems,
+        _ => slot == req,
+    }
+}
+
+fn logical_elements(ty: &TensorType) -> DimExpr {
+    if ty.dims.is_empty() {
+        DimExpr::Concrete(1)
+    } else {
+        ty.dims
+            .iter()
+            .map(dim_size)
+            .reduce(|lhs, rhs| DimExpr::Mul(Box::new(lhs), Box::new(rhs)))
+            .unwrap_or(DimExpr::Concrete(1))
+    }
+}
+
+fn dim_size(dim: &DimInfo) -> DimExpr {
+    match dim {
+        DimInfo::Lit(n) => DimExpr::Concrete(*n),
+        DimInfo::Named(_, Some(n)) => DimExpr::Concrete(*n),
+        DimInfo::Named(name, None) => DimExpr::Sym(name.clone()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{Dag, RiscOp, TensorType};
 
-    fn scalar_f32() -> TensorType {
-        TensorType::scalar_f32()
+    fn vec_f32(n: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn sym_f32(name: &str) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Named(name.to_string(), None)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn build_plan(dag: &Dag, output_ids: &[NodeId]) -> MemoryPlan {
+        MemoryPlan::build(dag, output_ids, &HashSet::new())
     }
 
     #[test]
-    fn cleanup_skips_output_nodes() {
+    fn planner_reuses_non_overlapping_slots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+        let c = dag.add_node(RiscOp::Neg, vec![b], vec_f32(4), None);
+        dag.add_root(c);
 
-        let lines = emit_cleanup(&dag, &[c]);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("t0"));
-        assert!(lines[1].contains("t1"));
-        assert!(!lines.iter().any(|l| l.contains("t2")));
+        let plan = build_plan(&dag, &[c]);
+        assert_eq!(plan.slots().len(), 2);
+        assert_eq!(plan.node_kind(a), &NodeMemoryKind::SlotBacked { slot: 0 });
+        assert_eq!(plan.node_kind(c), &NodeMemoryKind::SlotBacked { slot: 0 });
+        assert_eq!(plan.node_kind(b), &NodeMemoryKind::SlotBacked { slot: 1 });
     }
 
     #[test]
-    fn cleanup_empty_dag() {
-        let dag = Dag::new();
-        let lines = emit_cleanup(&dag, &[]);
-        assert!(lines.is_empty());
-    }
-
-    #[test]
-    fn cleanup_all_outputs_means_no_frees() {
+    fn planner_keeps_overlapping_values_separate() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let lines = emit_cleanup(&dag, &[a]);
-        assert!(lines.is_empty());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+        dag.add_root(c);
+
+        let plan = build_plan(&dag, &[c]);
+        assert_eq!(plan.slots().len(), 3);
     }
 
     #[test]
-    fn cleanup_multiple_outputs() {
+    fn planner_keeps_loads_borrowed() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let y = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4), None);
+        dag.add_root(y);
 
-        let lines = emit_cleanup(&dag, &[a, c]);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("t1"));
+        let plan = build_plan(&dag, &[y]);
+        assert_eq!(plan.node_kind(x), &NodeMemoryKind::BorrowedLoad);
+        assert_eq!(plan.slots().len(), 1);
+        assert!(
+            !plan
+                .emit_cleanup(&[y])
+                .iter()
+                .any(|line| line == "    chelis_free(t0);")
+        );
     }
 
     #[test]
-    fn cleanup_format_matches_indent() {
+    fn metadata_view_extends_source_lifetime() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let lines = emit_cleanup(&dag, &[]);
-        assert!(lines[0].starts_with("    chelis_free(t0)"));
-    }
-
-    #[test]
-    fn cleanup_skips_borrowed_loads() {
-        let mut dag = Dag::new();
-        dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            scalar_f32(),
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let v = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Concrete(4),
+            },
+            vec![a],
+            TensorType {
+                dims: vec![DimInfo::Lit(4), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
             None,
         );
-        let lines = emit_cleanup(&dag, &[]);
-        assert!(lines.is_empty());
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let c = dag.add_node(RiscOp::Neg, vec![v], vec_f32(4), None);
+        dag.add_root(c);
+
+        let plan = build_plan(&dag, &[c]);
+        assert_eq!(
+            plan.node_kind(v),
+            &NodeMemoryKind::MetadataView { source: a }
+        );
+        assert_ne!(plan.node_kind(a), plan.node_kind(b));
+    }
+
+    #[test]
+    fn store_outputs_are_standalone_not_slots() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let s = dag.add_node(
+            RiscOp::Store { name: "out".into() },
+            vec![a],
+            vec_f32(4),
+            None,
+        );
+        dag.add_root(s);
+
+        let plan = build_plan(&dag, &[s]);
+        assert_eq!(
+            plan.node_kind(s),
+            &NodeMemoryKind::StandaloneStore { source: a }
+        );
+        assert_eq!(plan.slots().len(), 1);
+    }
+
+    #[test]
+    fn symbolic_exact_match_reuses_but_non_match_falls_back() {
+        let mut exact = Dag::new();
+        let a = exact.add_node(RiscOp::Const { value: 1.0 }, vec![], sym_f32("n"), None);
+        let b = exact.add_node(RiscOp::Neg, vec![a], sym_f32("n"), None);
+        let c = exact.add_node(RiscOp::Neg, vec![b], sym_f32("n"), None);
+        exact.add_root(c);
+        assert_eq!(build_plan(&exact, &[c]).slots().len(), 2);
+
+        let mut mismatch = Dag::new();
+        let a = mismatch.add_node(RiscOp::Const { value: 1.0 }, vec![], sym_f32("m"), None);
+        let _b = mismatch.add_node(RiscOp::Neg, vec![a], sym_f32("m"), None);
+        let c = mismatch.add_node(RiscOp::Const { value: 2.0 }, vec![], sym_f32("n"), None);
+        mismatch.add_root(c);
+        assert_eq!(build_plan(&mismatch, &[c]).slots().len(), 3);
+    }
+
+    #[test]
+    fn cleanup_frees_wrappers_at_epilogue_then_slots() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+        dag.add_root(b);
+
+        let plan = build_plan(&dag, &[b]);
+        let lines = plan.emit_cleanup(&[b]);
+        assert_eq!(lines[0], "    chelis_free(t0);");
+        assert!(lines[1].starts_with("    chelis_free(chelis_slot"));
+        assert!(lines[2].starts_with("    chelis_free(chelis_slot"));
     }
 }
