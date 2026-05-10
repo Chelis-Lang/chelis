@@ -330,10 +330,16 @@ impl Expander {
         };
         self.consume_expansion_budget()?;
         let invocation = macro_source(&def.name, &args);
-        let param_map: HashMap<String, Expr> = def.params.iter().cloned().zip(args).collect();
-        let substituted = substitute_expr(&def.body, &param_map, &HashSet::new());
-        let hygienic = hygienize_expr(&substituted, &mut self.hygiene_counter, &HashMap::new());
-        Ok(Some(annotate_source_expr(&hygienic, &invocation)))
+        let (placeholder_params, placeholder_args) =
+            macro_arg_placeholders(def, &args, self.expansions);
+        let placeholder_body = substitute_expr(&def.body, &placeholder_params, &HashSet::new());
+        let hygienic = hygienize_expr(
+            &placeholder_body,
+            &mut self.hygiene_counter,
+            &HashMap::new(),
+        );
+        let substituted = replace_placeholder_vars(&hygienic, &placeholder_args);
+        Ok(Some(annotate_source_expr(&substituted, &invocation)))
     }
 
     fn consume_expansion_budget(&mut self) -> Result<(), ExpansionError> {
@@ -345,6 +351,85 @@ impl Expander {
         self.remaining_expansions -= 1;
         self.expansions += 1;
         Ok(())
+    }
+}
+
+fn macro_arg_placeholders(
+    def: &MacroDef,
+    args: &[Expr],
+    expansion_id: usize,
+) -> (HashMap<String, Expr>, HashMap<String, Expr>) {
+    let mut used_symbols = HashSet::new();
+    collect_symbols(&def.body, &mut used_symbols);
+
+    let mut placeholder_params = HashMap::new();
+    let mut placeholder_args = HashMap::new();
+    for (idx, (param, arg)) in def.params.iter().zip(args.iter()).enumerate() {
+        let placeholder = fresh_placeholder(idx, expansion_id, &mut used_symbols);
+        placeholder_params.insert(param.clone(), var(&placeholder));
+        placeholder_args.insert(placeholder, arg.clone());
+    }
+    (placeholder_params, placeholder_args)
+}
+
+fn fresh_placeholder(
+    idx: usize,
+    expansion_id: usize,
+    used_symbols: &mut HashSet<String>,
+) -> String {
+    let mut attempt = 0;
+    loop {
+        let candidate = format!("__chelis_macro_arg_{expansion_id}_{idx}_{attempt}");
+        if used_symbols.insert(candidate.clone()) {
+            return candidate;
+        }
+        attempt += 1;
+    }
+}
+
+fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -> Expr {
+    match expr {
+        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            MetaExpr {
+                entries: meta.entries.clone(),
+                expr: Box::new(replace_placeholder_vars(&meta.expr, replacements)),
+            },
+            *span,
+        ),
+        Expr::List(list, span) => {
+            if get_tag(list) == Some("var")
+                && let Some(name) = children(list).first().and_then(symbol_name)
+                && let Some(replacement) = replacements.get(name)
+            {
+                return replacement.clone();
+            }
+            Expr::List(
+                List {
+                    elements: list
+                        .elements
+                        .iter()
+                        .map(|child| replace_placeholder_vars(child, replacements))
+                        .collect(),
+                },
+                *span,
+            )
+        }
+    }
+}
+
+fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::Atom(Atom::Symbol(name), _) => {
+            out.insert(name.clone());
+        }
+        Expr::Atom(_, _) | Expr::Map(_, _) => {}
+        Expr::MetaExpr(meta, _) => collect_symbols(&meta.expr, out),
+        Expr::List(list, _) => {
+            for element in &list.elements {
+                collect_symbols(element, out);
+            }
+        }
     }
 }
 
