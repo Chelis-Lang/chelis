@@ -1,4 +1,4 @@
-# phase3h-gather-ad-incomplete: Phase 3h marked shipped but Surf `gather` is not yet lowered through the sparse path
+# phase3h-gather-ad-incomplete: Phase 3h marked shipped but dense recognizer and HIP sparse gather remain incomplete
 
 **Status:** **PARTIALLY ADDRESSED**
 **Filed:** 2026-05-08
@@ -17,14 +17,18 @@ sort, diagonal / trace, clamp."
 
 This bug was originally filed when `gather` existed only as a
 host-only forward-evaluating builtin. The remaining user-visible gap
-is narrower but still open: Surf-level `gather` does not yet lower
-through the §3.5 decomposition and sparse recognizer, and HIP does not
-yet have sparse `Gather` / `ScatterAdd` kernels.
+is narrower but still open: tensor-lane Surf `gather` now lowers
+directly to first-class sparse IR, but the dense §3.5 decomposition
+recognizer and HIP sparse `Gather` / `ScatterAdd` kernels are still
+missing.
 
 - `crates/chelis-types/src/builtins.rs:135` — registered as a
   generic_triop in the type environment.
-- `crates/chelis-ir/src/host.rs:4640` — host runtime dispatch for
-  `gather | scatter | where | cumsum | diagonal | trace | clamp`.
+- `crates/chelis-ir/src/lower.rs` — tensor-lane `gather(values,
+  indices, axis)` now lowers to `RiscOp::Gather` instead of the host
+  runtime call.
+- `crates/chelis-ir/src/host.rs` — host runtime dispatch still covers
+  scatter/where/cumsum/diagonal/trace/clamp and non-tensor host paths.
 - `crates/chelis-ir/src/dag.rs` — now includes first-class
   `RiscOp::Gather` and `RiscOp::ScatterAdd` implementation nodes.
 - `crates/chelis-ir/src/grad.rs` — now differentiates first-class
@@ -33,26 +37,20 @@ yet have sparse `Gather` / `ScatterAdd` kernels.
 - `crates/chelis-backend-c/src/emit.rs` — now emits bounded sparse C
   loops for first-class `Gather` and `ScatterAdd`.
 
-Net: the lower-level sparse IR/C path is in place and tested, but
-ordinary Surf programs that call the `gather` builtin still use the
-host lane rather than the sparse IR lowering. The cross-library AD
-claim is therefore still not closed for user-authored `gather`
-programs, even though the first-class sparse IR node now has the
-required AD and C backend behavior.
+Net: the sparse IR/C path is in place and tested for tensor-lane Surf
+`gather`, including the first-class `Gather -> ScatterAdd` adjoint.
+The remaining gap is no longer the ordinary C path; it is the dense
+§3.5 recognizer and HIP parity.
 
 ## Why this matters
 
 Two failure modes downstream:
 
-1. **MoE / embedding layers are not yet on the user-facing sparse AD
-   path.** The natural way to express embedding lookup
-   (`gather(table, token_indices, axis=0)`) and Mixture-of-Experts
-   routing (`gather(expert_weights, expert_indices, axis=0)`) still
-   needs Surf lowering into the sparse IR node before the shipped
-   `Gather -> ScatterAdd` adjoint is available to ordinary programs.
-   `Std.Nn.Embedding` is documented as the user-facing surface over
-   `gather` (`spec/design/chelis_phase3_plan.md:326,1129`), so the
-   Embedding layer is similarly affected until that lowering lands.
+1. **HIP MoE / embedding layers are not yet on a sparse backend path.**
+   The natural C path for embedding lookup
+   (`gather(table, token_indices, axis=0)`) now lowers to sparse IR, but
+   HIP still rejects those nodes rather than compiling kernels with
+   integer index tensors and duplicate-index scatter accumulation.
 
 2. **Future risk: shipping the §3.5 lowering naively re-arms an OOM
    trap.** `spec/05-risc-primitives.md` §3.5 says
@@ -66,35 +64,33 @@ Two failure modes downstream:
 
 ## Closure plan
 
-The remaining fix is two-step and must land together to avoid arming
-the OOM trap:
+The remaining fix is two-step:
 
-1. **Wire Surf `gather` into the §3.5 lowering path.** The lowering
-   may emit the dense `reshape + expand + mul + sum` contract shape
-   for recognizer input, or lower directly to the first-class
-   `RiscOp::Gather` node when the same structural contract is
-   preserved.
-2. **Add the dense-shape recognizer and HIP sparse codegen.** The
+1. **Add the dense-shape recognizer.** The
    recognizer belongs in `crates/chelis-ir/src/specialize.rs`, alongside
    the existing BLAS specialization substrate. It must replace the
    §3.5 dense shape with `RiscOp::Gather` / `RiscOp::ScatterAdd` before
-   DCE and backend codegen. The C backend already has bounded sparse
+   DCE and backend codegen when any producer emits the dense contract
+   shape.
+2. **Add HIP sparse codegen.** The C backend already has bounded sparse
    emission for the first-class nodes; HIP must gain equivalent kernels
-   or continue to reject with a diagnostic that names the missing sparse
-   kernel / duplicate-index scatter semantics.
+   plus integer index tensor support, or continue to reject with a
+   diagnostic that names the missing sparse kernel / duplicate-index
+   scatter semantics.
 
 The adversarial duplicate-index test
 (`gather_via_section_3_5_lowering_accumulates_duplicate_indices` in
 `crates/chelis-ir/tests/grad_gather_contract.rs`) now exercises the
 first-class sparse `Gather` adjoint and asserts the duplicate-index
 gradient is correctly accumulated. The remaining requirement is that
-Surf lowering and the recognizer route user-level programs to that
-path without materializing the dense one-hot product.
+the dense recognizer and HIP backend route all supported user-level
+programs to that path without materializing the dense one-hot product.
 
 Acceptance must be structural, not an attempted 200 GB runtime probe:
 
-- C and HIP build output for an embedding/MoE-shaped Surf fixture must select a
-  bounded sparse gather/scatter kernel path.
+- C build output for an embedding/MoE-shaped Surf fixture must select the
+  bounded sparse gather/scatter path; HIP must do the same once its sparse
+  backend support exists.
 - The generated code must not allocate the dense `[N, V, D]`
   one-hot/materialized product buffer.
 - A small fixture is sufficient as long as emitted-code inspection proves
@@ -120,6 +116,6 @@ Builds the sparse IR DAG and asserts the gradient at the embedding
 table is `[3, 3, 0, 0]` for an all-zero indices stress case (3 tokens
 routed to vocab 0, 0 to vocab 1). The C backend also has a bounded
 emitted-code test and a compiled numerical sparse gather/scatter test.
-When Surf lowering and HIP sparse kernels land, these tests must remain
-green and new Surf-level structural tests should prove the dense
-`[N, V, D]` allocation is absent.
+Surf-level C structural tests now prove the host runtime call is absent;
+when HIP sparse kernels land, equivalent HIP structural/numerical tests
+should prove the dense `[N, V, D]` allocation is absent.

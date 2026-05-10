@@ -37,6 +37,12 @@ struct MatmulEmitSpec {
     k: DimExpr,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FusedInPlaceSpec {
+    reusable_input: NodeId,
+    slot_has_later_owner: bool,
+}
+
 impl CEmitter {
     /// Emit C source for an entire DAG as a function.
     pub fn emit_dag(dag: &Dag, func_name: &str) -> String {
@@ -222,10 +228,10 @@ impl CEmitter {
         fn is_anon(name: &str) -> bool {
             name.is_empty() || name == "*"
         }
-        fn rewrite_dim(dim: &DimInfo) -> DimInfo {
+        fn rewrite_dim(id: NodeId, axis: usize, dim: &DimInfo) -> DimInfo {
             match dim {
                 DimInfo::Named(name, size) if is_anon(name) => {
-                    DimInfo::Named("_anon_dim".to_string(), *size)
+                    DimInfo::Named(format!("_anon_dim_{}_{}", id.0, axis), *size)
                 }
                 other => other.clone(),
             }
@@ -244,7 +250,30 @@ impl CEmitter {
                     continue;
                 }
                 let mut new_ty = node.output_type.clone();
-                new_ty.dims = new_ty.dims.iter().map(rewrite_dim).collect();
+                if let RiscOp::Gather { axis } = &node.op
+                    && node.inputs.len() == 2
+                    && let (Some(values), Some(indices)) =
+                        (out.get(node.inputs[0]), out.get(node.inputs[1]))
+                    && *axis < values.output_type.dims.len()
+                {
+                    let mut dims = Vec::new();
+                    dims.extend_from_slice(&values.output_type.dims[..*axis]);
+                    dims.extend(indices.output_type.dims.iter().cloned());
+                    dims.extend_from_slice(&values.output_type.dims[*axis + 1..]);
+                    new_ty.dims = dims;
+                } else if let Some(first_input) =
+                    node.inputs.first().and_then(|input| out.get(*input))
+                    && first_input.output_type.dims.len() == new_ty.dims.len()
+                {
+                    new_ty.dims = first_input.output_type.dims.clone();
+                } else {
+                    new_ty.dims = new_ty
+                        .dims
+                        .iter()
+                        .enumerate()
+                        .map(|(axis, dim)| rewrite_dim(id, axis, dim))
+                        .collect();
+                }
                 let op = node.op.clone();
                 let inputs = node.inputs.clone();
                 out.replace_node(id, op, inputs, new_ty);
@@ -369,7 +398,12 @@ impl CEmitter {
             RiscOp::Cast { .. } => self.emit_cast(id, &node.inputs, &node.output_type),
             RiscOp::Store { name } => self.emit_store(id, name.as_str(), &node.inputs),
             RiscOp::FusedElem { ops } => {
-                self.emit_fused_elem(id, ops, &node.inputs, &node.output_type);
+                let in_place =
+                    Self::fused_in_place_spec(node, dag).map(|reusable_input| FusedInPlaceSpec {
+                        reusable_input,
+                        slot_has_later_owner: self.slot_has_later_owner(id, dag),
+                    });
+                self.emit_fused_elem(id, ops, &node.inputs, &node.output_type, in_place);
             }
             RiscOp::BlasMatmul {
                 batch_dims,
@@ -849,6 +883,88 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data);"
         ));
+    }
+
+    fn emit_fused_in_place_wrapper(&mut self, id: usize, ty: &TensorType, spec: FusedInPlaceSpec) {
+        let slot_id = self.slot_id_for_node(id);
+        let slot_is_first_owner = self.memory_plan.slot(slot_id).first_owner == NodeId(id);
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        if slot_is_first_owner {
+            self.line(&format!("chelis_tensor *chelis_slot{slot_id} = NULL;"));
+            if spec.slot_has_later_owner {
+                self.line(&format!(
+                    "chelis_slot{slot_id} = chelis_alloc({ndim}, {shape}, {dtype});"
+                ));
+            }
+        }
+        self.line(&format!("chelis_tensor *t{id};"));
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{})) {{",
+            spec.reusable_input.0
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{}->data);",
+            spec.reusable_input.0
+        ));
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        if slot_is_first_owner && !spec.slot_has_later_owner {
+            self.line(&format!(
+                "chelis_slot{slot_id} = chelis_alloc({ndim}, {shape}, {dtype});"
+            ));
+        }
+        self.line(&format!(
+            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data);"
+        ));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn slot_has_later_owner(&self, id: usize, dag: &Dag) -> bool {
+        let slot_id = self.slot_id_for_node(id);
+        dag.nodes()
+            .iter()
+            .skip(id + 1)
+            .any(|node| matches!(self.memory_plan.node_kind(node.id), NodeMemoryKind::SlotBacked { slot } if *slot == slot_id))
+    }
+
+    fn fused_in_place_spec(node: &DagNode, dag: &Dag) -> Option<NodeId> {
+        let reusable_input = node.reusable_input?;
+        if !matches!(node.op, RiscOp::FusedElem { .. }) {
+            return None;
+        }
+        if node
+            .inputs
+            .iter()
+            .filter(|&&input| input == reusable_input)
+            .count()
+            != 1
+        {
+            return None;
+        }
+        let input_node = dag.get(reusable_input)?;
+        if input_node.output_type != node.output_type {
+            return None;
+        }
+        let consumer_count = dag
+            .nodes()
+            .iter()
+            .flat_map(|candidate| candidate.inputs.iter())
+            .filter(|&&input| input == reusable_input)
+            .count()
+            + dag
+                .roots()
+                .iter()
+                .filter(|&&root| root == reusable_input)
+                .count();
+        if consumer_count != 1 {
+            return None;
+        }
+        Some(reusable_input)
     }
 
     // ---- Const ----
@@ -1401,8 +1517,13 @@ impl CEmitter {
         ops: &[FusedStep],
         inputs: &[NodeId],
         ty: &TensorType,
+        in_place: Option<FusedInPlaceSpec>,
     ) {
-        self.emit_slot_wrapper(id, ty);
+        if let Some(spec) = in_place {
+            self.emit_fused_in_place_wrapper(id, ty, spec);
+        } else {
+            self.emit_slot_wrapper(id, ty);
+        }
 
         // Build contiguity guard for all external inputs.
         let contiguity_cond: String = if inputs.is_empty() {
@@ -1418,12 +1539,22 @@ impl CEmitter {
         self.indent += 1;
 
         // Declare restrict pointers for each external input (used by all fast paths).
-        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        if in_place.is_some() {
+            self.line(&format!("float* __out_{id} = t{id}->data;"));
+        } else {
+            self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        }
         for (ext_idx, ext_node) in inputs.iter().enumerate() {
             let ext_id = ext_node.0;
-            self.line(&format!(
-                "const float* restrict __ext{ext_idx}_{id} = t{ext_id}->data;"
-            ));
+            if in_place.is_some_and(|spec| spec.reusable_input == *ext_node) {
+                self.line(&format!(
+                    "const float* __ext{ext_idx}_{id} = t{ext_id}->data;"
+                ));
+            } else {
+                self.line(&format!(
+                    "const float* restrict __ext{ext_idx}_{id} = t{ext_id}->data;"
+                ));
+            }
         }
 
         let use_sleef = self.math_lib == crate::MathLib::Sleef && Self::has_math_ops(ops);
@@ -1693,7 +1824,9 @@ impl CEmitter {
             "for (int t{id}_i = 0; t{id}_i < t{id}_index_count; t{id}_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int t{id}_g = (int)t{id}_indices_data[t{id}_i];"));
+        self.line(&format!(
+            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)t{id}_indices->data[t{id}_i];"
+        ));
         self.line(&format!(
             "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
         ));
@@ -1779,7 +1912,9 @@ impl CEmitter {
             "for (int t{id}_i = 0; t{id}_i < t{id}_index_count; t{id}_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int t{id}_g = (int)t{id}_indices_data[t{id}_i];"));
+        self.line(&format!(
+            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)t{id}_indices->data[t{id}_i];"
+        ));
         self.line(&format!(
             "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
         ));
@@ -3352,7 +3487,7 @@ mod tests {
     }
 
     #[test]
-    fn current_fused_reusable_input_keeps_non_in_place_restrict_shape() {
+    fn fused_elem_without_reusable_input_keeps_non_in_place_restrict_shape() {
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
@@ -3361,8 +3496,7 @@ mod tests {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
-        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
-        dag.set_reusable_input(fused, x);
+        dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
 
         let c = CEmitter::emit_dag(&dag, "test_fn");
 
@@ -3371,7 +3505,7 @@ mod tests {
         assert!(c.contains("const float* restrict __ext1_2 = t1->data;"));
         assert!(
             !c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t0->data);"),
-            "current C fused codegen must not silently claim in-place aliasing"
+            "C fused codegen must not claim in-place aliasing without reusable_input"
         );
     }
 
@@ -3404,7 +3538,7 @@ mod tests {
         assert!(c.contains("const double *t2_values_data = (const double*)t2_values->data;"));
         assert!(c.contains("const int32_t *t2_indices_data = (const int32_t*)t2_indices->data;"));
         assert!(c.contains("double *t2_out_data = (double*)t2->data;"));
-        assert!(c.contains("int t2_g = (int)t2_indices_data[t2_i];"));
+        assert!(c.contains("t2_indices->dtype == CHELIS_I64"));
         assert!(c.contains("t2_out_data[t2_out] = t2_values_data[t2_src];"));
     }
 
@@ -3445,7 +3579,7 @@ mod tests {
             !c.contains("128 * 50000 * 1024"),
             "sparse gather codegen must not compute dense embedding volume"
         );
-        assert!(c.contains("int t2_g = (int)t2_indices_data[t2_i];"));
+        assert!(c.contains("t2_indices->dtype == CHELIS_I64"));
     }
 
     #[test]
@@ -3542,7 +3676,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "target behavior: enable when C fused in-place codegen aliases reusable_input"]
     fn target_fused_in_place_restrict_shape_aliases_only_reusable_input() {
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
@@ -3560,6 +3693,35 @@ mod tests {
         assert!(c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t0->data);"));
         assert!(!c.contains("float* restrict __out_2 = t2->data;"));
         assert!(!c.contains("const float* restrict __ext0_2 = t0->data;"));
+        assert!(c.contains("float* __out_2 = t2->data;"));
+        assert!(c.contains("const float* __ext0_2 = t0->data;"));
+        assert!(c.contains("const float* restrict __ext1_2 = t1->data;"));
+    }
+
+    #[test]
+    fn fused_reusable_input_with_multiple_consumers_does_not_alias() {
+        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        dag.set_reusable_input(fused, x);
+        let other = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4), None);
+        dag.add_root(fused);
+        dag.add_root(other);
+
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(
+            !c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t0->data);"),
+            "multi-consumer reusable input must not be aliased in place"
+        );
+        assert!(c.contains("float* restrict __out_2 = t2->data;"));
+        assert!(c.contains("const float* restrict __ext0_2 = t0->data;"));
         assert!(c.contains("const float* restrict __ext1_2 = t1->data;"));
     }
 

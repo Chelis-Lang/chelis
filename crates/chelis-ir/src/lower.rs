@@ -1093,7 +1093,6 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "pad_sequences_to"
                         | "einsum"
                         | "split"
-                        | "gather"
                         | "scatter"
                         | "where"
                         | "cumsum"
@@ -3737,6 +3736,19 @@ impl LowerCtx {
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_matmul(&mut self.dag, a, b, &a_ty, &b_ty, parent_span.as_deref())
             }
+            "gather" if args.len() == 3 => {
+                let values = self.lower_expr_node(&args[0], "gather values");
+                let indices = self.lower_expr_node(&args[1], "gather indices");
+                let axis = self.extract_axis(&args[2]);
+                let out_ty = Self::gather_out_ty_from_inputs(&self.dag, values, indices, axis)
+                    .unwrap_or_else(|| ty.clone());
+                self.dag.add_node(
+                    RiscOp::Gather { axis },
+                    vec![values, indices],
+                    out_ty,
+                    self.current_span_id.clone(),
+                )
+            }
             "softmax" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "softmax input");
                 let axis = self.extract_axis(&args[1]);
@@ -4110,6 +4122,27 @@ impl LowerCtx {
             }
             _ => 0,
         }
+    }
+
+    fn gather_out_ty_from_inputs(
+        dag: &Dag,
+        values: NodeId,
+        indices: NodeId,
+        axis: usize,
+    ) -> Option<TensorType> {
+        let values_ty = &dag.get(values)?.output_type;
+        let indices_ty = &dag.get(indices)?.output_type;
+        if axis >= values_ty.dims.len() {
+            return None;
+        }
+        let mut dims = Vec::new();
+        dims.extend_from_slice(&values_ty.dims[..axis]);
+        dims.extend(indices_ty.dims.iter().cloned());
+        dims.extend_from_slice(&values_ty.dims[axis + 1..]);
+        Some(TensorType {
+            dims,
+            precision: values_ty.precision,
+        })
     }
 
     /// Extract a single usize value from an expression.
@@ -4964,6 +4997,36 @@ mod tests {
             .and_then(|id| dag.get(*id))
             .expect("lowered root node");
         assert_eq!(node.reusable_input, Some(NodeId(0)));
+    }
+
+    #[test]
+    fn lower_gather_uses_sparse_ir_node() {
+        let src = r#"
+            (def {} values
+              (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} values))
+            (def {} indices
+              (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices))
+            (def {} out
+              (app {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))}
+                   (var {} gather)
+                   (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} values)
+                   (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices)
+                   (lit {type: (t-prim {} int32)} 0)))
+        "#;
+        let dag = parse_and_lower(src);
+        let gather = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Gather { axis: 0 }))
+            .expect("Surf gather should lower to first-class sparse IR");
+        assert_eq!(
+            gather.output_type,
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            }
+        );
+        assert!(verify::verify(&dag).is_empty());
     }
 
     #[test]

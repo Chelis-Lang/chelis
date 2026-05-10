@@ -3835,6 +3835,29 @@ fn build_hip_rejects_pad_lowering_without_panic() {
 }
 
 #[test]
+fn build_hip_rejects_sparse_gather_with_specific_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("gather.ch");
+    write_file(
+        &path,
+        "def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "HIP sparse gather/scatter kernels are not implemented",
+        ))
+        .stderr(predicate::str::contains(
+            "Use the C backend (`--target c`) for sparse gather/scatter",
+        ));
+}
+
+#[test]
 fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
     let dir = tempdir().expect("tempdir");
     let out_dir = dir.path().join("nested/hip-output");

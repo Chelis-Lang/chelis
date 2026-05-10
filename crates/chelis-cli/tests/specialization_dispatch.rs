@@ -48,17 +48,16 @@
 //! | softmax     | §4.2 lowering: 4 allocs + 3+ scalar parallel-for loops | no |
 //! | layer_norm  | §4.4 lowering: 10+ allocs + many loops              | no |
 //! | scatter     | Generic `chelis_tensor_scatter()` runtime call      | no |
-//! | gather      | Generic `chelis_tensor_gather()` runtime call       | no |
+//! | gather      | First-class sparse C loop                           | partial |
 //!
 //! **Translation to the user's framing:**
 //!   * matmul gets the equivalent of "Tensor Cores + cuBLAS dispatch."
 //!   * softmax / layer_norm get the equivalent of "naive CUDA cores
 //!     reading from main memory" — no fused reduction, no online-softmax,
 //!     no SRAM tiling.
-//!   * scatter / gather get a generic runtime call — better than naive
-//!     scalar code (the runtime fn can be hand-tuned), but no
-//!     parallel-radix-sort-based scheme, no warp-aware kernel, no
-//!     dataframe-grade speed.
+//!   * scatter still gets a generic runtime call. Tensor-lane gather now
+//!     lowers to a first-class sparse C loop, which avoids dense one-hot
+//!     materialization but is not yet a GPU warp-aware/cuDF-style path.
 //!
 //! ## Implication for the cross-library AD claim — Coral specifically
 //!
@@ -130,6 +129,7 @@ struct Dispatch {
     allocs: usize,
     sgemm_calls: usize,
     runtime_call: bool,
+    sparse_gather_loop: bool,
     fused_kernels: usize,
     generic_loops: usize,
 }
@@ -174,6 +174,11 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
         || c.contains("chelis_tensor_where(")
         || c.contains("chelis_tensor_cumsum(")
         || c.contains("chelis_tensor_sort(");
+    let sparse_gather_loop = c.contains("indices_data")
+        && c.contains("values_data")
+        && c.contains("_out_data")
+        && c.contains("_g =")
+        && c.contains("CHELIS_I64");
     let fused_kernels = c.matches("parallel for simd").count();
     // Generic non-SIMD parallel-for loops (used for reductions etc.).
     let generic_loops = c.matches("\n    #pragma omp parallel for\n").count();
@@ -184,6 +189,7 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
         allocs,
         sgemm_calls,
         runtime_call,
+        sparse_gather_loop,
         fused_kernels,
         generic_loops,
     }
@@ -236,7 +242,9 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
     eprintln!(
         "  scatter    -> single chelis_tensor_scatter() runtime call (no parallel-radix-sort)"
     );
-    eprintln!("  gather     -> single chelis_tensor_gather() runtime call (no warp-aware path)");
+    eprintln!(
+        "  gather     -> first-class sparse C loop (no dense one-hot, no warp-aware GPU path)"
+    );
 
     // ---- Locked assertions ----
     //
@@ -293,11 +301,12 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
     );
 
     assert!(
-        g.runtime_call,
-        "gather must lower to a chelis_tensor_gather() runtime call. \
-         If this changes, the §3.5 lowering or a specialised gather \
-         recognizer shipped — update the test (and revisit \
-         spec/upstream-bugs/phase3h-gather-ad-incomplete.md)."
+        !g.runtime_call,
+        "tensor-lane gather must not fall back to chelis_tensor_gather() once sparse IR lowering is wired"
+    );
+    assert!(
+        g.sparse_gather_loop,
+        "tensor-lane gather must emit the bounded sparse C loop over indices/values/output"
     );
     assert_eq!(
         g.sgemm_calls, 0,

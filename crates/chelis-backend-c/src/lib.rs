@@ -1574,8 +1574,7 @@ int main(void) {{
                 "indices" => input_lines.push(
                     r#"int shape_indices[1] = { 3 };
     chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_I32);
-    int32_t *indices_data = (int32_t*)indices->data;
-    indices_data[0] = 0; indices_data[1] = 2; indices_data[2] = 0;
+    indices->data[0] = 0.0f; indices->data[1] = 2.0f; indices->data[2] = 0.0f;
     inputs[SLOT] = indices;"#
                         .replace("SLOT", &slot.to_string()),
                 ),

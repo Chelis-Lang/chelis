@@ -2585,7 +2585,6 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
                 | "pad_sequences_to"
                 | "concat"
                 | "split"
-                | "gather"
                 | "scatter"
                 | "where"
                 | "cumsum"
@@ -4924,9 +4923,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             )))),
             _ => Some(HostType::Unknown),
         },
-        "gather" | "scatter" | "where" | "cumsum" | "diagonal" | "trace" | "clamp" => {
-            arg_tys.first().cloned()
-        }
+        "scatter" | "where" | "cumsum" | "diagonal" | "trace" | "clamp" => arg_tys.first().cloned(),
         "sort" => match arg_tys.first() {
             Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tuple(vec![
                 HostType::Tensor(tensor_ty.clone()),

@@ -1,19 +1,21 @@
 # Sparse Gather / Scatter Specialization
 
-**Status:** Active implementation contract, with only the first IR/AD slice
-shipped in the current branch.
+**Status:** Active implementation contract. The current branch ships the
+first-class sparse IR/AD/C path and routes tensor-lane Surf `gather` directly
+to that sparse node. The dense §3.5 recognizer and HIP sparse codegen remain
+open.
 
 ## Current Branch Status
 
 The current branch adds first-class `RiscOp::Gather { axis }` and
 `RiscOp::ScatterAdd { axis }`, evaluator support, verifier coverage, C sparse
 codegen, compiler-API wire variants, and a gather AD test proving duplicate
-index accumulation through `ScatterAdd`.
+index accumulation through `ScatterAdd`. Tensor-lane Surf calls of the form
+`gather(values, indices, axis)` now lower directly to the first-class sparse
+node instead of the host runtime call.
 
 The following items remain open and must not be implied as complete:
 
-- Surf / host `gather` is not yet lowered through the Section 3.5 RISC
-  decomposition.
 - The dense Section 3.5 tag-tree recognizer is not yet implemented in the
   shared specialization pass.
 - HIP sparse gather/scatter codegen is not yet implemented; HIP compilation
@@ -22,9 +24,11 @@ The following items remain open and must not be implied as complete:
 - The large embedding emitted-code oracle below is still target behavior, not a
   shipped acceptance test.
 
-Until the recognizer ships, do not wire Surf `gather` to the dense lowering for
-large embedding/MoE shapes; doing so would reintroduce the `[N,V,D]`
-materialization trap this design is meant to avoid.
+Until the recognizer ships, do not wire Surf `gather` through the dense §3.5
+one-hot lowering for large embedding/MoE shapes; doing so would reintroduce the
+`[N,V,D]` materialization trap this design is meant to avoid. The direct
+first-class lowering is the bounded path for tensor-lane `gather` in this
+branch.
 
 ## Pass Order
 
@@ -93,5 +97,8 @@ rule and is not the semantics of `ScatterAdd`.
 - Current branch acceptance: a C generated-code fixture for an embedding lookup
   with `V=50000`, `D=1024`, `N=128` asserts no dense `[N,V,D]` allocation
   appears.
+- Current branch acceptance: CLI dispatch coverage proves Surf tensor-lane
+  `gather` no longer emits `chelis_tensor_gather()` and instead emits the
+  bounded sparse C loop.
 - Target acceptance: HIP sparse paths agree with the evaluator on small
   concrete examples.

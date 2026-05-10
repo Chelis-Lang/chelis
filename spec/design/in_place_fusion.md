@@ -1,8 +1,9 @@
 # In-Place Fusion
 
 **Status:** Active implementation contract. The current branch ships fusion
-metadata preservation and target-behavior tests; broad C/HIP in-place codegen
-remains open.
+metadata preservation plus C backend v1 in-place codegen for fused elementwise
+nodes with a proven `reusable_input`. HIP in-place codegen and broader op-level
+rewrites remain open.
 
 ## Pass Order
 
@@ -43,6 +44,15 @@ it only from the aliased input/output pointer. A future broadening of the
 closed list must add an emitted-code assertion for the expected alias/restrict
 shape.
 
+The shipped C v1 is intentionally narrower than the full closed-list design:
+it only fires for `RiscOp::FusedElem` nodes that already carry a
+`reusable_input` hint, where the hinted tensor has the same shape/dtype as the
+output and no other live reader. If the reusable input is contiguous, the output
+aliases that input. If the reusable input is not contiguous, C codegen falls
+back to slot-backed materialization so the view cannot write through a strided
+borrow. The backend keeps the ordinary out-of-place path when the hint is
+absent or unsafe.
+
 Elementwise fusion may preserve a `reusable_input` hint when every surviving
 hint in the fused chain names the same external input to the fused node.
 Fusion must drop the hint rather than choose between conflicting reusable
@@ -53,15 +63,22 @@ external inputs or an absorbed internal value.
 - A fusion test proves `reusable_input` survives fusion.
 - Current branch acceptance: fusion preserves an unambiguous external
   `reusable_input` hint and drops ambiguous hints.
-- Target acceptance: emitted-code tests prove in-place kernels do not drop
-  `restrict` from every pointer.
-- Target acceptance: C/HIP numerical tests compare backend output with evaluator
-  output on eligible and ineligible examples.
+- Current branch acceptance: C emitted-code tests prove in-place kernels do not
+  drop `restrict` from every pointer.
+- Current branch acceptance: a C compile/run test verifies contiguous inputs are
+  mutated in place and strided inputs fall back to a materialized output.
+- Target acceptance: HIP emitted-code and numerical tests compare backend output
+  with evaluator output on eligible and ineligible examples.
 
-Known target-behavior checks while broad C/HIP in-place codegen is still open:
+Current C acceptance commands:
 
 ```sh
-cargo test -p chelis-backend-c target_fused_in_place_restrict_shape_aliases_only_reusable_input -- --ignored
+cargo test -p chelis-backend-c fused_in_place -- --nocapture
+```
+
+Known target-behavior check while HIP in-place codegen is still open:
+
+```sh
 cargo test -p chelis-backend-hip target_fused_in_place_hip_restrict_shape_preserves_non_aliased_inputs -- --ignored
 ```
 

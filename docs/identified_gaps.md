@@ -51,9 +51,10 @@ calls for the probe; explicit copies materialize through tensor
 realization loops and participate in slot planning.
 
 **What closed it:** the direct C-backend port. It intentionally remains
-conservative for symbolic non-equality and out-of-place fused fan-in
-shapes; reducing the copy probe below four slots requires fan-in or
-in-place fusion, not just slot coloring.
+conservative for symbolic non-equality. Reducing the copy probe below four
+slots still requires broader fan-in fusion; the C backend now has a narrower
+in-place fused-elementwise path for single reusable inputs, but that does not
+yet cover the full copy-probe fan-in shape.
 
 **Spec coverage:**
 - `spec/design/phase1c_memory_planning.md` ships the planner *as
@@ -209,12 +210,14 @@ gradients accumulate through `ScatterAdd`, and generated C for first-class
 sparse nodes has both bounded-memory structural coverage and a compile/run
 numeric oracle.
 
-**Remaining observation:** Surf-level `gather` is still not lowered through
-the §3.5 dense decomposition, and the shared specialization substrate still
-does not recognize the dense `one_hot + expand + mul + sum` tree and replace
-it with sparse nodes before codegen. Programs that use Surf/host `gather`
-therefore still take the host/runtime path for that surface. The OOM trap is
-still real if the dense lowering ships without the recognizer.
+**Remaining observation:** tensor-lane Surf `gather` now lowers directly to
+the first-class sparse `RiscOp::Gather` node, so the old host/runtime path is
+no longer the tensor-lane behavior. What remains open is the spec's §3.5
+dense-decomposition route: the shared specialization substrate still does not
+recognize a dense `one_hot + expand + mul + sum` tree and replace it with
+sparse nodes before codegen. The OOM trap is still real if that dense lowering
+ships without the recognizer, and HIP still rejects sparse gather/scatter with
+an explicit diagnostic rather than emitting GPU kernels.
 
 **Why this is a gap:** the spec promises §3.5 lowering. When that
 lowering ships:
@@ -243,12 +246,12 @@ handles BLAS before DCE/codegen. No dense gather recognizer exists today.
 - `spec/design/chelis_phase3_plan.md` Phase 3h scope adds gather /
   scatter as core primitives and ships `Std.Nn.Embedding` as the
   named user-facing surface.
-- **Roadmap status conflict partially reduced:** first-class sparse IR and
-  C codegen now exist, but Phase 3h still should not be considered complete
-  for Surf-level differentiable `gather` until §3.5 lowering and the dense
-  recognizer ship together.
-- **Not fully addressed:** the joint requirement that the Surf §3.5 lowering
-  must ship paired with a scatter recognizer.
+- **Roadmap status conflict partially reduced:** first-class sparse IR,
+  tensor-lane Surf `gather` lowering, AD, and C codegen now exist, but Phase
+  3h still should not be considered complete until the dense §3.5 recognizer
+  and HIP sparse backend path ship.
+- **Not fully addressed:** the joint requirement that any dense §3.5 lowering
+  must ship paired with a scatter/gather recognizer.
 
 **Locked test:** `crates/chelis-ir/tests/grad_gather_contract.rs` —
 `gather_via_section_3_5_lowering_accumulates_duplicate_indices`.
@@ -258,11 +261,11 @@ proves the AD side will be correct by construction whenever §3.5
 ships; it does not prove the OOM trap is closed.
 
 **Required remaining M4 oracle:** closure must add the dense §3.5 recognizer
-and HIP sparse codegen, then prove both C and HIP build output for
-embedding/MoE-shaped Surf lowering do not allocate the dense `[N, V, D]`
-one-hot materialization. The C first-class sparse node path already has
+and HIP sparse codegen, then prove HIP build output for embedding/MoE-shaped
+Surf lowering does not allocate the dense `[N, V, D]` one-hot materialization.
+The C tensor-lane Surf path now lowers directly to first-class `Gather`, with
 bounded emitted-code and small compile/run numerical coverage; the remaining
-oracle is about the Surf lowering/recognizer path and HIP parity.
+oracle is about the dense recognizer path and HIP parity.
 
 **Probe corpus:** `examples/illustrative/moe_gather_duplicate_indices.ch`
 (single MoE-style routing block with deliberately duplicated indices).

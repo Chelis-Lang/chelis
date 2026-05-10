@@ -3445,6 +3445,8 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
             }
             _ => {}
         }
+    }
+    for node in dag.nodes() {
         match node.output_type.precision {
             chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
             other => {
