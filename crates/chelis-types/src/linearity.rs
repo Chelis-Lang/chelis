@@ -619,22 +619,45 @@ impl Checker {
     }
 
     fn read_or_error(&mut self, name: &str, expr: &Expr, scope: &LinearScope) {
-        if let Some(BindingState::Consumed(site)) = scope.top(name) {
-            self.errors.push(CheckError::new(
-                CheckErrorKind::UseAfterConsume,
-                with_macro_provenance(
-                    expr,
-                    format!(
-                        "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
-                        site.description,
-                        expr.span().offset
-                    ),
-                ),
-                vec![format!(
-                    "Insert `copy({name})` before the first consuming use if you need to reuse it"
-                )],
-            ));
+        let Some(BindingState::Consumed(site)) = scope.top(name) else {
+            return;
+        };
+        // Var-RHS let-bindings (`alias = x`) are aliasing consumes: at the
+        // IR level `lower_let` maps `alias` to the same NodeId as `x`
+        // (the `Load { name: "x" }` node), so the value is structurally
+        // shared, not destroyed. Per `spec/design/implicit_linearity.md`
+        // §"Copy Insertion" + "Borrows do not count as fan-out", later
+        // borrow-reads (mul, add, matmul, ...) of `x` must succeed: the
+        // DAG keeps `x` and `alias` pointing to the same source and the
+        // Copy-insertion pass at `crates/chelis-ir/src/lower.rs:364` only
+        // forks values reached by multiple `Realize | Drop | Store`
+        // consumers. Real consumes (realize/drop/store, app-arg,
+        // pipe-stage, closure capture, match scrutinee) remain hard
+        // errors here — once a value is truly gone, borrow-reads of it
+        // would alias freed storage at runtime.
+        //
+        // Discrimination is by site description, mirroring the pattern
+        // already used in `consume_var_expr` (lines 580-607). A typed
+        // `ConsumeKind { Aliasing, Structural }` refactor is a candidate
+        // §5 follow-up; see
+        // `docs/investigations/var_rhs_let_fanout_diagnosis.md`.
+        if site.description.starts_with("binding ") {
+            return;
         }
+        self.errors.push(CheckError::new(
+            CheckErrorKind::UseAfterConsume,
+            with_macro_provenance(
+                expr,
+                format!(
+                    "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
+                    site.description,
+                    expr.span().offset
+                ),
+            ),
+            vec![format!(
+                "Insert `copy({name})` before the first consuming use if you need to reuse it"
+            )],
+        ));
     }
 
     fn invalid_borrow(&mut self, expr: &Expr, message: &str) {
