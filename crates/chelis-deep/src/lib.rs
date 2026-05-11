@@ -12,4 +12,5 @@ pub mod span;
 pub mod validate;
 
 pub use ast::{Atom, Expr, List, MetaExpr, MetaMap};
+pub use lexer::LiteralSuffix;
 pub use span::Span;

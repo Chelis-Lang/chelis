@@ -1,4 +1,4 @@
-use chelis_deep::Span;
+use chelis_deep::{LiteralSuffix, Span};
 use thiserror::Error;
 
 use crate::token::{Token, TokenKind};
@@ -19,6 +19,68 @@ pub enum LexError {
 
     #[error("unterminated block comment starting at byte {offset}")]
     UnterminatedBlockComment { offset: usize },
+
+    /// `f8e4m3` suffix attached to a numeric literal per
+    /// `spec/04-type-system.md` §5.5: f8e4m3 is deferred (§1.1.1).
+    #[error(
+        "invalid literal suffix `f8e4m3` on `{literal}` at byte {offset}: \
+         f8e4m3 is deferred per spec/04-type-system.md §1.1.1"
+    )]
+    DeferredF8e4m3Suffix { literal: String, offset: usize },
+
+    /// Unsigned integer suffix attached to a numeric literal per
+    /// `spec/04-type-system.md` §5.5: unsigned integer types are out of
+    /// scope (§1.1.2).
+    #[error(
+        "invalid literal suffix `{suffix}` on `{literal}` at byte {offset}: \
+         unsigned integer types are out of scope per spec/04-type-system.md §1.1.2"
+    )]
+    UnsignedSuffix {
+        literal: String,
+        suffix: String,
+        offset: usize,
+    },
+
+    /// Integer-typed suffix on a float literal, per
+    /// `spec/04-type-system.md` §5.5: `1.0i8` is a parse error.
+    #[error(
+        "invalid literal suffix `{suffix}` on float literal `{literal}` at \
+         byte {offset}: integer suffixes attach to integer literals only \
+         (spec/04-type-system.md §5.5)"
+    )]
+    IntegerSuffixOnFloat {
+        literal: String,
+        suffix: String,
+        offset: usize,
+    },
+
+    /// Float-typed suffix on a hex integer literal, per
+    /// `spec/04-type-system.md` §5.5 hex-suffix rule.
+    #[error(
+        "invalid literal suffix `{suffix}` on hex integer literal `{literal}` \
+         at byte {offset}: hex literals cannot carry float-typed suffixes \
+         (spec/04-type-system.md §5.5); use `cast({literal}, {suffix})` or \
+         insert whitespace (`{literal} {suffix}`)"
+    )]
+    HexFloatSuffix {
+        literal: String,
+        suffix: String,
+        offset: usize,
+    },
+
+    /// Unrecognized identifier sequence directly adjacent to a numeric
+    /// literal, per `spec/04-type-system.md` §5.5.
+    #[error(
+        "unrecognized literal suffix `{suffix}` on `{literal}` at byte \
+         {offset}: only the closed set f32/f64/bf16/f16/i8/i16/i32/i64 is \
+         valid (spec/04-type-system.md §5.5); insert whitespace if the \
+         adjacency was unintentional"
+    )]
+    UnknownSuffix {
+        literal: String,
+        suffix: String,
+        offset: usize,
+    },
 }
 
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
@@ -470,8 +532,25 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
                         text: text.to_string(),
                         offset: start,
                     })?;
+                // Hex+float-suffix interaction per spec/04-type-system.md §5.5:
+                // because `f` is a hex digit, `0xFFf32` is consumed by the
+                // maximal-munch hex rule. Detect the user-intended pattern
+                // (hex digits ending in a recognized float-suffix tail) and
+                // emit the hex+float-suffix diagnostic.
+                if let Some((prefix, suffix_str)) = detect_hex_float_suffix_tail(&digits) {
+                    return Err(LexError::HexFloatSuffix {
+                        literal: format!("0x{prefix}"),
+                        suffix: suffix_str.to_string(),
+                        offset: start,
+                    });
+                }
+                let suffix = lex_literal_suffix(source, i, text, start, /* on_hex = */ true)?;
+                let kind = match suffix {
+                    None => TokenKind::Int(val),
+                    Some(s) => TokenKind::TypedInt(val, s),
+                };
                 return Ok(Token {
-                    kind: TokenKind::Int(val),
+                    kind,
                     span: Span::new(start, *i - start),
                 });
             }
@@ -488,8 +567,13 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
                     text: text.to_string(),
                     offset: start,
                 })?;
+                let suffix = lex_literal_suffix(source, i, text, start, /* on_hex = */ false)?;
+                let kind = match suffix {
+                    None => TokenKind::Int(val),
+                    Some(s) => TokenKind::TypedInt(val, s),
+                };
                 return Ok(Token {
-                    kind: TokenKind::Int(val),
+                    kind,
                     span: Span::new(start, *i - start),
                 });
             }
@@ -515,39 +599,148 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
         }
     }
 
-    // Check for exponent (e/E) -- makes it a float even without decimal point
+    // Check for exponent (e/E) -- makes it a float even without decimal point.
+    // Disambiguation vs. suffix: only treat `e`/`E` as exponent when
+    // followed (after optional sign) by at least one digit. `1e10f32` is
+    // exponent + suffix; a bare `1e` falls through to the suffix path.
     if *i < bytes.len() && (bytes[*i] == b'e' || bytes[*i] == b'E') {
-        is_float = true;
-        *i += 1;
-        if *i < bytes.len() && (bytes[*i] == b'+' || bytes[*i] == b'-') {
+        let probe = *i + 1;
+        let after_sign = if probe < bytes.len() && (bytes[probe] == b'+' || bytes[probe] == b'-') {
+            probe + 1
+        } else {
+            probe
+        };
+        if after_sign < bytes.len() && bytes[after_sign].is_ascii_digit() {
+            is_float = true;
             *i += 1;
-        }
-        while *i < bytes.len() && (bytes[*i].is_ascii_digit() || bytes[*i] == b'_') {
-            *i += 1;
+            if *i < bytes.len() && (bytes[*i] == b'+' || bytes[*i] == b'-') {
+                *i += 1;
+            }
+            while *i < bytes.len() && (bytes[*i].is_ascii_digit() || bytes[*i] == b'_') {
+                *i += 1;
+            }
         }
     }
 
     let text = &source[start..*i];
     let clean: String = text.chars().filter(|c| *c != '_').collect();
+    let suffix = lex_literal_suffix(source, i, text, start, /* on_hex = */ false)?;
     if is_float {
         let val: f64 = clean.parse().map_err(|_| LexError::InvalidNumber {
             text: text.to_string(),
             offset: start,
         })?;
-        Ok(Token {
-            kind: TokenKind::Float(val),
-            span: Span::new(start, *i - start),
-        })
+        if let Some(s) = suffix {
+            if s.is_integer() {
+                return Err(LexError::IntegerSuffixOnFloat {
+                    literal: text.to_string(),
+                    suffix: s.as_str().to_string(),
+                    offset: start,
+                });
+            }
+            Ok(Token {
+                kind: TokenKind::TypedFloat(val, s),
+                span: Span::new(start, *i - start),
+            })
+        } else {
+            Ok(Token {
+                kind: TokenKind::Float(val),
+                span: Span::new(start, *i - start),
+            })
+        }
     } else {
         let val: i64 = clean.parse().map_err(|_| LexError::InvalidNumber {
             text: text.to_string(),
             offset: start,
         })?;
+        let kind = match suffix {
+            None => TokenKind::Int(val),
+            Some(s) => TokenKind::TypedInt(val, s),
+        };
         Ok(Token {
-            kind: TokenKind::Int(val),
+            kind,
             span: Span::new(start, *i - start),
         })
     }
+}
+
+/// Detect whether a hex digit sequence (without the `0x` prefix) ends in
+/// a user-intended float-typed suffix. Returns `Some((prefix, suffix))`
+/// where `prefix` is the hex digits stripped of the suffix and `suffix`
+/// is the matched suffix string. Surfaces the hex+float-suffix
+/// diagnostic per `spec/04-type-system.md` §5.5 even after the
+/// maximal-munch hex rule has eaten the suffix as hex digits.
+fn detect_hex_float_suffix_tail(hex_digits: &str) -> Option<(&str, &str)> {
+    for suffix in ["bf16", "f32", "f64", "f16"] {
+        if hex_digits.len() > suffix.len() && hex_digits.ends_with(suffix) {
+            let prefix = &hex_digits[..hex_digits.len() - suffix.len()];
+            return Some((prefix, suffix));
+        }
+    }
+    None
+}
+
+/// Consume an optional literal suffix following the digit sequence per
+/// `spec/04-type-system.md` §5.5. Mirrors `chelis_deep::lexer`.
+fn lex_literal_suffix(
+    source: &str,
+    i: &mut usize,
+    literal_text: &str,
+    literal_offset: usize,
+    on_hex: bool,
+) -> Result<Option<LiteralSuffix>, LexError> {
+    let bytes = source.as_bytes();
+    if *i >= bytes.len() {
+        return Ok(None);
+    }
+    if !bytes[*i].is_ascii_alphabetic() {
+        return Ok(None);
+    }
+    let suffix_start = *i;
+    let mut probe = *i;
+    while probe < bytes.len() && bytes[probe].is_ascii_alphanumeric() {
+        probe += 1;
+    }
+    let suffix_text = &source[suffix_start..probe];
+    let suffix = match suffix_text {
+        "f32" => LiteralSuffix::F32,
+        "f64" => LiteralSuffix::F64,
+        "bf16" => LiteralSuffix::Bf16,
+        "f16" => LiteralSuffix::F16,
+        "i8" => LiteralSuffix::I8,
+        "i16" => LiteralSuffix::I16,
+        "i32" => LiteralSuffix::I32,
+        "i64" => LiteralSuffix::I64,
+        "f8e4m3" => {
+            return Err(LexError::DeferredF8e4m3Suffix {
+                literal: literal_text.to_string(),
+                offset: literal_offset,
+            });
+        }
+        "u8" | "u16" | "u32" | "u64" | "uint8" | "uint16" | "uint32" | "uint64" => {
+            return Err(LexError::UnsignedSuffix {
+                literal: literal_text.to_string(),
+                suffix: suffix_text.to_string(),
+                offset: literal_offset,
+            });
+        }
+        _ => {
+            return Err(LexError::UnknownSuffix {
+                literal: literal_text.to_string(),
+                suffix: suffix_text.to_string(),
+                offset: literal_offset,
+            });
+        }
+    };
+    if on_hex && suffix.is_float() {
+        return Err(LexError::HexFloatSuffix {
+            literal: literal_text.to_string(),
+            suffix: suffix.as_str().to_string(),
+            offset: literal_offset,
+        });
+    }
+    *i = probe;
+    Ok(Some(suffix))
 }
 
 #[cfg(test)]
@@ -995,6 +1188,150 @@ mod tests {
                 TokenKind::Dot,
                 TokenKind::Ident("foo".into()),
             ]
+        );
+    }
+
+    // --- WS-B1: literal suffix grammar (spec/02-surf-syntax.md §P10a /
+    // spec/04-type-system.md §5.5) ---
+
+    #[test]
+    fn typed_int_suffix_each_member_of_closed_set() {
+        assert_eq!(
+            lex_kinds("42i8 42i16 42i32 42i64"),
+            vec![
+                TokenKind::TypedInt(42, LiteralSuffix::I8),
+                TokenKind::TypedInt(42, LiteralSuffix::I16),
+                TokenKind::TypedInt(42, LiteralSuffix::I32),
+                TokenKind::TypedInt(42, LiteralSuffix::I64),
+            ]
+        );
+    }
+
+    #[test]
+    fn typed_float_suffix_each_member_of_closed_set() {
+        assert_eq!(
+            lex_kinds("1.0f32 1.0f64 1.0bf16 1.0f16"),
+            vec![
+                TokenKind::TypedFloat(1.0, LiteralSuffix::F32),
+                TokenKind::TypedFloat(1.0, LiteralSuffix::F64),
+                TokenKind::TypedFloat(1.0, LiteralSuffix::Bf16),
+                TokenKind::TypedFloat(1.0, LiteralSuffix::F16),
+            ]
+        );
+    }
+
+    #[test]
+    fn float_suffix_attaches_to_integer_literal() {
+        assert_eq!(
+            lex_kinds("42f32 42f64 42bf16 42f16"),
+            vec![
+                TokenKind::TypedInt(42, LiteralSuffix::F32),
+                TokenKind::TypedInt(42, LiteralSuffix::F64),
+                TokenKind::TypedInt(42, LiteralSuffix::Bf16),
+                TokenKind::TypedInt(42, LiteralSuffix::F16),
+            ]
+        );
+    }
+
+    #[test]
+    fn integer_suffix_on_float_is_lex_error() {
+        let err = lex("1.0i8").unwrap_err();
+        assert!(
+            matches!(err, LexError::IntegerSuffixOnFloat { ref suffix, .. } if suffix == "i8"),
+            "expected IntegerSuffixOnFloat, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn deferred_f8e4m3_suffix_is_lex_error() {
+        let err = lex("1.0f8e4m3").unwrap_err();
+        assert!(
+            matches!(err, LexError::DeferredF8e4m3Suffix { .. }),
+            "expected DeferredF8e4m3Suffix, got {err:?}"
+        );
+        // Diagnostic must mention deferral and §1.1.1 spec section.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("f8e4m3 is deferred") && msg.contains("§1.1.1"),
+            "diagnostic must cite §1.1.1 and contain 'f8e4m3 is deferred', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unsigned_suffix_is_lex_error() {
+        for src in ["42u8", "42u16", "42u32", "42u64"] {
+            let err = lex(src).unwrap_err();
+            assert!(
+                matches!(err, LexError::UnsignedSuffix { .. }),
+                "expected UnsignedSuffix for {src}, got {err:?}"
+            );
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("unsigned integer types are out of scope") && msg.contains("§1.1.2"),
+                "diagnostic must cite §1.1.2 and contain 'unsigned integer types are out of scope', got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_suffix_is_lex_error() {
+        let err = lex("1.0xyz").unwrap_err();
+        assert!(
+            matches!(err, LexError::UnknownSuffix { ref suffix, .. } if suffix == "xyz"),
+            "expected UnknownSuffix, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn hex_integer_suffix_typed_int() {
+        assert_eq!(
+            lex_kinds("0xFFi8 0xFFi32"),
+            vec![
+                TokenKind::TypedInt(0xFF, LiteralSuffix::I8),
+                TokenKind::TypedInt(0xFF, LiteralSuffix::I32),
+            ]
+        );
+    }
+
+    #[test]
+    fn hex_float_suffix_is_lex_error() {
+        let err = lex("0xFFf32").unwrap_err();
+        assert!(
+            matches!(err, LexError::HexFloatSuffix { ref suffix, .. } if suffix == "f32"),
+            "expected HexFloatSuffix, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("hex literals cannot carry float-typed suffixes"),
+            "diagnostic must explain hex+float-suffix rule, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn whitespace_before_suffix_is_two_tokens() {
+        assert_eq!(
+            lex_kinds("1.0 f32"),
+            vec![TokenKind::Float(1.0), TokenKind::Ident("f32".into()),]
+        );
+    }
+
+    #[test]
+    fn scientific_notation_with_float_suffix() {
+        assert_eq!(
+            lex_kinds("3.14e-2f32 1e10f64"),
+            vec![
+                TokenKind::TypedFloat(3.14e-2, LiteralSuffix::F32),
+                TokenKind::TypedFloat(1e10, LiteralSuffix::F64),
+            ]
+        );
+    }
+
+    #[test]
+    fn underscore_separated_typed_literal() {
+        // Underscores are still stripped before suffix parsing.
+        assert_eq!(
+            lex_kinds("1_000i64"),
+            vec![TokenKind::TypedInt(1000, LiteralSuffix::I64)]
         );
     }
 }

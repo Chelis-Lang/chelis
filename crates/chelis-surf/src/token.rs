@@ -1,3 +1,4 @@
+pub use chelis_deep::LiteralSuffix;
 use chelis_deep::Span;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +77,12 @@ pub enum TokenKind {
     // Literals
     Int(i64),
     Float(f64),
+    /// Numeric literal carrying an explicit precision suffix per
+    /// `spec/02-surf-syntax.md` §P10a / `spec/04-type-system.md` §5.5.
+    /// Emitted by the lexer when the suffix immediately follows the
+    /// digit sequence with no intervening whitespace.
+    TypedInt(i64, LiteralSuffix),
+    TypedFloat(f64, LiteralSuffix),
     Str(String),
     True,
     False,

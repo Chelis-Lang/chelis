@@ -162,6 +162,18 @@ impl<'a> Parser<'a> {
             TokenKind::Symbol(s) => Atom::Symbol(s.clone()),
             TokenKind::Int(n) => Atom::Int(*n),
             TokenKind::Float(f) => Atom::Float(*f),
+            // Typed-suffix literals (spec/03-deep-syntax.md §6.4.1): the
+            // producer-friendly shape `(lit {} 1.0f64)` is canonicalized
+            // into `(lit {type: (t-prim {} f64)} 1.0)`. When a typed
+            // suffix appears as a bare atom, expand it into a synthetic
+            // `(lit {type: ...} N)` list so the type checker sees the
+            // suffix as an explicit type ascription.
+            TokenKind::TypedInt(n, suffix) => {
+                return Ok(typed_literal_lit_expr(Atom::Int(*n), *suffix, span));
+            }
+            TokenKind::TypedFloat(f, suffix) => {
+                return Ok(typed_literal_lit_expr(Atom::Float(*f), *suffix, span));
+            }
             TokenKind::Str(s) => Atom::Str(s.clone()),
             TokenKind::Keyword(k) => Atom::Keyword(k.clone()),
             TokenKind::Bool(b) => Atom::Bool(*b),
@@ -384,10 +396,234 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Collapse the producer-friendly shape `(lit {meta} <typed-lit>)` (where
+/// `<typed-lit>` is the synthetic node created by `typed_literal_lit_expr`
+/// from a suffixed literal token) into the canonical
+/// `(lit {meta + type: ...} <value>)` form per `spec/03-deep-syntax.md`
+/// §6.4.1.
+///
+/// Errors when the outer `lit` already carries a `type` metadata key that
+/// disagrees with the suffix; the suffix is the user-facing intent and
+/// silent overwrite would violate the "no implicit precision promotion"
+/// rule.
+///
+/// Performance note: this is called only on `lit`-tagged lists (the
+/// caller pre-filters), so the per-call cost is bounded. Marked
+/// `#[inline(never)]` so the parse_list hot path keeps a small stack
+/// frame and the deep-recursion test (1000 nested apps) does not bloat.
+#[inline(never)]
+fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, ParseError> {
+    // Cheap pre-checks: must be exactly 3 elements, tag must be `lit`,
+    // child must itself be a synthetic typed-`lit` of the exact shape
+    // `typed_literal_lit_expr` produces.
+    if list.elements.len() != 3 {
+        return Ok(list);
+    }
+    let is_outer_lit = matches!(
+        &list.elements[0],
+        Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+    );
+    if !is_outer_lit {
+        return Ok(list);
+    }
+    let outer_is_map = matches!(&list.elements[1], Expr::Map(_, _));
+    if !outer_is_map {
+        return Ok(list);
+    }
+    let inner_list = match &list.elements[2] {
+        Expr::List(inner, _) => inner,
+        _ => return Ok(list),
+    };
+    if inner_list.elements.len() != 3 {
+        return Ok(list);
+    }
+    let inner_is_lit = matches!(
+        &inner_list.elements[0],
+        Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+    );
+    if !inner_is_lit {
+        return Ok(list);
+    }
+    let inner_meta = match &inner_list.elements[1] {
+        Expr::Map(m, _) => m,
+        _ => return Ok(list),
+    };
+    // Inner must carry exactly the synthetic single `type` key our
+    // `typed_literal_lit_expr` produces. Be conservative: only collapse
+    // when the inner meta is exactly one `type: (t-prim {} <prim>)` entry
+    // and the inner child is an `Atom::Int` or `Atom::Float`.
+    if inner_meta.entries.len() != 1 || inner_meta.entries[0].0 != "type" {
+        return Ok(list);
+    }
+    let inner_type_ok = matches!(
+        &inner_meta.entries[0].1,
+        Expr::List(t_prim_list, _)
+            if t_prim_list.elements.len() == 3
+                && matches!(
+                    &t_prim_list.elements[0],
+                    Expr::Atom(Atom::Symbol(s), _) if s == "t-prim"
+                )
+    );
+    if !inner_type_ok {
+        return Ok(list);
+    }
+    if !matches!(
+        &inner_list.elements[2],
+        Expr::Atom(Atom::Int(_) | Atom::Float(_), _)
+    ) {
+        return Ok(list);
+    }
+
+    // Committed to collapsing — destructure to take ownership without
+    // cloning the deep subtree.
+    let mut iter = list.elements.into_iter();
+    let outer_tag = iter.next().expect("checked above");
+    let outer_meta_expr = iter.next().expect("checked above");
+    let inner_expr = iter.next().expect("checked above");
+    let outer_meta = match outer_meta_expr {
+        Expr::Map(m, _) => m,
+        _ => unreachable!("checked above"),
+    };
+    let inner_list = match inner_expr {
+        Expr::List(l, _) => l,
+        _ => unreachable!("checked above"),
+    };
+    let mut inner_iter = inner_list.elements.into_iter();
+    let _inner_tag = inner_iter.next();
+    let inner_meta_expr = inner_iter.next();
+    let inner_value = inner_iter.next().expect("checked above");
+    let inner_meta = match inner_meta_expr {
+        Some(Expr::Map(m, _)) => m,
+        _ => unreachable!("checked above"),
+    };
+    let inner_type_owned = inner_meta
+        .entries
+        .into_iter()
+        .next()
+        .expect("checked above")
+        .1;
+
+    // If the outer already declares a `type`, it must match the inner
+    // synthetic type exactly. A mismatch is a parse error per the
+    // no-implicit-promotion rule.
+    if let Some((_, outer_type_expr)) = outer_meta.entries.iter().find(|(k, _)| k == "type") {
+        if *outer_type_expr != inner_type_owned {
+            return Err(ParseError::Expected {
+                expected: "consistent literal type (outer `lit` declares one type but \
+                     inner suffix declares another); see spec/03-deep-syntax.md §6.4.1"
+                    .to_string(),
+                found: "conflicting type metadata in nested `lit`".to_string(),
+                offset: span.offset,
+            });
+        }
+        // Outer already has a matching type entry; just unwrap.
+        return Ok(List {
+            elements: vec![outer_tag, Expr::Map(outer_meta, span), inner_value],
+        });
+    }
+    // Merge: extend outer entries with the synthetic `type` entry.
+    let mut merged_entries = outer_meta.entries;
+    merged_entries.push(("type".to_string(), inner_type_owned));
+    Ok(List {
+        elements: vec![
+            outer_tag,
+            Expr::Map(
+                MetaMap {
+                    entries: merged_entries,
+                },
+                span,
+            ),
+            inner_value,
+        ],
+    })
+}
+
+/// Build the canonical Deep `lit`-with-type-metadata expression for a
+/// suffixed literal token per `spec/03-deep-syntax.md` §6.4.1. The
+/// producer-friendly bare `1.0f64` token expands into
+/// `(lit {type: (t-prim {} f64)} 1.0)` so the type checker sees the
+/// suffix as an explicit type ascription.
+fn typed_literal_lit_expr(value: Atom, suffix: lexer::LiteralSuffix, span: crate::Span) -> Expr {
+    let prim_name = suffix.t_prim_name();
+    // (t-prim {} <prim_name>)
+    let t_prim = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("t-prim".to_string()), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Symbol(prim_name.to_string()), span),
+            ],
+        },
+        span,
+    );
+    let meta = Expr::Map(
+        MetaMap {
+            entries: vec![("type".to_string(), t_prim)],
+        },
+        span,
+    );
+    // (lit {type: (t-prim {} <prim_name>)} <value>)
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("lit".to_string()), span),
+                meta,
+                Expr::Atom(value, span),
+            ],
+        },
+        span,
+    )
+}
+
+/// Walk the parsed tree and apply `collapse_typed_literal_lit` to every
+/// `lit`-tagged list. Done as a post-pass so it does not bloat the
+/// `parse_list` stack frame on the deep-recursion hot path.
+fn normalize_typed_literals(exprs: &mut [Expr]) -> Result<(), ParseError> {
+    for expr in exprs {
+        normalize_typed_literals_in_expr(expr)?;
+    }
+    Ok(())
+}
+
+fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
+    if let Expr::List(list, span) = expr {
+        // Recurse first so nested forms are normalized before the parent
+        // checks for the (lit {} (lit {type:...} N)) shape.
+        normalize_typed_literals(&mut list.elements)?;
+        let needs_collapse = list.elements.len() == 3
+            && matches!(
+                &list.elements[0],
+                Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+            );
+        if needs_collapse {
+            let span_copy = *span;
+            let taken = std::mem::replace(
+                list,
+                List {
+                    elements: Vec::new(),
+                },
+            );
+            *list = collapse_typed_literal_lit(taken, span_copy)?;
+        }
+    } else if let Expr::Map(map, _) = expr {
+        for (_, v) in &mut map.entries {
+            normalize_typed_literals_in_expr(v)?;
+        }
+    } else if let Expr::MetaExpr(me, _) = expr {
+        normalize_typed_literals_in_expr(&mut me.expr)?;
+        for (_, v) in &mut me.entries {
+            normalize_typed_literals_in_expr(v)?;
+        }
+    }
+    Ok(())
+}
+
 /// Parse a token stream into a list of expressions.
 pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
     let mut parser = Parser::new(tokens);
-    parser.parse_exprs()
+    let mut exprs = parser.parse_exprs()?;
+    normalize_typed_literals(&mut exprs)?;
+    Ok(exprs)
 }
 
 /// Convenience: lex and parse a source string in one step.
