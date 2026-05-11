@@ -656,6 +656,281 @@ fn well_typed_surface_does_not_emit_reserved_classes() {
 }
 
 // =========================================================================
+// Wave 6 Task A — BLAS rejection diagnostics through the Surf surface.
+//
+// Mirrors the sparse-side rejection tests above. Six BLAS-prefixed
+// `SummaryRejectionClass` variants — only the ones reachable through
+// the Surf user-def matmul-helper path are exercised here; the IR-
+// level companion `crates/chelis-ir/tests/host_blas_summary_diagnostics.rs`
+// drives the synthetic-DAG-only cases (`BlasMultipleRoots`,
+// `BlasNotMatmulPattern` subcase B, `BlasNonLoadOperand` via Const,
+// `BlasInputPrecisionMismatch` via mismatched Load precision,
+// `BlasDimensionBindingFailure` via unbound symbolic dims).
+//
+// Surface-reachable here:
+//   * `BlasOutputPrecisionMismatch` — `def my_mm(a: ..f64, b: ..f64)
+//     -> ..f64 = matmul(a, b)` — the W5 P0 silent rejection is now
+//     diagnosed.
+//
+// Surf-blocked at typecheck (and therefore tested only at the IR
+// level):
+//   * F32 lhs × Int32 rhs matmul → blocked by
+//     `check_matmul_signature` (precision mismatch error).
+//   * Hand-built multi-root BLAS DAG → no Surf source produces it.
+//
+// No false positive on accepted F32 matmul: covered below.
+// =========================================================================
+
+#[test]
+fn surface_f64_matmul_helper_emits_blas_output_precision_mismatch_rejection() {
+    // F64 user-`def` matmul helper. The W5 P0 fix kept this off the
+    // `RiscOp::BlasMatmul` path silently; W6 Task A upgrades that
+    // silence to a structured rejection.
+    let source = "def my_mm(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
+                  -> tensor[8, 4, f64] = matmul(a, b)\n\
+                  def f(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
+                  -> tensor[8, 4, f64] = my_mm(a, b)\n";
+    let rejections = rejections_for_source(source);
+
+    // At least one BLAS-precision rejection MUST fire for the F64
+    // helper. (Multiple helpers may register rejections — the inner
+    // `my_mm` and the outer `f` both lower through helper paths.)
+    let blas_rejections: Vec<&SummaryRejection> = rejections
+        .iter()
+        .filter(|r| r.rejection_class == SummaryRejectionClass::BlasOutputPrecisionMismatch)
+        .collect();
+    assert!(
+        !blas_rejections.is_empty(),
+        "F64 matmul helper MUST emit at least one BlasOutputPrecisionMismatch \
+         rejection — W5 P0 silent rejection is now diagnosed. \
+         Got rejections: {rejections:#?}",
+    );
+    let rejection = blas_rejections[0];
+
+    let SummaryRejectionDetail::BlasOutputPrecisionMismatch { observed } = &rejection.detail else {
+        panic!(
+            "expected SummaryRejectionDetail::BlasOutputPrecisionMismatch, got {:?}",
+            rejection.detail,
+        );
+    };
+    assert_eq!(*observed, Prim::F64);
+}
+
+#[test]
+fn surface_f64_matmul_rejection_carries_surf_span_when_available() {
+    // The surface-driven F64 helper's rejection must carry a
+    // surf-prefixed span on at least one of callsite_span /
+    // helper_body_span. Locks the same contract the sparse-side
+    // tests assert in this file (W4-A) — the BLAS path also
+    // propagates Surf spans through the rejection.
+    let source = "def my_mm(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
+                  -> tensor[8, 4, f64] = matmul(a, b)\n\
+                  def f(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
+                  -> tensor[8, 4, f64] = my_mm(a, b)\n";
+    let rejections = rejections_for_source(source);
+    let rejection = rejections
+        .iter()
+        .find(|r| r.rejection_class == SummaryRejectionClass::BlasOutputPrecisionMismatch)
+        .expect("must emit BlasOutputPrecisionMismatch for F64 helper");
+    let has_surf_span = rejection
+        .callsite_span
+        .as_deref()
+        .is_some_and(|s| s.starts_with("surf:"))
+        || rejection
+            .helper_body_span
+            .as_deref()
+            .is_some_and(|s| s.starts_with("surf:"));
+    assert!(
+        has_surf_span,
+        "surface-driven BLAS rejection must carry at least one surf-prefixed span; \
+         got callsite={:?}, body={:?}",
+        rejection.callsite_span, rejection.helper_body_span,
+    );
+}
+
+#[test]
+fn surface_f64_matmul_rejection_carries_helper_def_name() {
+    // Same source as above; locks that the helper_path.def_name
+    // names the F64 def (`my_mm`), mirroring the sparse-side
+    // `rejection_carries_helper_def_name` test above.
+    let source = "def my_mm(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
+                  -> tensor[8, 4, f64] = matmul(a, b)\n\
+                  def f(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
+                  -> tensor[8, 4, f64] = my_mm(a, b)\n";
+    let rejections = rejections_for_source(source);
+    // Find the rejection on def `my_mm` (the F64 helper). Some
+    // surfaces also register a rejection on the caller `f` — we
+    // care that `my_mm` itself is named.
+    let my_mm_rejection = rejections
+        .iter()
+        .find(|r| {
+            r.rejection_class == SummaryRejectionClass::BlasOutputPrecisionMismatch
+                && r.helper_path.def_name.ends_with("my_mm")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a BlasOutputPrecisionMismatch rejection on def `my_mm`; \
+             got rejections: {rejections:#?}",
+            )
+        });
+    assert_eq!(my_mm_rejection.helper_path.module, None);
+    assert!(
+        my_mm_rejection.helper_path.def_name.ends_with("my_mm"),
+        "helper_path.def_name must name `my_mm`; got {:?}",
+        my_mm_rejection.helper_path.def_name,
+    );
+}
+
+#[test]
+fn surface_f32_matmul_helper_emits_no_blas_rejection() {
+    // No false positive: a well-typed F32 matmul helper must NOT
+    // emit a BLAS rejection (it summarizes via the BlasMatmul path).
+    let source = "def my_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
+                  -> tensor[8, 4, f32] = matmul(a, b)\n\
+                  def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
+                  -> tensor[8, 4, f32] = my_mm(a, b)\n";
+    let rejections = rejections_for_source(source);
+    for r in &rejections {
+        assert!(
+            !matches!(
+                r.rejection_class,
+                SummaryRejectionClass::BlasMultipleRoots
+                    | SummaryRejectionClass::BlasOutputPrecisionMismatch
+                    | SummaryRejectionClass::BlasNotMatmulPattern
+                    | SummaryRejectionClass::BlasNonLoadOperand
+                    | SummaryRejectionClass::BlasInputPrecisionMismatch
+                    | SummaryRejectionClass::BlasDimensionBindingFailure
+            ),
+            "F32 matmul helper must NOT emit any Blas* rejection; got {r:?}",
+        );
+    }
+}
+
+#[test]
+fn surface_elementwise_helper_emits_no_blas_rejection() {
+    // Negative: a non-matmul elementwise helper must NOT trigger
+    // any BLAS rejection (no false positive on the
+    // not-matmul-near path).
+    let source = "def my_add(a: tensor[4, 4, f64], b: tensor[4, 4, f64]) \
+                  -> tensor[4, 4, f64] = add(a, b)\n\
+                  def f(a: tensor[4, 4, f64], b: tensor[4, 4, f64]) \
+                  -> tensor[4, 4, f64] = my_add(a, b)\n";
+    let rejections = rejections_for_source(source);
+    for r in &rejections {
+        assert!(
+            !matches!(
+                r.rejection_class,
+                SummaryRejectionClass::BlasMultipleRoots
+                    | SummaryRejectionClass::BlasOutputPrecisionMismatch
+                    | SummaryRejectionClass::BlasNotMatmulPattern
+                    | SummaryRejectionClass::BlasNonLoadOperand
+                    | SummaryRejectionClass::BlasInputPrecisionMismatch
+                    | SummaryRejectionClass::BlasDimensionBindingFailure
+            ),
+            "F64 elementwise helper (not matmul-near) must NOT emit any Blas* rejection; \
+             got {r:?}",
+        );
+    }
+}
+
+#[test]
+fn surface_f64_matmul_rejection_display_mentions_blas_precision() {
+    // Supplemental Display surface check — not the matchable
+    // contract. Mirrors `rejection_display_mentions_helper_and_class`
+    // for the BLAS path.
+    let source = "def my_mm(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
+                  -> tensor[8, 4, f64] = matmul(a, b)\n\
+                  def f(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
+                  -> tensor[8, 4, f64] = my_mm(a, b)\n";
+    let rejections = rejections_for_source(source);
+    let rejection = rejections
+        .iter()
+        .find(|r| r.rejection_class == SummaryRejectionClass::BlasOutputPrecisionMismatch)
+        .expect("must emit BlasOutputPrecisionMismatch for F64 helper");
+    let rendered = rejection.to_string();
+    assert!(
+        rendered.contains("blas-output-precision-mismatch"),
+        "Display must include the BLAS rejection-class kebab-case name; got {rendered}",
+    );
+}
+
+#[test]
+fn six_blas_rejection_classes_have_distinct_variants() {
+    // Compile-time-checked: all six BLAS variants are distinct from
+    // each other AND distinct from the seven sparse variants.
+    // Mirrors `all_seven_rejection_classes_have_distinct_variants`.
+    let blas = [
+        SummaryRejectionClass::BlasMultipleRoots,
+        SummaryRejectionClass::BlasOutputPrecisionMismatch,
+        SummaryRejectionClass::BlasNotMatmulPattern,
+        SummaryRejectionClass::BlasNonLoadOperand,
+        SummaryRejectionClass::BlasInputPrecisionMismatch,
+        SummaryRejectionClass::BlasDimensionBindingFailure,
+    ];
+    for i in 0..blas.len() {
+        for j in (i + 1)..blas.len() {
+            assert_ne!(
+                blas[i], blas[j],
+                "BLAS variants {i} and {j} compared equal — must be distinct",
+            );
+        }
+    }
+    let sparse = [
+        SummaryRejectionClass::MultipleRoots,
+        SummaryRejectionClass::MultipleReturnPaths,
+        SummaryRejectionClass::NonLoadOperand,
+        SummaryRejectionClass::PostProcessingAfterSparseOp,
+        SummaryRejectionClass::IndicesDTypeMismatch,
+        SummaryRejectionClass::PayloadDTypeMismatch,
+        SummaryRejectionClass::WildcardDim,
+    ];
+    for b in &blas {
+        for s in &sparse {
+            assert_ne!(
+                b, s,
+                "BLAS variant {b:?} must NOT collapse onto sparse {s:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn six_blas_rejection_classes_have_distinct_display() {
+    // Locks the Display strings; downstream tooling that filters
+    // diagnostics by string class name (a non-contract surface)
+    // gets stable values.
+    let pairs = [
+        (
+            SummaryRejectionClass::BlasMultipleRoots,
+            "blas-multiple-roots",
+        ),
+        (
+            SummaryRejectionClass::BlasOutputPrecisionMismatch,
+            "blas-output-precision-mismatch",
+        ),
+        (
+            SummaryRejectionClass::BlasNotMatmulPattern,
+            "blas-not-matmul-pattern",
+        ),
+        (
+            SummaryRejectionClass::BlasNonLoadOperand,
+            "blas-non-load-operand",
+        ),
+        (
+            SummaryRejectionClass::BlasInputPrecisionMismatch,
+            "blas-input-precision-mismatch",
+        ),
+        (
+            SummaryRejectionClass::BlasDimensionBindingFailure,
+            "blas-dimension-binding-failure",
+        ),
+    ];
+    for (class, expected) in &pairs {
+        assert_eq!(class.to_string(), *expected);
+    }
+}
+
+// =========================================================================
 // Dead-code reachability — keep `Prim` used so the import does not warn.
 // =========================================================================
 
