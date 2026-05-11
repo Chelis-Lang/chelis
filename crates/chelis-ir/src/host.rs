@@ -353,6 +353,54 @@ pub enum SummaryRejectionClass {
     /// mismatches through `NonLoadOperand` (the type-equality check on
     /// the Load op fails); reserved for future explicit rank checks.
     RankMismatch,
+    // ---------------------------------------------------------------
+    // W6 Task A — BLAS-recognizer rejection classes.
+    //
+    // The BLAS recognizer (`try_summarize_blas_helper` in
+    // `crates/chelis-ir/src/host.rs`) exposes six structural failure
+    // points where a helper-DAG that *almost* matched
+    // `RiscOp::BlasMatmul` was rejected. Each is a distinct
+    // BLAS-prefixed variant: the source recognizer is encoded in the
+    // variant name so tooling pattern-matching on the enum sees both
+    // "what shape failed" and "which recognizer rejected it" without
+    // needing to inspect an out-of-band recognizer-identity tag.
+    //
+    // The variant names are NOT collapsed with the sparse-named
+    // equivalents (`MultipleRoots`, `NonLoadOperand`) even though the
+    // detail payload shapes coincide today; future divergence is
+    // cheap to absorb when each path owns its own variant.
+    // ---------------------------------------------------------------
+    /// BLAS helper DAG (post-specialize) has more than one root.
+    /// Mirrors `MultipleRoots` for sparse helpers but identifies the
+    /// BLAS recognizer as the source.
+    BlasMultipleRoots,
+    /// BLAS helper's declared output precision is not `f32`. Today
+    /// the recognizer requires `f32` output for the BlasMatmul
+    /// path; non-`f32` outputs (e.g. an `f64` matmul helper) silently
+    /// skipped through `Option::None` before W6 — now they are
+    /// diagnosed.
+    BlasOutputPrecisionMismatch,
+    /// The helper's specialized DAG root is not `RiscOp::BlasMatmul`,
+    /// so the recognizer could not extract `batch_dims`, `m`, `n`,
+    /// `k`. Includes both the "root op is unrelated" case and the
+    /// "root op shape doesn't match BlasMatmul's expected operand
+    /// count / output precision" rejection.
+    BlasNotMatmulPattern,
+    /// One of the matmul operands is not a direct `RiscOp::Load` of a
+    /// helper input. Mirrors `NonLoadOperand` for sparse helpers but
+    /// identifies the BLAS recognizer as the source.
+    BlasNonLoadOperand,
+    /// At least one of the helper's input tensors has precision other
+    /// than `f32`. Today the recognizer requires every helper input to
+    /// be `f32`; mixed-precision inputs (e.g. an `f32 @ int8` quantized
+    /// matmul helper) silently skipped before W6.
+    BlasInputPrecisionMismatch,
+    /// One of `batch_dims`, `m`, `n`, `k` could not be bound to any
+    /// helper input dim by name. The recognizer requires every
+    /// matmul-derived dim symbol to appear on at least one input
+    /// tensor type's dim list; an unbindable dim means the helper
+    /// signature does not name its own contraction axes.
+    BlasDimensionBindingFailure,
 }
 
 impl fmt::Display for SummaryRejectionClass {
@@ -368,6 +416,12 @@ impl fmt::Display for SummaryRejectionClass {
             SummaryRejectionClass::UnrecognizedShape => "unrecognized-shape",
             SummaryRejectionClass::NonContiguousLayout => "non-contiguous-layout",
             SummaryRejectionClass::RankMismatch => "rank-mismatch",
+            SummaryRejectionClass::BlasMultipleRoots => "blas-multiple-roots",
+            SummaryRejectionClass::BlasOutputPrecisionMismatch => "blas-output-precision-mismatch",
+            SummaryRejectionClass::BlasNotMatmulPattern => "blas-not-matmul-pattern",
+            SummaryRejectionClass::BlasNonLoadOperand => "blas-non-load-operand",
+            SummaryRejectionClass::BlasInputPrecisionMismatch => "blas-input-precision-mismatch",
+            SummaryRejectionClass::BlasDimensionBindingFailure => "blas-dimension-binding-failure",
         };
         f.write_str(s)
     }
@@ -430,6 +484,75 @@ pub enum SummaryRejectionDetail {
     /// NonContiguousLayout, RankMismatch). Carries no structured
     /// information today.
     Reserved,
+    // ---------------------------------------------------------------
+    // W6 Task A — BLAS-recognizer detail payloads.
+    //
+    // Each variant mirrors a `SummaryRejectionClass::Blas*` variant.
+    // The payloads name the observed-precision / failing-dim values
+    // so tooling can distinguish e.g. "f64 helper rejected" from
+    // "int32 helper rejected" without re-running the recognizer.
+    // ---------------------------------------------------------------
+    BlasMultipleRoots {
+        /// Number of DAG roots observed in the helper's
+        /// post-specialize body.
+        root_count: usize,
+    },
+    BlasOutputPrecisionMismatch {
+        /// Helper's declared output precision (the one that disagreed
+        /// with the recognizer's required `f32`).
+        observed: Prim,
+    },
+    BlasNotMatmulPattern {
+        /// Snake-case canonical name of the root op the recognizer
+        /// observed in place of `BlasMatmul` (e.g. `"add"`,
+        /// `"reshape"`, or `"<other>"` for ops outside the canonical
+        /// name whitelist). When the root IS `BlasMatmul` but its
+        /// rank/precision doesn't match (e.g. wrong input count or
+        /// non-`f32` matmul output), `tail_op` is `"blas_matmul"` and
+        /// the caller still sees this variant.
+        tail_op: String,
+    },
+    BlasNonLoadOperand {
+        /// Positional index of the operand that was not a direct
+        /// `Load` (0 = lhs, 1 = rhs).
+        operand_index: usize,
+    },
+    BlasInputPrecisionMismatch {
+        /// Positional index of the helper input whose precision was
+        /// not `f32`.
+        input_index: usize,
+        /// Observed precision on the mismatching helper input.
+        observed: Prim,
+    },
+    BlasDimensionBindingFailure {
+        /// Symbolic role of the dim that could not be bound: one of
+        /// `"batch"`, `"m"`, `"n"`, or `"k"`. The recognizer reports
+        /// the first failing role.
+        role: BlasDimRole,
+    },
+}
+
+/// Which matmul dim symbol failed to bind to any helper input in the
+/// `BlasDimensionBindingFailure` rejection. The four roles match the
+/// `HostBlasMatmulSummary` field layout (`batch_dims`, `m`, `n`, `k`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlasDimRole {
+    Batch,
+    M,
+    N,
+    K,
+}
+
+impl fmt::Display for BlasDimRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            BlasDimRole::Batch => "batch",
+            BlasDimRole::M => "m",
+            BlasDimRole::N => "n",
+            BlasDimRole::K => "k",
+        };
+        f.write_str(s)
+    }
 }
 
 impl fmt::Display for SummaryRejectionDetail {
@@ -467,6 +590,31 @@ impl fmt::Display for SummaryRejectionDetail {
                 write!(f, "wildcard dim on helper {location}")
             }
             SummaryRejectionDetail::Reserved => f.write_str("<reserved>"),
+            SummaryRejectionDetail::BlasMultipleRoots { root_count } => {
+                write!(f, "{root_count} DAG roots in BLAS helper body")
+            }
+            SummaryRejectionDetail::BlasOutputPrecisionMismatch { observed } => {
+                write!(f, "BLAS matmul output precision {observed:?} is not f32")
+            }
+            SummaryRejectionDetail::BlasNotMatmulPattern { tail_op } => write!(
+                f,
+                "BLAS helper root op `{tail_op}` does not match the BlasMatmul pattern"
+            ),
+            SummaryRejectionDetail::BlasNonLoadOperand { operand_index } => write!(
+                f,
+                "BLAS matmul operand[{operand_index}] is not a direct load of a helper input"
+            ),
+            SummaryRejectionDetail::BlasInputPrecisionMismatch {
+                input_index,
+                observed,
+            } => write!(
+                f,
+                "BLAS helper input[{input_index}] precision {observed:?} is not f32"
+            ),
+            SummaryRejectionDetail::BlasDimensionBindingFailure { role } => write!(
+                f,
+                "BLAS matmul dim `{role}` could not be bound to any helper input"
+            ),
         }
     }
 }
@@ -1967,16 +2115,41 @@ fn finish_tensor_helper_call(
             Err(SparseSummaryAttempt::NotEligible) => (None, None),
             Err(SparseSummaryAttempt::Rejected(rejection)) => (None, Some(rejection)),
         };
-    let specialization = summarize_blas_helper_from_parts(&dag, &inputs, &output)
-        .map(HostTensorSpecialization::BlasMatmul)
-        .or(sparse_specialization);
+    // W6 Task A — drive the BLAS recognizer through the structured
+    // entry point so a BLAS-near rejection threads through to
+    // `summary_rejection` as a `Blas*` `SummaryRejection` (rather
+    // than the prior silent `Option::None` drop).
+    let (blas_specialization, blas_rejection) =
+        match try_summarize_blas_helper(&dag, &inputs, &output) {
+            Ok(spec) => (Some(HostTensorSpecialization::BlasMatmul(spec)), None),
+            Err(BlasSummaryAttempt::NotEligible) => (None, None),
+            Err(BlasSummaryAttempt::Rejected(rejection)) => (None, Some(rejection)),
+        };
+    let specialization = blas_specialization.or(sparse_specialization);
+    // Reconcile sparse vs BLAS rejections:
+    //
+    //   * If either recognizer accepted the helper, no rejection
+    //     should be reported on this helper (the specialization
+    //     takes over).
+    //   * If sparse rejected, the helper body had a sparse op —
+    //     that's the more specific signal; report the sparse
+    //     rejection.
+    //   * If sparse said NotEligible (no sparse op anywhere) and
+    //     BLAS rejected, report the BLAS rejection.
+    //   * If neither recognizer reached the rejection arm
+    //     (both NotEligible), report nothing.
+    let summary_rejection = if specialization.is_some() {
+        None
+    } else {
+        sparse_rejection.or(blas_rejection)
+    };
     tensor_helpers.push(HostTensorHelper {
         name: helper_name,
         dag,
         inputs,
         output,
         specialization,
-        summary_rejection: sparse_rejection,
+        summary_rejection,
     });
     HostExpr::new(HostExprKind::TensorCall {
         helper: helper_index,
@@ -1985,53 +2158,245 @@ fn finish_tensor_helper_call(
     })
 }
 
-fn summarize_blas_helper_from_parts(
+/// Outcome of the structured BLAS-helper recognizer (W6 Task A).
+/// Mirrors `SparseSummaryAttempt`: distinguishes "not even a BLAS
+/// helper" (silent skip) from "near-eligible but rejected for a
+/// specific structural reason" (emit a diagnostic).
+///
+/// The `NotEligible` arm is treated as a non-error skip by the outer
+/// summary-derivation pass; the `Rejected` arm carries a
+/// `HelperSummaryRejection` that is promoted to a fully-formed
+/// `SummaryRejection` once the owning function's name + callsite span
+/// are known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlasSummaryAttempt {
+    /// Helper body's post-specialize root is not (anywhere near) a
+    /// `BlasMatmul` op — i.e. there is no matmul-shape subgraph for
+    /// the BLAS recognizer to fold. Today this fires when the
+    /// specialized DAG has zero roots (empty body or fully-DCE'd
+    /// body). No diagnostic should be emitted.
+    NotEligible,
+    /// Helper body had at least one specialized root that the BLAS
+    /// recognizer attempted to match, but the structural check
+    /// failed. The carried rejection identifies the failure class.
+    Rejected(HelperSummaryRejection),
+}
+
+/// Pub-test entry point for the structured-rejection-aware BLAS
+/// summarizer. Mirrors `try_summarize_sparse_helper_for_test`.
+///
+/// IR-level tests in `crates/chelis-ir/tests/host_blas_summary_diagnostics.rs`
+/// drive synthetic helper DAGs through this entry point to lock the
+/// six BLAS rejection variants without going through the full
+/// `lower_compiled_program` pipeline.
+#[doc(hidden)]
+pub fn try_summarize_blas_helper_for_test(
     dag: &crate::Dag,
     inputs: &[HostTensorInput],
     output: &TensorType,
-) -> Option<HostBlasMatmulSummary> {
-    if output.precision != Prim::F32 {
-        return None;
-    }
+) -> Result<HostBlasMatmulSummary, BlasSummaryAttempt> {
+    try_summarize_blas_helper(dag, inputs, output)
+}
+
+/// Derive a BLAS-matmul summary for a helper whose specialized DAG is
+/// a single `RiscOp::BlasMatmul` root whose operands are direct
+/// `RiscOp::Load`s referencing helper inputs.
+///
+/// Rejection cases — each maps to a `SummaryRejectionClass::Blas*`
+/// variant (the six W6 Task A variants):
+///
+///   * `BlasOutputPrecisionMismatch` — helper output precision is not `f32`
+///   * `BlasMultipleRoots` — specialized DAG has more than one root
+///   * `BlasNotMatmulPattern` — root op is not `BlasMatmul`, or its
+///     operand count / output precision doesn't match the BlasMatmul
+///     shape
+///   * `BlasNonLoadOperand` — a matmul operand is not a direct `Load`
+///   * `BlasInputPrecisionMismatch` — a helper input has precision
+///     other than `f32`
+///   * `BlasDimensionBindingFailure` — a matmul dim (batch/M/N/K)
+///     cannot be bound to any helper input
+///
+/// The pre-eligibility check that produces `NotEligible` (silent skip,
+/// not a diagnostic) fires when the specialized DAG has zero roots —
+/// the body had nothing for the BLAS recognizer to look at.
+fn try_summarize_blas_helper(
+    dag: &crate::Dag,
+    inputs: &[HostTensorInput],
+    output: &TensorType,
+) -> Result<HostBlasMatmulSummary, BlasSummaryAttempt> {
     let specialized = crate::specialize::specialize_for_blas(dag);
-    let root = specialized.roots().first().copied()?;
-    if specialized.roots().len() != 1 {
-        return None;
+    if specialized.roots().is_empty() {
+        return Err(BlasSummaryAttempt::NotEligible);
     }
-    let root_node = specialized.get(root)?;
-    let RiscOp::BlasMatmul {
-        batch_dims,
-        m,
-        n,
-        k,
-    } = &root_node.op
-    else {
-        return None;
+    // Helper-body span: prefer the specialized root's span; fall back
+    // to the pre-specialize root's span; otherwise None.
+    let body_span = specialized
+        .roots()
+        .first()
+        .and_then(|id| specialized.get(*id))
+        .and_then(|n| n.span_id.clone())
+        .or_else(|| {
+            dag.roots()
+                .first()
+                .and_then(|id| dag.get(*id))
+                .and_then(|n| n.span_id.clone())
+        });
+    // Pre-eligibility: was the helper body matmul-near at all? If
+    // the specialized root is neither `BlasMatmul` (the accepted
+    // shape) nor a `Sum(Mul(Expand, Expand))` pattern (the
+    // matmul-near shape that `specialize_for_blas` keeps as-is when
+    // it cannot replace, e.g. non-F32 precision), the recognizer
+    // should NOT emit a diagnostic — this is just a non-BLAS helper.
+    //
+    // `is_matmul_near` returns `true` for both BLAS-shaped and
+    // matmul-pattern-shaped specialized roots, so we can distinguish
+    // "near-eligible BLAS helper" from "totally unrelated helper".
+    if specialized.roots().len() == 1 {
+        let only_root = specialized.roots()[0];
+        if let Some(root_node) = specialized.get(only_root)
+            && !is_matmul_near(&specialized, root_node)
+        {
+            return Err(BlasSummaryAttempt::NotEligible);
+        }
+    }
+    if specialized.roots().len() != 1 {
+        // Even a multi-root helper qualifies as "BLAS-near" only if
+        // at least one root is matmul-shape; otherwise it's an
+        // unrelated multi-output helper and we silently skip.
+        let any_matmul_near = specialized
+            .roots()
+            .iter()
+            .filter_map(|id| specialized.get(*id))
+            .any(|n| is_matmul_near(&specialized, n));
+        if !any_matmul_near {
+            return Err(BlasSummaryAttempt::NotEligible);
+        }
+        return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
+            rejection_class: SummaryRejectionClass::BlasMultipleRoots,
+            helper_body_span: body_span,
+            detail: SummaryRejectionDetail::BlasMultipleRoots {
+                root_count: specialized.roots().len(),
+            },
+        }));
+    }
+    // From here we are committed: the specialized DAG is BLAS-near
+    // and has exactly one root. Output-precision is the next gate.
+    if output.precision != Prim::F32 {
+        return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
+            rejection_class: SummaryRejectionClass::BlasOutputPrecisionMismatch,
+            helper_body_span: body_span,
+            detail: SummaryRejectionDetail::BlasOutputPrecisionMismatch {
+                observed: output.precision,
+            },
+        }));
+    }
+    let root = *specialized
+        .roots()
+        .first()
+        .expect("checked roots().len() == 1 above");
+    let root_node = match specialized.get(root) {
+        Some(node) => node,
+        None => return Err(BlasSummaryAttempt::NotEligible),
+    };
+    let (batch_dims, m, n, k) = match &root_node.op {
+        RiscOp::BlasMatmul {
+            batch_dims,
+            m,
+            n,
+            k,
+        } => (batch_dims.clone(), m.clone(), n.clone(), k.clone()),
+        other => {
+            return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
+                rejection_class: SummaryRejectionClass::BlasNotMatmulPattern,
+                helper_body_span: body_span,
+                detail: SummaryRejectionDetail::BlasNotMatmulPattern {
+                    tail_op: risc_op_canonical_name(other).to_string(),
+                },
+            }));
+        }
     };
     if root_node.output_type.precision != Prim::F32 || root_node.inputs.len() != 2 {
-        return None;
+        // Root IS BlasMatmul but its rank/precision doesn't match
+        // the recognized shape. Still a BlasNotMatmulPattern
+        // rejection — the variant name covers both "wrong op" and
+        // "right op, wrong shape".
+        return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
+            rejection_class: SummaryRejectionClass::BlasNotMatmulPattern,
+            helper_body_span: body_span,
+            detail: SummaryRejectionDetail::BlasNotMatmulPattern {
+                tail_op: "blas_matmul".to_string(),
+            },
+        }));
     }
-    let lhs_input = helper_load_input_index(&specialized, root_node.inputs[0], inputs)?;
-    let rhs_input = helper_load_input_index(&specialized, root_node.inputs[1], inputs)?;
+    let lhs_input = match helper_load_input_index(&specialized, root_node.inputs[0], inputs) {
+        Some(idx) => idx,
+        None => {
+            return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
+                rejection_class: SummaryRejectionClass::BlasNonLoadOperand,
+                helper_body_span: body_span,
+                detail: SummaryRejectionDetail::BlasNonLoadOperand { operand_index: 0 },
+            }));
+        }
+    };
+    let rhs_input = match helper_load_input_index(&specialized, root_node.inputs[1], inputs) {
+        Some(idx) => idx,
+        None => {
+            return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
+                rejection_class: SummaryRejectionClass::BlasNonLoadOperand,
+                helper_body_span: body_span,
+                detail: SummaryRejectionDetail::BlasNonLoadOperand { operand_index: 1 },
+            }));
+        }
+    };
     let input_tys = inputs
         .iter()
         .map(|input| input.ty.clone())
         .collect::<Vec<_>>();
-    if input_tys.iter().any(|ty| ty.precision != Prim::F32)
-        || !summary_dims_bind_to_inputs(&input_tys, batch_dims)
-        || !summary_dims_bind_to_inputs(&input_tys, &[m.clone(), n.clone(), k.clone()])
+    if let Some((input_index, ty)) = input_tys
+        .iter()
+        .enumerate()
+        .find(|(_, ty)| ty.precision != Prim::F32)
     {
-        return None;
+        return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
+            rejection_class: SummaryRejectionClass::BlasInputPrecisionMismatch,
+            helper_body_span: body_span,
+            detail: SummaryRejectionDetail::BlasInputPrecisionMismatch {
+                input_index,
+                observed: ty.precision,
+            },
+        }));
     }
-    Some(HostBlasMatmulSummary {
+    if !summary_dims_bind_to_inputs(&input_tys, &batch_dims) {
+        return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
+            rejection_class: SummaryRejectionClass::BlasDimensionBindingFailure,
+            helper_body_span: body_span,
+            detail: SummaryRejectionDetail::BlasDimensionBindingFailure {
+                role: BlasDimRole::Batch,
+            },
+        }));
+    }
+    for (dim, role) in [
+        (&m, BlasDimRole::M),
+        (&n, BlasDimRole::N),
+        (&k, BlasDimRole::K),
+    ] {
+        if !summary_dims_bind_to_inputs(&input_tys, std::slice::from_ref(dim)) {
+            return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
+                rejection_class: SummaryRejectionClass::BlasDimensionBindingFailure,
+                helper_body_span: body_span,
+                detail: SummaryRejectionDetail::BlasDimensionBindingFailure { role },
+            }));
+        }
+    }
+    Ok(HostBlasMatmulSummary {
         lhs_input,
         rhs_input,
         input_tys,
         output: output.clone(),
-        batch_dims: batch_dims.clone(),
-        m: m.clone(),
-        n: n.clone(),
-        k: k.clone(),
+        batch_dims,
+        m,
+        n,
+        k,
     })
 }
 
@@ -2391,6 +2756,48 @@ fn try_summarize_sparse_helper(
         }
         _ => unreachable!("root_sparse_kind.is_some() guard rules out non-sparse roots"),
     }
+}
+
+/// `true` when `root_node` is the root of a matmul-near subgraph in
+/// the specialized DAG. Used by the BLAS recognizer's
+/// pre-eligibility check (W6 Task A) to distinguish "this helper's
+/// body has a matmul shape that the recognizer attempted to fold"
+/// from "this helper is totally unrelated to matmul".
+///
+/// Returns `true` for two shapes:
+///   * `RiscOp::BlasMatmul` — the post-specialize accepted shape
+///   * `RiscOp::Sum` whose sole input is `RiscOp::Mul` of two
+///     `RiscOp::Expand`s — the matmul-pattern shape that
+///     `specialize_for_blas` leaves as-is when it cannot replace
+///     (e.g. when `detect_matmul_pattern` rejects on non-F32
+///     precision per the W5 P0 fix).
+///
+/// Returns `false` for everything else (elementwise helpers,
+/// pure-sparse helpers, etc.). Those produce `NotEligible` rather
+/// than a structured rejection.
+fn is_matmul_near(dag: &crate::Dag, root_node: &crate::DagNode) -> bool {
+    if matches!(&root_node.op, RiscOp::BlasMatmul { .. }) {
+        return true;
+    }
+    if !matches!(&root_node.op, RiscOp::Sum { .. }) {
+        return false;
+    }
+    if root_node.inputs.len() != 1 {
+        return false;
+    }
+    let Some(mul_node) = dag.get(root_node.inputs[0]) else {
+        return false;
+    };
+    if !matches!(&mul_node.op, RiscOp::Mul) || mul_node.inputs.len() != 2 {
+        return false;
+    }
+    let Some(expand_a) = dag.get(mul_node.inputs[0]) else {
+        return false;
+    };
+    let Some(expand_b) = dag.get(mul_node.inputs[1]) else {
+        return false;
+    };
+    matches!(&expand_a.op, RiscOp::Expand { .. }) && matches!(&expand_b.op, RiscOp::Expand { .. })
 }
 
 /// Map a `RiscOp` to a `SparseOpKind`. Returns `None` for non-sparse
