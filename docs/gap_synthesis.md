@@ -192,7 +192,7 @@ anchors for future audits.
 | **M4** | Gap 3, gather/scatter lowering | Closed for the scoped sparse path: tensor-lane Surf lowers directly to sparse IR, the internal dense §3.5 `OneHot + Expand + Mul + Sum` tree collapses to `Gather`, and C/HIP emit bounded sparse code for supported dtypes. Remaining future work is replace-scatter semantics, not `ScatterAdd`. | `crates/chelis-ir` specialization tests cover the dense recognizer and unmatched `OneHot` fallback; `grad_gather_contract.rs` locks duplicate-index AD; C/HIP emitted-code and GPU manual tests cover bounded sparse backend behavior. |
 | **M5-follow-up** | Gap 5, cross-function specialization | Broaden verified summaries beyond simple C BLAS helpers, add rejected-callsite diagnostics, and carry summary consumption into HIP. | `crates/chelis-cli/tests/cross_library_semantic_gap.rs` now proves direct, inline, user-def, and nested user-def C BLAS hits. Remaining work needs new negative and HIP tests. |
 | **Perf-F1** | HIP batched matmul implementation quality | **Closed.** `hipblasSgemmStridedBatched` is now the default on uniformly strided batched HIP layouts; the per-batch helper loop is retained only as a fallback for broadcasted leading axes (`Expand` on the batch dim → stride-0) or otherwise non-uniform leading strides. | `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs` locks the strided-batched default with exact-line matching on uniform layouts and exact-line fallback matching on broadcasted leading axes (default workspace pass). The HIP manual GPU gate `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` (with `HSA_OVERRIDE_GFX_VERSION=11.5.1` and `LD_LIBRARY_PATH` per `docs/local_hip_environment.md`) covers numerical agreement, including `g15_hipblas_strided_batched_symbolic_batch_matches_eval` and `g15_hipblas_batched_matmul_matches_eval`. |
-| **Perf-F2** | Post-BLAS allocator/fusion compounding | Normalize equivalent symbolic shape expressions for slot reuse and broaden in-place elementwise/fan-in fusion where aliasing permits. | DimExpr normalization v1 now has target tests for product/identity canonicalization and negative tests that unrelated symbols are not alpha-renamed. C fused-elementwise in-place codegen now aliases a proven single reusable input and falls back for strided inputs; HIP in-place codegen and scoped same-property `forall` / binder-equivalent aliases remain future work. |
+| **Perf-F2** | Post-BLAS allocator/fusion compounding | Normalize equivalent symbolic shape expressions for slot reuse and broaden in-place elementwise/fan-in fusion where aliasing permits. | **F2(a) DimExpr normalization v2 closed by W1-C:** in addition to v1 product/identity rules, `normalized_key()` now does Div numerator/denominator atom cancellation, GCD reduction on concrete factors, nested-Div flattening, and Mul × Div cross-term distribution. Positive and negative tests in `crates/chelis-ir/tests/dim_canonicalization.rs`. **F2(c) C scoped same-property `forall` / binder-equivalent aliases closed by W1-B:** C fused-elementwise in-place emit now admits same-binder, literal-equal, and named-equal-to-lit aliases via `binder_equivalent_tensor_type`. Positive and negative tests in `crates/chelis-backend-c/tests/fused_in_place_forall_alias.rs`. **F2(b) HIP in-place fused-elementwise** remains future work in W2-B. DimExpr canonicalization explicitly does *not* alpha-rename symbolic dims — a future scoped path must take same-binder aliases as explicit input. The `DimExpr` enum vocabulary stays `Concrete / Sym / Mul / Div`; a sum/add variant remains an open question parked here (see footnote below). |
 
 Fresh-context red-team status for M3/M3b: run 2026-05-10. The red-team
 pass found one medium issue: the legacy C codegen-time BLAS detector could
@@ -233,7 +233,27 @@ coverage / replication / plumbing work.
    batched layouts, with the per-batch helper loop retained only as the
    fallback for broadcasted leading axes or non-uniform leading strides.
 
-3. **The dispatch-coverage tail is unbounded.** Softmax, layer_norm,
+3. **`DimExpr` sum/add support is parked.** The W1-C plan named "sum
+   normalization (`a + b == b + a`)" and "broader identity folds
+   (`0 + x == x`)" as candidate canonicalizations. The current
+   `DimExpr` vocabulary is `Concrete / Sym / Mul / Div` — there is no
+   `Add` or `Sub` variant. Adding one is a public-enum expansion that
+   forces a match-arm addition at every existing site (227
+   construction sites, plus match exhaustiveness across `eval`,
+   `bind`, `as_concrete`, `symbolic_names`, `From<&DimInfo>`,
+   `Display`, plus all backend `memory.rs` / `blas.rs` / `emit.rs`
+   consumers). Per the agent contract that's an escalation trigger.
+   No current spec calls for sum-of-dims in tensor shape arithmetic
+   (axis sizes compose multiplicatively under reshape and product
+   under flattening; the only sum-shaped dim that would matter is
+   concatenation along an axis, which today is expressed at the
+   `Pad` / `Shrink` op level rather than in `DimExpr`). If a future
+   shape calculus needs `Add` — e.g. for explicit concat-shape
+   inference, or for striped tile bookkeeping — that's a deliberate
+   IR vocabulary change, scoped as its own work item rather than a
+   silent expansion under F2(a).
+
+4. **The dispatch-coverage tail is unbounded.** Softmax, layer_norm,
    attention, batched-attention, MoE routing, etc. each need their
    own recognizer. Phase α makes adding them cheap, but there's
    always one more shape that hasn't been recognised yet. The
