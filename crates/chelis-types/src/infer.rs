@@ -2289,18 +2289,34 @@ fn walk_for_tensor_precision(
                     && !prim.is_valid_tensor_precision()
                     && seen.insert((def_context.to_string(), name.to_string()))
                 {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::UnsupportedTensorPrecision,
-                        format!(
-                            "tensor element precision `{}` is not supported by the current \
-                             Phase 0f backend (supported: f32, f64, bool, int8, int32, int64)",
-                            name
-                        ),
-                        vec![format!(
-                            "Use tensor[..., f32] and cast host scalars explicitly, or keep `{name}` as a host scalar",
-                            name = name,
-                        )],
-                    ));
+                    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+                    if matches!(prim, Prim::F8e4m3) {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::UnsupportedTensorPrecision,
+                            format!(
+                                "tensor element precision `f8e4m3` is deferred per \
+                                 spec/04-type-system.md §1.1.1 and is not part of the active \
+                                 numeric primitive set ({active_set})",
+                            ),
+                            vec![format!(
+                                "f8e4m3 has no active backend in this cycle; pick one of \
+                                 {active_set} or see spec/04-type-system.md §1.1.1 for the \
+                                 deferral rationale",
+                            )],
+                        ));
+                    } else {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::UnsupportedTensorPrecision,
+                            format!(
+                                "tensor element precision `{name}` is not supported by the \
+                                 current backend set (supported: {active_set})",
+                            ),
+                            vec![format!(
+                                "Use tensor[..., f32] and cast host scalars explicitly, or \
+                                 keep `{name}` as a host scalar",
+                            )],
+                        ));
+                    }
                 }
             }
 
@@ -8948,33 +8964,14 @@ fn infer_cast(
     match resolved {
         Type::Tensor(dims, _) => {
             if !new_prec.is_valid_tensor_precision() {
-                errors.push(CheckError::new(
-                    CheckErrorKind::UnsupportedTensorPrecision,
-                    format!(
-                        "cannot cast tensor to unsupported element precision `{}` \
-                         (supported: f32, f64, bool, int8, int32, int64)",
-                        new_prec.name()
-                    ),
-                    vec!["Cast to f32 or an integer precision instead".to_string()],
-                ));
+                push_unsupported_precision_error(errors, new_prec, /* tensor = */ true);
                 return Type::Error;
             }
             Type::Tensor(dims, new_prec)
         }
         Type::Prim(_) => {
-            // Scalar cast targets: supported widths are the same as
-            // valid tensor precisions plus host f64. Reject f16, bf16,
-            // f8e4m3 which have no scalar representation either.
             if !new_prec.is_valid_scalar_cast_target() {
-                errors.push(CheckError::new(
-                    CheckErrorKind::UnsupportedTensorPrecision,
-                    format!(
-                        "cannot cast scalar to unsupported precision `{}` \
-                         (supported: f32, f64, bool, int8, int32, int64)",
-                        new_prec.name()
-                    ),
-                    vec!["Use a supported scalar precision".to_string()],
-                ));
+                push_unsupported_precision_error(errors, new_prec, /* tensor = */ false);
                 return Type::Error;
             }
             Type::Prim(new_prec)
@@ -8988,6 +8985,41 @@ fn infer_cast(
             ));
             Type::Error
         }
+    }
+}
+
+/// Emit the canonical "unsupported precision" diagnostic for either a
+/// tensor element or a scalar cast target. The deferred `f8e4m3` dtype
+/// (`spec/04-type-system.md` §1.1.1) gets a specific diagnostic citing the
+/// owning spec section so producers can resolve the deferral state without
+/// guessing.
+fn push_unsupported_precision_error(errors: &mut Vec<CheckError>, new_prec: Prim, tensor: bool) {
+    let surface = if tensor { "tensor element" } else { "scalar" };
+    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    if matches!(new_prec, Prim::F8e4m3) {
+        errors.push(CheckError::new(
+            CheckErrorKind::UnsupportedTensorPrecision,
+            format!(
+                "cannot cast {surface} to `f8e4m3`: f8e4m3 is deferred per \
+                 spec/04-type-system.md §1.1.1 and is not part of the active \
+                 numeric primitive set ({active_set})"
+            ),
+            vec![format!(
+                "f8e4m3 has no active backend in this cycle; cast to one of \
+                 {active_set} instead, or follow spec/04-type-system.md §1.1.1 \
+                 for the deferral rationale"
+            )],
+        ));
+    } else {
+        errors.push(CheckError::new(
+            CheckErrorKind::UnsupportedTensorPrecision,
+            format!(
+                "cannot cast {surface} to unsupported precision `{}` \
+                 (supported: {active_set})",
+                new_prec.name()
+            ),
+            vec![format!("Use a supported {surface} precision")],
+        ));
     }
 }
 
@@ -9981,23 +10013,27 @@ mod tests {
     }
 
     #[test]
-    fn tensor_ascription_rejects_f16() {
-        check_err(
-            "(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f16))} 0))",
-            CheckErrorKind::UnsupportedTensorPrecision,
-        );
+    fn tensor_ascription_accepts_f16() {
+        // WS-0 lock cc47e6d: f16 is in the active dtype set per
+        // spec/04-type-system.md §1.1 and must be admitted as a tensor
+        // element type at check time. Backend coverage is staged
+        // separately (WS-A1/A2/A3).
+        check_ok("(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f16))} 0))");
     }
 
     #[test]
-    fn tensor_ascription_rejects_bf16() {
-        check_err(
-            "(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} bf16))} 0))",
-            CheckErrorKind::UnsupportedTensorPrecision,
-        );
+    fn tensor_ascription_accepts_bf16() {
+        // WS-0 lock cc47e6d: bf16 is in the active dtype set per
+        // spec/04-type-system.md §1.1 and must be admitted as a tensor
+        // element type at check time. Backend coverage is staged
+        // separately (WS-A1/A2/A3).
+        check_ok("(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} bf16))} 0))");
     }
 
     #[test]
     fn tensor_ascription_rejects_f8e4m3() {
+        // f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and must
+        // be rejected at check time.
         check_err(
             "(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f8e4m3))} 0))",
             CheckErrorKind::UnsupportedTensorPrecision,
@@ -10026,10 +10062,23 @@ mod tests {
     }
 
     #[test]
-    fn cast_tensor_rejects_bf16() {
-        check_err(
+    fn cast_tensor_accepts_bf16() {
+        // WS-0 lock cc47e6d: cast(x: tensor[..., f32], bf16) is permitted
+        // because bf16 is in the active tensor element set per
+        // spec/04-type-system.md §1.1.
+        check_ok(
             "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
              (def {} y (cast {} (var {} x) (t-prim {} bf16)))",
+        );
+    }
+
+    #[test]
+    fn cast_tensor_rejects_f8e4m3() {
+        // f8e4m3 is deferred per spec/04-type-system.md §1.1.1; cast
+        // targets must be rejected with the deferred-dtype diagnostic.
+        check_err(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+             (def {} y (cast {} (var {} x) (t-prim {} f8e4m3)))",
             CheckErrorKind::UnsupportedTensorPrecision,
         );
     }

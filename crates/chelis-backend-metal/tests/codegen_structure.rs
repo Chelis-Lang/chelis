@@ -283,7 +283,13 @@ fn build_reduce_dag(reduce_op: RiscOp, n: usize) -> Dag {
 
 #[test]
 fn m4_sum_reduction_emits_threadgroup_memory_and_barriers() {
-    let dag = build_reduce_dag(RiscOp::Sum { axis: 0 }, 256);
+    let dag = build_reduce_dag(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        256,
+    );
     let result = codegen_metal(&dag, "sumv");
     let src = &result.mm_source;
     assert!(
@@ -364,7 +370,13 @@ fn m4_oversize_reduction_falls_through_to_stub_until_two_pass_lands() {
     // n>4096 exceeds the single-threadgroup wrap-loop limit. Two-pass
     // reduction lands in a follow-up phase; until then, fall through to
     // the stub so we never silently emit a wrong reduction.
-    let dag = build_reduce_dag(RiscOp::Sum { axis: 0 }, 4097);
+    let dag = build_reduce_dag(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        4097,
+    );
     let result = codegen_metal(&dag, "big");
     let src = &result.mm_source;
     assert!(
@@ -421,7 +433,10 @@ fn m4_reduce_root_emits_rank_zero_scalar_alloc() {
         None,
     );
     let r = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![a],
         TensorType::scalar_f32(),
         None,
@@ -490,7 +505,15 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(m, n), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(m, n),
+        None,
+    );
     dag.add_root(sum);
     dag
 }
@@ -577,7 +600,10 @@ fn m4_axis_nonzero_reduction_falls_through_to_stub() {
     // Construct an axis=1 sum even though our input is rank-1; this
     // simulates a partial-axis reduction the M4 first cut should reject.
     let r = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![a],
         TensorType::scalar_f32(),
         None,

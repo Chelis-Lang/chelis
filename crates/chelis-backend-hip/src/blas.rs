@@ -24,7 +24,7 @@ pub struct MatmulInfo {
 pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
     let axis = match &sum_node.op {
-        RiscOp::Sum { axis } => *axis,
+        RiscOp::Sum { axis, .. } => *axis,
         _ => return None,
     };
 
@@ -146,7 +146,15 @@ mod tests {
             None,
         );
         let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
 
         let info = detect_matmul_pattern(&dag, sum).expect("matmul should be detected");
         assert_eq!(info.a, a);

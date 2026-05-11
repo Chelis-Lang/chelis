@@ -11,7 +11,10 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
     for node in dag.nodes() {
         let output_type = prepend_batch_type(&node.output_type, &batch_dim);
         let op = match &node.op {
-            RiscOp::Sum { axis } => RiscOp::Sum { axis: axis + 1 },
+            RiscOp::Sum { axis, accumulator } => RiscOp::Sum {
+                axis: axis + 1,
+                accumulator: *accumulator,
+            },
             RiscOp::MaxReduce { axis } => RiscOp::MaxReduce { axis: axis + 1 },
             RiscOp::MinReduce { axis } => RiscOp::MinReduce { axis: axis + 1 },
             RiscOp::ProdReduce { axis } => RiscOp::ProdReduce { axis: axis + 1 },
@@ -155,7 +158,15 @@ mod tests {
             mat_f32(2, 3),
             None,
         );
-        let y = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(2), None);
+        let y = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![x],
+            vec_f32(2),
+            None,
+        );
         dag.add_root(y);
 
         let vmapped = vectorize_axis0(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
@@ -244,7 +255,15 @@ mod tests {
             },
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![prod], mat_f32(2, 4), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![prod],
+            mat_f32(2, 4),
+            None,
+        );
         dag.add_root(out);
 
         let vmapped = vectorize_axis0(&dag, DimInfo::Lit(5)).expect("vmap should succeed");

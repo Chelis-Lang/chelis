@@ -155,7 +155,7 @@ fn element_size_bytes(prim: Prim) -> usize {
     match prim {
         Prim::F64 | Prim::Int64 => 8,
         Prim::F32 | Prim::Int32 => 4,
-        Prim::F16 | Prim::Bf16 => 2,
+        Prim::F16 | Prim::Bf16 | Prim::Int16 => 2,
         Prim::F8e4m3 | Prim::Int8 | Prim::Bool => 1,
         Prim::String => 8,
     }

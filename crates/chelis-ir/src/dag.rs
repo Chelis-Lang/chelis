@@ -313,8 +313,22 @@ pub enum RiscOp {
     },
 
     // --- Reduction ---
+    /// `reduce_sum` over `axis`, with the accumulator precision pinned
+    /// per `spec/04-type-system.md` §5.7 / §5.7.1.
+    ///
+    /// The IR node always carries a populated `accumulator: Prim`; the
+    /// "no accumulator parameter" Surf/Deep ergonomic shorthand is
+    /// resolved to a concrete dtype before lowering. Callers should
+    /// prefer the constructor helpers
+    /// [`RiscOp::sum_with_accumulator`] / [`RiscOp::sum_default`] over
+    /// inline struct construction so the spec-default rule stays in one
+    /// place.
     Sum {
         axis: usize,
+        /// Precision used for the running sum. Per §5.7.1 this is also
+        /// the result precision of the reduction; the verifier checks
+        /// `output_type.precision == accumulator`.
+        accumulator: Prim,
     },
     MaxReduce {
         axis: usize,
@@ -401,11 +415,23 @@ pub enum RiscOp {
     // --- Backend specialization ---
     /// Matmul recognized from the Tier-2 `Sum(Mul(Expand(A), Expand(B)))`
     /// lowering after AD has run.
+    ///
+    /// Carries a pinned `accumulator: Prim` per
+    /// `spec/04-type-system.md` §5.7 / §5.7.1. Result precision matches
+    /// the operand precision (the wider accumulator is consumed inside
+    /// the op and downcast on output, per §5.7.1). Integer matmul
+    /// (operand precision in {int8, int16, int32, int64}) is NOT
+    /// admitted; use [`RiscOp::matmul_with_accumulator`] /
+    /// [`RiscOp::matmul_default`] for the rejection path.
     BlasMatmul {
         batch_dims: Vec<DimExpr>,
         m: DimExpr,
         n: DimExpr,
         k: DimExpr,
+        /// Precision used for the inner-product accumulator. Must be
+        /// at least as wide as the operand precision and at least as
+        /// wide as the documented spec §5.7.1 default.
+        accumulator: Prim,
     },
 
     /// Sparse gather recognized from the Section 3.5 one-hot lowering after
@@ -419,6 +445,221 @@ pub enum RiscOp {
     ScatterAdd {
         axis: usize,
     },
+}
+
+impl RiscOp {
+    /// Resolve the spec §5.7.1 default reduce-sum accumulator for the
+    /// given operand precision. Per the active dtype set
+    /// (`spec/04-type-system.md` §1.1):
+    ///
+    /// - bf16 / f16  → f32
+    /// - f32         → f32 (operand-matching)
+    /// - f64         → f64 (operand-matching)
+    /// - int8 / int16 → int32
+    /// - int32       → int32 (operand-matching)
+    /// - int64       → int64 (operand-matching)
+    ///
+    /// Returns an error for non-numeric operand precisions and for the
+    /// deferred f8e4m3 (§1.1.1).
+    pub fn default_reduce_sum_accumulator(operand: Prim) -> Result<Prim, String> {
+        Ok(match operand {
+            Prim::Bf16 | Prim::F16 => Prim::F32,
+            Prim::F32 => Prim::F32,
+            Prim::F64 => Prim::F64,
+            Prim::Int8 | Prim::Int16 => Prim::Int32,
+            Prim::Int32 => Prim::Int32,
+            Prim::Int64 => Prim::Int64,
+            Prim::Bool => {
+                return Err(
+                    "reduce_sum is not defined on bool tensors; cast to int32 first".to_string(),
+                );
+            }
+            Prim::F8e4m3 => {
+                return Err("reduce_sum: operand dtype `f8e4m3` is deferred per \
+                     spec/04-type-system.md §1.1.1 and is not part of the \
+                     active numeric primitive set"
+                    .to_string());
+            }
+            Prim::String => {
+                return Err("reduce_sum is not defined for string operands".to_string());
+            }
+        })
+    }
+
+    /// Resolve the spec §5.7.1 default matmul accumulator for the given
+    /// operand precision. Per the active dtype set:
+    ///
+    /// - bf16 / f16 → f32
+    /// - f32        → f32
+    /// - f64        → f64
+    ///
+    /// Integer operands are NOT admitted per §5.7.2; this returns
+    /// `Err`. Use [`RiscOp::sum_with_accumulator`] over an explicit
+    /// `expand` + `mul` lowering for integer inner products.
+    pub fn default_matmul_accumulator(operand: Prim) -> Result<Prim, String> {
+        Ok(match operand {
+            Prim::Bf16 | Prim::F16 => Prim::F32,
+            Prim::F32 => Prim::F32,
+            Prim::F64 => Prim::F64,
+            Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
+                return Err(format!(
+                    "matmul is not admitted for integer operand dtype `{}` per \
+                     spec/04-type-system.md §5.7.2; use reduce_sum over an \
+                     explicit expand+mul lowering for integer inner products",
+                    operand.name()
+                ));
+            }
+            Prim::F8e4m3 => {
+                return Err("matmul: operand dtype `f8e4m3` is deferred per \
+                     spec/04-type-system.md §1.1.1 and is not part of the \
+                     active numeric primitive set"
+                    .to_string());
+            }
+            Prim::Bool | Prim::String => {
+                return Err(format!(
+                    "matmul is not defined for operand dtype `{}`",
+                    operand.name()
+                ));
+            }
+        })
+    }
+
+    /// Construct a `Sum` op with an explicit `accumulator` precision.
+    /// Verifies the spec §5.7.1 narrowness rule: `accumulator` must be
+    /// at least as wide as the documented default for the operand
+    /// precision.
+    pub fn sum_with_accumulator(
+        axis: usize,
+        operand_prim: Prim,
+        accumulator: Prim,
+    ) -> Result<Self, String> {
+        let default = Self::default_reduce_sum_accumulator(operand_prim)?;
+        if !accumulator_at_least_as_wide(operand_prim, accumulator, default) {
+            return Err(format!(
+                "reduce_sum: explicit accumulator `{}` is narrower than the \
+                 spec/04-type-system.md §5.7.1 default `{}` for operand precision \
+                 `{}`; accumulator must be at least the default width (omit the \
+                 parameter to accept the default)",
+                accumulator.name(),
+                default.name(),
+                operand_prim.name(),
+            ));
+        }
+        Ok(RiscOp::Sum { axis, accumulator })
+    }
+
+    /// Construct a `Sum` op with the spec-default accumulator for the
+    /// operand precision. This is the canonical "no explicit
+    /// accumulator parameter" lowering path per §5.7.1.
+    pub fn sum_default(axis: usize, operand_prim: Prim) -> Result<Self, String> {
+        let accumulator = Self::default_reduce_sum_accumulator(operand_prim)?;
+        Ok(RiscOp::Sum { axis, accumulator })
+    }
+
+    /// Construct a `BlasMatmul` op with an explicit `accumulator`
+    /// precision. Verifies the spec §5.7.1 narrowness rule and
+    /// rejects integer operands per §5.7.2.
+    pub fn matmul_with_accumulator(
+        batch_dims: Vec<DimExpr>,
+        m: DimExpr,
+        n: DimExpr,
+        k: DimExpr,
+        operand_prim: Prim,
+        accumulator: Prim,
+    ) -> Result<Self, String> {
+        let default = Self::default_matmul_accumulator(operand_prim)?;
+        if !accumulator_at_least_as_wide(operand_prim, accumulator, default) {
+            return Err(format!(
+                "matmul: explicit accumulator `{}` is narrower than the \
+                 spec/04-type-system.md §5.7.1 default `{}` for operand precision \
+                 `{}`; accumulator must be at least the default width",
+                accumulator.name(),
+                default.name(),
+                operand_prim.name(),
+            ));
+        }
+        Ok(RiscOp::BlasMatmul {
+            batch_dims,
+            m,
+            n,
+            k,
+            accumulator,
+        })
+    }
+
+    /// Construct a `BlasMatmul` with the spec-default accumulator for
+    /// the operand precision. Rejects integer operands per §5.7.2.
+    pub fn matmul_default(
+        batch_dims: Vec<DimExpr>,
+        m: DimExpr,
+        n: DimExpr,
+        k: DimExpr,
+        operand_prim: Prim,
+    ) -> Result<Self, String> {
+        let accumulator = Self::default_matmul_accumulator(operand_prim)?;
+        Ok(RiscOp::BlasMatmul {
+            batch_dims,
+            m,
+            n,
+            k,
+            accumulator,
+        })
+    }
+}
+
+/// Spec §5.7.1 narrowness rule: `accumulator` must be (a) at least as
+/// wide as the operand precision and (b) at least as wide as the
+/// documented default for that operand precision. Width is measured by
+/// `prim_width_rank` (a per-Prim ordering that reflects bit width and
+/// integer-vs-float lane). Exposed for the verifier (`crate::verify`)
+/// so the BlasMatmul rule can be checked without duplicating the
+/// width-rank table.
+pub(crate) fn accumulator_at_least_as_wide(
+    operand: Prim,
+    accumulator: Prim,
+    default: Prim,
+) -> bool {
+    let op_lane = prim_lane(operand);
+    let acc_lane = prim_lane(accumulator);
+    // Don't allow crossing lanes (integer accumulator on float operand
+    // or vice versa); mixing lanes is not in the spec table.
+    if op_lane != acc_lane {
+        return false;
+    }
+    let acc_w = prim_width_rank(accumulator);
+    let op_w = prim_width_rank(operand);
+    let def_w = prim_width_rank(default);
+    acc_w >= op_w && acc_w >= def_w
+}
+
+/// "Lane" of a numeric Prim — float vs integer. Used by
+/// [`accumulator_at_least_as_wide`] to keep accumulator selection inside
+/// the operand's lane.
+fn prim_lane(p: Prim) -> u8 {
+    if p.is_float() {
+        1
+    } else if p.is_integer() {
+        2
+    } else {
+        0
+    }
+}
+
+/// Width ordering for the active dtype set. Larger is wider. Within the
+/// float lane: f16 = bf16 < f32 < f64. Within the integer lane:
+/// int8 < int16 < int32 < int64. Bool is 0; non-numeric returns 0.
+fn prim_width_rank(p: Prim) -> u32 {
+    match p {
+        Prim::Bool => 0,
+        Prim::Int8 => 1,
+        Prim::Int16 => 2,
+        Prim::Int32 => 4,
+        Prim::Int64 => 8,
+        Prim::F16 | Prim::Bf16 => 2,
+        Prim::F32 => 4,
+        Prim::F64 => 8,
+        Prim::F8e4m3 | Prim::String => 0,
+    }
 }
 
 /// A single node in the DAG.
@@ -786,6 +1027,7 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                 m,
                 n,
                 k,
+                accumulator,
             } => RiscOp::BlasMatmul {
                 batch_dims: batch_dims
                     .iter()
@@ -794,6 +1036,7 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                 m: m.bind(bindings)?,
                 n: n.bind(bindings)?,
                 k: k.bind(bindings)?,
+                accumulator: *accumulator,
             },
             other => other.clone(),
         };

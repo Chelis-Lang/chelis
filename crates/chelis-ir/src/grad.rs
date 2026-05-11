@@ -513,7 +513,7 @@ fn compute_adjoints(
         }
 
         // --- Reduction ---
-        RiscOp::Sum { axis } => {
+        RiscOp::Sum { axis, .. } => {
             // d/dx sum(x, axis) = expand(g, axis, original_size)
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
@@ -778,7 +778,19 @@ fn compute_adjoints(
         RiscOp::Expand { axis, .. } => {
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            let dx = dag.add_node(RiscOp::Sum { axis: *axis }, vec![g], input_ty, None);
+            // The gradient sum runs over the operand precision; use the
+            // spec-default accumulator so the AD path tracks WS-A0 §5.7.1.
+            let acc = RiscOp::default_reduce_sum_accumulator(input_ty.precision)
+                .unwrap_or(input_ty.precision);
+            let dx = dag.add_node(
+                RiscOp::Sum {
+                    axis: *axis,
+                    accumulator: acc,
+                },
+                vec![g],
+                input_ty,
+                None,
+            );
             Some(vec![(x, dx)])
         }
         RiscOp::OneHot { .. } => Some(vec![]),
@@ -1212,7 +1224,15 @@ mod tests {
             vec3_ty.clone(),
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![x],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -1377,7 +1397,10 @@ mod tests {
         );
         // Sum all elements to get a scalar
         let sum0 = dag.add_node(
-            RiscOp::Sum { axis: 0 },
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
             vec![reshaped],
             TensorType {
                 dims: vec![DimInfo::Lit(3)],
@@ -1385,7 +1408,15 @@ mod tests {
             },
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![sum0], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![sum0],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -1428,7 +1459,10 @@ mod tests {
         );
         // Sum all elements for a scalar output
         let sum0 = dag.add_node(
-            RiscOp::Sum { axis: 0 },
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
             vec![transposed],
             TensorType {
                 dims: vec![DimInfo::Lit(2)],
@@ -1436,7 +1470,15 @@ mod tests {
             },
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![sum0], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![sum0],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -1482,12 +1524,23 @@ mod tests {
         );
         // Sum back to scalar
         let sum0 = dag.add_node(
-            RiscOp::Sum { axis: 0 },
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
             vec![expanded],
             vec3_ty.clone(),
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![sum0], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![sum0],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -1984,7 +2037,15 @@ mod tests {
             vec3_ty.clone(),
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![maxr], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![maxr],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
 
@@ -2074,7 +2135,15 @@ mod tests {
             vec2_ty.clone(),
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![maxr], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![maxr],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
 
@@ -2136,7 +2205,15 @@ mod tests {
             vec2_ty.clone(),
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![maxr], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![maxr],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
 
@@ -2297,7 +2374,15 @@ mod tests {
             vec5_ty.clone(),
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![padded], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![padded],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -2340,7 +2425,15 @@ mod tests {
             vec3_ty.clone(),
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![shrunk], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![shrunk],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -2439,7 +2532,15 @@ mod tests {
             vec2_ty.clone(),
             None,
         );
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![strided], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![strided],
+            scalar_f32(),
+            None,
+        );
         assert!(
             grad_dag(&dag, out, &[x]).is_none(),
             "stride gradients should fail closed until the RISC set can express them soundly"
@@ -2505,7 +2606,15 @@ mod tests {
             None,
         );
         let minr = dag.add_node(RiscOp::MinReduce { axis: 0 }, vec![x], vec3, None);
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![minr], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![minr],
+            scalar_f32(),
+            None,
+        );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -2615,7 +2724,15 @@ mod tests {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat23, None);
         let am = dag.add_node(RiscOp::Argmax { axis: 0 }, vec![x], vec3, None);
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![am], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![am],
+            scalar_f32(),
+            None,
+        );
 
         let err = match grad_dag_checked(&dag, out, &[x]) {
             Err(e) => e,
@@ -2640,7 +2757,15 @@ mod tests {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat23, None);
         let am = dag.add_node(RiscOp::Argmin { axis: 1 }, vec![x], vec3, None);
-        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![am], scalar_f32(), None);
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![am],
+            scalar_f32(),
+            None,
+        );
 
         let err = match grad_dag_checked(&dag, out, &[x]) {
             Err(e) => e,

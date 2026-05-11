@@ -409,12 +409,18 @@ impl Emitter {
             RiscOp::Add | RiscOp::Mul => self.emit_binary(dag, node),
 
             // Full-axis rank-1 reductions to scalar (M4 first cut).
-            RiscOp::Sum { axis: 0 } => self.emit_reduce(dag, node, kernels::ReduceKind::Sum),
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            } => self.emit_reduce(dag, node, kernels::ReduceKind::Sum),
             RiscOp::MaxReduce { axis: 0 } => self.emit_reduce(dag, node, kernels::ReduceKind::Max),
             RiscOp::MinReduce { axis: 0 } => self.emit_reduce(dag, node, kernels::ReduceKind::Min),
 
             // Matmul (Sum{axis:1} head of expand+mul+sum subgraph; M5).
-            RiscOp::Sum { axis: 1 } if self.matmuls.contains_key(&node.id.0) => {
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            } if self.matmuls.contains_key(&node.id.0) => {
                 let info = self.matmuls[&node.id.0].clone();
                 self.emit_matmul(node, &info)
             }

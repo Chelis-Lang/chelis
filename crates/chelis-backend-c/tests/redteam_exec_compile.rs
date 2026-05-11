@@ -343,7 +343,15 @@ fn exec_reduce_sum_correct_output() {
         vec_f32(100),
         None,
     );
-    dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_ty, None);
+    dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![a],
+        scalar_ty,
+        None,
+    );
     let dag = fuse(&dag);
 
     let result = chelis_backend_c::codegen(&dag, "test_reduce_sum");

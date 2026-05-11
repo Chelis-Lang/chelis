@@ -83,7 +83,10 @@ fn m7_single_element_reduction_emits_real_kernel() {
     let mut dag = Dag::new();
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(1), None);
     let s = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![a],
         TensorType::scalar_f32(),
         None,
@@ -166,7 +169,15 @@ fn m7_matmul_at_tile_boundary_routes_to_tiled_kernel() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(16, 16, 16), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(16, 16), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(16, 16),
+        None,
+    );
     dag.add_root(sum);
 
     let result = codegen_metal(&dag, "mm_tile");
@@ -190,7 +201,10 @@ fn m7_partial_axis_reduction_falls_through_to_stub() {
     let mut dag = Dag::new();
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
     let r = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![a],
         TensorType::scalar_f32(),
         None,
@@ -213,7 +227,10 @@ fn m7_oversized_reduction_falls_through_to_stub() {
         None,
     );
     let r = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![a],
         TensorType::scalar_f32(),
         None,
@@ -236,7 +253,10 @@ fn m7_non_power_of_two_reduction_emits_real_kernel() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
         let r = dag.add_node(
-            RiscOp::Sum { axis: 0 },
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
             vec![a],
             TensorType::scalar_f32(),
             None,

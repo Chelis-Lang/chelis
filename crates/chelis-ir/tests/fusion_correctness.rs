@@ -205,7 +205,15 @@ fn f5_elementwise_into_reduction_fuses() {
     let x = load(&mut dag, "x", mat_f32(3, 4));
     let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![added], vec_f32(3), None);
+    let summed = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![added],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(summed);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -227,7 +235,15 @@ fn f5_elementwise_into_reduction_fuses() {
 fn f5_neg_reduction_into_elementwise_does_not_fuse() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(3), None);
+    let summed = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(3),
+        None,
+    );
     let negated = dag.add_node(RiscOp::Neg, vec![summed], vec_f32(3), None);
     dag.add_root(negated);
 
@@ -598,7 +614,15 @@ fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
     let x = load(&mut dag, "x", mat_f32(3, 4));
     let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![added], vec_f32(3), None);
+    let summed = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![added],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(summed);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -640,7 +664,15 @@ fn fr2_multi_consumer_fused_elem_not_inlined() {
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     // Two consumers of negated: root + sum
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
+    let summed = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![negated],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(negated);
     dag.add_root(summed);
 
@@ -662,7 +694,15 @@ fn fr3_chain_into_sum_correctness() {
     let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
+    let summed = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![negated],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(summed);
 
     let fused = chelis_ir::fuse::fuse(&dag);
