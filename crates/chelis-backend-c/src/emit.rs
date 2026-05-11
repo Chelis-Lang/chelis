@@ -952,7 +952,13 @@ impl CEmitter {
             return None;
         }
         let input_node = dag.get(reusable_input)?;
-        if input_node.output_type != node.output_type {
+        // Perf-F2(c): the reusable input's output_type must be
+        // binder-equivalent to the FusedElem's output_type, not just
+        // PartialEq-equal. This admits scoped same-property `forall` /
+        // binder-equivalent aliases (e.g. `Lit(4)` vs
+        // `Named("seq", Some(4))` for the same scope), which the
+        // upstream linearity analyzer already proved single-use.
+        if !Self::binder_equivalent_tensor_type(&input_node.output_type, &node.output_type) {
             return None;
         }
         let consumer_count = dag
@@ -970,6 +976,64 @@ impl CEmitter {
             return None;
         }
         Some(reusable_input)
+    }
+
+    /// Perf-F2(c): conservative binder-equivalent equality for
+    /// `TensorType` shape comparisons in the in-place fused-elementwise
+    /// aliasing gate.
+    ///
+    /// Two tensor types are binder-equivalent iff:
+    ///   * precisions match exactly,
+    ///   * ranks match exactly,
+    ///   * each pair of dim descriptors is binder-equivalent per
+    ///     `binder_equivalent_dim_info` below.
+    ///
+    /// This is strictly weaker than `DimExprKey::normalized_key` (which
+    /// alpha-renames symbolic dims by shape alone, an unsound expansion
+    /// per the warning in `chelis_ir::dag::DimExprKey`'s rustdoc) and
+    /// strictly stronger than ignoring binder names. It accepts only
+    /// dim pairs whose binder name or known-size is provably consistent.
+    fn binder_equivalent_tensor_type(a: &TensorType, b: &TensorType) -> bool {
+        if a.precision != b.precision {
+            return false;
+        }
+        if a.dims.len() != b.dims.len() {
+            return false;
+        }
+        a.dims
+            .iter()
+            .zip(b.dims.iter())
+            .all(|(da, db)| Self::binder_equivalent_dim_info(da, db))
+    }
+
+    /// Two `DimInfo`s are binder-equivalent under the same forall scope
+    /// when their known-or-binder identity provably matches:
+    ///   * `Lit(n)` ≡ `Lit(n)` — identical concrete sizes.
+    ///   * `Named(n1, _)` ≡ `Named(n2, _)` — identical binder names
+    ///     **and** consistent known sizes when both are known.
+    ///   * `Lit(n)` ≡ `Named(_, Some(n))` and vice versa — a concrete
+    ///     literal matches a named binder that has been resolved to the
+    ///     same size (e.g. specialize lowering a `Named("seq", Some(4))`
+    ///     to `Lit(4)` mid-pipeline still admits in-place aliasing).
+    ///   * Everything else is rejected. `Lit` vs `Named(_, None)` is
+    ///     intentionally rejected: a binder with unresolved size has no
+    ///     evidence it matches a specific literal — `n` may differ.
+    fn binder_equivalent_dim_info(a: &DimInfo, b: &DimInfo) -> bool {
+        match (a, b) {
+            (DimInfo::Lit(la), DimInfo::Lit(lb)) => la == lb,
+            (DimInfo::Named(na, sa), DimInfo::Named(nb, sb)) => {
+                if na != nb {
+                    return false;
+                }
+                match (sa, sb) {
+                    (Some(la), Some(lb)) => la == lb,
+                    _ => true,
+                }
+            }
+            (DimInfo::Lit(la), DimInfo::Named(_, Some(lb)))
+            | (DimInfo::Named(_, Some(la)), DimInfo::Lit(lb)) => la == lb,
+            _ => false,
+        }
     }
 
     // ---- Const ----
