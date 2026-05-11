@@ -1057,27 +1057,51 @@ where
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if tag(list) != Some("app") {
-        return None;
+    // `(app f (var ... name) rest...)` → `f(rest...)` (or bare `f` when no
+    // extra args). Mirrors spec `01-nomenclature.md` §3.6: the decompiler
+    // may compact a lambda stage back to call-stage sugar when the carried
+    // value is the first argument.
+    match tag(list) {
+        Some("app") => {
+            let kids = children(list);
+            if kids.len() < 2 {
+                return None;
+            }
+            let Expr::List(first_arg, _) = &kids[1] else {
+                return None;
+            };
+            if tag(first_arg) != Some("var")
+                || children(first_arg).first().and_then(sym_str) != Some(name)
+            {
+                return None;
+            }
+            let func = render(&kids[0]);
+            let rest = kids[2..].iter().map(render).collect::<Vec<_>>();
+            Some(if rest.is_empty() {
+                func
+            } else {
+                format!("{func}({})", rest.join(", "))
+            })
+        }
+        // Unary-builtin bodies produced by parser-side synthesis for bare
+        // keyword pipe stages — `(realize (var ... name))` ≡ `realize`,
+        // `(copy (var ... name))` ≡ `copy`. Item 2b round-trip support.
+        Some(tag_name @ ("realize" | "copy")) => {
+            let kids = children(list);
+            let [only] = kids else {
+                return None;
+            };
+            let Expr::List(inner, _) = only else {
+                return None;
+            };
+            if tag(inner) != Some("var") || children(inner).first().and_then(sym_str) != Some(name)
+            {
+                return None;
+            }
+            Some(tag_name.to_string())
+        }
+        _ => None,
     }
-    let kids = children(list);
-    if kids.len() < 2 {
-        return None;
-    }
-    let Expr::List(first_arg, _) = &kids[1] else {
-        return None;
-    };
-    if tag(first_arg) != Some("var") || children(first_arg).first().and_then(sym_str) != Some(name)
-    {
-        return None;
-    }
-    let func = render(&kids[0]);
-    let rest = kids[2..].iter().map(render).collect::<Vec<_>>();
-    Some(if rest.is_empty() {
-        func
-    } else {
-        format!("{func}({})", rest.join(", "))
-    })
 }
 
 fn render_pipe_stage<F>(expr: &Expr, render: F) -> String

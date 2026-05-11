@@ -999,7 +999,7 @@ impl Parser {
                 let mut stages = Vec::new();
                 while *self.peek() == TokenKind::Pipe {
                     self.advance();
-                    let stage = self.parse_prefix()?;
+                    let stage = self.parse_pipe_stage()?;
                     stages.push(stage);
                 }
                 let end = expr_span(stages.last().unwrap());
@@ -1075,6 +1075,99 @@ impl Parser {
             TokenKind::Percent => Some((BinOp::Mod, 11, 12)),
             _ => None,
         }
+    }
+
+    /// Parse a single pipe stage.
+    ///
+    /// Wraps `parse_prefix` for ordinary stages. Adds first-argument-insertion
+    /// support for bare keyword callable references per spec
+    /// `01-nomenclature.md` §3.6: `x |> realize` ≡ `realize(x)` and
+    /// `x |> copy` ≡ `copy(x)`. Without this, the pipe loop would dispatch
+    /// to `parse_prefix`, which routes every reserved keyword to its
+    /// normal-form parser and rejects the bare form (Item 2b / G11).
+    ///
+    /// Only the unary builtins `Realize` and `Copy` are special-cased here.
+    /// The other reserved keywords (`grad`, `vmap`, `jit`, `cast`, `with`,
+    /// `par`, `if`, `match`, `fn`) have no spec-meaningful bare-pipe-stage
+    /// form — see `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`.
+    fn parse_pipe_stage(&mut self) -> Result<Expr, ParseError> {
+        if self.at_eof() {
+            return Err(ParseError::UnexpectedEof);
+        }
+
+        // Bare unary-builtin keyword: synthesize an explicit lambda over a
+        // fresh `__chelis_pipe` parameter so the desugarer's existing
+        // pipe-stage handling produces the canonical
+        // `(fn (v) -> (realize v))` Deep shape.
+        let bare_kind = match self.peek() {
+            TokenKind::Realize | TokenKind::Copy
+                if !matches!(self.peek_after_current(), TokenKind::LParen) =>
+            {
+                Some(self.peek().clone())
+            }
+            _ => None,
+        };
+
+        if let Some(kind) = bare_kind {
+            let tok = self.advance();
+            let span = tok.span;
+            let pipe_param = self.fresh_pipe_param_name();
+            let body_inner = Expr::Var(pipe_param.clone(), span);
+            let body = match kind {
+                TokenKind::Realize => Expr::Realize(Box::new(body_inner), span),
+                TokenKind::Copy => Expr::Copy(Box::new(body_inner), span),
+                _ => unreachable!("bare_kind is gated above"),
+            };
+            return Ok(Expr::Lambda(
+                vec![Param {
+                    name: pipe_param,
+                    ty: None,
+                    span,
+                }],
+                Box::new(body),
+                span,
+            ));
+        }
+
+        self.parse_prefix()
+    }
+
+    /// Look at the token following `peek()` (skipping intervening newlines),
+    /// returning `TokenKind::Eof` if no further token exists. Used by
+    /// `parse_pipe_stage` to distinguish bare keyword pipe stages from the
+    /// keyword's normal-form continuation.
+    fn peek_after_current(&self) -> TokenKind {
+        let mut pos = self.pos;
+        // Skip newlines before the current token (mirrors `peek`).
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
+        // Step past the current token.
+        if self.tokens.get(pos).is_some() {
+            pos += 1;
+        }
+        // Skip newlines after the current token.
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
+        self.tokens
+            .get(pos)
+            .map(|t| t.kind.clone())
+            .unwrap_or(TokenKind::Eof)
+    }
+
+    /// Pick a fresh `__chelis_pipe[N]` parameter name. Mirrors the desugar
+    /// helper at `desugar.rs::fresh_pipe_param_name`. The parser only knows
+    /// the current stage's source text, so a basic counter-based choice
+    /// works here; the desugarer's name-collision check covers the rest.
+    fn fresh_pipe_param_name(&self) -> String {
+        "__chelis_pipe".to_string()
     }
 
     fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
