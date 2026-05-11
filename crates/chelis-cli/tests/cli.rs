@@ -5424,7 +5424,6 @@ fn lint_fix_prefer_pipe_operator_keeps_when_typed_pipeline_rejects() {
 }
 
 #[test]
-#[ignore = "F: prefer-pipe-operator autofix re-enable, see docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md"]
 fn lint_fix_prefer_pipe_operator_rewrites_when_typed_pipeline_accepts() {
     // Positive case: a nested first-argument call chain over stdlib
     // unary builtins `neg` and `relu`. Both nested and piped forms
@@ -5461,7 +5460,6 @@ fn lint_fix_prefer_pipe_operator_rewrites_when_typed_pipeline_accepts() {
 }
 
 #[test]
-#[ignore = "F: prefer-pipe-operator autofix re-enable, see docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md"]
 fn lint_fix_prefer_pipe_operator_rewrites_multi_arg_outer_stage() {
     // Second positive case: outer call carries extra arguments that
     // must survive the rewrite as `f(...)` call-stage form.

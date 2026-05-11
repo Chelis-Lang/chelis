@@ -443,7 +443,6 @@ fn unsupported_structural_keyword_pipe_stage_still_rejected() {
 // fix commit (see `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
 
 #[test]
-#[ignore = "H1: top-level bare unary-builtin reference (pipe-autofix workstream)"]
 fn top_level_bare_unary_builtin_reference_parses() {
     // `f = realize` at top level binds the identifier `f` to the unary
     // builtin `realize`. Per the canonical lowering for bare pipe stages
@@ -465,7 +464,6 @@ fn top_level_bare_unary_builtin_reference_parses() {
 }
 
 #[test]
-#[ignore = "H2: bare unary-builtin keyword as juxtaposition argument (pipe-autofix workstream)"]
 fn bare_unary_builtin_as_juxtaposition_argument_parses() {
     // `apply_fn(realize)` passes the unary builtin `realize` as a
     // function-valued argument. Same η-expansion as H1.
@@ -486,7 +484,6 @@ fn bare_unary_builtin_as_juxtaposition_argument_parses() {
 }
 
 #[test]
-#[ignore = "H3: `cast(type)` one-arg pipe-stage form (pipe-autofix workstream)"]
 fn one_arg_cast_pipe_stage_parses() {
     // Per spec §3.6, `x |> cast(f32)` ≡ `cast(x, f32)`: the piped value
     // fills the first slot, the type argument fills the second.

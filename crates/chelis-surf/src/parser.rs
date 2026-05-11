@@ -81,6 +81,17 @@ fn validate_property_names(decls: &[Decl]) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// The unary-builtin keyword tokens that have a spec-meaningful bare
+/// form per `spec/01-nomenclature.md` §3.6. Used by
+/// `synthesize_bare_unary_builtin_lambda` to η-expand `realize`/`copy`
+/// in non-call position (H1/H2 of the pipe-autofix-extras workstream;
+/// see `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
+#[derive(Copy, Clone)]
+enum BareUnaryBuiltinKind {
+    Realize,
+    Copy,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1079,45 +1090,50 @@ impl Parser {
 
     /// Parse a single pipe stage.
     ///
-    /// Wraps `parse_prefix` for ordinary stages. Adds first-argument-insertion
-    /// support for bare keyword callable references per spec
-    /// `01-nomenclature.md` §3.6: `x |> realize` ≡ `realize(x)` and
-    /// `x |> copy` ≡ `copy(x)`. Without this, the pipe loop would dispatch
-    /// to `parse_prefix`, which routes every reserved keyword to its
-    /// normal-form parser and rejects the bare form (Item 2b / G11).
+    /// Wraps `parse_prefix` for ordinary stages. Adds first-argument-
+    /// insertion support for two cases that `parse_prefix` alone cannot
+    /// handle, per spec `01-nomenclature.md` §3.6:
     ///
-    /// Only the unary builtins `Realize` and `Copy` are special-cased here.
-    /// The other reserved keywords (`grad`, `vmap`, `jit`, `cast`, `with`,
-    /// `par`, `if`, `match`, `fn`) have no spec-meaningful bare-pipe-stage
-    /// form — see `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`.
+    /// 1. Bare unary-builtin keyword references (`x |> realize` ≡
+    ///    `realize(x)`, `x |> copy` ≡ `copy(x)`). `parse_realize` and
+    ///    `parse_copy` themselves accept the bare form (H1/H2 of the
+    ///    pipe-autofix-extras workstream), so the pipe-stage path falls
+    ///    through to them.
+    /// 2. One-arg `cast(type)` pipe-stage form (H3): `x |> cast(f32)` ≡
+    ///    `cast(x, f32)`. The piped value fills the first slot; the
+    ///    type argument fills the second. The synthesized lambda
+    ///    `fn (v) -> cast(v, f32)` is returned so the desugarer's
+    ///    existing pipe-stage path produces the canonical Deep shape.
+    ///
+    /// Other reserved keywords (`grad`, `vmap`, `jit`, `with`, `par`,
+    /// `if`, `match`, `fn`) have no spec-meaningful bare-pipe-stage
+    /// form — see
+    /// `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`.
     fn parse_pipe_stage(&mut self) -> Result<Expr, ParseError> {
         if self.at_eof() {
             return Err(ParseError::UnexpectedEof);
         }
 
-        // Bare unary-builtin keyword: synthesize an explicit lambda over a
-        // fresh `__chelis_pipe` parameter so the desugarer's existing
-        // pipe-stage handling produces the canonical
-        // `(fn (v) -> (realize v))` Deep shape.
-        let bare_kind = match self.peek() {
-            TokenKind::Realize | TokenKind::Copy
-                if !matches!(self.peek_after_current(), TokenKind::LParen) =>
-            {
-                Some(self.peek().clone())
-            }
-            _ => None,
-        };
-
-        if let Some(kind) = bare_kind {
-            let tok = self.advance();
-            let span = tok.span;
+        // H3: one-arg `cast(type)` pipe-stage form. Look-ahead for
+        // `Cast LParen Ident RParen`; if matched, synthesize an explicit
+        // lambda over a fresh `__chelis_pipe` parameter so the
+        // desugarer's existing pipe-stage handling produces the
+        // canonical Deep shape. Anything else (including the two-arg
+        // form `cast(value, type)`) falls through to `parse_prefix`.
+        if matches!(self.peek(), TokenKind::Cast)
+            && let Some(precision) = self.peek_one_arg_cast_precision()
+        {
+            let cast_tok = self.advance(); // consume Cast
+            let span = cast_tok.span;
+            self.advance(); // consume LParen
+            self.advance(); // consume Ident
+            let close = self.expect(&TokenKind::RParen)?;
             let pipe_param = self.fresh_pipe_param_name();
-            let body_inner = Expr::Var(pipe_param.clone(), span);
-            let body = match kind {
-                TokenKind::Realize => Expr::Realize(Box::new(body_inner), span),
-                TokenKind::Copy => Expr::Copy(Box::new(body_inner), span),
-                _ => unreachable!("bare_kind is gated above"),
-            };
+            let body = Expr::Cast(
+                Box::new(Expr::Var(pipe_param.clone(), span)),
+                precision,
+                span.merge(close.span),
+            );
             return Ok(Expr::Lambda(
                 vec![Param {
                     name: pipe_param,
@@ -1125,41 +1141,79 @@ impl Parser {
                     span,
                 }],
                 Box::new(body),
-                span,
+                span.merge(close.span),
             ));
         }
 
+        // Bare `realize` / `copy` pipe stages are handled by
+        // `parse_realize` / `parse_copy` themselves (H1/H2 of the
+        // pipe-autofix-extras workstream), so the pipe-stage path falls
+        // through to `parse_prefix`.
         self.parse_prefix()
     }
 
-    /// Look at the token following `peek()` (skipping intervening newlines),
-    /// returning `TokenKind::Eof` if no further token exists. Used by
-    /// `parse_pipe_stage` to distinguish bare keyword pipe stages from the
-    /// keyword's normal-form continuation.
-    fn peek_after_current(&self) -> TokenKind {
+    /// If the next four tokens are `Cast LParen Ident RParen`, return
+    /// the precision identifier (the type name). Otherwise `None`.
+    /// Used by `parse_pipe_stage` to recognize the H3 one-arg
+    /// `cast(type)` pipe-stage form without consuming tokens on miss.
+    fn peek_one_arg_cast_precision(&self) -> Option<String> {
+        // Caller has already verified `self.peek() == Cast`. We need to
+        // look at the token after Cast (skipping newlines), then the
+        // token after that, etc. Using `peek_after_current` would only
+        // see one ahead, so do a manual look-ahead here.
         let mut pos = self.pos;
-        // Skip newlines before the current token (mirrors `peek`).
+        // Skip leading newlines.
         while matches!(
             self.tokens.get(pos).map(|t| &t.kind),
             Some(TokenKind::Newline)
         ) {
             pos += 1;
         }
-        // Step past the current token.
-        if self.tokens.get(pos).is_some() {
-            pos += 1;
+        // Step over `Cast`.
+        if !matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Cast)) {
+            return None;
         }
-        // Skip newlines after the current token.
+        pos += 1;
         while matches!(
             self.tokens.get(pos).map(|t| &t.kind),
             Some(TokenKind::Newline)
         ) {
             pos += 1;
         }
-        self.tokens
-            .get(pos)
-            .map(|t| t.kind.clone())
-            .unwrap_or(TokenKind::Eof)
+        // Expect `LParen`.
+        if !matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::LParen)
+        ) {
+            return None;
+        }
+        pos += 1;
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
+        // Expect Ident (the precision name).
+        let precision = match self.tokens.get(pos).map(|t| &t.kind) {
+            Some(TokenKind::Ident(name)) => name.clone(),
+            _ => return None,
+        };
+        pos += 1;
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
+        // Expect `RParen` (no Comma → exactly one arg, the type).
+        if !matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::RParen)
+        ) {
+            return None;
+        }
+        Some(precision)
     }
 
     /// Pick a fresh `__chelis_pipe[N]` parameter name. Mirrors the desugar
@@ -1602,6 +1656,15 @@ impl Parser {
 
     fn parse_realize(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span;
+        // Bare `realize` (H1/H2): no following `LParen` → η-expand to
+        // `fn (v) -> realize(v)`. Spec §3.6 says a bare callable in
+        // expression position is the function itself; this synthesis
+        // mirrors `parse_pipe_stage`'s bare-form handling.
+        if *self.peek() != TokenKind::LParen {
+            return Ok(
+                self.synthesize_bare_unary_builtin_lambda(BareUnaryBuiltinKind::Realize, start)
+            );
+        }
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
         let end = self.expect(&TokenKind::RParen)?;
@@ -1610,10 +1673,32 @@ impl Parser {
 
     fn parse_copy(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span;
+        // Bare `copy` (H1/H2): same η-expansion as bare `realize`.
+        if *self.peek() != TokenKind::LParen {
+            return Ok(self.synthesize_bare_unary_builtin_lambda(BareUnaryBuiltinKind::Copy, start));
+        }
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Copy(Box::new(expr), start.merge(end.span)))
+    }
+
+    fn synthesize_bare_unary_builtin_lambda(&self, kind: BareUnaryBuiltinKind, span: Span) -> Expr {
+        let pipe_param = self.fresh_pipe_param_name();
+        let body_inner = Expr::Var(pipe_param.clone(), span);
+        let body = match kind {
+            BareUnaryBuiltinKind::Realize => Expr::Realize(Box::new(body_inner), span),
+            BareUnaryBuiltinKind::Copy => Expr::Copy(Box::new(body_inner), span),
+        };
+        Expr::Lambda(
+            vec![Param {
+                name: pipe_param,
+                ty: None,
+                span,
+            }],
+            Box::new(body),
+            span,
+        )
     }
 
     fn parse_with_handler(&mut self) -> Result<Expr, ParseError> {

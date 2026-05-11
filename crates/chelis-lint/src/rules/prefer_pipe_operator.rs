@@ -1,7 +1,7 @@
 //! Rule `prefer-pipe-operator` -- nested first-argument call chains are easier
 //! to read as Surf pipes.
 
-use crate::{Context, Rule, Severity, Surface, Violation};
+use crate::{Context, Replacement, Rule, Severity, Surface, Violation};
 
 pub struct PreferPipeOperator;
 
@@ -47,19 +47,41 @@ impl Rule for PreferPipeOperator {
             .collect()
     }
 
-    // Deliberately no auto-fix in v1. Pipe rewrites require semantic proof
-    // that the nested expression is a first-argument dataflow chain, which the
-    // current source-text walker cannot provide safely for downstream corpora.
+    fn fix_requires_typed_pipeline_check(&self) -> bool {
+        // The pipe rewrite is safe iff the rewritten program still passes
+        // the typed/effect/linearity pipeline. Item 5 (PR #34) added the
+        // CLI-driver gate that runs the same pipeline `chelis check` uses;
+        // opting in here re-enables the autofix that 477bd0d disabled.
+        // Architectural decision in
+        // `docs/investigations/redundant_linearity_autofix_architecture.md`
+        // (Path 1B). The per-rule re-enable rationale is documented in
+        // `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`.
+        true
+    }
+
+    fn fix(&self, ctx: &Context<'_>, violation: &Violation) -> Option<Replacement> {
+        let source = ctx.source?;
+        let start = offset_from_line_col(source, violation.line?, violation.col?)?;
+        let candidate = pipe_candidate_at(source, start)?;
+        Some(Replacement {
+            path: ctx.path.to_path_buf(),
+            start: candidate.start,
+            end: candidate.end,
+            text: candidate.replacement,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
 struct Candidate {
     start: usize,
     end: usize,
+    replacement: String,
 }
 
 #[derive(Debug, Clone)]
 struct Call {
+    name: String,
     args: Vec<Arg>,
     start: usize,
     end: usize,
@@ -96,21 +118,46 @@ fn find_pipe_candidates(source: &str) -> Vec<Candidate> {
 
 fn pipe_candidate_at(source: &str, start: usize) -> Option<Candidate> {
     let call = parse_call_at(source, start)?;
-    let mut stage_count = 0usize;
+    let mut stages: Vec<String> = Vec::new();
     let mut current = call.clone();
     loop {
         let first = current.args.first()?;
         let Some(inner) = parse_arg_as_call(source, first) else {
-            if stage_count == 0 {
+            if stages.is_empty() {
                 return None;
+            }
+            // Innermost first argument becomes the seed of the pipe
+            // (e.g., the `x` in `outer(inner(x), scale)` → `x |> inner |> outer(scale)`).
+            let seed = first.text.trim().to_string();
+            stages.push(render_stage(&current));
+            stages.reverse();
+            let mut replacement = seed;
+            for stage in stages {
+                replacement.push_str(" |> ");
+                replacement.push_str(&stage);
             }
             return Some(Candidate {
                 start: call.start,
                 end: call.end,
+                replacement,
             });
         };
-        stage_count += 1;
+        stages.push(render_stage(&current));
         current = inner;
+    }
+}
+
+fn render_stage(call: &Call) -> String {
+    let rest: Vec<String> = call
+        .args
+        .iter()
+        .skip(1)
+        .map(|arg| arg.text.trim().to_string())
+        .collect();
+    if rest.is_empty() {
+        call.name.clone()
+    } else {
+        format!("{}({})", call.name, rest.join(", "))
     }
 }
 
@@ -130,6 +177,7 @@ fn parse_call_at(source: &str, start: usize) -> Option<Call> {
     while cursor < source.len() && is_ident_continue(source.as_bytes()[cursor]) {
         cursor += 1;
     }
+    let name = source[start..cursor].to_string();
     while cursor < source.len() && source.as_bytes()[cursor].is_ascii_whitespace() {
         cursor += 1;
     }
@@ -139,6 +187,7 @@ fn parse_call_at(source: &str, start: usize) -> Option<Call> {
     let close = matching_paren(source, cursor)?;
     let args = split_args(source, cursor + 1, close)?;
     Some(Call {
+        name,
         args,
         start,
         end: close + 1,
@@ -295,6 +344,24 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, offset.saturating_sub(line_start) + 1)
 }
 
+fn offset_from_line_col(source: &str, line_no: usize, col_no: usize) -> Option<usize> {
+    if line_no == 0 || col_no == 0 {
+        return None;
+    }
+    let mut line = 1usize;
+    let mut line_start = 0usize;
+    for (index, byte) in source.bytes().enumerate() {
+        if line == line_no {
+            return Some(line_start + col_no - 1);
+        }
+        if byte == b'\n' {
+            line += 1;
+            line_start = index + 1;
+        }
+    }
+    (line == line_no).then_some(line_start + col_no - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,10 +378,20 @@ mod tests {
 
     #[test]
     fn detects_nested_first_arg_chain() {
+        // The source-text walker proposes the pipe rewrite; the CLI
+        // driver's Path 1B gate (see
+        // `docs/investigations/redundant_linearity_autofix_architecture.md`)
+        // verifies safety before writing. The unit test pins the local
+        // proposal shape only.
         let src = "def f(x: f32) -> f32 = outer(inner(x), scale)\n";
         let violations = PreferPipeOperator.check(&ctx(src));
         assert_eq!(violations.len(), 1);
-        assert!(PreferPipeOperator.fix(&ctx(src), &violations[0]).is_none());
+        let rule = PreferPipeOperator;
+        assert!(rule.fix_requires_typed_pipeline_check());
+        let replacement = rule
+            .fix(&ctx(src), &violations[0])
+            .expect("fix should propose the pipe rewrite");
+        assert_eq!(replacement.text, "x |> inner |> outer(scale)");
     }
 
     #[test]
@@ -331,19 +408,31 @@ mod tests {
 
     #[test]
     fn preserves_string_argument_contents() {
+        // The inner call's `"a,b"` string argument keeps its exact text
+        // when assembled into the rewrite's trailing `outer("a,b")` stage.
         let src = "def f(x: f32) -> f32 = outer(inner(x), \"a,b\")\n";
         let violations = PreferPipeOperator.check(&ctx(src));
         assert_eq!(violations.len(), 1);
-        assert!(PreferPipeOperator.fix(&ctx(src), &violations[0]).is_none());
+        let replacement = PreferPipeOperator
+            .fix(&ctx(src), &violations[0])
+            .expect("fix should propose the pipe rewrite");
+        assert_eq!(replacement.text, "x |> inner |> outer(\"a,b\")");
     }
 
     #[test]
-    fn fix_is_unavailable_for_sibling_argument_calls() {
+    fn fix_proposes_literal_seed_for_inner_cast_chain() {
+        // The walker descends through the outer `beta(...)`'s first arg
+        // (`cast(2.0, f32)`), then through that call's first arg (the
+        // literal `2.0`). The proposed rewrite uses `2.0` as the pipe
+        // seed and accumulates the enclosing calls as pipe stages.
+        // This is a syntactic proposal only; the CLI driver's Path 1B
+        // gate decides whether the rewrite is semantically safe.
         let src = "def f() -> f32 = beta(cast(2.0, f32), cast(3.0, f32))\n";
         let violations = PreferPipeOperator.check(&ctx(src));
         assert_eq!(violations.len(), 1);
-        for violation in violations {
-            assert!(PreferPipeOperator.fix(&ctx(src), &violation).is_none());
-        }
+        let replacement = PreferPipeOperator
+            .fix(&ctx(src), &violations[0])
+            .expect("fix should propose the rewrite");
+        assert_eq!(replacement.text, "2.0 |> cast(f32) |> beta(cast(3.0, f32))");
     }
 }

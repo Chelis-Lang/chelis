@@ -161,7 +161,7 @@ returns the synthesized lambda, the juxtaposition-argument path
 inherits the fix. No separate code change is needed for H2 once H1's
 fix is in place — H1 + H2 share the same `parse_prefix` surface.
 
-### H3 — one-arg `cast(type)` pipe-stage form
+### H3 — one-arg `cast(type)` pipe-stage form (parser scope only)
 
 **Spec language** (`01-nomenclature.md` §3.6, lines 311-313):
 
@@ -207,6 +207,36 @@ that overloads `parse_cast`'s behavior (it would mean `cast(f32)` is a
 valid expression in non-pipe context too, which has no spec interpretation
 because the value-to-cast is missing). Keep the special form local to
 `parse_pipe_stage` so the non-pipe `cast` parser stays unambiguous.
+
+**Downstream type-inference limitation** (escalated to orchestrator):
+With the parse-level fix in place, `x |> cast(f32)` parses and desugars
+correctly to the canonical lambda over `__chelis_pipe`. However, the
+type-checker's `infer_cast` (`crates/chelis-types/src/infer.rs:9019`)
+requires the inner expression to resolve to `Type::Tensor(_,_)` or
+`Type::Prim(_)` at inference time. The synthesized lambda's parameter
+is initially a fresh type variable; `infer_cast` evaluates the body
+before the pipe-stage unification (`infer_pipe` at L8880-8932) binds
+the parameter. The result is a `CastNonTensor` error against the
+unresolved type variable.
+
+`realize` and `copy` do not have this issue because their inference
+arms (L4489-4505 and L4506+) pass the inner type through unchanged,
+allowing the pipe-stage unification to bind the parameter. `cast` is
+structurally different: its target type is part of the node, and its
+inference branches on the inner-expression type.
+
+The parse-level fix in this PR is correct per spec §3.6. The
+type-inference behavior is a separate structural concern (bidirectional
+or two-pass inference for `cast` inside synthesized lambdas, or
+delayed `infer_cast` resolution). Recommend filing as its own
+follow-on workstream rather than expanding this PR's scope — the
+H3 parser surface is closed by this fix, but end-to-end usage of
+`x |> cast(f32)` will continue to surface a type-checker error until
+that follow-on lands.
+
+Item 2b's diagnosis note already noted H3 as a separate gap; this PR
+fixes the parser half and documents the type-checker half as the
+remaining work.
 
 ### Lambda synthesis approach (H1/H2/H3)
 
