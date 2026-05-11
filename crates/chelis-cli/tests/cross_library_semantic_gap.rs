@@ -287,3 +287,170 @@ fn nested_user_def_matmul_helper_hits_blas() {
         nested_c.blas, nested_c.allocs, nested_c.fused, nested_c.total_alloc_bytes
     );
 }
+
+// ===========================================================================
+// HIP target — Gap 5 M5(a): user-def matmul helpers must emit hipBLAS on HIP
+// the same way they emit cblas_sgemm on the C backend (above). The HIP target
+// inlines pure-tensor helpers at DAG-lowering time via `program_defs`, so the
+// emitted HIP `.cpp` should contain `chelis_hipblas_sgemm_row_major(` for
+// each of the four matmul forms.
+//
+// These assertions use exact-substring match on the host-side hipBLAS
+// dispatch (`chelis_hipblas_sgemm_row_major(`). They are NOT `contains()` on
+// a loose pattern — they pin the row-major rank-2 dispatch the HIP backend
+// emits at `crates/chelis-backend-hip/src/emit.rs:1754` for a fixed 8x16 @
+// 16x4 matmul. Strided-batched / batched dispatch variants are locked
+// elsewhere (e.g. `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs`)
+// and intentionally not loosened here.
+// ===========================================================================
+
+struct HipCounts {
+    /// Exact-substring occurrences of `chelis_hipblas_sgemm_row_major(` in
+    /// the emitted HIP `.cpp`. The HIP emitter writes both a host-side entry
+    /// (`<func>(...)`) and a device-side entry (`<func>_device(...)`) for
+    /// the same DAG, so a single BLAS-eligible matmul produces TWO matches.
+    hipblas_row_major_calls: usize,
+    /// Occurrences of `cblas_sgemm(` — must be zero on the HIP target.
+    cblas_calls: usize,
+    /// Whether the link flags include `-lhipblas` (i.e. the HIP backend
+    /// detected hipBLAS dispatch).
+    has_lhipblas: bool,
+}
+
+fn build_hip_and_count(source: &str, name: &str) -> HipCounts {
+    let dir = tempdir().expect("tempdir");
+    let src_path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}_out"));
+    fs::write(&src_path, source).expect("write source");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args([
+            "build",
+            src_path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis build should run");
+    assert!(
+        output.status.success(),
+        "chelis build --target hip failed for {name}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cpp_path = out_dir.join(format!("{name}_hip.cpp"));
+    let cpp = fs::read_to_string(&cpp_path).expect("read generated hip cpp");
+    let hipblas_row_major_calls = cpp.matches("chelis_hipblas_sgemm_row_major(").count();
+    let cblas_calls = cpp.matches("cblas_sgemm(").count();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let has_lhipblas = stdout.contains("-lhipblas");
+
+    HipCounts {
+        hipblas_row_major_calls,
+        cblas_calls,
+        has_lhipblas,
+    }
+}
+
+#[test]
+fn hip_direct_matmul_hits_hipblas() {
+    let (direct, _, _, _) = semantic_gap_sources();
+    let h = build_hip_and_count(direct, "hip_sgap_direct");
+
+    // Locked: every form must hit `chelis_hipblas_sgemm_row_major(` at
+    // least twice — once in the host-side entry function and once in the
+    // device-side entry function (HIP backend emits both for each DAG).
+    assert_eq!(
+        h.hipblas_row_major_calls, 2,
+        "direct `matmul(a, b)` on HIP must emit exactly two \
+         `chelis_hipblas_sgemm_row_major(` calls (host entry + device \
+         entry). got={}",
+        h.hipblas_row_major_calls
+    );
+    assert_eq!(
+        h.cblas_calls, 0,
+        "HIP target must NOT emit `cblas_sgemm(`; got {} on direct matmul",
+        h.cblas_calls
+    );
+    assert!(
+        h.has_lhipblas,
+        "HIP link flags should include `-lhipblas` when hipBLAS is dispatched"
+    );
+}
+
+#[test]
+fn hip_inline_matmul_hits_hipblas() {
+    let (_, inline_manual, _, _) = semantic_gap_sources();
+    let h = build_hip_and_count(inline_manual, "hip_sgap_inline_manual");
+
+    assert_eq!(
+        h.hipblas_row_major_calls, 2,
+        "inline expand+mul+sum on HIP must emit exactly two \
+         `chelis_hipblas_sgemm_row_major(` calls (the Tier 2 specializer \
+         recognizes the hand-written Einstein-form matmul before HIP \
+         codegen). got={}",
+        h.hipblas_row_major_calls
+    );
+    assert_eq!(h.cblas_calls, 0);
+    assert!(h.has_lhipblas);
+}
+
+#[test]
+fn hip_user_def_builtin_matmul_helper_hits_hipblas() {
+    let (_, _, user_def_builtin, _) = semantic_gap_sources();
+    let h = build_hip_and_count(user_def_builtin, "hip_sgap_user_def_builtin");
+
+    // This is the M5(a) target behavior: `def my_mm(a, b) = matmul(a, b);
+    // def f(a, b) = my_mm(a, b)` on HIP must NOT lose hipBLAS the way it
+    // would lose cblas_sgemm without summary consumption on C. On HIP the
+    // mechanism is DAG-level helper inlining at lowering time, threaded
+    // through `lower_named_tensor_entry_dag` in `crates/chelis-ir/src/host.rs`.
+    assert_eq!(
+        h.hipblas_row_major_calls, 2,
+        "user-def builtin matmul wrapper on HIP must emit exactly two \
+         `chelis_hipblas_sgemm_row_major(` calls (M5(a) closure: helper \
+         calls hit hipBLAS the same way they hit cblas_sgemm on C). got={}",
+        h.hipblas_row_major_calls
+    );
+    assert_eq!(h.cblas_calls, 0);
+    assert!(h.has_lhipblas);
+}
+
+#[test]
+fn hip_user_def_manual_matmul_helper_hits_hipblas() {
+    let (_, _, _, user_def_manual) = semantic_gap_sources();
+    let h = build_hip_and_count(user_def_manual, "hip_sgap_user_def_manual");
+
+    assert_eq!(
+        h.hipblas_row_major_calls, 2,
+        "user-def expand+mul+sum wrapper on HIP must emit exactly two \
+         `chelis_hipblas_sgemm_row_major(` calls (the helper's body is \
+         specialized into a BLAS matmul before HIP emit). got={}",
+        h.hipblas_row_major_calls
+    );
+    assert_eq!(h.cblas_calls, 0);
+    assert!(h.has_lhipblas);
+}
+
+#[test]
+fn hip_nested_user_def_matmul_helper_hits_hipblas() {
+    let nested = "def my_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
+                  -> tensor[8, 4, f32] = matmul(a, b)\n\
+                  def wrap_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
+                  -> tensor[8, 4, f32] = my_mm(a, b)\n\
+                  def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
+                  -> tensor[8, 4, f32] = wrap_mm(a, b)\n";
+    let h = build_hip_and_count(nested, "hip_sgap_nested_user_def");
+
+    assert_eq!(
+        h.hipblas_row_major_calls, 2,
+        "nested user-def matmul wrapper on HIP must emit exactly two \
+         `chelis_hipblas_sgemm_row_major(` calls. got={}",
+        h.hipblas_row_major_calls
+    );
+    assert_eq!(h.cblas_calls, 0);
+    assert!(h.has_lhipblas);
+}

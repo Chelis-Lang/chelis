@@ -423,13 +423,31 @@ implementation technique for small helpers, not the design contract.
 - **Addressed by this branch for C BLAS helpers:** `cross_library_semantic_gap.rs`
   now proves direct, inline, user-def, and nested user-def matmul forms hit
   generated-C BLAS.
-- **Not fully addressed:** HIP summary consumption, gather/scatter summaries,
-  negative diagnostics for rejected summarized callsites, and broader helper
-  compositions.
+- **Addressed by W3-A (M5(a)) for HIP BLAS helpers:** the same fixture set is
+  now mirrored on `--target hip` in
+  `crates/chelis-cli/tests/cross_library_semantic_gap.rs` (the
+  `hip_*_hits_hipblas` test bank) with exact-substring matches on
+  `chelis_hipblas_sgemm_row_major(`. The HIP target threads helper bodies
+  through `lower_named_tensor_entry_dag` so the helper subgraph is inlined
+  into the entry DAG before HIP codegen runs the Tier 2 BLAS specializer; the
+  `hipblas` dispatch path therefore stays hit on both inline and user-`def`
+  forms. A GPU manual gate
+  (`crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs`,
+  `g15_user_def_matmul_helper_hits_hipblas_numeric`) verifies the
+  numerical correctness end-to-end.
+- **Not fully addressed:** gather/scatter summaries (W3-B), negative
+  diagnostics for rejected summarized callsites (W4-A), and broader helper
+  compositions (`softmax`, attention-shaped, etc. — out of M5 scope).
 
-**Locked test:** `crates/chelis-cli/tests/cross_library_semantic_gap.rs`
-asserts BLAS hits for the direct, inline, user-`def`, and nested user-`def`
-forms.
+**Locked tests:**
+- `crates/chelis-cli/tests/cross_library_semantic_gap.rs` asserts BLAS hits for
+  the direct, inline, user-`def`, and nested user-`def` forms on both
+  `--target c` (`cblas_sgemm`) and `--target hip`
+  (`chelis_hipblas_sgemm_row_major`).
+- `crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs` is the
+  GPU manual gate for the HIP path; it builds the user-`def` fixtures
+  through the CLI, runs them on the local GPU through hipBLAS, and asserts
+  numeric equality against a hand-rolled row-major reference.
 
 ## Gap 6 — BLAS-specialized matmul still allocates and computes the dead `Mul` intermediate — CLOSED by M1
 
