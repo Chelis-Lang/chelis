@@ -132,7 +132,6 @@ def fanout(w: tensor[3, f32]) -> tensor[3, f32] = {
 }
 
 #[test]
-#[ignore = "var-RHS let consume fan-out gap, see commit-pending; fix in fix/cross-statement-fanout-v2"]
 fn var_rhs_let_alias_then_borrow_use_lowers_without_explicit_copy() {
     // TARGET: the actual hello-chelis repro. `alias = x` is a var-RHS
     // let-binding that the linearity checker treats as consuming `x`.
