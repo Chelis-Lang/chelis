@@ -1,6 +1,6 @@
 # Lines of Code Report
 
-Generated: 2026-05-11 18:51 UTC
+Generated: 2026-05-11 19:10 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
@@ -17,5 +17,5 @@ Generated: 2026-05-11 18:51 UTC
 | JavaScript | 2 | 202 | 0 | 29 | 231 | Tree-sitter grammar definitions |
 | Objective-C | 1 | 143 | 63 | 46 | 252 |  |
 | Tree-sitter Queries (.scm) | 2 | 102 | 0 | 6 | 108 | Syntax highlighting for Surf and Deep |
-| Markdown | 134 | 0 | 12,425 | 6,224 | 18,649 | Specs, design docs, plans |
-| **Total** | **587** | **150,925** | **22,127** | **50,416** | **223,468** | |
+| Markdown | 135 | 0 | 12,627 | 6,260 | 18,887 | Specs, design docs, plans |
+| **Total** | **588** | **150,925** | **22,329** | **50,452** | **223,706** | |
