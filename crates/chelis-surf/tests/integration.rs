@@ -259,51 +259,69 @@ fn effect_annotations_desugar_into_t_fn_metadata() {
 
 // === Bare-keyword pipe stages (Item 2b / G11) ===
 //
-// Pinned by failing tests until the parser accepts bare keyword tokens as
-// pipe stages. The pipe-stage parser at `parser.rs:1000-1003` dispatches to
-// `parse_prefix`, which routes every reserved keyword (Realize, Copy, Grad,
-// Vmap, Jit, Par, Cast, If, Match, Fn, With) to a parser that unconditionally
-// expects an `LParen` or `LBrace` next. The fix should let bare keyword forms
-// produce a callable reference in pipe-stage context, matching the spec's
-// first-argument insertion rule (`spec/01-nomenclature.md` §3.6).
+// The pipe-stage parser at `parser.rs::parse_pipe_stage` recognizes bare
+// unary-builtin keyword tokens (`Realize`, `Copy`) and synthesizes an
+// explicit lambda over a fresh `__chelis_pipe` parameter, so the
+// desugarer produces the canonical `(pipe ... (fn (v) -> (realize v)))`
+// Deep shape per spec `01-nomenclature.md` §3.6 first-argument insertion.
 //
-// Only the keywords whose builtin form is **unary** have a meaningful bare
-// pipe-stage semantics — currently `realize` and `copy`. Keywords that take
-// additional arguments (`grad`, `vmap`, `cast`, `jit`, `with`, `par`) use the
-// arg form (e.g. `x |> grad(f)`), and the structural forms (`if`, `match`,
-// `fn`) have no bare-callable interpretation. The fixtures here cover the
-// unary cases plus a chained-pipe canary.
+// Only the unary builtins have spec-meaningful bare pipe-stage form;
+// keywords taking additional arguments (`grad`, `vmap`, `cast`, `jit`,
+// `with`) keep their existing arg-form behavior, and the structural forms
+// (`if`, `match`, `fn`, `par`) keep their existing rejection — see
+// `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`.
 
 #[test]
-#[ignore = "parser rejects bare keyword pipe stage, see commit fix/parser-pipe-bare-keyword"]
 fn bare_realize_as_pipe_stage_parses() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize";
     let decls = surf_parse(src).expect("bare `|> realize` should parse");
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
-    // Canonical desugar: `(pipe {} (var {} x) <realize-callable>)`, matching
-    // spec §3.6 first-argument insertion semantics for `realize`.
+    // Canonical desugar: pipe with a synthesized unary lambda calling
+    // the unary builtin on the piped value.
     assert!(
-        text.contains("(pipe {}"),
+        text.contains("(pipe {"),
         "expected pipe node in desugared output, got:\n{text}"
     );
+    assert!(
+        text.contains("__chelis_pipe") && text.contains("realize"),
+        "expected synthesized lambda body `(realize {{}} (var {{}} __chelis_pipe))`, got:\n{text}"
+    );
+    assert!(
+        text.contains("(params {} __chelis_pipe)"),
+        "expected fresh `__chelis_pipe` param, got:\n{text}"
+    );
+    // Deep round-trips with strict tag validation.
+    let reparsed = deep_parse_strict(&text).expect("synthesized lambda Deep validates");
+    assert_eq!(text, print_canonical(&reparsed));
 }
 
 #[test]
-#[ignore = "parser rejects bare keyword pipe stage, see commit fix/parser-pipe-bare-keyword"]
 fn bare_copy_as_pipe_stage_parses() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> copy";
     let decls = surf_parse(src).expect("bare `|> copy` should parse");
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(
-        text.contains("(pipe {}"),
+        text.contains("(pipe {"),
         "expected pipe node in desugared output, got:\n{text}"
     );
+    // Synthesized lambda over the piped value: `(fn ... (params __chelis_pipe)
+    // (copy ... (var ... __chelis_pipe)))`. Metadata maps carry source spans
+    // so we match on the structural body rather than literal `{}` markers.
+    assert!(
+        text.contains("(params {} __chelis_pipe)"),
+        "expected fresh `__chelis_pipe` param, got:\n{text}"
+    );
+    assert!(
+        text.contains("(copy {") && text.contains("(var {") && text.contains("__chelis_pipe))"),
+        "expected `(copy {{...}} (var {{...}} __chelis_pipe))` body, got:\n{text}"
+    );
+    let reparsed = deep_parse_strict(&text).expect("synthesized lambda Deep validates");
+    assert_eq!(text, print_canonical(&reparsed));
 }
 
 #[test]
-#[ignore = "parser rejects bare keyword pipe stage, see commit fix/parser-pipe-bare-keyword"]
 fn chained_bare_keyword_with_named_pipe_stages_parses() {
     // Mixed pipe: bare keyword stage chained with a regular named-function
     // stage. Exercises the pipe-loop boundary (the parser must not consume
@@ -313,32 +331,99 @@ fn chained_bare_keyword_with_named_pipe_stages_parses() {
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(
-        text.contains("(pipe {}"),
+        text.contains("(pipe {"),
         "expected pipe node in desugared output, got:\n{text}"
     );
-    // The named-ident stage must remain a `var` reference.
+    // The bare-keyword stage produces the synthesized lambda.
     assert!(
-        text.contains("(var {} relu)"),
-        "expected named-ident pipe stage (var relu) to survive, got:\n{text}"
+        text.contains("__chelis_pipe") && text.contains("realize"),
+        "expected bare-realize stage to expand to lambda body, got:\n{text}"
+    );
+    // The named-ident stage must remain a `var` reference (no lambda wrap).
+    assert!(
+        text.contains("relu)") && !text.contains("relu __chelis_pipe"),
+        "expected named-ident pipe stage `(var ... relu)` to survive (no lambda wrap), got:\n{text}"
     );
 }
 
 #[test]
-fn bare_realize_pipe_stage_rejection_is_pinned() {
-    // Regression pin for the current bug: parser rejects `x |> realize`. When
-    // the fix lands, this test must be inverted (assert success) and the three
-    // `#[ignore]` tests above must be flipped to running.
-    let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize";
-    let err = surf_parse(src).expect_err(
-        "expected parser to reject `x |> realize` (current G11 behavior); \
-         if this now parses successfully, the fix has landed — invert this test \
-         and flip the ignored fixtures above to running",
-    );
-    let msg = format!("{err}");
+fn keyword_with_arg_form_in_pipe_stage_still_parses() {
+    // Negative: the arg form `cast(value, type)` outside of pipe context
+    // remains unchanged. The bare recognition in `parse_pipe_stage` does
+    // not trigger because the token after `realize` in a hypothetical
+    // `... |> realize(x)` form (or after `cast` in `cast(x, f32)`) is
+    // `LParen`. This test exercises a non-pipe call followed by a bare
+    // pipe stage to ensure neither path interferes with the other.
+    let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = cast(x, f32) |> realize";
+    let decls = surf_parse(src).expect("cast arg form + bare-realize pipe should parse");
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    // The cast call retains its arg form.
     assert!(
-        msg.contains("expected LParen"),
-        "expected `expected LParen` diagnostic from bare-keyword rejection, got: {msg}"
+        text.contains("(cast {"),
+        "expected (cast {{...}} ...) in:\n{text}"
     );
+    // The bare-realize stage still synthesizes the canonical lambda body.
+    assert!(
+        text.contains("__chelis_pipe"),
+        "expected synthesized __chelis_pipe param, got:\n{text}"
+    );
+}
+
+#[test]
+fn fmt_compacts_bare_keyword_pipe_stages_back_to_keyword_form() {
+    // Surf → Surf format round-trip: `x |> realize` and `x |> copy` must
+    // re-emit as the bare keyword form (not the synthesized lambda). Spec
+    // `01-nomenclature.md` §3.6 permits this compaction for any
+    // single-arg-first-position pipe-stage lambda; Item 2b adds the unary
+    // builtin keywords to the formatter's compact path.
+    use chelis_surf::format::format_program;
+    for (label, src) in [
+        (
+            "bare-realize",
+            "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize",
+        ),
+        (
+            "bare-copy",
+            "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> copy",
+        ),
+        (
+            "chained",
+            "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize |> relu",
+        ),
+    ] {
+        let decls = surf_parse(src).expect(label);
+        let formatted = format_program(&decls);
+        assert!(
+            formatted.contains("|> realize") || formatted.contains("|> copy"),
+            "{label}: expected bare-keyword pipe form in formatter output, got:\n{formatted}"
+        );
+        assert!(
+            !formatted.contains("__chelis_pipe"),
+            "{label}: formatter must compact synthesized lambdas, but `__chelis_pipe` leaked:\n{formatted}"
+        );
+        // Idempotency: formatting the formatted output produces the same
+        // text (no further compaction or expansion).
+        let reformatted = format_program(&surf_parse(&formatted).expect(label));
+        assert_eq!(formatted, reformatted, "{label}: fmt is not idempotent");
+    }
+}
+
+#[test]
+fn unsupported_structural_keyword_pipe_stage_still_rejected() {
+    // Bare structural keywords (`if`, `match`, `fn`, `par`) have no
+    // callable-form interpretation per spec §3.6, so the parser must
+    // still reject them. The `with` keyword (effect handler) is in the
+    // same family.
+    for kw in ["if", "match", "fn", "par", "with"] {
+        let src = format!("def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> {kw}");
+        let result = surf_parse(&src);
+        assert!(
+            result.is_err(),
+            "expected parser to reject bare `|> {kw}` (no callable-form semantics), \
+             but it parsed successfully: {src}"
+        );
+    }
 }
 
 #[test]

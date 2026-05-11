@@ -489,7 +489,7 @@ fn format_pipe_expr(seed: &Expr, stages: &[Expr]) -> String {
     format_pipe_layout(
         None,
         format_expr(seed),
-        stages.iter().map(format_expr).collect(),
+        stages.iter().map(format_pipe_stage).collect(),
     )
 }
 
@@ -497,8 +497,42 @@ fn format_pipe_with_binding(head: &str, seed: &Expr, stages: &[Expr]) -> String 
     format_pipe_layout(
         Some(head),
         format_expr(seed),
-        stages.iter().map(format_expr).collect(),
+        stages.iter().map(format_pipe_stage).collect(),
     )
+}
+
+/// Format a single pipe stage, compacting synthesized unary-builtin
+/// lambdas (`fn (v) -> realize(v)`, `fn (v) -> copy(v)`) back to the
+/// bare keyword form. Mirrors spec `01-nomenclature.md` §3.6: the
+/// decompiler/formatter may compact a lambda stage to call-stage sugar
+/// when the carried value is the only argument. Item 2b round-trip.
+fn format_pipe_stage(stage: &Expr) -> String {
+    if let Some(compacted) = compact_bare_unary_builtin_stage(stage) {
+        return compacted;
+    }
+    format_expr(stage)
+}
+
+fn compact_bare_unary_builtin_stage(stage: &Expr) -> Option<String> {
+    let Expr::Lambda(params, body, _) = stage else {
+        return None;
+    };
+    let [only_param] = params.as_slice() else {
+        return None;
+    };
+    if only_param.ty.is_some() {
+        return None;
+    }
+    let name = &only_param.name;
+    match body.as_ref() {
+        Expr::Realize(inner, _) if matches!(inner.as_ref(), Expr::Var(v, _) if v == name) => {
+            Some("realize".to_string())
+        }
+        Expr::Copy(inner, _) if matches!(inner.as_ref(), Expr::Var(v, _) if v == name) => {
+            Some("copy".to_string())
+        }
+        _ => None,
+    }
 }
 
 fn format_pipe_layout(binding_head: Option<&str>, seed: String, stages: Vec<String>) -> String {
