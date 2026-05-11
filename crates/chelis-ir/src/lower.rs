@@ -2156,27 +2156,6 @@ impl LowerCtx {
         }
     }
 
-    /// Extract a list of dimensions from a `(t-dims {} dim1 dim2 ...)` expression.
-    fn try_extract_dims(expr: &Expr) -> Option<Vec<DimInfo>> {
-        if let Expr::List(list, _) = expr
-            && list.elements.len() >= 2
-            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-            && tag == "t-dims"
-        {
-            // Skip element [0] (tag) and [1] (empty map / metadata), parse remaining as dims.
-            let mut dims = Vec::new();
-            for elem in list.elements.iter().skip(2) {
-                if let Some(d) = Self::try_extract_dim(elem) {
-                    dims.push(d);
-                }
-            }
-            if !dims.is_empty() {
-                return Some(dims);
-            }
-        }
-        None
-    }
-
     fn dim_info_from_dim_expr(size: &DimExpr) -> Option<DimInfo> {
         match size {
             DimExpr::Concrete(value) => Some(DimInfo::Lit(*value)),
@@ -4252,14 +4231,7 @@ impl LowerCtx {
 
     /// Extract dimension info list from an expression (e.g., for reshape).
     fn extract_dim_list(&self, expr: &Expr) -> Option<Vec<DimInfo>> {
-        // Handle (t-dims {} dim1 dim2 ...) form.
         if let Expr::List(list, _) = expr {
-            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
-                && tag == "t-dims"
-            {
-                return Self::try_extract_dims(expr);
-            }
-            // Try as a plain list of integers.
             let mut dims = Vec::new();
             for elem in &list.elements {
                 match elem {
