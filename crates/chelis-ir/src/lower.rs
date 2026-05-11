@@ -1666,8 +1666,7 @@ fn assert_ir_lowerable(expr: &Expr) {
     match expr {
         Expr::List(list, _) => {
             if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
-                && ((tag == "if" && !if_expr_is_dag_lowerable(list))
-                    || matches!(tag.as_str(), "match" | "par" | "jit"))
+                && ((tag == "if" && !if_expr_is_dag_lowerable(list)) || tag == "match")
             {
                 raise_lowering_diagnostic(lower_diagnostic_for_expr(
                     unsupported_lowering_message(tag),
@@ -2518,7 +2517,8 @@ impl LowerCtx {
             "match" => self.lower_match(elems),
             "grad" => self.lower_grad(elems),
             "handle-effect" => self.lower_handle_effect(elems),
-            "vmap" | "jit" => self.lower_unsupported(tag, elems),
+            "jit" => self.lower_jit(elems),
+            "vmap" => self.lower_unsupported(tag, elems),
             "defsig" | "deftype" | "typealias" => LoweredValue::Node(self.dag.add_node(
                 RiscOp::Const { value: 0.0 },
                 vec![],
@@ -5012,9 +5012,41 @@ impl LowerCtx {
         )
     }
 
-    /// `(par {} expr1 expr2 ...)` -- not representable in the Phase 0 RISC DAG.
+    /// `(par {} expr1 expr2 ...)` -- v1 sequential composition per
+    /// `spec/03-deep-syntax.md` §2.3 ("Parallel evaluation (v1: sequential)").
+    /// Each child is lowered in order; the value of the last child is the
+    /// par's value. Intermediate children still contribute their nodes to the
+    /// DAG so any side-effecting operations (e.g. `realize`) are preserved.
     fn lower_par(&mut self, elems: &[Expr]) -> LoweredValue {
-        self.lower_unrepresentable("par", elems)
+        let mut last: Option<LoweredValue> = None;
+        for expr in elems.iter().skip(2) {
+            last = Some(self.lower_expr(expr));
+        }
+        last.unwrap_or_else(|| {
+            LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+                self.current_span_id.clone(),
+            ))
+        })
+    }
+
+    /// `(jit {} expr)` -- compilation trigger per
+    /// `spec/03-deep-syntax.md` §2.7. Semantically a no-op at evaluation; the
+    /// JIT effect (if any) lives in metadata. Lower as identity on the inner
+    /// expression.
+    fn lower_jit(&mut self, elems: &[Expr]) -> LoweredValue {
+        if let Some(inner) = elems.get(2) {
+            self.lower_expr(inner)
+        } else {
+            LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+                self.current_span_id.clone(),
+            ))
+        }
     }
 
     /// `(realize {} expr)` -- explicit materialization barrier.
@@ -6517,12 +6549,33 @@ mod regression_tests {
     }
 
     #[test]
-    fn fix4_jit_is_rejected_before_lowering() {
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower("(jit {} (var {} f))");
-        })
-        .expect_err("jit should be rejected");
-        assert!(captured_lower_message(err).contains("`jit` is not supported by IR lowering"));
+    fn jit_is_passthrough_at_lowering() {
+        // Spec/03-deep-syntax.md §2.7: `jit` is a compilation trigger,
+        // semantically a no-op at evaluation. Lowering must produce the same
+        // DAG as the inner expression.
+        let src = "(jit {} (lit {} 42.0))";
+        let dag = parse_and_lower(src);
+        assert_eq!(non_drop_len(&dag), 1);
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::Const { value: 42.0 }
+        );
+    }
+
+    #[test]
+    fn par_is_sequential_at_lowering() {
+        // Spec/03-deep-syntax.md §2.3: `par` v1 is sequential composition.
+        // All children are lowered in order; the par's value is the value of
+        // the last child. The DAG carries every intermediate child as well so
+        // any side-effecting node (e.g. realize) is preserved.
+        let src = "(par {} (lit {} 1.0) (lit {} 2.0) (lit {} 3.0))";
+        let dag = parse_and_lower_unchecked(src);
+        // Three Const nodes, one per child. The par node itself does not
+        // produce an extra DAG node; its value is reused from the last child.
+        assert_eq!(non_drop_len(&dag), 3);
+        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 1.0 });
+        assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Const { value: 2.0 });
+        assert_eq!(dag.get(NodeId(2)).unwrap().op, RiscOp::Const { value: 3.0 });
     }
 
     #[test]
