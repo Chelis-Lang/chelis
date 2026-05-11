@@ -844,6 +844,14 @@ fn prim_lane(p: Prim) -> u8 {
 /// Width ordering for the active dtype set. Larger is wider. Within the
 /// float lane: f16 = bf16 < f32 < f64. Within the integer lane:
 /// int8 < int16 < int32 < int64. Bool is 0; non-numeric returns 0.
+///
+/// E2 (WS-A0 RT-1 fixup, sibling sweep): `f8e4m3` is deferred per
+/// `spec/04-type-system.md` §1.1.1 and is rejected upstream by
+/// `default_reduce_sum_accumulator` and `default_matmul_accumulator`.
+/// If a caller ever asks for the width rank of f8e4m3 the upstream
+/// rejection has a hole — panic rather than silently returning 0
+/// (which would entrench f8e4m3 as "narrowest-float" in width
+/// comparisons and let the deferred dtype propagate downstream).
 fn prim_width_rank(p: Prim) -> u32 {
     match p {
         Prim::Bool => 0,
@@ -854,7 +862,11 @@ fn prim_width_rank(p: Prim) -> u32 {
         Prim::F16 | Prim::Bf16 => 2,
         Prim::F32 => 4,
         Prim::F64 => 8,
-        Prim::F8e4m3 | Prim::String => 0,
+        Prim::F8e4m3 => panic!(
+            "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
+             should have been rejected upstream"
+        ),
+        Prim::String => 0,
     }
 }
 

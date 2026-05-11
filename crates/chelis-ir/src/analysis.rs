@@ -156,7 +156,16 @@ fn element_size_bytes(prim: Prim) -> usize {
         Prim::F64 | Prim::Int64 => 8,
         Prim::F32 | Prim::Int32 => 4,
         Prim::F16 | Prim::Bf16 | Prim::Int16 => 2,
-        Prim::F8e4m3 | Prim::Int8 | Prim::Bool => 1,
+        Prim::Int8 | Prim::Bool => 1,
+        // E2 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.1
+        // f8e4m3 is deferred and the type checker rejects it
+        // upstream. Computing a memory-cost classification for a
+        // dtype that has no admitted backend would silently entrench
+        // the deferred classification — panic rather than report 1.
+        Prim::F8e4m3 => panic!(
+            "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
+             should have been rejected upstream"
+        ),
         Prim::String => 8,
     }
 }
@@ -200,6 +209,15 @@ mod tests {
         assert_eq!(summary.total_bytes_copied, Some(24));
         assert_eq!(summary.functions[0].copy_count, 1);
         assert_eq!(summary.functions[0].bytes_copied, Some(24));
+    }
+
+    /// E2 (WS-A0 RT-1 fixup): `element_size_bytes` must panic on
+    /// f8e4m3 with the §1.1.1 message rather than silently
+    /// classifying it as a 1-byte dtype.
+    #[test]
+    #[should_panic(expected = "f8e4m3 is deferred per spec/04-type-system.md §1.1.1")]
+    fn element_size_bytes_panics_on_f8e4m3_per_spec_1_1_1() {
+        let _ = element_size_bytes(Prim::F8e4m3);
     }
 
     #[test]

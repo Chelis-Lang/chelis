@@ -65,6 +65,29 @@ struct StridedBatchedMatmulPlan {
 impl HipEmitter {
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(dag: &Dag, func_name: &str) -> (String, PeakDeviceBytesBreakdown) {
+        // F1 (WS-A0 RT-1 fixup, tactical): the HIP backend's BlasMatmul
+        // lowering destructures with `..` and unconditionally calls
+        // `hipblasSgemm`. Reject every non-f32 BlasMatmul here until
+        // WS-A1 plumbs the accumulator through and dispatches to
+        // `hipblasDgemm`. Mirrors the matching guard in
+        // crates/chelis-ir/src/verify.rs and the C backend.
+        for node in dag.nodes() {
+            if matches!(node.op, RiscOp::BlasMatmul { .. })
+                && let Some(lhs) = dag.get(node.inputs[0])
+                && lhs.output_type.precision != Prim::F32
+            {
+                panic!(
+                    "F1: BlasMatmul currently supports only f32; node {} has \
+                     operand precision `{}`. spec/04-type-system.md §5.7.1 \
+                     documents the per-precision accumulator defaults, but the \
+                     HIP backend in this cycle dispatches only single-precision \
+                     GEMM. WS-A1 lifts this guard.",
+                    node.id.0,
+                    lhs.output_type.precision.name(),
+                );
+            }
+        }
+
         let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
         let output_specs = Self::output_specs(dag);
         let output_ids: Vec<NodeId> = output_specs.iter().map(|o| o.id).collect();

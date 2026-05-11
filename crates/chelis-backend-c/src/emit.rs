@@ -568,6 +568,31 @@ impl CEmitter {
                     node.id.0
                 );
             }
+
+            // F1 (WS-A0 RT-1 fixup, tactical): the C backend's
+            // BlasMatmul lowering destructures the op with `..` and
+            // unconditionally calls `cblas_sgemm`. For non-f32 operand
+            // precisions this is silent precision loss (or, on f64
+            // source data laid out as `double*`, undefined behavior).
+            // Reject every non-f32 BlasMatmul here until WS-A1 plumbs
+            // the accumulator through and dispatches to `cblas_dgemm`.
+            // The literal "F1:" tag mirrors the matching guard in
+            // crates/chelis-ir/src/verify.rs and makes the WS-A1 lift
+            // greppable across the workspace.
+            if matches!(node.op, RiscOp::BlasMatmul { .. })
+                && let Some(lhs) = dag.get(node.inputs[0])
+                && lhs.output_type.precision != Prim::F32
+            {
+                panic!(
+                    "F1: BlasMatmul currently supports only f32; node {} has \
+                     operand precision `{}`. spec/04-type-system.md §5.7.1 \
+                     documents the per-precision accumulator defaults, but the \
+                     C backend in this cycle dispatches only single-precision \
+                     GEMM. WS-A1 lifts this guard.",
+                    node.id.0,
+                    lhs.output_type.precision.name(),
+                );
+            }
         }
     }
 
