@@ -134,6 +134,29 @@ pub trait Rule: Send + Sync {
     fn fix(&self, _ctx: &Context<'_>, _violation: &Violation) -> Option<Replacement> {
         None
     }
+
+    /// Whether the CLI fix driver must verify the post-fix source against
+    /// the typed/linearity pipeline before writing the replacement to disk.
+    ///
+    /// Default `false` for rules whose fix is purely structural (case
+    /// rename, allowlist update, identifier normalization, etc.).
+    ///
+    /// Rules whose rewrites cross the semantic safety bar named in
+    /// `spec/01-nomenclature.md` §12 — currently `redundant-linearity-call`
+    /// — override to `true`. The CLI's `apply_lint_fixes` driver then
+    /// applies the replacement to a candidate `String`, runs the typed
+    /// pipeline (parse, desugar, expand, type-check, effect-check,
+    /// linearity-check), and only writes the replacement to disk if every
+    /// stage accepts. If the pipeline rejects the candidate, the
+    /// replacement is silently dropped.
+    ///
+    /// Architectural choice documented in
+    /// `docs/investigations/redundant_linearity_autofix_architecture.md`
+    /// (Path 1B): the gate lives in the CLI driver so `chelis-lint` stays
+    /// dep-pure.
+    fn fix_requires_typed_pipeline_check(&self) -> bool {
+        false
+    }
 }
 
 /// A lint exception. Every entry must cross-reference a section of
