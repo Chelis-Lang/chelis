@@ -6,7 +6,7 @@
 //! instead of `registry::all_rules`, so it does not fail style-gated build,
 //! check, eval, or validate paths.
 
-use crate::{Context, Rule, Severity, Surface, Violation};
+use crate::{Context, Replacement, Rule, Severity, Surface, Violation};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -77,9 +77,40 @@ impl Rule for RedundantLinearityCall {
         out
     }
 
-    // Deliberately no auto-fix in v1. The source-only lint walker cannot prove
-    // that an explicit `copy()` is not carrying required ownership fan-out, so
-    // removing it during ecosystem rollout is not semantics-preserving.
+    fn fix_requires_typed_pipeline_check(&self) -> bool {
+        // The strip `copy(x) -> x` is safe iff the resulting program still
+        // type/effect/linearity-checks. After Item 1 of the 0.7.6 toolchain
+        // hygiene workstream (PR #29) extended implicit linearity to handle
+        // var-RHS let-bindings, the broad class of programs the lint targets
+        // is safe to rewrite — but the CLI fix driver still verifies each
+        // candidate against the typed pipeline before writing. See
+        // `docs/investigations/redundant_linearity_autofix_architecture.md`
+        // for the architectural decision (Path 1B).
+        true
+    }
+
+    fn fix(&self, ctx: &Context<'_>, violation: &Violation) -> Option<Replacement> {
+        let source = ctx.source?;
+        let line_start = line_start_offset(source, violation.line?)?;
+        let col = violation.col?.checked_sub(1)?;
+        let start = line_start + col;
+        let call_match = call_re().find_at(source, start)?;
+        if call_match.start() != start {
+            return None;
+        }
+        let open = call_match.end().checked_sub(1)?;
+        let close = matching_paren(source, open)?;
+        if !has_single_top_level_argument(source, open, close) {
+            return None;
+        }
+        let inner = source[open + 1..close].trim();
+        Some(Replacement {
+            path: ctx.path.to_path_buf(),
+            start,
+            end: close + 1,
+            text: inner.to_string(),
+        })
+    }
 }
 
 fn has_single_top_level_argument(source: &str, open: usize, close: usize) -> bool {
@@ -121,6 +152,25 @@ fn has_single_top_level_argument(source: &str, open: usize, close: usize) -> boo
         cursor += ch.len_utf8();
     }
     !in_string && depth == 0
+}
+
+fn line_start_offset(source: &str, line_no: usize) -> Option<usize> {
+    if line_no == 0 {
+        return None;
+    }
+    if line_no == 1 {
+        return Some(0);
+    }
+    let mut line = 1usize;
+    for (index, byte) in source.bytes().enumerate() {
+        if byte == b'\n' {
+            line += 1;
+            if line == line_no {
+                return Some(index + 1);
+            }
+        }
+    }
+    None
 }
 
 fn line_col(source: &str, offset: usize) -> (usize, usize) {
@@ -242,7 +292,13 @@ mod tests {
     }
 
     #[test]
-    fn fix_is_unavailable_without_linearity_proof() {
+    fn fix_proposes_strip_and_opts_into_typed_pipeline_verification() {
+        // The rule proposes the source-level strip `copy(x) -> x`. The
+        // typed-pipeline safety check is enforced by the CLI fix driver
+        // (see `apply_lint_fixes` in chelis-cli), keyed on
+        // `fix_requires_typed_pipeline_check`. The unit test here only
+        // pins the rule's local behavior: it proposes the strip and
+        // signals that the driver must verify before writing.
         let src = "def f(x: tensor[2, f32]) -> tensor[2, f32] = add(copy(x), x)\n";
         let violations = run(src);
         assert_eq!(violations.len(), 1);
@@ -253,6 +309,19 @@ mod tests {
             source: Some(src),
             surface: Surface::SurfSource,
         };
-        assert!(RedundantLinearityCall.fix(&ctx, &violations[0]).is_none());
+        let rule = RedundantLinearityCall;
+        assert!(rule.fix_requires_typed_pipeline_check());
+        let replacement = rule
+            .fix(&ctx, &violations[0])
+            .expect("fix should propose the strip");
+        // The replacement covers exactly the `copy(x)` span and replaces
+        // it with the inner argument `x`.
+        let pre = &src[..replacement.start];
+        let post = &src[replacement.end..];
+        assert_eq!(replacement.text, "x");
+        assert_eq!(
+            format!("{pre}{}{post}", replacement.text),
+            "def f(x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)\n",
+        );
     }
 }

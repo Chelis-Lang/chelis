@@ -5347,9 +5347,41 @@ fn lint_rules_filter_runs_selected_rules_only() {
 }
 
 #[test]
-fn lint_fix_preserves_unproven_linearity_and_pipe_warnings() {
+fn lint_fix_redundant_linearity_call_strips_when_typed_pipeline_accepts() {
+    // After Item 5 of the 0.7.6 toolchain hygiene workstream re-enabled
+    // the autofix, `chelis lint --fix` strips a redundant `copy()` from a
+    // valid program. The CLI fix driver verifies the post-strip candidate
+    // against the typed pipeline before writing (see
+    // `docs/investigations/redundant_linearity_autofix_architecture.md`).
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("rewrite.ch");
+    let path = dir.path().join("rewrite_valid.ch");
+    write_file(
+        &path,
+        "def f(w: tensor[2, f32]) -> tensor[2, f32] = realize(copy(w))\n\n\
+         result = f(to_tensor([1.0, 2.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let rewritten = fs::read_to_string(&path).expect("read rewritten");
+    assert!(
+        !rewritten.contains("copy(w)"),
+        "autofix should have stripped `copy(w)`; got:\n{rewritten}",
+    );
+}
+
+#[test]
+fn lint_fix_redundant_linearity_call_keeps_when_typed_pipeline_rejects() {
+    // The typed-pipeline gate is the safety bar for the
+    // `redundant-linearity-call` autofix. Programs that don't type-check
+    // before the fix can't have their post-fix candidate verified, so the
+    // gate drops the strip and the source is left unchanged.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rewrite_invalid.ch");
     write_file(
         &path,
         "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(copy(x)), scale)\n",
@@ -5361,8 +5393,29 @@ fn lint_fix_preserves_unproven_linearity_and_pipe_warnings() {
         .assert()
         .success();
 
-    let rewritten = fs::read_to_string(path).expect("read rewritten");
+    let rewritten = fs::read_to_string(&path).expect("read rewritten");
     assert!(rewritten.contains("outer(inner(copy(x)), scale)"));
+}
+
+#[test]
+fn lint_fix_preserves_unproven_prefer_pipe_operator_rewrites() {
+    // The `prefer-pipe-operator` autofix remains disabled (per 477bd0d).
+    // Until its own re-enablement workstream lands, `chelis lint --fix`
+    // must leave the warning visible without rewriting source.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_warn.ch");
+    let original = "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(x), scale)\n";
+    write_file(&path, original);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let rewritten = fs::read_to_string(&path).expect("read rewritten");
+    assert!(rewritten.contains("outer(inner(x), scale)"));
+    assert!(!rewritten.contains("|>"));
 }
 
 #[test]

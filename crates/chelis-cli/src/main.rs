@@ -4999,6 +4999,39 @@ fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<Stri
     }
 }
 
+/// Run the typed pipeline against a Surf source string (parse, desugar,
+/// macro-expand, type-check, effect-check, linearity-check) and return
+/// `true` iff every stage accepts.
+///
+/// Used by the lint fix driver to gate auto-fixes from rules that opt in
+/// via `Rule::fix_requires_typed_pipeline_check()` — currently only
+/// `redundant-linearity-call`. The spec safety bar in
+/// `spec/01-nomenclature.md` §12 names this exact pipeline: "the proof
+/// requires the type and linearity pipeline, not source-text matching".
+///
+/// Architectural rationale in
+/// `docs/investigations/redundant_linearity_autofix_architecture.md`
+/// (Path 1B).
+fn typed_pipeline_accepts_surf(source: &str) -> bool {
+    let Ok(decls) = chelis_surf::parser::parse_str(source) else {
+        return false;
+    };
+    let Ok(deep_exprs) = expanded_desugared_program(&decls) else {
+        return false;
+    };
+    let report = chelis_types::check_ir_fitness(&deep_exprs);
+    if !report.errors.is_empty() {
+        return false;
+    }
+    let Ok(typed_program) = chelis_types::check_typed_program(&deep_exprs) else {
+        return false;
+    };
+    let Ok(effect_checked) = chelis_effects::check_program(&typed_program) else {
+        return false;
+    };
+    chelis_types::check_linearity(&effect_checked).is_ok()
+}
+
 /// `chelis lint` — naming-convention lint per `spec/01-nomenclature.md`.
 ///
 /// Walks each path in `paths` (default: `.`), dispatches to every registered
@@ -5140,7 +5173,7 @@ fn apply_lint_fixes(
                 source: Some(&source),
                 surface,
             };
-            let mut replacements = Vec::new();
+            let mut replacements: Vec<(chelis_lint::Replacement, bool)> = Vec::new();
             for violation in &violations {
                 let Some(rule) = rules.iter().find(|rule| rule.id() == violation.rule_id) else {
                     continue;
@@ -5151,36 +5184,62 @@ fn apply_lint_fixes(
                     continue;
                 }
                 if let Some(replacement) = rule.fix(&ctx, violation) {
-                    replacements.push(replacement);
+                    replacements.push((replacement, rule.fix_requires_typed_pipeline_check()));
                 }
             }
-            replacements.sort_by_key(|replacement| {
+            replacements.sort_by_key(|(replacement, _)| {
                 (
                     replacement.end.saturating_sub(replacement.start),
                     replacement.start,
                 )
             });
-            let mut filtered: Vec<chelis_lint::Replacement> = Vec::new();
-            for replacement in replacements {
+            let mut filtered: Vec<(chelis_lint::Replacement, bool)> = Vec::new();
+            for (replacement, needs_check) in replacements {
                 if replacement.start > replacement.end
-                    || filtered
-                        .iter()
-                        .any(|kept| replacement.start < kept.end && kept.start < replacement.end)
+                    || filtered.iter().any(|(kept, _)| {
+                        replacement.start < kept.end && kept.start < replacement.end
+                    })
                 {
                     continue;
                 }
-                filtered.push(replacement);
+                filtered.push((replacement, needs_check));
             }
             if filtered.is_empty() {
                 continue;
             }
-            filtered.sort_by_key(|replacement| replacement.start);
+            filtered.sort_by_key(|(replacement, _)| replacement.start);
+
+            // Per-replacement typed-pipeline gate for rules that opted in
+            // (Path 1B per
+            // docs/investigations/redundant_linearity_autofix_architecture.md).
+            // We test each verification-required replacement independently
+            // by applying it to the original source and running the typed
+            // pipeline. Independent verification preserves the maximum set
+            // of safe rewrites: one unsafe strip does not block the others.
+            let surface_eligible_for_typed_check =
+                matches!(surface, chelis_lint::Surface::SurfSource);
+            let mut accepted: Vec<chelis_lint::Replacement> = Vec::new();
+            for (replacement, needs_check) in filtered {
+                if needs_check && surface_eligible_for_typed_check {
+                    let mut candidate = source.clone();
+                    candidate.replace_range(replacement.start..replacement.end, &replacement.text);
+                    if !typed_pipeline_accepts_surf(&candidate) {
+                        // Drop this replacement silently; the lint warning
+                        // remains so the user sees the still-flagged copy().
+                        continue;
+                    }
+                }
+                accepted.push(replacement);
+            }
+            if accepted.is_empty() {
+                continue;
+            }
             let mut edited = source;
-            for replacement in filtered.iter().rev() {
+            for replacement in accepted.iter().rev() {
                 edited.replace_range(replacement.start..replacement.end, &replacement.text);
             }
             fs::write(&path, edited)?;
-            pass_total += filtered.len();
+            pass_total += accepted.len();
         }
         total += pass_total;
         if pass_total == 0 {
@@ -5215,5 +5274,18 @@ fn fix_available_for_violation(
     }) {
         return false;
     }
-    rule.fix(&ctx, violation).is_some()
+    let Some(replacement) = rule.fix(&ctx, violation) else {
+        return false;
+    };
+    if rule.fix_requires_typed_pipeline_check()
+        && matches!(surface, chelis_lint::Surface::SurfSource)
+    {
+        let mut candidate = source.clone();
+        if replacement.start > candidate.len() || replacement.end > candidate.len() {
+            return false;
+        }
+        candidate.replace_range(replacement.start..replacement.end, &replacement.text);
+        return typed_pipeline_accepts_surf(&candidate);
+    }
+    true
 }
