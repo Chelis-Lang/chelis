@@ -3,10 +3,11 @@
 **Status:** partially closed — Gaps 2 and 6 are closed by M1; the adjacent
 Surf-span finding is closed by M2b; Gap 4's rank ≥ 2 expressibility and
 symbolic/batched BLAS performance paths are closed by M3/M3b; Gap 3's scoped
-sparse gather/scatter path is closed by M4. The remaining
+sparse gather/scatter path is closed by M4; the HIP strided-batched quality
+follow-on for Gap 4 is closed by Perf-F1. The remaining
 work is explicitly tracked in `docs/gap_synthesis.md` §5 "Remaining Work
-Register": Gap 5 implementation, HIP strided-batched quality work,
-post-BLAS slot/fusion compounding, and the formal red-team follow-up.
+Register": Gap 5 implementation, post-BLAS slot/fusion compounding, and
+the formal red-team follow-up.
 **Filed:** 2026-05-08
 **Owning phase:** cross-phase (perf + ergonomics)
 
@@ -270,7 +271,7 @@ gate.
 **Probe corpus:** `examples/illustrative/moe_gather_duplicate_indices.ch`
 (single MoE-style routing block with deliberately duplicated indices).
 
-## Gap 4 — `matmul` is rank-2 only; canonical heads-as-dim MHA not expressible — CLOSED by M3/M3b
+## Gap 4 — `matmul` is rank-2 only; canonical heads-as-dim MHA not expressible — CLOSED by M3/M3b + Perf-F1
 
 **Claim qualified:** "Multi-head attention expresses naturally as a
 heads dimension, with batched matmul broadcasting over leading axes."
@@ -279,9 +280,11 @@ heads dimension, with batched matmul broadcasting over leading axes."
 and Tier 2 lowering layers. M3b extends the IR-level BLAS specializer to
 symbolic and batched matmul when the operands have contiguous trailing
 matrix slices. The C backend emits runtime-sized `cblas_sgemm` calls,
-looping over batch slices for rank ≥ 3. The HIP backend emits through a
-batched hipBLAS helper loop. A quality follow-up remains to use
-`hipblasSgemmStridedBatched` directly for uniformly strided HIP batches.
+looping over batch slices for rank ≥ 3. The HIP backend now defaults to
+`hipblasSgemmStridedBatched` on uniformly strided batched layouts
+(Perf-F1, shipped) and retains the per-batch hipBLAS helper loop only as
+a fallback for broadcasted leading axes or otherwise non-uniform leading
+strides.
 
 **Original observation:** Chelis's `matmul` was hard rank-2 at the
 type-checker level. PyTorch's canonical MHA form
@@ -314,11 +317,15 @@ matrix-pair` shape rule), then extending the IR specializer and C/HIP
 emitters to carry runtime `DimExpr` sizes into BLAS calls.
 
 **Spec coverage:**
-- `spec/design/chelis_canonical_reference.md:438-443` now documents
-  runtime-sized symbolic/batched BLAS as shipped behavior, while naming
-  the HIP strided-batched API as a quality follow-up.
-- `spec/design/phase1d_flattening.md:39` now scopes the hipBLAS path to
-  contiguous matrix slices rather than only rank-2 operands.
+- `spec/design/chelis_canonical_reference.md:438-445` documents
+  runtime-sized symbolic/batched BLAS as shipped behavior, with
+  `hipblasSgemmStridedBatched` now the HIP default on uniform layouts
+  and the helper loop retained only as the fallback for broadcasted /
+  non-uniform leading strides.
+- `spec/design/phase1d_flattening.md:40-49` scopes the hipBLAS path to
+  contiguous matrix slices and names the
+  `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs`
+  structural test as the strided-batched-default lock.
 - `spec/design/chelis_phase2_plan.md:561` notes batched matmul
   remains correct via generic expand+mul+sum decomposition (i.e.,
   the rank-3+ case works numerically, just slowly).
@@ -331,8 +338,15 @@ emitters to carry runtime `DimExpr` sizes into BLAS calls.
   batched matmul.
 - **Addressed by M3b:** symbolic and batched matmul specialize to
   runtime-sized BLAS when trailing matrix slices are contiguous. The
-  C backend loops over batch slices; HIP uses a helper loop over
-  hipBLAS calls pending a strided-batched optimization.
+  C backend loops over batch slices.
+- **Addressed by Perf-F1:** HIP defaults to
+  `hipblasSgemmStridedBatched` on uniformly strided batched layouts
+  and falls back to the per-batch helper loop only for broadcasted
+  leading axes or otherwise non-uniform leading strides. Locked by
+  `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs`
+  with exact-line matching; validated numerically by
+  `g15_hipblas_strided_batched_symbolic_batch_matches_eval` and
+  `g15_hipblas_batched_matmul_matches_eval` on the HIP manual gate.
 
 **Probe corpus:**
 - `examples/illustrative/mha_single_head.ch` — single-head reference,

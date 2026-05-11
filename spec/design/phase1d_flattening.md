@@ -39,10 +39,15 @@ other multi-output reductions stay on the segmented path.
 
 **hipBLAS specialization is deliberately constrained.**
 Only operands with contiguous trailing matrix slices take the hipBLAS path. Rank ≥ 3
-batched matmul uses `hipblasSgemmStridedBatched` when per-batch strides are uniform and
-statically computable. The older helper loop remains the silent fallback for supported
-batched layouts that are not strided-batched eligible. Non-contiguous matmul-shaped DAGs
-remain correct via the generic reduction fallback.
+batched matmul defaults to `hipblasSgemmStridedBatched` whenever the leading batch
+strides are uniform and statically computable (Perf-F1, shipped). The per-batch helper
+loop `chelis_hipblas_sgemm_batched_row_major` is retained only as a fallback for batched
+layouts where strided-batched is unsound — broadcasted leading axes (`Expand` on the
+batch dim, producing stride-0 columns) and non-uniform leading strides. Non-contiguous
+matmul-shaped DAGs remain correct via the generic reduction fallback. The
+strided-batched-default invariant is locked by
+`crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs` (default workspace
+test pass) and validated numerically by the HIP `gpu_correctness` manual gate.
 
 **Runtime-sized BLAS dimensions.**
 Symbolic dimensions are not required to be compile-time constants for BLAS. Generated
