@@ -421,11 +421,115 @@ Underscore separators: `1_000_000`, `3.141_592_6`. Stripped during lexing.
 
 Scientific notation: `1e-5`, `3.14e10`. Canonical Deep form: `d.dE±d`.
 
-No hex, octal, or binary literals. Not needed for ML workloads.
+Hex integer literals are accepted (`0xFF`, `0xCAFE_BABE`); see the
+hex-suffix interaction note below. Octal and binary literals are accepted
+by the current Surf lexer (`0b...`) but their long-term spec status is
+unchanged by this section.
 
-Integer range: i64 at parse time, narrowed to int32/int8 during type checking.
+**Literal default rule (authoritative):** an unsuffixed integer literal binds
+at type `int32`; an unsuffixed float literal binds at type `f32`. The lexer
+parses unsuffixed literals at i64/f64 precision so that out-of-range literals
+can be diagnosed before defaulting; the desugarer/type-checker then narrows
+the value to `int32` (for integer tokens) or `f32` (for float tokens) before
+Deep is materialized. The narrowing is the **user-facing contract** and is
+non-overridable except by:
+
+1. an explicit literal suffix (P10a)
+2. the contextual tensor-literal inference rule (P10b) when the literal
+   appears inside a tensor body in a known-element-type position
+3. an explicit `cast(literal, p)` around the literal expression
+
+There is no implicit precision promotion. A bare `42` in any unannotated
+position binds at `int32`, not `int64`. A bare `1.0` binds at `f32`, not
+`f64`. See `spec/04-type-system.md` §5.3 for the type-system statement of
+this rule.
 
 **Negative literals:** `-42` is always parsed as unary minus applied to `42`, not as a negative literal. This resolves the `f -42` ambiguity: it's `f - 42` (infix) because `-` has lower BP than application. Use parens for negative arguments: `f(-42)`.
+
+### P10a: Literal Suffixes
+
+Numeric literal tokens may carry an explicit precision suffix that binds the
+literal at exactly that precision, with no inference, no widening, and no
+narrowing. The closed suffix set is:
+
+| Suffix | Bound type | Example | Notes |
+|---|---|---|---|
+| `f32` | `f32` | `1.0f32`, `42f32`, `3.14e-2f32` | Float-typed |
+| `f64` | `f64` | `1.0f64` | Float-typed |
+| `bf16` | `bf16` | `1.0bf16` | Float-typed |
+| `f16` | `f16` | `1.0f16` | Float-typed |
+| `i8` | `int8` | `42i8` | Integer-typed |
+| `i16` | `int16` | `42i16` | Integer-typed |
+| `i32` | `int32` | `42i32` | Integer-typed |
+| `i64` | `int64` | `42i64` | Integer-typed |
+
+Float-typed suffixes attach to either an integer or a float literal token.
+Integer-typed suffixes attach to integer literal tokens only; `1.0i8` is a
+parse error.
+
+**Adjacency rule.** A suffix is part of the literal token only if it
+**immediately** follows the digit sequence with no intervening whitespace,
+comment, or other character. `1.0 f32` (with whitespace) is two tokens (a
+float literal followed by an identifier-position token); the literal then
+binds at the §P10 default and is subject to the surrounding-position rules in
+the type checker.
+
+**Hex-literal interaction.** The lexer's hex-literal rule consumes
+`[0-9a-fA-F_]*` after `0x`. Because `f` is a hex digit, a hex integer
+literal cannot directly carry a float-typed suffix. `0xFFf32` lexes as the
+hex digit sequence `FFf` followed by integer `32`, which is rejected as a
+malformed hex literal followed by a stray integer; the diagnostic suggests
+either an explicit `cast` (`cast(0xFF, f32)`) or whitespace
+(`0xFF f32`). Hex integer literals MAY carry integer-typed suffixes:
+`0xFFi8`, `0xFFi32`. Decimal float literals carry float suffixes without
+ambiguity (`1.0f32`, `1.0e3f32`).
+
+**Deferred and out-of-scope suffixes.**
+
+- `f8e4m3` is deferred per `spec/04-type-system.md` §1.1.1; the suffix
+  `f8e4m3` is rejected at lex time with a diagnostic pointing at §1.1.1.
+- Unsigned suffixes (`u8`, `u16`, `u32`, `u64`) are out of scope per
+  `spec/04-type-system.md` §1.1.2; they are rejected at lex time with a
+  diagnostic pointing at §1.1.2.
+- An unrecognized identifier sequence directly adjacent to a numeric literal
+  (e.g. `1.0xyz`) is a parse error rather than a silently-split
+  literal-then-identifier pair. The diagnostic suggests adding whitespace
+  if the adjacency was unintentional.
+
+The suffix grammar is identical in Deep canonical form (`spec/03-deep-syntax.md`
+§6.4); the Surf and Deep lexers parse the same token shape.
+
+### P10b: Contextual Tensor-Literal Inference
+
+When a tensor literal `[e1, e2, ...]` appears in a position with a **known
+element type**, the unsuffixed numeric literals in the tensor body adopt that
+element type instead of the §P10 default. The closed set of "known-element-type"
+positions is exactly:
+
+1. the right-hand side of a `let`-binding whose declared type is a tensor
+   type — `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]` makes the literals
+   bind at `f64`
+2. the corresponding argument position of a call to a function with a
+   declared signature whose parameter at that position is a tensor type
+3. the body expression of a function with a declared return type that is a
+   tensor type, when the body is itself a tensor literal
+4. the first argument of an explicit `cast(literal, p)` expression — the
+   literals bind at `p`
+
+Outside this closed set, numeric literals in a tensor body fall back to the
+§P10 literal defaults: integer literals to `int32`, float literals to `f32`.
+A bare `[1, 2, 3]` in an unannotated top-level binding evaluates to
+`tensor[3, int32]`; a bare `[1.0, 2.0, 3.0]` evaluates to `tensor[3, f32]`.
+
+**Mixed suffixes inside a contextual literal.** A suffixed entry inside a
+contextual tensor literal is well-formed only if its suffix matches the
+inferred element type. `[1.0, 2.0f64, 3.0]` in an `f32`-context is a type
+error: the f64-suffixed literal at index 1 has an explicit dtype that
+disagrees with the surrounding `f32` element type. The diagnostic identifies
+the offending index and suggests removing the suffix.
+
+See `spec/04-type-system.md` §5.6 for the type-system statement of the
+contextual-inference rule.
 
 ### P11: Strings
 
@@ -569,8 +673,11 @@ TypeAtom      <- 'tensor' '[' S DimList S ',' S PrecType S ']'
                / '(' S TypeExpr S ')'
                / TypeIdent
 
-PrecType      <- 'f32' / 'f64' / 'f16' / 'bf16' / 'f8e4m3'
-               / 'int8' / 'int32' / 'int64' / 'bool' / 'string'
+PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
+               / 'int8' / 'int16' / 'int32' / 'int64'
+               / 'bool' / 'string'
+               # f8e4m3 is reserved/deferred per spec/04-type-system.md §1.1.1
+               # unsigned types (u8/u16/u32/u64) are out of scope per §1.1.2
 
 DimList       <- DimExpr (S ',' S DimExpr)*
 DimExpr       <- IntLit / Ident
@@ -668,11 +775,15 @@ InfixOp       <- '|>' / '||' / '&&' / CmpOp
 
 Literal       <- FloatLit / IntLit / BoolLit / StringLit
 
-FloatLit      <- '-'? Digits '.' Digits Exponent?
-               / '-'? Digits Exponent
+FloatLit      <- ('-'? Digits '.' Digits Exponent? / '-'? Digits Exponent) FloatSuffix?
 Exponent      <- [eE] [+-]? Digits
-IntLit        <- '-'? Digits !('.' [0-9]) ![eE]
+IntLit        <- '-'? Digits !('.' [0-9]) ![eE] (FloatSuffix / IntSuffix)?
 Digits        <- [0-9] ([0-9_]* [0-9])?
+FloatSuffix   <- 'f32' / 'f64' / 'bf16' / 'f16'
+IntSuffix     <- 'i8' / 'i16' / 'i32' / 'i64'
+# Suffix must immediately follow the digit sequence (no whitespace, no comment).
+# Closed sets: any other identifier sequence directly adjacent to a numeric
+# literal (e.g. `1.0xyz`, `42u8`, `1.0f8e4m3`) is a parse error per P10a.
 BoolLit       <- 'true' / 'false'
 StringLit     <- '"' StringChar* '"'
 StringChar    <- '\\' [nrt0"\\] / !'"' .

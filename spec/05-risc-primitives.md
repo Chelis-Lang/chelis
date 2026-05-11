@@ -79,12 +79,39 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 
 | Name | Signature | Semantics | AD Adjoint |
 |---|---|---|---|
-| `sum` | `(&tensor[d1,...,dn,p], axis: int) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Sum over axis k, removing that dimension | `expand(g, original_shape, axis=k)` |
+| `sum` | `(&tensor[d1,...,dn,p], axis: int, accumulator: prec = default(p)) -> tensor[d1,...,d{k-1},d{k+1},...,dn,acc]` | Sum over axis k, removing that dimension. `accumulator` controls the precision of the running sum and the result element type. | `expand(g, original_shape, axis=k)` (gradient flows back at the operand precision `p`; the adjoint is computed in operand precision) |
 | `max_reduce` | `(&tensor[d1,...,dn,p], axis: int) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Max over axis k, removing that dimension | `g * one_hot(argmax(x, k))` — gradient flows to the max element only |
 
 **Axis:** Zero-indexed integer. Must be a valid axis for the input rank.
 
 **Output dimensions:** The dimension at position `axis` is removed. All other dimensions are preserved.
+
+**Accumulator parameter (`sum` only).** The optional `accumulator: prec`
+parameter controls the precision used for the running sum and the precision
+of the output tensor. The default is the operand precision for f32/f64/i32/i64
+operands, and a wider promoted type for narrower operand types. The full
+table of defaults (and the rationale for each row) is the authoritative
+statement in `spec/04-type-system.md` §5.7.1; this primitive doc is the
+operational location of the parameter on the IR node.
+
+In short:
+
+- `bf16` / `f16` operands → `f32` accumulator → `f32` result
+- `f32` operands → `f32` accumulator → `f32` result
+- `f64` operands → `f64` accumulator → `f64` result
+- `int8` / `int16` operands → `int32` accumulator → `int32` result
+- `int32` operands → `int32` accumulator → `int32` result
+- `int64` operands → `int64` accumulator → `int64` result
+
+There is no implicit precision promotion: omitting the parameter resolves to
+the documented default before lowering. The IR `RiscOp::ReduceSum` node
+always carries a populated accumulator-precision field. Programs that
+explicitly request a narrower-than-default accumulator are a type error per
+§5.7.1.
+
+`max_reduce` does not take an accumulator parameter. Max is order-preserving
+and does not lose precision the way a long sum does, so the result element
+type matches the operand element type.
 
 ### 2.4 Movement
 
@@ -272,7 +299,9 @@ stop-gradient.
 ### 4.1 Matrix Multiplication
 
 ```
-matmul(A: tensor[..., i, j, p], B: tensor[..., j, k, p]) → tensor[..., i, k, p]
+matmul(A: tensor[..., i, j, p], B: tensor[..., j, k, p],
+       accumulator: prec = default(p))
+       → tensor[..., i, k, p]
 ```
 
 Lowering:
@@ -280,10 +309,33 @@ Lowering:
 1. A_expanded = expand(A, [..., i, j, 1])      ;; add dimension for k
 2. B_expanded = expand(B, [..., 1, j, k])      ;; add dimension for i
 3. product    = mul(A_expanded, B_expanded)     ;; [..., i, j, k]
-4. result     = sum(product, axis=-2)           ;; [..., i, k] — sum over j
+4. result     = sum(product, axis=-2,           ;; [..., i, k] — sum over j
+                    accumulator=acc)             ;; in `acc` precision
+5. (optional) result = cast(result, p)          ;; downcast back to operand
+                                                 ;; precision when acc != p
 ```
 
-This is the Einstein summation form. The compiler can recognize this pattern and emit optimized BLAS calls instead of the naive implementation.
+This is the Einstein summation form. The compiler can recognize this pattern
+and emit optimized BLAS calls instead of the naive implementation.
+
+**Accumulator parameter.** Like `sum` (§2.3), `matmul` carries an optional
+accumulator-precision parameter. The defaults for matmul are:
+
+- `bf16` / `f16` operands → `f32` accumulator, downcast to operand precision
+- `f32` operands → `f32` accumulator (no downcast)
+- `f64` operands → `f64` accumulator (no downcast)
+
+The result precision is always the operand precision so callers see a
+uniform-precision output; the wider accumulator is consumed inside the op.
+There is no implicit precision promotion; omitting the parameter resolves to
+the documented default before lowering. The IR `RiscOp::Matmul` node always
+carries a populated accumulator-precision field. The full default table and
+rationale are in `spec/04-type-system.md` §5.7.1.
+
+Integer matmul (operands of `int8` / `int16` / `int32` / `int64`) is not
+admitted in the active matmul signature; see `spec/04-type-system.md` §5.7.2
+for rationale. Use `reduce_sum` over an explicit `expand`+`mul` lowering for
+integer inner products.
 
 ### 4.2 Softmax
 

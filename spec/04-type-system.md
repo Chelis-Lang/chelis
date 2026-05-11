@@ -35,18 +35,49 @@ Types are represented as Deep AST nodes using the `t-*` tag family.
 
 ### 1.1 Primitive Types
 
+The active numeric primitive set is exactly nine names:
+
 ```scheme
 (t-prim {} f32)       ;; 32-bit float
 (t-prim {} f64)       ;; 64-bit float
-(t-prim {} f16)       ;; 16-bit float
 (t-prim {} bf16)      ;; bfloat16
-(t-prim {} f8e4m3)    ;; 8-bit float (E4M3 format)
-(t-prim {} int8)      ;; 8-bit integer
-(t-prim {} int32)     ;; 32-bit integer
-(t-prim {} int64)     ;; 64-bit integer
+(t-prim {} f16)       ;; 16-bit float (IEEE 754 binary16)
+(t-prim {} int8)      ;; 8-bit signed integer
+(t-prim {} int16)     ;; 16-bit signed integer
+(t-prim {} int32)     ;; 32-bit signed integer
+(t-prim {} int64)     ;; 64-bit signed integer
 (t-prim {} bool)      ;; boolean
 (t-prim {} string)    ;; string type exists in the grammar/type layer; practical first-class runtime support is a remaining Phase 3 item
 ```
+
+This is the **active** numeric dtype list. Code, tests, examples, and stdlib
+signatures referenced from any active spec section must resolve to one of these
+names (or to a documented deferred name in §1.1.1).
+
+#### 1.1.1 Deferred Numeric Primitives
+
+The following primitive name is reserved in the spec but **not active** in the
+current dtype build-out cycle. It is documented here rather than silently
+dropped so producers do not assume it has gone away.
+
+- `f8e4m3` — 8-bit float (E4M3 format). Deferred. **Rationale:** no current
+  Chelis backend implements f8e4m3; revisit when a concrete backend (HIP, C, or
+  Metal) gains native E4M3 support and a corresponding evaluator round-trip
+  representation. Until then, `(t-prim {} f8e4m3)` is rejected by the type
+  checker with a diagnostic pointing at this section. `cast(x, f8e4m3)` is also
+  rejected.
+
+#### 1.1.2 Out-of-Scope: Unsigned Integer Types
+
+Unsigned integer types (`u8`, `u16`, `u32`, `u64`, or any `uint*` spelling) are
+**out of scope for this cycle** and are not part of the active or deferred
+numeric primitive set. **Rationale:** no current customer use case justifies
+the implementation surface (separate signed/unsigned arithmetic, comparison,
+overflow, AD adjoints, and backend dispatch). The documented workaround is
+to cast to a signed integer type (typically `int32` or `int64`) at the
+boundary where unsigned data enters the program. If a future cycle adds
+unsigned types, this section must be revised at the same time as the active
+list above.
 
 ### 1.2 Function Types
 
@@ -410,7 +441,28 @@ Cast is always explicit. The compiler never inserts implicit casts.
 
 ### 5.3 Literal Types
 
-Integer literals default to `int32`. Float literals default to `f32`. These defaults can be overridden by context (annotation on the `lit` node) or by explicit `cast`.
+Integer literals default to `int32`. Float literals default to `f32`. These
+defaults can be overridden in three ways:
+
+1. an explicit literal suffix (§5.5) attached to the literal token
+2. a known element type in the surrounding position (§5.6)
+3. an explicit `cast` around the literal expression
+
+There is **no implicit precision promotion** from these defaults to any other
+type. A bare `[1, 2, 3]` in an unannotated position is `tensor[3, int32]`, not
+`tensor[3, int64]`. A bare `[1.0, 2.0, 3.0]` in an unannotated position is
+`tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
+type must say so via suffix, declared element type, or `cast`.
+
+The default is the **user-facing contract**. The lexer parses an unsuffixed
+integer or float literal token at i64/f64 precision so that out-of-range
+literals can be diagnosed before defaulting; the desugarer/type-check
+narrows the literal to `int32` (for integer tokens) or `f32` (for float
+tokens) before Deep is materialized. The narrowing is mechanical and
+non-overridable except by the three mechanisms above. Implementation
+references for verification: `crates/chelis-surf/src/desugar.rs` (literal
+desugaring emits `(lit {type: (t-prim {} int32)} N)`), `crates/chelis-types/src/infer.rs`
+(literal inference rule maps `Atom::Int → Prim::Int32`, `Atom::Float → Prim::F32`).
 
 ### 5.4 Precision Compatibility Table
 
@@ -418,10 +470,199 @@ Operations accept same-precision operands only. The table of valid combinations:
 
 | Operation type | Valid precisions |
 |---|---|
-| Arithmetic (add, mul, sub, div) | f32, f64, f16, bf16, f8e4m3, int32, int64 (all same) |
+| Arithmetic (add, mul, sub, div) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
 | Comparison (cmplt, eq) | any numeric (same precision) → bool |
 | Logical (and, or, not) | bool only |
-| Transcendental (exp, log, sin, sqrt) | f32, f64, f16, bf16 only (not integer) |
+| Transcendental (exp, log, sin, sqrt) | f32, f64, bf16, f16 only (not integer) |
+
+`f8e4m3` is deferred (§1.1.1) and is not a valid arithmetic precision in any
+row. Unsigned integer types are out of scope (§1.1.2) and never appear in any
+row.
+
+### 5.5 Literal Suffix Grammar
+
+Numeric literal tokens may carry an explicit precision suffix. A suffixed
+literal binds at exactly that precision; no inference, no widening, no
+narrowing. The closed suffix set is:
+
+| Suffix | Bound type | Example |
+|---|---|---|
+| `f32` | `(t-prim {} f32)` | `1.0f32`, `3.14e-2f32` |
+| `f64` | `(t-prim {} f64)` | `1.0f64` |
+| `bf16` | `(t-prim {} bf16)` | `1.0bf16` |
+| `f16` | `(t-prim {} f16)` | `1.0f16` |
+| `i8` | `(t-prim {} int8)` | `42i8` |
+| `i16` | `(t-prim {} int16)` | `42i16` |
+| `i32` | `(t-prim {} int32)` | `42i32` |
+| `i64` | `(t-prim {} int64)` | `42i64` |
+
+Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) attach to either an integer
+or a float literal token (`42f32` and `1.0f32` are both well-formed and bind
+at f32). Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`) attach to integer
+literal tokens only; `1.0i8` is a parse error.
+
+Suffix lexing rule: a suffix is part of the literal token only if it
+**immediately** follows the digit sequence with no intervening whitespace,
+comment, or other character. `1.0 f32` (with whitespace) is two tokens (a
+float followed by an identifier) and binds at the literal default per §5.3,
+which is then subject to the surrounding-position rules in the type checker.
+
+Hex-literal interaction (parser-implementation note): the lexer's hex-literal
+rule consumes `[0-9a-fA-F_]*` after `0x`. Because `f` is a hex digit, a hex
+integer literal cannot directly carry a float-typed suffix (`0xFFf32` is not
+"hex 0xFF then suffix f32"; it is "hex 0xFFf then int 32" under maximal-munch
+hex lexing, which is rejected as malformed). Hex integer literals MAY carry
+integer-typed suffixes only (`0xFFi8`, `0xFFi32`, etc.); float-typed suffixes
+on hex literals are a parse error with a diagnostic suggesting an explicit
+`cast`. Decimal float literals carry float suffixes without ambiguity
+(`1.0f32`, `1.0e3f32`).
+
+Deferred / out-of-scope suffixes:
+
+- `f8e4m3` is deferred (§1.1.1); the suffix `f8e4m3` is rejected at lex time
+  with a diagnostic pointing at §1.1.1.
+- Unsigned suffixes (`u8`, `u16`, `u32`, `u64`) are out of scope (§1.1.2) and
+  are rejected at lex time with a diagnostic pointing at §1.1.2.
+- Any other unrecognized identifier sequence directly adjacent to a numeric
+  literal (e.g. `1.0xyz`) is a parse error rather than a silently-split
+  literal-then-identifier pair.
+
+The suffix grammar is identical in Surf (`spec/02-surf-syntax.md` §3, P10)
+and Deep (`spec/03-deep-syntax.md` §6.4).
+
+### 5.6 Contextual Tensor-Literal Inference
+
+When a tensor literal appears in a position with a **known element type**, the
+numeric literals in the tensor body adopt that element type instead of the
+literal default in §5.3. The closed set of "known-element-type" positions is
+exactly:
+
+1. the right-hand side of a binding whose declared type is a tensor type, e.g.
+   `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
+2. the corresponding argument position of a call whose callee has a declared
+   signature whose parameter at that position is a tensor type, e.g.
+   `f(xs)` where `f : tensor[3, f64] -> ...`
+3. the body expression of a function with a declared return type that is a
+   tensor type, when the body is a tensor literal
+4. the first argument of a `cast(literal, p)` expression, where `p` is a
+   precision type literal — the literal body adopts `p`
+
+Outside this closed set, numeric literals in a tensor body fall back to the
+§5.3 literal defaults: integer literals to `int32`, float literals to `f32`.
+
+A tensor literal with mixed-suffix entries is well-formed only if every
+suffix matches the inferred element type. `[1.0, 2.0f64, 3.0]` in an
+`f32`-context is a type error: the f64-suffixed literal at index 1 has an
+explicit dtype that disagrees with the surrounding `f32` element type.
+
+A bare tensor literal `[1, 2, 3]` in an unannotated position evaluates to
+`tensor[3, int32]`, not `tensor[3, int64]`. The fallback to the §5.3
+default is the spec contract; the implementation must not silently widen.
+
+### 5.7 Mixed-Precision Accumulator Parameter
+
+Two reduction-shaped operations carry an **optional** accumulator-precision
+parameter that controls the precision used for the inner sum:
+
+- `matmul(A, B, accumulator=p)` — the precision of the inner-product
+  accumulator before the result is downcast to the operand precision (when
+  the accumulator is wider than the operands)
+- `reduce_sum(x, axis=k, accumulator=p)` (also known under the spec name
+  `sum`; see `spec/05-risc-primitives.md` §2.3) — the precision of the
+  running sum
+
+The accumulator parameter is the **only** mechanism for mixed precision in
+these ops. There is no implicit precision promotion: passing two `bf16`
+operands to `matmul` does not implicitly widen them. The accumulator
+parameter is what tells the backend to compute the inner sum at a wider
+precision and (where the result is the operand precision) downcast at the
+end.
+
+When the accumulator parameter is **omitted**, the compiler resolves it to
+the documented default for the operand precision, before any backend is
+invoked. The IR matmul/reduce_sum nodes always carry a populated
+accumulator-precision field; "no accumulator parameter" is a Surf/Deep
+ergonomic shorthand, not an IR state.
+
+#### 5.7.1 Default Accumulator Precision
+
+For operands of precision `p`, the default accumulator precision is:
+
+| Operand precision `p` | Default accumulator (matmul) | Default accumulator (reduce_sum) | Result precision |
+|---|---|---|---|
+| `bf16` | `f32` | `f32` | operand precision (`bf16`) |
+| `f16` | `f32` | `f32` | operand precision (`f16`) |
+| `f32` | `f32` | `f32` | operand precision (`f32`) |
+| `f64` | `f64` | `f64` | operand precision (`f64`) |
+| `int8` | (matmul not defined for int8 — see §5.7.2) | `int32` | `int32` |
+| `int16` | (matmul not defined for int16 — see §5.7.2) | `int32` | `int32` |
+| `int32` | (matmul not defined for int32 — see §5.7.2) | `int32` | `int32` |
+| `int64` | (matmul not defined for int64 — see §5.7.2) | `int64` | `int64` |
+
+Rationale for the bf16/f16 → f32 default: numerical stability of long
+inner-product reductions in low-precision arithmetic. PyTorch and JAX use the
+same wider-accumulator default for bf16/f16 matmul.
+
+Rationale for the i8/i16 → i32 default: overflow safety. Summing 200
+non-trivial `int8` values overflows `int8` but fits comfortably in `int32`.
+This matches PyTorch's `torch.sum` accumulator-promotion rule for narrow
+integer inputs.
+
+The accumulator parameter is permitted only when it is at least as wide as
+the operand precision and is not narrower than the documented default. A
+program that explicitly requests a narrower accumulator (e.g.
+`reduce_sum(x: tensor[N, int8], accumulator=int8)`) is a type error with a
+diagnostic suggesting either omitting the parameter (which yields the i32
+default) or accepting the wider default explicitly.
+
+The result precision of `reduce_sum` is the accumulator precision. The
+result precision of `matmul` matches the operand precision (the wider
+accumulator is consumed inside the op and downcast on output) so that the
+caller sees a uniform-precision result tensor.
+
+#### 5.7.2 Integer matmul
+
+The active matmul signature does not admit integer operand precisions
+(`int8`, `int16`, `int32`, `int64`). The spec deliberately does not pin an
+integer-matmul accumulator rule in this cycle: there is no current backend
+that supports integer BLAS, and an integer-matmul surface raises questions
+(saturating vs wrapping accumulator, signed-vs-unsigned interaction with
+§1.1.2) that are out of scope here. Integer `reduce_sum` is supported per
+§5.7.1.
+
+### 5.8 Stdlib Generalization Shape
+
+Every public tensor-op signature exported from `packages/chelis-std/` is
+generalized over a precision type variable. Type-check enforces that each
+instantiation works against the active dtype set (§1.1) and the precision
+compatibility table (§5.4).
+
+A typical generalized signature has the shape:
+
+```scheme
+;; Std.Tensor.add : forall p. tensor[D, p] -> tensor[D, p] -> tensor[D, p]
+(defsig {} add
+  (t-fn {}
+    (t-tensor {} (d-var {} d) (t-var {} p))
+    (t-tensor {} (d-var {} d) (t-var {} p))
+    (t-tensor {} (d-var {} d) (t-var {} p))))
+```
+
+Float-only operations (those whose §5.4 row reads "f32, f64, bf16, f16 only")
+carry an explicit kind restriction limiting `p` to the float subset of the
+active dtype set. Examples include `exp`, `log`, `sin`, `sqrt`, and the
+transcendental row in §5.4. Calling a float-only op on an integer tensor is a
+type error reported at the call site, not deep inside the implementation.
+
+The implementation is permitted to specialize each instantiation (e.g. via
+monomorphization) so that backends never see a polymorphic stdlib body. The
+spec contract is that the **public signature** is generalized; per-backend
+specialization is an implementation detail.
+
+The active dtype set is the source of truth for stdlib generalization
+coverage: every public tensor op must be usable at every dtype in §1.1 that
+its §5.4 row admits. A stdlib op that fails for a §5.4-admissible dtype is a
+spec compliance bug, not a documentation bug.
 
 ---
 
