@@ -2582,12 +2582,26 @@ fn dispatch_scalar_binop(
             // Float-float: pick the wider of the two operand dtypes (no
             // implicit promotion when they match — but keep f64 if either
             // side is f64 so we don't downgrade an f64-typed value).
+            //
+            // E1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.1
+            // there is no implicit precision promotion. The mixed
+            // narrow-float case (`(Bf16, F16)` and `(F16, Bf16)`) must
+            // be rejected by the type checker before reaching this
+            // dispatch; if the runtime ever observes it the type
+            // checker has a hole. Replace the silent `_ => Prim::F32`
+            // re-precisioning fallback with an `unreachable!` that
+            // names the spec invariant.
             let result_dtype = match (*ldt, *rdt) {
                 (Prim::F64, _) | (_, Prim::F64) => Prim::F64,
                 (Prim::F32, _) | (_, Prim::F32) => Prim::F32,
                 (Prim::Bf16, Prim::Bf16) => Prim::Bf16,
                 (Prim::F16, Prim::F16) => Prim::F16,
-                _ => Prim::F32,
+                _ => unreachable!(
+                    "type checker must reject mismatched float precisions per \
+                     spec/04-type-system.md §5.1 (no implicit precision promotion); \
+                     reached float-binop fallback with ({:?}, {:?})",
+                    ldt, rdt
+                ),
             };
             let value = op(lb.as_f64(), rb.as_f64());
             RuntimeValue::scalar_like_float(result_dtype, value)
@@ -5456,6 +5470,31 @@ y = softmax(x, cast(5, int32))
                 Err(e) => e,
             }
         }
+    }
+
+    /// E1 (WS-A0 RT-1 fixup): the float-binop dispatch's mixed
+    /// narrow-float fallback used to silently re-precision to F32. The
+    /// type checker must reject `(Bf16, F16)` and `(F16, Bf16)` per
+    /// spec/04-type-system.md §5.1 (no implicit precision promotion);
+    /// pin that the type checker still rejects so the unreachable!
+    /// arm in `dispatch_scalar_binop` cannot be reached from any
+    /// in-tree program.
+    #[test]
+    fn type_checker_rejects_mixed_narrow_float_binop_per_spec_5_1() {
+        let src = r#"
+def main -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
+"#;
+        let res = chelis_types::check_ir_program(
+            &chelis_surf::desugar::desugar_program(
+                &chelis_surf::parser::parse_str(src).expect("surf parse"),
+            ),
+        );
+        assert!(
+            res.is_err(),
+            "spec §5.1 forbids implicit precision promotion; \
+             `add(_:bf16, _:f16)` must be rejected by the type checker so the \
+             E1 unreachable! in `dispatch_scalar_binop` cannot be reached"
+        );
     }
 
     #[test]
