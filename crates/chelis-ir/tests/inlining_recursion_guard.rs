@@ -203,7 +203,7 @@ fn true_self_recursion_still_rejected_by_inlining_guard() {
         "guard-protected lowering still produces a root"
     );
     let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds — guard prevents infinite recursion");
+        .expect("eval succeeds; guard prevents infinite recursion");
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
     // Guard fired: the recursive call lowers to "return last arg", i.e. the
@@ -216,6 +216,6 @@ fn true_self_recursion_still_rejected_by_inlining_guard() {
         vec![1.0, 2.0, 3.0],
         "true self-recursion guard must finish lowering with a finite \
          result (the fallback identity); changing this output means the \
-         guard has been disabled — fix is too aggressive."
+         guard has been disabled; fix is too aggressive."
     );
 }
