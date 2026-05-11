@@ -1,22 +1,29 @@
 # Chelis Compiler Gaps — Empirical Findings
 
-**Status:** closed for the M1→W5 batch as of 2026-05-11. Gaps 2 and 6
+**Status:** closed for the M1→W7 batch as of 2026-05-11. Gaps 2 and 6
 closed by M1; Surf-span adjacent finding closed by M2b; Gap 4 rank ≥ 2
 expressibility + symbolic/batched BLAS closed by M3/M3b; Gap 3 sparse
 gather/scatter closed by M4 and replace-scatter with structured AD
 rejection closed by W2-A; Gap 4 HIP strided-batched closed by Perf-F1;
 Perf-F2(a)/(b)/(c) closed by W1-C / W2-B / W1-B; Gap 5 BLAS-helper
-specialization closed for C (M5) and HIP (W3-A), Gap 5 sparse-helper
-specialization closed for C (W3-B), Gap 5 rejected-callsite structured
-diagnostics closed by W4-A. Fresh-context red-team run as W5 on
-2026-05-11 surfaced one P0 silent miscompile (non-F32 matmul →
-`RiscOp::BlasMatmul` → `cblas_sgemm` against wrong-precision data);
-the fix shipped in-band as `fix(specialize): require F32 precision for
-matmul→BlasMatmul replacement`, with the W5 P0-asserting tests inverted
-to positive regressions. Remaining tracked follow-ups (BLAS-summary
-rejection-diagnostics sibling sweep, HIP consumption of sparse summary
-kinds, softmax/layer_norm/attention recognizers, DimExpr `Add` variant
-parking decision) live in `docs/gap_synthesis.md` §5 / §6.
+specialization closed for C (M5) and HIP (W3-A); Gap 5 sparse-helper
+specialization closed for C (W3-B) and HIP (W6 Task B via inlining
+lock-tests); Gap 5 rejected-callsite structured diagnostics closed for
+both sparse helpers (W4-A) and BLAS helpers (W6 Task A — 6
+BLAS-prefixed variants on top of W4-A's 10 sparse variants). Two
+fresh-context red-team passes: **W5** (2026-05-11) surfaced one P0
+silent miscompile (non-F32 matmul → `RiscOp::BlasMatmul` →
+`cblas_sgemm` against wrong-precision data) — fix shipped in-band with
+precision filter at the canonical specializer site + defense-in-depth
+panics in both backend emit sites. **W7** (2026-05-11) ran 35
+adversarial tests against W6, zero P0/P1, locked the W5 P0 → W6
+diagnosed-rejection cross-product invariant (all 8 non-F32 `Prim`
+values now produce a structured `BlasOutputPrecisionMismatch`
+diagnostic with zero silent fallthroughs). Standalone follow-ups
+filed as §5 R1–R5 in `docs/gap_synthesis.md`: softmax/layer_norm/
+attention recognizers, Path-B HIP host-program fallback codegen,
+DimExpr `Add` variant decision, DimExpr rational vs integer-floor
+semantics, HIP sparse gather Cast-wrapped indices.
 **Filed:** 2026-05-08
 **Owning phase:** cross-phase (perf + ergonomics)
 
