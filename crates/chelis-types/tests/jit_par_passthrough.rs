@@ -31,7 +31,7 @@ fn jit_wrapping_a_value_type_checks_and_carries_inner_type() {
     let res = check_ir_program(&exprs);
     assert!(
         res.is_ok(),
-        "jit({{value}}) should type-check (spec §2.7 — compilation trigger, no-op at eval). errors={:?}",
+        "jit({{value}}) should type-check (spec §2.7: compilation trigger, no-op at eval). errors={:?}",
         res.err().map(|r| r.errors)
     );
 }
@@ -50,7 +50,7 @@ fn par_sequential_body_type_checks_and_yields_last_type() {
     let res = check_ir_program(&exprs);
     assert!(
         res.is_ok(),
-        "par({{a; b}}) should type-check (spec §2.3 — v1 sequential). errors={:?}",
+        "par({{a; b}}) should type-check (spec §2.3: v1 sequential). errors={:?}",
         res.err().map(|r| r.errors)
     );
 }
