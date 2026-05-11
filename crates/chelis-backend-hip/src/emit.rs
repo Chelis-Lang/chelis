@@ -400,7 +400,7 @@ impl HipEmitter {
                     // here, then the standard `emit_node` dispatch in
                     // `emit_dag` launches them via the same machinery as
                     // the existing Sum/MaxReduce kernels.
-                    let sources = self.extra_reduction_kernel_sources(node);
+                    let sources = self.extra_reduction_kernel_sources(node, dag);
                     for (name, source) in sources {
                         if seen.insert(name.clone()) {
                             self.kernel_sources.push((name, source));
@@ -672,14 +672,16 @@ impl HipEmitter {
         vec![(name, source)]
     }
 
-    fn extra_reduction_kernel_sources(&self, node: &DagNode) -> Vec<(String, String)> {
+    fn extra_reduction_kernel_sources(&self, node: &DagNode, dag: &Dag) -> Vec<(String, String)> {
         // Kernel sources for the four reductions previously deferred to
         // the C backend: Min / Prod / Argmax / Argmin. Argmax/Argmin emit
         // an i64 result tensor; Min/Prod emit an in-precision result.
-        let elem = Self::elem_kind(
-            &Self::reduction_input_type_for_extra(node)
-                .expect("extra reduction node must have a single tensor input"),
-        );
+        // For all four, kernel naming + body are driven by the OPERAND
+        // precision, which lives on the input tensor (Argmax/Argmin's
+        // output_type is `int64` and would otherwise tip elem_kind into
+        // its panic arm).
+        let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+        let elem = Self::elem_kind(input_ty);
         match &node.op {
             RiscOp::MinReduce { axis } => {
                 let name = Self::extra_reduction_kernel_name("min", *axis, elem);
@@ -703,17 +705,6 @@ impl HipEmitter {
             }
             _ => unreachable!("extra_reduction_kernel_sources expected Min/Prod/Argmax/Argmin"),
         }
-    }
-
-    fn reduction_input_type_for_extra(node: &DagNode) -> Option<TensorType> {
-        // For Min/Prod the input tensor type drives kernel selection
-        // (operand == result precision). For Argmax/Argmin the input is
-        // also the precision of the value being compared even though the
-        // output is i64.
-        // The input is always at index 0 for these ops; this helper just
-        // exists to make the call site at extra_reduction_kernel_sources
-        // unambiguous.
-        Some(node.output_type.clone())
     }
 
     fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, dag: &Dag) -> Option<String> {
@@ -777,16 +768,22 @@ impl HipEmitter {
                     ))
                 }
             }
-            RiscOp::MinReduce { axis } => Some(Self::extra_reduction_kernel_name(
-                "min",
-                *axis,
-                Self::elem_kind(&node.output_type),
-            )),
-            RiscOp::ProdReduce { axis } => Some(Self::extra_reduction_kernel_name(
-                "prod",
-                *axis,
-                Self::elem_kind(&node.output_type),
-            )),
+            RiscOp::MinReduce { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                Some(Self::extra_reduction_kernel_name(
+                    "min",
+                    *axis,
+                    Self::elem_kind(input_ty),
+                ))
+            }
+            RiscOp::ProdReduce { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                Some(Self::extra_reduction_kernel_name(
+                    "prod",
+                    *axis,
+                    Self::elem_kind(input_ty),
+                ))
+            }
             RiscOp::Argmax { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                 Some(Self::extra_reduction_kernel_name(
@@ -916,8 +913,14 @@ impl HipEmitter {
                     kernels::reduce_max(name, *axis, elem)
                 }
             }
-            RiscOp::MinReduce { axis } => kernels::reduce_min(name, *axis, elem),
-            RiscOp::ProdReduce { axis } => kernels::reduce_prod(name, *axis, elem),
+            RiscOp::MinReduce { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                kernels::reduce_min(name, *axis, Self::elem_kind(input_ty))
+            }
+            RiscOp::ProdReduce { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                kernels::reduce_prod(name, *axis, Self::elem_kind(input_ty))
+            }
             RiscOp::Argmax { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                 kernels::reduce_argmax(name, *axis, Self::elem_kind(input_ty))
@@ -1740,10 +1743,13 @@ impl HipEmitter {
         let a = inputs[0].0;
         let input_ty = &dag.get(inputs[0]).unwrap().output_type;
         let node_op = &dag.get(NodeId(id)).unwrap().op;
-        let elem_for_naming = match node_op {
-            RiscOp::Argmax { .. } | RiscOp::Argmin { .. } => Self::elem_kind(input_ty),
-            _ => Self::elem_kind(ty),
-        };
+        // All four extra reductions name kernels by the operand
+        // precision: Min/Prod return the operand precision (so input ==
+        // output), and Argmax/Argmin's output is i64 even though the
+        // value being compared is the operand precision. Reading the
+        // input precision uniformly avoids the elem_kind panic on the
+        // i64 output of the arg-reductions.
+        let elem_for_naming = Self::elem_kind(input_ty);
         let op_name = match node_op {
             RiscOp::MinReduce { .. } => "min",
             RiscOp::ProdReduce { .. } => "prod",
