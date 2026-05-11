@@ -426,6 +426,85 @@ fn unsupported_structural_keyword_pipe_stage_still_rejected() {
     }
 }
 
+// === Bare-keyword sibling-sweep extras (Item 2b H1/H2/H3) ===
+//
+// The pipe-stage fix in Item 2b (`parse_pipe_stage` synthesizes a lambda
+// for `x |> realize` / `x |> copy`) intentionally left three sibling
+// surfaces out of scope; see the "Sibling sweep" table in
+// `docs/investigations/parser_pipe_bare_keyword_diagnosis.md`:
+//
+// H1: top-level bare unary-builtin reference, e.g. `f = realize`.
+// H2: bare unary-builtin keyword as juxtaposition argument, e.g.
+//     `apply_fn(realize)`.
+// H3: one-arg `cast(type)` pipe-stage form, e.g. `x |> cast(f32)` which
+//     per spec §3.6 ≡ `cast(x, f32)`.
+//
+// These three fixtures pin the failures. They flip to running in the
+// fix commit (see `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`).
+
+#[test]
+fn top_level_bare_unary_builtin_reference_parses() {
+    // `f = realize` at top level binds the identifier `f` to the unary
+    // builtin `realize`. Per the canonical lowering for bare pipe stages
+    // (parser_pipe_bare_keyword_diagnosis.md), the natural η-expansion
+    // is `fn (v) -> realize(v)`.
+    for kw in ["realize", "copy"] {
+        let src = format!("f = {kw}\n");
+        let decls = surf_parse(&src)
+            .unwrap_or_else(|e| panic!("bare top-level `{kw}` should parse, got: {e}"));
+        assert_eq!(decls.len(), 1, "expected one decl for `{src}`");
+        let deep = desugar_program(&decls);
+        let text = print_canonical(&deep);
+        // η-expanded body references the builtin.
+        assert!(
+            text.contains(kw),
+            "{kw}: expected lowered output to mention `{kw}`, got:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn bare_unary_builtin_as_juxtaposition_argument_parses() {
+    // `apply_fn(realize)` passes the unary builtin `realize` as a
+    // function-valued argument. Same η-expansion as H1.
+    for kw in ["realize", "copy"] {
+        let src = format!("def f(x: tensor[3, f32]) -> tensor[3, f32] = apply_fn({kw})\n");
+        let decls =
+            surf_parse(&src).unwrap_or_else(|e| panic!("`apply_fn({kw})` should parse, got: {e}"));
+        let deep = desugar_program(&decls);
+        let text = print_canonical(&deep);
+        // The `apply_fn` call must remain a single `app` of `apply_fn`
+        // applied to the synthesized lambda (or builtin reference) — not
+        // a parse of `apply_fn` as a zero-arg call.
+        assert!(
+            text.contains("apply_fn") && text.contains(kw),
+            "{kw}: expected `apply_fn` call carrying `{kw}` body, got:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn one_arg_cast_pipe_stage_parses() {
+    // Per spec §3.6, `x |> cast(f32)` ≡ `cast(x, f32)`: the piped value
+    // fills the first slot, the type argument fills the second.
+    let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> cast(f32)\n";
+    let decls = surf_parse(src).expect("`x |> cast(f32)` should parse per spec §3.6");
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    assert!(
+        text.contains("(pipe {"),
+        "expected pipe node in lowered output, got:\n{text}"
+    );
+    assert!(
+        text.contains("(cast {"),
+        "expected `(cast ...)` node receiving the piped value as first arg, got:\n{text}"
+    );
+    assert!(
+        text.contains("f32"),
+        "expected `f32` target type to survive lowering, got:\n{text}"
+    );
+}
+
 #[test]
 fn parsed_surf_expression_spans_enter_deep_metadata() {
     let source = "def f(x) = add(x, 1)";
