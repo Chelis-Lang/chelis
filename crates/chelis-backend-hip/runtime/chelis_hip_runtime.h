@@ -7,6 +7,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* WS-A3: request the HIPBLAS_V2 hipblasGemmEx surface so the bf16/f16
+ * matmul path can pass `hipDataType` + `hipblasComputeType_t` per the
+ * spec/04-type-system.md §5.7.1 mixed-precision rule (bf16/f16 forward
+ * + f32 accumulator). The legacy hipblasDatatype_t API is deprecated
+ * upstream; pinning V2 keeps generated kernels on the supported
+ * surface. Defined before the hipblas include so the header switches
+ * to the V2 prototypes. */
+#define HIPBLAS_V2 1
 #if __has_include(<hipblas/hipblas.h>)
 #include <hipblas/hipblas.h>
 #define CHELIS_HAS_HIPBLAS_HEADER 1
@@ -95,6 +103,46 @@ extern hipblasStatus_t hipblasDgemmStridedBatched(
     long long strideC,
     int batchCount
 );
+/* WS-A3 fallback: minimal hipblasGemmEx surface so generated bf16/f16
+ * matmul code still compiles when the hipblas header is absent. Real
+ * builds resolve these symbols against libhipblas at link time, so the
+ * fallback prototypes below need only match the V2 signature shape. */
+typedef enum {
+    HIP_R_32F = 0,
+    HIP_R_64F = 1,
+    HIP_R_16F = 2,
+    HIP_R_16BF = 14
+} hipDataType;
+typedef enum {
+    HIPBLAS_COMPUTE_16F = 64,
+    HIPBLAS_COMPUTE_32F = 68,
+    HIPBLAS_COMPUTE_64F = 70,
+    HIPBLAS_COMPUTE_32I = 72
+} hipblasComputeType_t;
+typedef enum {
+    HIPBLAS_GEMM_DEFAULT = 160
+} hipblasGemmAlgo_t;
+extern hipblasStatus_t hipblasGemmEx(
+    hipblasHandle_t handle,
+    hipblasOperation_t transA,
+    hipblasOperation_t transB,
+    int m,
+    int n,
+    int k,
+    const void *alpha,
+    const void *A,
+    hipDataType aType,
+    int lda,
+    const void *B,
+    hipDataType bType,
+    int ldb,
+    const void *beta,
+    void *C,
+    hipDataType cType,
+    int ldc,
+    hipblasComputeType_t computeType,
+    hipblasGemmAlgo_t algo
+);
 #endif
 
 /* Re-use the CPU tensor struct for host-side data. */
@@ -140,7 +188,15 @@ typedef struct {
 /* ---- Allocation / deallocation ---- */
 
 static inline size_t chelis_gpu_dtype_size(int dtype) {
-    return (dtype == CHELIS_I64 || dtype == CHELIS_F64) ? sizeof(int64_t) : sizeof(float);
+    if (dtype == CHELIS_I64 || dtype == CHELIS_F64) {
+        return sizeof(int64_t);
+    }
+    if (dtype == CHELIS_BF16 || dtype == CHELIS_F16) {
+        /* WS-A3: bf16 / f16 storage is 2 bytes. Mirrors the host
+         * runtime's `chelis_alloc` dispatch. */
+        return 2;
+    }
+    return sizeof(float);
 }
 
 static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {
@@ -282,6 +338,87 @@ static inline int chelis_gpu_matrix_slices_contiguous(
     if (t->ndim < 2) return 0;
     return t->strides[t->ndim - 1] == 1
         && t->strides[t->ndim - 2] == trailing_cols;
+}
+
+/* WS-A3: bf16 matmul with f32 accumulator per spec/04-type-system.md
+ * §5.7.1. Operand storage is bf16; alpha/beta and the GEMM accumulate
+ * happen at f32; the result is downcast back to bf16 by hipblasGemmEx
+ * (cType == HIP_R_16BF, computeType == HIPBLAS_COMPUTE_32F). hipBLAS is
+ * column-major; we swap A/B and m/n to preserve row-major semantics
+ * (same trick as `chelis_hipblas_sgemm_row_major`). */
+static inline void chelis_hipblas_bf16_gemm_f32_acc_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k
+) {
+    hipblasHandle_t handle;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    CHELIS_HIPBLAS_CHECK(hipblasGemmEx(
+        handle,
+        HIPBLAS_OP_N,
+        HIPBLAS_OP_N,
+        n,
+        m,
+        k,
+        &alpha,
+        b->data,
+        HIP_R_16BF,
+        n,
+        a->data,
+        HIP_R_16BF,
+        k,
+        &beta,
+        out->data,
+        HIP_R_16BF,
+        n,
+        HIPBLAS_COMPUTE_32F,
+        HIPBLAS_GEMM_DEFAULT
+    ));
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
+}
+
+/* WS-A3: f16 matmul with f32 accumulator per spec §5.7.1. Same shape
+ * as the bf16 wrapper above; differs only in the operand/result data
+ * type (HIP_R_16F). */
+static inline void chelis_hipblas_f16_gemm_f32_acc_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k
+) {
+    hipblasHandle_t handle;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    CHELIS_HIPBLAS_CHECK(hipblasGemmEx(
+        handle,
+        HIPBLAS_OP_N,
+        HIPBLAS_OP_N,
+        n,
+        m,
+        k,
+        &alpha,
+        b->data,
+        HIP_R_16F,
+        n,
+        a->data,
+        HIP_R_16F,
+        k,
+        &beta,
+        out->data,
+        HIP_R_16F,
+        n,
+        HIPBLAS_COMPUTE_32F,
+        HIPBLAS_GEMM_DEFAULT
+    ));
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
 }
 
 static inline void chelis_hipblas_sgemm_batched_row_major(

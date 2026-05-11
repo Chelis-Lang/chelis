@@ -1287,14 +1287,19 @@ fn ws_a1_negative_integer_matmul_rejected_with_spec_citation() {
     }
 }
 
-// ---- WS-A1 Negative parity: bf16/f16 matmul still blocked at validation ----
+// ---- WS-A1 / WS-A3: bf16/f16 matmul admitted at IR validation ----
 //
-// Spec §5.7.1: bf16/f16 matmul accumulator default is f32. The C
-// backend in WS-A1 only wired f32/f64 dispatch; bf16/f16 has no
-// native dispatch on any backend yet, so the F1 IR validation guard
-// keeps rejecting bf16/f16 BlasMatmul. WS-A3 lifts this for HIP.
+// Spec §5.7.1: bf16/f16 matmul accumulator default is f32. WS-A3
+// wired the HIP backend's bf16/f16 dispatch through `hipblasGemmEx`
+// with `HIPBLAS_COMPUTE_32F`, so the F1 IR validation guard now
+// admits bf16/f16. The C backend still rejects bf16/f16 at its own
+// F1 guard (no `cblas_*` dispatch yet); this IR-level test pins
+// that the validation guard no longer catches the bf16/f16 case.
+// Replaces the prior `ws_a1_negative_bf16_f16_matmul_still_blocked_by_f1_guard`
+// assertion per the spec-sync rule that lifted-guard tests be
+// REPLACED, not silently deleted.
 #[test]
-fn ws_a1_negative_bf16_f16_matmul_still_blocked_by_f1_guard() {
+fn ws_a3_bf16_f16_matmul_admitted_at_ir_validation() {
     use chelis_ir::verify;
     for prim in [Prim::Bf16, Prim::F16] {
         let mut dag = Dag::new();
@@ -1324,10 +1329,9 @@ fn ws_a1_negative_bf16_f16_matmul_still_blocked_by_f1_guard() {
 
         let errors = verify::verify(&dag);
         assert!(
-            errors
-                .iter()
-                .any(|m| m.contains("F1: BlasMatmul currently supports only f32")),
-            "{prim:?} BlasMatmul must still trip the (post-WS-A1, partially-lifted) F1 guard; got: {errors:?}"
+            !errors.iter().any(|m| m.contains("F1: BlasMatmul")),
+            "WS-A3 lifted {prim:?} from the F1 guard; {prim:?} BlasMatmul must validate cleanly. \
+             Got: {errors:?}"
         );
     }
 }
