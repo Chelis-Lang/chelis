@@ -291,7 +291,7 @@ part of this public vocabulary.
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `t-prim` | `(t-prim {} f32)` | Primitive type (f32, bf16, int32, bool, string) |
+| `t-prim` | `(t-prim {} f32)` | Primitive type (active set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; `f8e4m3` is reserved/deferred per §1.1.1; unsigned types are out of scope per §1.1.2) |
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
@@ -489,6 +489,61 @@ None in canonical Deep. Comments are Surf-only. Stripped during desugaring. Use 
 | String | Double-quoted, standard escapes | |
 | Boolean | `true` / `false` | |
 
+**Literal default rule.** An unsuffixed integer literal binds at type
+`int32` (i.e. its `lit` node carries `{type: (t-prim {} int32)}`); an
+unsuffixed float literal binds at type `f32`. The lexer accepts i64/f64
+ranges so that out-of-range literals produce a useful diagnostic before
+defaulting; the desugarer/type-checker narrows the value to `int32` /
+`f32` before Deep is materialized. See `spec/04-type-system.md` §5.3 for
+the type-system statement. The narrowing is overridable only by an
+explicit literal suffix (§6.4.1), the contextual tensor-literal inference
+rule (`spec/02-surf-syntax.md` §P10b), or an explicit `cast`.
+
+#### 6.4.1 Literal Suffixes
+
+Numeric literal tokens may carry an explicit precision suffix that binds
+the literal at exactly that precision. The suffix is part of the literal
+token only if it immediately follows the digit sequence with no
+intervening whitespace or comment. The closed suffix set, identical to
+the Surf suffix set (`spec/02-surf-syntax.md` §P10a):
+
+| Suffix | Bound type | Example |
+|---|---|---|
+| `f32` | `(t-prim {} f32)` | `1.0f32` |
+| `f64` | `(t-prim {} f64)` | `1.0f64` |
+| `bf16` | `(t-prim {} bf16)` | `1.0bf16` |
+| `f16` | `(t-prim {} f16)` | `1.0f16` |
+| `i8` | `(t-prim {} int8)` | `42i8` |
+| `i16` | `(t-prim {} int16)` | `42i16` |
+| `i32` | `(t-prim {} int32)` | `42i32` |
+| `i64` | `(t-prim {} int64)` | `42i64` |
+
+In canonical Deep, a suffixed literal MAY be written either with the
+suffix on the literal token (the producer-friendly shape) or as a `lit`
+node carrying an explicit `{type: ...}` metadata key (the
+canonical-form shape). The two shapes are interchangeable; the canonical
+serialization printed by `chelis fmt` for `.dp` is the metadata-key
+shape. Example:
+
+```
+;; producer-friendly shape (lexer accepts both)
+(lit {} 1.0f64)
+
+;; canonical Deep shape after fmt
+(lit {type: (t-prim {} f64)} 1.0)
+```
+
+Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) attach to either an
+integer or float literal token. Integer-typed suffixes (`i8`, `i16`,
+`i32`, `i64`) attach to integer literal tokens only.
+
+The suffix `f8e4m3` is reserved/deferred per `spec/04-type-system.md`
+§1.1.1 and is rejected at lex time. Unsigned suffixes (`u8`, `u16`,
+`u32`, `u64`) are out of scope per §1.1.2 and are rejected at lex time.
+Hex integer literals interact with float-typed suffixes per the
+hex-suffix rule in `spec/02-surf-syntax.md` §P10a; the same rule applies
+to Deep.
+
 ### 6.5 Identifier Rules
 - Variables/functions: `[a-z_][a-z0-9_]*` (snake_case)
 - Types/variants: `[A-Z][a-zA-Z0-9]*` (PascalCase)
@@ -512,9 +567,15 @@ BareName    ← Identifier / TypeName                # bare names only in params
 Identifier  ← [a-z_] [a-zA-Z0-9_]*
 TypeName    ← [A-Z] [a-zA-Z0-9]*
 Literal     ← FloatLit / IntLit / BoolLit / StringLit
-FloatLit    ← '-'? [0-9]+ '.' [0-9]+ ([Ee] [+-]? [0-9]+)?
-           /  '-'? [0-9]+ [Ee] [+-]? [0-9]+       # exponent without decimal
-IntLit      ← '-'? [0-9]+
+FloatLit    ← ('-'? [0-9]+ '.' [0-9]+ ([Ee] [+-]? [0-9]+)?
+            / '-'? [0-9]+ [Ee] [+-]? [0-9]+)       # exponent without decimal
+              FloatSuffix?
+IntLit      ← '-'? [0-9]+ (FloatSuffix / IntSuffix)?
+FloatSuffix ← 'f32' / 'f64' / 'bf16' / 'f16'
+IntSuffix   ← 'i8' / 'i16' / 'i32' / 'i64'
+# Suffix must immediately follow the digit sequence (no whitespace, no comment).
+# `f8e4m3`, `u8`, `u16`, `u32`, `u64` are reserved/deferred or out-of-scope per
+# spec/04-type-system.md §1.1.1 / §1.1.2 and are rejected at lex time.
 BoolLit     ← 'true' / 'false'
 StringLit   ← '"' (!'"' .)* '"'
 Spacing     ← ([ \t\n\r] / Comment)*
