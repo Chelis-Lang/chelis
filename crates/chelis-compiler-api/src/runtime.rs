@@ -4497,7 +4497,16 @@ fn prim_from_name(name: &str) -> Option<Prim> {
         "f64" => Prim::F64,
         "f16" => Prim::F16,
         "bf16" => Prim::Bf16,
-        "f8e4m3" => Prim::F8e4m3,
+        // E2 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.1
+        // f8e4m3 is deferred and the type checker rejects every cast
+        // and tensor-element use upstream. If the host runtime ever
+        // resolves an `f8e4m3` token here, the upstream rejection has
+        // a hole — panic loudly rather than carrying the deferred
+        // dtype into runtime classification.
+        "f8e4m3" => panic!(
+            "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
+             should have been rejected upstream"
+        ),
         "int8" => Prim::Int8,
         "int16" => Prim::Int16,
         "int32" => Prim::Int32,
@@ -5469,6 +5478,38 @@ y = softmax(x, cast(5, int32))
                 Ok(v) => on_ok(v),
                 Err(e) => e,
             }
+        }
+    }
+
+    /// E2 (WS-A0 RT-1 fixup): `prim_from_name` must panic on the
+    /// `"f8e4m3"` token with the §1.1.1 message rather than producing
+    /// `Some(Prim::F8e4m3)` and letting the deferred dtype flow into
+    /// runtime classification.
+    #[test]
+    #[should_panic(expected = "f8e4m3 is deferred per spec/04-type-system.md §1.1.1")]
+    fn prim_from_name_panics_on_f8e4m3_per_spec_1_1_1() {
+        let _ = prim_from_name("f8e4m3");
+    }
+
+    /// Negative-parity twin: the active dtype names still resolve.
+    #[test]
+    fn prim_from_name_resolves_active_dtype_names() {
+        for (name, expected) in &[
+            ("f32", Prim::F32),
+            ("f64", Prim::F64),
+            ("f16", Prim::F16),
+            ("bf16", Prim::Bf16),
+            ("int8", Prim::Int8),
+            ("int16", Prim::Int16),
+            ("int32", Prim::Int32),
+            ("int64", Prim::Int64),
+            ("bool", Prim::Bool),
+        ] {
+            assert_eq!(
+                prim_from_name(name),
+                Some(*expected),
+                "active dtype name `{name}` must still resolve"
+            );
         }
     }
 

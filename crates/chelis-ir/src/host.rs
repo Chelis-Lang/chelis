@@ -5104,8 +5104,17 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                     chelis_types::types::Prim::F16
                     | chelis_types::types::Prim::Bf16
                     | chelis_types::types::Prim::F32
-                    | chelis_types::types::Prim::F64
-                    | chelis_types::types::Prim::F8e4m3 => HostType::Float64,
+                    | chelis_types::types::Prim::F64 => HostType::Float64,
+                    // E2 (WS-A0 RT-1 fixup): per spec/04-type-system.md
+                    // §1.1.1 f8e4m3 is deferred and the type checker
+                    // must reject it upstream. If it ever reaches this
+                    // host-classification site there is a hole in the
+                    // upstream rejection — do not silently re-classify
+                    // as Float64.
+                    chelis_types::types::Prim::F8e4m3 => panic!(
+                        "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 \
+                         and should have been rejected upstream"
+                    ),
                     _ => HostType::Unknown,
                 };
                 Some(HostType::List(Box::new(element_ty)))
@@ -5410,6 +5419,19 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
+    }
+
+    /// E2 (WS-A0 RT-1 fixup): the `to_list` host classification arm
+    /// must panic on an f8e4m3-precision tensor with the §1.1.1
+    /// message rather than silently classifying as Float64.
+    #[test]
+    #[should_panic(expected = "f8e4m3 is deferred per spec/04-type-system.md §1.1.1")]
+    fn to_list_classifier_panics_on_f8e4m3_tensor_per_spec_1_1_1() {
+        let f8_tensor = HostType::Tensor(crate::dag::TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F8e4m3,
+        });
+        let _ = infer_builtin_host_type_from_arg_tys("to_list", &[f8_tensor]);
     }
 
     #[test]

@@ -860,7 +860,16 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
         chelis_types::types::Prim::F64 => "f64",
         chelis_types::types::Prim::F16 => "f16",
         chelis_types::types::Prim::Bf16 => "bf16",
-        chelis_types::types::Prim::F8e4m3 => "f8e4m3",
+        // E2 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.1
+        // f8e4m3 is deferred and the type checker must reject it
+        // before lowering. If a TensorType reaches this Deep
+        // re-encoder with f8e4m3 precision, the upstream rejection
+        // has a hole — panic rather than emit a `(t-prim {} f8e4m3)`
+        // node into lowered IR.
+        chelis_types::types::Prim::F8e4m3 => panic!(
+            "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
+             should have been rejected upstream"
+        ),
         chelis_types::types::Prim::Int8 => "int8",
         chelis_types::types::Prim::Int16 => "int16",
         chelis_types::types::Prim::Int32 => "int32",
@@ -5941,6 +5950,19 @@ mod regression_tests {
     use crate::dag::{DimInfo, NodeId, RiscOp};
     use crate::verify;
     use chelis_types::types::Prim;
+
+    /// E2 (WS-A0 RT-1 fixup): `ty_expr_to_deep` must panic on
+    /// f8e4m3 with the §1.1.1 message rather than emitting a
+    /// `(t-prim {} f8e4m3)` node into lowered Deep.
+    #[test]
+    #[should_panic(expected = "f8e4m3 is deferred per spec/04-type-system.md §1.1.1")]
+    fn ty_expr_to_deep_panics_on_f8e4m3_per_spec_1_1_1() {
+        let ty = crate::dag::TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F8e4m3,
+        };
+        let _ = ty_expr_to_deep(&ty);
+    }
 
     fn parse_and_lower(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
