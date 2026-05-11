@@ -416,4 +416,54 @@ mod tests {
         let v = ModulePascalComponents.check(&ctx);
         assert_eq!(v.len(), 2);
     }
+
+    // §6.3 sibling-sweep: the `KNOWN_SINGLE_WORDS` allowlist is hand-maintained
+    // and drifts behind the documented ecosystem name set. The fixtures below
+    // pin the gap so subsequent commits in this branch (diagnosis + fix)
+    // close it without regression. Each name is asserted to be a single
+    // PascalCase ecosystem name per spec §6.1/§6.3 and the canonical-reference
+    // shell roster (`spec/design/chelis_canonical_reference.md` §"Shell
+    // Ecosystem"). Currently fails because long lowercase runs (>=7 chars
+    // after the leading capital) trip the suspicion heuristic at L271 even
+    // though the names are single-word and correctly PascalCase per spec.
+    #[test]
+    #[ignore = "missing KNOWN_SINGLE_WORDS entries, see commit fix: add missing ecosystem names to module-pascal-components allowlist"]
+    fn accepts_capstone_ecosystem_name() {
+        // User-reported failure: `Capstone` is 1 leading cap + 7 lowercase,
+        // hits the >=7 long-run threshold even though it's a single English
+        // word being used as an ecosystem module-prefix name.
+        assert_eq!(component_violation("Capstone"), None);
+    }
+
+    #[test]
+    fn sibling_sweep_canonical_ecosystem_names_pass() {
+        // Sibling sweep: every chelis-ecosystem PascalCase top-level name
+        // from `spec/design/chelis_canonical_reference.md` §"Shell Ecosystem"
+        // (active shells + post-Phase-3 stubs) plus the canonical
+        // chelis-runtime prefix should pass the rule. Today, the entries
+        // listed below all pass through the short-lowercase-run path (each
+        // has fewer than 7 lowercase chars after the leading cap), so the
+        // canary stays green. This test exists to lock the invariant: if
+        // any future ecosystem-name addition trips the 7-char threshold,
+        // it must be added to `KNOWN_SINGLE_WORDS` rather than tightening
+        // the rule's detection logic. The `Capstone`-shaped failure mode
+        // is exercised by `accepts_capstone_ecosystem_name` above.
+        let canonical_ecosystem = [
+            // Compiler-bundled runtime + special-case external prefix.
+            "Chelis", "Std", "CEarchin",
+            // Currently shipped reef shells (canonical reference §"Shell
+            // Ecosystem" — Active and current-phase rows).
+            "Nautilus", "Coral", "Shoals", "Octant",
+            // Post-Phase-3 stub shells (canonical reference §"Shell
+            // Ecosystem" — Stub / Future rows).
+            "School", "Darwin", "Hull", "Beacon",
+        ];
+        for name in canonical_ecosystem {
+            assert_eq!(
+                component_violation(name),
+                None,
+                "ecosystem name `{name}` should pass module-pascal-components per §6.3",
+            );
+        }
+    }
 }
