@@ -363,6 +363,7 @@ mod tests {
             inputs: vec![],
             output: scalar_f32(),
             specialization: None,
+            summary_rejection: None,
         };
 
         let func = HostFunction {
@@ -377,12 +378,14 @@ mod tests {
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
             specialization: None,
+            summary_rejections: Vec::new(),
         };
 
         let program = HostProgram {
             globals: vec![],
             global_tensor_helpers: vec![],
             functions: vec![func],
+            summary_rejections: Vec::new(),
         };
 
         let result = codegen_host_program(&program, "my_prog");
@@ -462,6 +465,7 @@ mod tests {
             ],
             output: out_ty,
             specialization: None,
+            summary_rejection: None,
         };
         let func = HostFunction {
             name: "my_fn".to_string(),
@@ -473,11 +477,13 @@ mod tests {
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
             specialization: None,
+            summary_rejections: Vec::new(),
         };
         let program = HostProgram {
             globals: vec![],
             global_tensor_helpers: vec![],
             functions: vec![func],
+            summary_rejections: Vec::new(),
         };
 
         let result = codegen_host_program(&program, "my_prog");
@@ -2845,6 +2851,7 @@ int main(void) {{
             inputs: vec![],
             output: scalar_f32(),
             specialization: None,
+            summary_rejection: None,
         };
 
         let func = HostFunction {
@@ -2857,6 +2864,7 @@ int main(void) {{
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
             specialization: None,
+            summary_rejections: Vec::new(),
         };
 
         // Adding a global binding triggers internal_linkage=true.
@@ -2869,6 +2877,7 @@ int main(void) {{
             }],
             global_tensor_helpers: vec![],
             functions: vec![func],
+            summary_rejections: Vec::new(),
         };
 
         let result = codegen_host_program(&program, "prog");
@@ -2913,6 +2922,7 @@ int main(void) {{
             inputs: vec![],
             output: scalar_f32(),
             specialization: None,
+            summary_rejection: None,
         };
 
         let func = HostFunction {
@@ -2925,6 +2935,7 @@ int main(void) {{
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
             specialization: None,
+            summary_rejections: Vec::new(),
         };
 
         // No globals → external linkage for functions (library mode)
@@ -2932,6 +2943,7 @@ int main(void) {{
             globals: vec![],
             global_tensor_helpers: vec![],
             functions: vec![func],
+            summary_rejections: Vec::new(),
         };
 
         let result = codegen_host_program(&program, "lib");

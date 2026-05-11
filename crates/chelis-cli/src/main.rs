@@ -1496,6 +1496,7 @@ fn cmd_build(
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
     let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
+    emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
     let all_root_names = lowered_root_names_from_exprs(&deep_exprs, checked.type_env());
     let entry_root_names =
@@ -1734,6 +1735,7 @@ fn cmd_build_deep(
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
     let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
+    emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
     let all_root_names = lowered_root_names_from_exprs(&final_deep_exprs, checked.type_env());
     let entry_root_names = lowered_root_names_from_exprs(&entry_deep_exprs, checked.type_env());
@@ -4546,6 +4548,31 @@ fn checked_program_with_effects(
     let checked =
         chelis_effects::check_program(&checked).map_err(|errors| format_effect_errors(&errors))?;
     chelis_types::check_linearity(&checked).map_err(|errors| format_type_errors(&errors))
+}
+
+/// Emit any sparse-helper summary rejections collected during host
+/// lowering to stderr as advisory warnings. These do not fail the
+/// build — the C/HIP backend already falls back to the helper
+/// marshaling path for rejected callsites — but they tell the user
+/// (and downstream tooling) which callsites missed the sparse-loop
+/// inlining and why.
+///
+/// The W4-A acceptance oracle pattern-matches on the structured
+/// `SummaryRejection` values directly (see
+/// `crates/chelis-cli/tests/cross_library_semantic_gap_diagnostics.rs`);
+/// this function is the human-readable rendering, not the matchable
+/// contract surface.
+fn emit_summary_rejections(host: Option<&chelis_ir::host::HostProgram>) {
+    let Some(host) = host else {
+        return;
+    };
+    let rejections = chelis_ir::host::host_program_summary_rejections(host);
+    if rejections.is_empty() {
+        return;
+    }
+    for rejection in rejections {
+        eprintln!("warning: {rejection}");
+    }
 }
 
 fn expanded_desugared_program(

@@ -31,7 +31,9 @@ fn make_program(body: HostExpr) -> HostProgram {
             body,
             tensor_helpers: Vec::new(),
             specialization: None,
+            summary_rejections: Vec::new(),
         }],
+        summary_rejections: Vec::new(),
     }
 }
 
