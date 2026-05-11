@@ -9,6 +9,7 @@ use chelis_ir::dag::{
 use chelis_types::types::Prim;
 
 use crate::blas;
+use crate::fusion::{FusedInPlaceSpec, fused_in_place_spec};
 use crate::kernels;
 use crate::launch;
 use crate::memory::{MemoryPlan, NodeMemoryKind};
@@ -756,7 +757,15 @@ impl HipEmitter {
             RiscOp::Realize => kernels::cast(name),
             RiscOp::Cast { .. } => kernels::cast(name),
             RiscOp::Copy => kernels::cast(name),
-            RiscOp::FusedElem { ops } => kernels::fused_elementwise(name, ops, node.inputs.len()),
+            RiscOp::FusedElem { ops } => {
+                let aliased_ext = fused_in_place_spec(node, dag).map(|reusable| {
+                    node.inputs
+                        .iter()
+                        .position(|&input| input == reusable)
+                        .expect("reusable input must appear in node inputs")
+                });
+                kernels::fused_elementwise(name, ops, node.inputs.len(), aliased_ext)
+            }
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 match indices_ty.precision {
@@ -969,12 +978,18 @@ impl HipEmitter {
             }
             RiscOp::FusedElem { ops } => {
                 let kernel_name = format!("kernel_fused_{}", node.id.0);
+                let in_place =
+                    fused_in_place_spec(node, dag).map(|reusable_input| FusedInPlaceSpec {
+                        reusable_input,
+                        slot_has_later_owner: self.slot_has_later_owner(id),
+                    });
                 self.emit_fused_launch(
                     node.id.0,
                     &kernel_name,
                     &node.inputs,
                     ops,
                     &node.output_type,
+                    in_place,
                 );
             }
             RiscOp::BlasMatmul {
@@ -1015,6 +1030,21 @@ impl HipEmitter {
             NodeMemoryKind::UniqueInput { slot, .. } | NodeMemoryKind::SlotBacked { slot } => *slot,
             other => panic!("node {id} does not own slot-backed storage: {other:?}"),
         }
+    }
+
+    /// True iff some node strictly after `id` in topological order also
+    /// owns the slot that `id` owns. Mirrors the C-side
+    /// `slot_has_later_owner` used by the in-place fused-elementwise
+    /// wrapper to decide whether to defer slot allocation to the
+    /// non-aliased fall-back branch.
+    fn slot_has_later_owner(&self, id: usize) -> bool {
+        let slot_id = self.slot_id_for_node(id);
+        self.plan.iter_node_kinds().skip(id + 1).any(|kind| {
+            matches!(
+                kind,
+                NodeMemoryKind::SlotBacked { slot } if *slot == slot_id
+            )
+        })
     }
 
     fn emit_slot_allocation_if_needed(&mut self, id: usize, ty: &TensorType) {
@@ -1385,8 +1415,13 @@ impl HipEmitter {
         inputs: &[NodeId],
         _ops: &[chelis_ir::dag::FusedStep],
         ty: &TensorType,
+        in_place: Option<FusedInPlaceSpec>,
     ) {
-        self.emit_slot_wrapper(id, ty);
+        if let Some(spec) = in_place {
+            self.emit_fused_in_place_wrapper(id, ty, spec);
+        } else {
+            self.emit_slot_wrapper(id, ty);
+        }
         self.line("{");
         self.indent += 1;
         self.line(&format!("int t{id}_size = d_t{id}->size;"));
@@ -1428,6 +1463,58 @@ impl HipEmitter {
             "256",
             "args",
         );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Emit the host-side wrapper for an in-place FusedElem launch on
+    /// HIP. At runtime, if the reusable input's device storage is
+    /// contiguous, the FusedElem output view is aliased onto the
+    /// reusable input's device buffer (saving one slot's worth of GPU
+    /// allocation + the eventual `hipFree`). Otherwise we fall back to
+    /// the slot-backed view exactly as the non-in-place path would.
+    ///
+    /// Mirrors the C-side `emit_fused_in_place_wrapper`
+    /// (`crates/chelis-backend-c/src/emit.rs::emit_fused_in_place_wrapper`)
+    /// with one HIP-specific addition: in `device_entrypoint_mode` the
+    /// slot declarations are pre-emitted by
+    /// `emit_device_slot_allocations`, so the wrapper must not
+    /// redeclare them. In host-entrypoint mode the C-side discipline
+    /// applies: declare the slot variable on the first-owner path and
+    /// defer allocation to inside the non-contiguous branch when the
+    /// slot has no later owners.
+    fn emit_fused_in_place_wrapper(&mut self, id: usize, ty: &TensorType, spec: FusedInPlaceSpec) {
+        let slot_id = self.slot_id_for_node(id);
+        let slot_is_first_owner = self.plan.slot(slot_id).first_owner == NodeId(id);
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        let reusable = spec.reusable_input.0;
+        if !self.device_entrypoint_mode && slot_is_first_owner {
+            self.line(&format!("chelis_gpu_tensor *chelis_slot{slot_id} = NULL;"));
+            if spec.slot_has_later_owner {
+                self.line(&format!(
+                    "chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
+                ));
+            }
+        }
+        self.line(&format!("chelis_gpu_tensor *d_t{id};"));
+        self.line(&format!("if (chelis_gpu_is_contiguous(d_t{reusable})) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, d_t{reusable}->data, d_t{reusable}->storage_size);"
+        ));
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        if !self.device_entrypoint_mode && slot_is_first_owner && !spec.slot_has_later_owner {
+            self.line(&format!(
+                "chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
+            ));
+        }
+        self.line(&format!(
+            "d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->storage_size);"
+        ));
         self.indent -= 1;
         self.line("}");
     }
@@ -2366,9 +2453,43 @@ mod tests {
         assert!(hip.contains("atomicAdd(&out[dst], updates[i]);"));
     }
 
+    /// Perf-F2(b) shipped: with a single-consumer reusable input
+    /// (here `x`, the FusedElem's first external), the kernel ships
+    /// the in-place shape — `__restrict__` only on non-aliased
+    /// externals (`ext1`), never on the aliased external (`ext0`) or
+    /// `out`.
     #[test]
-    fn current_fused_reusable_input_does_not_emit_hip_restrict_shape() {
+    fn fused_reusable_input_emits_hip_in_place_restrict_shape() {
         let dag = fused_mul_reusable_input_dag();
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
+        // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
+        assert!(!hip.contains("const float *__restrict__ ext0"));
+        // Output must NOT carry __restrict__ — it aliases ext0.
+        assert!(!hip.contains("float *__restrict__ out"));
+        // Non-aliased externals (ext1 here, the const scale) MUST
+        // carry __restrict__ in the in-place shape.
+        assert!(hip.contains("const float *__restrict__ ext1"));
+    }
+
+    /// Negative: a FusedElem with no `reusable_input` set must still
+    /// emit the legacy non-`__restrict__` kernel parameter list.
+    /// The in-place shape is opt-in via the upstream linearity-marked
+    /// hint, not the default.
+    #[test]
+    fn fused_without_reusable_input_keeps_non_in_place_kernel_shape() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        // No set_reusable_input call — the in-place gate must reject.
+        dag.add_root(fused);
+
         let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
@@ -2377,19 +2498,7 @@ mod tests {
         assert!(hip.contains("float *out"));
         assert!(
             !hip.contains("__restrict__"),
-            "current HIP fused kernels do not yet express in-place restrict shape"
+            "no-reusable-input fused kernels must keep the legacy non-__restrict__ shape"
         );
-    }
-
-    #[test]
-    #[ignore = "target behavior: enable when HIP fused in-place codegen aliases reusable_input"]
-    fn target_fused_in_place_hip_restrict_shape_preserves_non_aliased_inputs() {
-        let dag = fused_mul_reusable_input_dag();
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
-
-        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
-        assert!(!hip.contains("const float *__restrict__ ext0"));
-        assert!(!hip.contains("float *__restrict__ out"));
-        assert!(hip.contains("const float *__restrict__ ext1"));
     }
 }

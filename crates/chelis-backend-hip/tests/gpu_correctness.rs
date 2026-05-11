@@ -1158,6 +1158,41 @@ fn gf2_fused_three_way_chain_gpu_matches_cpu() {
 }
 
 // ===========================================================================
+// GF3: Fused in-place fan-in (Perf-F2(b)) — when the chain marks an
+// external input as reusable, the HIP backend aliases the FusedElem
+// output view onto the reusable input's device buffer at runtime
+// (`chelis_gpu_is_contiguous` guard + `chelis_gpu_alloc_view` onto
+// `d_t{reusable}->data`). The GPU result must still match the unfused
+// CPU evaluator bit-for-bit-within-tolerance.
+// ===========================================================================
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn gf3_fused_in_place_fan_in_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    // `(x + y) * z`, with `x` marked as the reusable input on the
+    // Add step. `fuse` propagates the hint into the new FusedElem
+    // node so the HIP emitter takes the in-place alias path.
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(8), None);
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(8), None);
+    let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], vec_f32(8), None);
+    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(8), None);
+    dag.set_reusable_input(add, x);
+    let out = dag.add_node(RiscOp::Mul, vec![add, z], vec_f32(8), None);
+    dag.add_root(out);
+
+    assert_fused_gpu_matches_unfused_eval(
+        &dag,
+        "gf3_fused_in_place_fan_in",
+        &[
+            TestInput::new("x", &[8], &[1.0, -2.0, 3.5, -4.25, 0.5, -0.75, 8.0, -16.0]),
+            TestInput::new("y", &[8], &[0.5, 4.0, -1.5, 2.25, -0.25, 1.5, -2.0, 4.0]),
+            TestInput::new("z", &[8], &[2.0, 3.0, -1.5, 4.0, -2.5, 1.0, 0.5, -0.5]),
+        ],
+    );
+}
+
+// ===========================================================================
 // G13: Segmented reductions cover tiny/small/large strategies
 // ===========================================================================
 

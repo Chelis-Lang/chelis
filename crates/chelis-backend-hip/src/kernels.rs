@@ -1028,18 +1028,39 @@ pub enum ReduceKind {
 ///
 /// Each step computes into a register `float v{step_idx}`, resolving inputs
 /// from either external input arrays or previous step outputs.
+///
+/// When `in_place_aliased_ext` is `Some(i)`, the fused output is aliased
+/// onto external input `i`'s device buffer at runtime (Perf-F2(b)).
+/// To keep that alias sound, neither `ext{i}` nor `out` may carry a
+/// `__restrict__` qualifier — the two pointers reference the same
+/// memory in the in-place fast path. All other externals do carry
+/// `__restrict__` so the compiler can still hoist their loads.
+///
+/// When `in_place_aliased_ext` is `None`, no aliasing is possible and
+/// the legacy non-`__restrict__` parameter list is preserved (the HIP
+/// fused kernel has historically not used `__restrict__` for either
+/// the non-aliased nor aliased case).
 pub fn fused_elementwise(
     kernel_name: &str,
     steps: &[chelis_ir::dag::FusedStep],
     n_external: usize,
+    in_place_aliased_ext: Option<usize>,
 ) -> String {
     use chelis_ir::dag::{FusedInput, FusedStepOp};
 
-    // Build parameter list
+    // Build parameter list. `__restrict__` is added only when the
+    // kernel ships the in-place aliasing path, and only on the
+    // pointers that are provably non-aliasing (every external except
+    // the aliased one, but never on `out`).
     let mut params = Vec::new();
     for i in 0..n_external {
         let pfx = format!("ext{i}");
-        params.push(format!("const float *{pfx}"));
+        let qual = if in_place_aliased_ext.is_some() && in_place_aliased_ext != Some(i) {
+            "const float *__restrict__ "
+        } else {
+            "const float *"
+        };
+        params.push(format!("{qual}{pfx}"));
         params.push(stride_params(&pfx));
         params.push(format!("int {pfx}_ndim"));
         params.push(format!("int {pfx}_size"));
