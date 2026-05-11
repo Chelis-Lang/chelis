@@ -33,7 +33,6 @@ fn run(src: &str) -> Vec<Violation> {
 /// Deep (read-only borrow type, `spec/03-deep-syntax.md` §2.5) and the
 /// lint rejects the program. After the allowlist fix, this passes.
 #[test]
-#[ignore = "incomplete CLOSED_TAGS allowlist, see Item 3 of 0.7.6 toolchain hygiene workstream"]
 fn accepts_t_ref_compound_tag() {
     // A typed function parameter `x: &Tensor[f32, [n]]` desugars to a
     // `(t-ref {} (t-tensor ...))` annotation in Deep.
@@ -61,7 +60,6 @@ fn accepts_t_ref_compound_tag() {
 /// emitted by any current path — see the diagnosis note for
 /// `docs/investigations/deep_compound_tag_allowlist_diagnosis.md`.
 #[test]
-#[ignore = "incomplete CLOSED_TAGS allowlist, see Item 3 of 0.7.6 toolchain hygiene workstream"]
 fn accepts_all_emitted_compound_tags() {
     // Each line exercises a distinct hyphenated compound tag from the
     // canonical 61-tag vocabulary. Stringing them into one Deep

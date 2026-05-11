@@ -67,6 +67,7 @@ const CLOSED_TAGS: &[&str] = &[
     "t-prim",
     "t-fn",
     "t-tensor",
+    "t-ref",
     "t-adt",
     "t-var",
     "t-unit",
