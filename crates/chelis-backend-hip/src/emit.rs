@@ -711,6 +711,14 @@ impl HipEmitter {
                     _ => "kernel_scatter_add_invalid".into(),
                 })
             }
+            RiscOp::Scatter { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                Some(match indices_ty.precision {
+                    Prim::Int32 => "kernel_scatter_replace_i32".into(),
+                    Prim::Int64 => "kernel_scatter_replace_i64".into(),
+                    _ => "kernel_scatter_replace_invalid".into(),
+                })
+            }
             RiscOp::FusedElem { .. } => Some(format!("kernel_fused_{}", node.id.0)),
         }
     }
@@ -784,6 +792,17 @@ impl HipEmitter {
                     Prim::Int64 => kernels::scatter_add(name, "long long"),
                     other => panic!(
                         "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                        other.name()
+                    ),
+                }
+            }
+            RiscOp::Scatter { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                match indices_ty.precision {
+                    Prim::Int32 => kernels::scatter_replace(name, "int"),
+                    Prim::Int64 => kernels::scatter_replace(name, "long long"),
+                    other => panic!(
+                        "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -1017,6 +1036,9 @@ impl HipEmitter {
             }
             RiscOp::ScatterAdd { axis } => {
                 self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag)
+            }
+            RiscOp::Scatter { axis } => {
+                self.emit_scatter_replace_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
         }
     }
@@ -1400,6 +1422,73 @@ impl HipEmitter {
             "256",
             "args",
         );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Launch the sparse replace-scatter (last-write-wins) kernel.
+    ///
+    /// Per `spec/05-risc-primitives.md` §3.5, the deterministic-order
+    /// rule is updates-tensor row-major flat iteration. The kernel is
+    /// launched as `<<<1, 1>>>` — a single thread serializes all
+    /// writes so duplicate target indices resolve in the same order
+    /// the IR evaluator and C backend use. This is intentionally low
+    /// throughput; the AD policy for this op is `no_grad` and the
+    /// design assumes scatter_replace is used in inference / data
+    /// pipelines, not on a hot training path. A parallel
+    /// implementation would have to preserve the same tie-breaking
+    /// (max-flat-index wins per cell) — see `kernels::scatter_replace`.
+    fn emit_scatter_replace_launch(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let target = inputs[0].0;
+        let indices = inputs[1].0;
+        let updates = inputs[2].0;
+        let target_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
+        if target_ty.precision != Prim::F32
+            || updates_ty.precision != Prim::F32
+            || ty.precision != Prim::F32
+        {
+            panic!("HIP backend sparse scatter_replace currently supports f32 payloads only");
+        }
+        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+            panic!(
+                "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
+                indices_ty.precision.name()
+            );
+        }
+        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
+        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
+        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
+        let kernel_name = match indices_ty.precision {
+            Prim::Int32 => "kernel_scatter_replace_i32",
+            Prim::Int64 => "kernel_scatter_replace_i64",
+            _ => unreachable!(),
+        };
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+        ));
+        self.line(&format!("int t{id}_before = {before};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_after = {after};"));
+        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
+        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+        ));
+        // Single-thread serial launch preserves last-write-wins order.
+        self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
         self.indent -= 1;
         self.line("}");
     }
@@ -2134,7 +2223,8 @@ impl HipEmitter {
             | RiscOp::FusedElem { .. }
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Gather { .. }
-            | RiscOp::ScatterAdd { .. } => true,
+            | RiscOp::ScatterAdd { .. }
+            | RiscOp::Scatter { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }

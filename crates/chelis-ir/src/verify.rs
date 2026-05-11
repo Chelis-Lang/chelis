@@ -244,59 +244,15 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 }
             }
             RiscOp::ScatterAdd { axis } => {
-                if arity != 3 {
-                    errors.push(format!(
-                        "scatter_add at node {} has {} inputs (expected 3)",
-                        node.id.0, arity
-                    ));
-                }
-                if arity == 3
-                    && let (Some(target), Some(indices), Some(updates)) = (
-                        dag.get(node.inputs[0]),
-                        dag.get(node.inputs[1]),
-                        dag.get(node.inputs[2]),
-                    )
-                {
-                    if !matches!(indices.output_type.precision, Prim::Int32 | Prim::Int64) {
-                        errors.push(format!(
-                            "scatter_add at node {} requires int32/int64 indices, got {:?}",
-                            node.id.0, indices.output_type.precision
-                        ));
-                    }
-                    if updates.output_type.precision != target.output_type.precision {
-                        errors.push(format!(
-                            "scatter_add at node {} update precision {:?} must match target precision {:?}",
-                            node.id.0,
-                            updates.output_type.precision,
-                            target.output_type.precision
-                        ));
-                    }
-                    if node.output_type != target.output_type {
-                        errors.push(format!(
-                            "scatter_add at node {} output type must match target",
-                            node.id.0
-                        ));
-                    }
-                    if *axis >= target.output_type.dims.len() {
-                        errors.push(format!(
-                            "scatter_add at node {} has axis {} out of bounds for rank {}",
-                            node.id.0,
-                            axis,
-                            target.output_type.dims.len()
-                        ));
-                    } else {
-                        let mut expected_updates = Vec::new();
-                        expected_updates.extend_from_slice(&target.output_type.dims[..*axis]);
-                        expected_updates.extend(indices.output_type.dims.iter().cloned());
-                        expected_updates.extend_from_slice(&target.output_type.dims[*axis + 1..]);
-                        if updates.output_type.dims != expected_updates {
-                            errors.push(format!(
-                                "scatter_add at node {} has update dims {:?}, expected {:?}",
-                                node.id.0, updates.output_type.dims, expected_updates
-                            ));
-                        }
-                    }
-                }
+                verify_scatter_like(node, dag, *axis, "scatter_add", &mut errors);
+            }
+            RiscOp::Scatter { axis } => {
+                // Replace-scatter (last-write-wins) shares the input
+                // arity / index-precision / shape contract with
+                // scatter_add — only the duplicate-index semantics
+                // differ (replace vs accumulate), which is a runtime
+                // concern not a structural one.
+                verify_scatter_like(node, dag, *axis, "scatter_replace", &mut errors);
             }
             RiscOp::Neg
             | RiscOp::Exp
@@ -825,6 +781,70 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         }
     }
     errors
+}
+
+/// Shared structural verification for replace-scatter and scatter-add.
+/// Inputs are `[target, indices, updates]`; output shape equals
+/// `target`; `updates` shape equals `target.dims[..axis] +
+/// indices.dims + target.dims[axis+1..]`. Indices must be int32/int64.
+fn verify_scatter_like(
+    node: &crate::dag::DagNode,
+    dag: &Dag,
+    axis: usize,
+    label: &str,
+    errors: &mut Vec<String>,
+) {
+    let arity = node.inputs.len();
+    if arity != 3 {
+        errors.push(format!(
+            "{label} at node {} has {} inputs (expected 3)",
+            node.id.0, arity
+        ));
+        return;
+    }
+    if let (Some(target), Some(indices), Some(updates)) = (
+        dag.get(node.inputs[0]),
+        dag.get(node.inputs[1]),
+        dag.get(node.inputs[2]),
+    ) {
+        if !matches!(indices.output_type.precision, Prim::Int32 | Prim::Int64) {
+            errors.push(format!(
+                "{label} at node {} requires int32/int64 indices, got {:?}",
+                node.id.0, indices.output_type.precision
+            ));
+        }
+        if updates.output_type.precision != target.output_type.precision {
+            errors.push(format!(
+                "{label} at node {} update precision {:?} must match target precision {:?}",
+                node.id.0, updates.output_type.precision, target.output_type.precision
+            ));
+        }
+        if node.output_type != target.output_type {
+            errors.push(format!(
+                "{label} at node {} output type must match target",
+                node.id.0
+            ));
+        }
+        if axis >= target.output_type.dims.len() {
+            errors.push(format!(
+                "{label} at node {} has axis {} out of bounds for rank {}",
+                node.id.0,
+                axis,
+                target.output_type.dims.len()
+            ));
+        } else {
+            let mut expected_updates = Vec::new();
+            expected_updates.extend_from_slice(&target.output_type.dims[..axis]);
+            expected_updates.extend(indices.output_type.dims.iter().cloned());
+            expected_updates.extend_from_slice(&target.output_type.dims[axis + 1..]);
+            if updates.output_type.dims != expected_updates {
+                errors.push(format!(
+                    "{label} at node {} has update dims {:?}, expected {:?}",
+                    node.id.0, updates.output_type.dims, expected_updates
+                ));
+            }
+        }
+    }
 }
 
 /// Compute the product of known dimension sizes. Returns None if any dim is unknown.

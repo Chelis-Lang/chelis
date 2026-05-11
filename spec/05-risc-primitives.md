@@ -198,14 +198,72 @@ pattern-matched operations. Most decompose into Tier 1 primitives:
 | `where(cond, a, b)` | `add(mul(cond, a), mul(neg(cond), b))` assuming bool 0/1 |
 
 Implementation note: the compiler now also has first-class specialized sparse
-IR nodes `RiscOp::Gather { axis }` and `RiscOp::ScatterAdd { axis }`, with
-evaluator, verifier, AD, C/HIP backend, and wire-schema support. Tensor-lane
-Surf `gather(values, indices, axis)` lowers directly to `RiscOp::Gather` in the
-current implementation, avoiding the host runtime call and the dense one-hot
-materialization. The shared specialization pass also recognizes the internal
-`RiscOp::OneHot { vocab } + Expand + Mul + Sum` gather tree and collapses it
-before DCE/codegen. Arbitrary historical const/eq one-hot encodings are not
-recognized because they do not preserve the original index operand.
+IR nodes `RiscOp::Gather { axis }`, `RiscOp::ScatterAdd { axis }`, and
+`RiscOp::Scatter { axis }`, with evaluator, verifier, AD, C/HIP backend, and
+wire-schema support. Tensor-lane Surf `gather(values, indices, axis)` lowers
+directly to `RiscOp::Gather` in the current implementation, avoiding the host
+runtime call and the dense one-hot materialization. The tensor-lane Surf
+builtin `scatter_replace(base, indices, updates, axis)` lowers directly to
+`RiscOp::Scatter` for the last-write-wins case. The shared specialization pass
+also recognizes the internal `RiscOp::OneHot { vocab } + Expand + Mul + Sum`
+gather tree and collapses it before DCE/codegen. Arbitrary historical const/eq
+one-hot encodings are not recognized because they do not preserve the original
+index operand.
+
+#### Replace-scatter vs scatter-add
+
+`Scatter` and `ScatterAdd` are intentionally distinct primitives. Both
+take inputs `(target, indices, updates)` with the same shape contract
+(updates shape equals `target.dims[..axis] ++ indices.dims ++
+target.dims[axis+1..]`) and the same precision constraints
+(int32/int64 indices; target/updates/output precision identical).
+They differ only in how duplicate target indices are resolved and in
+their AD policies:
+
+| Op | Duplicate-index semantics | AD adjoint |
+|---|---|---|
+| `ScatterAdd { axis }` | commutative accumulation (`+=`) | `Gather { axis }` — duplicate indices fan-out correctly |
+| `Scatter { axis }` | last-write-wins (deterministic order rule below) | **no_grad** — fail-closed with `AdError::NotSupported` |
+
+**Deterministic-order rule for `Scatter`:** updates-tensor row-major
+(C order) flat iteration. For each `i ∈ 0..updates.size` in
+ascending flat-index order, the write
+`target[..., indices[idx_pos(i)], ...] = updates[i]` occurs at step
+`i`. When two updates target the same cell, the write with the
+larger flat index in `updates` is the final value at that cell.
+Every backend (interpreter, C, HIP) must observe this rule:
+
+- The IR evaluator (`chelis_ir::eval::scatter_replace`) iterates the
+  updates tensor sequentially in row-major flat order.
+- The C backend emits a single-threaded sequential loop (no
+  `#pragma omp parallel for`) — parallelizing would race on
+  duplicate indices and break determinism.
+- The HIP backend emits a `<<<1, 1>>>` single-thread serial kernel
+  for the same reason. Atomic ops do not provide ordered
+  last-write-wins semantics; introducing a parallel implementation
+  would require an explicit tie-breaker that picks the maximum
+  flat-index writer per target cell. That optimization is
+  permitted only when it preserves exactly this rule.
+
+**AD policy for `Scatter`:** reverse-mode AD is structurally
+rejected. The forward result depends on iteration order at
+duplicate indices, so distributing a single output gradient across
+the colliding updates would require an arbitrary policy that does
+not derive from the forward semantics. The rejection is returned
+through the new structured error type `chelis_ir::grad::AdError`:
+
+```rust
+AdError::NotSupported {
+    op: "scatter_replace",
+    reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
+}
+```
+
+Downstream consumers pattern-match on the enum variant; the
+rendered `Display` string is for human consumption only. Programs
+that need a differentiable variant must use `ScatterAdd` (whose
+adjoint is well-defined as `Gather`) or wrap `Scatter` in a
+stop-gradient.
 
 ---
 

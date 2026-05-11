@@ -636,7 +636,8 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::BlasMatmul { .. }
         | RiscOp::OneHot { .. }
         | RiscOp::Gather { .. }
-        | RiscOp::ScatterAdd { .. } => true,
+        | RiscOp::ScatterAdd { .. }
+        | RiscOp::Scatter { .. } => true,
         RiscOp::Reshape { .. } | RiscOp::Store { .. } => node
             .inputs
             .first()

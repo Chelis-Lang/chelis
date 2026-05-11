@@ -1,8 +1,8 @@
 # phase3h-gather-ad-incomplete: Phase 3h gather AD/sparse path closure notes
 
-**Status:** **CLOSED FOR SCOPED SPARSE PATH**
+**Status:** **CLOSED FOR SCOPED SPARSE PATH (gather + scatter-add); replace-scatter shipped under W2-A (M4-residual) 2026-05-11**
 **Filed:** 2026-05-08
-**Owning phase:** Phase 3h (core numeric primitives)
+**Owning phase:** Phase 3h (core numeric primitives); replace-scatter work tracked under W2-A
 **Discovered by:** Adversarial test for cross-library AD claim
 (`crates/chelis-ir/tests/grad_gather_contract.rs`,
 `docs/identified_gaps.md` Gap 3)
@@ -108,3 +108,49 @@ routed to vocab 0, 0 to vocab 1). Additional coverage now includes
 `chelis_ir::specialize` dense recognizer tests, C bounded emitted-code and
 compile/run tests, HIP structural tests, and ignored HIP GPU correctness tests
 for sparse gather plus duplicate-index scatter-add.
+
+## W2-A (M4-residual) addendum — replace-scatter, 2026-05-11
+
+`RiscOp::Scatter { axis }` shipped alongside the existing
+`RiscOp::ScatterAdd { axis }`. The two are intentionally distinct
+primitives, sharing the structural input contract (target, indices,
+updates with conforming shapes; int32/int64 indices; matching
+target/updates/output precision) but differing in duplicate-index
+semantics and AD policy:
+
+- `ScatterAdd { axis }` — commutative accumulation; AD adjoint is
+  `Gather { axis }`. Unchanged by this milestone.
+- `Scatter { axis }` — last-write-wins per the deterministic-order
+  rule documented in `spec/05-risc-primitives.md` §3.5 (updates-tensor
+  row-major flat iteration). AD is fail-closed via the new
+  structured error
+  `chelis_ir::grad::AdError::NotSupported { op: "scatter_replace",
+  reason: AdRejectionReason::NonDeterministicAtDuplicateIndices }`.
+
+Public-surface additions:
+
+- `chelis_ir::grad::AdError` and `chelis_ir::grad::AdRejectionReason`
+  are new public enums. `grad_dag_checked` now returns
+  `Result<GradResult, AdError>` (previously `Result<_, String>`).
+  Existing AD-rejection branches for `Argmax`, `Argmin`, `Floor`,
+  `Ceil` were converted to structured variants
+  (`AdRejectionReason::IntegerIndexOutput`,
+  `AdRejectionReason::PiecewiseConstant`) preserving their
+  rendered `Display` strings.
+- `WireRiscOp::Scatter { axis }` was added to the compiler-API
+  wire schema (additive variant; existing serialized DAGs continue
+  to decode).
+- Surf builtin `scatter_replace(base, indices, updates, axis)` is a
+  new tensor-lane sparse op (distinct from the existing
+  `scatter(base, indices, updates, axis, mode)` which remains the
+  host-lane builtin with `mode ∈ {"replace", "add"}`).
+
+Regression test: `crates/chelis-ir/tests/scatter_replace_contract.rs`
+(6 tests covering: forward last-write-wins; forward distinct-indices
+single-write; structured AD rejection via pattern-match on the enum
+variant; unchecked `grad_dag` returning None rather than silent
+zero; `ScatterAdd` AD path unchanged regression; verifier rejecting
+out-of-bounds axis). The `Gather` adjoint regression assertion
+(`scatter_add_ad_path_unchanged_after_scatter_landed`) inspects the
+backward DAG to confirm `Gather` still produces `ScatterAdd`, never
+the new `Scatter`.

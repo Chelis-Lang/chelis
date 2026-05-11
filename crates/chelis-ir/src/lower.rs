@@ -3750,6 +3750,26 @@ impl LowerCtx {
                     self.current_span_id.clone(),
                 )
             }
+            "scatter_replace" if args.len() == 4 => {
+                // Tensor-lane replace-scatter: lowers directly to
+                // RiscOp::Scatter (last-write-wins). The output type
+                // equals the base/target tensor's type.
+                let base = self.lower_expr_node(&args[0], "scatter_replace base");
+                let indices = self.lower_expr_node(&args[1], "scatter_replace indices");
+                let updates = self.lower_expr_node(&args[2], "scatter_replace updates");
+                let axis = self.extract_axis(&args[3]);
+                let out_ty = self
+                    .dag
+                    .get(base)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                self.dag.add_node(
+                    RiscOp::Scatter { axis },
+                    vec![base, indices, updates],
+                    out_ty,
+                    self.current_span_id.clone(),
+                )
+            }
             "softmax" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "softmax input");
                 let axis = self.extract_axis(&args[1]);
@@ -5026,6 +5046,58 @@ mod tests {
                 dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
                 precision: Prim::F32,
             }
+        );
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn lower_scatter_replace_uses_sparse_ir_node() {
+        // Surf `scatter_replace(base, indices, updates, axis)` must
+        // lower directly to the first-class `RiscOp::Scatter` sparse
+        // IR node, paralleling the tensor-lane `gather` lowering.
+        // This locks the contract: a Surf-level use of
+        // scatter_replace MUST reach the sparse evaluator/codegen
+        // path, NOT the host-runtime fallback (which the existing
+        // `scatter(..., mode)` builtin uses).
+        let src = r#"
+            (def {} base
+              (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} base))
+            (def {} indices
+              (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices))
+            (def {} updates
+              (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))} updates))
+            (def {} out
+              (app {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))}
+                   (var {} scatter_replace)
+                   (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} base)
+                   (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices)
+                   (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))} updates)
+                   (lit {type: (t-prim {} int32)} 0)))
+        "#;
+        let dag = parse_and_lower(src);
+        let scatter = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Scatter { axis: 0 }))
+            .expect("Surf scatter_replace should lower to first-class sparse IR");
+        assert_eq!(
+            scatter.output_type,
+            TensorType {
+                dims: vec![DimInfo::Lit(4), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            }
+        );
+        // Defense in depth: the lowered DAG must NOT contain a
+        // ScatterAdd from a Surf scatter_replace — those are
+        // intentionally distinct primitives.
+        let has_scatter_add = dag
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::ScatterAdd { .. }));
+        assert!(
+            !has_scatter_add,
+            "scatter_replace must NOT lower to RiscOp::ScatterAdd; \
+             those are distinct primitives with different semantics"
         );
         assert!(verify::verify(&dag).is_empty());
     }
