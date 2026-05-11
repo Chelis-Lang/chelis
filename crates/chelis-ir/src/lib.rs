@@ -29,7 +29,11 @@ pub use analysis::{
 };
 pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 pub use grad::{AdError, AdRejectionReason};
-pub use host::CompiledProgram;
+pub use host::{
+    CompiledProgram, HelperPath, HelperSummaryRejection, PayloadRole, SparseOpKind,
+    SummaryRejection, SummaryRejectionClass, SummaryRejectionDetail, WildcardLocation,
+    host_program_summary_rejections,
+};
 pub use load_store_name::{LoadStoreName, LoadStoreNameError};
 pub use lower::{
     LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,

@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_types::types::Prim;
@@ -41,6 +42,22 @@ pub struct HostProgram {
     pub globals: Vec<HostBinding>,
     pub global_tensor_helpers: Vec<HostTensorHelper>,
     pub functions: Vec<HostFunction>,
+    /// Structured rejections collected during sparse-helper summary
+    /// recognition. Populated by [`lower_compiled_program`] when a
+    /// near-summary-eligible callsite (helper body contains a sparse
+    /// `RiscOp::Gather`, `RiscOp::ScatterAdd`, or `RiscOp::Scatter`)
+    /// is rejected by the recognizer.
+    ///
+    /// Each entry carries the helper identity, the callsite + helper
+    /// body spans, the rejection class, and structured class-specific
+    /// detail. Consumers (CLI diagnostic reporter, downstream tooling,
+    /// red-team tests) MUST pattern-match on the enum variants and
+    /// struct fields rather than parsing the `Display` rendering.
+    ///
+    /// See `crates/chelis-cli/tests/cross_library_semantic_gap_diagnostics.rs`
+    /// for the acceptance oracle that locks the structured shape of
+    /// each rejection class.
+    pub summary_rejections: Vec<SummaryRejection>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +76,10 @@ pub struct HostFunction {
     pub body: HostExpr,
     pub tensor_helpers: Vec<HostTensorHelper>,
     pub specialization: Option<HostFunctionSpecialization>,
+    /// Structured rejections collected from this function's tensor
+    /// helpers and from the function-level summary-derivation pass.
+    /// See `HostProgram::summary_rejections`.
+    pub summary_rejections: Vec<SummaryRejection>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +95,20 @@ pub struct HostTensorHelper {
     pub inputs: Vec<HostTensorInput>,
     pub output: TensorType,
     pub specialization: Option<HostTensorSpecialization>,
+    /// Partial rejection captured at helper-construction time when the
+    /// helper body is summary-near-eligible (root op is one of the
+    /// three sparse RiscOps, or contains one in a recognizable place)
+    /// but the summarizer rejected it.
+    ///
+    /// Carries everything the helper itself knows: rejection class,
+    /// structured detail, and helper-body span. The owning function's
+    /// name (the `HelperPath`) and the callsite span are filled in by
+    /// [`derive_host_function_specializations`] when the function-level
+    /// pass walks each fn's tensor helpers; the per-helper data is
+    /// then promoted into a fully-formed `SummaryRejection` on
+    /// `HostFunction::summary_rejections` and
+    /// `HostProgram::summary_rejections`.
+    pub summary_rejection: Option<HelperSummaryRejection>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +165,357 @@ pub struct HostSparseOpSummary {
     pub input_indices: Vec<usize>,
     pub input_tys: Vec<TensorType>,
     pub output: TensorType,
+}
+
+// =========================================================================
+// W4-A — M5(c) structured rejection diagnostics
+// =========================================================================
+//
+// `SummaryRejection` is the public diagnostic shape emitted when a
+// callsite is summary-eligible (helper body contains a sparse RiscOp)
+// but the summarizer rejects it. The shape is intentionally
+// **programmatically matchable**: downstream consumers must pattern-
+// match on `rejection_class` (an enum) and the strongly-typed
+// `detail` enum payload rather than parsing the rendered `Display`
+// string. The acceptance oracle for this contract is
+// `crates/chelis-cli/tests/cross_library_semantic_gap_diagnostics.rs`.
+//
+// Variant naming mirrors W3-B's seven enumerated rejection categories
+// (see `crates/chelis-ir/tests/host_sparse_summary.rs` and the cli
+// counterparts in `crates/chelis-cli/tests/cross_library_sparse_summaries.rs`):
+//
+//   1. `MultipleRoots`               — helper body has multiple DAG roots
+//   2. `MultipleReturnPaths`         — helper body branches via if/then/else
+//   3. `NonLoadOperand`              — sparse-op operand is not a direct Load
+//   4. `PostProcessingAfterSparseOp` — helper post-processes the sparse result
+//   5. `IndicesDTypeMismatch`        — indices precision not int32/int64
+//   6. `PayloadDTypeMismatch`        — values/target/updates/output disagree
+//   7. `WildcardDim`                 — `Named("*", None)` placeholder in input/output
+//
+// Three additional variants (`UnrecognizedShape`, `NonContiguousLayout`,
+// `RankMismatch`) are reserved for future helper-shape categories that
+// the current summarizer does not check today but the plan's pinned
+// shape names explicitly.
+
+/// Identifies the rejected helper for diagnostic attribution.
+///
+/// `module` is the producing module path (today always `None` — the
+/// host program is flat — but reserved for the Reef/library-import
+/// case where helpers come from imported modules and a fully qualified
+/// helper identity matters).
+///
+/// `def_name` is the Surf `def` name of the function whose body owns
+/// the rejected tensor helper. For a top-level expression binding
+/// (e.g. `result = gather(...)`) this is the synthetic global name
+/// (`__global` etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperPath {
+    pub module: Option<String>,
+    pub def_name: String,
+}
+
+impl HelperPath {
+    /// Convenience constructor for the module-less (flat-program) case.
+    pub fn local(def_name: impl Into<String>) -> Self {
+        Self {
+            module: None,
+            def_name: def_name.into(),
+        }
+    }
+}
+
+impl fmt::Display for HelperPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(module) = &self.module {
+            write!(f, "{module}.{}", self.def_name)
+        } else {
+            write!(f, "{}", self.def_name)
+        }
+    }
+}
+
+/// Which payload role a `PayloadDTypeMismatch` is reporting on. The
+/// sparse RiscOps have different operand roles:
+///   * `Gather`: only `Values` is a payload (the indexed-into tensor);
+///     the output type's precision must match.
+///   * `ScatterAdd` / `Scatter`: `Target` (the base), `Updates` (the
+///     scattered values), and the output type's precision must all
+///     match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayloadRole {
+    Values,
+    Target,
+    Updates,
+    Output,
+}
+
+impl fmt::Display for PayloadRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            PayloadRole::Values => "values",
+            PayloadRole::Target => "target",
+            PayloadRole::Updates => "updates",
+            PayloadRole::Output => "output",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Which tensor (input or output) carries the wildcard `Named("*",
+/// None)` dim that disqualified the helper. `Input(i)` is the
+/// positional helper input index (matches `HostSparseOpSummary::input_indices`
+/// indexing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WildcardLocation {
+    Output,
+    Input(usize),
+}
+
+impl fmt::Display for WildcardLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WildcardLocation::Output => f.write_str("output"),
+            WildcardLocation::Input(i) => write!(f, "input[{i}]"),
+        }
+    }
+}
+
+/// Which sparse RiscOp the helper's body root names.
+///
+/// `Unknown` covers the case where the body root isn't a sparse op at
+/// all (the helper is post-processing a sparse op, or the root is
+/// something else entirely). The summarizer reports the rejection
+/// against the deepest sparse op it finds in the helper body so the
+/// diagnostic still names a specific op when possible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SparseOpKind {
+    Gather,
+    ScatterAdd,
+    ScatterReplace,
+    Unknown,
+}
+
+impl fmt::Display for SparseOpKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            SparseOpKind::Gather => "gather",
+            SparseOpKind::ScatterAdd => "scatter_add",
+            SparseOpKind::ScatterReplace => "scatter_replace",
+            SparseOpKind::Unknown => "<unknown>",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Closed enumeration of summary-rejection classes. Each variant is a
+/// distinct public contract; consumers MUST match on the variant. New
+/// classes are additive: adding a variant is a breaking change for
+/// exhaustive matches but never silently re-routes an existing case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummaryRejectionClass {
+    /// Helper body has more than one DAG root (multi-output helper).
+    /// Distinct from `MultipleReturnPaths` because the multi-root case
+    /// is a DAG-structural property; the multi-return-path case is a
+    /// host-side host-expr-shape property (the body lowered to `If`).
+    MultipleRoots,
+    /// Helper body branches via if/then/else (or another host-side
+    /// conditional). Detected by the function-level pass when the
+    /// function body is a `HostExprKind::If` rather than a `TensorCall`.
+    MultipleReturnPaths,
+    /// One of the sparse-op operands is not a direct `RiscOp::Load`
+    /// of a helper input (e.g. an intervening elementwise op, a cast,
+    /// or a reshape).
+    NonLoadOperand,
+    /// The helper body has an extra op on top of the sparse op (e.g.
+    /// `add(gather(...), zero)`). The sparse op is not the DAG root.
+    PostProcessingAfterSparseOp,
+    /// The indices operand's precision is neither `int32` nor `int64`.
+    IndicesDTypeMismatch,
+    /// One of the payload precisions (values, target, updates, output)
+    /// disagrees with the others.
+    PayloadDTypeMismatch,
+    /// Helper input or output carries a `Named("*", None)` wildcard
+    /// dim — a type-inference placeholder that does not bind to a
+    /// unique callsite axis.
+    WildcardDim,
+    /// Reserved: helper body shape does not match any recognized
+    /// sparse-op pattern. Today the summarizer routes most "shape
+    /// doesn't match" cases through `NonLoadOperand` /
+    /// `PostProcessingAfterSparseOp`; this variant is in the public
+    /// surface for forward-compatibility with future shape extensions.
+    UnrecognizedShape,
+    /// Reserved: helper body uses non-contiguous tensor layouts that
+    /// the summary contract requires to be contiguous. No current
+    /// summarizer check fires this; reserved for future use.
+    NonContiguousLayout,
+    /// Reserved: helper input or output rank disagrees with the rank
+    /// the sparse op requires. Today the summarizer rejects rank
+    /// mismatches through `NonLoadOperand` (the type-equality check on
+    /// the Load op fails); reserved for future explicit rank checks.
+    RankMismatch,
+}
+
+impl fmt::Display for SummaryRejectionClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            SummaryRejectionClass::MultipleRoots => "multiple-roots",
+            SummaryRejectionClass::MultipleReturnPaths => "multiple-return-paths",
+            SummaryRejectionClass::NonLoadOperand => "non-load-operand",
+            SummaryRejectionClass::PostProcessingAfterSparseOp => "post-processing-after-sparse-op",
+            SummaryRejectionClass::IndicesDTypeMismatch => "indices-dtype-mismatch",
+            SummaryRejectionClass::PayloadDTypeMismatch => "payload-dtype-mismatch",
+            SummaryRejectionClass::WildcardDim => "wildcard-dim",
+            SummaryRejectionClass::UnrecognizedShape => "unrecognized-shape",
+            SummaryRejectionClass::NonContiguousLayout => "non-contiguous-layout",
+            SummaryRejectionClass::RankMismatch => "rank-mismatch",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Class-specific structured payload for a `SummaryRejection`. Each
+/// variant mirrors a `SummaryRejectionClass` variant, but only the
+/// classes that carry additional structured information have a payload;
+/// the payload-less classes use the unit `*Empty` variants. This split
+/// keeps the public surface programmatically matchable on
+/// (`rejection_class`, `detail`) jointly without forcing every consumer
+/// to inspect `detail` for an empty payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummaryRejectionDetail {
+    MultipleRoots {
+        /// Number of DAG roots observed in the helper body.
+        root_count: usize,
+    },
+    MultipleReturnPaths {
+        /// Approximate number of return-arm branches observed in the
+        /// function body. Today the host lowerer collapses multiple
+        /// branches into a single nested `If`; this field records the
+        /// branch count at the outermost level.
+        branch_count: usize,
+    },
+    NonLoadOperand {
+        /// Sparse op the helper's body root names.
+        op: SparseOpKind,
+        /// Positional index of the operand that wasn't a Load (0 =
+        /// first operand, 1 = second, etc.). Matches the RiscOp's
+        /// `inputs` ordering.
+        operand_index: usize,
+    },
+    PostProcessingAfterSparseOp {
+        /// Sparse op that was post-processed (the deepest sparse op in
+        /// the helper body).
+        op: SparseOpKind,
+        /// Snake-case name of the tail op sitting on top of the sparse
+        /// op (e.g. `"add"`, `"reshape"`).
+        tail_op: String,
+    },
+    IndicesDTypeMismatch {
+        op: SparseOpKind,
+        observed: Prim,
+    },
+    PayloadDTypeMismatch {
+        op: SparseOpKind,
+        /// Which payload role's dtype did not match the others.
+        which: PayloadRole,
+        /// Expected precision (the output / target / values precision
+        /// the others should have matched).
+        expected: Prim,
+        /// Observed precision on the mismatching payload.
+        observed: Prim,
+    },
+    WildcardDim {
+        location: WildcardLocation,
+    },
+    /// Empty payload for the reserved classes (UnrecognizedShape,
+    /// NonContiguousLayout, RankMismatch). Carries no structured
+    /// information today.
+    Reserved,
+}
+
+impl fmt::Display for SummaryRejectionDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SummaryRejectionDetail::MultipleRoots { root_count } => {
+                write!(f, "{root_count} DAG roots in helper body")
+            }
+            SummaryRejectionDetail::MultipleReturnPaths { branch_count } => {
+                write!(f, "{branch_count} return-path branches")
+            }
+            SummaryRejectionDetail::NonLoadOperand { op, operand_index } => write!(
+                f,
+                "{op} operand[{operand_index}] is not a direct load of a helper input"
+            ),
+            SummaryRejectionDetail::PostProcessingAfterSparseOp { op, tail_op } => {
+                write!(
+                    f,
+                    "{tail_op} on top of {op}; sparse op is not the helper root"
+                )
+            }
+            SummaryRejectionDetail::IndicesDTypeMismatch { op, observed } => {
+                write!(f, "{op} indices dtype {observed:?} is not int32 / int64")
+            }
+            SummaryRejectionDetail::PayloadDTypeMismatch {
+                op,
+                which,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "{op} payload `{which}` dtype {observed:?} disagrees with expected {expected:?}"
+            ),
+            SummaryRejectionDetail::WildcardDim { location } => {
+                write!(f, "wildcard dim on helper {location}")
+            }
+            SummaryRejectionDetail::Reserved => f.write_str("<reserved>"),
+        }
+    }
+}
+
+/// Public diagnostic shape for a rejected summary callsite. This is
+/// the central correctness contract of W4-A. Downstream consumers
+/// (CLI diagnostic reporter, red-team tests, future tooling) MUST
+/// pattern-match on the enum variants and struct fields rather than
+/// parsing the `Display` rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryRejection {
+    pub rejection_class: SummaryRejectionClass,
+    pub helper_path: HelperPath,
+    /// Surf-source span ID of the callsite that would have consumed
+    /// the summary (`surf:<start>..<end>` per
+    /// `spec/design/chelis_span_survival.md` §1, threaded through
+    /// host lowering as `HostExpr::span_id`). `None` only when the
+    /// caller chain has no surf-side span at all (synthesized code).
+    pub callsite_span: Option<String>,
+    /// Surf-source span ID of the helper body itself (the helper-DAG
+    /// root). `None` for synthetic helpers that never had a Surf
+    /// span attached (rare; matches the `HostExpr::span_id`
+    /// convention).
+    pub helper_body_span: Option<String>,
+    pub detail: SummaryRejectionDetail,
+}
+
+impl fmt::Display for SummaryRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let callsite = self.callsite_span.as_deref().unwrap_or("<no-span>");
+        let body = self.helper_body_span.as_deref().unwrap_or("<no-span>");
+        write!(
+            f,
+            "rejected summary for `{}` ({}): {}; callsite={}, helper-body={}",
+            self.helper_path, self.rejection_class, self.detail, callsite, body,
+        )
+    }
+}
+
+/// Partial rejection captured at tensor-helper construction time, when
+/// the owning function's name + callsite span are not yet known. The
+/// function-level pass ([`derive_host_function_specializations`])
+/// promotes each `HelperSummaryRejection` into a fully-formed
+/// `SummaryRejection` on `HostFunction::summary_rejections`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperSummaryRejection {
+    pub rejection_class: SummaryRejectionClass,
+    pub helper_body_span: Option<String>,
+    pub detail: SummaryRejectionDetail,
 }
 
 #[derive(Debug, Clone)]
@@ -716,7 +1102,54 @@ fn lower_host_program(
         }
     }
     derive_host_function_specializations(&mut host.functions);
+    // Also collect rejections from global tensor helpers (top-level
+    // expressions like `result = gather(...)` lower into
+    // `host.global_tensor_helpers`, not into a function's
+    // tensor_helpers). The owning "function" for diagnostic
+    // attribution is the synthetic global name; today we report it
+    // under the helper's own name since global tensor helpers don't
+    // share a binding name directly.
+    collect_program_summary_rejections(&mut host);
     host
+}
+
+/// Aggregate per-function rejections into `HostProgram::summary_rejections`
+/// and also fold in any rejections attached to `global_tensor_helpers`
+/// (rejections detected on top-level tensor expression bindings).
+fn collect_program_summary_rejections(host: &mut HostProgram) {
+    host.summary_rejections.clear();
+    for function in &host.functions {
+        for rejection in &function.summary_rejections {
+            host.summary_rejections.push(rejection.clone());
+        }
+    }
+    // Per-global rejections: the global tensor helpers carry partial
+    // rejections from `finish_tensor_helper_call`. The HelperPath is
+    // synthesized from the helper's own name (e.g.
+    // `__global_tensor_helper_0`) when there is no enclosing
+    // function. This is sufficient for diagnostic emission today;
+    // future work can thread the binding name through.
+    for helper in &host.global_tensor_helpers {
+        if let Some(partial) = &helper.summary_rejection {
+            host.summary_rejections.push(SummaryRejection {
+                rejection_class: partial.rejection_class.clone(),
+                helper_path: HelperPath::local(&helper.name),
+                callsite_span: None,
+                helper_body_span: partial.helper_body_span.clone(),
+                detail: partial.detail.clone(),
+            });
+        }
+    }
+}
+
+/// Public accessor for the structured summary rejections collected
+/// during host lowering. CLI diagnostic reporters and downstream
+/// tests pattern-match on the returned slice's enum variants and
+/// struct fields. The order is deterministic: per-function rejections
+/// appear in function-declaration order, followed by per-global
+/// rejections in helper-declaration order.
+pub fn host_program_summary_rejections(program: &HostProgram) -> &[SummaryRejection] {
+    &program.summary_rejections
 }
 
 /// Walk a HostExpr and report whether any node is the generic-fallback
@@ -773,6 +1206,240 @@ fn derive_host_function_specializations(functions: &mut [HostFunction]) {
             break;
         }
     }
+
+    // After spec derivation, collect structured summary rejections per
+    // function. This pass owns:
+    //
+    //   * promoting partial `HelperSummaryRejection`s on each tensor
+    //     helper into fully-formed `SummaryRejection`s attached to
+    //     `HostFunction::summary_rejections` (and to
+    //     `HostProgram::summary_rejections` via `lower_compiled_program`),
+    //   * detecting the function-level `MultipleReturnPaths` case
+    //     (helper body is `If`, not `TensorCall`) and emitting a
+    //     rejection for it. This is the W3-B-enumerated category 2
+    //     case; it is not visible to `try_summarize_sparse_helper`
+    //     because the function body never reaches the tensor-helper
+    //     summarization path.
+    for function in functions.iter_mut() {
+        function.summary_rejections.clear();
+        collect_function_summary_rejections(function);
+    }
+}
+
+/// Promote each tensor helper's `HelperSummaryRejection` into a
+/// fully-formed `SummaryRejection` on this function. Also detects the
+/// function-level `MultipleReturnPaths` case (function body lowered
+/// to `If` rather than `TensorCall`, branching across multiple
+/// sparse-op return paths).
+fn collect_function_summary_rejections(function: &mut HostFunction) {
+    // Track which helpers are referenced from the body so we can
+    // attach the right callsite span.
+    let callsite_span_for_helper = body_callsite_span_per_helper(&function.body);
+
+    let helper_path = HelperPath::local(&function.name);
+
+    for (idx, helper) in function.tensor_helpers.iter().enumerate() {
+        if let Some(partial) = &helper.summary_rejection {
+            let callsite_span = callsite_span_for_helper.get(&idx).cloned().unwrap_or(None);
+            function.summary_rejections.push(SummaryRejection {
+                rejection_class: partial.rejection_class.clone(),
+                helper_path: helper_path.clone(),
+                callsite_span,
+                helper_body_span: partial.helper_body_span.clone(),
+                detail: partial.detail.clone(),
+            });
+        }
+    }
+
+    // Category 2 (MultipleReturnPaths): function body is `If` whose
+    // arms both name a sparse op (directly or via a wrapper call).
+    // Detect by walking the body shape; if the body is exactly `If`
+    // and at least one arm references a sparse-op helper, emit.
+    if let Some(rejection) = detect_multiple_return_paths_rejection(function) {
+        function.summary_rejections.push(rejection);
+    }
+}
+
+/// Build a map from `helper_index -> callsite_span` by walking a
+/// HostExpr for `TensorCall { helper, .. }` nodes. The first
+/// observed callsite span wins; a `None` entry means the helper is
+/// referenced but the call site has no span. Helpers never referenced
+/// are absent from the map.
+fn body_callsite_span_per_helper(expr: &HostExpr) -> HashMap<usize, Option<String>> {
+    fn walk(expr: &HostExpr, out: &mut HashMap<usize, Option<String>>) {
+        match &expr.kind {
+            HostExprKind::TensorCall { helper, args, .. } => {
+                out.entry(*helper).or_insert_with(|| expr.span_id.clone());
+                for arg in args {
+                    walk(arg, out);
+                }
+            }
+            HostExprKind::Call { args, .. } => {
+                for arg in args {
+                    walk(arg, out);
+                }
+            }
+            HostExprKind::Builtin { args, .. } => {
+                for arg in args {
+                    walk(arg, out);
+                }
+            }
+            HostExprKind::If {
+                cond,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                walk(cond, out);
+                walk(then_expr, out);
+                walk(else_expr, out);
+            }
+            HostExprKind::Let { bindings, body, .. } => {
+                for binding in bindings {
+                    walk(&binding.value, out);
+                }
+                walk(body, out);
+            }
+            HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            HostExprKind::AdtConstruct { fields, .. } => {
+                for field in fields {
+                    walk(field, out);
+                }
+            }
+            HostExprKind::AdtFieldAccess { base, .. } => {
+                walk(base, out);
+            }
+            HostExprKind::MatchOption {
+                scrutinee,
+                some_expr,
+                none_expr,
+                ..
+            } => {
+                walk(scrutinee, out);
+                walk(some_expr, out);
+                walk(none_expr, out);
+            }
+            HostExprKind::MatchAdt {
+                scrutinee,
+                arms,
+                default_expr,
+                ..
+            } => {
+                walk(scrutinee, out);
+                for arm in arms {
+                    walk(&arm.expr, out);
+                }
+                if let Some(d) = default_expr {
+                    walk(d, out);
+                }
+            }
+            HostExprKind::Map { list, .. }
+            | HostExprKind::Filter { list, .. }
+            | HostExprKind::Partition { list, .. }
+            | HostExprKind::FlatMap { list, .. } => walk(list, out),
+            HostExprKind::Fold { init, list, .. } | HostExprKind::Scan { init, list, .. } => {
+                walk(init, out);
+                walk(list, out);
+            }
+            HostExprKind::WithSeed { seed, body, .. } => {
+                walk(seed, out);
+                walk(body, out);
+            }
+            _ => {}
+        }
+    }
+    let mut out = HashMap::new();
+    walk(expr, &mut out);
+    out
+}
+
+/// Detect the `MultipleReturnPaths` rejection (W3-B category 2):
+/// function body lowers to a HostExprKind::If with at least two
+/// distinct return arms, and at least one arm names a sparse op
+/// (directly via a TensorCall on a sparse-summarized helper, or
+/// transitively via a Call to a function with a sparse
+/// specialization). The callsite_span is the If's own span; the
+/// helper_body_span is the deepest available arm span.
+fn detect_multiple_return_paths_rejection(function: &HostFunction) -> Option<SummaryRejection> {
+    let HostExprKind::If {
+        then_expr,
+        else_expr,
+        ..
+    } = &function.body.kind
+    else {
+        return None;
+    };
+    // Count branches: a chain of nested if/else collapses into one
+    // detection but `branch_count` records the visible structural arm
+    // count (then + else, recursively counting else-as-if).
+    fn count_branches(expr: &HostExpr) -> usize {
+        match &expr.kind {
+            HostExprKind::If {
+                then_expr,
+                else_expr,
+                ..
+            } => count_branches(then_expr) + count_branches(else_expr),
+            _ => 1,
+        }
+    }
+    let branch_count = count_branches(&function.body);
+    // Heuristic: at least one arm contains a TensorCall to a sparse-
+    // summarized helper OR a Call to a known sparse function. We err
+    // on the side of "yes, this is a sparse-helper rejection" if any
+    // arm has a tensor call. The narrower check is a follow-up; for
+    // W4-A the structural marker is what matters.
+    fn arm_references_sparse_helper(expr: &HostExpr, function: &HostFunction) -> bool {
+        match &expr.kind {
+            HostExprKind::TensorCall { helper, .. } => function
+                .tensor_helpers
+                .get(*helper)
+                .and_then(|h| h.specialization.as_ref())
+                .is_some_and(|s| {
+                    matches!(
+                        s,
+                        HostTensorSpecialization::SparseGather(_)
+                            | HostTensorSpecialization::SparseScatterAdd(_)
+                            | HostTensorSpecialization::SparseScatterReplace(_)
+                    )
+                }),
+            HostExprKind::If {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                arm_references_sparse_helper(then_expr, function)
+                    || arm_references_sparse_helper(else_expr, function)
+            }
+            HostExprKind::Let { body, bindings, .. } => {
+                arm_references_sparse_helper(body, function)
+                    || bindings
+                        .iter()
+                        .any(|b| arm_references_sparse_helper(&b.value, function))
+            }
+            _ => false,
+        }
+    }
+    if !arm_references_sparse_helper(then_expr, function)
+        && !arm_references_sparse_helper(else_expr, function)
+    {
+        return None;
+    }
+    let callsite_span = function.body.span_id.clone();
+    let helper_body_span = then_expr
+        .span_id
+        .clone()
+        .or_else(|| else_expr.span_id.clone());
+    Some(SummaryRejection {
+        rejection_class: SummaryRejectionClass::MultipleReturnPaths,
+        helper_path: HelperPath::local(&function.name),
+        callsite_span,
+        helper_body_span,
+        detail: SummaryRejectionDetail::MultipleReturnPaths { branch_count },
+    })
 }
 
 fn derive_host_function_specialization(
@@ -1174,6 +1841,7 @@ fn lower_host_function(
         body: host_body,
         tensor_helpers,
         specialization: None,
+        summary_rejections: Vec::new(),
     })
 }
 
@@ -1293,15 +1961,22 @@ fn finish_tensor_helper_call(
         .map(|node| node.output_type.clone())
         .unwrap_or_else(|| expected.clone());
     let args = tensor_helper_args(&inputs, scope);
+    let (sparse_specialization, sparse_rejection) =
+        match try_summarize_sparse_helper(&dag, &inputs, &output) {
+            Ok(spec) => (Some(spec), None),
+            Err(SparseSummaryAttempt::NotEligible) => (None, None),
+            Err(SparseSummaryAttempt::Rejected(rejection)) => (None, Some(rejection)),
+        };
     let specialization = summarize_blas_helper_from_parts(&dag, &inputs, &output)
         .map(HostTensorSpecialization::BlasMatmul)
-        .or_else(|| summarize_sparse_helper_from_parts(&dag, &inputs, &output));
+        .or(sparse_specialization);
     tensor_helpers.push(HostTensorHelper {
         name: helper_name,
         dag,
         inputs,
         output,
         specialization,
+        summary_rejection: sparse_rejection,
     });
     HostExpr::new(HostExprKind::TensorCall {
         helper: helper_index,
@@ -1378,65 +2053,225 @@ pub fn summarize_sparse_helper_for_test(
     summarize_sparse_helper_from_parts(dag, inputs, output)
 }
 
-/// Derive a sparse-op summary for a helper whose DAG is a single
-/// `RiscOp::Gather`, `RiscOp::ScatterAdd`, or `RiscOp::Scatter` root
-/// whose operands are direct `RiscOp::Load`s referencing helper inputs.
+/// Pub-test entry point for the structured-rejection-aware sparse
+/// summarizer. Mirrors `summarize_sparse_helper_for_test` but exposes
+/// the W4-A `SparseSummaryAttempt` result so IR-level tests can lock
+/// the structured rejection class + detail for each near-eligible
+/// rejection case.
+#[doc(hidden)]
+pub fn try_summarize_sparse_helper_for_test(
+    dag: &crate::Dag,
+    inputs: &[HostTensorInput],
+    output: &TensorType,
+) -> Result<HostTensorSpecialization, SparseSummaryAttempt> {
+    try_summarize_sparse_helper(dag, inputs, output)
+}
+
+/// Outcome of the structured sparse-helper recognizer. Distinguishes
+/// "not even a sparse helper" (silent skip) from "near-eligible but
+/// rejected for a specific structural reason" (emit a diagnostic).
 ///
-/// Rejection cases (returns `None`):
-///   * helper body has more than one root (multi-output helper)
-///   * root op is not one of the three sparse ops
-///   * any sparse-op operand is not a `Load` (e.g. an intervening
-///     elementwise op, a constant injection, or a reshape)
-///   * a `Load` refers to a name not present in the helper input set
-///     or whose type does not match the helper input's type
-///   * indices precision is not int32 / int64
-///   * payload precisions (values vs output, target vs updates vs
-///     output) do not match
-///   * helper input or output carries a wildcard `Named("*", None)`
-///     dim — these are type-inference placeholders that do not bind
-///     to a unique callsite axis and cannot be safely consumed by the
-///     summary-derived contract assertions
-///
-/// Recognized helper inputs become positional `input_indices`; the
-/// callsite remapper then verifies arg-to-param remap.
+/// The `NotEligible` arm is treated as a non-error skip by the
+/// outer summary-derivation pass; the `Rejected` arm carries a
+/// `HelperSummaryRejection` that will be promoted to a fully-formed
+/// `SummaryRejection` once the owning function's name + callsite
+/// span are known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SparseSummaryAttempt {
+    /// Helper body contains no sparse RiscOp anywhere. Not a
+    /// near-summary case; no diagnostic should be emitted. The outer
+    /// pass falls through to the BLAS recognizer.
+    NotEligible,
+    /// Helper body has a sparse RiscOp in a position where the
+    /// summarizer attempts recognition, but the structural check
+    /// failed. The carried rejection identifies the failure class.
+    Rejected(HelperSummaryRejection),
+}
+
+/// Back-compat helper around `try_summarize_sparse_helper` that
+/// collapses both error arms to `None`. Used by the existing
+/// `summarize_sparse_helper_for_test` IR-level test entry point and
+/// by any code path that does not consume the structured rejection.
 fn summarize_sparse_helper_from_parts(
     dag: &crate::Dag,
     inputs: &[HostTensorInput],
     output: &TensorType,
 ) -> Option<HostTensorSpecialization> {
+    try_summarize_sparse_helper(dag, inputs, output).ok()
+}
+
+/// Derive a sparse-op summary for a helper whose DAG is a single
+/// `RiscOp::Gather`, `RiscOp::ScatterAdd`, or `RiscOp::Scatter` root
+/// whose operands are direct `RiscOp::Load`s referencing helper
+/// inputs. When the helper body contains a sparse op but the
+/// recognizer rejects, the returned `Err(SparseSummaryAttempt::Rejected(...))`
+/// carries a structured rejection class + detail per W4-A; consumers
+/// programmatically match on the class rather than on rendered
+/// strings.
+///
+/// Rejection cases — each maps to a `SummaryRejectionClass` variant:
+///
+/// * `MultipleRoots` — helper body has more than one DAG root.
+/// * `WildcardDim` — helper input/output carries a `Named("*", None)` wildcard.
+/// * `PostProcessingAfterSparseOp` — root op is not sparse but a sparse op
+///   appears in the body.
+/// * `NonLoadOperand` — a sparse-op operand is not a direct `RiscOp::Load`, or
+///   its `Load` does not match a helper input by name + type (rank / type
+///   mismatch surfaces here until a dedicated `RankMismatch` check is added).
+/// * `IndicesDTypeMismatch` — indices precision is not int32 / int64.
+/// * `PayloadDTypeMismatch` — values / target / updates precision disagrees
+///   with output precision.
+fn try_summarize_sparse_helper(
+    dag: &crate::Dag,
+    inputs: &[HostTensorInput],
+    output: &TensorType,
+) -> Result<HostTensorSpecialization, SparseSummaryAttempt> {
+    if dag.is_empty() {
+        return Err(SparseSummaryAttempt::NotEligible);
+    }
+    // Pre-scan: does the DAG mention any sparse op at all? If not, the
+    // recognizer is not the right code path; the BLAS recognizer (or
+    // no specialization) takes over silently.
+    let deepest_sparse_op = dag
+        .nodes()
+        .iter()
+        .find_map(|node| sparse_op_kind(&node.op).map(|kind| (kind, node)));
+    if deepest_sparse_op.is_none() {
+        return Err(SparseSummaryAttempt::NotEligible);
+    }
+    let (deepest_op_kind, _deepest_node) = deepest_sparse_op.unwrap();
+
+    // Helper-body span: prefer the deepest sparse node's span; fall
+    // back to the helper root's span; otherwise None.
+    let body_span = dag
+        .roots()
+        .first()
+        .and_then(|id| dag.get(*id))
+        .and_then(|n| n.span_id.clone())
+        .or_else(|| {
+            dag.nodes()
+                .iter()
+                .find_map(|n| sparse_op_kind(&n.op).and(n.span_id.clone()))
+        });
+
     if dag.roots().len() != 1 {
-        return None;
+        return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+            rejection_class: SummaryRejectionClass::MultipleRoots,
+            helper_body_span: body_span,
+            detail: SummaryRejectionDetail::MultipleRoots {
+                root_count: dag.roots().len(),
+            },
+        }));
     }
-    let root_id = *dag.roots().first()?;
-    let root = dag.get(root_id)?;
+    let root_id = *dag
+        .roots()
+        .first()
+        .expect("checked roots().len() == 1 above");
+    let root = match dag.get(root_id) {
+        Some(node) => node,
+        None => return Err(SparseSummaryAttempt::NotEligible),
+    };
     if root.output_type != *output {
-        return None;
+        // Output-type mismatch is a structural shape issue — treat as
+        // NotEligible to avoid emitting a diagnostic for cases that
+        // are routed through a different specialization path.
+        return Err(SparseSummaryAttempt::NotEligible);
     }
-    if tensor_type_has_wildcard_dim(output) {
-        return None;
-    }
-    if inputs.iter().any(|i| tensor_type_has_wildcard_dim(&i.ty)) {
-        return None;
+    if let Some(location) = wildcard_location(output, inputs) {
+        return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+            rejection_class: SummaryRejectionClass::WildcardDim,
+            helper_body_span: body_span,
+            detail: SummaryRejectionDetail::WildcardDim { location },
+        }));
     }
     let input_tys = inputs.iter().map(|i| i.ty.clone()).collect::<Vec<_>>();
+
+    // Root must itself be a sparse op. If a sparse op exists deeper in
+    // the body but the root is something else, the recognizer rejects
+    // with `PostProcessingAfterSparseOp` (and names the tail op).
+    let root_sparse_kind = sparse_op_kind(&root.op);
+    if root_sparse_kind.is_none() {
+        return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+            rejection_class: SummaryRejectionClass::PostProcessingAfterSparseOp,
+            helper_body_span: body_span,
+            detail: SummaryRejectionDetail::PostProcessingAfterSparseOp {
+                op: deepest_op_kind,
+                tail_op: risc_op_canonical_name(&root.op).to_string(),
+            },
+        }));
+    }
+    let root_kind = root_sparse_kind.expect("root_sparse_kind is Some by guard");
 
     match &root.op {
         RiscOp::Gather { axis } => {
             // Inputs: [values, indices].
             if root.inputs.len() != 2 {
-                return None;
+                return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                    rejection_class: SummaryRejectionClass::NonLoadOperand,
+                    helper_body_span: body_span,
+                    detail: SummaryRejectionDetail::NonLoadOperand {
+                        op: root_kind,
+                        operand_index: root.inputs.len().min(1),
+                    },
+                }));
             }
-            let values_idx = helper_load_input_index(dag, root.inputs[0], inputs)?;
-            let indices_idx = helper_load_input_index(dag, root.inputs[1], inputs)?;
-            let values_ty = dag.get(root.inputs[0])?.output_type.clone();
-            let indices_ty = dag.get(root.inputs[1])?.output_type.clone();
+            let values_idx = match helper_load_input_index(dag, root.inputs[0], inputs) {
+                Some(i) => i,
+                None => {
+                    return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                        rejection_class: SummaryRejectionClass::NonLoadOperand,
+                        helper_body_span: body_span,
+                        detail: SummaryRejectionDetail::NonLoadOperand {
+                            op: root_kind,
+                            operand_index: 0,
+                        },
+                    }));
+                }
+            };
+            let indices_idx = match helper_load_input_index(dag, root.inputs[1], inputs) {
+                Some(i) => i,
+                None => {
+                    return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                        rejection_class: SummaryRejectionClass::NonLoadOperand,
+                        helper_body_span: body_span,
+                        detail: SummaryRejectionDetail::NonLoadOperand {
+                            op: root_kind,
+                            operand_index: 1,
+                        },
+                    }));
+                }
+            };
+            let values_ty = match dag.get(root.inputs[0]) {
+                Some(n) => n.output_type.clone(),
+                None => return Err(SparseSummaryAttempt::NotEligible),
+            };
+            let indices_ty = match dag.get(root.inputs[1]) {
+                Some(n) => n.output_type.clone(),
+                None => return Err(SparseSummaryAttempt::NotEligible),
+            };
             if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
-                return None;
+                return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                    rejection_class: SummaryRejectionClass::IndicesDTypeMismatch,
+                    helper_body_span: body_span,
+                    detail: SummaryRejectionDetail::IndicesDTypeMismatch {
+                        op: root_kind,
+                        observed: indices_ty.precision,
+                    },
+                }));
             }
             if values_ty.precision != output.precision {
-                return None;
+                return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                    rejection_class: SummaryRejectionClass::PayloadDTypeMismatch,
+                    helper_body_span: body_span,
+                    detail: SummaryRejectionDetail::PayloadDTypeMismatch {
+                        op: root_kind,
+                        which: PayloadRole::Values,
+                        expected: output.precision,
+                        observed: values_ty.precision,
+                    },
+                }));
             }
-            Some(HostTensorSpecialization::SparseGather(
+            Ok(HostTensorSpecialization::SparseGather(
                 HostSparseOpSummary {
                     axis: *axis,
                     input_indices: vec![values_idx, indices_idx],
@@ -1448,19 +2283,99 @@ fn summarize_sparse_helper_from_parts(
         RiscOp::ScatterAdd { axis } | RiscOp::Scatter { axis } => {
             // Inputs: [target, indices, updates].
             if root.inputs.len() != 3 {
-                return None;
+                return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                    rejection_class: SummaryRejectionClass::NonLoadOperand,
+                    helper_body_span: body_span,
+                    detail: SummaryRejectionDetail::NonLoadOperand {
+                        op: root_kind,
+                        operand_index: root.inputs.len().min(2),
+                    },
+                }));
             }
-            let target_idx = helper_load_input_index(dag, root.inputs[0], inputs)?;
-            let indices_idx = helper_load_input_index(dag, root.inputs[1], inputs)?;
-            let updates_idx = helper_load_input_index(dag, root.inputs[2], inputs)?;
-            let target_ty = dag.get(root.inputs[0])?.output_type.clone();
-            let indices_ty = dag.get(root.inputs[1])?.output_type.clone();
-            let updates_ty = dag.get(root.inputs[2])?.output_type.clone();
+            let target_idx = match helper_load_input_index(dag, root.inputs[0], inputs) {
+                Some(i) => i,
+                None => {
+                    return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                        rejection_class: SummaryRejectionClass::NonLoadOperand,
+                        helper_body_span: body_span,
+                        detail: SummaryRejectionDetail::NonLoadOperand {
+                            op: root_kind,
+                            operand_index: 0,
+                        },
+                    }));
+                }
+            };
+            let indices_idx = match helper_load_input_index(dag, root.inputs[1], inputs) {
+                Some(i) => i,
+                None => {
+                    return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                        rejection_class: SummaryRejectionClass::NonLoadOperand,
+                        helper_body_span: body_span,
+                        detail: SummaryRejectionDetail::NonLoadOperand {
+                            op: root_kind,
+                            operand_index: 1,
+                        },
+                    }));
+                }
+            };
+            let updates_idx = match helper_load_input_index(dag, root.inputs[2], inputs) {
+                Some(i) => i,
+                None => {
+                    return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                        rejection_class: SummaryRejectionClass::NonLoadOperand,
+                        helper_body_span: body_span,
+                        detail: SummaryRejectionDetail::NonLoadOperand {
+                            op: root_kind,
+                            operand_index: 2,
+                        },
+                    }));
+                }
+            };
+            let target_ty = match dag.get(root.inputs[0]) {
+                Some(n) => n.output_type.clone(),
+                None => return Err(SparseSummaryAttempt::NotEligible),
+            };
+            let indices_ty = match dag.get(root.inputs[1]) {
+                Some(n) => n.output_type.clone(),
+                None => return Err(SparseSummaryAttempt::NotEligible),
+            };
+            let updates_ty = match dag.get(root.inputs[2]) {
+                Some(n) => n.output_type.clone(),
+                None => return Err(SparseSummaryAttempt::NotEligible),
+            };
             if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
-                return None;
+                return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                    rejection_class: SummaryRejectionClass::IndicesDTypeMismatch,
+                    helper_body_span: body_span,
+                    detail: SummaryRejectionDetail::IndicesDTypeMismatch {
+                        op: root_kind,
+                        observed: indices_ty.precision,
+                    },
+                }));
             }
-            if target_ty.precision != output.precision || updates_ty.precision != output.precision {
-                return None;
+            if target_ty.precision != output.precision {
+                return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                    rejection_class: SummaryRejectionClass::PayloadDTypeMismatch,
+                    helper_body_span: body_span,
+                    detail: SummaryRejectionDetail::PayloadDTypeMismatch {
+                        op: root_kind,
+                        which: PayloadRole::Target,
+                        expected: output.precision,
+                        observed: target_ty.precision,
+                    },
+                }));
+            }
+            if updates_ty.precision != output.precision {
+                return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
+                    rejection_class: SummaryRejectionClass::PayloadDTypeMismatch,
+                    helper_body_span: body_span,
+                    detail: SummaryRejectionDetail::PayloadDTypeMismatch {
+                        op: root_kind,
+                        which: PayloadRole::Updates,
+                        expected: output.precision,
+                        observed: updates_ty.precision,
+                    },
+                }));
             }
             let summary = HostSparseOpSummary {
                 axis: *axis,
@@ -1468,14 +2383,76 @@ fn summarize_sparse_helper_from_parts(
                 input_tys,
                 output: output.clone(),
             };
-            Some(match &root.op {
+            Ok(match &root.op {
                 RiscOp::ScatterAdd { .. } => HostTensorSpecialization::SparseScatterAdd(summary),
                 RiscOp::Scatter { .. } => HostTensorSpecialization::SparseScatterReplace(summary),
                 _ => unreachable!("matched arm guarantees op kind"),
             })
         }
+        _ => unreachable!("root_sparse_kind.is_some() guard rules out non-sparse roots"),
+    }
+}
+
+/// Map a `RiscOp` to a `SparseOpKind`. Returns `None` for non-sparse
+/// ops. Used to detect "near-eligible" helpers and to populate
+/// rejection-class details with the specific sparse op that was
+/// rejected.
+fn sparse_op_kind(op: &RiscOp) -> Option<SparseOpKind> {
+    match op {
+        RiscOp::Gather { .. } => Some(SparseOpKind::Gather),
+        RiscOp::ScatterAdd { .. } => Some(SparseOpKind::ScatterAdd),
+        RiscOp::Scatter { .. } => Some(SparseOpKind::ScatterReplace),
         _ => None,
     }
+}
+
+/// Canonical snake-case name for a `RiscOp` for use in
+/// `SummaryRejectionDetail::PostProcessingAfterSparseOp::tail_op`.
+/// Mirrors the user-facing Surf builtin name where one exists. The
+/// surface is intentionally a small whitelist of "tail ops that
+/// commonly appear above a rejected sparse op in user code"; opaque
+/// `<other>` is the safe default for everything else.
+fn risc_op_canonical_name(op: &RiscOp) -> &'static str {
+    match op {
+        RiscOp::Add => "add",
+        RiscOp::Mul => "mul",
+        RiscOp::Neg => "neg",
+        RiscOp::Abs => "abs",
+        RiscOp::Reshape { .. } => "reshape",
+        RiscOp::Expand { .. } => "expand",
+        RiscOp::Cast { .. } => "cast",
+        RiscOp::Permute { .. } => "permute",
+        RiscOp::Load { .. } => "load",
+        RiscOp::Const { .. } => "const",
+        RiscOp::BlasMatmul { .. } => "blas_matmul",
+        RiscOp::Gather { .. } => "gather",
+        RiscOp::ScatterAdd { .. } => "scatter_add",
+        RiscOp::Scatter { .. } => "scatter_replace",
+        RiscOp::Sum { .. } => "sum",
+        RiscOp::Copy => "copy",
+        RiscOp::Drop => "drop",
+        RiscOp::Realize => "realize",
+        // Fallback: opaque rather than panicking, because the
+        // canonical-name surface is exhaustive for the ops the
+        // recognizer cares about but not for every RiscOp.
+        _ => "<other>",
+    }
+}
+
+/// Returns the location of the first `Named("*", None)` wildcard dim
+/// in (output, inputs[0], inputs[1], ...), or `None` if no wildcard
+/// is present. Output is checked first so that "wildcard in output"
+/// is reported preferentially.
+fn wildcard_location(output: &TensorType, inputs: &[HostTensorInput]) -> Option<WildcardLocation> {
+    if tensor_type_has_wildcard_dim(output) {
+        return Some(WildcardLocation::Output);
+    }
+    for (idx, input) in inputs.iter().enumerate() {
+        if tensor_type_has_wildcard_dim(&input.ty) {
+            return Some(WildcardLocation::Input(idx));
+        }
+    }
+    None
 }
 
 /// `true` when `ty` carries at least one wildcard dim
