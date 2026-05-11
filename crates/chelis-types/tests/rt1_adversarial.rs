@@ -147,7 +147,7 @@ fn out_of_i32_range_literal_default_behavior() {
     match res {
         Ok(_) => panic!(
             "spec §5.3: literal `2147483648` does NOT fit int32 (the §5.3 default). \
-             Program type-checked silently — this is silent integer overflow. \
+             Program type-checked silently, which is silent integer overflow. \
              Expected an out-of-range diagnostic; got accepted program."
         ),
         Err(rep) => {
