@@ -17,22 +17,59 @@
 //! Manual gate per AGENTS.md: not part of default CI. To run:
 //!
 //! ```sh
-//! HSA_OVERRIDE_GFX_VERSION=11.5.1 \
-//! LD_LIBRARY_PATH=$WHEEL_CORE/lib:$WHEEL_GFX/lib \
-//! HIPCC_COMPILE_FLAGS_APPEND="-isystem $WHEEL_CORE/include -L$WHEEL_GFX/lib" \
-//! cargo test -p chelis-cli --test cross_library_semantic_gap_hip_gpu -- \
-//!     --ignored --test-threads=1
+//! scripts/hip_test.py -p chelis-cli --test cross_library_semantic_gap_hip_gpu \
+//!     -- --ignored --test-threads=1
 //! ```
+//!
+//! That wrapper sets the full hipBLAS env per `docs/local_hip_environment.md`.
+//! The panic-site hint below detects when that env is incomplete.
 //!
 //! The structural test pins the dispatch shape (row-major sgemm at 8x16 @
 //! 16x4); this gate proves the dispatched call is numerically correct.
 
+use std::env;
 use std::fs;
 use std::path::Path;
-use std::process::Command as StdCommand;
+use std::process::{Command as StdCommand, Output};
 
 use assert_cmd::cargo::CommandCargoExt;
 use tempfile::tempdir;
+
+const GFX1151_LIB_FRAGMENT: &str = "_rocm_sdk_libraries_gfx1151/lib";
+const REQUIRED_HSA_OVERRIDE: &str = "11.5.1";
+
+fn hipblas_env_hint() -> String {
+    // This file always exercises hipBLAS, so unconditionally check env on failure.
+    let flags = env::var("HIPCC_COMPILE_FLAGS_APPEND").unwrap_or_default();
+    let gfx = env::var("HSA_OVERRIDE_GFX_VERSION").unwrap_or_default();
+    let ld = env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    let missing_l = !flags.contains(GFX1151_LIB_FRAGMENT);
+    let wrong_gfx = gfx != REQUIRED_HSA_OVERRIDE;
+    let missing_ld = !ld.contains(GFX1151_LIB_FRAGMENT);
+    if !(missing_l || wrong_gfx || missing_ld) {
+        return String::new();
+    }
+    format!(
+        "\n\nhint: empty output is the signature of a process-exit SIGSEGV from \
+         a mismatched ROCm stack. See docs/local_hip_environment.md §3 and re-run \
+         via scripts/hip_test.py, or set:\n  \
+         HSA_OVERRIDE_GFX_VERSION=11.5.1 (got {gfx:?})\n  \
+         LD_LIBRARY_PATH must contain {GFX1151_LIB_FRAGMENT} (got {ld:?})\n  \
+         HIPCC_COMPILE_FLAGS_APPEND must contain `-L .../{GFX1151_LIB_FRAGMENT}` (got {flags:?})"
+    )
+}
+
+fn assert_gpu_binary_success(name: &str, run: &Output) {
+    if run.status.success() {
+        return;
+    }
+    panic!(
+        "GPU binary failed for {name}:\nstderr:\n{}\nstdout:\n{}{}",
+        String::from_utf8_lossy(&run.stderr),
+        String::from_utf8_lossy(&run.stdout),
+        hipblas_env_hint()
+    );
+}
 
 /// Row-major reference matmul. Locked at f32 since the user-`def` fixture
 /// below is `tensor[8, 16, f32]` @ `tensor[16, 4, f32]`.
@@ -209,12 +246,7 @@ fn build_run_user_def_matmul_hip(source: &str, name: &str, a: &[f32], b: &[f32])
     let run = StdCommand::new(&bin_path)
         .output()
         .expect("run generated GPU binary");
-    assert!(
-        run.status.success(),
-        "GPU binary failed for {name}:\nstderr:\n{}\nstdout:\n{}",
-        String::from_utf8_lossy(&run.stderr),
-        String::from_utf8_lossy(&run.stdout),
-    );
+    assert_gpu_binary_success(name, &run);
 
     let stdout = String::from_utf8(run.stdout).expect("utf8 stdout");
     let line = stdout

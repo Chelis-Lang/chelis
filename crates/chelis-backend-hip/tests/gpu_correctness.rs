@@ -2,7 +2,14 @@
 //!
 //! These require a HIP-capable GPU plus `hipcc`/`hiprtc`.
 //! They are `#[ignore]` by default — run with:
-//!     cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+//!     scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+//!
+//! The `scripts/hip_test.py` wrapper sets the full hipBLAS env per
+//! `docs/local_hip_environment.md`. Running the raw `cargo test ...` command
+//! without that wrapper inherits only the systemd `environment.d/hip.conf`
+//! settings (the `-isystem` half of `HIPCC_COMPILE_FLAGS_APPEND` and
+//! `HSA_OVERRIDE_GFX_VERSION=11.0.0`), which segfaults at process exit for
+//! hipBLAS-dependent tests. The panic-site hint below detects this case.
 //!
 //! Manual gate per AGENTS.md: not part of default CI.
 
@@ -15,7 +22,47 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+
+const GFX1151_LIB_FRAGMENT: &str = "_rocm_sdk_libraries_gfx1151/lib";
+const REQUIRED_HSA_OVERRIDE: &str = "11.5.1";
+
+fn hipblas_env_hint(link_flags: &[String]) -> String {
+    let uses_hipblas = link_flags.iter().any(|f| f.contains("hipblas"));
+    if !uses_hipblas {
+        return String::new();
+    }
+    let flags = env::var("HIPCC_COMPILE_FLAGS_APPEND").unwrap_or_default();
+    let gfx = env::var("HSA_OVERRIDE_GFX_VERSION").unwrap_or_default();
+    let ld = env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    let missing_l = !flags.contains(GFX1151_LIB_FRAGMENT);
+    let wrong_gfx = gfx != REQUIRED_HSA_OVERRIDE;
+    let missing_ld = !ld.contains(GFX1151_LIB_FRAGMENT);
+    if !(missing_l || wrong_gfx || missing_ld) {
+        return String::new();
+    }
+    format!(
+        "\n\nhint: this test uses hipBLAS; the empty output is the signature \
+         of a process-exit SIGSEGV from a mismatched ROCm stack. \
+         See docs/local_hip_environment.md §3 and re-run via scripts/hip_test.py, \
+         or set:\n  \
+         HSA_OVERRIDE_GFX_VERSION=11.5.1 (got {gfx:?})\n  \
+         LD_LIBRARY_PATH must contain {GFX1151_LIB_FRAGMENT} (got {ld:?})\n  \
+         HIPCC_COMPILE_FLAGS_APPEND must contain `-L .../{GFX1151_LIB_FRAGMENT}` (got {flags:?})"
+    )
+}
+
+fn assert_gpu_binary_success(run: &Output, link_flags: &[String]) {
+    if run.status.success() {
+        return;
+    }
+    panic!(
+        "GPU binary failed:\nstdout: {}\nstderr: {}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr),
+        hipblas_env_hint(link_flags)
+    );
+}
 
 #[derive(Clone)]
 struct TestInput {
@@ -404,12 +451,7 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
     );
 
     let run = Command::new(&bin_path).output().expect("run gpu binary");
-    assert!(
-        run.status.success(),
-        "GPU binary failed:\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&run.stdout),
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_gpu_binary_success(&run, &result.link_flags);
     let stdout = String::from_utf8(run.stdout).expect("utf8 stdout");
     stdout
         .lines()
@@ -475,12 +517,7 @@ fn compile_and_run_output_cases(
     );
 
     let run = Command::new(&bin_path).output().expect("run gpu binary");
-    assert!(
-        run.status.success(),
-        "GPU binary failed:\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&run.stdout),
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_gpu_binary_success(&run, &result.link_flags);
     String::from_utf8(run.stdout)
         .expect("utf8 stdout")
         .lines()

@@ -154,6 +154,15 @@ default workspace run.
 This workstation has a reconciled AMD/ROCm HIP setup, so HIP manual gates are locally
 runnable. The authoritative runbook is [`docs/local_hip_environment.md`](docs/local_hip_environment.md).
 
+**For any HIP manual gate (especially hipBLAS-linked tests), run via**
+`scripts/hip_test.py` — e.g.
+`scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`.
+The wrapper sets `HSA_OVERRIDE_GFX_VERSION=11.5.1`, the full `LD_LIBRARY_PATH`, and
+the full `HIPCC_COMPILE_FLAGS_APPEND` (including `-L` to the gfx1151 wheel lib that
+hipBLAS link resolution needs). Plain `cargo test --ignored` inherits only the
+`environment.d/hip.conf` defaults, which segfault hipBLAS-linked binaries at process
+exit with empty output — looks like a code regression but is purely environmental.
+
 Key durable invariant: the wheel ROCm stack is authoritative, and
 `~/.config/environment.d/hip.conf` provides the `HIPCC_COMPILE_FLAGS_APPEND` include
 override so non-interactive shells and `cargo test --workspace` resolve HIP headers from
