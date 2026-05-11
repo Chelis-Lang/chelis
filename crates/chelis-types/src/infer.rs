@@ -2285,37 +2285,53 @@ fn walk_for_tensor_precision(
                     && let deep::Expr::List(prec_list, _) = last
                     && get_tag(prec_list) == Some("t-prim")
                     && let Some(name) = children(prec_list).first().and_then(symbol_name)
-                    && let Some(prim) = Prim::parse_name(name)
-                    && !prim.is_valid_tensor_precision()
-                    && seen.insert((def_context.to_string(), name.to_string()))
                 {
                     let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-                    if matches!(prim, Prim::F8e4m3) {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::UnsupportedTensorPrecision,
-                            format!(
-                                "tensor element precision `f8e4m3` is deferred per \
-                                 spec/04-type-system.md §1.1.1 and is not part of the active \
-                                 numeric primitive set ({active_set})",
-                            ),
-                            vec![format!(
-                                "f8e4m3 has no active backend in this cycle; pick one of \
-                                 {active_set} or see spec/04-type-system.md §1.1.1 for the \
-                                 deferral rationale",
-                            )],
-                        ));
-                    } else {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::UnsupportedTensorPrecision,
-                            format!(
-                                "tensor element precision `{name}` is not supported by the \
-                                 current backend set (supported: {active_set})",
-                            ),
-                            vec![format!(
-                                "Use tensor[..., f32] and cast host scalars explicitly, or \
-                                 keep `{name}` as a host scalar",
-                            )],
-                        ));
+                    // A1 (WS-A0 RT-1 fixup): unsigned dtype names per
+                    // spec/04-type-system.md §1.1.2. Mirror the f8e4m3
+                    // §1.1.1 rejection contract — these names never
+                    // resolve through `Prim::parse_name`, so without
+                    // this guard `tensor[..., u8]` would silently fall
+                    // through with no diagnostic.
+                    if is_unsigned_dtype_name(name)
+                        && seen.insert((def_context.to_string(), name.to_string()))
+                    {
+                        if let Some(diag) =
+                            unsigned_family_diagnostic(name, /* tensor = */ true)
+                        {
+                            errors.push(diag);
+                        }
+                    } else if let Some(prim) = Prim::parse_name(name)
+                        && !prim.is_valid_tensor_precision()
+                        && seen.insert((def_context.to_string(), name.to_string()))
+                    {
+                        if matches!(prim, Prim::F8e4m3) {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::UnsupportedTensorPrecision,
+                                format!(
+                                    "tensor element precision `f8e4m3` is deferred per \
+                                     spec/04-type-system.md §1.1.1 and is not part of the active \
+                                     numeric primitive set ({active_set})",
+                                ),
+                                vec![format!(
+                                    "f8e4m3 has no active backend in this cycle; pick one of \
+                                     {active_set} or see spec/04-type-system.md §1.1.1 for the \
+                                     deferral rationale",
+                                )],
+                            ));
+                        } else {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::UnsupportedTensorPrecision,
+                                format!(
+                                    "tensor element precision `{name}` is not supported by the \
+                                     current backend set (supported: {active_set})",
+                                ),
+                                vec![format!(
+                                    "Use tensor[..., f32] and cast host scalars explicitly, or \
+                                     keep `{name}` as a host scalar",
+                                )],
+                            ));
+                        }
                     }
                 }
             }
@@ -4285,7 +4301,7 @@ fn infer_expr(
             let tag = get_tag(list);
             match tag {
                 Some("var") => infer_var(list, env, vg, subst, errors),
-                Some("lit") => infer_lit(list, vg, adt_reg),
+                Some("lit") => infer_lit(list, vg, adt_reg, errors),
                 Some("app") => infer_app(
                     list,
                     env,
@@ -4541,6 +4557,21 @@ fn infer_expr(
 
 fn infer_atom(atom: &deep::Atom) -> Type {
     match atom {
+        // D1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.3 the
+        // lexer parses unsuffixed integer tokens at i64 so that
+        // out-of-range literals can be diagnosed before the int32
+        // narrowing. The bare-atom path is the value-only fallback for
+        // Deep code that bypasses the desugarer's `(lit {type: int32}
+        // N)` wrapping; the same range check is enforced more visibly
+        // at `infer_lit` where the type metadata is in scope.
+        // Out-of-range here would silently wrap to a negative i32 if
+        // we let it default unchecked — exactly what §5.3 forbids.
+        // We can't push errors from this signature; the lit-form path
+        // in `infer_lit` is the user-facing diagnostic site, and
+        // bare-atom Deep code never round-trips through the surf
+        // surface where the diagnostic is mandatory. Pin the decision
+        // here so a future refactor doesn't mistakenly read this as
+        // dead code.
         deep::Atom::Int(_) => Type::Prim(Prim::Int32),
         deep::Atom::Float(_) => Type::Prim(Prim::F32),
         deep::Atom::Bool(_) => Type::Prim(Prim::Bool),
@@ -4581,9 +4612,58 @@ fn infer_var(
     }
 }
 
-fn infer_lit(list: &deep::List, vg: &mut VarGen, adt_reg: &AdtRegistry) -> Type {
+fn infer_lit(
+    list: &deep::List,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+) -> Type {
     let meta = get_meta(list);
     let kids = children(list);
+
+    // D1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.3 last
+    // paragraph, the lexer parses unsuffixed integer literals at i64
+    // so that out-of-range literals can be diagnosed before the
+    // int32 narrowing. The desugarer attaches `type: int32` ahead of
+    // type-check (because §5.3 declares int32 as the default), so
+    // here we check whether the underlying i64 value actually fits in
+    // i32. If it doesn't, emit the §5.3 diagnostic before defaulting
+    // — silently wrapping to a negative i32 is the bug §5.3 was
+    // written to prevent.
+    let value_atom = kids.first();
+    let meta_int32 = meta.is_some_and(|m| {
+        m.entries.iter().any(|(k, v)| {
+            k == "type" && {
+                if let deep::Expr::List(inner, _) = v
+                    && get_tag(inner) == Some("t-prim")
+                    && let Some(name) = children(inner).first().and_then(symbol_name)
+                {
+                    name == "int32"
+                } else {
+                    false
+                }
+            }
+        })
+    });
+    if meta_int32
+        && let Some(deep::Expr::Atom(deep::Atom::Int(n), _)) = value_atom
+        && i32::try_from(*n).is_err()
+    {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!(
+                "literal {n} out of range for default int32; suggest `i64` \
+                 suffix (after WS-B1) or explicit cast({n}, i64) \
+                 (spec/04-type-system.md §5.3)"
+            ),
+            vec![format!(
+                "spec/04-type-system.md §5.3: integer literals default to int32; \
+                 the lexer parses at i64 so out-of-range tokens can be diagnosed \
+                 before the narrowing rather than wrapping silently"
+            )],
+        ));
+        return Type::Error;
+    }
 
     // Check metadata for type annotation
     if let Some(meta) = meta {
@@ -4597,7 +4677,32 @@ fn infer_lit(list: &deep::List, vg: &mut VarGen, adt_reg: &AdtRegistry) -> Type 
     // Fall back to value-based defaults
     if let Some(val) = kids.first() {
         match val {
-            deep::Expr::Atom(deep::Atom::Int(_), _) => Type::Prim(Prim::Int32),
+            deep::Expr::Atom(deep::Atom::Int(n), _) => {
+                // D1 (WS-A0 RT-1 fixup): same check as the metadata
+                // path above but for Deep producers that omit the
+                // explicit `type: int32` ascription on a `(lit {} N)`
+                // form. Without this guard the bare-form path would
+                // silently default to int32 and wrap.
+                if i32::try_from(*n).is_err() {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "literal {n} out of range for default int32; suggest \
+                             `i64` suffix (after WS-B1) or explicit cast({n}, i64) \
+                             (spec/04-type-system.md §5.3)"
+                        ),
+                        vec![format!(
+                            "spec/04-type-system.md §5.3: integer literals default \
+                             to int32; the lexer parses at i64 so out-of-range \
+                             tokens can be diagnosed before the narrowing rather \
+                             than wrapping silently"
+                        )],
+                    ));
+                    Type::Error
+                } else {
+                    Type::Prim(Prim::Int32)
+                }
+            }
             deep::Expr::Atom(deep::Atom::Float(_), _) => Type::Prim(Prim::F32),
             deep::Expr::Atom(deep::Atom::Bool(_), _) => Type::Prim(Prim::Bool),
             deep::Expr::Atom(deep::Atom::Str(_), _) => Type::Prim(Prim::String),
@@ -8956,6 +9061,19 @@ fn infer_cast(
     let resolved = subst.apply(&expr_ty);
 
     // kids[1] = (t-prim {} new_precision)
+    // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2, unsigned
+    // integer types (u8/u16/u32/u64 and the uint8/uint16/uint32/uint64
+    // alias family) are explicitly out of scope for this cycle. They
+    // never resolve through `Prim::parse_name`, so without this guard
+    // `cast(_, u8)` would silently fall through to `Type::Error` with
+    // no diagnostic — exactly the silent-cast pattern §1.1.1 was added
+    // to avoid for f8e4m3. Mirror the f8e4m3 rejection path here.
+    if let Some(name) = cast_target_prim_name(&kids[1])
+        && let Some(diag) = unsigned_family_diagnostic(name, /* tensor = */ false)
+    {
+        errors.push(diag);
+        return Type::Error;
+    }
     let new_prec = match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new()) {
         Type::Prim(p) => p,
         _ => return Type::Error,
@@ -8986,6 +9104,55 @@ fn infer_cast(
             Type::Error
         }
     }
+}
+
+/// Extract the symbol-name from a `(t-prim {} <name>)` Deep node so a
+/// rejection path can run before `Prim::parse_name` returns `None` and
+/// erases the spelling. Returns `None` for any other shape.
+fn cast_target_prim_name(expr: &deep::Expr) -> Option<&str> {
+    let list = match expr {
+        deep::Expr::List(l, _) => l,
+        _ => return None,
+    };
+    if get_tag(list) != Some("t-prim") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
+}
+
+/// True if `name` is one of the unsigned integer dtype names that
+/// `spec/04-type-system.md` §1.1.2 declares out of scope. Covers both
+/// the short form (`u8`/`u16`/`u32`/`u64`) and the explicit `uint*`
+/// alias family that LLMs and cross-language users tend to write.
+fn is_unsigned_dtype_name(name: &str) -> bool {
+    matches!(
+        name,
+        "u8" | "u16" | "u32" | "u64" | "uint8" | "uint16" | "uint32" | "uint64"
+    )
+}
+
+/// Build a §1.1.2 diagnostic for an unsigned dtype name appearing as a
+/// cast target or a tensor element type. Returns `None` for non-unsigned
+/// names so call sites can short-circuit with `&&`.
+fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
+    if !is_unsigned_dtype_name(name) {
+        return None;
+    }
+    let surface = if tensor { "tensor element" } else { "scalar" };
+    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    Some(CheckError::new(
+        CheckErrorKind::UnsupportedTensorPrecision,
+        format!(
+            "cannot use `{name}` as a {surface} dtype: unsigned integer types \
+             are out of scope per spec/04-type-system.md §1.1.2 (active set: \
+             {active_set})"
+        ),
+        vec![format!(
+            "spec/04-type-system.md §1.1.2 documents the workaround: cast to \
+             int32 or int64 and reason at the wider signed precision; or use \
+             a tensor of int8 / int16 / int32 / int64 if the bit-width matters"
+        )],
+    ))
 }
 
 /// Emit the canonical "unsupported precision" diagnostic for either a
