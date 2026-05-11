@@ -5398,10 +5398,15 @@ fn lint_fix_redundant_linearity_call_keeps_when_typed_pipeline_rejects() {
 }
 
 #[test]
-fn lint_fix_preserves_unproven_prefer_pipe_operator_rewrites() {
-    // The `prefer-pipe-operator` autofix remains disabled (per 477bd0d).
-    // Until its own re-enablement workstream lands, `chelis lint --fix`
-    // must leave the warning visible without rewriting source.
+fn lint_fix_prefer_pipe_operator_keeps_when_typed_pipeline_rejects() {
+    // The `prefer-pipe-operator` autofix is re-enabled (Agent 2 / F),
+    // gated on the typed-pipeline accepting the post-rewrite source
+    // (Path 1B per
+    // `docs/investigations/redundant_linearity_autofix_architecture.md`).
+    // This program references undefined `outer`, `inner`, `scale`, so the
+    // pre-rewrite source already fails the typed pipeline. The candidate
+    // post-rewrite source fails for the same reason. The Path 1B gate
+    // therefore silently drops the rewrite and the source is preserved.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pipe_warn.ch");
     let original = "def f(x: tensor[2, f32]) -> tensor[2, f32] = outer(inner(x), scale)\n";
@@ -5416,6 +5421,69 @@ fn lint_fix_preserves_unproven_prefer_pipe_operator_rewrites() {
     let rewritten = fs::read_to_string(&path).expect("read rewritten");
     assert!(rewritten.contains("outer(inner(x), scale)"));
     assert!(!rewritten.contains("|>"));
+}
+
+#[test]
+#[ignore = "F: prefer-pipe-operator autofix re-enable, see docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md"]
+fn lint_fix_prefer_pipe_operator_rewrites_when_typed_pipeline_accepts() {
+    // Positive case: a nested first-argument call chain over stdlib
+    // unary builtins `neg` and `relu`. Both nested and piped forms
+    // type-check (verified with `chelis check`), so the Path 1B gate
+    // accepts the rewrite.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_rewrite.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let rewritten = fs::read_to_string(&path).expect("read rewritten");
+    assert!(
+        rewritten.contains("|>"),
+        "expected autofix to introduce `|>`, got:\n{rewritten}"
+    );
+    assert!(
+        !rewritten.contains("relu(neg(x))"),
+        "expected the nested call to be rewritten, got:\n{rewritten}"
+    );
+    // The canonical first-argument-insertion rewrite of `relu(neg(x))`
+    // is `x |> neg |> relu` per spec §3.6.
+    assert!(
+        rewritten.contains("x |> neg |> relu"),
+        "expected `x |> neg |> relu`, got:\n{rewritten}"
+    );
+}
+
+#[test]
+#[ignore = "F: prefer-pipe-operator autofix re-enable, see docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md"]
+fn lint_fix_prefer_pipe_operator_rewrites_multi_arg_outer_stage() {
+    // Second positive case: outer call carries extra arguments that
+    // must survive the rewrite as `f(...)` call-stage form.
+    // `add(neg(x), bias)` ≡ `x |> neg |> add(bias)` per spec §3.6.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_rewrite_multi.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[2, f32], bias: tensor[2, f32]) -> tensor[2, f32] = add(neg(x), bias)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let rewritten = fs::read_to_string(&path).expect("read rewritten");
+    assert!(
+        rewritten.contains("x |> neg |> add(bias)"),
+        "expected `x |> neg |> add(bias)`, got:\n{rewritten}"
+    );
 }
 
 #[test]
