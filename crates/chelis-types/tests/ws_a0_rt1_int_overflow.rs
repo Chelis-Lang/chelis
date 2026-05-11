@@ -40,15 +40,11 @@ fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
         "expected D1 range diagnostic; got: {messages:?}"
     );
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("`i64` suffix")),
+        messages.iter().any(|m| m.contains("`i64` suffix")),
         "diagnostic must suggest the i64 suffix workaround; got: {messages:?}"
     );
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("cast(2147483648, i64)")),
+        messages.iter().any(|m| m.contains("cast(2147483648, i64)")),
         "diagnostic must suggest the explicit cast workaround; got: {messages:?}"
     );
     assert!(

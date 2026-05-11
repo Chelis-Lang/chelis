@@ -2296,7 +2296,8 @@ fn walk_for_tensor_precision(
                     if is_unsigned_dtype_name(name)
                         && seen.insert((def_context.to_string(), name.to_string()))
                     {
-                        if let Some(diag) = unsigned_family_diagnostic(name, /* tensor = */ true)
+                        if let Some(diag) =
+                            unsigned_family_diagnostic(name, /* tensor = */ true)
                         {
                             errors.push(diag);
                         }
@@ -4635,8 +4636,7 @@ fn infer_lit(
             k == "type" && {
                 if let deep::Expr::List(inner, _) = v
                     && get_tag(inner) == Some("t-prim")
-                    && let Some(name) =
-                        children(inner).first().and_then(symbol_name)
+                    && let Some(name) = children(inner).first().and_then(symbol_name)
                 {
                     name == "int32"
                 } else {
@@ -9127,13 +9127,7 @@ fn cast_target_prim_name(expr: &deep::Expr) -> Option<&str> {
 fn is_unsigned_dtype_name(name: &str) -> bool {
     matches!(
         name,
-        "u8" | "u16"
-            | "u32"
-            | "u64"
-            | "uint8"
-            | "uint16"
-            | "uint32"
-            | "uint64"
+        "u8" | "u16" | "u32" | "u64" | "uint8" | "uint16" | "uint32" | "uint64"
     )
 }
 

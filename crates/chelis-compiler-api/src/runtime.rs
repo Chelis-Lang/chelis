@@ -2876,10 +2876,7 @@ fn int_binop(args: &[RuntimeValue], op: impl Fn(i64, i64) -> i64) -> Result<Runt
             // operands, and fails closed for mixed widths.
             let (ldt, rdt) = (lp.dtype(), rp.dtype());
             let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            RuntimeValue::scalar_like_int(
-                result_dtype,
-                op(lp.bits().as_i64(), rp.bits().as_i64()),
-            )
+            RuntimeValue::scalar_like_int(result_dtype, op(lp.bits().as_i64(), rp.bits().as_i64()))
         }
         other => Err(format!("integer op expects int args, got {other:?}")),
     }
@@ -2923,16 +2920,12 @@ fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
             if lp.dtype().is_integer() && rp.dtype().is_integer() =>
         {
-            Ok(RuntimeValue::Bool(
-                lp.bits().as_i64() == rp.bits().as_i64(),
-            ))
+            Ok(RuntimeValue::Bool(lp.bits().as_i64() == rp.bits().as_i64()))
         }
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
         {
-            Ok(RuntimeValue::Bool(
-                lp.bits().as_f64() == rp.bits().as_f64(),
-            ))
+            Ok(RuntimeValue::Bool(lp.bits().as_f64() == rp.bits().as_f64()))
         }
         (Some(RuntimeValue::Bool(lhs)), Some(RuntimeValue::Bool(rhs))) => {
             Ok(RuntimeValue::Bool(lhs == rhs))
@@ -4567,7 +4560,16 @@ fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Expr {
         Prim::F64 => "f64",
         Prim::F16 => "f16",
         Prim::Bf16 => "bf16",
-        Prim::F8e4m3 => "f8e4m3",
+        // E2 (WS-A0 RT-1 fixup, sibling sweep): per
+        // spec/04-type-system.md §1.1.1 f8e4m3 is deferred and the
+        // type checker rejects it upstream. If a TensorType reaches
+        // this Deep re-encoder with f8e4m3 precision, the upstream
+        // rejection has a hole — panic rather than emit a
+        // `(t-prim {} f8e4m3)` node into a synthesized Deep var.
+        Prim::F8e4m3 => panic!(
+            "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
+             should have been rejected upstream"
+        ),
         Prim::Int8 => "int8",
         Prim::Int16 => "int16",
         Prim::Int32 => "int32",
@@ -5522,6 +5524,50 @@ y = softmax(x, cast(5, int32))
         }
     }
 
+    // ----------------------------------------------------------------
+    // RT-1 finding (C1): the original RT-1 test landed in
+    // origin/rt1-redteam-findings exercised
+    //
+    //     RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }
+    //
+    // directly — that struct-literal form bypassed the
+    // `RuntimeValue::scalar()` invariant check. Post-C1 the variant is
+    // a tuple over the sealed `ScalarPayload` newtype; the same code
+    // would no longer compile because the variant is no longer
+    // struct-shaped and the payload's fields are private. Pin the
+    // closed-finding evidence directly: the only construction path
+    // (`ScalarPayload::new`) returns the typed mismatch error rather
+    // than silently constructing an invariant-broken value.
+    // ----------------------------------------------------------------
+
+    /// RT-1 closed finding C1: post-fix evidence that the only
+    /// in-tree construction path enforces the dtype/bits invariant.
+    #[test]
+    fn rt1_struct_literal_for_mismatched_scalar_payload_is_blocked_post_c1() {
+        // The pre-fix RT-1 test built
+        //     RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(1.5) }
+        // verbatim. With the C1 refactor that line no longer compiles
+        // because `RuntimeValue::Scalar` is now `Scalar(ScalarPayload)`
+        // and `ScalarPayload` has private fields.
+        //
+        // The runtime-side invariant pin: the only legal construction
+        // path (`ScalarPayload::new`) rejects the same mismatched pair
+        // with the typed `ScalarMismatchError`.
+        let err = ScalarPayload::new(Prim::F16, ScalarBits::F32(1.5))
+            .expect_err("post-C1: every Scalar construction path enforces the invariant");
+        assert_eq!(err.dtype, Prim::F16);
+        assert_eq!(err.bits_dtype, Prim::F32);
+        assert_eq!(
+            err.dtype,
+            Prim::F16,
+            "post-C1: the requested dtype field is preserved in the error"
+        );
+        assert_ne!(
+            err.dtype, err.bits_dtype,
+            "post-C1: the typed error names both sides of the contradiction"
+        );
+    }
+
     /// C1 (WS-A0 RT-1 fixup): `ScalarPayload::new` rejects every
     /// mismatched dtype/bits pair. Before C1, an in-crate caller could
     /// write `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
@@ -5608,11 +5654,9 @@ y = softmax(x, cast(5, int32))
         let src = r#"
 def main -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
 "#;
-        let res = chelis_types::check_ir_program(
-            &chelis_surf::desugar::desugar_program(
-                &chelis_surf::parser::parse_str(src).expect("surf parse"),
-            ),
-        );
+        let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(src).expect("surf parse"),
+        ));
         assert!(
             res.is_err(),
             "spec §5.1 forbids implicit precision promotion; \
