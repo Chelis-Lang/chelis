@@ -1,21 +1,15 @@
-//! Pipe-stage lowering: pin the gap and the controls.
+//! Pipe-stage lowering: pin all four supported callable shapes.
 //!
 //! `lower_pipe()` in `crates/chelis-ir/src/lower.rs` chains a seed value
-//! through stages. Plain function and `vmap` stages already lower; `grad`
-//! and `vmap(grad)` callable stages currently route to
-//! `lower_unrepresentable("pipe stage", ...)` and emit
-//! "pipe stage is not supported by IR evaluation yet".
+//! through stages. Plain function, `vmap`, `grad`, and `vmap(grad)`
+//! callable stages all lower via the shared non-pipe construction.
 //!
 //! This file pins all four shapes:
 //!
-//! 1. Plain unary builtin (`x |> relu`) — control, expected pass today.
-//! 2. Plain callable with extra args (`x |> add(a)` ≡ `add(x, a)`) — control,
-//!    expected pass today.
-//! 3. `x |> grad(f)` ≡ `grad(f)(x)` — expected fail; primary target.
-//! 4. `xs |> vmap(grad(f))` ≡ `vmap(grad(f))(xs)` — expected fail; second
-//!    target.
-//!
-//! Fixtures 3 and 4 are `#[ignore]` until the fix lands.
+//! 1. Plain unary builtin (`x |> relu`).
+//! 2. Plain callable with extra args (`x |> add(a)` ≡ `add(x, a)`).
+//! 3. `x |> grad(f)` ≡ `grad(f)(x)`.
+//! 4. `xs |> vmap(grad(f))` ≡ `vmap(grad(f))(xs)`.
 
 use std::collections::HashMap;
 
@@ -130,7 +124,6 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "pipe grad stage gap; flipped to running by the fix commit (Item 2)"]
 fn pipe_grad_stage_matches_non_pipe_application() {
     let fn_src = r#"
         (fn {}
@@ -216,7 +209,6 @@ fn pipe_grad_stage_matches_non_pipe_application() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "pipe vmap(grad) stage gap; flipped to running by the fix commit (Item 2)"]
 fn pipe_vmap_grad_stage_matches_non_pipe_application() {
     let fn_src = r#"
         (fn {}
