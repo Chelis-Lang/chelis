@@ -2285,37 +2285,52 @@ fn walk_for_tensor_precision(
                     && let deep::Expr::List(prec_list, _) = last
                     && get_tag(prec_list) == Some("t-prim")
                     && let Some(name) = children(prec_list).first().and_then(symbol_name)
-                    && let Some(prim) = Prim::parse_name(name)
-                    && !prim.is_valid_tensor_precision()
-                    && seen.insert((def_context.to_string(), name.to_string()))
                 {
                     let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-                    if matches!(prim, Prim::F8e4m3) {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::UnsupportedTensorPrecision,
-                            format!(
-                                "tensor element precision `f8e4m3` is deferred per \
-                                 spec/04-type-system.md §1.1.1 and is not part of the active \
-                                 numeric primitive set ({active_set})",
-                            ),
-                            vec![format!(
-                                "f8e4m3 has no active backend in this cycle; pick one of \
-                                 {active_set} or see spec/04-type-system.md §1.1.1 for the \
-                                 deferral rationale",
-                            )],
-                        ));
-                    } else {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::UnsupportedTensorPrecision,
-                            format!(
-                                "tensor element precision `{name}` is not supported by the \
-                                 current backend set (supported: {active_set})",
-                            ),
-                            vec![format!(
-                                "Use tensor[..., f32] and cast host scalars explicitly, or \
-                                 keep `{name}` as a host scalar",
-                            )],
-                        ));
+                    // A1 (WS-A0 RT-1 fixup): unsigned dtype names per
+                    // spec/04-type-system.md §1.1.2. Mirror the f8e4m3
+                    // §1.1.1 rejection contract — these names never
+                    // resolve through `Prim::parse_name`, so without
+                    // this guard `tensor[..., u8]` would silently fall
+                    // through with no diagnostic.
+                    if is_unsigned_dtype_name(name)
+                        && seen.insert((def_context.to_string(), name.to_string()))
+                    {
+                        if let Some(diag) = unsigned_family_diagnostic(name, /* tensor = */ true)
+                        {
+                            errors.push(diag);
+                        }
+                    } else if let Some(prim) = Prim::parse_name(name)
+                        && !prim.is_valid_tensor_precision()
+                        && seen.insert((def_context.to_string(), name.to_string()))
+                    {
+                        if matches!(prim, Prim::F8e4m3) {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::UnsupportedTensorPrecision,
+                                format!(
+                                    "tensor element precision `f8e4m3` is deferred per \
+                                     spec/04-type-system.md §1.1.1 and is not part of the active \
+                                     numeric primitive set ({active_set})",
+                                ),
+                                vec![format!(
+                                    "f8e4m3 has no active backend in this cycle; pick one of \
+                                     {active_set} or see spec/04-type-system.md §1.1.1 for the \
+                                     deferral rationale",
+                                )],
+                            ));
+                        } else {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::UnsupportedTensorPrecision,
+                                format!(
+                                    "tensor element precision `{name}` is not supported by the \
+                                     current backend set (supported: {active_set})",
+                                ),
+                                vec![format!(
+                                    "Use tensor[..., f32] and cast host scalars explicitly, or \
+                                     keep `{name}` as a host scalar",
+                                )],
+                            ));
+                        }
                     }
                 }
             }
@@ -8956,6 +8971,19 @@ fn infer_cast(
     let resolved = subst.apply(&expr_ty);
 
     // kids[1] = (t-prim {} new_precision)
+    // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2, unsigned
+    // integer types (u8/u16/u32/u64 and the uint8/uint16/uint32/uint64
+    // alias family) are explicitly out of scope for this cycle. They
+    // never resolve through `Prim::parse_name`, so without this guard
+    // `cast(_, u8)` would silently fall through to `Type::Error` with
+    // no diagnostic — exactly the silent-cast pattern §1.1.1 was added
+    // to avoid for f8e4m3. Mirror the f8e4m3 rejection path here.
+    if let Some(name) = cast_target_prim_name(&kids[1])
+        && let Some(diag) = unsigned_family_diagnostic(name, /* tensor = */ false)
+    {
+        errors.push(diag);
+        return Type::Error;
+    }
     let new_prec = match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new()) {
         Type::Prim(p) => p,
         _ => return Type::Error,
@@ -8986,6 +9014,61 @@ fn infer_cast(
             Type::Error
         }
     }
+}
+
+/// Extract the symbol-name from a `(t-prim {} <name>)` Deep node so a
+/// rejection path can run before `Prim::parse_name` returns `None` and
+/// erases the spelling. Returns `None` for any other shape.
+fn cast_target_prim_name(expr: &deep::Expr) -> Option<&str> {
+    let list = match expr {
+        deep::Expr::List(l, _) => l,
+        _ => return None,
+    };
+    if get_tag(list) != Some("t-prim") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
+}
+
+/// True if `name` is one of the unsigned integer dtype names that
+/// `spec/04-type-system.md` §1.1.2 declares out of scope. Covers both
+/// the short form (`u8`/`u16`/`u32`/`u64`) and the explicit `uint*`
+/// alias family that LLMs and cross-language users tend to write.
+fn is_unsigned_dtype_name(name: &str) -> bool {
+    matches!(
+        name,
+        "u8" | "u16"
+            | "u32"
+            | "u64"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+    )
+}
+
+/// Build a §1.1.2 diagnostic for an unsigned dtype name appearing as a
+/// cast target or a tensor element type. Returns `None` for non-unsigned
+/// names so call sites can short-circuit with `&&`.
+fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
+    if !is_unsigned_dtype_name(name) {
+        return None;
+    }
+    let surface = if tensor { "tensor element" } else { "scalar" };
+    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    Some(CheckError::new(
+        CheckErrorKind::UnsupportedTensorPrecision,
+        format!(
+            "cannot use `{name}` as a {surface} dtype: unsigned integer types \
+             are out of scope per spec/04-type-system.md §1.1.2 (active set: \
+             {active_set})"
+        ),
+        vec![format!(
+            "spec/04-type-system.md §1.1.2 documents the workaround: cast to \
+             int32 or int64 and reason at the wider signed precision; or use \
+             a tensor of int8 / int16 / int32 / int64 if the bit-width matters"
+        )],
+    ))
 }
 
 /// Emit the canonical "unsupported precision" diagnostic for either a
