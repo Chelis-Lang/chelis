@@ -5097,6 +5097,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                 let element_ty = match tensor.precision {
                     chelis_types::types::Prim::Bool => HostType::Bool,
                     chelis_types::types::Prim::Int8
+                    | chelis_types::types::Prim::Int16
                     | chelis_types::types::Prim::Int32
                     | chelis_types::types::Prim::Int64 => HostType::Int64,
                     chelis_types::types::Prim::F16

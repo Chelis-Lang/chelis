@@ -1783,7 +1783,9 @@ impl<'a> EvalContext<'a> {
                 let value = tensor.value.data.first().copied().unwrap_or(0.0);
                 match tensor.precision {
                     Prim::Bool => Ok(RuntimeValue::Bool(value != 0.0)),
-                    Prim::Int8 | Prim::Int32 | Prim::Int64 => Ok(RuntimeValue::Int(value as i64)),
+                    Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
+                        Ok(RuntimeValue::Int(value as i64))
+                    }
                     _ => Ok(RuntimeValue::Float(value)),
                 }
             }
@@ -2831,7 +2833,9 @@ fn tensor_to_list_values(tensor: &RuntimeTensorValue) -> Result<Vec<RuntimeValue
     for value in &tensor.value.data {
         values.push(match tensor.precision {
             Prim::Bool => RuntimeValue::Bool(*value != 0.0),
-            Prim::Int8 | Prim::Int32 | Prim::Int64 => RuntimeValue::Int(*value as i64),
+            Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
+                RuntimeValue::Int(*value as i64)
+            }
             Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64 | Prim::F8e4m3 => {
                 RuntimeValue::Float(*value)
             }
@@ -4045,6 +4049,7 @@ fn prim_from_name(name: &str) -> Option<Prim> {
         "bf16" => Prim::Bf16,
         "f8e4m3" => Prim::F8e4m3,
         "int8" => Prim::Int8,
+        "int16" => Prim::Int16,
         "int32" => Prim::Int32,
         "int64" => Prim::Int64,
         "bool" => Prim::Bool,
@@ -4064,6 +4069,7 @@ fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Expr {
         Prim::Bf16 => "bf16",
         Prim::F8e4m3 => "f8e4m3",
         Prim::Int8 => "int8",
+        Prim::Int16 => "int16",
         Prim::Int32 => "int32",
         Prim::Int64 => "int64",
         Prim::Bool => "bool",

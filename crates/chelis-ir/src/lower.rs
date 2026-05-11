@@ -860,6 +860,7 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
         chelis_types::types::Prim::Bf16 => "bf16",
         chelis_types::types::Prim::F8e4m3 => "f8e4m3",
         chelis_types::types::Prim::Int8 => "int8",
+        chelis_types::types::Prim::Int16 => "int16",
         chelis_types::types::Prim::Int32 => "int32",
         chelis_types::types::Prim::Int64 => "int64",
         chelis_types::types::Prim::Bool => "bool",
