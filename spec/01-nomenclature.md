@@ -170,6 +170,7 @@ Examples:
 | shoals          | `shoals`       | `Shoals`        |
 | octant          | `octant`       | `Octant`        |
 | c-earchin       | `c-earchin`    | `CEarchin`      |
+| capstone        | `capstone`     | `Capstone`      |
 
 The `module_prefix` form is forced by Surf's case-split rule (§1.1):
 identifiers must be uppercase-leading to be module-path components.
