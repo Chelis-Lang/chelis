@@ -1,11 +1,22 @@
 use chelis_ir::host::{
     HostBlasMatmulSummary, HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostFunction,
-    HostFunctionSpecialization, HostMatchArm, HostParam, HostProgram, HostTensorHelper,
-    HostTensorSpecialization, HostType,
+    HostFunctionSpecialization, HostMatchArm, HostParam, HostProgram, HostSparseOpSummary,
+    HostTensorHelper, HostTensorSpecialization, HostType,
 };
+
+/// Sparse-op kind discriminator for the C summary-derived emission path.
+/// Mirrors the three `HostTensorSpecialization` / `HostFunctionSpecialization`
+/// sparse variants without re-importing them at every call site.
+#[derive(Clone, Copy)]
+enum SparseSummaryKind {
+    Gather,
+    ScatterAdd,
+    ScatterReplace,
+}
 
 use crate::emit::CEmitter;
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp};
+use chelis_types::types::Prim;
 use std::collections::HashMap;
 
 pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
@@ -1637,13 +1648,44 @@ impl<'a> HostEmitter<'a> {
         args: &[HostExpr],
         ty: &HostType,
     ) {
-        if let Some(HostTensorHelper {
-            specialization: Some(HostTensorSpecialization::BlasMatmul(summary)),
-            ..
-        }) = self.tensor_helpers.get(helper)
-        {
-            self.assign_blas_matmul_summary(target, summary, args, ty);
-            return;
+        if let Some(host_helper) = self.tensor_helpers.get(helper) {
+            match host_helper.specialization.as_ref() {
+                Some(HostTensorSpecialization::BlasMatmul(summary)) => {
+                    self.assign_blas_matmul_summary(target, summary, args, ty);
+                    return;
+                }
+                Some(HostTensorSpecialization::SparseGather(summary)) => {
+                    self.assign_sparse_summary(
+                        target,
+                        SparseSummaryKind::Gather,
+                        summary,
+                        args,
+                        ty,
+                    );
+                    return;
+                }
+                Some(HostTensorSpecialization::SparseScatterAdd(summary)) => {
+                    self.assign_sparse_summary(
+                        target,
+                        SparseSummaryKind::ScatterAdd,
+                        summary,
+                        args,
+                        ty,
+                    );
+                    return;
+                }
+                Some(HostTensorSpecialization::SparseScatterReplace(summary)) => {
+                    self.assign_sparse_summary(
+                        target,
+                        SparseSummaryKind::ScatterReplace,
+                        summary,
+                        args,
+                        ty,
+                    );
+                    return;
+                }
+                None => {}
+            }
         }
 
         let helper_name = format!("{}__tensor_{helper}", self.helper_prefix);
@@ -1990,6 +2032,404 @@ impl<'a> HostEmitter<'a> {
             })
     }
 
+    /// Emit a summary-derived inline sparse op (Gather / ScatterAdd /
+    /// Scatter-replace). The loop body mirrors the direct-call C
+    /// emission at `chelis_backend_c::emit::CEmitter::emit_sparse_*`
+    /// so a user-`def` wrapper compiles to the same bounded sparse
+    /// loop as `f(table, indices) = gather(table, indices, 0)`.
+    ///
+    /// Argument marshaling matches `assign_blas_matmul_summary`:
+    /// callers' `args` are materialized into local tensor pointers
+    /// (with their `summary.input_tys[i]` as the expected type), then
+    /// contract assertions (nonnull, dtype, rank, dim) lock the
+    /// summary's expectations.
+    fn assign_sparse_summary(
+        &mut self,
+        target: &str,
+        kind: SparseSummaryKind,
+        summary: &HostSparseOpSummary,
+        args: &[HostExpr],
+        _ty: &HostType,
+    ) {
+        assert_eq!(
+            args.len(),
+            summary.input_tys.len(),
+            "sparse summary argument count must match callsite argument count"
+        );
+        let tensor_args = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                let arg_name = self.next_temp(&format!("sparse_arg{index}"));
+                let expected_ty = HostType::Tensor(
+                    summary
+                        .input_tys
+                        .get(index)
+                        .expect("sparse summary input type")
+                        .clone(),
+                );
+                self.emit_expr_to_var(arg, &arg_name, &expected_ty);
+                arg_name
+            })
+            .collect::<Vec<_>>();
+        self.emit_sparse_summary_contract(summary, &tensor_args);
+
+        let target_dtype = sparse_dtype_macro(summary.output.precision);
+        let target_elem_t = sparse_elem_type(summary.output.precision);
+        let target_elem_size = format!("sizeof({target_elem_t})");
+
+        // Build output shape from `summary.output.dims`. Symbolic dims
+        // resolve via the caller's tensor-arg shape (the contract
+        // assertions above already verified those are consistent).
+        let output_dims = summary
+            .output
+            .dims
+            .iter()
+            .map(|dim| sparse_dim_info_expr(dim, summary, &tensor_args))
+            .collect::<Vec<_>>();
+        let shape_name = self.next_temp("sparse_shape");
+        self.lines.push(format!(
+            "{}int {shape_name}[{}] = {{ {} }};",
+            self.indent,
+            output_dims.len(),
+            output_dims.join(", ")
+        ));
+        self.lines.push(format!(
+            "{}{target} = chelis_alloc({}, {shape_name}, {target_dtype});",
+            self.indent,
+            output_dims.len()
+        ));
+
+        match kind {
+            SparseSummaryKind::Gather => {
+                self.emit_sparse_gather_summary_body(target, summary, &tensor_args, target_elem_t);
+            }
+            SparseSummaryKind::ScatterAdd => {
+                self.emit_sparse_scatter_summary_body(
+                    target,
+                    summary,
+                    &tensor_args,
+                    target_elem_t,
+                    &target_elem_size,
+                    /* accumulate */ true,
+                );
+            }
+            SparseSummaryKind::ScatterReplace => {
+                self.emit_sparse_scatter_summary_body(
+                    target,
+                    summary,
+                    &tensor_args,
+                    target_elem_t,
+                    &target_elem_size,
+                    /* accumulate */ false,
+                );
+            }
+        }
+    }
+
+    /// Emit input-contract assertions for a sparse summary: nonnull,
+    /// dtype, rank, and per-axis dim checks. Mirrors
+    /// `emit_blas_summary_contract` so summary-derived sparse
+    /// codepaths fail loudly on the same shape mismatches the BLAS
+    /// path catches.
+    fn emit_sparse_summary_contract(
+        &mut self,
+        summary: &HostSparseOpSummary,
+        tensor_args: &[String],
+    ) {
+        let mut symbolic_first = HashMap::<String, String>::new();
+        for (input_index, (arg, ty)) in tensor_args.iter().zip(summary.input_tys.iter()).enumerate()
+        {
+            let expected_dtype = sparse_dtype_macro(ty.precision);
+            self.lines
+                .push(format!("{}if ({arg} == NULL) {{", self.indent));
+            self.lines.push(format!(
+                "{}    fprintf(stderr, \"specialized sparse call input {input_index} is NULL\\n\");",
+                self.indent
+            ));
+            self.lines.push(format!("{}    abort();", self.indent));
+            self.lines.push(format!("{}}}", self.indent));
+            self.lines.push(format!(
+                "{}if ({arg}->dtype != {expected_dtype}) {{",
+                self.indent
+            ));
+            self.lines.push(format!(
+                "{}    fprintf(stderr, \"specialized sparse call input {input_index} expected {expected_dtype} tensor\\n\");",
+                self.indent
+            ));
+            self.lines.push(format!("{}    abort();", self.indent));
+            self.lines.push(format!("{}}}", self.indent));
+            self.lines.push(format!(
+                "{}if ({arg}->ndim != {}) {{",
+                self.indent,
+                ty.dims.len()
+            ));
+            self.lines.push(format!(
+                "{}    fprintf(stderr, \"specialized sparse call input {input_index} expected rank {}, got %d\\n\", {arg}->ndim);",
+                self.indent,
+                ty.dims.len()
+            ));
+            self.lines.push(format!("{}    abort();", self.indent));
+            self.lines.push(format!("{}}}", self.indent));
+            for (axis, dim) in ty.dims.iter().enumerate() {
+                match dim {
+                    DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
+                        self.lines.push(format!(
+                            "{}if ({arg}->shape[{axis}] != {size}) {{",
+                            self.indent
+                        ));
+                        self.lines.push(format!(
+                            "{}    fprintf(stderr, \"specialized sparse call input {input_index} axis {axis} expected {size}, got %d\\n\", {arg}->shape[{axis}]);",
+                            self.indent
+                        ));
+                        self.lines.push(format!("{}    abort();", self.indent));
+                        self.lines.push(format!("{}}}", self.indent));
+                    }
+                    DimInfo::Named(name, None) => {
+                        let expr = format!("{arg}->shape[{axis}]");
+                        if let Some(first) = symbolic_first.get(name) {
+                            self.lines
+                                .push(format!("{}if ({expr} != {first}) {{", self.indent));
+                            self.lines.push(format!(
+                                "{}    fprintf(stderr, \"specialized sparse call symbolic dimension `{name}` mismatch\\n\");",
+                                self.indent
+                            ));
+                            self.lines.push(format!("{}    abort();", self.indent));
+                            self.lines.push(format!("{}}}", self.indent));
+                        } else {
+                            symbolic_first.insert(name.clone(), expr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Emit the Gather loop body for a summary-derived callsite.
+    /// Operands come from `summary.input_indices` referencing
+    /// `tensor_args`: `[values, indices]`.
+    ///
+    /// The emitted shape mirrors `emit_sparse_gather` so structural
+    /// tests can match the same `_g`, `_values_data`, `_indices_data`,
+    /// `_out_data` markers and the same nested `(b, i, d)` loop
+    /// ordering.
+    fn emit_sparse_gather_summary_body(
+        &mut self,
+        target: &str,
+        summary: &HostSparseOpSummary,
+        tensor_args: &[String],
+        target_elem_t: &str,
+    ) {
+        let values_arg = &tensor_args[summary.input_indices[0]];
+        let indices_arg = &tensor_args[summary.input_indices[1]];
+        let values_ty = &summary.input_tys[summary.input_indices[0]];
+        let indices_ty = &summary.input_tys[summary.input_indices[1]];
+        let values_elem_t = sparse_elem_type(values_ty.precision);
+        let indices_elem_t = sparse_elem_type(indices_ty.precision);
+        let before = sparse_dim_product(&values_ty.dims[..summary.axis], summary, tensor_args);
+        let axis_size = sparse_dim_info_expr(&values_ty.dims[summary.axis], summary, tensor_args);
+        let after = sparse_dim_product(&values_ty.dims[summary.axis + 1..], summary, tensor_args);
+
+        let values_ct = self.next_temp("sparse_values");
+        let indices_ct = self.next_temp("sparse_indices");
+        self.lines.push(format!(
+            "{}chelis_tensor *{values_ct} = chelis_contiguous({values_arg});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}chelis_tensor *{indices_ct} = chelis_contiguous({indices_arg});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}const {values_elem_t} *{values_ct}_data = (const {values_elem_t}*){values_ct}->data;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}const {indices_elem_t} *{indices_ct}_data = (const {indices_elem_t}*){indices_ct}->data;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target}->data;",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}int {target}_before = {before};", self.indent));
+        self.lines.push(format!(
+            "{}int {target}_axis_size = {axis_size};",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}int {target}_after = {after};", self.indent));
+        self.lines.push(format!(
+            "{}int {target}_index_count = {indices_ct}->size;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}for (int {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    for (int {target}_i = 0; {target}_i < {target}_index_count; {target}_i++) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}        int {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int)((const int64_t*){indices_ct}->data)[{target}_i] : (int)({indices_ct}_data)[{target}_i];",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}        if ({target}_g < 0 || {target}_g >= {target}_axis_size) abort();",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}        for (int {target}_d = 0; {target}_d < {target}_after; {target}_d++) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}            int {target}_out = (({target}_b * {target}_index_count + {target}_i) * {target}_after) + {target}_d;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}            int {target}_src = (({target}_b * {target}_axis_size + {target}_g) * {target}_after) + {target}_d;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}            {target}_out_data[{target}_out] = {values_ct}_data[{target}_src];",
+            self.indent
+        ));
+        self.lines.push(format!("{}        }}", self.indent));
+        self.lines.push(format!("{}    }}", self.indent));
+        self.lines.push(format!("{}}}", self.indent));
+        self.lines.push(format!(
+            "{}if ({values_ct} != {values_arg}) chelis_free({values_ct});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}if ({indices_ct} != {indices_arg}) chelis_free({indices_ct});",
+            self.indent
+        ));
+    }
+
+    /// Emit the ScatterAdd or Scatter-replace loop body for a
+    /// summary-derived callsite. Operands are `[target_in, indices,
+    /// updates]`. `accumulate=true` selects `+=` (ScatterAdd);
+    /// `accumulate=false` selects `=` (last-write-wins Scatter, single
+    /// threaded to preserve the deterministic order documented in
+    /// `spec/05-risc-primitives.md` §3.5).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_sparse_scatter_summary_body(
+        &mut self,
+        target: &str,
+        summary: &HostSparseOpSummary,
+        tensor_args: &[String],
+        target_elem_t: &str,
+        target_elem_size: &str,
+        accumulate: bool,
+    ) {
+        let target_arg = &tensor_args[summary.input_indices[0]];
+        let indices_arg = &tensor_args[summary.input_indices[1]];
+        let updates_arg = &tensor_args[summary.input_indices[2]];
+        let target_ty = &summary.input_tys[summary.input_indices[0]];
+        let indices_ty = &summary.input_tys[summary.input_indices[1]];
+        let updates_ty = &summary.input_tys[summary.input_indices[2]];
+        let indices_elem_t = sparse_elem_type(indices_ty.precision);
+        let updates_elem_t = sparse_elem_type(updates_ty.precision);
+        let before = sparse_dim_product(&target_ty.dims[..summary.axis], summary, tensor_args);
+        let axis_size = sparse_dim_info_expr(&target_ty.dims[summary.axis], summary, tensor_args);
+        let after = sparse_dim_product(&target_ty.dims[summary.axis + 1..], summary, tensor_args);
+
+        let target_ct = self.next_temp("sparse_target");
+        let indices_ct = self.next_temp("sparse_indices");
+        let updates_ct = self.next_temp("sparse_updates");
+        self.lines.push(format!(
+            "{}chelis_tensor *{target_ct} = chelis_contiguous({target_arg});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}chelis_tensor *{indices_ct} = chelis_contiguous({indices_arg});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}chelis_tensor *{updates_ct} = chelis_contiguous({updates_arg});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}const {indices_elem_t} *{indices_ct}_data = (const {indices_elem_t}*){indices_ct}->data;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}const {updates_elem_t} *{updates_ct}_data = (const {updates_elem_t}*){updates_ct}->data;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target}->data;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}memcpy({target}->data, {target_ct}->data, (size_t){target}->size * {target_elem_size});",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}int {target}_before = {before};", self.indent));
+        self.lines.push(format!(
+            "{}int {target}_axis_size = {axis_size};",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}int {target}_after = {after};", self.indent));
+        self.lines.push(format!(
+            "{}int {target}_index_count = {indices_ct}->size;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}for (int {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    for (int {target}_i = 0; {target}_i < {target}_index_count; {target}_i++) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}        int {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int)((const int64_t*){indices_ct}->data)[{target}_i] : (int)({indices_ct}_data)[{target}_i];",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}        if ({target}_g < 0 || {target}_g >= {target}_axis_size) abort();",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}        for (int {target}_d = 0; {target}_d < {target}_after; {target}_d++) {{",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}            int {target}_src = (({target}_b * {target}_index_count + {target}_i) * {target}_after) + {target}_d;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}            int {target}_out = (({target}_b * {target}_axis_size + {target}_g) * {target}_after) + {target}_d;",
+            self.indent
+        ));
+        let op = if accumulate { "+=" } else { "=" };
+        self.lines.push(format!(
+            "{}            {target}_out_data[{target}_out] {op} {updates_ct}_data[{target}_src];",
+            self.indent
+        ));
+        self.lines.push(format!("{}        }}", self.indent));
+        self.lines.push(format!("{}    }}", self.indent));
+        self.lines.push(format!("{}}}", self.indent));
+        self.lines.push(format!(
+            "{}if ({target_ct} != {target_arg}) chelis_free({target_ct});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}if ({indices_ct} != {indices_arg}) chelis_free({indices_ct});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}if ({updates_ct} != {updates_arg}) chelis_free({updates_ct});",
+            self.indent
+        ));
+    }
+
     fn assign_call(
         &mut self,
         target: &str,
@@ -1998,11 +2438,43 @@ impl<'a> HostEmitter<'a> {
         arg_tys: &[HostType],
         ty: &HostType,
     ) {
-        if let Some(HostFunctionSpecialization::BlasMatmul(summary)) =
-            self.function_specializations.get(function).cloned()
-        {
-            self.assign_blas_matmul_summary(target, &summary, args, ty);
-            return;
+        if let Some(spec) = self.function_specializations.get(function).cloned() {
+            match spec {
+                HostFunctionSpecialization::BlasMatmul(summary) => {
+                    self.assign_blas_matmul_summary(target, &summary, args, ty);
+                    return;
+                }
+                HostFunctionSpecialization::SparseGather(summary) => {
+                    self.assign_sparse_summary(
+                        target,
+                        SparseSummaryKind::Gather,
+                        &summary,
+                        args,
+                        ty,
+                    );
+                    return;
+                }
+                HostFunctionSpecialization::SparseScatterAdd(summary) => {
+                    self.assign_sparse_summary(
+                        target,
+                        SparseSummaryKind::ScatterAdd,
+                        &summary,
+                        args,
+                        ty,
+                    );
+                    return;
+                }
+                HostFunctionSpecialization::SparseScatterReplace(summary) => {
+                    self.assign_sparse_summary(
+                        target,
+                        SparseSummaryKind::ScatterReplace,
+                        &summary,
+                        args,
+                        ty,
+                    );
+                    return;
+                }
+            }
         }
 
         let arg_vars = args
@@ -2931,4 +3403,81 @@ fn callback_param(callback: &HostCallback, index: usize) -> &HostParam {
     callback_params(callback)
         .get(index)
         .expect("callback parameter should exist")
+}
+
+/// C element type for a `Prim` tensor payload, mirroring
+/// `CEmitter::elem_type`. Kept as a module-level helper here so the
+/// summary-derived sparse emission path can reuse the same dtype
+/// table without depending on `CEmitter`'s `self`.
+fn sparse_elem_type(prim: Prim) -> &'static str {
+    match prim {
+        Prim::F32 | Prim::Bool => "float",
+        Prim::F64 => "double",
+        Prim::Int32 => "int32_t",
+        Prim::Int64 => "int64_t",
+        _ => "float",
+    }
+}
+
+/// `CHELIS_<DTYPE>` macro selector for a `Prim`. Mirrors
+/// `CEmitter::dtype_macro`. Used by the summary-derived sparse path
+/// for both output allocation and contract assertions.
+fn sparse_dtype_macro(prim: Prim) -> &'static str {
+    match prim {
+        Prim::F32 => "CHELIS_F32",
+        Prim::F64 => "CHELIS_F64",
+        Prim::Bool => "CHELIS_BOOL",
+        Prim::Int32 => "CHELIS_I32",
+        Prim::Int64 => "CHELIS_I64",
+        other => panic!(
+            "C backend sparse summary does not support {} tensors",
+            other.name()
+        ),
+    }
+}
+
+/// Resolve a `DimInfo` to a C expression usable inside the summary's
+/// inline emission. Concrete literals and named-with-binding dims
+/// emit their literal value. Pure symbolic dims (`Named(name, None)`)
+/// resolve to `arg->shape[axis]` against the first summary input that
+/// carries the same symbol.
+fn sparse_dim_info_expr(
+    dim: &DimInfo,
+    summary: &HostSparseOpSummary,
+    tensor_args: &[String],
+) -> String {
+    match dim {
+        DimInfo::Lit(n) => n.to_string(),
+        DimInfo::Named(_, Some(n)) => n.to_string(),
+        DimInfo::Named(name, None) => sparse_symbol_expr(name, summary, tensor_args)
+            .unwrap_or_else(|| panic!("sparse summary symbol `{name}` has no input binding")),
+    }
+}
+
+fn sparse_dim_product(
+    dims: &[DimInfo],
+    summary: &HostSparseOpSummary,
+    tensor_args: &[String],
+) -> String {
+    dims.iter()
+        .map(|d| sparse_dim_info_expr(d, summary, tensor_args))
+        .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
+        .unwrap_or_else(|| "1".to_string())
+}
+
+fn sparse_symbol_expr(
+    name: &str,
+    summary: &HostSparseOpSummary,
+    tensor_args: &[String],
+) -> Option<String> {
+    summary
+        .input_tys
+        .iter()
+        .zip(tensor_args.iter())
+        .find_map(|(ty, arg)| {
+            ty.dims.iter().enumerate().find_map(|(axis, dim)| {
+                matches!(dim, DimInfo::Named(dim_name, None) if dim_name == name)
+                    .then(|| format!("{arg}->shape[{axis}]"))
+            })
+        })
 }

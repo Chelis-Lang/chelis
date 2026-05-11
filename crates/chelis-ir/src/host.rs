@@ -85,11 +85,17 @@ pub struct HostTensorInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostTensorSpecialization {
     BlasMatmul(HostBlasMatmulSummary),
+    SparseGather(HostSparseOpSummary),
+    SparseScatterAdd(HostSparseOpSummary),
+    SparseScatterReplace(HostSparseOpSummary),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostFunctionSpecialization {
     BlasMatmul(HostBlasMatmulSummary),
+    SparseGather(HostSparseOpSummary),
+    SparseScatterAdd(HostSparseOpSummary),
+    SparseScatterReplace(HostSparseOpSummary),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +108,28 @@ pub struct HostBlasMatmulSummary {
     pub m: DimExpr,
     pub n: DimExpr,
     pub k: DimExpr,
+}
+
+/// Compiler-derived summary for a sparse helper body (`Gather`,
+/// `ScatterAdd`, or `Scatter`/replace).
+///
+/// `input_indices` is the ordered list of helper input positions that
+/// supply the sparse op's operands. The order matches the RiscOp's
+/// `inputs` order:
+///   * Gather: `[values, indices]`
+///   * ScatterAdd / Scatter: `[target, indices, updates]`
+///
+/// `input_tys` is the full ordered tuple of helper-input types (one
+/// entry per helper input parameter, not just the sparse operands).
+/// `output` is the tensor type the sparse op produces. The remapper
+/// uses `input_tys` to verify that the callsite arg types still match
+/// the recognized helper-body types after wrapper propagation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSparseOpSummary {
+    pub axis: usize,
+    pub input_indices: Vec<usize>,
+    pub input_tys: Vec<TensorType>,
+    pub output: TensorType,
 }
 
 #[derive(Debug, Clone)]
@@ -753,25 +781,108 @@ fn derive_host_function_specialization(
 ) -> Option<HostFunctionSpecialization> {
     match &function.body.kind {
         HostExprKind::TensorCall { helper, args, .. } => {
-            let HostTensorSpecialization::BlasMatmul(summary) = function
+            match function
                 .tensor_helpers
                 .get(*helper)?
                 .specialization
-                .as_ref()?;
-            remap_blas_summary_to_params(summary, args, &function.params)
-                .map(HostFunctionSpecialization::BlasMatmul)
+                .as_ref()?
+            {
+                HostTensorSpecialization::BlasMatmul(summary) => {
+                    remap_blas_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::BlasMatmul)
+                }
+                HostTensorSpecialization::SparseGather(summary) => {
+                    remap_sparse_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::SparseGather)
+                }
+                HostTensorSpecialization::SparseScatterAdd(summary) => {
+                    remap_sparse_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::SparseScatterAdd)
+                }
+                HostTensorSpecialization::SparseScatterReplace(summary) => {
+                    remap_sparse_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::SparseScatterReplace)
+                }
+            }
         }
         HostExprKind::Call {
             function: callee,
             args,
             ..
-        } => {
-            let HostFunctionSpecialization::BlasMatmul(summary) = summaries.get(callee)?;
-            remap_blas_summary_to_params(summary, args, &function.params)
-                .map(HostFunctionSpecialization::BlasMatmul)
-        }
+        } => match summaries.get(callee)? {
+            HostFunctionSpecialization::BlasMatmul(summary) => {
+                remap_blas_summary_to_params(summary, args, &function.params)
+                    .map(HostFunctionSpecialization::BlasMatmul)
+            }
+            HostFunctionSpecialization::SparseGather(summary) => {
+                remap_sparse_summary_to_params(summary, args, &function.params)
+                    .map(HostFunctionSpecialization::SparseGather)
+            }
+            HostFunctionSpecialization::SparseScatterAdd(summary) => {
+                remap_sparse_summary_to_params(summary, args, &function.params)
+                    .map(HostFunctionSpecialization::SparseScatterAdd)
+            }
+            HostFunctionSpecialization::SparseScatterReplace(summary) => {
+                remap_sparse_summary_to_params(summary, args, &function.params)
+                    .map(HostFunctionSpecialization::SparseScatterReplace)
+            }
+        },
         _ => None,
     }
+}
+
+/// Remap a sparse-op summary's positional `input_indices` so they
+/// reference the caller's parameters rather than the callee's
+/// parameters. The shape of `args` must be a tuple of `Var` references
+/// to caller parameters (the pure-pass-through wrapper case); any other
+/// shape disqualifies the callsite.
+fn remap_sparse_summary_to_params(
+    summary: &HostSparseOpSummary,
+    args: &[HostExpr],
+    params: &[HostParam],
+) -> Option<HostSparseOpSummary> {
+    let arg_to_param = args
+        .iter()
+        .map(|arg| {
+            let HostExprKind::Var(name, HostType::Tensor(_)) = &arg.kind else {
+                return None;
+            };
+            params.iter().position(|param| param.name == *name)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if arg_to_param.len() != summary.input_tys.len() {
+        return None;
+    }
+    let input_tys = params
+        .iter()
+        .map(|param| match &param.ty {
+            HostType::Tensor(ty) => Some(ty.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // Verify that each summarized callee-input position still maps to a
+    // caller parameter whose tensor type matches the callee's
+    // requirement. This locks the contract that wrapper propagation
+    // cannot widen or coerce the sparse-op operand types.
+    let input_indices = summary
+        .input_indices
+        .iter()
+        .map(|callee_idx| {
+            let caller_idx = *arg_to_param.get(*callee_idx)?;
+            let caller_ty = input_tys.get(caller_idx)?;
+            let callee_ty = summary.input_tys.get(*callee_idx)?;
+            if caller_ty != callee_ty {
+                return None;
+            }
+            Some(caller_idx)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(HostSparseOpSummary {
+        axis: summary.axis,
+        input_indices,
+        input_tys,
+        output: summary.output.clone(),
+    })
 }
 
 fn remap_blas_summary_to_params(
@@ -1183,7 +1294,8 @@ fn finish_tensor_helper_call(
         .unwrap_or_else(|| expected.clone());
     let args = tensor_helper_args(&inputs, scope);
     let specialization = summarize_blas_helper_from_parts(&dag, &inputs, &output)
-        .map(HostTensorSpecialization::BlasMatmul);
+        .map(HostTensorSpecialization::BlasMatmul)
+        .or_else(|| summarize_sparse_helper_from_parts(&dag, &inputs, &output));
     tensor_helpers.push(HostTensorHelper {
         name: helper_name,
         dag,
@@ -1246,6 +1358,136 @@ fn summarize_blas_helper_from_parts(
         n: n.clone(),
         k: k.clone(),
     })
+}
+
+/// Pub-test entry point for the sparse summarizer. Wraps the
+/// crate-private `summarize_sparse_helper_from_parts` so integration
+/// tests in `crates/chelis-ir/tests/` can lock the recognizer
+/// directly without driving a full `lower_compiled_program` pipeline.
+///
+/// Surface code today has no path that lowers to `RiscOp::ScatterAdd`
+/// (that op is produced exclusively by AD adjoint of `gather`), so
+/// the integration test that exercises ScatterAdd-helper recognition
+/// constructs a synthetic helper DAG and calls through here.
+#[doc(hidden)]
+pub fn summarize_sparse_helper_for_test(
+    dag: &crate::Dag,
+    inputs: &[HostTensorInput],
+    output: &TensorType,
+) -> Option<HostTensorSpecialization> {
+    summarize_sparse_helper_from_parts(dag, inputs, output)
+}
+
+/// Derive a sparse-op summary for a helper whose DAG is a single
+/// `RiscOp::Gather`, `RiscOp::ScatterAdd`, or `RiscOp::Scatter` root
+/// whose operands are direct `RiscOp::Load`s referencing helper inputs.
+///
+/// Rejection cases (returns `None`):
+///   * helper body has more than one root (multi-output helper)
+///   * root op is not one of the three sparse ops
+///   * any sparse-op operand is not a `Load` (e.g. an intervening
+///     elementwise op, a constant injection, or a reshape)
+///   * a `Load` refers to a name not present in the helper input set
+///     or whose type does not match the helper input's type
+///   * indices precision is not int32 / int64
+///   * payload precisions (values vs output, target vs updates vs
+///     output) do not match
+///   * helper input or output carries a wildcard `Named("*", None)`
+///     dim — these are type-inference placeholders that do not bind
+///     to a unique callsite axis and cannot be safely consumed by the
+///     summary-derived contract assertions
+///
+/// Recognized helper inputs become positional `input_indices`; the
+/// callsite remapper then verifies arg-to-param remap.
+fn summarize_sparse_helper_from_parts(
+    dag: &crate::Dag,
+    inputs: &[HostTensorInput],
+    output: &TensorType,
+) -> Option<HostTensorSpecialization> {
+    if dag.roots().len() != 1 {
+        return None;
+    }
+    let root_id = *dag.roots().first()?;
+    let root = dag.get(root_id)?;
+    if root.output_type != *output {
+        return None;
+    }
+    if tensor_type_has_wildcard_dim(output) {
+        return None;
+    }
+    if inputs.iter().any(|i| tensor_type_has_wildcard_dim(&i.ty)) {
+        return None;
+    }
+    let input_tys = inputs.iter().map(|i| i.ty.clone()).collect::<Vec<_>>();
+
+    match &root.op {
+        RiscOp::Gather { axis } => {
+            // Inputs: [values, indices].
+            if root.inputs.len() != 2 {
+                return None;
+            }
+            let values_idx = helper_load_input_index(dag, root.inputs[0], inputs)?;
+            let indices_idx = helper_load_input_index(dag, root.inputs[1], inputs)?;
+            let values_ty = dag.get(root.inputs[0])?.output_type.clone();
+            let indices_ty = dag.get(root.inputs[1])?.output_type.clone();
+            if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+                return None;
+            }
+            if values_ty.precision != output.precision {
+                return None;
+            }
+            Some(HostTensorSpecialization::SparseGather(
+                HostSparseOpSummary {
+                    axis: *axis,
+                    input_indices: vec![values_idx, indices_idx],
+                    input_tys,
+                    output: output.clone(),
+                },
+            ))
+        }
+        RiscOp::ScatterAdd { axis } | RiscOp::Scatter { axis } => {
+            // Inputs: [target, indices, updates].
+            if root.inputs.len() != 3 {
+                return None;
+            }
+            let target_idx = helper_load_input_index(dag, root.inputs[0], inputs)?;
+            let indices_idx = helper_load_input_index(dag, root.inputs[1], inputs)?;
+            let updates_idx = helper_load_input_index(dag, root.inputs[2], inputs)?;
+            let target_ty = dag.get(root.inputs[0])?.output_type.clone();
+            let indices_ty = dag.get(root.inputs[1])?.output_type.clone();
+            let updates_ty = dag.get(root.inputs[2])?.output_type.clone();
+            if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+                return None;
+            }
+            if target_ty.precision != output.precision || updates_ty.precision != output.precision {
+                return None;
+            }
+            let summary = HostSparseOpSummary {
+                axis: *axis,
+                input_indices: vec![target_idx, indices_idx, updates_idx],
+                input_tys,
+                output: output.clone(),
+            };
+            Some(match &root.op {
+                RiscOp::ScatterAdd { .. } => HostTensorSpecialization::SparseScatterAdd(summary),
+                RiscOp::Scatter { .. } => HostTensorSpecialization::SparseScatterReplace(summary),
+                _ => unreachable!("matched arm guarantees op kind"),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `true` when `ty` carries at least one wildcard dim
+/// (`Named("*", None)`). Wildcards survive from type inference when a
+/// dim was unconstrained at the use site and were never bound to a
+/// concrete or symbolic axis. They make summary-derived contract
+/// assertions meaningless because all wildcards in a helper share the
+/// same string name and would falsely collapse to one axis.
+fn tensor_type_has_wildcard_dim(ty: &TensorType) -> bool {
+    ty.dims
+        .iter()
+        .any(|dim| matches!(dim, DimInfo::Named(name, None) if name == "*"))
 }
 
 fn helper_load_input_index(

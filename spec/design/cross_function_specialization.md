@@ -36,16 +36,35 @@ library boundaries.
 ## Specialization Summaries
 
 A top-level pure helper may be summarized as equivalent to a compiler-known tensor
-operation, initially `matmul` / GEMM and sparse gather once the gather recognizer
-ships.
+operation. The shipped surface covers `matmul` / GEMM (the first slice) and the three
+sparse RISC primitives `gather`, `scatter_add`, and `scatter_replace`.
 
 The derived metadata shape is:
 
 ```text
 chelis_specialization: { kind: "blas_matmul", m: <expr>, n: <expr>, k: <expr> }
-chelis_specialization: { kind: "gather", axis: <axis>, ... }
+chelis_specialization: { kind: "sparse_gather", axis: <axis>, input_indices: [...] }
+chelis_specialization: { kind: "sparse_scatter_add", axis: <axis>, input_indices: [...] }
+chelis_specialization: { kind: "sparse_scatter_replace", axis: <axis>, input_indices: [...] }
 chelis_specialization: { kind: "none" }
 ```
+
+For sparse summaries the recognizer requires:
+
+- exactly one DAG root, equal to a `RiscOp::Gather`, `RiscOp::ScatterAdd`, or
+  `RiscOp::Scatter`
+- every sparse-op operand is a direct `RiscOp::Load` referencing one of the
+  helper's input parameters by name
+- indices precision is `int32` or `int64`
+- payload precisions match across `values`/`updates`/`target`/`output`
+- no helper input or output carries a wildcard `Named("*", None)` dim (type-
+  inference placeholder); wildcard helpers fall back to the marshaling shim
+  rather than register a false-positive summary
+
+`RiscOp::ScatterAdd` has no Surf surface form today (it is produced exclusively
+by the AD adjoint of `gather`). The recognizer covers it mechanically for
+symmetry with the other two sparse ops; IR-level coverage lives in
+`crates/chelis-ir/tests/host_sparse_summary.rs`.
 
 The semantic contract is:
 
@@ -172,8 +191,12 @@ hits in the generated C, and the user-defined cases no longer rely on clang LTO 
 recover performance.
 
 Current implementation note: the shipped C path combines helper-body BLAS
-specialization with compiler-derived host summaries for simple wrappers. Remaining
-work is to broaden the summary verifier, add explicit negative diagnostics for
-summary-derived-but-callsite-rejected cases, carry the same summary consumption into
-HIP, and surface BLAS link requirements from structured host-program metadata instead
-of source-string inference.
+specialization with compiler-derived host summaries for simple wrappers. The W3-B
+batch broadens the recognizer to the three sparse RISC primitives (`Gather`,
+`ScatterAdd`, `Scatter`/replace) with the same wrapper-propagation rules. The
+sparse acceptance oracle is `crates/chelis-cli/tests/cross_library_sparse_summaries.rs`
+plus the IR-level lock at `crates/chelis-ir/tests/host_sparse_summary.rs`. Remaining
+work is to add explicit negative diagnostics for summary-derived-but-callsite-
+rejected cases (W4-A), carry the same summary consumption into HIP (W3-A), and
+surface BLAS link requirements from structured host-program metadata instead of
+source-string inference.

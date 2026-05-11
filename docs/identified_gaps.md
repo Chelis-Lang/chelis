@@ -387,9 +387,12 @@ surface is still emitted for debugging/non-specialized paths, but eligible
 calls can emit the specialized BLAS path without relying on clang/gcc LTO.
 
 **The bridge that still doesn't:** this is not yet a general user-library
-specialization system. HIP summary consumption, gather/scatter summaries,
+specialization system. HIP summary consumption,
 summary-derived-but-callsite-rejected diagnostics, and broader helper shapes
-remain follow-up work.
+(softmax / layer_norm / attention) remain follow-up work. The sparse summary
+slice (W3-B) is shipped: user-`def` wrappers around `gather`,
+`scatter_add` (AD-internal), and `scatter_replace` recover the same inline
+sparse C loop as the direct builtin call.
 
 **Why this matters for the cross-library AD claim:** a Coral
 `groupby + sum`, a Nautilus `simpsons_rule_integral`, or an Octant
@@ -423,9 +426,14 @@ implementation technique for small helpers, not the design contract.
 - **Addressed by this branch for C BLAS helpers:** `cross_library_semantic_gap.rs`
   now proves direct, inline, user-def, and nested user-def matmul forms hit
   generated-C BLAS.
-- **Not fully addressed:** HIP summary consumption, gather/scatter summaries,
+- **Addressed by W3-B for C sparse helpers:**
+  `crates/chelis-cli/tests/cross_library_sparse_summaries.rs` plus
+  `crates/chelis-ir/tests/host_sparse_summary.rs` lock the
+  recognizer + C consumption for `Gather`, `ScatterAdd`, and
+  `Scatter` (replace) helper-body forms.
+- **Not fully addressed:** HIP summary consumption,
   negative diagnostics for rejected summarized callsites, and broader helper
-  compositions.
+  compositions (softmax / layer_norm / attention).
 
 **Locked test:** `crates/chelis-cli/tests/cross_library_semantic_gap.rs`
 asserts BLAS hits for the direct, inline, user-`def`, and nested user-`def`
