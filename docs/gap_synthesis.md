@@ -157,12 +157,14 @@ future recognizers (softmax, layer_norm, attention, gather→scatter).
 slot-based memory planning, and desugared Deep now receives
 `surf:<start>..<end>` metadata for parsed Surf expression bodies.
 
-**Phase γ (closed by M3/M3b):** `matmul` now accepts rank ≥ 2, and
-runtime-sized BLAS specialization covers symbolic and batched matmul
+**Phase γ (closed by M3/M3b + Perf-F1):** `matmul` now accepts rank ≥ 2,
+and runtime-sized BLAS specialization covers symbolic and batched matmul
 when the operands have contiguous trailing matrix slices. The C backend
-emits one `cblas_sgemm` per batch slice; the HIP backend emits through a
-batched hipBLAS helper loop. Symbolic dimensions are read from the
-existing runtime shape bindings.
+emits one `cblas_sgemm` per batch slice; the HIP backend defaults to
+`hipblasSgemmStridedBatched` on uniformly strided batched layouts
+(Perf-F1, shipped) and retains the per-batch hipBLAS helper loop only
+for broadcasted leading axes or non-uniform leading strides. Symbolic
+dimensions are read from the existing runtime shape bindings.
 
 **Phase δ (~1 month, paired):** Ship the §3.5 gather lowering paired
 with a scatter-recognition pattern in Phase α's new specialize pass
@@ -189,7 +191,7 @@ anchors for future audits.
 |---|---|---|---|
 | **M4** | Gap 3, gather/scatter lowering | Closed for the scoped sparse path: tensor-lane Surf lowers directly to sparse IR, the internal dense §3.5 `OneHot + Expand + Mul + Sum` tree collapses to `Gather`, and C/HIP emit bounded sparse code for supported dtypes. Remaining future work is replace-scatter semantics, not `ScatterAdd`. | `crates/chelis-ir` specialization tests cover the dense recognizer and unmatched `OneHot` fallback; `grad_gather_contract.rs` locks duplicate-index AD; C/HIP emitted-code and GPU manual tests cover bounded sparse backend behavior. |
 | **M5-follow-up** | Gap 5, cross-function specialization | Broaden verified summaries beyond simple C BLAS helpers, add rejected-callsite diagnostics, and carry summary consumption into HIP. | `crates/chelis-cli/tests/cross_library_semantic_gap.rs` now proves direct, inline, user-def, and nested user-def C BLAS hits. Remaining work needs new negative and HIP tests. |
-| **Perf-F1** | HIP batched matmul implementation quality | Benchmark and tune the `hipblasSgemmStridedBatched` path, retaining the helper loop for broadcasted/non-uniform leading strides. | Default structural coverage requires the strided-batched API on uniform layouts; the HIP manual GPU gate covers numerical agreement. |
+| **Perf-F1** | HIP batched matmul implementation quality | **Closed.** `hipblasSgemmStridedBatched` is now the default on uniformly strided batched HIP layouts; the per-batch helper loop is retained only as a fallback for broadcasted leading axes (`Expand` on the batch dim → stride-0) or otherwise non-uniform leading strides. | `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs` locks the strided-batched default with exact-line matching on uniform layouts and exact-line fallback matching on broadcasted leading axes (default workspace pass). The HIP manual GPU gate `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` (with `HSA_OVERRIDE_GFX_VERSION=11.5.1` and `LD_LIBRARY_PATH` per `docs/local_hip_environment.md`) covers numerical agreement, including `g15_hipblas_strided_batched_symbolic_batch_matches_eval` and `g15_hipblas_batched_matmul_matches_eval`. |
 | **Perf-F2** | Post-BLAS allocator/fusion compounding | Normalize equivalent symbolic shape expressions for slot reuse and broaden in-place elementwise/fan-in fusion where aliasing permits. | DimExpr normalization v1 now has target tests for product/identity canonicalization and negative tests that unrelated symbols are not alpha-renamed. C fused-elementwise in-place codegen now aliases a proven single reusable input and falls back for strided inputs; HIP in-place codegen and scoped same-property `forall` / binder-equivalent aliases remain future work. |
 
 Fresh-context red-team status for M3/M3b: run 2026-05-10. The red-team
@@ -223,12 +225,13 @@ coverage / replication / plumbing work.
    lets backend specialization treat selected user functions as
    compiler-visible abstractions.
 
-2. **Gap 4 is closed, with backend-quality follow-ons.** M3 picked the
-   PyTorch-ergonomic answer by lifting `matmul` to rank ≥ 2, and M3b
-   lets symbolic/batched matmul specialize through runtime BLAS sizes.
-   The remaining work is quality of implementation: especially using
-   `hipblasSgemmStridedBatched` on uniform HIP batch layouts instead of
-   the current helper loop.
+2. **Gap 4 is closed, including the HIP strided-batched backend-quality
+   follow-on.** M3 picked the PyTorch-ergonomic answer by lifting
+   `matmul` to rank ≥ 2, and M3b lets symbolic/batched matmul specialize
+   through runtime BLAS sizes. Perf-F1 then made
+   `hipblasSgemmStridedBatched` the HIP default on uniformly strided
+   batched layouts, with the per-batch helper loop retained only as the
+   fallback for broadcasted leading axes or non-uniform leading strides.
 
 3. **The dispatch-coverage tail is unbounded.** Softmax, layer_norm,
    attention, batched-attention, MoE routing, etc. each need their

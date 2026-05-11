@@ -1,8 +1,11 @@
 # matmul-rank2-rule-vs-einsum-shipped: `matmul` type rule rejected rank ≥ 2 even though `einsum` is the documented batched answer
 
-**Status:** **CLOSED by M3/M3b** — rank ≥ 2 `matmul` now type-checks
-and symbolic/batched matmul specializes to runtime-sized BLAS when
-matrix slices are contiguous.
+**Status:** **CLOSED by M3/M3b + Perf-F1** — rank ≥ 2 `matmul` now
+type-checks, symbolic/batched matmul specializes to runtime-sized BLAS
+when matrix slices are contiguous, and HIP defaults to
+`hipblasSgemmStridedBatched` on uniformly strided batched layouts with
+the per-batch helper loop retained only as a fallback for broadcasted
+leading axes or non-uniform leading strides.
 **Filed:** 2026-05-08
 **Owning phase:** Phase 3h / language ergonomics
 **Discovered by:** Canonical heads-as-dimension MHA expressibility
@@ -64,8 +67,10 @@ shape.
 2. **The performance fast path now covers the transformer-shaped case.**
    Symbolic and batched matmul specialize through the IR BLAS node when
    trailing matrix slices are contiguous. The C backend loops over batch
-   slices with `cblas_sgemm`; the HIP backend uses a helper loop over
-   hipBLAS calls.
+   slices with `cblas_sgemm`; the HIP backend defaults to
+   `hipblasSgemmStridedBatched` on uniformly strided batched layouts
+   and retains the per-batch helper loop only as a fallback for
+   broadcasted leading axes or non-uniform leading strides.
 
 3. **It used to block honest expression of `Std.Nn.Attention`.** The
    `scaled_dot_product_attention` reference shipped in
@@ -89,10 +94,15 @@ M3 resolved the language-level question in favor of Option B:
 
 ## Remaining quality work
 
-The user-facing gap is closed. Remaining work is backend quality:
-replace the HIP batched helper loop with `hipblasSgemmStridedBatched`
-when the batch layout is uniformly strided, while retaining the helper
-loop for broadcasted or otherwise non-uniform leading strides.
+None. Perf-F1 made `hipblasSgemmStridedBatched` the HIP default on
+uniformly strided batched layouts and retains the per-batch helper loop
+only as a fallback for broadcasted or otherwise non-uniform leading
+strides. The dispatch policy is locked structurally by
+`crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs`
+(exact-line match on both the strided-batched and helper-loop paths,
+default workspace pass) and validated numerically by the HIP manual
+gate (`g15_hipblas_strided_batched_symbolic_batch_matches_eval` and
+`g15_hipblas_batched_matmul_matches_eval`).
 
 ## Probe corpus
 
