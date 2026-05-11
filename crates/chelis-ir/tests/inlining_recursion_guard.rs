@@ -85,9 +85,6 @@ fn parse_one(src: &str) -> Expr {
 // fallback specifics; the assertion below pins the correct result.)
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
-#[ignore = "Inlining-F1: inlining_names guard over-applies to legitimate \
-            nested fn-typed parameter applications (f(f(x))). Flip to \
-            running once the guard is narrowed to true self-recursion."]
 fn nested_fn_param_call_lowers_via_substituted_callable() {
     // `doubler(x) = add(x, x)` — concrete, non-recursive.
     let doubler_src = r#"

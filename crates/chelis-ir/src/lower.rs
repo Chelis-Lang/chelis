@@ -2761,19 +2761,26 @@ impl LowerCtx {
         app_span: Span,
     ) -> Option<LoweredValue> {
         let callable = self.resolve_callable_expr(func)?;
-        // If the callee is a named top-level/local def, track it on the
-        // inlining stack so a recursive body doesn't re-resolve and re-inline
-        // itself infinitely. Nameless fn literals don't need tracking because
-        // they can't refer to themselves by name.
+        // If the callee is a named top-level/local def, compute its
+        // tracking name so `lower_plain_callable_app` can install a
+        // recursion guard around the *body lowering* step (Inlining-F1).
+        // Nameless fn literals don't need tracking because they can't
+        // refer to themselves by name.
+        //
+        // The insert/remove pair lives inside `lower_plain_callable_app`
+        // *after* argument evaluation. Placing it here in
+        // `try_lower_callable_app` (around the entire dispatch) would
+        // also block legitimate nested fn-typed parameter calls like
+        // `outer(doubler, seed)` where `outer(f, x) = f(f(x))` — the
+        // inner `f(x)` runs as an argument to the outer `f`, not as
+        // part of the outer body, and must not trip the guard. See
+        // `docs/investigations/inlining_names_recursion_guard_diagnosis.md`.
         let inlining_name = callable_ref_name(func).filter(|name| {
             self.local_callables.contains_key(name) || self.program_defs.contains_key(name)
         });
-        if let Some(name) = inlining_name.as_ref() {
-            self.inlining_names.insert(name.clone());
-        }
-        let result = match callable {
+        match callable {
             CallableExpr::Plain(fn_expr) => {
-                Some(self.lower_plain_callable_app(&fn_expr, args, app_span))
+                Some(self.lower_plain_callable_app(&fn_expr, args, app_span, inlining_name))
             }
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
@@ -2794,11 +2801,7 @@ impl LowerCtx {
             // the inlined body, so the resolver sees a `Plain` not a
             // `Parameter`).
             CallableExpr::Parameter { .. } => None,
-        };
-        if let Some(name) = inlining_name {
-            self.inlining_names.remove(&name);
         }
-        result
     }
 
     fn resolve_callable_expr(&self, expr: &Expr) -> Option<CallableExpr> {
@@ -3051,6 +3054,7 @@ impl LowerCtx {
         fn_expr: &Expr,
         args: &[Expr],
         _app_span: Span,
+        inlining_name: Option<String>,
     ) -> LoweredValue {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self
@@ -3099,7 +3103,21 @@ impl LowerCtx {
         }
         self.dim_substitutions
             .extend(tensor_dim_substitutions(&formal_types, &actual_types));
+        // Inlining-F1: install the recursion guard *here*, after argument
+        // evaluation, so legitimate nested calls passed as arguments to
+        // the same fn-typed-parameter alias (e.g. `outer(doubler, seed)`
+        // with `outer(f, x) = f(f(x))`) finish lowering before the body
+        // lowering's guard takes effect. A true self-recursive call
+        // inside `body` (`def f(x) = f(x)`) still trips
+        // `resolve_callable_expr_inner`'s `inlining_names.contains(&name)`
+        // check at `lower.rs` and falls through to the `lower_app`
+        // fallback, terminating bounded. See
+        // `docs/investigations/inlining_names_recursion_guard_diagnosis.md`.
+        let guard_name = inlining_name.filter(|name| self.inlining_names.insert(name.clone()));
         let result = self.lower_expr(body);
+        if let Some(name) = guard_name {
+            self.inlining_names.remove(&name);
+        }
         self.bindings = saved;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
