@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::fmt;
 
 use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use crate::tier2;
@@ -20,6 +21,106 @@ pub struct GradResult {
     pub grad_nodes: HashMap<NodeId, NodeId>,
 }
 
+/// Structured reason for an AD rejection.
+///
+/// Variants are intentionally distinct so downstream consumers can
+/// programmatically match on the rejection class rather than parsing
+/// free-text. New variants are added as new AD-rejected ops ship; the
+/// `Other` catch-all carries the legacy free-text message until each
+/// case is given a structured variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdRejectionReason {
+    /// The op is non-differentiable because its output is an integer
+    /// index (e.g. `Argmax`, `Argmin`).
+    IntegerIndexOutput,
+    /// The op is piecewise constant; the analytic derivative is zero
+    /// almost everywhere and undefined at the breakpoints (e.g.
+    /// `Floor`, `Ceil`).
+    PiecewiseConstant,
+    /// The op is non-deterministic over duplicate target indices, so
+    /// no well-defined reverse-mode adjoint exists. This is the
+    /// fail-closed contract for replace-scatter (`Scatter`): when two
+    /// updates target the same cell, the forward result depends on
+    /// the iteration order, so the backward direction cannot
+    /// distribute a single output gradient between the colliding
+    /// updates without an arbitrary policy. Use `ScatterAdd` (whose
+    /// adjoint is `Gather`) when an accumulating semantic is
+    /// acceptable.
+    NonDeterministicAtDuplicateIndices,
+    /// The forward DAG was empty or the output node did not exist.
+    EmptyOrMissingOutput,
+    /// The output node's type is not a scalar float — reverse-mode AD
+    /// requires a scalar loss.
+    NonScalarOutput,
+    /// Catch-all for legacy free-text rejection reasons that have not
+    /// yet been given a structured variant. Carries the original
+    /// message verbatim. Adding a new structured variant should
+    /// migrate the corresponding message out of `Other` and into the
+    /// dedicated enum case.
+    Other(String),
+}
+
+/// Structured error returned by [`grad_dag_checked`].
+///
+/// The public AD-error surface is **programmatically matchable**:
+/// downstream consumers should pattern-match on the enum variant and
+/// fields, not parse the rendered `Display` string. The rendered
+/// string is provided for human consumption only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdError {
+    /// AD is not supported for the named op for the given structural
+    /// reason. `op` uses the canonical `RiscOp` snake-case name (e.g.
+    /// `"scatter_replace"` for the replace-scatter primitive, which
+    /// matches the user-facing Surf builtin name).
+    NotSupported {
+        op: &'static str,
+        reason: AdRejectionReason,
+    },
+}
+
+impl AdError {
+    /// Construct a `NotSupported` error.
+    pub fn not_supported(op: &'static str, reason: AdRejectionReason) -> Self {
+        AdError::NotSupported { op, reason }
+    }
+}
+
+impl fmt::Display for AdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AdError::NotSupported { op, reason } => match reason {
+                AdRejectionReason::IntegerIndexOutput => write!(
+                    f,
+                    "grad: {op} is non-differentiable (integer-index output); \
+                     remove it from the gradient path or wrap it in a stop-gradient"
+                ),
+                AdRejectionReason::PiecewiseConstant => write!(
+                    f,
+                    "grad: {op} is non-differentiable (piecewise constant); \
+                     remove it from the gradient path or wrap it in a stop-gradient"
+                ),
+                AdRejectionReason::NonDeterministicAtDuplicateIndices => write!(
+                    f,
+                    "grad: {op} is non-differentiable (non-deterministic at duplicate \
+                     indices — last-write-wins forward semantics has no well-defined \
+                     adjoint); use scatter_add (whose adjoint is gather) or wrap \
+                     {op} in a stop-gradient"
+                ),
+                AdRejectionReason::EmptyOrMissingOutput => write!(
+                    f,
+                    "grad: cannot differentiate ({op}: empty DAG or missing output node)"
+                ),
+                AdRejectionReason::NonScalarOutput => {
+                    write!(f, "grad: output of {op} must be a scalar float")
+                }
+                AdRejectionReason::Other(msg) => write!(f, "{msg}"),
+            },
+        }
+    }
+}
+
+impl std::error::Error for AdError {}
+
 /// Run reverse-mode AD on `forward` and return a diagnostic error if the
 /// gradient cannot be computed for a structural reason (non-differentiable
 /// ops such as `Argmax`/`Argmin` on the live forward graph, or an unsupported
@@ -31,18 +132,22 @@ pub fn grad_dag_checked(
     forward: &Dag,
     output: NodeId,
     wrt: &[NodeId],
-) -> Result<GradResult, String> {
+) -> Result<GradResult, AdError> {
     if forward.is_empty() {
-        return Err("cannot differentiate an empty DAG".to_string());
+        return Err(AdError::NotSupported {
+            op: "<empty>",
+            reason: AdRejectionReason::EmptyOrMissingOutput,
+        });
     }
-    let out_node = forward
-        .get(output)
-        .ok_or_else(|| format!("output node {output:?} does not exist in forward DAG"))?;
+    let out_node = forward.get(output).ok_or(AdError::NotSupported {
+        op: "<missing>",
+        reason: AdRejectionReason::EmptyOrMissingOutput,
+    })?;
     if !is_scalar_float(&out_node.output_type) {
-        return Err(format!(
-            "grad: output node {} must be a scalar float, got {:?}",
-            output.0, out_node.output_type
-        ));
+        return Err(AdError::NotSupported {
+            op: risc_op_name(&out_node.op),
+            reason: AdRejectionReason::NonScalarOutput,
+        });
     }
 
     // Walk the subgraph of nodes reachable from `output` and look for ops
@@ -62,41 +167,101 @@ pub fn grad_dag_checked(
         }
         match &node.op {
             RiscOp::Argmax { .. } => {
-                return Err(format!(
-                    "grad: Argmax at node {} is non-differentiable (integer-index output); \
-                     remove it from the gradient path or wrap it in a stop-gradient",
-                    node.id.0
-                ));
+                return Err(AdError::NotSupported {
+                    op: "argmax",
+                    reason: AdRejectionReason::IntegerIndexOutput,
+                });
             }
             RiscOp::Argmin { .. } => {
-                return Err(format!(
-                    "grad: Argmin at node {} is non-differentiable (integer-index output); \
-                     remove it from the gradient path or wrap it in a stop-gradient",
-                    node.id.0
-                ));
+                return Err(AdError::NotSupported {
+                    op: "argmin",
+                    reason: AdRejectionReason::IntegerIndexOutput,
+                });
             }
             RiscOp::Floor => {
-                return Err(format!(
-                    "grad: Floor at node {} is non-differentiable (piecewise constant); \
-                     remove it from the gradient path or wrap it in a stop-gradient",
-                    node.id.0
-                ));
+                return Err(AdError::NotSupported {
+                    op: "floor",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                });
             }
             RiscOp::Ceil => {
-                return Err(format!(
-                    "grad: Ceil at node {} is non-differentiable (piecewise constant); \
-                     remove it from the gradient path or wrap it in a stop-gradient",
-                    node.id.0
-                ));
+                return Err(AdError::NotSupported {
+                    op: "ceil",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                });
+            }
+            RiscOp::Scatter { .. } => {
+                // Last-write-wins replace-scatter is fail-closed for
+                // AD: the forward result depends on iteration order at
+                // duplicate target indices, so no well-defined adjoint
+                // exists. See `RiscOp::Scatter` doc and
+                // `spec/05-risc-primitives.md` §3.5.
+                return Err(AdError::NotSupported {
+                    op: "scatter_replace",
+                    reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
+                });
             }
             _ => {}
         }
     }
 
-    grad_dag(forward, output, wrt).ok_or_else(|| {
-        "grad: failed to construct backward DAG (unsupported op or verification failure)"
-            .to_string()
+    grad_dag(forward, output, wrt).ok_or(AdError::NotSupported {
+        op: "<unknown>",
+        reason: AdRejectionReason::Other(
+            "grad: failed to construct backward DAG (unsupported op or verification failure)"
+                .to_string(),
+        ),
     })
+}
+
+/// Canonical snake-case name for a `RiscOp` for use in `AdError`'s
+/// `op` field. Mirrors the user-facing Surf builtin name where one
+/// exists.
+fn risc_op_name(op: &RiscOp) -> &'static str {
+    match op {
+        RiscOp::Add => "add",
+        RiscOp::Mul => "mul",
+        RiscOp::CmpLt => "cmplt",
+        RiscOp::MaxElem => "max_elem",
+        RiscOp::Neg => "neg",
+        RiscOp::Exp => "exp",
+        RiscOp::Log => "log",
+        RiscOp::Sin => "sin",
+        RiscOp::Sqrt => "sqrt",
+        RiscOp::Cos => "cos",
+        RiscOp::Tan => "tan",
+        RiscOp::Atan => "atan",
+        RiscOp::Abs => "abs",
+        RiscOp::Floor => "floor",
+        RiscOp::Ceil => "ceil",
+        RiscOp::UniformLike { .. } => "uniform_like",
+        RiscOp::Dropout { .. } => "dropout",
+        RiscOp::Sum { .. } => "sum",
+        RiscOp::MaxReduce { .. } => "max_reduce",
+        RiscOp::MinReduce { .. } => "min_reduce",
+        RiscOp::ProdReduce { .. } => "prod_reduce",
+        RiscOp::Argmax { .. } => "argmax",
+        RiscOp::Argmin { .. } => "argmin",
+        RiscOp::Reshape { .. } => "reshape",
+        RiscOp::Permute { .. } => "permute",
+        RiscOp::Expand { .. } => "expand",
+        RiscOp::OneHot { .. } => "one_hot",
+        RiscOp::Pad { .. } => "pad",
+        RiscOp::Shrink { .. } => "shrink",
+        RiscOp::Stride { .. } => "stride",
+        RiscOp::Const { .. } => "const",
+        RiscOp::Load { .. } => "load",
+        RiscOp::Store { .. } => "store",
+        RiscOp::Copy => "copy",
+        RiscOp::Drop => "drop",
+        RiscOp::Realize => "realize",
+        RiscOp::Cast { .. } => "cast",
+        RiscOp::FusedElem { .. } => "fused_elem",
+        RiscOp::BlasMatmul { .. } => "blas_matmul",
+        RiscOp::Gather { .. } => "gather",
+        RiscOp::ScatterAdd { .. } => "scatter_add",
+        RiscOp::Scatter { .. } => "scatter_replace",
+    }
 }
 
 /// Canonical synthesized marker for AD backward (adjoint) nodes. Locked
@@ -870,6 +1035,18 @@ fn compute_adjoints(
             Some(vec![(values, dvalues)])
         }
         RiscOp::ScatterAdd { .. } => None,
+        RiscOp::Scatter { .. } => {
+            // Replace-scatter (last-write-wins) is non-differentiable.
+            // `grad_dag_checked` rejects this case before reaching here
+            // with a structured `AdError::NotSupported { op:
+            // "scatter_replace", reason:
+            // AdRejectionReason::NonDeterministicAtDuplicateIndices }`.
+            // Returning `None` here keeps the legacy `grad_dag` path
+            // fail-closed (rather than synthesizing a silent-zero or
+            // arbitrary adjoint) for any caller that still uses the
+            // un-checked entry point.
+            None
+        }
         RiscOp::BlasMatmul { .. } => None,
     }
 }
@@ -2622,8 +2799,15 @@ mod tests {
             Ok(_) => panic!("argmax on the gradient path must error, not succeed"),
         };
         assert!(
-            err.contains("Argmax") && err.contains("non-differentiable"),
-            "error message must identify the non-differentiable op; got: {err}"
+            matches!(
+                err,
+                AdError::NotSupported {
+                    op: "argmax",
+                    reason: AdRejectionReason::IntegerIndexOutput,
+                }
+            ),
+            "argmax must be rejected with structured AdError::NotSupported \
+             {{ op: \"argmax\", reason: IntegerIndexOutput }}; got: {err:?}"
         );
     }
 
@@ -2647,8 +2831,15 @@ mod tests {
             Ok(_) => panic!("argmin on the gradient path must error, not succeed"),
         };
         assert!(
-            err.contains("Argmin") && err.contains("non-differentiable"),
-            "error message must identify the non-differentiable op; got: {err}"
+            matches!(
+                err,
+                AdError::NotSupported {
+                    op: "argmin",
+                    reason: AdRejectionReason::IntegerIndexOutput,
+                }
+            ),
+            "argmin must be rejected with structured AdError::NotSupported \
+             {{ op: \"argmin\", reason: IntegerIndexOutput }}; got: {err:?}"
         );
     }
 
@@ -2729,8 +2920,15 @@ mod tests {
             Ok(_) => panic!("floor on the gradient path must error, not succeed"),
         };
         assert!(
-            err.contains("Floor") && err.contains("non-differentiable"),
-            "error message must identify Floor as non-differentiable; got: {err}"
+            matches!(
+                err,
+                AdError::NotSupported {
+                    op: "floor",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                }
+            ),
+            "floor must be rejected with structured AdError::NotSupported \
+             {{ op: \"floor\", reason: PiecewiseConstant }}; got: {err:?}"
         );
     }
 
@@ -2744,8 +2942,15 @@ mod tests {
             Ok(_) => panic!("ceil on the gradient path must error, not succeed"),
         };
         assert!(
-            err.contains("Ceil") && err.contains("non-differentiable"),
-            "error message must identify Ceil as non-differentiable; got: {err}"
+            matches!(
+                err,
+                AdError::NotSupported {
+                    op: "ceil",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                }
+            ),
+            "ceil must be rejected with structured AdError::NotSupported \
+             {{ op: \"ceil\", reason: PiecewiseConstant }}; got: {err:?}"
         );
     }
 
@@ -2839,8 +3044,8 @@ mod tests {
         );
     }
 
-    /// floor must give a CLEAN error (containing "Floor" and "non-differentiable"),
-    /// not a silent zero gradient. Double-checks grad_dag_checked, not just grad_dag.
+    /// floor must give a CLEAN structured error, not a silent zero gradient.
+    /// Pattern-matches on the AdError enum, not the rendered string.
     #[test]
     fn adv_floor_grad_dag_checked_error_is_not_silent_zero() {
         let (dag, x, out) =
@@ -2849,29 +3054,41 @@ mod tests {
         // grad_dag_checked must be the gate that rejects it.
         let result = grad_dag_checked(&dag, out, &[x]);
         match result {
-            Err(msg) => {
-                assert!(msg.contains("Floor"), "error must name 'Floor'; got: {msg}");
+            Err(err) => {
                 assert!(
-                    msg.contains("non-differentiable"),
-                    "error must say 'non-differentiable'; got: {msg}"
+                    matches!(
+                        err,
+                        AdError::NotSupported {
+                            op: "floor",
+                            reason: AdRejectionReason::PiecewiseConstant,
+                        }
+                    ),
+                    "floor must be rejected with structured AdError::NotSupported \
+                     {{ op: \"floor\", reason: PiecewiseConstant }}; got: {err:?}"
                 );
             }
             Ok(_) => panic!("floor must be rejected by grad_dag_checked. Got Ok"),
         }
     }
 
-    /// ceil must give a CLEAN error, not succeed.
+    /// ceil must give a CLEAN structured error, not succeed.
     #[test]
     fn adv_ceil_grad_dag_checked_error_is_not_silent_zero() {
         let (dag, x, out) =
             build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Ceil, vec![a], ty.clone(), None));
         let result = grad_dag_checked(&dag, out, &[x]);
         match result {
-            Err(msg) => {
-                assert!(msg.contains("Ceil"), "error must name 'Ceil'; got: {msg}");
+            Err(err) => {
                 assert!(
-                    msg.contains("non-differentiable"),
-                    "error must say 'non-differentiable'; got: {msg}"
+                    matches!(
+                        err,
+                        AdError::NotSupported {
+                            op: "ceil",
+                            reason: AdRejectionReason::PiecewiseConstant,
+                        }
+                    ),
+                    "ceil must be rejected with structured AdError::NotSupported \
+                     {{ op: \"ceil\", reason: PiecewiseConstant }}; got: {err:?}"
                 );
             }
             Ok(_) => panic!("ceil must be rejected by grad_dag_checked. Got Ok"),

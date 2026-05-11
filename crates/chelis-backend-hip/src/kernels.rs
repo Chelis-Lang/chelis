@@ -1268,6 +1268,51 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+/// Generate sparse replace-scatter (last-write-wins) kernel for f32
+/// payloads and typed integer indices.
+///
+/// Per `spec/05-risc-primitives.md` §3.5, the deterministic order is
+/// updates-tensor row-major flat iteration. HIP atomics do not
+/// guarantee ordered last-write semantics across concurrent threads,
+/// so this kernel is executed by a **single thread** that walks
+/// `i = 0..total` in ascending flat order and writes each update
+/// non-atomically. The launch site uses grid=1, block=1. This
+/// trades GPU throughput for the determinism the AD policy
+/// depends on. Higher-throughput strategies (sort-then-scatter,
+/// segmented scan) require a tie-breaker that picks the max flat
+/// index per target cell; they are a future optimization but must
+/// preserve this exact tie-breaking rule.
+pub fn scatter_replace(kernel_name: &str, index_ty: &str) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {index_ty} *indices,
+    const float *updates,
+    float *out,
+    int before,
+    int axis_size,
+    int after,
+    int index_count,
+    int total) {{
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  for (int i = 0; i < total; i++) {{
+    int d = i % after;
+    int tmp = i / after;
+    int index_pos = tmp % index_count;
+    int b = tmp / index_count;
+    int g = (int)indices[index_pos];
+    if (g < 0 || g >= axis_size || b >= before) {{
+      CHELIS_GUARD_INDEX(g, axis_size, 4);
+      return;
+    }}
+    int dst = ((b * axis_size + g) * after) + d;
+    out[dst] = updates[i];
+  }}
+}}
+"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

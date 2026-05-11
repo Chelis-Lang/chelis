@@ -435,6 +435,9 @@ impl CEmitter {
             RiscOp::ScatterAdd { axis } => {
                 self.emit_sparse_scatter_add(id, *axis, &node.inputs, &node.output_type, dag);
             }
+            RiscOp::Scatter { axis } => {
+                self.emit_sparse_scatter_replace(id, *axis, &node.inputs, &node.output_type, dag);
+            }
         }
     }
 
@@ -626,6 +629,29 @@ impl CEmitter {
                     {
                         panic!(
                             "C backend sparse scatter_add target, update, and output precision must match at node {}",
+                            node.id.0
+                        );
+                    }
+                }
+                RiscOp::Scatter { .. } => {
+                    if node.inputs.len() != 3 {
+                        continue;
+                    }
+                    let target_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                    let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                    let updates_ty = &dag.get(node.inputs[2]).unwrap().output_type;
+                    if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+                        panic!(
+                            "C backend sparse scatter_replace requires int32/int64 indices, got {} at node {}",
+                            indices_ty.precision.name(),
+                            node.id.0
+                        );
+                    }
+                    if updates_ty.precision != target_ty.precision
+                        || node.output_type.precision != target_ty.precision
+                    {
+                        panic!(
+                            "C backend sparse scatter_replace target, update, and output precision must match at node {}",
                             node.id.0
                         );
                     }
@@ -1935,6 +1961,113 @@ impl CEmitter {
         ));
         self.line(&format!(
             "t{id}_out_data[t{id}_out] += t{id}_updates_data[t{id}_src];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "if (t{id}_target != t{target}) chelis_free(t{id}_target);"
+        ));
+        self.line(&format!(
+            "if (t{id}_indices != t{indices}) chelis_free(t{id}_indices);"
+        ));
+        self.line(&format!(
+            "if (t{id}_updates != t{updates}) chelis_free(t{id}_updates);"
+        ));
+    }
+
+    /// Emit a bounded sparse replace-scatter (last-write-wins) loop.
+    ///
+    /// The deterministic order matches `spec/05-risc-primitives.md` §3.5:
+    /// updates-tensor row-major (C order) flat iteration. We iterate
+    /// `(b, i, d)` in the same nesting as `emit_sparse_scatter_add` —
+    /// that nest order traverses `updates` flat-index ascending, so
+    /// the **last write wins** invariant matches the IR evaluator
+    /// (`scatter_replace` in `chelis_ir::eval`). The loop is single-
+    /// threaded: no `#pragma omp parallel for`. Adding parallelism
+    /// would race on duplicate indices and break determinism, which
+    /// is the whole reason this op rejects AD.
+    fn emit_sparse_scatter_replace(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let target = inputs[0].0;
+        let indices = inputs[1].0;
+        let updates = inputs[2].0;
+        let target_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
+        let target_et = Self::elem_type(target_ty);
+        let index_et = Self::elem_type(indices_ty);
+        let update_et = Self::elem_type(updates_ty);
+        let target_elem_size = Self::elem_size_expr(target_ty);
+        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
+        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
+        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
+        self.line(&format!(
+            "chelis_tensor *t{id}_target = chelis_contiguous(t{target});"
+        ));
+        self.line(&format!(
+            "chelis_tensor *t{id}_indices = chelis_contiguous(t{indices});"
+        ));
+        self.line(&format!(
+            "chelis_tensor *t{id}_updates = chelis_contiguous(t{updates});"
+        ));
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "const {index_et} *t{id}_indices_data = (const {index_et}*)t{id}_indices->data;"
+        ));
+        self.line(&format!(
+            "const {update_et} *t{id}_updates_data = (const {update_et}*)t{id}_updates->data;"
+        ));
+        self.line(&format!(
+            "{target_et} *t{id}_out_data = ({target_et}*)t{id}->data;"
+        ));
+        self.line(&format!(
+            "memcpy(t{id}->data, t{id}_target->data, (size_t)t{id}->size * {target_elem_size});"
+        ));
+        self.line(&format!("int t{id}_before = {before};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_after = {after};"));
+        self.line(&format!("int t{id}_index_count = t{id}_indices->size;"));
+        // Single-threaded sequential loop: deterministic last-write-wins
+        // requires that no two writes to the same target cell race. The
+        // outer (b, i, d) iteration order is the canonical
+        // updates-tensor row-major traversal.
+        self.line(&format!(
+            "for (int t{id}_b = 0; t{id}_b < t{id}_before; t{id}_b++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "for (int t{id}_i = 0; t{id}_i < t{id}_index_count; t{id}_i++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "int t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int)t{id}_indices->data[t{id}_i];"
+        ));
+        self.line(&format!(
+            "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
+        ));
+        self.line(&format!(
+            "for (int t{id}_d = 0; t{id}_d < t{id}_after; t{id}_d++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "int t{id}_src = ((t{id}_b * t{id}_index_count + t{id}_i) * t{id}_after) + t{id}_d;"
+        ));
+        self.line(&format!(
+            "int t{id}_out = ((t{id}_b * t{id}_axis_size + t{id}_g) * t{id}_after) + t{id}_d;"
+        ));
+        // Last-write-wins assignment (NOT accumulation).
+        self.line(&format!(
+            "t{id}_out_data[t{id}_out] = t{id}_updates_data[t{id}_src];"
         ));
         self.indent -= 1;
         self.line("}");

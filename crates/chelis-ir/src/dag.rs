@@ -419,6 +419,25 @@ pub enum RiscOp {
     ScatterAdd {
         axis: usize,
     },
+
+    /// Sparse replace-scatter (last-write-wins). Inputs are
+    /// `target, indices, updates`. Duplicate indices do not accumulate;
+    /// the last write in deterministic-order wins. Per
+    /// `spec/05-risc-primitives.md` §3.5 the deterministic order is
+    /// updates-tensor row-major (C order) flat iteration: the write at
+    /// `target[..., indices[i], ...] = updates[i, ...]` occurs in
+    /// ascending flat index over `updates`, so the maximum flat-index
+    /// write to any target cell is the final value.
+    ///
+    /// AD policy: `no_grad`. Reverse-mode AD over `Scatter` is
+    /// structurally rejected via `AdError::NotSupported { op:
+    /// "scatter_replace", reason:
+    /// AdRejectionReason::NonDeterministicAtDuplicateIndices }`. Wrap
+    /// in a stop-gradient or restructure the program to use
+    /// `ScatterAdd` (whose adjoint is well-defined as `Gather`).
+    Scatter {
+        axis: usize,
+    },
 }
 
 /// A single node in the DAG.

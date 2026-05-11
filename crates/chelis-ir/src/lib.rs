@@ -28,6 +28,7 @@ pub use analysis::{
     CopyCostSummary, FunctionCopyCost, analyze_copy_costs, analyze_copy_costs_for_roots,
 };
 pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
+pub use grad::{AdError, AdRejectionReason};
 pub use host::CompiledProgram;
 pub use load_store_name::{LoadStoreName, LoadStoreNameError};
 pub use lower::{

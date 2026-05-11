@@ -145,7 +145,8 @@ fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
                 | RiscOp::Shrink { .. }
                 | RiscOp::BlasMatmul { .. }
                 | RiscOp::Gather { .. }
-                | RiscOp::ScatterAdd { .. } => NodeMemoryKind::SlotBacked { slot: usize::MAX },
+                | RiscOp::ScatterAdd { .. }
+                | RiscOp::Scatter { .. } => NodeMemoryKind::SlotBacked { slot: usize::MAX },
             }
         };
         kinds.push(kind);
