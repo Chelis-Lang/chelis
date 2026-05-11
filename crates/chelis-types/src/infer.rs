@@ -2403,14 +2403,11 @@ fn validate_ir_expr(
                 return StaticValue::Unknown;
             }
             if let Some(tag) = get_tag(list) {
-                if matches!(tag, "par" | "jit") {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::Other,
-                        format!("`{tag}` is not supported by IR lowering"),
-                        vec!["Remove this construct or defer it to a later phase".to_string()],
-                    ));
-                }
-
+                // `par` (sequential v1, spec/03-deep-syntax.md §2.3) and `jit`
+                // (compilation trigger, §2.7) are spec-blessed pass-through
+                // forms at Phase 0 evaluation. The validator used to reject
+                // both; the rejection is removed because lowering handles them
+                // (see `lower_par` and the `jit` lowering arm).
                 if tag == "app"
                     && let Some(func_name) = ir_builtin_name(list)
                     && is_ir_shape_sensitive_builtin(func_name)
@@ -4485,6 +4482,26 @@ fn infer_expr(
                         );
                     }
                     last_ty
+                }
+                Some("jit") => {
+                    // jit: compilation trigger; semantically a no-op at eval
+                    // (spec/03-deep-syntax.md §2.7). Type is the type of the
+                    // wrapped expression.
+                    let kids = children(list);
+                    if let Some(inner) = kids.first() {
+                        infer_expr(
+                            inner,
+                            env,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                            typed_nodes,
+                            total_nodes,
+                        )
+                    } else {
+                        Type::Error
+                    }
                 }
                 Some("realize") => {
                     let kids = children(list);
