@@ -1802,6 +1802,22 @@ enum CallableExpr {
         fn_expr: Expr,
         wrt: Option<Vec<usize>>,
     },
+    /// A reference to a function-valued parameter (e.g. `f` inside
+    /// `def double_apply(f: T -> T, x: T) = x |> f`). The parameter has
+    /// no body to inline at standalone-def lowering time — the DAG can't
+    /// represent a call to it because there is no `RiscOp::Call`. Call
+    /// sites that pass a concrete function for this parameter (via
+    /// `lower_plain_callable_app`) insert the resolved callable into
+    /// `local_callables` *before* lowering the inlined body, so the
+    /// resolver never produces this variant on the inlined-body path.
+    /// `Parameter` therefore appears only on the standalone-def lowering
+    /// path, where the right thing to do is no-op (see `lower_pipe`'s
+    /// arm) — the standalone DAG entry is never user-visible because
+    /// every caller re-inlines.
+    Parameter {
+        #[allow(dead_code)]
+        name: String,
+    },
 }
 
 #[derive(Clone)]
@@ -1960,6 +1976,14 @@ struct LowerCtx {
     random_seed: Option<u64>,
     linearity: LinearityInfo,
     inlining_names: HashSet<String>,
+    /// Parameter names whose declared type is `t-fn` — used by
+    /// `resolve_callable_expr_inner` to distinguish a fn-typed parameter
+    /// reference (legitimate `CallableExpr::Parameter`) from a truly
+    /// unresolvable name (`None`). Populated by `lower_fn` when a `t-fn`
+    /// param is registered; saved/restored across nested `fn` scopes
+    /// alongside `bindings` and `local_callables`. See
+    /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
+    fn_typed_params: HashSet<String>,
     dim_substitutions: HashMap<String, DimInfo>,
     /// The span_id of the Deep `Expr` currently being lowered. Threaded
     /// through `lower_expr` (set on entry, restored on exit) so every
@@ -1985,6 +2009,7 @@ impl LowerCtx {
             random_seed: None,
             linearity,
             inlining_names: HashSet::new(),
+            fn_typed_params: HashSet::new(),
             dim_substitutions: HashMap::new(),
             current_span_id: None,
         }
@@ -2557,6 +2582,7 @@ impl LowerCtx {
         }
         let saved = self.bindings.clone();
         let saved_callables = self.local_callables.clone();
+        let saved_fn_typed_params = self.fn_typed_params.clone();
 
         // elems[2] = (bind {} name1 expr1 name2 expr2 ...)
         if let Expr::List(bind_list, _) = &elems[2] {
@@ -2565,6 +2591,13 @@ impl LowerCtx {
             let mut i = 0;
             while i + 1 < bind_kids.len() {
                 if let Expr::Atom(Atom::Symbol(name), _) = &bind_kids[i] {
+                    // Same shadowing rationale as
+                    // `lower_plain_callable_app`: drop any outer-scope
+                    // `fn_typed_params[name]` so a let-shadowed name
+                    // resolves through the new `local_callable` /
+                    // `bindings` entry, not through the outer fn's
+                    // `Parameter` classification.
+                    self.fn_typed_params.remove(name);
                     if let Some(callable) = self.callable_binding_expr(&bind_kids[i + 1]) {
                         self.local_callables.insert(name.clone(), callable);
                     } else {
@@ -2579,6 +2612,7 @@ impl LowerCtx {
         let result = self.lower_expr(&elems[3]);
         self.bindings = saved; // Restore scope
         self.local_callables = saved_callables;
+        self.fn_typed_params = saved_fn_typed_params;
         result
     }
 
@@ -2750,6 +2784,16 @@ impl LowerCtx {
             CallableExpr::Grad { fn_expr, wrt } => {
                 Some(self.lower_grad_callable_app(&fn_expr, wrt.as_deref(), args, app_span))
             }
+            // `Parameter` carries no body the IR can inline. Fall back to
+            // `lower_app`'s existing "lower func and args, return last"
+            // path (`lower.rs:2644`–`2649`), which is the same broken-but-
+            // silent shape `lower_app` already produces for fn-typed-
+            // parameter calls today. Real semantics come from call-site
+            // inlining (`lower_plain_callable_app` substitutes the
+            // concrete callable into `local_callables` before lowering
+            // the inlined body, so the resolver sees a `Plain` not a
+            // `Parameter`).
+            CallableExpr::Parameter { .. } => None,
         };
         if let Some(name) = inlining_name {
             self.inlining_names.remove(&name);
@@ -2779,11 +2823,28 @@ impl LowerCtx {
                 if !visited.insert(name.clone()) || self.inlining_names.contains(&name) {
                     return None;
                 }
-                let body = self
+                // Item 2-extended: a function-valued parameter is a
+                // legitimate callable (Surf lets `def f(g: T -> T, x: T) =
+                // x |> g` typecheck), but it has no body to recurse into
+                // — the DAG can't represent a call to it (no
+                // `RiscOp::Call`). Surface it as
+                // `CallableExpr::Parameter` so `lower_pipe` can no-op the
+                // stage on the standalone-def lowering path; call-site
+                // inlining replaces this with the resolved callable via
+                // `local_callables`, so this variant only appears when
+                // the def is lowered in isolation. See
+                // `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
+                if let Some(body) = self
                     .local_callables
                     .get(&name)
-                    .or_else(|| self.program_defs.get(&name))?;
-                self.resolve_callable_expr_inner(body, visited)
+                    .or_else(|| self.program_defs.get(&name))
+                {
+                    return self.resolve_callable_expr_inner(body, visited);
+                }
+                if self.fn_typed_params.contains(&name) {
+                    return Some(CallableExpr::Parameter { name });
+                }
+                None
             }
             Some("vmap") => {
                 let kids = children(list);
@@ -2801,6 +2862,10 @@ impl LowerCtx {
                             CallableExpr::Plain(fn_expr) => {
                                 Some(CallableExpr::VmapGrad { fn_expr, wrt, axis })
                             }
+                            // `vmap(grad(parameter))` / `grad(...)`/`vmap(...)`
+                            // inner shapes are G1/G2/G4 territory from the
+                            // Item 2 sibling sweep — out of scope for
+                            // dispatch A. Propagate `None`.
                             _ => None,
                         });
                 }
@@ -2812,6 +2877,8 @@ impl LowerCtx {
                         CallableExpr::Grad { fn_expr, wrt } => {
                             Some(CallableExpr::Grad { fn_expr, wrt })
                         }
+                        // `vmap(parameter)` is G2 territory.
+                        CallableExpr::Parameter { .. } => None,
                     })
             }
             Some("grad") => self
@@ -2821,6 +2888,7 @@ impl LowerCtx {
                         fn_expr,
                         wrt: self.extract_grad_wrt_indices(list),
                     }),
+                    // `grad(parameter)` is G1 territory.
                     _ => None,
                 }),
             _ => None,
@@ -2990,6 +3058,7 @@ impl LowerCtx {
         };
         let saved = self.bindings.clone();
         let saved_callables = self.local_callables.clone();
+        let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
         let param_types: Vec<TensorType> = param_names
             .iter()
@@ -3003,6 +3072,17 @@ impl LowerCtx {
         let mut formal_types = Vec::new();
         let mut actual_types = Vec::new();
         for ((name, arg_expr), param_ty) in param_names.iter().zip(args.iter()).zip(param_types) {
+            // Item 2-extended: shadowing — the inlined fn's param name
+            // is bound to a fresh value (either a `local_callable` or a
+            // `bindings` entry). Drop any outer-scope
+            // `fn_typed_params[name]` so the resolver doesn't
+            // misclassify the shadowed name as a `Parameter` when it's
+            // really backed by a concrete `local_callable` or a tensor
+            // binding. `local_callables` takes precedence in the
+            // resolver anyway, but bindings-only shadowing (non-callable
+            // arg for a non-callable param) would otherwise leak the
+            // outer `fn_typed_params` entry.
+            self.fn_typed_params.remove(name);
             if let Some(callable) = self.callable_binding_expr(arg_expr) {
                 self.local_callables.insert(name.clone(), callable);
             } else {
@@ -3022,6 +3102,7 @@ impl LowerCtx {
         let result = self.lower_expr(body);
         self.bindings = saved;
         self.local_callables = saved_callables;
+        self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
         result
     }
@@ -3037,7 +3118,10 @@ impl LowerCtx {
         };
         let saved = self.bindings.clone();
         let saved_callables = self.local_callables.clone();
+        let saved_fn_typed_params = self.fn_typed_params.clone();
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
+            // Same shadowing rationale as `lower_plain_callable_app`.
+            self.fn_typed_params.remove(name);
             self.bindings.insert(name.clone(), arg_id);
         }
         let result = self.lower_expr(body);
@@ -3047,6 +3131,7 @@ impl LowerCtx {
         }
         self.bindings = saved;
         self.local_callables = saved_callables;
+        self.fn_typed_params = saved_fn_typed_params;
         result
     }
 
@@ -4439,11 +4524,22 @@ impl LowerCtx {
         }
         let saved = self.bindings.clone();
         let saved_callables = self.local_callables.clone();
+        let saved_fn_typed_params = self.fn_typed_params.clone();
 
-        // Register params as Load nodes.
+        // Register params as Load nodes. For `t-fn`-typed params,
+        // additionally track the name in `fn_typed_params` so
+        // `resolve_callable_expr_inner` can surface
+        // `CallableExpr::Parameter` (Item 2-extended G10). The Load is
+        // still emitted for safety, but a fn-typed parameter is never
+        // loaded as a tensor on any reachable path — `lower_pipe`/`lower_app`
+        // dispatch on the callable shape, not on the binding's
+        // `LoweredValue`.
         if let Expr::List(params_list, _) = &elems[2] {
             for param in &params_list.elements[2..] {
                 if let Some((name, ty_expr)) = param_name_and_type_expr(param) {
+                    if Self::type_expr_is_fn(ty_expr) {
+                        self.fn_typed_params.insert(name.clone());
+                    }
                     let lowered = self.lower_fn_param_binding(&name, ty_expr);
                     self.bindings.insert(name, lowered);
                 }
@@ -4453,7 +4549,28 @@ impl LowerCtx {
         let result = self.lower_expr(&elems[3]);
         self.bindings = saved; // Restore scope
         self.local_callables = saved_callables;
+        self.fn_typed_params = saved_fn_typed_params;
         result
+    }
+
+    /// Returns `true` when the parameter type expression is a `t-fn`
+    /// (function-valued parameter). Used by `lower_fn` to populate
+    /// `fn_typed_params` so `resolve_callable_expr_inner` can return
+    /// `CallableExpr::Parameter` for unresolvable callables that are
+    /// nonetheless legitimate fn-typed parameters. Walks through
+    /// `t-ref` wrappers (a borrowed function type is still a function).
+    fn type_expr_is_fn(ty_expr: Option<&Expr>) -> bool {
+        let Some(expr) = ty_expr else {
+            return false;
+        };
+        let Expr::List(list, _) = expr else {
+            return false;
+        };
+        match get_tag(list) {
+            Some("t-fn") => true,
+            Some("t-ref") => Self::type_expr_is_fn(children(list).first()),
+            _ => false,
+        }
     }
 
     fn lower_fn_param_binding(&mut self, name: &str, ty_expr: Option<&Expr>) -> LoweredValue {
@@ -4695,6 +4812,19 @@ impl LowerCtx {
                             func_expr.span(),
                         )
                     }
+                    // Item 2-extended G10: `x |> f` where `f` is a fn-
+                    // typed parameter. The DAG has no `RiscOp::Call`, so
+                    // the standalone-def lowering can't actually apply
+                    // `f` — leave `current` unchanged. This is correct on
+                    // every reachable path: standalone-def lowering only
+                    // builds a DAG entry that `try_lower_program`
+                    // produces eagerly but no caller ever references (every
+                    // caller re-inlines through `lower_plain_callable_app`,
+                    // which substitutes the concrete callable into
+                    // `local_callables` so the resolver returns
+                    // `Plain`/`Vmap`/`Grad`/`VmapGrad`, not `Parameter`).
+                    // See `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
+                    CallableExpr::Parameter { .. } => current,
                 };
                 continue;
             }

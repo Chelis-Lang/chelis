@@ -374,7 +374,6 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "pipe fn-typed parameter stage gap, see Item 2-extended dispatch A"]
 fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
     // Standalone def body: `def double_apply(f, x) = x |> f |> f`.
     // Lowering this in isolation (without a caller to inline `f`) is the
