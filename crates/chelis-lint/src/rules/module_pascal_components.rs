@@ -59,13 +59,17 @@ impl Rule for ModulePascalComponents {
 /// Seed list comes from a survey of `.ch` files across `chelis`,
 /// `nautilus`, `coral`, `shoals`, `octant` (May 2026 ecosystem snapshot).
 const KNOWN_SINGLE_WORDS: &[&str] = &[
-    // Top-level repo prefixes
+    // Top-level repo prefixes. Each name is asserted to be a single
+    // English PascalCase word under spec §6.1/§6.3. See
+    // `docs/investigations/module_pascal_allowlist_diagnosis.md` for the
+    // canonical chelis-ecosystem name set and cross-references.
     "Chelis",
     "CEarchin",
     "Nautilus",
     "Coral",
     "Shoals",
     "Octant",
+    "Capstone",
     "Std",
     // Nautilus subsystems
     "Distance",
@@ -427,7 +431,6 @@ mod tests {
     // after the leading capital) trip the suspicion heuristic at L271 even
     // though the names are single-word and correctly PascalCase per spec.
     #[test]
-    #[ignore = "missing KNOWN_SINGLE_WORDS entries, see commit fix: add missing ecosystem names to module-pascal-components allowlist"]
     fn accepts_capstone_ecosystem_name() {
         // User-reported failure: `Capstone` is 1 leading cap + 7 lowercase,
         // hits the >=7 long-run threshold even though it's a single English
