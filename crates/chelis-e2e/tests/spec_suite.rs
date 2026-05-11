@@ -746,7 +746,10 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         None,
     );
     let loss = single.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![sq],
         TensorType::scalar_f32(),
         None,

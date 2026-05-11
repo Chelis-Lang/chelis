@@ -323,7 +323,15 @@ fn s3_all_unary_ops_emit_kernels() {
 fn s4_sum_reduction_emits_kernel() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
-    let s = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(3), None);
+    let s = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(s);
     let result = codegen_hip(&dag, "test_sum");
     assert!(
@@ -938,7 +946,15 @@ int main(void) {
 fn s15_segmented_reduction_strategy_names_track_axis_size() {
     let mut tiny = Dag::new();
     let x_tiny = tiny.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 8), None);
-    let sum_tiny = tiny.add_node(RiscOp::Sum { axis: 1 }, vec![x_tiny], vec_f32(3), None);
+    let sum_tiny = tiny.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x_tiny],
+        vec_f32(3),
+        None,
+    );
     tiny.add_root(sum_tiny);
     let tiny_result = codegen_hip(&tiny, "test_tiny_reduce");
     assert!(
@@ -948,7 +964,15 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
 
     let mut small = Dag::new();
     let x_small = small.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 16), None);
-    let sum_small = small.add_node(RiscOp::Sum { axis: 1 }, vec![x_small], vec_f32(3), None);
+    let sum_small = small.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x_small],
+        vec_f32(3),
+        None,
+    );
     small.add_root(sum_small);
     let small_result = codegen_hip(&small, "test_small_reduce");
     assert!(
@@ -958,7 +982,15 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
 
     let mut large = Dag::new();
     let x_large = large.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 128), None);
-    let sum_large = large.add_node(RiscOp::Sum { axis: 1 }, vec![x_large], vec_f32(3), None);
+    let sum_large = large.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x_large],
+        vec_f32(3),
+        None,
+    );
     large.add_root(sum_large);
     let large_result = codegen_hip(&large, "test_large_reduce");
     assert!(
@@ -977,7 +1009,15 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
 fn s15_scalar_reduction_uses_staged_kernels_and_estimate() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1024), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], scalar_f32(), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        scalar_f32(),
+        None,
+    );
     dag.add_root(sum);
     let result = codegen_hip(&dag, "test_scalar_stage");
 
@@ -1016,7 +1056,15 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(2, 4),
+        None,
+    );
     dag.add_root(sum);
     let result = codegen_hip(&dag, "test_hipblas_matmul");
 
@@ -1192,6 +1240,7 @@ fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
             m: chelis_ir::dag::DimExpr::Concrete(4),
             n: chelis_ir::dag::DimExpr::Concrete(6),
             k: chelis_ir::dag::DimExpr::Concrete(5),
+            accumulator: chelis_types::types::Prim::F32,
         },
         vec![a, b],
         out_ty,
@@ -1247,6 +1296,7 @@ fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
             m: chelis_ir::dag::DimExpr::Sym("m".into()),
             n: chelis_ir::dag::DimExpr::Sym("n".into()),
             k: chelis_ir::dag::DimExpr::Sym("k".into()),
+            accumulator: chelis_types::types::Prim::F32,
         },
         vec![a, b],
         out_ty,
@@ -1298,6 +1348,7 @@ fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
             m: chelis_ir::dag::DimExpr::Concrete(4),
             n: chelis_ir::dag::DimExpr::Concrete(6),
             k: chelis_ir::dag::DimExpr::Concrete(5),
+            accumulator: chelis_types::types::Prim::F32,
         },
         vec![a, b],
         tensor3_f32(3, 4, 6),
@@ -1350,7 +1401,15 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(2, 4),
+        None,
+    );
     dag.add_root(sum);
     let result = codegen_hip(&dag, "test_generic_matmul");
 
@@ -1489,7 +1548,15 @@ fn sfr1_fused_elem_into_reduction_no_intermediate_alloc() {
     let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
+    let summed = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![negated],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(summed);
 
     let fused = fuse(&dag);
@@ -1577,7 +1644,15 @@ fn sfr3_multi_consumer_fused_elem_not_inlined() {
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     // Two consumers of the fused chain output:
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
+    let summed = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![negated],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(negated); // negated is also a root → 2 consumers
     dag.add_root(summed);
 

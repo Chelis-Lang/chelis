@@ -2246,7 +2246,7 @@ fn try_summarize_blas_helper(
     // shape) nor a `Sum(Mul(Expand, Expand))` pattern (the
     // matmul-near shape that `specialize_for_blas` keeps as-is when
     // it cannot replace, e.g. non-F32 precision), the recognizer
-    // should NOT emit a diagnostic — this is just a non-BLAS helper.
+    // should NOT emit a diagnostic; this is just a non-BLAS helper.
     //
     // `is_matmul_near` returns `true` for both BLAS-shaped and
     // matmul-pattern-shaped specialized roots, so we can distinguish
@@ -5754,7 +5754,7 @@ fn actualize_tensor_helper_types(
                 .first()
                 .and_then(|id| inferred.get(id))
                 .map(|input| precision_like(input, node.output_type.precision)),
-            crate::dag::RiscOp::Sum { axis }
+            crate::dag::RiscOp::Sum { axis, .. }
             | crate::dag::RiscOp::MaxReduce { axis }
             | crate::dag::RiscOp::MinReduce { axis }
             | crate::dag::RiscOp::ProdReduce { axis }
@@ -6761,6 +6761,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                 let element_ty = match tensor.precision {
                     chelis_types::types::Prim::Bool => HostType::Bool,
                     chelis_types::types::Prim::Int8
+                    | chelis_types::types::Prim::Int16
                     | chelis_types::types::Prim::Int32
                     | chelis_types::types::Prim::Int64 => HostType::Int64,
                     chelis_types::types::Prim::F16
@@ -7382,7 +7383,10 @@ mod tests {
             None,
         );
         let root = dag.add_node(
-            RiscOp::Sum { axis: 1 },
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
             vec![product],
             TensorType {
                 dims: vec![batch.clone(), out_dim.clone()],

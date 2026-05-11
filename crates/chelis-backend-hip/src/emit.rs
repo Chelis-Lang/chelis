@@ -348,7 +348,7 @@ impl HipEmitter {
                 continue;
             }
             match &node.op {
-                RiscOp::Sum { axis } | RiscOp::MaxReduce { axis } => {
+                RiscOp::Sum { axis, .. } | RiscOp::MaxReduce { axis } => {
                     let sources = self.reduction_kernel_sources(node, dag, *axis);
                     for (name, source) in sources {
                         if seen.insert(name.clone()) {
@@ -655,7 +655,7 @@ impl HipEmitter {
             RiscOp::UniformLike { .. } => Some("kernel_uniform_like".into()),
             RiscOp::Dropout { .. } | RiscOp::Drop => None,
             RiscOp::Copy => Some("kernel_cast".into()),
-            RiscOp::Sum { axis } => {
+            RiscOp::Sum { axis, .. } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     Some(Self::fused_reduction_kernel_name(
@@ -741,7 +741,7 @@ impl HipEmitter {
             RiscOp::Floor => kernels::unary_func(name, "floorf"),
             RiscOp::Ceil => kernels::unary_func(name, "ceilf"),
             RiscOp::UniformLike { .. } => kernels::uniform_like(name),
-            RiscOp::Sum { axis } => {
+            RiscOp::Sum { axis, .. } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
@@ -913,7 +913,7 @@ impl HipEmitter {
                 self.emit_unary_launch(id, "kernel_cast", &node.inputs, &node.output_type);
             }
             RiscOp::Drop => {}
-            RiscOp::Sum { axis } => {
+            RiscOp::Sum { axis, .. } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     self.emit_fused_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
@@ -1016,6 +1016,7 @@ impl HipEmitter {
                 m,
                 n,
                 k,
+                ..
             } => {
                 self.emit_blas_matmul(
                     id,

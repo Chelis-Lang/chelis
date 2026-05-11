@@ -776,7 +776,15 @@ fn g4_sum_reduction_gpu_matches_cpu() {
         mat_f32(2, 3),
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], vec_f32(3), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -828,7 +836,15 @@ fn g4_symbolic_row_sum_gpu_matches_cpu() {
         precision: Prim::F32,
     };
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], out_ty, None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        out_ty,
+        None,
+    );
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1243,7 +1259,15 @@ fn g13_tiny_segmented_sum_matches_eval() {
         mat_f32(3, 8),
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(3), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(out);
 
     assert_gpu_matches_eval(
@@ -1291,7 +1315,15 @@ fn g13_large_segmented_sum_matches_eval() {
         mat_f32(2, 128),
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(2), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(2),
+        None,
+    );
     dag.add_root(out);
 
     let data: Vec<f32> = (0..256).map(|i| ((i % 17) as f32) - 8.0).collect();
@@ -1316,7 +1348,15 @@ fn g14_staged_scalar_sum_matches_eval() {
         vec_f32(1024),
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], scalar_f32(), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        scalar_f32(),
+        None,
+    );
     dag.add_root(out);
 
     let data: Vec<f32> = (0..1024).map(|i| ((i % 9) as f32) - 4.0).collect();
@@ -1366,7 +1406,15 @@ fn g15_hipblas_matmul_matches_eval() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(2, 4),
+        None,
+    );
     dag.add_root(out);
 
     assert_gpu_matches_eval(
@@ -1408,6 +1456,7 @@ fn g15_hipblas_batched_matmul_matches_eval() {
             m: chelis_ir::dag::DimExpr::Concrete(2),
             n: chelis_ir::dag::DimExpr::Concrete(2),
             k: chelis_ir::dag::DimExpr::Concrete(3),
+            accumulator: chelis_types::types::Prim::F32,
         },
         vec![a, b],
         tensor4_f32(2, 2, 2, 2),
@@ -1475,6 +1524,7 @@ fn g15_hipblas_strided_batched_symbolic_batch_matches_eval() {
             m: chelis_ir::dag::DimExpr::Concrete(2),
             n: chelis_ir::dag::DimExpr::Concrete(2),
             k: chelis_ir::dag::DimExpr::Concrete(3),
+            accumulator: chelis_types::types::Prim::F32,
         },
         vec![a, b],
         out_ty,
@@ -1549,7 +1599,15 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(2, 4),
+        None,
+    );
     dag.add_root(out);
 
     assert_gpu_matches_eval(

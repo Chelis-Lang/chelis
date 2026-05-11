@@ -312,7 +312,7 @@ impl CEmitter {
             }
             RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Drop => {}
-            RiscOp::Sum { axis } => {
+            RiscOp::Sum { axis, .. } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
@@ -415,6 +415,7 @@ impl CEmitter {
                 m,
                 n,
                 k,
+                ..
             } => {
                 self.emit_blas_matmul(
                     id,
@@ -842,13 +843,28 @@ impl CEmitter {
     /// Int32 uses `int32_t` (reinterpret cast; sizeof matches float).
     /// Int64 uses `int64_t` (reinterpret cast; sizeof is 2x float, alloc adjusts).
     /// F64 uses `double` (reinterpret cast; sizeof is 2x float, alloc adjusts).
+    ///
+    /// **WS-A0 footgun fix.** This used to fall through to `"float"` for
+    /// any unhandled `Prim`, which silently downgraded the wider
+    /// active dtypes (f16, bf16, int8, int16) to single-precision in
+    /// emitted C code. WS-A1 expands the C backend to handle those
+    /// dtypes; until then this function panics with the unhandled
+    /// variant so the silent downgrade cannot recur and so any new
+    /// dtype landing later in the active set per
+    /// `spec/04-type-system.md` §1.1 produces an explicit gap, not a
+    /// quiet wrong answer.
     fn elem_type(ty: &TensorType) -> &'static str {
         match ty.precision {
             Prim::F32 | Prim::Bool => "float",
             Prim::F64 => "double",
             Prim::Int32 => "int32_t",
             Prim::Int64 => "int64_t",
-            _ => "float",
+            other => panic!(
+                "C backend does not yet support `{}` tensors; the silent \
+                 default-arm downgrade was removed by WS-A0 to surface \
+                 missing dtype emit logic. WS-A1 widens this match.",
+                other.name()
+            ),
         }
     }
 
@@ -3038,7 +3054,15 @@ mod tests {
     fn sum_emits_reduction_loop() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
-        dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("acc +="));
         assert!(c.contains("for (int __reduce_i"));
@@ -3362,7 +3386,15 @@ mod tests {
     fn sum_then_neg_chains() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(3), None);
-        let s = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32(), None);
+        let s = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Neg, vec![s], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("acc +="));
@@ -3575,7 +3607,15 @@ mod tests {
             },
             None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         let result = crate::codegen_with_options(
             &dag,
             "test_fn",
@@ -3625,7 +3665,15 @@ mod tests {
             },
             None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(!c.contains("cblas_sgemm("));
         assert!(c.contains("for (int __reduce_i = 0; __reduce_i < 3; __reduce_i++) {"));

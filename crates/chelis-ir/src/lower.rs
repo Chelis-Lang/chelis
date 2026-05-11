@@ -804,6 +804,7 @@ pub fn remap_tensor_dim_symbols(
                 m,
                 n,
                 k,
+                accumulator,
             } => RiscOp::BlasMatmul {
                 batch_dims: batch_dims
                     .iter()
@@ -812,6 +813,7 @@ pub fn remap_tensor_dim_symbols(
                 m: rewrite_dim_expr(&m, &substitutions),
                 n: rewrite_dim_expr(&n, &substitutions),
                 k: rewrite_dim_expr(&k, &substitutions),
+                accumulator,
             },
             other => other,
         };
@@ -930,6 +932,7 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
         chelis_types::types::Prim::Bf16 => "bf16",
         chelis_types::types::Prim::F8e4m3 => "f8e4m3",
         chelis_types::types::Prim::Int8 => "int8",
+        chelis_types::types::Prim::Int16 => "int16",
         chelis_types::types::Prim::Int32 => "int32",
         chelis_types::types::Prim::Int64 => "int64",
         chelis_types::types::Prim::Bool => "bool",
@@ -4131,8 +4134,12 @@ impl LowerCtx {
                 } else {
                     ty.clone()
                 };
+                let acc = out_ty.precision;
                 self.dag.add_node(
-                    RiscOp::Sum { axis },
+                    RiscOp::Sum {
+                        axis,
+                        accumulator: acc,
+                    },
                     vec![x],
                     out_ty,
                     self.current_span_id.clone(),
@@ -6250,7 +6257,7 @@ mod tests {
         let found_sum = dag
             .nodes()
             .iter()
-            .any(|n| matches!(n.op, RiscOp::Sum { axis: 0 }));
+            .any(|n| matches!(n.op, RiscOp::Sum { axis: 0, .. }));
         assert!(found_sum, "expected a Sum{{axis:0}} node");
     }
 

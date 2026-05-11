@@ -29,7 +29,7 @@ pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
 
     // Must be a Sum node
     let axis = match &sum_node.op {
-        RiscOp::Sum { axis } => *axis,
+        RiscOp::Sum { axis, .. } => *axis,
         _ => return None,
     };
 
@@ -169,7 +169,15 @@ mod tests {
             None,
         );
         let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
 
         let info = detect_matmul_pattern(&dag, sum).unwrap();
         assert_eq!(info.a, a);
@@ -198,7 +206,15 @@ mod tests {
             },
             None,
         );
-        let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32(), None);
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
         assert!(detect_matmul_pattern(&dag, sum).is_none());
     }
 
@@ -227,7 +243,15 @@ mod tests {
             None,
         );
         let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         assert!(detect_matmul_pattern(&dag, sum).is_none());
     }
 

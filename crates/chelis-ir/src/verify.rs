@@ -102,6 +102,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 m,
                 n,
                 k,
+                ..
             } => {
                 if arity != 2 {
                     errors.push(format!(
@@ -316,7 +317,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
 
         // C3: validate reduction axis bounds.
         match &node.op {
-            RiscOp::Sum { axis }
+            RiscOp::Sum { axis, .. }
             | RiscOp::MaxReduce { axis }
             | RiscOp::MinReduce { axis }
             | RiscOp::ProdReduce { axis }
@@ -331,6 +332,55 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             "reduction op at node {} has axis {} but input has {} dimensions",
                             node.id.0, axis, ndims
                         ));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // C3a (WS-A0): per spec/04-type-system.md §5.7.1 the result
+        // precision of `reduce_sum` IS the accumulator precision; the
+        // IR invariant is `Sum.output_type.precision == accumulator`.
+        // For BlasMatmul, the accumulator must be at least as wide as
+        // the operand precision and at least as wide as the spec
+        // default for that operand precision.
+        match &node.op {
+            RiscOp::Sum { accumulator, .. } => {
+                if node.output_type.precision != *accumulator {
+                    errors.push(format!(
+                        "reduce_sum at node {} has output precision `{}` but \
+                         accumulator `{}`; per spec/04-type-system.md §5.7.1 \
+                         the result precision must equal the accumulator",
+                        node.id.0,
+                        node.output_type.precision.name(),
+                        accumulator.name()
+                    ));
+                }
+            }
+            RiscOp::BlasMatmul { accumulator, .. } => {
+                if arity == 2
+                    && let Some(lhs) = dag.get(node.inputs[0])
+                {
+                    let operand = lhs.output_type.precision;
+                    match RiscOp::default_matmul_accumulator(operand) {
+                        Ok(default) => {
+                            if !crate::dag::accumulator_at_least_as_wide(
+                                operand,
+                                *accumulator,
+                                default,
+                            ) {
+                                errors.push(format!(
+                                    "matmul at node {} has accumulator `{}` narrower than \
+                                     the spec/04-type-system.md §5.7.1 default `{}` for \
+                                     operand precision `{}`",
+                                    node.id.0,
+                                    accumulator.name(),
+                                    default.name(),
+                                    operand.name(),
+                                ));
+                            }
+                        }
+                        Err(msg) => errors.push(format!("matmul at node {}: {msg}", node.id.0)),
                     }
                 }
             }
@@ -1092,7 +1142,15 @@ mod tests {
             precision: Prim::F32,
         };
         let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone(), None);
-        dag.add_node(RiscOp::Sum { axis: 5 }, vec![x], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 5,
+                accumulator: Prim::F32,
+            },
+            vec![x],
+            scalar_f32(),
+            None,
+        );
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("axis 5")));
     }
@@ -1121,7 +1179,15 @@ mod tests {
             precision: Prim::F32,
         };
         let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty, None);
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], out_ty, None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![x],
+            out_ty,
+            None,
+        );
         assert!(verify(&dag).is_empty());
     }
 

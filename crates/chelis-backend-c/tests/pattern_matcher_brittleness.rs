@@ -75,7 +75,15 @@ fn canonical_matmul_pattern_is_detected() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(2, 3, 4), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat(2, 4), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat(2, 4),
+        None,
+    );
 
     let info = detect_matmul_pattern(&dag, sum)
         .expect("canonical Sum-Mul-Expand-Expand pattern must be recognized");
@@ -131,7 +139,15 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ca, cb], t3(2, 3, 4), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat(2, 4), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat(2, 4),
+        None,
+    );
     dag.add_root(sum);
 
     assert!(
@@ -151,6 +167,7 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
                     m,
                     n,
                     k,
+                    ..
                 } if batch_dims.is_empty()
                     && *m == DimExpr::Concrete(2)
                     && *n == DimExpr::Concrete(4)
@@ -199,7 +216,15 @@ fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
         t3(4, 3, 2),
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![product], mat(4, 2), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![product],
+        mat(4, 2),
+        None,
+    );
     dag.add_root(out);
 
     let specialized = specialize_for_blas(&dag);
