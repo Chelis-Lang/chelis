@@ -22,6 +22,13 @@ const CHELIS_I64: c_int = 4;
 // matching macros in `crates/chelis-runtime/include/chelis_runtime.h`.
 const CHELIS_BF16: c_int = 5;
 const CHELIS_F16: c_int = 6;
+// WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
+// `chelis_alloc` consults these so the backing buffer is sized at the
+// correct element width (1 byte for i8, 2 bytes for i16) rather than the
+// f32-default 4 bytes. Generated C code reinterprets `t->data` to
+// `int8_t*` / `int16_t*` for direct element access.
+const CHELIS_I8: c_int = 7;
+const CHELIS_I16: c_int = 8;
 const CHELIS_MAX_DIM: usize = 8;
 
 macro_rules! runtime_fail {
@@ -420,14 +427,24 @@ pub unsafe extern "C" fn chelis_alloc(
     if tensor.size == 0 {
         tensor.size = 1;
     }
+    // WS-A4: dtype-aware element sizing. The narrow integer dtypes
+    // (CHELIS_I8, CHELIS_I16) need 1- and 2-byte slots; previously they
+    // would have been silently sized to 4 bytes via the f32 default,
+    // which is over-allocation for a single tensor but breaks
+    // contiguity assumptions for any bulk reinterpret-cast helper.
     let elem_size = if dtype == CHELIS_I64 || dtype == CHELIS_F64 {
         std::mem::size_of::<i64>()
-    } else if dtype == CHELIS_BF16 || dtype == CHELIS_F16 {
+    } else if dtype == CHELIS_BF16 || dtype == CHELIS_F16 || dtype == CHELIS_I16 {
         // WS-A3: bf16 / f16 storage is 2 bytes. The host runtime
         // does not perform bf16/f16 arithmetic; the HIP backend is
         // the only consumer in this cycle. Mirror the matching
         // dispatch in `chelis_hip_runtime.h::chelis_gpu_dtype_size`.
+        // WS-A4: i16 storage is also 2 bytes; the C backend reads
+        // / writes via reinterpret cast on `t->data` so the slot
+        // sizing matches `int16_t`.
         2
+    } else if dtype == CHELIS_I8 {
+        std::mem::size_of::<i8>()
     } else {
         std::mem::size_of::<f32>()
     };
@@ -2488,10 +2505,20 @@ pub unsafe extern "C" fn chelis_mmap_len(mapped: *const chelis_mapped_file) -> i
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chelis_tensor {
+    // WS-A4: dtype-aware element sizing must mirror `chelis_alloc` exactly.
+    // Pre-WS-A4 the allocator and this routine both treated narrow dtypes as
+    // 4 bytes, so the source (4 bytes per i8 element) and destination (4
+    // bytes per i8 element) were nominally consistent. Now `chelis_alloc`
+    // sizes i8 buffers at 1 byte and i16 buffers at 2 bytes, so this
+    // routine must compute matching strides — otherwise a copy of `size *
+    // 4` bytes overruns a 1-byte-per-element destination buffer and
+    // corrupts the heap.
     let elem_size = if (*t).dtype == CHELIS_I64 || (*t).dtype == CHELIS_F64 {
         std::mem::size_of::<i64>()
-    } else if (*t).dtype == CHELIS_BF16 || (*t).dtype == CHELIS_F16 {
+    } else if (*t).dtype == CHELIS_BF16 || (*t).dtype == CHELIS_F16 || (*t).dtype == CHELIS_I16 {
         2
+    } else if (*t).dtype == CHELIS_I8 {
+        std::mem::size_of::<i8>()
     } else {
         std::mem::size_of::<f32>()
     };

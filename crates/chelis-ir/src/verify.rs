@@ -1107,6 +1107,46 @@ mod tests {
         assert!(verify(&dag).is_empty());
     }
 
+    /// WS-A4 negative coverage: i8 + i32 add must be rejected by the
+    /// IR verifier per spec/04-type-system.md §5.1 (no implicit
+    /// precision promotion). This is the i8-specific instance of the
+    /// generic `c1_mismatched_precision_binary_op` test above; pinning
+    /// it explicitly so a future refactor that special-cases narrow
+    /// integers cannot silently widen i8 to i32 at the binary-op site.
+    #[test]
+    fn ws_a4_i8_plus_i32_add_is_precision_mismatch() {
+        let mut dag = Dag::new();
+        let i8_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int8,
+        };
+        let i32_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int32,
+        };
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            i8_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            i32_ty.clone(),
+            None,
+        );
+        // The output type doesn't matter — the verifier rejects on the
+        // operand mismatch first.
+        dag.add_node(RiscOp::Add, vec![a, b], i32_ty, None);
+        let errs = verify(&dag);
+        assert!(
+            errs.iter().any(|e| e.contains("mismatched precisions")),
+            "i8 + i32 add must be rejected with a precision-mismatch \
+             diagnostic per spec §5.1; got: {errs:?}"
+        );
+    }
+
     // --- C2: dimension matching ---
 
     #[test]
