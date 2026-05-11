@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use chelis_deep::Expr;
 use chelis_ir::dag::{DimInfo, NodeId, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::lower::lower_subexpr_program;
+use chelis_ir::lower::{lower_subexpr_program, try_lower_subexpr_program};
 use chelis_types::types::Prim;
 
 fn f32_vec(n: usize) -> TensorType {
@@ -282,6 +282,239 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
         assert!(
             (p - a).abs() < 1e-6,
             "pipe and non-pipe vmap-grad must agree element-wise: pipe={p}, app={a}",
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fixture 5 — control: `xs |> vmap(relu_row)` where `relu_row` is a top-level
+// def. Pins Item 2-extended dispatch A's second control. The `vmap` arm of
+// `resolve_callable_expr_inner` recurses into the `(var {} relu_row)` callee,
+// resolves it through `program_defs`, and the pipe stage's
+// `CallableExpr::Vmap` arm reduces to a per-row evaluation over the batch
+// axis. This is the working sibling of fixture 6: a callable-shaped pipe
+// stage whose inner var IS in `program_defs`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn pipe_vmap_def_stage_lowers_and_evaluates() {
+    // `relu_row(x: [3]f32) -> [3]f32 = relu(x)` — user-defined row relu so the
+    // resolver finds it in `program_defs` (the builtin `relu` lives in neither
+    // `local_callables` nor `program_defs`, so a bare `(var {} relu)` inside
+    // `(vmap ...)` would itself trip the `None`-resolution path; that case is
+    // a separate gap from G10, see the diagnosis note).
+    let relu_row_src = r#"
+        (fn {}
+          (params {}
+            (x {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}))
+          (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+            (var {} relu)
+            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
+    "#;
+    let pipe_src = r#"
+        (pipe {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
+          (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} xs)
+          (vmap {} (var {} relu_row) (lit {type: (t-prim {} int32)} 0)))
+    "#;
+    let mut program_defs = HashMap::new();
+    program_defs.insert("relu_row".to_string(), parse_one(relu_row_src));
+    let scoped = HashMap::from([("xs".to_string(), f32_mat(2, 3))]);
+    let dag = lower_subexpr_program(&parse_one(pipe_src), scoped, HashMap::new(), program_defs);
+
+    let inputs = HashMap::from([(
+        "xs".to_string(),
+        TensorValue::from_vec(vec![2, 3], vec![-1.0, 0.0, 2.5, -3.0, 1.0, 0.5]),
+    )]);
+    let roots: Vec<NodeId> = dag.roots().to_vec();
+    assert!(!roots.is_empty(), "lowered vmap-pipe must produce a root");
+    let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
+        .expect("eval succeeds");
+    let out = &values[roots.last().unwrap()];
+    assert_eq!(out.shape, vec![2, 3]);
+    // vmap(relu_row)([[-1, 0, 2.5], [-3, 1, 0.5]]) = [[0, 0, 2.5], [0, 1, 0.5]]
+    assert_eq!(out.data, vec![0.0, 0.0, 2.5, 0.0, 1.0, 0.5]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fixture 6 (Item 2-extended target) — `x |> f` where `f` is a function-valued
+// parameter. Reproduces the G9/G10 gap from the Item 2 sibling sweep
+// (`docs/investigations/item2_sibling_sweep_findings.md`).
+//
+// The bug: `resolve_callable_expr_inner` returns `None` when the pipe stage
+// resolves to a `(var {} f)` for a function-typed parameter, because the name
+// lives in `bindings` (as a parameter Load) but not in `local_callables` or
+// `program_defs`. `lower_pipe` then hits the `None`-resolution fallthrough at
+// `crates/chelis-ir/src/lower.rs:4631` and rejects with
+// "pipe stage is not supported by IR evaluation yet".
+//
+// Two-part fixture:
+//   6a — direct repro (gating, `#[ignore]` today): lower the standalone fn
+//        body
+//        `(fn (params (f t-fn) (x t-tensor)) (pipe (var x) (var f) (var f)))`
+//        via `try_lower_subexpr_program`. This is the exact lowering path
+//        `try_lower_program` takes for every top-level def — what `chelis
+//        eval --file` and `chelis build` exercise on the user-reported
+//        repro. Today this fails with the "pipe stage is not supported"
+//        diagnostic; after the fix it must succeed (the resulting DAG is
+//        semantically a no-op since the DAG has no Call op for fn-typed
+//        parameters, but it must not panic; correct semantics come from
+//        call-site inlining, pinned in 6b).
+//   6b — call-site parity (passes today via inlining, regression
+//        protection): lower `(app (var apply_one_pipe) (var doubler)
+//        (var seed))` with `apply_one_pipe` (pipe body) and `doubler`
+//        (`add(x, x)`) in `program_defs`. Compare against the non-pipe
+//        equivalent `(app (var apply_one_app) (var doubler) (var seed))`.
+//        Asserts both evaluate to `2 * seed` within 1e-6. This already
+//        works because `lower_plain_callable_app` substitutes `doubler`
+//        into `local_callables["f"]` before lowering the inlined body, so
+//        the pipe stage's resolver finds `f` and dispatches through the
+//        `Plain` arm. The single-stage shape avoids unrelated bug
+//        interactions with the `inlining_names` recursion guard that the
+//        nested `f(f(x))` non-pipe form would expose.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
+    // Standalone def body: `def double_apply(f, x) = x |> f |> f`.
+    // Lowering this in isolation (without a caller to inline `f`) is the
+    // exact path `try_lower_program` takes for every top-level def, which is
+    // what `chelis eval --file` and `chelis build` exercise.
+    let fn_src = r#"
+        (fn {}
+          (params {}
+            (f {type: (t-fn {}
+                         (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+                         (t-tensor {} (d-lit {} 3) (t-prim {} f32)))})
+            (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
+          (pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
+            (var {} f)
+            (var {} f)))
+    "#;
+    let result = try_lower_subexpr_program(
+        &parse_one(fn_src),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    assert!(
+        result.is_ok(),
+        "lowering a fn body whose pipe stage is a fn-typed parameter must \
+         succeed; today this fires the `pipe stage is not supported by IR \
+         evaluation yet` diagnostic. Diagnostic: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
+    // `doubler(x) = add(x, x)` — distinguishes identity (`x |> f` would
+    // collapse to `x` if the stage no-oped).
+    let doubler_src = r#"
+        (fn {}
+          (params {}
+            (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
+          (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+            (var {} add)
+            (copy {} (var {} x))
+            (copy {} (var {} x))))
+    "#;
+    // Pipe form: `def apply_one(f, x) = x |> f`. Single pipe stage isolates
+    // the fn-typed-parameter pipe gap from the unrelated `inlining_names`
+    // recursion guard interaction that a nested `f(f(x))` non-pipe shape
+    // would expose (separate bug; out of scope for Item 2-extended).
+    let apply_one_pipe_src = r#"
+        (fn {}
+          (params {}
+            (f {type: (t-fn {}
+                         (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+                         (t-tensor {} (d-lit {} 3) (t-prim {} f32)))})
+            (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
+          (pipe {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
+            (var {} f)))
+    "#;
+    // Non-pipe equivalent: `def apply_one_app(f, x) = f(x)`.
+    let apply_one_app_src = r#"
+        (fn {}
+          (params {}
+            (f {type: (t-fn {}
+                         (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))
+                         (t-tensor {} (d-lit {} 3) (t-prim {} f32)))})
+            (x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))}))
+          (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+            (var {} f)
+            (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)))
+    "#;
+    // Call-site app expressions.
+    let pipe_call_src = r#"
+        (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+          (var {} apply_one_pipe)
+          (var {} doubler)
+          (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
+    "#;
+    let app_call_src = r#"
+        (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+          (var {} apply_one_app)
+          (var {} doubler)
+          (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
+    "#;
+
+    let mut program_defs = HashMap::new();
+    program_defs.insert("apply_one_pipe".to_string(), parse_one(apply_one_pipe_src));
+    program_defs.insert("apply_one_app".to_string(), parse_one(apply_one_app_src));
+    program_defs.insert("doubler".to_string(), parse_one(doubler_src));
+
+    let seed_ty = f32_vec(3);
+    let scoped = HashMap::from([("seed".to_string(), seed_ty)]);
+
+    let pipe_dag = lower_subexpr_program(
+        &parse_one(pipe_call_src),
+        scoped.clone(),
+        HashMap::new(),
+        program_defs.clone(),
+    );
+    let app_dag = lower_subexpr_program(
+        &parse_one(app_call_src),
+        scoped,
+        HashMap::new(),
+        program_defs,
+    );
+
+    let inputs = HashMap::from([(
+        "seed".to_string(),
+        TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
+    )]);
+
+    let pipe_roots: Vec<NodeId> = pipe_dag.roots().to_vec();
+    let app_roots: Vec<NodeId> = app_dag.roots().to_vec();
+    assert!(!pipe_roots.is_empty(), "pipe DAG must have a root");
+    assert!(!app_roots.is_empty(), "app DAG must have a root");
+
+    let pipe_values =
+        eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
+            .expect("pipe eval succeeds");
+    let app_values =
+        eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
+            .expect("app eval succeeds");
+
+    let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
+    let app_out = &app_values[app_roots.last().unwrap()];
+    assert_eq!(pipe_out.shape, vec![3]);
+    assert_eq!(pipe_out.shape, app_out.shape);
+    // doubler([1, 2, 3]) = [2, 4, 6].
+    let expected = [2.0, 4.0, 6.0];
+    for (i, want) in expected.iter().enumerate() {
+        assert!(
+            (pipe_out.data[i] - want).abs() < 1e-6,
+            "apply_one via pipe must produce {want} at index {i}, got {:?}",
+            pipe_out.data,
+        );
+    }
+    for (p, a) in pipe_out.data.iter().zip(app_out.data.iter()) {
+        assert!(
+            (p - a).abs() < 1e-6,
+            "pipe and non-pipe apply_one must agree element-wise: pipe={p}, app={a}",
         );
     }
 }
