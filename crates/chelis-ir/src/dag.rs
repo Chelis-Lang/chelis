@@ -50,11 +50,16 @@ pub enum DimExpr {
     Div(Box<DimExpr>, Box<DimExpr>),
 }
 
-/// Canonical key for conservative dimension-expression equality.
+/// Canonical key for sound dimension-expression equality.
 ///
-/// The key is intentionally weaker than algebraic simplification: multiplication
-/// is flattened and sorted, constants are folded, and division stays structural
-/// unless it can be evaluated exactly or the denominator is one.
+/// The key is mathematically equivalent for positive-integer-valued dim
+/// expressions (tensor axis sizes are always positive integers): multiplication
+/// is flattened, factor-sorted, and constants are folded; division flattens
+/// nested quotients, cancels common factors between numerator and denominator,
+/// and GCD-reduces the concrete portions of both. Division stays structural
+/// only when no cancellation applies (e.g. `(n * 3) / 2`, where 3 is not a
+/// multiple of 2 and the symbolic factor `n` is not known to be divisible by
+/// 2 either).
 ///
 /// Symbols compare by their stored names. `DimExpr` currently carries no binder
 /// identity or property scope, so this key does not alpha-rename symbolic dims.
@@ -160,52 +165,224 @@ impl DimExpr {
                 normalize_dim_product([lhs.normalized_key(), rhs.normalized_key()])
             }
             Self::Div(lhs, rhs) => {
-                let lhs = lhs.normalized_key();
-                let rhs = rhs.normalized_key();
-                match (&lhs, &rhs) {
-                    (DimExprKey::Concrete(lhs), DimExprKey::Concrete(rhs))
-                        if *rhs != 0 && lhs % rhs == 0 =>
-                    {
-                        DimExprKey::Concrete(lhs / rhs)
-                    }
-                    (_, DimExprKey::Concrete(1)) => lhs,
-                    _ => DimExprKey::Div(Box::new(lhs), Box::new(rhs)),
-                }
+                normalize_dim_quotient(lhs.normalized_key(), rhs.normalized_key())
             }
         }
     }
 }
 
-fn normalize_dim_product(factors: impl IntoIterator<Item = DimExprKey>) -> DimExprKey {
+/// Greatest common divisor for usize. Euclidean algorithm. `gcd(0, x) = x`.
+fn usize_gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// Split a product key into (concrete factor, symbolic-atom multiset).
+///
+/// Symbolic atoms are non-`Mul` and non-`Concrete` keys — i.e. `Sym` or
+/// residual `Div` that could not be cancelled.
+fn flatten_product(key: DimExprKey) -> (usize, Vec<DimExprKey>) {
     let mut concrete = 1usize;
-    let mut symbolic = Vec::new();
-    for factor in factors {
+    let mut atoms = Vec::new();
+    push_product_atoms(key, &mut concrete, &mut atoms);
+    (concrete, atoms)
+}
+
+fn push_product_atoms(key: DimExprKey, concrete: &mut usize, atoms: &mut Vec<DimExprKey>) {
+    match key {
+        DimExprKey::Concrete(value) => *concrete = concrete.saturating_mul(value),
+        DimExprKey::Mul(nested) => {
+            for factor in nested {
+                push_product_atoms(factor, concrete, atoms);
+            }
+        }
+        atom @ (DimExprKey::Sym(_) | DimExprKey::Div(_, _)) => atoms.push(atom),
+    }
+}
+
+/// Reassemble a canonical key from a concrete factor and a sorted atom multiset.
+///
+/// - if both are empty (concrete == 1 and no atoms), returns `Concrete(1)`
+/// - if concrete is 0, returns `Concrete(0)` (the multiset is irrelevant)
+/// - if there is exactly one factor (concrete = 1 with one atom, or no atoms
+///   with concrete > 1), returns that factor directly
+/// - otherwise returns a `Mul` of the sorted factors with the concrete (if !=1)
+///   appended last so canonical ordering keeps `Concrete` after `Sym`/`Div`.
+fn assemble_product(concrete: usize, mut atoms: Vec<DimExprKey>) -> DimExprKey {
+    if concrete == 0 {
+        return DimExprKey::Concrete(0);
+    }
+    if concrete != 1 {
+        atoms.push(DimExprKey::Concrete(concrete));
+    }
+    atoms.sort();
+    match atoms.len() {
+        0 => DimExprKey::Concrete(1),
+        1 => atoms.pop().expect("one factor"),
+        _ => DimExprKey::Mul(atoms),
+    }
+}
+
+fn normalize_dim_product(factors: impl IntoIterator<Item = DimExprKey>) -> DimExprKey {
+    let mut num_concrete = 1usize;
+    let mut num_atoms: Vec<DimExprKey> = Vec::new();
+    let mut denom_concrete = 1usize;
+    let mut denom_atoms: Vec<DimExprKey> = Vec::new();
+    let mut saw_div = false;
+
+    // Collapse a single factor into the running numerator / denominator.
+    // Calling `take_factor` recursively handles `Mul` and `Div`; `Concrete(0)`
+    // is caught at the top of the loop below.
+    fn take_factor(
+        factor: DimExprKey,
+        num_concrete: &mut usize,
+        num_atoms: &mut Vec<DimExprKey>,
+        denom_concrete: &mut usize,
+        denom_atoms: &mut Vec<DimExprKey>,
+        saw_div: &mut bool,
+    ) {
         match factor {
-            DimExprKey::Concrete(0) => return DimExprKey::Concrete(0),
-            DimExprKey::Concrete(value) => concrete *= value,
+            DimExprKey::Concrete(value) => *num_concrete = num_concrete.saturating_mul(value),
+            DimExprKey::Sym(_) => num_atoms.push(factor),
             DimExprKey::Mul(nested) => {
                 for nested_factor in nested {
-                    match nested_factor {
-                        DimExprKey::Concrete(0) => return DimExprKey::Concrete(0),
-                        DimExprKey::Concrete(value) => concrete *= value,
-                        other => symbolic.push(other),
-                    }
+                    take_factor(
+                        nested_factor,
+                        num_concrete,
+                        num_atoms,
+                        denom_concrete,
+                        denom_atoms,
+                        saw_div,
+                    );
                 }
             }
-            other => symbolic.push(other),
+            DimExprKey::Div(num, denom) => {
+                *saw_div = true;
+                let (c_num, atoms_num) = flatten_product(*num);
+                let (c_denom, atoms_denom) = flatten_product(*denom);
+                *num_concrete = num_concrete.saturating_mul(c_num);
+                num_atoms.extend(atoms_num);
+                *denom_concrete = denom_concrete.saturating_mul(c_denom);
+                denom_atoms.extend(atoms_denom);
+            }
         }
     }
 
-    if concrete != 1 {
-        symbolic.push(DimExprKey::Concrete(concrete));
+    for factor in factors {
+        if let DimExprKey::Concrete(0) = factor {
+            return DimExprKey::Concrete(0);
+        }
+        take_factor(
+            factor,
+            &mut num_concrete,
+            &mut num_atoms,
+            &mut denom_concrete,
+            &mut denom_atoms,
+            &mut saw_div,
+        );
     }
-    symbolic.sort();
 
-    match symbolic.len() {
-        0 => DimExprKey::Concrete(1),
-        1 => symbolic.pop().expect("one symbolic factor"),
-        _ => DimExprKey::Mul(symbolic),
+    if !saw_div {
+        return assemble_product(num_concrete, num_atoms);
     }
+
+    normalize_quotient_parts(num_concrete, num_atoms, denom_concrete, denom_atoms)
+}
+
+fn normalize_dim_quotient(num: DimExprKey, denom: DimExprKey) -> DimExprKey {
+    // Handle a nested numerator quotient: `(a / b) / c = a / (b * c)`. We
+    // lift the inner denominator into the outer denominator and recurse on
+    // the cleaned-up form.
+    if let DimExprKey::Div(inner_num, inner_denom) = num {
+        let combined_denom = normalize_dim_product([*inner_denom, denom]);
+        return normalize_dim_quotient(*inner_num, combined_denom);
+    }
+
+    // Handle nested division on the denominator: `a / (b / c) = (a * c) / b`.
+    if let DimExprKey::Div(inner_num, inner_denom) = denom {
+        let combined_num = normalize_dim_product([num, *inner_denom]);
+        return normalize_dim_quotient(combined_num, *inner_num);
+    }
+
+    let (num_concrete, num_atoms) = flatten_product(num);
+    let (denom_concrete, denom_atoms) = flatten_product(denom);
+    normalize_quotient_parts(num_concrete, num_atoms, denom_concrete, denom_atoms)
+}
+
+/// Cancel common atom factors and GCD-reduce the concrete portions of a
+/// numerator / denominator pair, then reassemble the canonical key.
+///
+/// This relies on tensor axis sizes being positive integers: `n / n = 1` is
+/// only sound when `n > 0`. Chelis dimensions are always positive (zero-axis
+/// tensors are degenerate and not used as slot keys), so atom-level
+/// cancellation is sound. Constants are GCD-reduced exactly; division
+/// remains structural when nothing more cancels.
+fn normalize_quotient_parts(
+    mut num_concrete: usize,
+    mut num_atoms: Vec<DimExprKey>,
+    mut denom_concrete: usize,
+    mut denom_atoms: Vec<DimExprKey>,
+) -> DimExprKey {
+    if num_concrete == 0 {
+        // 0 / x is 0; division by zero is rejected by `evaluate`, but at
+        // the key level a structural `0 / x` collapses to `Concrete(0)`.
+        return DimExprKey::Concrete(0);
+    }
+    if denom_concrete == 0 {
+        // Division by an all-zero denominator would be invalid; keep
+        // structural so the runtime evaluator can surface the error.
+        return DimExprKey::Div(
+            Box::new(assemble_product(num_concrete, num_atoms)),
+            Box::new(DimExprKey::Concrete(0)),
+        );
+    }
+
+    // Cancel matching atoms between numerator and denominator.
+    num_atoms.sort();
+    denom_atoms.sort();
+    let mut cancelled_num: Vec<DimExprKey> = Vec::with_capacity(num_atoms.len());
+    let mut remaining_denom: Vec<DimExprKey> = Vec::with_capacity(denom_atoms.len());
+    let mut denom_iter = denom_atoms.into_iter().peekable();
+    for atom in num_atoms {
+        // Advance denom_iter past atoms strictly less than `atom`.
+        while let Some(d) = denom_iter.peek() {
+            if *d < atom {
+                remaining_denom.push(denom_iter.next().expect("peeked"));
+            } else {
+                break;
+            }
+        }
+        if denom_iter.peek() == Some(&atom) {
+            // Cancel one copy.
+            denom_iter.next();
+        } else {
+            cancelled_num.push(atom);
+        }
+    }
+    remaining_denom.extend(denom_iter);
+
+    // GCD-reduce the concrete factors.
+    let g = usize_gcd(num_concrete, denom_concrete);
+    if g > 1 {
+        num_concrete /= g;
+        denom_concrete /= g;
+    }
+
+    // If the denominator collapses to 1 with no remaining atoms, the
+    // result is a pure product.
+    if denom_concrete == 1 && remaining_denom.is_empty() {
+        return assemble_product(num_concrete, cancelled_num);
+    }
+
+    // Otherwise keep a structural Div. Both sides are themselves
+    // canonical products.
+    let numerator = assemble_product(num_concrete, cancelled_num);
+    let denominator = assemble_product(denom_concrete, remaining_denom);
+    DimExprKey::Div(Box::new(numerator), Box::new(denominator))
 }
 
 impl From<&DimInfo> for DimExpr {
@@ -905,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn dim_expr_normalized_key_handles_div_conservatively() {
+    fn dim_expr_normalized_key_handles_div_exact_and_identity() {
         let exact = DimExpr::Div(
             Box::new(DimExpr::Concrete(12)),
             Box::new(DimExpr::Concrete(3)),
@@ -917,7 +1094,15 @@ mod tests {
             Box::new(DimExpr::Concrete(1)),
         );
         assert_eq!(identity.normalized_key(), DimExprKey::Sym("n".into()));
+    }
 
+    #[test]
+    fn dim_expr_normalized_key_constant_factor_div_canonicalizes() {
+        // Phase Perf-F2(a) broadens v1's structural-only Div handling.
+        // `(n * 4) / 2 = n * 2` is mathematically exact for any positive
+        // integer `n` (because 4 is exactly divisible by 2). v1 left this
+        // structural; v2 GCD-reduces the concrete factor so the slot
+        // planner can equate the two shapes and reuse a single slot.
         let quotient = DimExpr::Div(
             Box::new(DimExpr::Mul(
                 Box::new(DimExpr::Sym("n".into())),
@@ -929,7 +1114,7 @@ mod tests {
             Box::new(DimExpr::Sym("n".into())),
             Box::new(DimExpr::Concrete(2)),
         );
-        assert_ne!(quotient.normalized_key(), product.normalized_key());
+        assert_eq!(quotient.normalized_key(), product.normalized_key());
     }
 
     #[test]
