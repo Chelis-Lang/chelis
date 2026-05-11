@@ -257,6 +257,90 @@ fn effect_annotations_desugar_into_t_fn_metadata() {
     );
 }
 
+// === Bare-keyword pipe stages (Item 2b / G11) ===
+//
+// Pinned by failing tests until the parser accepts bare keyword tokens as
+// pipe stages. The pipe-stage parser at `parser.rs:1000-1003` dispatches to
+// `parse_prefix`, which routes every reserved keyword (Realize, Copy, Grad,
+// Vmap, Jit, Par, Cast, If, Match, Fn, With) to a parser that unconditionally
+// expects an `LParen` or `LBrace` next. The fix should let bare keyword forms
+// produce a callable reference in pipe-stage context, matching the spec's
+// first-argument insertion rule (`spec/01-nomenclature.md` §3.6).
+//
+// Only the keywords whose builtin form is **unary** have a meaningful bare
+// pipe-stage semantics — currently `realize` and `copy`. Keywords that take
+// additional arguments (`grad`, `vmap`, `cast`, `jit`, `with`, `par`) use the
+// arg form (e.g. `x |> grad(f)`), and the structural forms (`if`, `match`,
+// `fn`) have no bare-callable interpretation. The fixtures here cover the
+// unary cases plus a chained-pipe canary.
+
+#[test]
+#[ignore = "parser rejects bare keyword pipe stage, see commit fix/parser-pipe-bare-keyword"]
+fn bare_realize_as_pipe_stage_parses() {
+    let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize";
+    let decls = surf_parse(src).expect("bare `|> realize` should parse");
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    // Canonical desugar: `(pipe {} (var {} x) <realize-callable>)`, matching
+    // spec §3.6 first-argument insertion semantics for `realize`.
+    assert!(
+        text.contains("(pipe {}"),
+        "expected pipe node in desugared output, got:\n{text}"
+    );
+}
+
+#[test]
+#[ignore = "parser rejects bare keyword pipe stage, see commit fix/parser-pipe-bare-keyword"]
+fn bare_copy_as_pipe_stage_parses() {
+    let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> copy";
+    let decls = surf_parse(src).expect("bare `|> copy` should parse");
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    assert!(
+        text.contains("(pipe {}"),
+        "expected pipe node in desugared output, got:\n{text}"
+    );
+}
+
+#[test]
+#[ignore = "parser rejects bare keyword pipe stage, see commit fix/parser-pipe-bare-keyword"]
+fn chained_bare_keyword_with_named_pipe_stages_parses() {
+    // Mixed pipe: bare keyword stage chained with a regular named-function
+    // stage. Exercises the pipe-loop boundary (the parser must not consume
+    // the next `|>` while parsing the bare keyword stage).
+    let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize |> relu";
+    let decls = surf_parse(src).expect("chained bare-keyword + named pipe should parse");
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    assert!(
+        text.contains("(pipe {}"),
+        "expected pipe node in desugared output, got:\n{text}"
+    );
+    // The named-ident stage must remain a `var` reference.
+    assert!(
+        text.contains("(var {} relu)"),
+        "expected named-ident pipe stage (var relu) to survive, got:\n{text}"
+    );
+}
+
+#[test]
+fn bare_realize_pipe_stage_rejection_is_pinned() {
+    // Regression pin for the current bug: parser rejects `x |> realize`. When
+    // the fix lands, this test must be inverted (assert success) and the three
+    // `#[ignore]` tests above must be flipped to running.
+    let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> realize";
+    let err = surf_parse(src).expect_err(
+        "expected parser to reject `x |> realize` (current G11 behavior); \
+         if this now parses successfully, the fix has landed — invert this test \
+         and flip the ignored fixtures above to running",
+    );
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("expected LParen"),
+        "expected `expected LParen` diagnostic from bare-keyword rejection, got: {msg}"
+    );
+}
+
 #[test]
 fn parsed_surf_expression_spans_enter_deep_metadata() {
     let source = "def f(x) = add(x, 1)";
