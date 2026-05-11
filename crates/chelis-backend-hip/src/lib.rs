@@ -9,6 +9,7 @@ use chelis_ir::dag::DimExpr;
 
 pub mod blas;
 pub mod emit;
+pub(crate) mod fusion;
 pub mod kernels;
 pub mod launch;
 pub mod memory;
