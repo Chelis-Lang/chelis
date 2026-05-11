@@ -227,7 +227,7 @@ fn hip_gather_wrapper_with_cast_callsite_indices_loud_failure_or_kernel() {
     // dense fallback is the contract violation.
     assert!(
         emitted.contains("kernel_gather_i64"),
-        "build succeeded but `kernel_gather_i64` is absent — silent dense \
+        "build succeeded but `kernel_gather_i64` is absent -- silent dense \
          fallback for cast-callsite-indices is the regression this test \
          catches. Emitted source:\n{emitted}",
     );

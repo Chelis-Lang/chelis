@@ -898,7 +898,7 @@ fn six_blas_rejection_classes_are_distinct_from_sparse_variants() {
         for j in (i + 1)..blas_classes.len() {
             assert_ne!(
                 blas_classes[i], blas_classes[j],
-                "BLAS variants {i} and {j} compared equal — must be distinct",
+                "BLAS variants {i} and {j} compared equal -- must be distinct",
             );
         }
     }

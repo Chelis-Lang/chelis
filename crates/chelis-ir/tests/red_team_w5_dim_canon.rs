@@ -147,7 +147,7 @@ fn zero_over_zero_does_not_collapse_to_zero_or_one() {
     assert!(
         key == collapse_to_zero || matches!(key, DimExprKey::Div(_, _)),
         "0/0 canonical key should be either Concrete(0) (zero-numerator wins) \
-         or a structural Div (zero-denominator wins) — must NOT collapse to 1; got {key:?}"
+         or a structural Div (zero-denominator wins) -- must NOT collapse to 1; got {key:?}"
     );
     assert_ne!(key, collapse_to_one, "0/0 must NEVER canonicalize to 1");
 }

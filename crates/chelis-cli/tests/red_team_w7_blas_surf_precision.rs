@@ -143,7 +143,7 @@ fn nonempty_summary_rejections_for_surf_f64_matmul_helper() {
     assert!(
         !rejections.is_empty(),
         "Surf F64 matmul helper MUST produce at least one summary rejection. \
-         Under the pre-W6 silent rejection path, this was empty — exactly \
+         Under the pre-W6 silent rejection path, this was empty -- exactly \
          the bug W6 closed. If this test fails, the silent path has been \
          reintroduced."
     );

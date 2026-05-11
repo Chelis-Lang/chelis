@@ -155,7 +155,7 @@ fn assert_close(actual: &[f32], expected: &[f32], tag: &str) {
     assert_eq!(
         actual.len(),
         expected.len(),
-        "{tag}: output length mismatch — actual={} expected={}",
+        "{tag}: output length mismatch -- actual={} expected={}",
         actual.len(),
         expected.len()
     );

@@ -100,7 +100,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
         !result.c_source.contains("cblas_sgemm("),
         "F64 matmul subgraph must stay off the BLAS path (cblas_sgemm is \
          single-precision only). Found a cblas_sgemm call in the emitted \
-         C source — the precision filter at \
+         C source -- the precision filter at \
          chelis_ir::specialize::detect_matmul_pattern has regressed. \
          Emitted C source:\n{}",
         result.c_source

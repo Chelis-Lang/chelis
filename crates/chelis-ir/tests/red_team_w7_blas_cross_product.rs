@@ -160,7 +160,7 @@ fn w7_f64_matmul_helper_specializer_locked_and_w6_rejection_fires() {
         }
         Err(BlasSummaryAttempt::NotEligible) => panic!(
             "F64 matmul helper MUST emit BlasOutputPrecisionMismatch (W6 closes \
-             the W5 silent-rejection loop); got NotEligible — silent skip regressed"
+             the W5 silent-rejection loop); got NotEligible -- silent skip regressed"
         ),
         Err(BlasSummaryAttempt::Rejected(r)) => {
             assert_eq!(
@@ -192,7 +192,7 @@ fn w7_f16_matmul_helper_specializer_locked_and_w6_rejection_fires() {
         }
         Err(BlasSummaryAttempt::NotEligible) => panic!(
             "F16 matmul helper MUST emit BlasOutputPrecisionMismatch; \
-             got NotEligible — silent skip regressed"
+             got NotEligible -- silent skip regressed"
         ),
         Err(BlasSummaryAttempt::Rejected(r)) => {
             assert_eq!(
@@ -224,7 +224,7 @@ fn w7_bf16_matmul_helper_specializer_locked_and_w6_rejection_fires() {
         }
         Err(BlasSummaryAttempt::NotEligible) => panic!(
             "Bf16 matmul helper MUST emit BlasOutputPrecisionMismatch; \
-             got NotEligible — silent skip regressed"
+             got NotEligible -- silent skip regressed"
         ),
         Err(BlasSummaryAttempt::Rejected(r)) => {
             assert_eq!(
@@ -254,7 +254,7 @@ fn w7_f8e4m3_matmul_helper_specializer_locked_and_w6_rejection_fires() {
         Ok(summary) => panic!("F8e4m3 matmul helper MUST be rejected; got Ok({summary:?})"),
         Err(BlasSummaryAttempt::NotEligible) => panic!(
             "F8e4m3 matmul helper MUST emit BlasOutputPrecisionMismatch; \
-             got NotEligible — silent skip regressed"
+             got NotEligible -- silent skip regressed"
         ),
         Err(BlasSummaryAttempt::Rejected(r)) => {
             assert_eq!(
@@ -284,7 +284,7 @@ fn w7_int8_matmul_helper_specializer_locked_and_w6_rejection_fires() {
         Ok(summary) => panic!("Int8 matmul helper MUST be rejected; got Ok({summary:?})"),
         Err(BlasSummaryAttempt::NotEligible) => panic!(
             "Int8 matmul helper MUST emit BlasOutputPrecisionMismatch; \
-             got NotEligible — silent skip regressed"
+             got NotEligible -- silent skip regressed"
         ),
         Err(BlasSummaryAttempt::Rejected(r)) => {
             assert_eq!(
@@ -316,7 +316,7 @@ fn w7_int32_matmul_helper_specializer_locked_and_w6_rejection_fires() {
         Ok(summary) => panic!("Int32 matmul helper MUST be rejected; got Ok({summary:?})"),
         Err(BlasSummaryAttempt::NotEligible) => panic!(
             "Int32 matmul helper MUST emit BlasOutputPrecisionMismatch; \
-             got NotEligible — silent skip regressed"
+             got NotEligible -- silent skip regressed"
         ),
         Err(BlasSummaryAttempt::Rejected(r)) => {
             assert_eq!(
@@ -346,7 +346,7 @@ fn w7_int64_matmul_helper_specializer_locked_and_w6_rejection_fires() {
         Ok(summary) => panic!("Int64 matmul helper MUST be rejected; got Ok({summary:?})"),
         Err(BlasSummaryAttempt::NotEligible) => panic!(
             "Int64 matmul helper MUST emit BlasOutputPrecisionMismatch; \
-             got NotEligible — silent skip regressed"
+             got NotEligible -- silent skip regressed"
         ),
         Err(BlasSummaryAttempt::Rejected(r)) => {
             assert_eq!(
@@ -380,7 +380,7 @@ fn w7_bool_matmul_helper_specializer_locked_and_w6_rejection_fires() {
         Ok(summary) => panic!("Bool matmul helper MUST be rejected; got Ok({summary:?})"),
         Err(BlasSummaryAttempt::NotEligible) => panic!(
             "Bool matmul helper MUST emit BlasOutputPrecisionMismatch; \
-             got NotEligible — silent skip regressed"
+             got NotEligible -- silent skip regressed"
         ),
         Err(BlasSummaryAttempt::Rejected(r)) => {
             assert_eq!(
@@ -489,7 +489,7 @@ fn nonsilent_rejection_invariant_for_every_w5_rejected_precision() {
             "ACCIDENTAL ACCEPTANCE for precisions {accidental_acceptances:?}: \
              W6 BLAS recognizer returned Ok(_) for a non-F32 matmul helper. \
              The W5 P0 fix at specialize.rs:519 prevented `RiscOp::BlasMatmul` \
-             replacement, but the helper recognizer accepted anyway — \
+             replacement, but the helper recognizer accepted anyway -- \
              ship-blocker miscompile risk."
         ));
     }
@@ -552,7 +552,7 @@ fn trap_f64_helper_would_have_silently_passed_under_pre_w6() {
         Err(BlasSummaryAttempt::NotEligible) => panic!(
             "SILENT REJECTION REGRESSED: F64 matmul helper produced \
              BlasSummaryAttempt::NotEligible, which under the outer \
-             summary-derivation pass produces NO diagnostic — exactly \
+             summary-derivation pass produces NO diagnostic -- exactly \
              the pre-W6 bug. NotEligible is reserved for non-matmul-near \
              helpers (elementwise Add, pure-sparse, etc.), NOT for non-F32 \
              matmul helpers."

@@ -569,7 +569,7 @@ fn all_seven_rejection_classes_have_distinct_variants() {
         for j in (i + 1)..classes.len() {
             assert_ne!(
                 classes[i], classes[j],
-                "variants {i} and {j} compared equal — must be distinct",
+                "variants {i} and {j} compared equal -- must be distinct",
             );
         }
     }
@@ -702,7 +702,7 @@ fn surface_f64_matmul_helper_emits_blas_output_precision_mismatch_rejection() {
     assert!(
         !blas_rejections.is_empty(),
         "F64 matmul helper MUST emit at least one BlasOutputPrecisionMismatch \
-         rejection — W5 P0 silent rejection is now diagnosed. \
+         rejection -- W5 P0 silent rejection is now diagnosed. \
          Got rejections: {rejections:#?}",
     );
     let rejection = blas_rejections[0];
@@ -871,7 +871,7 @@ fn six_blas_rejection_classes_have_distinct_variants() {
         for j in (i + 1)..blas.len() {
             assert_ne!(
                 blas[i], blas[j],
-                "BLAS variants {i} and {j} compared equal — must be distinct",
+                "BLAS variants {i} and {j} compared equal -- must be distinct",
             );
         }
     }

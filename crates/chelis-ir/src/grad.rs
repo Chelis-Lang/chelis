@@ -102,7 +102,7 @@ impl fmt::Display for AdError {
                 AdRejectionReason::NonDeterministicAtDuplicateIndices => write!(
                     f,
                     "grad: {op} is non-differentiable (non-deterministic at duplicate \
-                     indices — last-write-wins forward semantics has no well-defined \
+                     indices -- last-write-wins forward semantics has no well-defined \
                      adjoint); use scatter_add (whose adjoint is gather) or wrap \
                      {op} in a stop-gradient"
                 ),
