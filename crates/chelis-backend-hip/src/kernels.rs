@@ -1028,18 +1028,39 @@ pub enum ReduceKind {
 ///
 /// Each step computes into a register `float v{step_idx}`, resolving inputs
 /// from either external input arrays or previous step outputs.
+///
+/// When `in_place_aliased_ext` is `Some(i)`, the fused output is aliased
+/// onto external input `i`'s device buffer at runtime (Perf-F2(b)).
+/// To keep that alias sound, neither `ext{i}` nor `out` may carry a
+/// `__restrict__` qualifier — the two pointers reference the same
+/// memory in the in-place fast path. All other externals do carry
+/// `__restrict__` so the compiler can still hoist their loads.
+///
+/// When `in_place_aliased_ext` is `None`, no aliasing is possible and
+/// the legacy non-`__restrict__` parameter list is preserved (the HIP
+/// fused kernel has historically not used `__restrict__` for either
+/// the non-aliased nor aliased case).
 pub fn fused_elementwise(
     kernel_name: &str,
     steps: &[chelis_ir::dag::FusedStep],
     n_external: usize,
+    in_place_aliased_ext: Option<usize>,
 ) -> String {
     use chelis_ir::dag::{FusedInput, FusedStepOp};
 
-    // Build parameter list
+    // Build parameter list. `__restrict__` is added only when the
+    // kernel ships the in-place aliasing path, and only on the
+    // pointers that are provably non-aliasing (every external except
+    // the aliased one, but never on `out`).
     let mut params = Vec::new();
     for i in 0..n_external {
         let pfx = format!("ext{i}");
-        params.push(format!("const float *{pfx}"));
+        let qual = if in_place_aliased_ext.is_some() && in_place_aliased_ext != Some(i) {
+            "const float *__restrict__ "
+        } else {
+            "const float *"
+        };
+        params.push(format!("{qual}{pfx}"));
         params.push(stride_params(&pfx));
         params.push(format!("int {pfx}_ndim"));
         params.push(format!("int {pfx}_size"));
@@ -1263,6 +1284,51 @@ extern \"C\" __global__ void {kernel_name}(
   }}
   int dst = ((b * axis_size + g) * after) + d;
   atomicAdd(&out[dst], updates[i]);
+}}
+"
+    )
+}
+
+/// Generate sparse replace-scatter (last-write-wins) kernel for f32
+/// payloads and typed integer indices.
+///
+/// Per `spec/05-risc-primitives.md` §3.5, the deterministic order is
+/// updates-tensor row-major flat iteration. HIP atomics do not
+/// guarantee ordered last-write semantics across concurrent threads,
+/// so this kernel is executed by a **single thread** that walks
+/// `i = 0..total` in ascending flat order and writes each update
+/// non-atomically. The launch site uses grid=1, block=1. This
+/// trades GPU throughput for the determinism the AD policy
+/// depends on. Higher-throughput strategies (sort-then-scatter,
+/// segmented scan) require a tie-breaker that picks the max flat
+/// index per target cell; they are a future optimization but must
+/// preserve this exact tie-breaking rule.
+pub fn scatter_replace(kernel_name: &str, index_ty: &str) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {index_ty} *indices,
+    const float *updates,
+    float *out,
+    int before,
+    int axis_size,
+    int after,
+    int index_count,
+    int total) {{
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  for (int i = 0; i < total; i++) {{
+    int d = i % after;
+    int tmp = i / after;
+    int index_pos = tmp % index_count;
+    int b = tmp / index_count;
+    int g = (int)indices[index_pos];
+    if (g < 0 || g >= axis_size || b >= before) {{
+      CHELIS_GUARD_INDEX(g, axis_size, 4);
+      return;
+    }}
+    int dst = ((b * axis_size + g) * after) + d;
+    out[dst] = updates[i];
+  }}
 }}
 "
     )

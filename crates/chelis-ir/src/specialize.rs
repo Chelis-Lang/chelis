@@ -511,6 +511,14 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     if sum_node.inputs.len() != 1 || sum_node.output_type.dims.len() < 2 {
         return None;
     }
+    // BlasMatmul dispatches to cblas_sgemm / hipblas_sgemm — single-precision
+    // BLAS — at codegen. Replacing a non-F32 matmul subgraph with BlasMatmul
+    // would silently miscompile the user's program (F64 bytes read as F32,
+    // integer bytes read as F32, etc.). Keep non-F32 matmul on the generic
+    // expand+mul+sum path.
+    if sum_node.output_type.precision != Prim::F32 {
+        return None;
+    }
     let lead_len = sum_node.output_type.dims.len() - 2;
     if sum_axis != lead_len + 1 {
         return None;
@@ -546,6 +554,9 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     }
     let a_ty = &dag.get(a)?.output_type;
     let b_ty = &dag.get(b)?.output_type;
+    if a_ty.precision != Prim::F32 || b_ty.precision != Prim::F32 {
+        return None;
+    }
     let batch_dims = sum_node.output_type.dims[..lead_len]
         .iter()
         .map(DimExpr::from)
@@ -636,7 +647,8 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::BlasMatmul { .. }
         | RiscOp::OneHot { .. }
         | RiscOp::Gather { .. }
-        | RiscOp::ScatterAdd { .. } => true,
+        | RiscOp::ScatterAdd { .. }
+        | RiscOp::Scatter { .. } => true,
         RiscOp::Reshape { .. } | RiscOp::Store { .. } => node
             .inputs
             .first()

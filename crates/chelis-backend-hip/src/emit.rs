@@ -9,6 +9,7 @@ use chelis_ir::dag::{
 use chelis_types::types::Prim;
 
 use crate::blas;
+use crate::fusion::{FusedInPlaceSpec, fused_in_place_spec};
 use crate::kernels;
 use crate::launch;
 use crate::memory::{MemoryPlan, NodeMemoryKind};
@@ -710,6 +711,14 @@ impl HipEmitter {
                     _ => "kernel_scatter_add_invalid".into(),
                 })
             }
+            RiscOp::Scatter { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                Some(match indices_ty.precision {
+                    Prim::Int32 => "kernel_scatter_replace_i32".into(),
+                    Prim::Int64 => "kernel_scatter_replace_i64".into(),
+                    _ => "kernel_scatter_replace_invalid".into(),
+                })
+            }
             RiscOp::FusedElem { .. } => Some(format!("kernel_fused_{}", node.id.0)),
         }
     }
@@ -756,7 +765,15 @@ impl HipEmitter {
             RiscOp::Realize => kernels::cast(name),
             RiscOp::Cast { .. } => kernels::cast(name),
             RiscOp::Copy => kernels::cast(name),
-            RiscOp::FusedElem { ops } => kernels::fused_elementwise(name, ops, node.inputs.len()),
+            RiscOp::FusedElem { ops } => {
+                let aliased_ext = fused_in_place_spec(node, dag).map(|reusable| {
+                    node.inputs
+                        .iter()
+                        .position(|&input| input == reusable)
+                        .expect("reusable input must appear in node inputs")
+                });
+                kernels::fused_elementwise(name, ops, node.inputs.len(), aliased_ext)
+            }
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 match indices_ty.precision {
@@ -775,6 +792,17 @@ impl HipEmitter {
                     Prim::Int64 => kernels::scatter_add(name, "long long"),
                     other => panic!(
                         "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                        other.name()
+                    ),
+                }
+            }
+            RiscOp::Scatter { .. } => {
+                let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                match indices_ty.precision {
+                    Prim::Int32 => kernels::scatter_replace(name, "int"),
+                    Prim::Int64 => kernels::scatter_replace(name, "long long"),
+                    other => panic!(
+                        "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -969,12 +997,18 @@ impl HipEmitter {
             }
             RiscOp::FusedElem { ops } => {
                 let kernel_name = format!("kernel_fused_{}", node.id.0);
+                let in_place =
+                    fused_in_place_spec(node, dag).map(|reusable_input| FusedInPlaceSpec {
+                        reusable_input,
+                        slot_has_later_owner: self.slot_has_later_owner(id),
+                    });
                 self.emit_fused_launch(
                     node.id.0,
                     &kernel_name,
                     &node.inputs,
                     ops,
                     &node.output_type,
+                    in_place,
                 );
             }
             RiscOp::BlasMatmul {
@@ -1003,6 +1037,9 @@ impl HipEmitter {
             RiscOp::ScatterAdd { axis } => {
                 self.emit_scatter_add_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
+            RiscOp::Scatter { axis } => {
+                self.emit_scatter_replace_launch(id, *axis, &node.inputs, &node.output_type, dag)
+            }
         }
     }
 
@@ -1015,6 +1052,21 @@ impl HipEmitter {
             NodeMemoryKind::UniqueInput { slot, .. } | NodeMemoryKind::SlotBacked { slot } => *slot,
             other => panic!("node {id} does not own slot-backed storage: {other:?}"),
         }
+    }
+
+    /// True iff some node strictly after `id` in topological order also
+    /// owns the slot that `id` owns. Mirrors the C-side
+    /// `slot_has_later_owner` used by the in-place fused-elementwise
+    /// wrapper to decide whether to defer slot allocation to the
+    /// non-aliased fall-back branch.
+    fn slot_has_later_owner(&self, id: usize) -> bool {
+        let slot_id = self.slot_id_for_node(id);
+        self.plan.iter_node_kinds().skip(id + 1).any(|kind| {
+            matches!(
+                kind,
+                NodeMemoryKind::SlotBacked { slot } if *slot == slot_id
+            )
+        })
     }
 
     fn emit_slot_allocation_if_needed(&mut self, id: usize, ty: &TensorType) {
@@ -1374,6 +1426,73 @@ impl HipEmitter {
         self.line("}");
     }
 
+    /// Launch the sparse replace-scatter (last-write-wins) kernel.
+    ///
+    /// Per `spec/05-risc-primitives.md` §3.5, the deterministic-order
+    /// rule is updates-tensor row-major flat iteration. The kernel is
+    /// launched as `<<<1, 1>>>` — a single thread serializes all
+    /// writes so duplicate target indices resolve in the same order
+    /// the IR evaluator and C backend use. This is intentionally low
+    /// throughput; the AD policy for this op is `no_grad` and the
+    /// design assumes scatter_replace is used in inference / data
+    /// pipelines, not on a hot training path. A parallel
+    /// implementation would have to preserve the same tie-breaking
+    /// (max-flat-index wins per cell) — see `kernels::scatter_replace`.
+    fn emit_scatter_replace_launch(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let target = inputs[0].0;
+        let indices = inputs[1].0;
+        let updates = inputs[2].0;
+        let target_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
+        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
+        if target_ty.precision != Prim::F32
+            || updates_ty.precision != Prim::F32
+            || ty.precision != Prim::F32
+        {
+            panic!("HIP backend sparse scatter_replace currently supports f32 payloads only");
+        }
+        if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
+            panic!(
+                "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
+                indices_ty.precision.name()
+            );
+        }
+        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
+        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
+        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
+        let kernel_name = match indices_ty.precision {
+            Prim::Int32 => "kernel_scatter_replace_i32",
+            Prim::Int64 => "kernel_scatter_replace_i64",
+            _ => unreachable!(),
+        };
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+        ));
+        self.line(&format!("int t{id}_before = {before};"));
+        self.line(&format!("int t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int t{id}_after = {after};"));
+        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
+        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+        ));
+        // Single-thread serial launch preserves last-write-wins order.
+        self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     // ------------------------------------------------------------------
     // Fused elementwise kernel launch
     // ------------------------------------------------------------------
@@ -1385,8 +1504,13 @@ impl HipEmitter {
         inputs: &[NodeId],
         _ops: &[chelis_ir::dag::FusedStep],
         ty: &TensorType,
+        in_place: Option<FusedInPlaceSpec>,
     ) {
-        self.emit_slot_wrapper(id, ty);
+        if let Some(spec) = in_place {
+            self.emit_fused_in_place_wrapper(id, ty, spec);
+        } else {
+            self.emit_slot_wrapper(id, ty);
+        }
         self.line("{");
         self.indent += 1;
         self.line(&format!("int t{id}_size = d_t{id}->size;"));
@@ -1428,6 +1552,58 @@ impl HipEmitter {
             "256",
             "args",
         );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Emit the host-side wrapper for an in-place FusedElem launch on
+    /// HIP. At runtime, if the reusable input's device storage is
+    /// contiguous, the FusedElem output view is aliased onto the
+    /// reusable input's device buffer (saving one slot's worth of GPU
+    /// allocation + the eventual `hipFree`). Otherwise we fall back to
+    /// the slot-backed view exactly as the non-in-place path would.
+    ///
+    /// Mirrors the C-side `emit_fused_in_place_wrapper`
+    /// (`crates/chelis-backend-c/src/emit.rs::emit_fused_in_place_wrapper`)
+    /// with one HIP-specific addition: in `device_entrypoint_mode` the
+    /// slot declarations are pre-emitted by
+    /// `emit_device_slot_allocations`, so the wrapper must not
+    /// redeclare them. In host-entrypoint mode the C-side discipline
+    /// applies: declare the slot variable on the first-owner path and
+    /// defer allocation to inside the non-contiguous branch when the
+    /// slot has no later owners.
+    fn emit_fused_in_place_wrapper(&mut self, id: usize, ty: &TensorType, spec: FusedInPlaceSpec) {
+        let slot_id = self.slot_id_for_node(id);
+        let slot_is_first_owner = self.plan.slot(slot_id).first_owner == NodeId(id);
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        let reusable = spec.reusable_input.0;
+        if !self.device_entrypoint_mode && slot_is_first_owner {
+            self.line(&format!("chelis_gpu_tensor *chelis_slot{slot_id} = NULL;"));
+            if spec.slot_has_later_owner {
+                self.line(&format!(
+                    "chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
+                ));
+            }
+        }
+        self.line(&format!("chelis_gpu_tensor *d_t{id};"));
+        self.line(&format!("if (chelis_gpu_is_contiguous(d_t{reusable})) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, d_t{reusable}->data, d_t{reusable}->storage_size);"
+        ));
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        if !self.device_entrypoint_mode && slot_is_first_owner && !spec.slot_has_later_owner {
+            self.line(&format!(
+                "chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
+            ));
+        }
+        self.line(&format!(
+            "d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->storage_size);"
+        ));
         self.indent -= 1;
         self.line("}");
     }
@@ -1567,6 +1743,21 @@ impl HipEmitter {
 
     #[allow(dead_code)]
     fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType, dag: &Dag) {
+        // Defense in depth: chelis_hipblas_sgemm_* wraps hipblasSgemm /
+        // hipblasSgemmStridedBatched, both single-precision only. If a non-F32
+        // BlasMatmul reaches here it indicates a missing precision filter
+        // upstream (the canonical filter is at
+        // chelis_ir::specialize::detect_matmul_pattern). Refuse to emit
+        // rather than silently miscompile.
+        assert_eq!(
+            ty.precision,
+            Prim::F32,
+            "emit_blas_matmul received non-F32 output (precision={:?}) at node {id}; \
+             chelis_hipblas_sgemm_* is single-precision only. The upstream specializer \
+             in chelis_ir::specialize must keep non-F32 matmul subgraphs on the \
+             generic expand+mul+sum path.",
+            ty.precision,
+        );
         let a = spec.a.0;
         let b = spec.b.0;
         let m_expr = Self::emit_dim_expr(&spec.m);
@@ -2047,7 +2238,8 @@ impl HipEmitter {
             | RiscOp::FusedElem { .. }
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Gather { .. }
-            | RiscOp::ScatterAdd { .. } => true,
+            | RiscOp::ScatterAdd { .. }
+            | RiscOp::Scatter { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }
@@ -2366,9 +2558,43 @@ mod tests {
         assert!(hip.contains("atomicAdd(&out[dst], updates[i]);"));
     }
 
+    /// Perf-F2(b) shipped: with a single-consumer reusable input
+    /// (here `x`, the FusedElem's first external), the kernel ships
+    /// the in-place shape — `__restrict__` only on non-aliased
+    /// externals (`ext1`), never on the aliased external (`ext0`) or
+    /// `out`.
     #[test]
-    fn current_fused_reusable_input_does_not_emit_hip_restrict_shape() {
+    fn fused_reusable_input_emits_hip_in_place_restrict_shape() {
         let dag = fused_mul_reusable_input_dag();
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+
+        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
+        // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
+        assert!(!hip.contains("const float *__restrict__ ext0"));
+        // Output must NOT carry __restrict__ — it aliases ext0.
+        assert!(!hip.contains("float *__restrict__ out"));
+        // Non-aliased externals (ext1 here, the const scale) MUST
+        // carry __restrict__ in the in-place shape.
+        assert!(hip.contains("const float *__restrict__ ext1"));
+    }
+
+    /// Negative: a FusedElem with no `reusable_input` set must still
+    /// emit the legacy non-`__restrict__` kernel parameter list.
+    /// The in-place shape is opt-in via the upstream linearity-marked
+    /// hint, not the default.
+    #[test]
+    fn fused_without_reusable_input_keeps_non_in_place_kernel_shape() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        // No set_reusable_input call — the in-place gate must reject.
+        dag.add_root(fused);
+
         let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
@@ -2377,19 +2603,7 @@ mod tests {
         assert!(hip.contains("float *out"));
         assert!(
             !hip.contains("__restrict__"),
-            "current HIP fused kernels do not yet express in-place restrict shape"
+            "no-reusable-input fused kernels must keep the legacy non-__restrict__ shape"
         );
-    }
-
-    #[test]
-    #[ignore = "target behavior: enable when HIP fused in-place codegen aliases reusable_input"]
-    fn target_fused_in_place_hip_restrict_shape_preserves_non_aliased_inputs() {
-        let dag = fused_mul_reusable_input_dag();
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
-
-        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
-        assert!(!hip.contains("const float *__restrict__ ext0"));
-        assert!(!hip.contains("float *__restrict__ out"));
-        assert!(hip.contains("const float *__restrict__ ext1"));
     }
 }

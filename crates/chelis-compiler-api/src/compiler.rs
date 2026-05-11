@@ -1429,7 +1429,9 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
         .nodes()
         .iter()
         .filter_map(|node| match node.op {
-            RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } => node.inputs.get(1).copied(),
+            RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } => {
+                node.inputs.get(1).copied()
+            }
             _ => None,
         })
         .collect();
@@ -1514,7 +1516,28 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     ));
                 }
             }
-            RiscOp::ScatterAdd { .. } => {
+            RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } => {
+                let (label, payload_blocker) = match &node.op {
+                    RiscOp::ScatterAdd { .. } => (
+                        "scatter_add",
+                        // Preserved verbatim from the pre-W2-A
+                        // message so existing rejection tests (and
+                        // downstream consumers grepping for the
+                        // rationale phrase) keep working.
+                        "f64 scatter_add needs backend-specific atomic support and is not in this milestone.",
+                    ),
+                    RiscOp::Scatter { .. } => (
+                        "scatter_replace",
+                        // For replace-scatter the limitation is not
+                        // atomics — it's the single-thread serial
+                        // kernel that the determinism rule requires.
+                        // f64 support is a future widening of the
+                        // serialized kernel, not an atomics
+                        // question.
+                        "f64 scatter_replace requires a widened serial last-write-wins kernel and is not in this milestone.",
+                    ),
+                    _ => unreachable!(),
+                };
                 let target = &dag.get(node.inputs[0]).unwrap().output_type;
                 let index_node = dag.get(node.inputs[1]).unwrap();
                 let indices = &index_node.output_type;
@@ -1526,9 +1549,9 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     return Err(stage_error(
                         "compile",
                         format!(
-                            "`chelis build --target hip` sparse scatter_add supports f32 payloads only; \
+                            "`chelis build --target hip` sparse {label} supports f32 payloads only; \
                              node {} carries target `{}`, updates `{}`, output `{}`. \
-                             f64 scatter_add needs backend-specific atomic support and is not in this milestone.",
+                             {payload_blocker}",
                             node.id.0,
                             target.precision.name(),
                             updates.precision.name(),
@@ -1544,7 +1567,7 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     return Err(stage_error(
                         "compile",
                         format!(
-                            "`chelis build --target hip` sparse scatter_add requires int32/int64 indices; \
+                            "`chelis build --target hip` sparse {label} requires int32/int64 indices; \
                              node {} uses `{}`",
                             node.id.0,
                             indices.precision.name()
@@ -1556,7 +1579,7 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     return Err(stage_error(
                         "compile",
                         format!(
-                            "`chelis build --target hip` sparse scatter_add requires indices to be loaded input tensors in this milestone; \
+                            "`chelis build --target hip` sparse {label} requires indices to be loaded input tensors in this milestone; \
                              node {} uses indices produced by {:?}. \
                              Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
                             node.id.0, index_node.op
@@ -2337,6 +2360,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         },
         RiscOp::Gather { axis } => WireRiscOp::Gather { axis: *axis },
         RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd { axis: *axis },
+        RiscOp::Scatter { axis } => WireRiscOp::Scatter { axis: *axis },
     }
 }
 

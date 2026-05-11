@@ -62,6 +62,13 @@ impl MemoryPlan {
         &self.node_kinds[id.0]
     }
 
+    /// Iterate over node memory kinds in DAG order. Used by the
+    /// in-place fused-elementwise wrapper to detect slots that have
+    /// downstream owners after the current node.
+    pub fn iter_node_kinds(&self) -> impl Iterator<Item = &NodeMemoryKind> {
+        self.node_kinds.iter()
+    }
+
     pub fn slot(&self, id: usize) -> &SlotPlan {
         &self.slots[id]
     }
@@ -169,7 +176,8 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::Shrink { .. }
                 | RiscOp::BlasMatmul { .. }
                 | RiscOp::Gather { .. }
-                | RiscOp::ScatterAdd { .. } => NodeMemoryKind::SlotBacked { slot: usize::MAX },
+                | RiscOp::ScatterAdd { .. }
+                | RiscOp::Scatter { .. } => NodeMemoryKind::SlotBacked { slot: usize::MAX },
             }
         };
         kinds.push(kind);

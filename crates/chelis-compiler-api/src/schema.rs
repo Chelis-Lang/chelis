@@ -924,6 +924,9 @@ pub enum WireRiscOp {
     ScatterAdd {
         axis: usize,
     },
+    Scatter {
+        axis: usize,
+    },
 }
 
 fn default_true() -> bool {
@@ -948,6 +951,13 @@ mod tests {
         match serde_json::from_str::<WireRiscOp>(&scatter).unwrap() {
             WireRiscOp::ScatterAdd { axis } => assert_eq!(axis, 0),
             other => panic!("expected scatter_add wire op, got {other:?}"),
+        }
+
+        let scatter_replace = serde_json::to_string(&WireRiscOp::Scatter { axis: 2 }).unwrap();
+        assert_eq!(scatter_replace, r#"{"kind":"scatter","axis":2}"#);
+        match serde_json::from_str::<WireRiscOp>(&scatter_replace).unwrap() {
+            WireRiscOp::Scatter { axis } => assert_eq!(axis, 2),
+            other => panic!("expected scatter wire op, got {other:?}"),
         }
 
         let one_hot = serde_json::to_string(&WireRiscOp::OneHot { vocab: 7 }).unwrap();

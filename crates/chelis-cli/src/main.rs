@@ -1496,6 +1496,7 @@ fn cmd_build(
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
     let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
+    emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
     let all_root_names = lowered_root_names_from_exprs(&deep_exprs, checked.type_env());
     let entry_root_names =
@@ -1734,6 +1735,7 @@ fn cmd_build_deep(
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
     let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
+    emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
     let all_root_names = lowered_root_names_from_exprs(&final_deep_exprs, checked.type_env());
     let entry_root_names = lowered_root_names_from_exprs(&entry_deep_exprs, checked.type_env());
@@ -3750,15 +3752,16 @@ fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::e
 }
 
 fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn std::error::Error>> {
-    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> =
-        dag.nodes()
-            .iter()
-            .filter_map(|node| match node.op {
-                chelis_ir::dag::RiscOp::Gather { .. }
-                | chelis_ir::dag::RiscOp::ScatterAdd { .. } => node.inputs.get(1).copied(),
-                _ => None,
-            })
-            .collect();
+    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> = dag
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.op {
+            chelis_ir::dag::RiscOp::Gather { .. }
+            | chelis_ir::dag::RiscOp::ScatterAdd { .. }
+            | chelis_ir::dag::RiscOp::Scatter { .. } => node.inputs.get(1).copied(),
+            _ => None,
+        })
+        .collect();
 
     for node in dag.nodes() {
         match &node.op {
@@ -3823,7 +3826,18 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                     .into());
                 }
             }
-            chelis_ir::dag::RiscOp::ScatterAdd { .. } => {
+            chelis_ir::dag::RiscOp::ScatterAdd { .. } | chelis_ir::dag::RiscOp::Scatter { .. } => {
+                let (label, payload_blocker) = match &node.op {
+                    chelis_ir::dag::RiscOp::ScatterAdd { .. } => (
+                        "scatter_add",
+                        "f64 scatter_add needs backend-specific atomic support and is not in this milestone.",
+                    ),
+                    chelis_ir::dag::RiscOp::Scatter { .. } => (
+                        "scatter_replace",
+                        "f64 scatter_replace requires a widened serial last-write-wins kernel and is not in this milestone.",
+                    ),
+                    _ => unreachable!(),
+                };
                 let target = &dag.get(node.inputs[0]).unwrap().output_type;
                 let index_node = dag.get(node.inputs[1]).unwrap();
                 let indices = &index_node.output_type;
@@ -3833,9 +3847,9 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                     || node.output_type.precision != chelis_types::types::Prim::F32
                 {
                     return Err(format!(
-                        "`chelis build --target hip` sparse scatter_add supports f32 payloads only; \
+                        "`chelis build --target hip` sparse {label} supports f32 payloads only; \
                          node {} carries target `{}`, updates `{}`, output `{}`. \
-                         f64 scatter_add needs backend-specific atomic support and is not in this milestone.",
+                         {payload_blocker}",
                         node.id.0,
                         target.precision.name(),
                         updates.precision.name(),
@@ -3848,7 +3862,7 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                     chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
                 ) {
                     return Err(format!(
-                        "`chelis build --target hip` sparse scatter_add requires int32/int64 indices; \
+                        "`chelis build --target hip` sparse {label} requires int32/int64 indices; \
                          node {} uses `{}`",
                         node.id.0,
                         indices.precision.name()
@@ -3857,7 +3871,7 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 }
                 if !matches!(index_node.op, chelis_ir::dag::RiscOp::Load { .. }) {
                     return Err(format!(
-                        "`chelis build --target hip` sparse scatter_add requires indices to be loaded input tensors in this milestone; \
+                        "`chelis build --target hip` sparse {label} requires indices to be loaded input tensors in this milestone; \
                          node {} uses indices produced by {:?}. \
                          Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
                         node.id.0,
@@ -3945,15 +3959,16 @@ fn reject_unsupported_metal_ops(
 fn reject_unsupported_c_precisions(
     dag: &chelis_ir::dag::Dag,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> =
-        dag.nodes()
-            .iter()
-            .filter_map(|node| match node.op {
-                chelis_ir::dag::RiscOp::Gather { .. }
-                | chelis_ir::dag::RiscOp::ScatterAdd { .. } => node.inputs.get(1).copied(),
-                _ => None,
-            })
-            .collect();
+    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> = dag
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.op {
+            chelis_ir::dag::RiscOp::Gather { .. }
+            | chelis_ir::dag::RiscOp::ScatterAdd { .. }
+            | chelis_ir::dag::RiscOp::Scatter { .. } => node.inputs.get(1).copied(),
+            _ => None,
+        })
+        .collect();
 
     for node in dag.nodes() {
         match node.output_type.precision {
@@ -4533,6 +4548,31 @@ fn checked_program_with_effects(
     let checked =
         chelis_effects::check_program(&checked).map_err(|errors| format_effect_errors(&errors))?;
     chelis_types::check_linearity(&checked).map_err(|errors| format_type_errors(&errors))
+}
+
+/// Emit any sparse-helper summary rejections collected during host
+/// lowering to stderr as advisory warnings. These do not fail the
+/// build — the C/HIP backend already falls back to the helper
+/// marshaling path for rejected callsites — but they tell the user
+/// (and downstream tooling) which callsites missed the sparse-loop
+/// inlining and why.
+///
+/// The W4-A acceptance oracle pattern-matches on the structured
+/// `SummaryRejection` values directly (see
+/// `crates/chelis-cli/tests/cross_library_semantic_gap_diagnostics.rs`);
+/// this function is the human-readable rendering, not the matchable
+/// contract surface.
+fn emit_summary_rejections(host: Option<&chelis_ir::host::HostProgram>) {
+    let Some(host) = host else {
+        return;
+    };
+    let rejections = chelis_ir::host::host_program_summary_rejections(host);
+    if rejections.is_empty() {
+        return;
+    }
+    for rejection in rejections {
+        eprintln!("warning: {rejection}");
+    }
 }
 
 fn expanded_desugared_program(

@@ -1,9 +1,9 @@
 # In-Place Fusion
 
 **Status:** Active implementation contract. The current branch ships fusion
-metadata preservation plus C backend v1 in-place codegen for fused elementwise
-nodes with a proven `reusable_input`. HIP in-place codegen and broader op-level
-rewrites remain open.
+metadata preservation plus C and HIP backend v1 in-place codegen for fused
+elementwise nodes with a proven `reusable_input`. Broader op-level rewrites
+beyond `FusedElem` remain open.
 
 ## Pass Order
 
@@ -53,6 +53,15 @@ back to slot-backed materialization so the view cannot write through a strided
 borrow. The backend keeps the ordinary out-of-place path when the hint is
 absent or unsafe.
 
+The HIP v1 mirrors the C v1 with the same alias-proof predicate
+(`binder_equivalent_tensor_type`) and the same runtime contiguity guard.
+HIP-specific: the kernel parameter list adopts `__restrict__` qualifiers only
+on the non-aliased external inputs; the aliased external + output stay as
+plain pointers because they may reference the same device memory when the
+contiguity branch fires. The fall-back slot allocation path is suppressed in
+device-entrypoint mode because the slot is pre-allocated by
+`emit_device_slot_allocations`.
+
 Elementwise fusion may preserve a `reusable_input` hint when every surviving
 hint in the fused chain names the same external input to the fused node.
 Fusion must drop the hint rather than choose between conflicting reusable
@@ -67,8 +76,10 @@ external inputs or an absorbed internal value.
   drop `restrict` from every pointer.
 - Current branch acceptance: a C compile/run test verifies contiguous inputs are
   mutated in place and strided inputs fall back to a materialized output.
-- Target acceptance: HIP emitted-code and numerical tests compare backend output
-  with evaluator output on eligible and ineligible examples.
+- Current branch acceptance: HIP emitted-code structural tests assert the
+  contiguity guard, the aliased view, and the `__restrict__` discipline on the
+  kernel parameter list; the GPU manual gate `gf3_fused_in_place_fan_in_gpu_matches_cpu`
+  proves numerical agreement end-to-end against the unfused evaluator.
 
 Current C acceptance commands:
 
@@ -76,12 +87,13 @@ Current C acceptance commands:
 cargo test -p chelis-backend-c fused_in_place -- --nocapture
 ```
 
-Known target-behavior check while HIP in-place codegen is still open:
+Current HIP acceptance commands:
 
 ```sh
-cargo test -p chelis-backend-hip target_fused_in_place_hip_restrict_shape_preserves_non_aliased_inputs -- --ignored
+cargo test -p chelis-backend-hip --test fused_in_place_forall_alias
+HSA_OVERRIDE_GFX_VERSION=11.5.1 \
+  cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1 gf3_fused_in_place_fan_in_gpu_matches_cpu
 ```
 
-Expected target condition: the reusable input/output alias drops `restrict` only
-from the aliased pointer pair, and unrelated inputs keep their restrict-qualified
-fast path.
+(The HIP manual gate requires the local ROCm/HIP environment per
+`docs/local_hip_environment.md`.)

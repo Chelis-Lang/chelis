@@ -410,6 +410,53 @@ fn scatter_add(
     out
 }
 
+/// Replace-scatter (last-write-wins) over duplicate target indices.
+///
+/// Per `spec/05-risc-primitives.md` §3.5, the deterministic-order
+/// rule is **updates-tensor row-major (C order) flat iteration**:
+/// updates are written into the target in ascending flat-index order
+/// over `updates.shape`. When two updates target the same cell, the
+/// write with the larger flat index in `updates` is the final value.
+/// This is intentionally distinct from `scatter_add` (whose
+/// duplicate-index semantics are commutative accumulation) and is
+/// the reason replace-scatter has no well-defined AD adjoint.
+fn scatter_replace(
+    target: &TensorValue,
+    indices: &TensorValue,
+    updates: &TensorValue,
+    axis: usize,
+) -> TensorValue {
+    assert!(axis < target.shape.len());
+    let index_rank = indices.shape.len();
+    let mut expected_updates = Vec::with_capacity(target.shape.len() - 1 + index_rank);
+    expected_updates.extend_from_slice(&target.shape[..axis]);
+    expected_updates.extend_from_slice(&indices.shape);
+    expected_updates.extend_from_slice(&target.shape[axis + 1..]);
+    assert_eq!(updates.shape, expected_updates);
+
+    let mut out = target.clone();
+    for update_linear in 0..updates.data.len() {
+        let update_index = linear_to_index(update_linear, &updates.shape);
+        let mut idx_index = Vec::with_capacity(index_rank);
+        for pos in 0..index_rank {
+            idx_index.push(update_index[axis + pos]);
+        }
+        let gathered = indices.data[index_to_linear(&idx_index, &indices.shape)] as isize;
+        assert!(
+            gathered >= 0 && (gathered as usize) < target.shape[axis],
+            "scatter_replace index {gathered} out of bounds for axis {axis}"
+        );
+        let mut target_index = Vec::with_capacity(target.shape.len());
+        target_index.extend_from_slice(&update_index[..axis]);
+        target_index.push(gathered as usize);
+        target_index.extend_from_slice(&update_index[axis + index_rank..]);
+        let target_linear = index_to_linear(&target_index, &target.shape);
+        // Last-write-wins: deterministic-order overwrite.
+        out.data[target_linear] = updates.data[update_linear];
+    }
+    out
+}
+
 fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f64) -> TensorValue {
     assert!(axis < input.shape.len());
     let mut out_shape = input.shape.clone();
@@ -841,6 +888,12 @@ where
                 gather(&values[&node.inputs[0]], &values[&node.inputs[1]], *axis)
             }
             RiscOp::ScatterAdd { axis } => scatter_add(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                &values[&node.inputs[2]],
+                *axis,
+            ),
+            RiscOp::Scatter { axis } => scatter_replace(
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
                 &values[&node.inputs[2]],

@@ -1,12 +1,29 @@
 # Chelis Compiler Gaps — Empirical Findings
 
-**Status:** partially closed — Gaps 2 and 6 are closed by M1; the adjacent
-Surf-span finding is closed by M2b; Gap 4's rank ≥ 2 expressibility and
-symbolic/batched BLAS performance paths are closed by M3/M3b; Gap 3's scoped
-sparse gather/scatter path is closed by M4. The remaining
-work is explicitly tracked in `docs/gap_synthesis.md` §5 "Remaining Work
-Register": Gap 5 implementation, HIP strided-batched quality work,
-post-BLAS slot/fusion compounding, and the formal red-team follow-up.
+**Status:** closed for the M1→W7 batch as of 2026-05-11. Gaps 2 and 6
+closed by M1; Surf-span adjacent finding closed by M2b; Gap 4 rank ≥ 2
+expressibility + symbolic/batched BLAS closed by M3/M3b; Gap 3 sparse
+gather/scatter closed by M4 and replace-scatter with structured AD
+rejection closed by W2-A; Gap 4 HIP strided-batched closed by Perf-F1;
+Perf-F2(a)/(b)/(c) closed by W1-C / W2-B / W1-B; Gap 5 BLAS-helper
+specialization closed for C (M5) and HIP (W3-A); Gap 5 sparse-helper
+specialization closed for C (W3-B) and HIP (W6 Task B via inlining
+lock-tests); Gap 5 rejected-callsite structured diagnostics closed for
+both sparse helpers (W4-A) and BLAS helpers (W6 Task A — 6
+BLAS-prefixed variants on top of W4-A's 10 sparse variants). Two
+fresh-context red-team passes: **W5** (2026-05-11) surfaced one P0
+silent miscompile (non-F32 matmul → `RiscOp::BlasMatmul` →
+`cblas_sgemm` against wrong-precision data) — fix shipped in-band with
+precision filter at the canonical specializer site + defense-in-depth
+panics in both backend emit sites. **W7** (2026-05-11) ran 35
+adversarial tests against W6, zero P0/P1, locked the W5 P0 → W6
+diagnosed-rejection cross-product invariant (all 8 non-F32 `Prim`
+values now produce a structured `BlasOutputPrecisionMismatch`
+diagnostic with zero silent fallthroughs). Standalone follow-ups
+filed as §5 R1–R5 in `docs/gap_synthesis.md`: softmax/layer_norm/
+attention recognizers, Path-B HIP host-program fallback codegen,
+DimExpr `Add` variant decision, DimExpr rational vs integer-floor
+semantics, HIP sparse gather Cast-wrapped indices.
 **Filed:** 2026-05-08
 **Owning phase:** cross-phase (perf + ergonomics)
 
@@ -270,7 +287,7 @@ gate.
 **Probe corpus:** `examples/illustrative/moe_gather_duplicate_indices.ch`
 (single MoE-style routing block with deliberately duplicated indices).
 
-## Gap 4 — `matmul` is rank-2 only; canonical heads-as-dim MHA not expressible — CLOSED by M3/M3b
+## Gap 4 — `matmul` is rank-2 only; canonical heads-as-dim MHA not expressible — CLOSED by M3/M3b + Perf-F1
 
 **Claim qualified:** "Multi-head attention expresses naturally as a
 heads dimension, with batched matmul broadcasting over leading axes."
@@ -279,9 +296,11 @@ heads dimension, with batched matmul broadcasting over leading axes."
 and Tier 2 lowering layers. M3b extends the IR-level BLAS specializer to
 symbolic and batched matmul when the operands have contiguous trailing
 matrix slices. The C backend emits runtime-sized `cblas_sgemm` calls,
-looping over batch slices for rank ≥ 3. The HIP backend emits through a
-batched hipBLAS helper loop. A quality follow-up remains to use
-`hipblasSgemmStridedBatched` directly for uniformly strided HIP batches.
+looping over batch slices for rank ≥ 3. The HIP backend now defaults to
+`hipblasSgemmStridedBatched` on uniformly strided batched layouts
+(Perf-F1, shipped) and retains the per-batch hipBLAS helper loop only as
+a fallback for broadcasted leading axes or otherwise non-uniform leading
+strides.
 
 **Original observation:** Chelis's `matmul` was hard rank-2 at the
 type-checker level. PyTorch's canonical MHA form
@@ -314,11 +333,15 @@ matrix-pair` shape rule), then extending the IR specializer and C/HIP
 emitters to carry runtime `DimExpr` sizes into BLAS calls.
 
 **Spec coverage:**
-- `spec/design/chelis_canonical_reference.md:438-443` now documents
-  runtime-sized symbolic/batched BLAS as shipped behavior, while naming
-  the HIP strided-batched API as a quality follow-up.
-- `spec/design/phase1d_flattening.md:39` now scopes the hipBLAS path to
-  contiguous matrix slices rather than only rank-2 operands.
+- `spec/design/chelis_canonical_reference.md:438-445` documents
+  runtime-sized symbolic/batched BLAS as shipped behavior, with
+  `hipblasSgemmStridedBatched` now the HIP default on uniform layouts
+  and the helper loop retained only as the fallback for broadcasted /
+  non-uniform leading strides.
+- `spec/design/phase1d_flattening.md:40-49` scopes the hipBLAS path to
+  contiguous matrix slices and names the
+  `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs`
+  structural test as the strided-batched-default lock.
 - `spec/design/chelis_phase2_plan.md:561` notes batched matmul
   remains correct via generic expand+mul+sum decomposition (i.e.,
   the rank-3+ case works numerically, just slowly).
@@ -331,8 +354,15 @@ emitters to carry runtime `DimExpr` sizes into BLAS calls.
   batched matmul.
 - **Addressed by M3b:** symbolic and batched matmul specialize to
   runtime-sized BLAS when trailing matrix slices are contiguous. The
-  C backend loops over batch slices; HIP uses a helper loop over
-  hipBLAS calls pending a strided-batched optimization.
+  C backend loops over batch slices.
+- **Addressed by Perf-F1:** HIP defaults to
+  `hipblasSgemmStridedBatched` on uniformly strided batched layouts
+  and falls back to the per-batch helper loop only for broadcasted
+  leading axes or otherwise non-uniform leading strides. Locked by
+  `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs`
+  with exact-line matching; validated numerically by
+  `g15_hipblas_strided_batched_symbolic_batch_matches_eval` and
+  `g15_hipblas_batched_matmul_matches_eval` on the HIP manual gate.
 
 **Probe corpus:**
 - `examples/illustrative/mha_single_head.ch` — single-head reference,
@@ -373,9 +403,12 @@ surface is still emitted for debugging/non-specialized paths, but eligible
 calls can emit the specialized BLAS path without relying on clang/gcc LTO.
 
 **The bridge that still doesn't:** this is not yet a general user-library
-specialization system. HIP summary consumption, gather/scatter summaries,
+specialization system. HIP summary consumption,
 summary-derived-but-callsite-rejected diagnostics, and broader helper shapes
-remain follow-up work.
+(softmax / layer_norm / attention) remain follow-up work. The sparse summary
+slice (W3-B) is shipped: user-`def` wrappers around `gather`,
+`scatter_add` (AD-internal), and `scatter_replace` recover the same inline
+sparse C loop as the direct builtin call.
 
 **Why this matters for the cross-library AD claim:** a Coral
 `groupby + sum`, a Nautilus `simpsons_rule_integral`, or an Octant
@@ -409,13 +442,37 @@ implementation technique for small helpers, not the design contract.
 - **Addressed by this branch for C BLAS helpers:** `cross_library_semantic_gap.rs`
   now proves direct, inline, user-def, and nested user-def matmul forms hit
   generated-C BLAS.
-- **Not fully addressed:** HIP summary consumption, gather/scatter summaries,
-  negative diagnostics for rejected summarized callsites, and broader helper
-  compositions.
+- **Addressed by W3-A (M5(a)) for HIP BLAS helpers:** the same fixture set is
+  now mirrored on `--target hip` in
+  `crates/chelis-cli/tests/cross_library_semantic_gap.rs` (the
+  `hip_*_hits_hipblas` test bank) with exact-substring matches on
+  `chelis_hipblas_sgemm_row_major(`. The HIP target threads helper bodies
+  through `lower_named_tensor_entry_dag` so the helper subgraph is inlined
+  into the entry DAG before HIP codegen runs the Tier 2 BLAS specializer; the
+  `hipblas` dispatch path therefore stays hit on both inline and user-`def`
+  forms. A GPU manual gate
+  (`crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs`,
+  `g15_user_def_matmul_helper_hits_hipblas_numeric`) verifies the
+  numerical correctness end-to-end.
+- **Addressed by W3-B for C sparse helpers:**
+  `crates/chelis-cli/tests/cross_library_sparse_summaries.rs` plus
+  `crates/chelis-ir/tests/host_sparse_summary.rs` lock the
+  recognizer + C consumption for `Gather`, `ScatterAdd`, and
+  `Scatter` (replace) helper-body forms.
+- **Not fully addressed:** HIP consumption for sparse summary kinds,
+  negative diagnostics for rejected summarized callsites (W4-A), and broader
+  helper compositions (`softmax` / `layer_norm` / attention — separate
+  follow-up workstream).
 
-**Locked test:** `crates/chelis-cli/tests/cross_library_semantic_gap.rs`
-asserts BLAS hits for the direct, inline, user-`def`, and nested user-`def`
-forms.
+**Locked tests:**
+- `crates/chelis-cli/tests/cross_library_semantic_gap.rs` asserts BLAS hits for
+  the direct, inline, user-`def`, and nested user-`def` forms on both
+  `--target c` (`cblas_sgemm`) and `--target hip`
+  (`chelis_hipblas_sgemm_row_major`).
+- `crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs` is the
+  GPU manual gate for the HIP path; it builds the user-`def` fixtures
+  through the CLI, runs them on the local GPU through hipBLAS, and asserts
+  numeric equality against a hand-rolled row-major reference.
 
 ## Gap 6 — BLAS-specialized matmul still allocates and computes the dead `Mul` intermediate — CLOSED by M1
 

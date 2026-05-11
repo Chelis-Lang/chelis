@@ -137,6 +137,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "split",
     "gather",
     "scatter",
+    "scatter_replace",
     "where",
     "cumsum",
     "sort",
@@ -515,6 +516,23 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    fn generic_quadop(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let a = vg.fresh_tvar();
+        let b = vg.fresh_tvar();
+        let c = vg.fresh_tvar();
+        let d = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![a, b, c, d, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Var(a), Type::Var(b), Type::Var(c), Type::Var(d)],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     fn generic_unop_borrow(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let output = vg.fresh_tvar();
@@ -867,6 +885,11 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_triop_first_borrow("split", &mut env, &mut vg);
     generic_triop_first_two_borrow("gather", &mut env, &mut vg);
     generic_pentaop("scatter", &mut env, &mut vg);
+    // scatter_replace is the tensor-lane sparse builtin that lowers
+    // to RiscOp::Scatter (last-write-wins). Distinct from the
+    // host-lane `scatter(base, indices, updates, axis, mode)` which
+    // remains the pentaop form with a string mode argument.
+    generic_quadop("scatter_replace", &mut env, &mut vg);
     generic_triop_all_borrow("where", &mut env, &mut vg);
     generic_binop_first_borrow("cumsum", &mut env, &mut vg);
     generic_binop_first_borrow("sort", &mut env, &mut vg);

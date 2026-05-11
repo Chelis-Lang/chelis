@@ -2562,6 +2562,7 @@ fn validate_static_builtin_application(
         "split" => static_split(args, expr, errors),
         "gather" => static_gather(args, expr, errors),
         "scatter" => static_scatter(args, expr, errors),
+        "scatter_replace" => static_scatter_replace(args, expr, errors),
         "clamp" => static_clamp(args, expr, errors),
         "einsum" => static_einsum(args, expr, errors),
         _ => StaticValue::Unknown,
@@ -2804,6 +2805,75 @@ fn static_scatter(
                     );
                     return StaticValue::Unknown;
                 }
+            }
+        }
+    }
+    StaticValue::Tensor(base.clone())
+}
+
+/// Static check for the tensor-lane `scatter_replace(base, indices,
+/// updates, axis)` builtin. Mirrors `static_scatter` with `mode ==
+/// "replace"` semantics: validates the updates-shape contract,
+/// rejects out-of-bounds indices when statically knowable, and
+/// rejects duplicate target indices that would resolve via
+/// non-deterministic per-axis collisions. Differs from
+/// `static_scatter` in that there is no `mode` argument.
+fn static_scatter_replace(
+    args: &[StaticValue],
+    expr: &deep::Expr,
+    errors: &mut Vec<CheckError>,
+) -> StaticValue {
+    let (
+        Some(StaticValue::Tensor(base)),
+        Some(StaticValue::Tensor(indices)),
+        Some(StaticValue::Tensor(updates)),
+        Some(StaticValue::Int(axis)),
+    ) = (args.first(), args.get(1), args.get(2), args.get(3))
+    else {
+        return StaticValue::Unknown;
+    };
+    let Some(axis) = normalize_static_axis(base.shape.len(), *axis) else {
+        return StaticValue::Unknown;
+    };
+    let expected_updates = gather_result_shape(&base.shape, &indices.shape, axis);
+    if updates.shape != expected_updates {
+        push_static_runtime_error(
+            expr,
+            errors,
+            "scatter_replace updates must match gathered tensor shape and precision".to_string(),
+        );
+        return StaticValue::Unknown;
+    }
+    if let Some(index_values) = &indices.int_values {
+        let mut seen = HashSet::new();
+        for linear in 0..updates_shape_numel(&updates.shape) {
+            let update_index = unravel_index(linear, &updates.shape);
+            let gather_index = update_index[axis..axis + indices.shape.len()].to_vec();
+            let gather_linear = ravel_index(&gather_index, &indices.shape);
+            let gathered = index_values[gather_linear];
+            if gathered < 0 || gathered >= base.shape[axis] as i64 {
+                push_static_runtime_error(
+                    expr,
+                    errors,
+                    format!("scatter_replace index {gathered} out of bounds"),
+                );
+                return StaticValue::Unknown;
+            }
+            let mut out_index = Vec::with_capacity(base.shape.len());
+            out_index.extend_from_slice(&update_index[..axis]);
+            out_index.push(gathered as usize);
+            out_index.extend_from_slice(&update_index[axis + indices.shape.len()..]);
+            let out_linear = ravel_index(&out_index, &base.shape);
+            if !seen.insert(out_linear) {
+                push_static_runtime_error(
+                    expr,
+                    errors,
+                    format!(
+                        "scatter_replace rejects statically-known duplicate target index {out_linear}; \
+                         use scatter_add (or scatter with mode=\"add\") for commutative accumulation"
+                    ),
+                );
+                return StaticValue::Unknown;
             }
         }
     }
@@ -5927,6 +5997,40 @@ fn infer_app(
                                 return Type::Error;
                             }
                         }
+                        match infer_gather_result_type(&base_ty, &indices_ty, axis) {
+                            Ok(expected_updates) => {
+                                if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                return base_ty;
+                            }
+                            Err(message) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        message,
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "scatter_replace" => {
+                        // Tensor-lane replace-scatter (last-write-wins) — lowers
+                        // to RiscOp::Scatter. Distinct from the host-lane
+                        // `scatter(..., mode)` pentaop. AD policy: no_grad
+                        // (rejected via AdError::NotSupported); see
+                        // spec/05-risc-primitives.md §3.5.
+                        if arg_tys.len() != 4 {
+                            return Type::Error;
+                        }
+                        let base_ty = subst.apply(&arg_tys[0]);
+                        let indices_ty = subst.apply(&arg_tys[1]);
+                        let updates_ty = subst.apply(&arg_tys[2]);
+                        let axis = kids.get(4).and_then(extract_axis_literal).unwrap_or(0);
                         match infer_gather_result_type(&base_ty, &indices_ty, axis) {
                             Ok(expected_updates) => {
                                 if let Err(te) = unify(&expected_updates, &updates_ty, subst) {

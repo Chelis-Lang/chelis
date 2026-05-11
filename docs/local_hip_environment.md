@@ -4,6 +4,42 @@ This repository is currently being worked on from a real AMD/ROCm machine, not a
 CPU-only dev box. HIP manual gates are locally runnable when the environment below is
 intact.
 
+## Quick reference (run HIP tests this way)
+
+Use `scripts/hip_test.py` — it sets the full hipBLAS env from the documented
+wheel paths, verifies the paths exist, and execs `cargo test` with your args:
+
+```sh
+scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+scripts/hip_test.py -p chelis-cli --test cross_library_semantic_gap_hip_gpu -- --ignored --test-threads=1
+```
+
+The wrapper is required for any test that links `libhipblas`. Plain
+`cargo test --ignored ...` inherits only the systemd `environment.d/hip.conf`
+defaults — the `-isystem` half of `HIPCC_COMPILE_FLAGS_APPEND` and
+`HSA_OVERRIDE_GFX_VERSION=11.0.0`. That is enough for non-hipBLAS HIP
+tests, but for hipBLAS-linked tests the binary segfaults at process exit
+with empty stdout/stderr — the failure mode looks like a code regression
+but is purely environmental. The Rust test harness emits an explicit hint
+when it detects this pattern.
+
+If you need the env in your own shell:
+
+```sh
+eval $(scripts/hip_test.py --print-env)
+```
+
+The authoritative env block, equivalent to what the wrapper sets:
+
+```sh
+HSA_OVERRIDE_GFX_VERSION=11.5.1
+LD_LIBRARY_PATH=/home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_core/lib:/home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_libraries_gfx1151/lib
+HIPCC_COMPILE_FLAGS_APPEND="-isystem /home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_core/include -L/home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_libraries_gfx1151/lib"
+```
+
+The sections below explain why each piece is necessary; read them when
+diagnosing a workstation breakage, not on the happy path.
+
 ## Hardware and Tools
 
 - Host OS: Fedora 43 (`Linux fedora 6.18.16-200.fc43.x86_64`)

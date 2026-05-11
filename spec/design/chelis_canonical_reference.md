@@ -440,9 +440,10 @@ Current 2d performance boundary:
 
 - batched `matmul` is correct on both backends and specializes to runtime-sized BLAS when
   the operands have contiguous trailing matrix slices
-- the C backend emits a host loop over `cblas_sgemm` for batched matmul; HIP emits
-  `hipblasSgemmStridedBatched` for uniformly strided batched layouts and keeps the
-  helper loop as a fallback for ineligible batched layouts
+- the C backend emits a host loop over `cblas_sgemm` for batched matmul; HIP defaults to
+  `hipblasSgemmStridedBatched` on uniformly strided batched layouts (Perf-F1, shipped)
+  and retains the per-batch hipBLAS helper loop only as a fallback for broadcasted
+  leading axes or otherwise non-uniform leading strides
 
 ---
 
