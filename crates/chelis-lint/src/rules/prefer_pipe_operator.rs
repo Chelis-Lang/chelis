@@ -1,7 +1,7 @@
 //! Rule `prefer-pipe-operator` -- nested first-argument call chains are easier
 //! to read as Surf pipes.
 
-use crate::{Context, Replacement, Rule, Severity, Surface, Violation};
+use crate::{Context, Rule, Severity, Surface, Violation};
 
 pub struct PreferPipeOperator;
 
@@ -47,29 +47,19 @@ impl Rule for PreferPipeOperator {
             .collect()
     }
 
-    fn fix(&self, ctx: &Context<'_>, violation: &Violation) -> Option<Replacement> {
-        let source = ctx.source?;
-        let start = offset_from_line_col(source, violation.line?, violation.col?)?;
-        let candidate = pipe_candidate_at(source, start)?;
-        Some(Replacement {
-            path: ctx.path.to_path_buf(),
-            start: candidate.start,
-            end: candidate.end,
-            text: candidate.replacement,
-        })
-    }
+    // Deliberately no auto-fix in v1. Pipe rewrites require semantic proof
+    // that the nested expression is a first-argument dataflow chain, which the
+    // current source-text walker cannot provide safely for downstream corpora.
 }
 
 #[derive(Debug, Clone)]
 struct Candidate {
     start: usize,
     end: usize,
-    replacement: String,
 }
 
 #[derive(Debug, Clone)]
 struct Call {
-    name: String,
     args: Vec<Arg>,
     start: usize,
     end: usize,
@@ -106,44 +96,21 @@ fn find_pipe_candidates(source: &str) -> Vec<Candidate> {
 
 fn pipe_candidate_at(source: &str, start: usize) -> Option<Candidate> {
     let call = parse_call_at(source, start)?;
-    let mut stages: Vec<String> = Vec::new();
+    let mut stage_count = 0usize;
     let mut current = call.clone();
     loop {
         let first = current.args.first()?;
         let Some(inner) = parse_arg_as_call(source, first) else {
-            if stages.is_empty() {
+            if stage_count == 0 {
                 return None;
-            }
-            let seed = first.text.trim().to_string();
-            stages.push(render_stage(&current));
-            stages.reverse();
-            let mut replacement = seed;
-            for stage in stages {
-                replacement.push_str(" |> ");
-                replacement.push_str(&stage);
             }
             return Some(Candidate {
                 start: call.start,
                 end: call.end,
-                replacement,
             });
         };
-        stages.push(render_stage(&current));
+        stage_count += 1;
         current = inner;
-    }
-}
-
-fn render_stage(call: &Call) -> String {
-    let rest: Vec<String> = call
-        .args
-        .iter()
-        .skip(1)
-        .map(|arg| arg.text.trim().to_string())
-        .collect();
-    if rest.is_empty() {
-        call.name.clone()
-    } else {
-        format!("{}({})", call.name, rest.join(", "))
     }
 }
 
@@ -163,7 +130,6 @@ fn parse_call_at(source: &str, start: usize) -> Option<Call> {
     while cursor < source.len() && is_ident_continue(source.as_bytes()[cursor]) {
         cursor += 1;
     }
-    let name = source[start..cursor].to_string();
     while cursor < source.len() && source.as_bytes()[cursor].is_ascii_whitespace() {
         cursor += 1;
     }
@@ -173,7 +139,6 @@ fn parse_call_at(source: &str, start: usize) -> Option<Call> {
     let close = matching_paren(source, cursor)?;
     let args = split_args(source, cursor + 1, close)?;
     Some(Call {
-        name,
         args,
         start,
         end: close + 1,
@@ -330,24 +295,6 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, offset.saturating_sub(line_start) + 1)
 }
 
-fn offset_from_line_col(source: &str, line_no: usize, col_no: usize) -> Option<usize> {
-    if line_no == 0 || col_no == 0 {
-        return None;
-    }
-    let mut line = 1usize;
-    let mut line_start = 0usize;
-    for (index, byte) in source.bytes().enumerate() {
-        if line == line_no {
-            return Some(line_start + col_no - 1);
-        }
-        if byte == b'\n' {
-            line += 1;
-            line_start = index + 1;
-        }
-    }
-    (line == line_no).then_some(line_start + col_no - 1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,10 +314,7 @@ mod tests {
         let src = "def f(x: f32) -> f32 = outer(inner(x), scale)\n";
         let violations = PreferPipeOperator.check(&ctx(src));
         assert_eq!(violations.len(), 1);
-        let replacement = PreferPipeOperator
-            .fix(&ctx(src), &violations[0])
-            .expect("fix");
-        assert_eq!(replacement.text, "x |> inner |> outer(scale)");
+        assert!(PreferPipeOperator.fix(&ctx(src), &violations[0]).is_none());
     }
 
     #[test]
@@ -390,9 +334,16 @@ mod tests {
         let src = "def f(x: f32) -> f32 = outer(inner(x), \"a,b\")\n";
         let violations = PreferPipeOperator.check(&ctx(src));
         assert_eq!(violations.len(), 1);
-        let replacement = PreferPipeOperator
-            .fix(&ctx(src), &violations[0])
-            .expect("fix");
-        assert_eq!(replacement.text, "x |> inner |> outer(\"a,b\")");
+        assert!(PreferPipeOperator.fix(&ctx(src), &violations[0]).is_none());
+    }
+
+    #[test]
+    fn fix_is_unavailable_for_sibling_argument_calls() {
+        let src = "def f() -> f32 = beta(cast(2.0, f32), cast(3.0, f32))\n";
+        let violations = PreferPipeOperator.check(&ctx(src));
+        assert_eq!(violations.len(), 1);
+        for violation in violations {
+            assert!(PreferPipeOperator.fix(&ctx(src), &violation).is_none());
+        }
     }
 }

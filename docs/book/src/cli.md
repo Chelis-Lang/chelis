@@ -72,6 +72,9 @@ human-facing examples should use implicit linearity unless the explicit
 form is the subject of the example.
 
 `chelis lint --fix <path>` applies available source rewrites in-place.
+The warning-only `redundant-linearity-call` and `prefer-pipe-operator`
+rules are diagnostic-only until their fixers have semantic proof that a
+rewrite preserves ownership and call argument behavior.
 `chelis lint --rules a,b <path>` runs a comma-separated subset, and
 `chelis lint --list` prints the registered rules, severities, spec
 references, and summaries.

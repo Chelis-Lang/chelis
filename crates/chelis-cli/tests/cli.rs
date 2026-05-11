@@ -5222,7 +5222,7 @@ fn lint_rules_filter_runs_selected_rules_only() {
 }
 
 #[test]
-fn lint_fix_removes_redundant_copy_and_rewrites_pipe_chain() {
+fn lint_fix_preserves_unproven_linearity_and_pipe_warnings() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("rewrite.ch");
     write_file(
@@ -5237,8 +5237,7 @@ fn lint_fix_removes_redundant_copy_and_rewrites_pipe_chain() {
         .success();
 
     let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("x |> inner |> outer(scale)"));
-    assert!(!rewritten.contains("copy("));
+    assert!(rewritten.contains("outer(inner(copy(x)), scale)"));
 }
 
 #[test]
@@ -5263,6 +5262,24 @@ fn lint_keep_preserves_fixable_linearity_call_but_still_warns() {
 
     let rewritten = fs::read_to_string(path).expect("read rewritten");
     assert!(rewritten.contains("copy(x)"));
+}
+
+#[test]
+fn lint_fix_does_not_rewrite_sibling_argument_pipe_candidates() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("sibling_args.ch");
+    let original = "def f() -> f32 = beta(cast(2.0, f32), cast(3.0, f32))\n";
+    write_file(&path, original);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[fix]").not());
+
+    let rewritten = fs::read_to_string(path).expect("read rewritten");
+    assert_eq!(rewritten, original);
 }
 
 #[test]
@@ -5436,7 +5453,7 @@ fn lint_fix_ignores_surf_string_literals() {
 }
 
 #[test]
-fn lint_pipe_fix_preserves_string_argument_contents() {
+fn lint_pipe_warning_does_not_rewrite_string_argument_contents() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("string_arg.ch");
     write_file(&path, "def f(x: f32) -> f32 = outer(inner(x), \"a,b\")\n");
@@ -5454,7 +5471,7 @@ fn lint_pipe_fix_preserves_string_argument_contents() {
         .success();
 
     let rewritten = fs::read_to_string(path).expect("read rewritten");
-    assert!(rewritten.contains("x |> inner |> outer(\"a,b\")"));
+    assert!(rewritten.contains("outer(inner(x), \"a,b\")"));
     assert!(!rewritten.contains("\"a, b\""));
 }
 
