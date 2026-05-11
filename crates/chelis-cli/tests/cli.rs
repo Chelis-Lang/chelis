@@ -2025,7 +2025,6 @@ fn build_c_grad_over_named_fn_with_nested_call_body_builds() {
 /// After Item 2c, this must compile, link, and produce the same gradient
 /// as the nested-call control fixture.
 #[test]
-#[ignore = "C-backend rejects grad-in-piped-body, see Item 2c diagnosis"]
 fn build_c_grad_over_named_fn_with_pipe_body_builds() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("grad_pipe_sumsq.ch");
