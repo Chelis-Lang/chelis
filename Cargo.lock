@@ -493,6 +493,7 @@ dependencies = [
  "bincode",
  "chelis-deep",
  "chelis-effects",
+ "chelis-surf",
  "chelis-types",
  "serde",
  "serde_json",
