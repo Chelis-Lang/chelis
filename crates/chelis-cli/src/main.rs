@@ -3750,15 +3750,16 @@ fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::e
 }
 
 fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn std::error::Error>> {
-    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> =
-        dag.nodes()
-            .iter()
-            .filter_map(|node| match node.op {
-                chelis_ir::dag::RiscOp::Gather { .. }
-                | chelis_ir::dag::RiscOp::ScatterAdd { .. } => node.inputs.get(1).copied(),
-                _ => None,
-            })
-            .collect();
+    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> = dag
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.op {
+            chelis_ir::dag::RiscOp::Gather { .. }
+            | chelis_ir::dag::RiscOp::ScatterAdd { .. }
+            | chelis_ir::dag::RiscOp::Scatter { .. } => node.inputs.get(1).copied(),
+            _ => None,
+        })
+        .collect();
 
     for node in dag.nodes() {
         match &node.op {
@@ -3823,7 +3824,18 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                     .into());
                 }
             }
-            chelis_ir::dag::RiscOp::ScatterAdd { .. } => {
+            chelis_ir::dag::RiscOp::ScatterAdd { .. } | chelis_ir::dag::RiscOp::Scatter { .. } => {
+                let (label, payload_blocker) = match &node.op {
+                    chelis_ir::dag::RiscOp::ScatterAdd { .. } => (
+                        "scatter_add",
+                        "f64 scatter_add needs backend-specific atomic support and is not in this milestone.",
+                    ),
+                    chelis_ir::dag::RiscOp::Scatter { .. } => (
+                        "scatter_replace",
+                        "f64 scatter_replace requires a widened serial last-write-wins kernel and is not in this milestone.",
+                    ),
+                    _ => unreachable!(),
+                };
                 let target = &dag.get(node.inputs[0]).unwrap().output_type;
                 let index_node = dag.get(node.inputs[1]).unwrap();
                 let indices = &index_node.output_type;
@@ -3833,9 +3845,9 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                     || node.output_type.precision != chelis_types::types::Prim::F32
                 {
                     return Err(format!(
-                        "`chelis build --target hip` sparse scatter_add supports f32 payloads only; \
+                        "`chelis build --target hip` sparse {label} supports f32 payloads only; \
                          node {} carries target `{}`, updates `{}`, output `{}`. \
-                         f64 scatter_add needs backend-specific atomic support and is not in this milestone.",
+                         {payload_blocker}",
                         node.id.0,
                         target.precision.name(),
                         updates.precision.name(),
@@ -3848,7 +3860,7 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                     chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
                 ) {
                     return Err(format!(
-                        "`chelis build --target hip` sparse scatter_add requires int32/int64 indices; \
+                        "`chelis build --target hip` sparse {label} requires int32/int64 indices; \
                          node {} uses `{}`",
                         node.id.0,
                         indices.precision.name()
@@ -3857,7 +3869,7 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 }
                 if !matches!(index_node.op, chelis_ir::dag::RiscOp::Load { .. }) {
                     return Err(format!(
-                        "`chelis build --target hip` sparse scatter_add requires indices to be loaded input tensors in this milestone; \
+                        "`chelis build --target hip` sparse {label} requires indices to be loaded input tensors in this milestone; \
                          node {} uses indices produced by {:?}. \
                          Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
                         node.id.0,
@@ -3945,15 +3957,16 @@ fn reject_unsupported_metal_ops(
 fn reject_unsupported_c_precisions(
     dag: &chelis_ir::dag::Dag,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> =
-        dag.nodes()
-            .iter()
-            .filter_map(|node| match node.op {
-                chelis_ir::dag::RiscOp::Gather { .. }
-                | chelis_ir::dag::RiscOp::ScatterAdd { .. } => node.inputs.get(1).copied(),
-                _ => None,
-            })
-            .collect();
+    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> = dag
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.op {
+            chelis_ir::dag::RiscOp::Gather { .. }
+            | chelis_ir::dag::RiscOp::ScatterAdd { .. }
+            | chelis_ir::dag::RiscOp::Scatter { .. } => node.inputs.get(1).copied(),
+            _ => None,
+        })
+        .collect();
 
     for node in dag.nodes() {
         match node.output_type.precision {
