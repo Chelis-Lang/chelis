@@ -1951,6 +1951,131 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Item 2c control + target: `grad(named_fn)(theta)` where `named_fn`'s body
+// is canonical Surf using pipes vs. the equivalent nested-call form. Both
+// shapes are spec-blessed (pipe is canonical Surf style per
+// `spec/01-nomenclature.md` §3.6); both should compile through the C
+// backend. The pipe form is currently rejected by
+// `host_program_unresolved_call_sites` (`crates/chelis-ir/src/host.rs:1314`)
+// because the host-lane summarizer doesn't recognize pipe-lowered function
+// bodies as inlinable. See `docs/investigations/c_backend_grad_piped_body_diagnosis.md`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Control fixture: `grad(named_fn)(theta)` where `named_fn`'s body is
+/// written as nested calls (no pipes). Compiles cleanly today and must keep
+/// compiling — locks the baseline so the pipe-form fix doesn't regress it.
+#[test]
+fn build_c_grad_over_named_fn_with_nested_call_body_builds() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_nopipe_sumsq.ch");
+    let out_dir = dir.path().join("grad-nopipe-sumsq-out");
+    write_file(
+        &path,
+        "def sumsq(theta: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(theta, theta), 0))\n\
+         def gradient(theta: tensor[3, f32]) -> tensor[3, f32] = grad(sumsq)(theta)\n\
+         out = gradient(to_tensor([1.0, 2.0, 3.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("grad_nopipe_sumsq.c")).expect("generated c");
+    assert!(
+        !source.contains("__result = call(") && !source.contains("unsupported builtin"),
+        "generated C must not contain unresolved call stubs:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "grad_nopipe_sumsq.c", "grad_nopipe_sumsq");
+    assert!(status.success(), "gcc link failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("grad_nopipe_sumsq"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // grad(sum(theta*theta)) = 2 * theta = [2.0, 4.0, 6.0]
+    assert!(
+        stdout.contains("out = tensor(shape=[3], data=[2.0, 4.0, 6.0])"),
+        "grad of sum(theta*theta) w.r.t. theta must be 2*theta=[2.0, 4.0, 6.0], got:\n{stdout}"
+    );
+}
+
+/// Target fixture: same shape as the control, except `sumsq`'s body is
+/// written as the canonical pipe form
+/// `mul(theta, theta) |> sum(0) |> tensor_to_scalar`. Today the C backend
+/// rejects this with the long-form "host lane can't resolve" diagnostic
+/// (`crates/chelis-cli/src/main.rs:1571`, gated by
+/// `host_program_unresolved_call_sites` at `crates/chelis-ir/src/host.rs:1314`).
+/// After Item 2c, this must compile, link, and produce the same gradient
+/// as the nested-call control fixture.
+#[test]
+fn build_c_grad_over_named_fn_with_pipe_body_builds() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_pipe_sumsq.ch");
+    let out_dir = dir.path().join("grad-pipe-sumsq-out");
+    write_file(
+        &path,
+        "def sumsq(theta: tensor[3, f32]) -> f32 = mul(theta, theta) |> sum(0) |> tensor_to_scalar\n\
+         def gradient(theta: tensor[3, f32]) -> tensor[3, f32] = grad(sumsq)(theta)\n\
+         out = gradient(to_tensor([1.0, 2.0, 3.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("grad_pipe_sumsq.c")).expect("generated c");
+    assert!(
+        !source.contains("__result = call(") && !source.contains("unsupported builtin"),
+        "generated C must not contain unresolved call stubs:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "grad_pipe_sumsq.c", "grad_pipe_sumsq");
+    assert!(status.success(), "gcc link failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("grad_pipe_sumsq"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // grad(sum(theta*theta)) = 2 * theta = [2.0, 4.0, 6.0] — must match the
+    // nested-call control fixture's output exactly.
+    assert!(
+        stdout.contains("out = tensor(shape=[3], data=[2.0, 4.0, 6.0])"),
+        "grad of sum(theta*theta) w.r.t. theta must be 2*theta=[2.0, 4.0, 6.0], got:\n{stdout}"
+    );
+}
+
 #[test]
 fn build_c_recursive_tensor_function_stays_on_host_path() {
     let dir = tempdir().expect("tempdir");

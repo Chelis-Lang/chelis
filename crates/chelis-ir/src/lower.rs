@@ -87,6 +87,76 @@ fn unsupported_lowering_message(tag: &str) -> String {
     )
 }
 
+/// If `expr` is exactly `(var {} name)`, return the symbol name. Used by
+/// `lower_pipe` to detect bare-var pipe stages that should be lowered as
+/// unary applications (Item 2c — see
+/// `docs/investigations/c_backend_grad_piped_body_diagnosis.md`).
+fn bare_var_name(expr: &Expr) -> Option<String> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    let first = list.elements.first()?;
+    let Expr::Atom(Atom::Symbol(tag), _) = first else {
+        return None;
+    };
+    if tag != "var" {
+        return None;
+    }
+    let third = list.elements.get(2)?;
+    let Expr::Atom(Atom::Symbol(name), _) = third else {
+        return None;
+    };
+    Some(name.clone())
+}
+
+/// Synthetic accumulator-binding name reserved for the IR-side pipe
+/// rewrite (Item 2c). Chosen to be unrepresentable in Surf so it cannot
+/// collide with user bindings; `lower_pipe` saves and restores any prior
+/// entry under this name before/after the synthesized lookup.
+fn synth_pipe_acc_binding_name() -> String {
+    "__chelis_pipe_acc__".to_string()
+}
+
+/// Synthesize `(app {} (var {} fname) (var {} acc_name))` — the Deep
+/// expression that `lower_app` will route through `lower_builtin_app`
+/// for an unresolved-as-callable bare-var pipe stage. The accumulator
+/// `var` is resolved against the binding inserted by `lower_pipe` before
+/// the call.
+fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
+    let zero_span = Span::new(0, 0);
+    let callee = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("var".to_string()), zero_span),
+                Expr::Map(MetaMap::default(), zero_span),
+                Expr::Atom(Atom::Symbol(fname.to_string()), zero_span),
+            ],
+        },
+        zero_span,
+    );
+    let arg = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("var".to_string()), zero_span),
+                Expr::Map(MetaMap::default(), zero_span),
+                Expr::Atom(Atom::Symbol(acc_name.to_string()), zero_span),
+            ],
+        },
+        zero_span,
+    );
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("app".to_string()), zero_span),
+                Expr::Map(MetaMap::default(), zero_span),
+                callee,
+                arg,
+            ],
+        },
+        app_span,
+    )
+}
+
 fn expr_diagnostic_location(expr: &Expr) -> (Option<Span>, Option<String>) {
     (Some(expr.span()), expr.span_id().map(ToOwned::to_owned))
 }
@@ -169,7 +239,7 @@ pub fn install_chelis_panic_hook() {
 }
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List};
+use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
@@ -4626,6 +4696,33 @@ impl LowerCtx {
                         )
                     }
                 };
+                continue;
+            }
+            // Item 2c: bare `(var {} name)` stage where `name` is neither a
+            // local callable nor a program def is a primitive (builtin) used
+            // as a unary pipe stage — e.g. `... |> tensor_to_scalar`. The
+            // host lane already normalizes this via `beta_reduce_pipe_stage`
+            // (`crates/chelis-ir/src/host.rs:2947`); the IR lane has to
+            // mirror that rewrite. Synthesize `(app (var name) (var __acc))`
+            // with the accumulator bound to the already-lowered `current`
+            // value, then dispatch through `lower_app` which routes
+            // unresolved-name callees through `lower_builtin_app`.
+            //
+            // See `docs/investigations/c_backend_grad_piped_body_diagnosis.md`.
+            if let Some(unary_name) = bare_var_name(func_expr) {
+                let acc_binding = synth_pipe_acc_binding_name();
+                let saved = self.bindings.get(&acc_binding).cloned();
+                self.bindings.insert(acc_binding.clone(), current.clone());
+                let synthesized = synth_unary_app(&unary_name, &acc_binding, func_expr.span());
+                current = self.lower_expr(&synthesized);
+                match saved {
+                    Some(prior) => {
+                        self.bindings.insert(acc_binding, prior);
+                    }
+                    None => {
+                        self.bindings.remove(&acc_binding);
+                    }
+                }
                 continue;
             }
             current = self.lower_unrepresentable("pipe stage", std::slice::from_ref(func_expr));
