@@ -7,14 +7,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-/* WS-A3: request the HIPBLAS_V2 hipblasGemmEx surface so the bf16/f16
- * matmul path can pass `hipDataType` + `hipblasComputeType_t` per the
- * spec/04-type-system.md §5.7.1 mixed-precision rule (bf16/f16 forward
- * + f32 accumulator). The legacy hipblasDatatype_t API is deprecated
- * upstream; pinning V2 keeps generated kernels on the supported
- * surface. Defined before the hipblas include so the header switches
- * to the V2 prototypes. */
-#define HIPBLAS_V2 1
+/* WS-A3: route bf16 / f16 matmul through `hipblasGemmEx` per
+ * spec/04-type-system.md §5.7.1 (bf16/f16 forward + f32 accumulator).
+ * We use the **legacy** hipblasGemmEx signature
+ * (`hipblasDatatype_t` parameters, not `hipDataType`) because the
+ * wheel-library hipBLAS shipped with `_rocm_sdk_libraries_gfx1151` on
+ * this workstation only exports the unsuffixed `hipblasGemmEx`
+ * symbol — defining `HIPBLAS_V2` would rewrite calls to
+ * `hipblasGemmEx_v2`, an alias the wheel library does not provide,
+ * producing an undefined-symbol link error at the manual HIP gate.
+ * The legacy API is deprecated but still supported; switching to V2
+ * is a separate ROCm-stack-upgrade story. */
 #if __has_include(<hipblas/hipblas.h>)
 #include <hipblas/hipblas.h>
 #define CHELIS_HAS_HIPBLAS_HEADER 1
@@ -103,22 +106,18 @@ extern hipblasStatus_t hipblasDgemmStridedBatched(
     long long strideC,
     int batchCount
 );
-/* WS-A3 fallback: minimal hipblasGemmEx surface so generated bf16/f16
- * matmul code still compiles when the hipblas header is absent. Real
- * builds resolve these symbols against libhipblas at link time, so the
- * fallback prototypes below need only match the V2 signature shape. */
+/* WS-A3 fallback: minimal legacy hipblasGemmEx surface so generated
+ * bf16/f16 matmul code still compiles when the hipblas header is
+ * absent. Real builds resolve these symbols against libhipblas at
+ * link time. The legacy signature carries `hipblasDatatype_t`
+ * (instead of `hipDataType`) — see the rationale at the top of this
+ * file for why we avoid the V2 alias. */
 typedef enum {
-    HIP_R_32F = 0,
-    HIP_R_64F = 1,
-    HIP_R_16F = 2,
-    HIP_R_16BF = 14
-} hipDataType;
-typedef enum {
-    HIPBLAS_COMPUTE_16F = 64,
-    HIPBLAS_COMPUTE_32F = 68,
-    HIPBLAS_COMPUTE_64F = 70,
-    HIPBLAS_COMPUTE_32I = 72
-} hipblasComputeType_t;
+    HIPBLAS_R_16F = 150,    /* 16-bit float, real */
+    HIPBLAS_R_16B = 168,    /* 16-bit bfloat, real */
+    HIPBLAS_R_32F = 151,    /* 32-bit float, real */
+    HIPBLAS_R_64F = 152     /* 64-bit float, real */
+} hipblasDatatype_t;
 typedef enum {
     HIPBLAS_GEMM_DEFAULT = 160
 } hipblasGemmAlgo_t;
@@ -131,16 +130,16 @@ extern hipblasStatus_t hipblasGemmEx(
     int k,
     const void *alpha,
     const void *A,
-    hipDataType aType,
+    hipblasDatatype_t aType,
     int lda,
     const void *B,
-    hipDataType bType,
+    hipblasDatatype_t bType,
     int ldb,
     const void *beta,
     void *C,
-    hipDataType cType,
+    hipblasDatatype_t cType,
     int ldc,
-    hipblasComputeType_t computeType,
+    hipblasDatatype_t computeType,
     hipblasGemmAlgo_t algo
 );
 #endif
@@ -343,9 +342,13 @@ static inline int chelis_gpu_matrix_slices_contiguous(
 /* WS-A3: bf16 matmul with f32 accumulator per spec/04-type-system.md
  * §5.7.1. Operand storage is bf16; alpha/beta and the GEMM accumulate
  * happen at f32; the result is downcast back to bf16 by hipblasGemmEx
- * (cType == HIP_R_16BF, computeType == HIPBLAS_COMPUTE_32F). hipBLAS is
+ * (cType == HIPBLAS_R_16B, computeType == HIPBLAS_R_32F). hipBLAS is
  * column-major; we swap A/B and m/n to preserve row-major semantics
- * (same trick as `chelis_hipblas_sgemm_row_major`). */
+ * (same trick as `chelis_hipblas_sgemm_row_major`).
+ *
+ * The `compute_type` parameter on the legacy hipblasGemmEx signature
+ * is also a `hipblasDatatype_t` (matching the data-type parameters);
+ * `HIPBLAS_R_32F` selects f32 accumulation. */
 static inline void chelis_hipblas_bf16_gemm_f32_acc_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
@@ -367,16 +370,16 @@ static inline void chelis_hipblas_bf16_gemm_f32_acc_row_major(
         k,
         &alpha,
         b->data,
-        HIP_R_16BF,
+        HIPBLAS_R_16B,
         n,
         a->data,
-        HIP_R_16BF,
+        HIPBLAS_R_16B,
         k,
         &beta,
         out->data,
-        HIP_R_16BF,
+        HIPBLAS_R_16B,
         n,
-        HIPBLAS_COMPUTE_32F,
+        HIPBLAS_R_32F,
         HIPBLAS_GEMM_DEFAULT
     ));
     CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
@@ -384,7 +387,7 @@ static inline void chelis_hipblas_bf16_gemm_f32_acc_row_major(
 
 /* WS-A3: f16 matmul with f32 accumulator per spec §5.7.1. Same shape
  * as the bf16 wrapper above; differs only in the operand/result data
- * type (HIP_R_16F). */
+ * type (HIPBLAS_R_16F). */
 static inline void chelis_hipblas_f16_gemm_f32_acc_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
@@ -406,16 +409,16 @@ static inline void chelis_hipblas_f16_gemm_f32_acc_row_major(
         k,
         &alpha,
         b->data,
-        HIP_R_16F,
+        HIPBLAS_R_16F,
         n,
         a->data,
-        HIP_R_16F,
+        HIPBLAS_R_16F,
         k,
         &beta,
         out->data,
-        HIP_R_16F,
+        HIPBLAS_R_16F,
         n,
-        HIPBLAS_COMPUTE_32F,
+        HIPBLAS_R_32F,
         HIPBLAS_GEMM_DEFAULT
     ));
     CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
