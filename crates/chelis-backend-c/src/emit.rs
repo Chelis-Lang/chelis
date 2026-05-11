@@ -321,7 +321,19 @@ impl CEmitter {
             }
             RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Drop => {}
-            RiscOp::Sum { axis, .. } => {
+            RiscOp::Sum { axis, accumulator } => {
+                // WS-A1: bind `accumulator` explicitly (no `..`
+                // destructure) so the dtype-aware reduce paths can
+                // honor the IR-pinned accumulator precision. The
+                // accumulator field is currently consumed by
+                // `emit_reduce_sum` and `emit_fused_reduce` via
+                // `output_type` (which equals accumulator per
+                // §5.7.1's `output_type.precision == accumulator`
+                // invariant enforced by verify::C3a); binding it here
+                // documents the dependency and prevents the
+                // destructure-`..` footgun that triggered RT-1's F1
+                // finding from recurring at the dispatch site.
+                let _ = accumulator;
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
@@ -1580,6 +1592,24 @@ impl CEmitter {
         ty: &TensorType,
         in_place: Option<FusedInPlaceSpec>,
     ) {
+        // WS-A1 guard: this codegen path is f32-hardcoded (`float*` data
+        // pointers, `float v{s}` step variables, single-precision math
+        // symbols). A non-f32 output dtype would silently truncate to
+        // f32 — exactly the F1 footgun class. Reject loudly until a
+        // follow-on parameterizes the path on the IR-pinned dtype per
+        // spec/04-type-system.md §5.7.1. The fuse pass currently only
+        // produces f32 fused chains in practice; this guard catches a
+        // future regression that admits non-f32 fused chains.
+        if !matches!(ty.precision, Prim::F32) {
+            panic!(
+                "WS-A1 / F1: emit_fused_elem path is f32-hardcoded; node {id} has \
+                 output precision `{}`. The silent f32 truncation that would \
+                 result is exactly the destructure-`..` footgun RT-1 surfaced. \
+                 Widen the fused-elem emit path before admitting non-f32 fused \
+                 chains.",
+                ty.precision.name(),
+            );
+        }
         if let Some(spec) = in_place {
             self.emit_fused_in_place_wrapper(id, ty, spec);
         } else {
@@ -2172,6 +2202,25 @@ impl CEmitter {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
         let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        // WS-A1 guard: reduce_max codegen is f32-hardcoded
+        // (`chelis_max_f32` SIMD helper, `float acc = -INFINITY`,
+        // `fmaxf` reduction operator). Per spec §2.3 max_reduce
+        // returns operand precision, so f64 input → f64 output, but
+        // the C-backend implementation does not yet handle that.
+        // Reject loudly to avoid the same silent-truncation footgun
+        // the F1 fix targets; widening is follow-on work.
+        if !matches!(ty.precision, Prim::F32)
+            || !matches!(input_node.output_type.precision, Prim::F32)
+        {
+            panic!(
+                "WS-A1 / F1: emit_reduce_max path is f32-hardcoded; node {id} has \
+                 input precision `{}` and output precision `{}`. Widening \
+                 max_reduce to non-f32 dtypes is follow-on work; the safe \
+                 alternative is the dtype-parameterized scalar reduction.",
+                input_node.output_type.precision.name(),
+                ty.precision.name(),
+            );
+        }
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
         if output_is_scalar {
@@ -2253,6 +2302,24 @@ impl CEmitter {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
         let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        // WS-A1 guard: emit_reduce_simple is f32-hardcoded (`float acc`
+        // declarator, scalar `INFINITY`/`-INFINITY` literals, `fmaxf`/
+        // `fminf` operators in the update template). Used by
+        // MinReduce/ProdReduce; per spec §2.3 these return operand
+        // precision, so f64 input → f64 output, but the C-backend
+        // implementation does not yet handle that. Reject loudly to
+        // avoid silent truncation; widening is follow-on work.
+        if !matches!(ty.precision, Prim::F32)
+            || !matches!(input_node.output_type.precision, Prim::F32)
+        {
+            panic!(
+                "WS-A1 / F1: emit_reduce_simple path is f32-hardcoded; node {id} has \
+                 input precision `{}` and output precision `{}`. Widening \
+                 min_reduce / prod_reduce to non-f32 dtypes is follow-on work.",
+                input_node.output_type.precision.name(),
+                ty.precision.name(),
+            );
+        }
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
         let use_simd = output_is_scalar && simd_fn.is_some();
@@ -2332,6 +2399,22 @@ impl CEmitter {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
         let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        // WS-A1 guard: argmax/argmin codegen is f32-hardcoded
+        // (`chelis_argmax_f32`/`chelis_argmin_f32` SIMD helpers,
+        // `float best_val` declarator). Per the doc comment above,
+        // the OUTPUT is intentionally F32-encoded integer indices,
+        // but the INPUT may be F64; reading f64 storage as float*
+        // would silently truncate. Reject loudly until follow-on
+        // widens the input read.
+        if !matches!(input_node.output_type.precision, Prim::F32) {
+            panic!(
+                "WS-A1 / F1: emit_reduce_argcmp path is f32-hardcoded; node {id} \
+                 has input precision `{}`. Widening argmax/argmin to non-f32 \
+                 inputs is follow-on work (the F32-encoded output index is \
+                 deliberate per the doc comment).",
+                input_node.output_type.precision.name(),
+            );
+        }
         let init = if is_argmax { "-INFINITY" } else { "INFINITY" };
         let cmp = if is_argmax { ">" } else { "<" };
         let simd_fn = if is_argmax {
@@ -2419,6 +2502,28 @@ impl CEmitter {
             RiscOp::FusedElem { ops } => ops,
             _ => panic!("expected FusedElem op"),
         };
+        // WS-A1 guard: this codegen path is f32-hardcoded (chelis_fill_f32
+        // zero, `float acc = 0.0f` initializer, `expf`/`logf`/`sinf`
+        // single-precision math symbols, fmaxf reduction operator). A
+        // non-f32 output dtype would silently truncate to f32 — exactly
+        // the F1 footgun class. Reject loudly until a follow-on widens
+        // the fused path to honor the IR `Sum`/`MaxReduce` accumulator
+        // and the input element type per spec/04-type-system.md §5.7.1.
+        if !matches!(out_ty.precision, Prim::F32)
+            || !matches!(fused_input_type.precision, Prim::F32)
+        {
+            panic!(
+                "WS-A1 / F1: emit_fused_reduce path is f32-hardcoded; node {id} has \
+                 fused_input precision `{}` and reduction output precision `{}`. The \
+                 silent f32 truncation that would result is exactly the destructure-\
+                 `..` footgun RT-1 surfaced. Widen this path before admitting \
+                 non-f32 fused reductions; the safe stop-gap is to keep \
+                 reduction_inlined_fused_elems out of the f64/i32/i64 path until \
+                 then.",
+                fused_input_type.precision.name(),
+                out_ty.precision.name(),
+            );
+        }
         let axis_size = Self::emit_dim_info(&fused_input_type.dims[axis]);
         // ndim of the fused input (pre-reduction shape)
         let fused_ndim = fused_input_type.dims.len();
@@ -2668,6 +2773,11 @@ impl CEmitter {
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
+        // WS-A1: pad fill must honor the output dtype. Pre-WS-A1 the
+        // default arm fell through to chelis_fill_f32 even for f64
+        // outputs, silently truncating the fill value. Match each
+        // active dtype explicitly; an unhandled dtype panics rather
+        // than silently downgrades.
         match ty.precision {
             Prim::Int64 => {
                 self.line(&format!(
@@ -2681,9 +2791,16 @@ impl CEmitter {
                     fill as i32
                 ));
             }
-            _ => {
+            Prim::F64 => {
+                self.line(&format!("chelis_fill_f64(t{id}, {fill:.17});"));
+            }
+            Prim::F32 | Prim::Bool => {
                 self.line(&format!("chelis_fill_f32(t{id}, {:.8}f);", fill as f32));
             }
+            other => panic!(
+                "C backend Pad does not yet support `{}` fill (spec/04-type-system.md §1.1)",
+                other.name()
+            ),
         }
         // Copy source data into the padded region
         self.line(&format!("for (int i = 0; i < t{a}->size; i++) {{"));
