@@ -95,6 +95,7 @@ pub fn codegen_host_program(
     let h_header = host_emit::emit_host_header(program, func_name);
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
         || c_source.contains("cblas_sgemm(")
+        || c_source.contains("cblas_dgemm(")
         || c_source.contains("chelis_blas_matmul");
     CodegenResult {
         c_source,
