@@ -443,7 +443,10 @@ fn m6_full_axis_sum_reduction_matches_evaluator() {
     let mut dag = Dag::new();
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
     let s = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![a],
         TensorType::scalar_f32(),
         None,
@@ -472,7 +475,10 @@ fn m6_full_axis_sum_reduction_non_power_of_two_matches_evaluator() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
         let s = dag.add_node(
-            RiscOp::Sum { axis: 0 },
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
             vec![a],
             TensorType::scalar_f32(),
             None,
@@ -593,7 +599,15 @@ fn m6_tiled_matmul_matches_evaluator() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(m, n), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(m, n),
+        None,
+    );
     dag.add_root(sum);
 
     let mut a_data = Vec::with_capacity(m * k);

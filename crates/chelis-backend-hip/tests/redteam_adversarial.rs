@@ -59,7 +59,15 @@ fn rt1_load_permute_add_sum_chain() {
     );
     let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(4, 3), None);
     let a = dag.add_node(RiscOp::Add, vec![p, c], mat_f32(4, 3), None);
-    let s = dag.add_node(RiscOp::Sum { axis: 1 }, vec![a], vec_f32(4), None);
+    let s = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![a],
+        vec_f32(4),
+        None,
+    );
     dag.add_root(s);
     let result = codegen_hip(&dag, "test_chain");
     let src = &result.c_source;
@@ -265,8 +273,24 @@ fn rt6_multiple_stores() {
 fn rt7_different_reductions_different_kernels() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
-    let sum_ax0 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], vec_f32(4), None);
-    let sum_ax1 = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(3), None);
+    let sum_ax0 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(4),
+        None,
+    );
+    let sum_ax1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(sum_ax0);
     dag.add_root(sum_ax1);
     let result = codegen_hip(&dag, "test_diff_reductions");
@@ -462,7 +486,15 @@ fn rt13_zero_size_grid() {
 fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1024), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], scalar_f32(), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        scalar_f32(),
+        None,
+    );
     dag.add_root(sum);
     let result = codegen_hip(&dag, "test_stage_scratch");
     let src = &result.c_source;
@@ -503,7 +535,15 @@ fn rt15_matmul_specialization_respects_contiguity() {
         None,
     );
     let mul = contiguous.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-    let sum = contiguous.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+    let sum = contiguous.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(2, 4),
+        None,
+    );
     contiguous.add_root(sum);
     let contiguous_src = codegen_hip(&contiguous, "test_matmul_contig").c_source;
     assert!(
@@ -539,7 +579,15 @@ fn rt15_matmul_specialization_respects_contiguity() {
         None,
     );
     let mul = fallback.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-    let sum = fallback.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+    let sum = fallback.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(2, 4),
+        None,
+    );
     fallback.add_root(sum);
     let fallback_src = codegen_hip(&fallback, "test_matmul_fallback").c_source;
     assert!(

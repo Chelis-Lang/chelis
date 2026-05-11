@@ -114,12 +114,22 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
         if let Some(info) = detect_matmul_pattern(dag, node.id) {
             let a = id_map[&info.a];
             let b = id_map[&info.b];
+            // The matmul-pattern detector recognizes the
+            // `Sum(Mul(Expand(A), Expand(B)))` shape from tier2 lowering.
+            // The accumulator on the synthesized BlasMatmul follows the
+            // accumulator pinned on the source `Sum` node so the WS-A0
+            // §5.7.1 default propagates through specialization.
+            let accumulator = match &dag.get(node.id).map(|n| &n.op) {
+                Some(RiscOp::Sum { accumulator, .. }) => *accumulator,
+                _ => node.output_type.precision,
+            };
             let new_id = out.add_node(
                 RiscOp::BlasMatmul {
                     batch_dims: info.batch_dims.clone(),
                     m: info.m.clone(),
                     n: info.n.clone(),
                     k: info.k.clone(),
+                    accumulator,
                 },
                 vec![a, b],
                 node.output_type.clone(),
@@ -384,7 +394,7 @@ struct DenseGatherInfo {
 fn detect_dense_gather_pattern(dag: &Dag, sum_id: NodeId) -> Option<DenseGatherInfo> {
     let sum_node = dag.get(sum_id)?;
     let sum_axis = match &sum_node.op {
-        RiscOp::Sum { axis } => *axis,
+        RiscOp::Sum { axis, .. } => *axis,
         _ => return None,
     };
     if sum_node.inputs.len() != 1 {
@@ -505,7 +515,7 @@ fn dims_equivalent(lhs: &DimInfo, rhs: &DimInfo) -> bool {
 fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
     let sum_axis = match &sum_node.op {
-        RiscOp::Sum { axis } => *axis,
+        RiscOp::Sum { axis, .. } => *axis,
         _ => return None,
     };
     if sum_node.inputs.len() != 1 || sum_node.output_type.dims.len() < 2 {
@@ -816,7 +826,15 @@ mod tests {
             None,
         );
         let mul = dag.add_node(RiscOp::Mul, vec![ca, cb], t3(2, 3, 4), None);
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat(2, 4), None);
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat(2, 4),
+            None,
+        );
         dag.add_root(sum);
 
         let out = specialize_for_blas(&dag);
@@ -828,6 +846,7 @@ mod tests {
                     m,
                     n,
                     k,
+                    ..
                 } if batch_dims.is_empty()
                     && *m == DimExpr::Concrete(2)
                     && *n == DimExpr::Concrete(4)
@@ -876,7 +895,10 @@ mod tests {
         );
         let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], symbolic_t3("m", "k", "n"), None);
         let sum = dag.add_node(
-            RiscOp::Sum { axis: 1 },
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
             vec![mul],
             symbolic_mat("m", "n"),
             None,
@@ -892,6 +914,7 @@ mod tests {
                     m,
                     n,
                     k,
+                    ..
                 } if batch_dims.is_empty()
                     && *m == DimExpr::Sym("m".into())
                     && *n == DimExpr::Sym("n".into())
@@ -936,7 +959,15 @@ mod tests {
             None,
         );
         let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(2, 3, 4), None);
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat(2, 4), None);
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat(2, 4),
+            None,
+        );
         dag.add_root(sum);
 
         let out = specialize_for_blas(&dag);
@@ -977,6 +1008,7 @@ mod tests {
                     m,
                     n,
                     k,
+                    ..
                 } if batch_dims == &vec![DimExpr::Sym("batch".into()), DimExpr::Sym("heads".into())]
                     && *m == DimExpr::Sym("seq".into())
                     && *n == DimExpr::Sym("seq".into())
@@ -1075,7 +1107,15 @@ mod tests {
             t3(4, 2, 3),
             None,
         );
-        let gathered = dag.add_node(RiscOp::Sum { axis: 1 }, vec![product], mat(4, 3), None);
+        let gathered = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![product],
+            mat(4, 3),
+            None,
+        );
         dag.add_root(gathered);
 
         let specialized = specialize_for_blas(&dag);
@@ -1160,7 +1200,15 @@ mod tests {
             t3(4, 2, 3),
             None,
         );
-        let not_gather = dag.add_node(RiscOp::Sum { axis: 2 }, vec![product], mat(4, 2), None);
+        let not_gather = dag.add_node(
+            RiscOp::Sum {
+                axis: 2,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![product],
+            mat(4, 2),
+            None,
+        );
         dag.add_root(not_gather);
 
         let specialized = specialize_for_blas(&dag);

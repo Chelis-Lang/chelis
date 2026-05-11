@@ -100,12 +100,31 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
 
     // Mul + sum-over-vocab → [n=3, dim=2] (this IS the gather output).
     let product = dag.add_node(RiscOp::Mul, vec![oh_exp, table_exp], t(vec![3, 2, 2]), None);
-    let gathered = dag.add_node(RiscOp::Sum { axis: 1 }, vec![product], t(vec![3, 2]), None);
+    let gathered = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![product],
+        t(vec![3, 2]),
+        None,
+    );
 
     // Collapse to scalar via two sum reductions to drive a scalar output.
-    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![gathered], t(vec![2]), None);
+    let s1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![gathered],
+        t(vec![2]),
+        None,
+    );
     let s2 = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![s1],
         TensorType::scalar_f32(),
         None,
@@ -176,9 +195,20 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
         t(vec![3, 2]),
         None,
     );
-    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![gathered], t(vec![2]), None);
+    let s1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![gathered],
+        t(vec![2]),
+        None,
+    );
     let s2 = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![s1],
         TensorType::scalar_f32(),
         None,
@@ -232,9 +262,20 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
         t(vec![2, 4]),
         None,
     );
-    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![gathered], t(vec![4]), None);
+    let s1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![gathered],
+        t(vec![4]),
+        None,
+    );
     let s2 = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![s1],
         TensorType::scalar_f32(),
         None,

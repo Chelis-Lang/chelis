@@ -92,10 +92,7 @@ impl Prim {
 
     /// True for all signed integer dtypes in the active set per §1.1.
     pub fn is_integer(&self) -> bool {
-        matches!(
-            self,
-            Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
-        )
+        matches!(self, Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64)
     }
 
     /// True if this primitive is in the **active** numeric/scalar set per
@@ -354,10 +351,7 @@ mod prim_classification_tests {
     #[test]
     fn is_integer_matches_active_integer_set() {
         for prim in ALL_PRIMS {
-            let expected = matches!(
-                prim,
-                Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
-            );
+            let expected = matches!(prim, Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64);
             assert_eq!(
                 prim.is_integer(),
                 expected,

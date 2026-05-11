@@ -1217,6 +1217,7 @@ fn summarize_blas_helper_from_parts(
         m,
         n,
         k,
+        ..
     } = &root_node.op
     else {
         return None;
@@ -4090,7 +4091,7 @@ fn actualize_tensor_helper_types(
                 .first()
                 .and_then(|id| inferred.get(id))
                 .map(|input| precision_like(input, node.output_type.precision)),
-            crate::dag::RiscOp::Sum { axis }
+            crate::dag::RiscOp::Sum { axis, .. }
             | crate::dag::RiscOp::MaxReduce { axis }
             | crate::dag::RiscOp::MinReduce { axis }
             | crate::dag::RiscOp::ProdReduce { axis }
@@ -5719,7 +5720,10 @@ mod tests {
             None,
         );
         let root = dag.add_node(
-            RiscOp::Sum { axis: 1 },
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
             vec![product],
             TensorType {
                 dims: vec![batch.clone(), out_dim.clone()],

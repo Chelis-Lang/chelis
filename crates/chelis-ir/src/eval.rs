@@ -722,7 +722,9 @@ where
                     if a < b { 1.0 } else { 0.0 }
                 },
             ),
-            RiscOp::Sum { axis } => reduce(&values[&node.inputs[0]], *axis, 0.0, |acc, x| acc + x),
+            RiscOp::Sum { axis, .. } => {
+                reduce(&values[&node.inputs[0]], *axis, 0.0, |acc, x| acc + x)
+            }
             RiscOp::MaxReduce { axis } => {
                 reduce(&values[&node.inputs[0]], *axis, f64::NEG_INFINITY, f64::max)
             }

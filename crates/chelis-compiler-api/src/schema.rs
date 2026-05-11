@@ -855,6 +855,11 @@ pub enum WireRiscOp {
     },
     Sum {
         axis: usize,
+        /// Accumulator precision, populated per spec/04-type-system.md
+        /// §5.7.1. Defaults are resolved before lowering, so this is
+        /// always concrete in the wire schema.
+        #[serde(default = "default_sum_accumulator_name")]
+        accumulator: String,
     },
     MaxReduce {
         axis: usize,
@@ -917,6 +922,11 @@ pub enum WireRiscOp {
         m: WireDimExpr,
         n: WireDimExpr,
         k: WireDimExpr,
+        /// Accumulator precision per spec/04-type-system.md §5.7.1.
+        /// Result precision matches operand precision; the wider
+        /// accumulator is consumed inside the op.
+        #[serde(default = "default_matmul_accumulator_name")]
+        accumulator: String,
     },
     Gather {
         axis: usize,
@@ -924,6 +934,21 @@ pub enum WireRiscOp {
     ScatterAdd {
         axis: usize,
     },
+}
+
+/// Backwards-compat default for the `accumulator` field on
+/// [`WireRiscOp::Sum`]. Old wire payloads predate the WS-A0 spec lock
+/// (cc47e6d) and don't carry the field; default to `f32`, the
+/// pre-WS-A0 implicit accumulator.
+fn default_sum_accumulator_name() -> String {
+    "f32".to_string()
+}
+
+/// Backwards-compat default for the `accumulator` field on
+/// [`WireRiscOp::BlasMatmul`]. Same rationale as
+/// [`default_sum_accumulator_name`].
+fn default_matmul_accumulator_name() -> String {
+    "f32".to_string()
 }
 
 fn default_true() -> bool {

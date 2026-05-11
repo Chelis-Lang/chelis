@@ -8993,11 +8993,7 @@ fn infer_cast(
 /// (`spec/04-type-system.md` §1.1.1) gets a specific diagnostic citing the
 /// owning spec section so producers can resolve the deferral state without
 /// guessing.
-fn push_unsupported_precision_error(
-    errors: &mut Vec<CheckError>,
-    new_prec: Prim,
-    tensor: bool,
-) {
+fn push_unsupported_precision_error(errors: &mut Vec<CheckError>, new_prec: Prim, tensor: bool) {
     let surface = if tensor { "tensor element" } else { "scalar" };
     let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
     if matches!(new_prec, Prim::F8e4m3) {

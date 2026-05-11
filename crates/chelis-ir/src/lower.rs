@@ -734,6 +734,7 @@ pub fn remap_tensor_dim_symbols(
                 m,
                 n,
                 k,
+                accumulator,
             } => RiscOp::BlasMatmul {
                 batch_dims: batch_dims
                     .iter()
@@ -742,6 +743,7 @@ pub fn remap_tensor_dim_symbols(
                 m: rewrite_dim_expr(&m, &substitutions),
                 n: rewrite_dim_expr(&n, &substitutions),
                 k: rewrite_dim_expr(&k, &substitutions),
+                accumulator,
             },
             other => other,
         };
@@ -3922,8 +3924,12 @@ impl LowerCtx {
                 } else {
                     ty.clone()
                 };
+                let acc = out_ty.precision;
                 self.dag.add_node(
-                    RiscOp::Sum { axis },
+                    RiscOp::Sum {
+                        axis,
+                        accumulator: acc,
+                    },
                     vec![x],
                     out_ty,
                     self.current_span_id.clone(),
@@ -5869,7 +5875,7 @@ mod tests {
         let found_sum = dag
             .nodes()
             .iter()
-            .any(|n| matches!(n.op, RiscOp::Sum { axis: 0 }));
+            .any(|n| matches!(n.op, RiscOp::Sum { axis: 0, .. }));
         assert!(found_sum, "expected a Sum{{axis:0}} node");
     }
 

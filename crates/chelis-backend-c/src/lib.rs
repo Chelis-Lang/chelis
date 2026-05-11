@@ -440,6 +440,7 @@ mod tests {
                 m: chelis_ir::dag::DimExpr::Concrete(2),
                 n: chelis_ir::dag::DimExpr::Concrete(4),
                 k: chelis_ir::dag::DimExpr::Concrete(3),
+                accumulator: chelis_types::types::Prim::F32,
             },
             vec![a, b],
             out_ty.clone(),
@@ -569,7 +570,15 @@ mod tests {
             },
             None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         let result = codegen(&dag, "test_fn");
         assert!(!result.requirements.needs_blas);
         assert!(!result.c_source.contains("cblas_sgemm("));
@@ -613,7 +622,15 @@ mod tests {
             },
             None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         let result = codegen_with_options(
             &dag,
             "test_fn",
@@ -1281,7 +1298,15 @@ int main(void) {{
         // sum([2, 2, 2]) = 6
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(3), None);
-        dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
         let out = compile_and_run(&dag, "test_sum");
         assert_float_eq(&out, 6.0);
     }
@@ -1385,7 +1410,15 @@ int main(void) {{
         let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(3), None);
         let d = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], vec_f32(3), None);
         let e = dag.add_node(RiscOp::Mul, vec![c, d], vec_f32(3), None);
-        dag.add_node(RiscOp::Sum { axis: 0 }, vec![e], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![e],
+            scalar_f32(),
+            None,
+        );
         let out = compile_and_run(&dag, "test_pipe");
         assert_float_eq(&out, 27.0);
     }
@@ -1494,7 +1527,15 @@ int main(void) {{
             None,
         );
         // Sum along axis 0 (3 rows) to get vec of 2: each column sums 3 x 2.0 = 6.0
-        dag.add_node(RiscOp::Sum { axis: 0 }, vec![permuted], vec_f32(2), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![permuted],
+            vec_f32(2),
+            None,
+        );
         let out = compile_and_run(&dag, "test_permute");
         assert_floats_eq(&out, &[6.0, 6.0]);
     }
@@ -1737,7 +1778,15 @@ int main(void) {{
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1024), None);
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(1024), None);
         let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(1024), None);
-        dag.add_node(RiscOp::Sum { axis: 0 }, vec![c], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![c],
+            scalar_f32(),
+            None,
+        );
         let out = compile_and_run(&dag, "test_large_add_sum");
         assert_float_eq(&out, 3072.0);
     }
@@ -2196,7 +2245,15 @@ int main(void) {
             },
             None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         let result = codegen_with_options(
             &dag,
             "test_blas",
@@ -2281,7 +2338,15 @@ int main(void) {
             },
             None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         let out = compile_and_run_with_codegen_options(
             &dag,
             "test_matmul_fallback",
@@ -2333,7 +2398,15 @@ int main(void) {
             },
             None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         let out = compile_and_run_with_codegen_options(
             &dag,
             "test_matmul_blas_num",

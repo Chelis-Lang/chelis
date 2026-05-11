@@ -157,7 +157,10 @@ fn adv4_fused_and_unfused_feed_same_output() {
     let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     // Non-fusible: sum
     let s = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
         vec![x],
         TensorType::scalar_f32(),
         None,
