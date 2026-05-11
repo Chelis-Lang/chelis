@@ -106,32 +106,17 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     (dag, inputs, mat(prim, 8, 4))
 }
 
-/// Test 1: **P0 finding — silent miscompile on F64 matmul.**
+/// Regression lock for the P0 fix: F64 matmul must NOT be replaced
+/// with `RiscOp::BlasMatmul`.
 ///
 /// The IR-level specializer (`chelis_ir::specialize::specialize_for_blas`)
-/// has no precision check in `detect_matmul_pattern` (see `specialize.rs`
-/// lines 505-579 — the recognizer keys off shape and op structure only).
-/// As a result, **an F64 matmul subgraph is silently replaced with
-/// `RiscOp::BlasMatmul`**, and downstream C codegen at
-/// `crates/chelis-backend-c/src/emit.rs::emit_blas_matmul` emits
-/// `cblas_sgemm(...)` — single-precision BLAS — against the F64 data
-/// buffer.
-///
-/// `cblas_sgemm` reinterprets the bytes as `float*` with `sizeof(float)`
-/// stride arithmetic. For a double-precision tensor this is a wrong
-/// answer (every other 4 bytes treated as a float; size mismatch in
-/// indexing), not a fail-closed panic.
-///
-/// The sparse summarizer says `NotEligible` (correctly — no sparse op).
-/// The BLAS summary path's F32 gate at
-/// `host.rs::summarize_blas_helper_from_parts` returns `None` silently,
-/// so the host-side summary specialization is correctly not produced.
-/// But the IR-level recognizer fires anyway, and the C backend trusts it.
-///
-/// This is the load-bearing silent-correctness failure mode the
-/// red-team brief flagged. We lock it as a P0 with this test.
+/// gained a precision filter in `detect_matmul_pattern` so a non-F32
+/// matmul subgraph stays on the generic `expand+mul+sum` path. Defense-
+/// in-depth: both `emit_blas_matmul` sites (C and HIP) panic on non-F32.
+/// This test locks the canonical-site filter so a regression that drops
+/// the precision check is visible immediately.
 #[test]
-fn f64_matmul_helper_specializer_silently_emits_blas_matmul_p0() {
+fn f64_matmul_helper_specializer_stays_off_blas_path() {
     let (dag, inputs, output) = build_matmul_helper(Prim::F64);
     let sparse_result = try_summarize_sparse_helper_for_test(&dag, &inputs, &output);
     // The sparse path correctly says NotEligible: no sparse op in the body.
@@ -141,44 +126,21 @@ fn f64_matmul_helper_specializer_silently_emits_blas_matmul_p0() {
          got {sparse_result:?}"
     );
 
-    // The IR-level recognizer has no precision gate. F64 matmul is
-    // silently replaced with `BlasMatmul`. Lock the current (buggy)
-    // behavior so a remediation that adds a precision gate will fail
-    // this test deliberately — we want the regression visible.
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let blas_node = specialized
         .nodes()
         .iter()
         .find(|n| matches!(n.op, RiscOp::BlasMatmul { .. }));
-    let blas_node = blas_node.expect(
-        "P0 BUG SURFACED: F64 matmul subgraph is currently replaced with \
-         RiscOp::BlasMatmul by the IR specializer (no precision gate in \
-         detect_matmul_pattern). This is a SILENT MISCOMPILE: C codegen \
-         emits cblas_sgemm against F64 data. The fix is a precision \
-         filter in specialize.rs::detect_matmul_pattern (or in \
-         emit_blas_matmul to reject non-F32 BlasMatmul). When the fix \
-         lands, flip this assertion to `assert!(blas_node.is_none())` \
-         and add a regression positive test that asserts F64 stays on \
-         the generic path.",
-    );
-    // While the bug exists, lock the F64 precision on the BlasMatmul
-    // output so a future commit that adds a precision gate fails this
-    // test (test_vs_spec_divergence: the test ENCODES the bug as a
-    // pinned negative; closing the bug requires updating the test
-    // in the same change set).
-    assert_eq!(
-        blas_node.output_type.precision,
-        Prim::F64,
-        "BlasMatmul output should still carry the original F64 precision"
+    assert!(
+        blas_node.is_none(),
+        "F64 matmul must not produce RiscOp::BlasMatmul (cblas_sgemm is F32-only); \
+         the precision filter at specialize.rs::detect_matmul_pattern has regressed",
     );
 }
 
-/// Test 1b: **P0 sibling — Int32 matmul** also silently fires BLAS
-/// specialization. The recognizer has no precision filter, so any
-/// matmul-shaped subgraph regardless of dtype gets replaced. This is
-/// the broader bug-class behind the F64 finding.
+/// Regression lock — Int32 matmul stays off the BLAS path.
 #[test]
-fn int32_matmul_helper_specializer_silently_emits_blas_matmul_p0_sibling() {
+fn int32_matmul_helper_specializer_stays_off_blas_path() {
     let (dag, _inputs, _output) = build_matmul_helper(Prim::Int32);
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let blas_node = specialized
@@ -186,22 +148,14 @@ fn int32_matmul_helper_specializer_silently_emits_blas_matmul_p0_sibling() {
         .iter()
         .find(|n| matches!(n.op, RiscOp::BlasMatmul { .. }));
     assert!(
-        blas_node.is_some(),
-        "P0 BUG SIBLING: Int32 matmul also passes through the IR specializer \
-         without a precision check, producing BlasMatmul on integer data. \
-         Closing the F64 bug must close this sibling at the same site \
-         (precision-filter sweep)."
-    );
-    assert_eq!(
-        blas_node.unwrap().output_type.precision,
-        Prim::Int32,
-        "BlasMatmul output should still carry the original Int32 precision"
+        blas_node.is_none(),
+        "Int32 matmul must not produce RiscOp::BlasMatmul",
     );
 }
 
-/// Test 1c: **P0 sibling — Int64 matmul** also silently fires.
+/// Regression lock — Int64 matmul stays off the BLAS path.
 #[test]
-fn int64_matmul_helper_specializer_silently_emits_blas_matmul_p0_sibling() {
+fn int64_matmul_helper_specializer_stays_off_blas_path() {
     let (dag, _inputs, _output) = build_matmul_helper(Prim::Int64);
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let blas_node = specialized
@@ -209,10 +163,26 @@ fn int64_matmul_helper_specializer_silently_emits_blas_matmul_p0_sibling() {
         .iter()
         .find(|n| matches!(n.op, RiscOp::BlasMatmul { .. }));
     assert!(
-        blas_node.is_some(),
-        "P0 BUG SIBLING: Int64 matmul also passes through the IR specializer \
-         without a precision check."
+        blas_node.is_none(),
+        "Int64 matmul must not produce RiscOp::BlasMatmul",
     );
+}
+
+/// Positive regression: F32 matmul MUST still produce BlasMatmul.
+/// Prevents an overshooting fix that accidentally rejects F32 too.
+#[test]
+fn f32_matmul_helper_specializer_still_hits_blas_path() {
+    let (dag, _inputs, _output) = build_matmul_helper(Prim::F32);
+    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+    let blas_node = specialized
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::BlasMatmul { .. }));
+    assert!(
+        blas_node.is_some(),
+        "F32 matmul must still hit the BLAS specialization path",
+    );
+    assert_eq!(blas_node.unwrap().output_type.precision, Prim::F32);
 }
 
 /// Test 2: A rank-3 matmul helper body (rank-3 inputs producing a rank-3

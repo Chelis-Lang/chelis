@@ -1,26 +1,25 @@
-//! Wave 5 red-team — **P0 SILENT MISCOMPILE** confirmation.
+//! Wave 5 red-team — **P0 silent-miscompile regression lock** (now closed).
 //!
-//! Demonstrates end-to-end that an F64 matmul subgraph reaches C
-//! codegen as `RiscOp::BlasMatmul` (because the IR specializer has no
-//! precision gate) and the C backend then emits `cblas_sgemm` —
-//! single-precision BLAS — against the F64 data.
+//! Originally surfaced by W5 as a P0: an F64 matmul subgraph reached
+//! C codegen as `RiscOp::BlasMatmul` (because the IR specializer had
+//! no precision gate) and the C backend emitted `cblas_sgemm` —
+//! single-precision BLAS — against the F64 data. The orchestrator
+//! shipped the fix in-band with this commit set:
 //!
-//! This is a SILENT MISCOMPILE: no diagnostic, no fail-closed panic,
-//! just `cblas_sgemm` reading F64 data through `float*` strides. The
-//! emitted code would (at runtime) compute mathematical nonsense.
+//! 1. `crates/chelis-ir/src/specialize.rs::detect_matmul_pattern`
+//!    early-returns `None` when any operand or output is not
+//!    `Prim::F32`, keeping non-F32 matmul on the generic
+//!    `expand+mul+sum` path.
+//! 2. `crates/chelis-backend-c/src/emit.rs::emit_blas_matmul` panics
+//!    if it ever receives a non-F32 `BlasMatmul` (defense-in-depth
+//!    against future code paths that bypass the specializer).
+//! 3. `crates/chelis-backend-hip/src/emit.rs::emit_blas_matmul` has
+//!    the same defense-in-depth panic.
 //!
-//! The fix is a precision filter in
-//! `crates/chelis-ir/src/specialize.rs::detect_matmul_pattern` (or in
-//! `crates/chelis-backend-c/src/emit.rs::emit_blas_matmul` to reject
-//! non-F32 BlasMatmul). The latter is more conservative — it catches
-//! the bug at every call site.
-//!
-//! This test PINS the current (buggy) behavior. When the fix lands,
-//! this test must be removed or flipped to assert a panic/skip.
-//!
-//! Per the W5 brief's "escalate structural workarounds" rule, the
-//! red-team agent does NOT fix this in-place; it surfaces the finding
-//! with severity P0 to the orchestrator.
+//! This file now LOCKS THE FIX: the F64 matmul subgraph must NOT
+//! reach the C backend as `BlasMatmul`, and the emitted C source must
+//! NOT contain `cblas_sgemm`. A regression that drops the precision
+//! filter would fail these assertions.
 
 use chelis_backend_c::{CodegenOptions, codegen_with_options};
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
@@ -33,9 +32,9 @@ fn t(prim: Prim, dims: Vec<usize>) -> TensorType {
     }
 }
 
-/// P0 confirmation: end-to-end F64 matmul → cblas_sgemm.
+/// Regression lock: end-to-end F64 matmul must NOT emit cblas_sgemm.
 #[test]
-fn p0_f64_matmul_subgraph_emits_cblas_sgemm_in_c_backend_silent_miscompile() {
+fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::Load { name: "a".into() },
@@ -94,42 +93,99 @@ fn p0_f64_matmul_subgraph_emits_cblas_sgemm_in_c_backend_silent_miscompile() {
         },
     );
 
-    // The IR specializer must have replaced the matmul with BlasMatmul
-    // (no precision gate). The C backend must have emitted cblas_sgemm
-    // — single-precision — against the F64 data. This is the silent
-    // miscompile. Lock both legs.
+    // The IR specializer must NOT replace the F64 matmul with BlasMatmul
+    // (cblas_sgemm is F32-only), and the C backend must NOT emit
+    // cblas_sgemm. Lock both legs as positive assertions on the fix.
     assert!(
-        result.c_source.contains("cblas_sgemm("),
-        "P0 BUG: F64 matmul subgraph is reaching the C backend as \
-         BlasMatmul (silent specialization) and emitting cblas_sgemm \
-         against double-precision data. This is a SILENT MISCOMPILE. \
+        !result.c_source.contains("cblas_sgemm("),
+        "F64 matmul subgraph must stay off the BLAS path (cblas_sgemm is \
+         single-precision only). Found a cblas_sgemm call in the emitted \
+         C source — the precision filter at \
+         chelis_ir::specialize::detect_matmul_pattern has regressed. \
          Emitted C source:\n{}",
         result.c_source
     );
 
-    // Sanity: the data buffer the call addresses is the F64 buffer.
-    // Look for `double *` typed accesses near the cblas_sgemm site —
-    // the chelis runtime treats data as untyped void*, but the
-    // `chelis_slotN` allocation should be sized for F64. Lock the
-    // slot allocation tag.
+    // F64 slot allocation should still be present (the data is F64;
+    // the generic expand+mul+sum path computes against it).
     assert!(
         result.c_source.contains("CHELIS_F64"),
-        "F64 slot allocation must be present (proves F64 ground truth); \
-         got source:\n{}",
+        "F64 slot allocation must be present on the generic path; got source:\n{}",
         result.c_source
     );
 
-    // The BLAS requirement should be set on the requirements struct so
-    // the user's build invokes -lopenblas — confirming the silently-wrong
-    // binary would actually link.
-    let requires_blas = format!("{:?}", result.requirements)
-        .to_lowercase()
-        .contains("blas");
+    // With BLAS specialization skipped, the BLAS link requirement must
+    // NOT be set — the generic path doesn't need -lopenblas.
     assert!(
-        requires_blas,
-        "F64 matmul→BLAS specialization should surface a BLAS requirement, \
-         confirming the user would *successfully build* the silently \
-         wrong binary; got requirements = {:?}",
+        !result.requirements.needs_blas,
+        "F64 matmul on the generic path must not surface needs_blas; \
+         got requirements = {:?}",
         result.requirements
+    );
+}
+
+/// Positive regression: F32 matmul must still hit the BLAS path.
+/// The precision filter must be tight (only F32 admitted), not overshoot
+/// to F32-shaped-but-other-types or accidentally also reject F32.
+#[test]
+fn f32_matmul_subgraph_still_hits_blas_path_in_c_backend() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        t(Prim::F32, vec![8, 16]),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        t(Prim::F32, vec![16, 4]),
+        None,
+    );
+    let ea = dag.add_node(
+        RiscOp::Expand {
+            axis: 2,
+            size: DimExpr::Concrete(4),
+        },
+        vec![a],
+        t(Prim::F32, vec![8, 16, 4]),
+        None,
+    );
+    let eb = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: DimExpr::Concrete(8),
+        },
+        vec![b],
+        t(Prim::F32, vec![8, 16, 4]),
+        None,
+    );
+    let mul = dag.add_node(
+        RiscOp::Mul,
+        vec![ea, eb],
+        t(Prim::F32, vec![8, 16, 4]),
+        None,
+    );
+    let sum = dag.add_node(
+        RiscOp::Sum { axis: 1 },
+        vec![mul],
+        t(Prim::F32, vec![8, 4]),
+        None,
+    );
+    dag.add_root(sum);
+
+    let result = codegen_with_options(
+        &dag,
+        "f32_matmul_blas_positive",
+        CodegenOptions {
+            use_blas: true,
+            ..CodegenOptions::default()
+        },
+    );
+
+    assert!(
+        result.c_source.contains("cblas_sgemm("),
+        "F32 matmul must still hit the BLAS path; emitted source:\n{}",
+        result.c_source
     );
 }

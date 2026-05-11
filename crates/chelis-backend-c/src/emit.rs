@@ -1799,6 +1799,19 @@ impl CEmitter {
 
     // ---- BLAS matmul ----
     fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
+        // Defense in depth: cblas_sgemm is F32-only. If a non-F32 BlasMatmul
+        // reaches here it indicates a missing precision filter upstream (the
+        // canonical filter is at chelis_ir::specialize::detect_matmul_pattern).
+        // Refuse to emit rather than silently miscompile.
+        assert_eq!(
+            ty.precision,
+            Prim::F32,
+            "emit_blas_matmul received non-F32 output (precision={:?}) at node {id}; \
+             cblas_sgemm is single-precision only. The upstream specializer in \
+             chelis_ir::specialize must keep non-F32 matmul subgraphs on the \
+             generic expand+mul+sum path.",
+            ty.precision,
+        );
         let a = spec.a.0;
         let b = spec.b.0;
         let m_expr = Self::emit_dim_expr(&spec.m);
