@@ -206,12 +206,28 @@ contiguous copies, bypassing the IR specializer's negative rule. The legacy
 C detector path has been removed from reduction emission; BLAS now enters C
 codegen through `RiscOp::BlasMatmul` produced by the IR specialization pass.
 
-HIP manual gate status for this batch: run 2026-05-10 on the local ROCm/HIP
-workstation with the documented `HSA_OVERRIDE_GFX_VERSION=11.5.1` environment;
-`cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored
---test-threads=1` passed the available GPU correctness tests, including
-batched hipBLAS. The sparse follow-up adds the focused
-`g16_sparse_*` manual gate for HIP gather and duplicate-index scatter-add.
+Fresh-context red-team status for the W1–W4 batch: run 2026-05-11 as **W5**
+in a worktree-isolated subagent. The pass added 32 adversarial tests across
+seven new files (`crates/chelis-{backend-c,backend-hip,cli,ir}/tests/red_team_w5_*.rs`)
+and surfaced one **P0 silent miscompile**: the IR specializer's
+`detect_matmul_pattern` had no precision filter, so an F64/Int32/Int64 matmul
+subgraph silently became `RiscOp::BlasMatmul` and the C backend emitted
+`cblas_sgemm` — single-precision BLAS — against the wrong-precision data.
+The fix shipped in-band: precision filter at the canonical specializer site
+plus defense-in-depth panics in both backend `emit_blas_matmul` sites. The
+W5 P0-asserting tests were inverted to positive regressions and joined by
+F32-still-hits-BLAS positive tests on both legs. The other red-team findings
+(P2: BLAS-summary recognizer is silent on near-eligible rejections; P3:
+DimExpr canonicalizer uses rational-not-floor semantics) are tracked: P2 in
+the sibling-sweep follow-up named under the M5-follow-up entry above; P3 is
+harmless under today's symbolic-dim corpus and parked.
+
+HIP manual gate status for this batch: run 2026-05-11 on the local ROCm/HIP
+workstation via `scripts/hip_test.py` (which sets the full hipBLAS env per
+`docs/local_hip_environment.md`); 37/37 GPU correctness tests passed plus the
+W5-added g15/g4 batched and symbolic batched cases. The earlier 2026-05-10 run
+on the same suite also passed including `g16_sparse_*` for HIP gather and
+duplicate-index scatter-add.
 
 ## 6. Verdict on structural feasibility
 
