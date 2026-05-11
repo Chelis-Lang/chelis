@@ -2796,6 +2796,24 @@ impl LowerCtx {
         args: &[Expr],
         app_span: Span,
     ) -> LoweredValue {
+        let actual_args: Vec<NodeId> = args
+            .iter()
+            .map(|arg| self.lower_expr_node(arg, "grad arguments"))
+            .collect();
+        self.lower_grad_callable_with_nodes(fn_expr, wrt_indices, &actual_args, app_span)
+    }
+
+    /// Core lowering for `grad(fn)` applied to already-lowered argument
+    /// nodes. Used by both `lower_grad_callable_app` (which lowers
+    /// expression arguments first) and `lower_pipe` (which inherits the
+    /// argument from the previous pipe stage).
+    fn lower_grad_callable_with_nodes(
+        &mut self,
+        fn_expr: &Expr,
+        wrt_indices: Option<&[usize]>,
+        actual_args: &[NodeId],
+        app_span: Span,
+    ) -> LoweredValue {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("grad", std::slice::from_ref(fn_expr));
         };
@@ -2807,10 +2825,6 @@ impl LowerCtx {
                     .map(Self::type_from_type_expr)
                     .unwrap_or_else(Self::default_type)
             })
-            .collect();
-        let actual_args: Vec<NodeId> = args
-            .iter()
-            .map(|arg| self.lower_expr_node(arg, "grad arguments"))
             .collect();
         let actual_types: Vec<TensorType> = actual_args
             .iter()
@@ -2889,7 +2903,7 @@ impl LowerCtx {
             self.dag.set_reusable_input(*grad_node, *reusable_input);
         }
         match grad_results.as_slice() {
-            [single] => LoweredValue::Node(self.attach_reuse_hint(*single, app_span, &actual_args)),
+            [single] => LoweredValue::Node(self.attach_reuse_hint(*single, app_span, actual_args)),
             _ => LoweredValue::Tuple(grad_results.into_iter().map(LoweredValue::Node).collect()),
         }
     }
@@ -3133,6 +3147,25 @@ impl LowerCtx {
         args: &[Expr],
         app_span: Span,
     ) -> LoweredValue {
+        let actual_args: Vec<NodeId> = args
+            .iter()
+            .map(|arg| self.lower_expr_node(arg, "vmap(grad) arguments"))
+            .collect();
+        self.lower_vmap_grad_callable_with_nodes(fn_expr, wrt_indices, axis, &actual_args, app_span)
+    }
+
+    /// Core lowering for `vmap(grad(fn))` applied to already-lowered
+    /// argument nodes. Used by both `lower_vmap_grad_callable_app` (which
+    /// lowers expression arguments first) and `lower_pipe` (which
+    /// inherits the argument from the previous pipe stage).
+    fn lower_vmap_grad_callable_with_nodes(
+        &mut self,
+        fn_expr: &Expr,
+        wrt_indices: Option<&[usize]>,
+        axis: usize,
+        actual_args: &[NodeId],
+        app_span: Span,
+    ) -> LoweredValue {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("vmap(grad)", std::slice::from_ref(fn_expr));
         };
@@ -3144,10 +3177,6 @@ impl LowerCtx {
                     .map(Self::type_from_type_expr)
                     .unwrap_or_else(Self::default_type)
             })
-            .collect();
-        let actual_args: Vec<NodeId> = args
-            .iter()
-            .map(|arg| self.lower_expr_node(arg, "vmap(grad) arguments"))
             .collect();
         let actual_types: Vec<TensorType> = actual_args
             .iter()
@@ -4570,8 +4599,31 @@ impl LowerCtx {
                             func_expr.span(),
                         )
                     }
-                    CallableExpr::VmapGrad { .. } | CallableExpr::Grad { .. } => {
-                        self.lower_unrepresentable("pipe stage", std::slice::from_ref(func_expr))
+                    CallableExpr::Grad { fn_expr, wrt } => {
+                        // `x |> grad(f)` lowers as `grad(f)(x)` — reuse
+                        // the non-pipe grad lowering with the previous
+                        // stage's NodeId as the single argument.
+                        let current_node = current.expect_node("pipe stage");
+                        self.lower_grad_callable_with_nodes(
+                            &fn_expr,
+                            wrt.as_deref(),
+                            &[current_node],
+                            func_expr.span(),
+                        )
+                    }
+                    CallableExpr::VmapGrad { fn_expr, wrt, axis } => {
+                        // `xs |> vmap(grad(f))` lowers as
+                        // `vmap(grad(f))(xs)` — reuse the non-pipe
+                        // vmap-grad lowering with the previous stage's
+                        // NodeId as the single argument.
+                        let current_node = current.expect_node("pipe stage");
+                        self.lower_vmap_grad_callable_with_nodes(
+                            &fn_expr,
+                            wrt.as_deref(),
+                            axis,
+                            &[current_node],
+                            func_expr.span(),
+                        )
                     }
                 };
                 continue;
