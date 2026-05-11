@@ -5458,6 +5458,56 @@ y = softmax(x, cast(5, int32))
         }
     }
 
+    // ----------------------------------------------------------------
+    // RT-1 adversarial: priority C — bypass the constructor.
+    //
+    // The `RuntimeValue::scalar()` function checks the dtype/bits
+    // invariant, but the variant `Scalar { dtype, bits }` is `pub(crate)`
+    // with public fields, so any caller in this crate can write
+    // `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
+    // directly and bypass the check. The convenience constructors
+    // (`int_lit`, `float_lit`, `int64`, `float64`, `scalar_like_*`)
+    // happen to use struct-literal syntax themselves and rely on the
+    // hardcoded pairing being correct.
+    //
+    // Pin two facts: (1) struct-literal construction is not blocked by
+    // the type system, and (2) `bits.dtype()` exposes the contradiction
+    // when this happens (so a future linter or audit pass can catch it).
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn rt1_struct_literal_can_construct_mismatched_scalar_payload() {
+        // This compiles. That is the finding. The invariant lives only
+        // in the `scalar()` constructor; raw struct-literal construction
+        // bypasses it.
+        let bad = RuntimeValue::Scalar {
+            dtype: Prim::F16,
+            bits: ScalarBits::F32(1.5),
+        };
+        match bad {
+            RuntimeValue::Scalar { dtype, bits } => {
+                assert_eq!(dtype, Prim::F16, "dtype field stored as F16");
+                assert_eq!(
+                    bits.dtype(),
+                    Prim::F32,
+                    "bits' inherent dtype is F32 — contradicting the F16 dtype \
+                     field; the runtime invariant is violated but no compile-time \
+                     or runtime check fires"
+                );
+                assert_ne!(
+                    dtype,
+                    bits.dtype(),
+                    "RT-1 finding: struct-literal initialization of \
+                     RuntimeValue::Scalar bypasses the dtype/bits invariant \
+                     enforced by the `scalar()` constructor. Either the \
+                     variant should be private (constructor-only) or the \
+                     invariant should be checked at every read site."
+                );
+            }
+            other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
+        }
+    }
+
     #[test]
     fn scalar_constructor_accepts_matching_dtype_bits_pairs() {
         // Sanity sibling: every matching pair across the active dtype
