@@ -21,6 +21,12 @@
  * without round-tripping through a wider type. */
 #define CHELIS_BF16 5
 #define CHELIS_F16 6
+/* WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
+ * Element sizes (1 byte for i8, 2 bytes for i16) are honored by
+ * `chelis_alloc` so generated C code can index `(int8_t*)t->data` /
+ * `(int16_t*)t->data` directly without overrunning the buffer. */
+#define CHELIS_I8 7
+#define CHELIS_I16 8
 #define CHELIS_MAX_DIM 8
 
 typedef struct {

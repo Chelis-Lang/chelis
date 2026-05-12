@@ -44,6 +44,32 @@ impl TestInput {
         }
     }
 
+    /// WS-A4: i8 input. Stored as f32 in the carrier `data` field for
+    /// API symmetry; the harness reinterpret-casts to `int8_t*` before
+    /// writing into the runtime-allocated buffer, and `chelis_alloc`
+    /// is called with `CHELIS_I8` so the buffer is sized at 1 byte
+    /// per element.
+    #[allow(dead_code, reason = "WS-A4 manual HIP gate; constructed by i8 tests")]
+    fn int8(name: &str, shape: &[usize], data: &[i8]) -> Self {
+        Self {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            data: data.iter().map(|value| *value as f32).collect(),
+            dtype: Prim::Int8,
+        }
+    }
+
+    /// WS-A4: i16 input. Same packing convention as `int8`.
+    #[allow(dead_code, reason = "WS-A4 manual HIP gate; constructed by i16 tests")]
+    fn int16(name: &str, shape: &[usize], data: &[i16]) -> Self {
+        Self {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            data: data.iter().map(|value| *value as f32).collect(),
+            dtype: Prim::Int16,
+        }
+    }
+
     fn int32(name: &str, shape: &[usize], data: &[i32]) -> Self {
         Self {
             name: name.to_string(),
@@ -247,6 +273,9 @@ fn append_case_lines(
                 "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
                 dtype = match input.dtype {
                     Prim::F32 => "CHELIS_F32",
+                    // WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
+                    Prim::Int8 => "CHELIS_I8",
+                    Prim::Int16 => "CHELIS_I16",
                     Prim::Int32 => "CHELIS_I32",
                     Prim::Int64 => "CHELIS_I64",
                     other => panic!("unsupported manual HIP test dtype {}", other.name()),
@@ -257,6 +286,17 @@ fn append_case_lines(
                     Prim::F32 => lines.push(format!(
                         "    {prefix}_input_storage[{slot}]->data[{idx}] = {:.8}f;",
                         value
+                    )),
+                    // WS-A4: i8/i16 inputs are written via reinterpret cast on
+                    // `t->data` so the harness exercises the same memory layout
+                    // the generated HIP code reads from.
+                    Prim::Int8 => lines.push(format!(
+                        "    ((int8_t*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
+                        *value as i8
+                    )),
+                    Prim::Int16 => lines.push(format!(
+                        "    ((int16_t*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
+                        *value as i16
                     )),
                     Prim::Int32 => lines.push(format!(
                         "    ((int*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
@@ -2300,5 +2340,410 @@ fn ws_a2_hip_argmax_f64_kernel_emitted() {
     assert!(
         result.c_source.contains("long long *out"),
         "argmax output must be long long *"
+    );
+}
+
+// ============================================================================
+// WS-A4: i8 / i16 end-to-end execution tests on GPU.
+//
+// These mirror the C-backend WS-A4 tests in
+// crates/chelis-backend-c/tests/redteam_exec_compile.rs. The
+// `gpu_*` tests are `#[ignore]` so they only run under the manual
+// HIP gate (see file header). The codegen-shape tests below run by
+// default in CI so a kernel-name regression is caught without
+// requiring a HIP toolchain.
+// ============================================================================
+
+/// WS-A4: dtype-aware single-output runner. The output is read as the
+/// requested `out_c_ty` (e.g. `int8_t`, `int32_t`) and parsed back as
+/// `i64` so callers can assert exact integer equality. This sits next
+/// to the f32 `compile_and_run_single_output` rather than retrofitting
+/// it so the f32 callers stay byte-identical and the WS-A4 lift stays
+/// localized to this section.
+#[allow(dead_code, reason = "WS-A4 manual HIP gate; called from i8/i16 tests")]
+fn compile_and_run_single_output_typed_i64(
+    dag: &Dag,
+    func_name: &str,
+    inputs: &[TestInput],
+    out_c_ty: &str,
+    out_printf_spec: &str,
+) -> Vec<i64> {
+    require_hipcc();
+    let result = codegen_hip(dag, func_name);
+    assert_eq!(
+        result.output_labels.len(),
+        1,
+        "WS-A4 manual harness expects a single output"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hip_rt = hip_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_hip_runtime.h",
+        &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
+    );
+    copy_runtime_artifacts(tmp.path());
+    write_temp_file(tmp.path(), "model.cpp", &result.c_source);
+
+    let mut input_setup = Vec::new();
+    append_case_lines(
+        &mut input_setup,
+        func_name,
+        &result.input_labels,
+        result.output_labels.len(),
+        inputs,
+        "case0",
+    );
+    // Reuse `append_case_lines`'s prefix (input init + call invocation)
+    // and then append a typed read-and-print block. The float-formatted
+    // tail emitted by `append_case_lines` is dropped because we only
+    // copy lines through the call invocation line.
+    let mut prefix_lines = Vec::new();
+    for line in &input_setup {
+        prefix_lines.push(line.clone());
+        if line.contains(&format!("{func_name}(")) {
+            break;
+        }
+    }
+    prefix_lines.push("    for (int i = 0; i < case0_outputs[0]->size; i++) {".to_string());
+    prefix_lines.push("        if (i > 0) printf(\" \");".to_string());
+    prefix_lines.push(format!(
+        "        printf(\"{out_printf_spec}\", (long long)(({out_c_ty}*)case0_outputs[0]->data)[i]);"
+    ));
+    prefix_lines.push("    }".to_string());
+    prefix_lines.push("    printf(\"\\n\");".to_string());
+    prefix_lines.push("    chelis_free(case0_outputs[0]);".to_string());
+    for slot in 0..result.input_labels.len() {
+        prefix_lines.push(format!("    chelis_free(case0_input_storage[{slot}]);"));
+    }
+
+    let main_src = format!(
+        r#"#include "chelis_runtime.h"
+#include <stdint.h>
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+
+int main(void) {{
+{body}
+    return 0;
+}}
+"#,
+        body = prefix_lines.join("\n")
+    );
+    write_temp_file(tmp.path(), "main.cpp", &main_src);
+
+    let bin_path = tmp.path().join("gpu_correctness_bin");
+    let mut compile_cmd = Command::new("hipcc");
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("main.cpp"));
+    compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run hipcc");
+    assert!(
+        compile.status.success(),
+        "hipcc failed (WS-A4 typed):\nstderr: {}\nsource:\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.c_source
+    );
+
+    let run = Command::new(&bin_path).output().expect("run gpu binary");
+    assert!(
+        run.status.success(),
+        "GPU binary failed (WS-A4 typed):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8(run.stdout).expect("utf8 stdout");
+    stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|token| token.parse::<i64>().expect("parse output i64"))
+        .collect()
+}
+
+/// WS-A4: i8 add on GPU. Picks values that exercise the i8 elementwise
+/// kernel path, including a planned wrap (127 + 1 = -128).
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn ws_a4_i8_add_gpu_matches_two_complement_wrap() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Add,
+        vec![a, b],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "ws_a4_i8_add",
+        &[
+            TestInput::int8("a", &[4], &[1, 100, 127, -50]),
+            TestInput::int8("b", &[4], &[2, 50, 1, -80]),
+        ],
+        "int8_t",
+        "%lld",
+    );
+    // i8 wrap-around: 100+50 = 150 → -106; 127+1 = 128 → -128;
+    // -50 + -80 = -130 → +126.
+    assert_eq!(actual, vec![3, -106, -128, 126]);
+}
+
+/// WS-A4: i16 mul on GPU. 1000 * 1000 = 1_000_000 wraps in i16 to
+/// 16960 (1_000_000 mod 65536, with high bit clear).
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn ws_a4_i16_mul_gpu_matches_two_complement_wrap() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int16,
+        },
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int16,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Mul,
+        vec![a, b],
+        TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int16,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "ws_a4_i16_mul",
+        &[
+            TestInput::int16("a", &[2], &[100, 1000]),
+            TestInput::int16("b", &[2], &[100, 1000]),
+        ],
+        "int16_t",
+        "%lld",
+    );
+    assert_eq!(actual, vec![10000, 16960]);
+}
+
+/// WS-A4: i8 reduce_sum on GPU promotes accumulator to i32 per spec
+/// §5.7.1. 200 ones at i8 source produce 200 at i32 output (no wrap).
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn ws_a4_i8_reduce_sum_gpu_promotes_to_i32() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(200)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let sum_op =
+        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
+    let out = dag.add_node(
+        sum_op,
+        vec![a],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int32,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let data: Vec<i8> = vec![1; 200];
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "ws_a4_i8_reduce_sum",
+        &[TestInput::int8("a", &[200], &data)],
+        "int32_t",
+        "%lld",
+    );
+    assert_eq!(actual, vec![200], "200 i8 ones must sum to 200 in i32");
+}
+
+/// WS-A4: i16 reduce_sum on GPU. 200 i16 1000s = 200_000 (overflows
+/// i16 but fits in i32). Mirrors `ws_a4_i8_reduce_sum_gpu_promotes_to_i32`.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn ws_a4_i16_reduce_sum_gpu_promotes_to_i32() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(200)],
+            precision: Prim::Int16,
+        },
+        None,
+    );
+    let sum_op =
+        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int16).expect("i16 sum_default must succeed");
+    let out = dag.add_node(
+        sum_op,
+        vec![a],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int32,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let data: Vec<i16> = vec![1000; 200];
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "ws_a4_i16_reduce_sum",
+        &[TestInput::int16("a", &[200], &data)],
+        "int32_t",
+        "%lld",
+    );
+    assert_eq!(
+        actual,
+        vec![200_000],
+        "200 i16 1000s must sum to 200_000 in i32 (overflows i16)"
+    );
+}
+
+/// WS-A4 codegen-shape test (no GPU required): the dtype-suffixed
+/// kernel name appears in the generated HIP source for an i8 add.
+/// Runs by default so a kernel-name regression is caught without a
+/// HIP toolchain.
+#[test]
+fn ws_a4_i8_add_emits_dtype_suffixed_kernel_name() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Add,
+        vec![a, b],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "ws_a4_i8_add_codegen");
+    assert!(
+        result.c_source.contains("kernel_add_i8"),
+        "i8 add must emit `kernel_add_i8`; got source:\n{}",
+        result.c_source
+    );
+    assert!(
+        result.c_source.contains("int8_t"),
+        "i8 add kernel source must mention int8_t; got source:\n{}",
+        result.c_source
+    );
+}
+
+/// WS-A4 codegen-shape test (no GPU required): i8 reduce_sum emits a
+/// (source, accumulator) suffixed kernel name that resolves at
+/// kernel-source-emit time to the integer-promoted template.
+#[test]
+fn ws_a4_i8_reduce_sum_emits_promoted_kernel_name() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(200)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let sum_op =
+        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
+    let out = dag.add_node(
+        sum_op,
+        vec![a],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int32,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "ws_a4_i8_reduce_sum_codegen");
+    // Kernel name encodes both source dtype (`_i8`) and accumulator
+    // dtype (`_i32`). The unsuffixed `kernel_sum_ax0` would be the f32
+    // → f32 path, so its absence is the regression-shield.
+    assert!(
+        result.c_source.contains("kernel_sum_ax0_i8_i32"),
+        "i8 reduce_sum must emit `kernel_sum_ax0_i8_i32`; got source:\n{}",
+        result.c_source
+    );
+    assert!(
+        result.c_source.contains("int32_t acc"),
+        "i8 reduce_sum kernel source must use int32_t accumulator (per spec §5.7.1); got source:\n{}",
+        result.c_source
+    );
+    assert!(
+        result.c_source.contains("(int32_t)a[src_idx]"),
+        "i8 reduce_sum kernel source must widen each source element to int32_t before summing; got source:\n{}",
+        result.c_source
     );
 }

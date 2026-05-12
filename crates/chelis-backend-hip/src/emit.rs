@@ -447,6 +447,12 @@ impl HipEmitter {
                 continue;
             }
             match &node.op {
+                // WS-A4: `accumulator` is read inside
+                // `reduction_kernel_sources` (it picks the
+                // dtype-specialized kernel template). The `..` here
+                // would normally trip the destructure-`..` rule, but
+                // the dispatch happens inside the called helper which
+                // explicitly re-matches and binds the field.
                 RiscOp::Sum { axis, .. } | RiscOp::MaxReduce { axis } => {
                     let sources = self.reduction_kernel_sources(node, dag, *axis);
                     for (name, source) in sources {
@@ -712,9 +718,13 @@ impl HipEmitter {
         dag: &Dag,
         axis: usize,
     ) -> Vec<(String, String)> {
-        let kind = match node.op {
-            RiscOp::Sum { .. } => kernels::ReduceKind::Sum,
-            RiscOp::MaxReduce { .. } => kernels::ReduceKind::Max,
+        // WS-A4: bind `accumulator` instead of `..`. The kernel-name and
+        // kernel-source paths agree on the (source, accumulator) tuple
+        // so the i8/i16 → i32 promoted path produces a uniquely-named
+        // kernel source instead of colliding with the f32 default.
+        let (kind, accumulator) = match node.op {
+            RiscOp::Sum { accumulator, .. } => (kernels::ReduceKind::Sum, Some(accumulator)),
+            RiscOp::MaxReduce { .. } => (kernels::ReduceKind::Max, None),
             _ => unreachable!("reduction_kernel_sources called on non-reduction"),
         };
         let input_id = node.inputs[0];
@@ -736,14 +746,46 @@ impl HipEmitter {
 
         // For Sum, the result precision IS the accumulator (spec §5.7.1)
         // so we read the operand precision separately. For MaxReduce, the
-        // accumulator and result both match the operand precision.
+        // accumulator and result both match the operand precision. The
+        // f32/f64 paths use the WS-A2 dtype-parameterized
+        // `reduction_kernel_name(kind, axis, ElemKind)` naming so the
+        // pre-WS-A4 kernel-name convention is preserved; the WS-A4
+        // i8/i16 → i32 promoted path uses `reduction_kernel_name_typed`
+        // so its source/accumulator suffix encodes the promotion.
         let operand_ty = &dag.get(input_id).unwrap().output_type;
-        let operand_kind = Self::elem_kind(operand_ty);
-        let acc_kind = Self::elem_kind(&node.output_type);
-        let name = Self::reduction_kernel_name(kind, axis, acc_kind);
-        let source = match kind {
-            kernels::ReduceKind::Sum => kernels::reduce_sum(&name, axis, operand_kind, acc_kind),
-            kernels::ReduceKind::Max => kernels::reduce_max(&name, axis, acc_kind),
+        let src_prec = operand_ty.precision;
+        let acc_prec = node.output_type.precision;
+        let (name, source) = match kind {
+            kernels::ReduceKind::Sum => {
+                let acc = accumulator.unwrap_or(acc_prec);
+                if matches!(src_prec, Prim::Int8 | Prim::Int16) && acc == Prim::Int32 {
+                    // WS-A4 i8/i16 → i32 promoted-accumulator path.
+                    let name = Self::reduction_kernel_name_typed(kind, axis, src_prec, acc);
+                    let source = kernels::reduce_sum_promoted(
+                        &name,
+                        axis,
+                        Self::dtype_c_type(src_prec),
+                        "int32_t",
+                    );
+                    (name, source)
+                } else {
+                    // WS-A2 f32/f64 path via ElemKind-driven naming +
+                    // dispatch. Panics in `elem_kind` if a non-float
+                    // dtype slips through here, which is the loud
+                    // failure mode we want for unwired precisions.
+                    let operand_kind = Self::elem_kind(operand_ty);
+                    let acc_kind = Self::elem_kind(&node.output_type);
+                    let name = Self::reduction_kernel_name(kind, axis, acc_kind);
+                    let source = kernels::reduce_sum(&name, axis, operand_kind, acc_kind);
+                    (name, source)
+                }
+            }
+            kernels::ReduceKind::Max => {
+                let acc_kind = Self::elem_kind(&node.output_type);
+                let name = Self::reduction_kernel_name(kind, axis, acc_kind);
+                let source = kernels::reduce_max(&name, axis, acc_kind);
+                (name, source)
+            }
         };
         vec![(name, source)]
     }
@@ -784,10 +826,27 @@ impl HipEmitter {
     }
 
     fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, dag: &Dag) -> Option<String> {
+        // WS-A2 + WS-A4: kernel-name dispatch must agree with the
+        // kernel-source emission in `kernel_source_for_op`. For binary
+        // elementwise ops the operand precision is unambiguous
+        // (verifier-enforced same-precision per spec §5.4) and drives
+        // the kernel specialization. For unary ops and reductions the
+        // f32/f64 split is owned by `ElemKind::suffix()`.
+        let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
         let kind_for_node = |n: &DagNode| -> kernels::ElemKind { Self::elem_kind(&n.output_type) };
         match op {
-            RiscOp::Add => Some(format!("kernel_add_{}", kind_for_node(node).suffix())),
-            RiscOp::Mul => Some(format!("kernel_mul_{}", kind_for_node(node).suffix())),
+            // WS-A4: Add / Mul use the dtype-suffixed convention so f32
+            // stays unsuffixed (`kernel_add`) and non-f32 dtypes pick
+            // up an explicit suffix (`kernel_add_f64`, `kernel_add_i8`).
+            RiscOp::Add => Some(format!(
+                "kernel_add{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::Mul => Some(format!(
+                "kernel_mul{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            // WS-A2: float-only kernel templates remain `_<f32|f64>`-suffixed.
             RiscOp::MaxElem => Some(format!("kernel_max_elem_{}", kind_for_node(node).suffix())),
             RiscOp::CmpLt => {
                 // CmpLt has bool output but operand-precision storage;
@@ -814,7 +873,12 @@ impl HipEmitter {
             )),
             RiscOp::Dropout { .. } | RiscOp::Drop => None,
             RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)),
-            RiscOp::Sum { axis, .. } => {
+            // WS-A4: bind `accumulator` instead of `..` per the
+            // destructure-`..` memory rule. The kernel name encodes
+            // both source and accumulator dtype when they differ
+            // (i8/i16 → i32 path), so the kernel-source emission can
+            // dispatch unambiguously from the name.
+            RiscOp::Sum { axis, accumulator } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     Some(Self::fused_reduction_kernel_name(
@@ -822,11 +886,27 @@ impl HipEmitter {
                         kernels::ReduceKind::Sum,
                     ))
                 } else {
-                    Some(Self::reduction_kernel_name(
-                        kernels::ReduceKind::Sum,
-                        *axis,
-                        Self::elem_kind(&node.output_type),
-                    ))
+                    // Sum naming follows the same dispatch rule as
+                    // `reduction_kernel_sources`: f32/f64 use the
+                    // `ElemKind`-suffixed legacy name; i8/i16 → i32 uses
+                    // the WS-A4 typed naming so the i8/i16 kernel is
+                    // distinguishable from any future i32→i32 case.
+                    if matches!(operand_prec(), Prim::Int8 | Prim::Int16)
+                        && *accumulator == Prim::Int32
+                    {
+                        Some(Self::reduction_kernel_name_typed(
+                            kernels::ReduceKind::Sum,
+                            *axis,
+                            operand_prec(),
+                            *accumulator,
+                        ))
+                    } else {
+                        Some(Self::reduction_kernel_name(
+                            kernels::ReduceKind::Sum,
+                            *axis,
+                            Self::elem_kind(&node.output_type),
+                        ))
+                    }
                 }
             }
             RiscOp::MaxReduce { axis } => {
@@ -931,29 +1011,66 @@ impl HipEmitter {
         // writes 1.0/0.0 of operand precision to the GPU buffer. Use the
         // operand precision for kernel emission; the rest of the
         // floating ops have output_type == operand_type so the more
-        // common path uses output_type below.
-        let elem = match op {
-            RiscOp::CmpLt => Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
-            _ => Self::elem_kind(&node.output_type),
-        };
+        // common path uses output_type below. For Add/Mul/Sum the
+        // output may be a non-float dtype (i32 acc for i8/i16 sum,
+        // i8/i16 for narrow-int Add/Mul), so each of those arms
+        // resolves the right template inline rather than touching the
+        // float-only `elem_kind` shorthand.
+        let elem_for_unary = || Self::elem_kind(&node.output_type);
+        let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
         match op {
-            RiscOp::Add => kernels::binary_elementwise(name, "+", elem),
-            RiscOp::Mul => kernels::binary_elementwise(name, "*", elem),
-            RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem),
-            RiscOp::CmpLt => kernels::cmplt(name, elem),
-            RiscOp::Neg => kernels::unary_prefix(name, "-", elem),
-            RiscOp::Exp => kernels::unary_func(name, "expf", elem),
-            RiscOp::Log => kernels::unary_func(name, "logf", elem),
-            RiscOp::Sin => kernels::unary_func(name, "sinf", elem),
-            RiscOp::Sqrt => kernels::unary_func(name, "sqrtf", elem),
-            RiscOp::Cos => kernels::unary_func(name, "cosf", elem),
-            RiscOp::Tan => kernels::unary_func(name, "tanf", elem),
-            RiscOp::Atan => kernels::unary_func(name, "atanf", elem),
-            RiscOp::Abs => kernels::unary_func(name, "fabsf", elem),
-            RiscOp::Floor => kernels::unary_func(name, "floorf", elem),
-            RiscOp::Ceil => kernels::unary_func(name, "ceilf", elem),
-            RiscOp::UniformLike { .. } => kernels::uniform_like(name, elem),
-            RiscOp::Sum { axis, .. } => {
+            // WS-A4: Add / Mul dispatch on operand precision so each
+            // dtype gets its own kernel source. f32/f64 route through
+            // the WS-A2 `ElemKind` template (which now also handles
+            // f64); i8/i16 route through the typed template.
+            RiscOp::Add => {
+                let prec = operand_prec();
+                if matches!(prec, Prim::F32 | Prim::F64) {
+                    kernels::binary_elementwise(
+                        name,
+                        "+",
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+                    )
+                } else {
+                    kernels::binary_elementwise_typed(name, "+", Self::dtype_c_type(prec))
+                }
+            }
+            RiscOp::Mul => {
+                let prec = operand_prec();
+                if matches!(prec, Prim::F32 | Prim::F64) {
+                    kernels::binary_elementwise(
+                        name,
+                        "*",
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+                    )
+                } else {
+                    kernels::binary_elementwise_typed(name, "*", Self::dtype_c_type(prec))
+                }
+            }
+            RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem_for_unary()),
+            RiscOp::CmpLt => kernels::cmplt(
+                name,
+                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+            ),
+            RiscOp::Neg => kernels::unary_prefix(name, "-", elem_for_unary()),
+            RiscOp::Exp => kernels::unary_func(name, "expf", elem_for_unary()),
+            RiscOp::Log => kernels::unary_func(name, "logf", elem_for_unary()),
+            RiscOp::Sin => kernels::unary_func(name, "sinf", elem_for_unary()),
+            RiscOp::Sqrt => kernels::unary_func(name, "sqrtf", elem_for_unary()),
+            RiscOp::Cos => kernels::unary_func(name, "cosf", elem_for_unary()),
+            RiscOp::Tan => kernels::unary_func(name, "tanf", elem_for_unary()),
+            RiscOp::Atan => kernels::unary_func(name, "atanf", elem_for_unary()),
+            RiscOp::Abs => kernels::unary_func(name, "fabsf", elem_for_unary()),
+            RiscOp::Floor => kernels::unary_func(name, "floorf", elem_for_unary()),
+            RiscOp::Ceil => kernels::unary_func(name, "ceilf", elem_for_unary()),
+            RiscOp::UniformLike { .. } => kernels::uniform_like(name, elem_for_unary()),
+            // WS-A4: bind `accumulator` instead of `..`. The fused
+            // reduction path is f32-only today (its source kernel
+            // template doesn't carry a dtype suffix); the unfused path
+            // dispatches on (source, accumulator) and uses the
+            // promoted-accumulator template for the i8/i16 → i32
+            // case.
+            RiscOp::Sum { axis, accumulator } => {
                 let input_id = node.inputs[0];
                 let operand_kind = Self::elem_kind(&dag.get(input_id).unwrap().output_type);
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -968,7 +1085,25 @@ impl HipEmitter {
                         operand_kind,
                     )
                 } else {
-                    kernels::reduce_sum(name, *axis, operand_kind, elem)
+                    let src = operand_prec();
+                    if matches!(src, Prim::Int8 | Prim::Int16) && *accumulator == Prim::Int32 {
+                        // WS-A4 i8/i16 → i32 promoted-accumulator path.
+                        kernels::reduce_sum_promoted(
+                            name,
+                            *axis,
+                            Self::dtype_c_type(src),
+                            "int32_t",
+                        )
+                    } else {
+                        // WS-A2 f32/f64 path. `operand_kind` and the
+                        // accumulator `ElemKind` (derived from
+                        // `node.output_type`) drive the dtype-parameterized
+                        // template; non-float dtypes that aren't covered
+                        // by the WS-A4 promoted path panic loudly inside
+                        // `elem_kind` rather than silently downgrading.
+                        let acc_kind = Self::elem_kind(&node.output_type);
+                        kernels::reduce_sum(name, *axis, operand_kind, acc_kind)
+                    }
                 }
             }
             RiscOp::MaxReduce { axis } => {
@@ -986,7 +1121,7 @@ impl HipEmitter {
                         inner_kind,
                     )
                 } else {
-                    kernels::reduce_max(name, *axis, elem)
+                    kernels::reduce_max(name, *axis, elem_for_unary())
                 }
             }
             RiscOp::MinReduce { axis } => {
@@ -1005,15 +1140,16 @@ impl HipEmitter {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                 kernels::reduce_argmin(name, *axis, Self::elem_kind(input_ty))
             }
-            RiscOp::Const { .. } => kernels::fill(name, elem),
+            RiscOp::Const { .. } => kernels::fill(name, elem_for_unary()),
             RiscOp::Realize => Self::cast_kernel_source(name, node, dag),
             RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag),
             RiscOp::Copy => Self::cast_kernel_source(name, node, dag),
             RiscOp::FusedElem { ops } => {
-                kernels::fused_elementwise(name, ops, node.inputs.len(), elem)
+                kernels::fused_elementwise(name, ops, node.inputs.len(), elem_for_unary())
             }
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                let elem = elem_for_unary();
                 match indices_ty.precision {
                     Prim::Int32 => kernels::gather(name, "int", elem),
                     Prim::Int64 => kernels::gather(name, "long long", elem),
@@ -1025,6 +1161,7 @@ impl HipEmitter {
             }
             RiscOp::ScatterAdd { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                let elem = elem_for_unary();
                 match indices_ty.precision {
                     Prim::Int32 => kernels::scatter_add(name, "int", elem),
                     Prim::Int64 => kernels::scatter_add(name, "long long", elem),
@@ -1172,7 +1309,12 @@ impl HipEmitter {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Drop => {}
-            RiscOp::Sum { axis, .. } => {
+            // WS-A4: bind `accumulator` instead of `..` and thread it
+            // through to `emit_reduce_launch` so the launch-side kernel
+            // name agrees with the kernel-source-side name (otherwise
+            // hipModuleGetFunction fails to resolve the launched
+            // symbol against the registered source).
+            RiscOp::Sum { axis, accumulator } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     self.emit_fused_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
@@ -1184,6 +1326,7 @@ impl HipEmitter {
                         &node.output_type,
                         dag,
                         kernels::ReduceKind::Sum,
+                        Some(*accumulator),
                     );
                 }
             }
@@ -1199,6 +1342,7 @@ impl HipEmitter {
                         &node.output_type,
                         dag,
                         kernels::ReduceKind::Max,
+                        None,
                     );
                 }
             }
@@ -1752,6 +1896,11 @@ impl HipEmitter {
     // Reduce kernel launch
     // ------------------------------------------------------------------
 
+    // WS-A4: extra `accumulator` parameter is required so the launch
+    // site computes the same dtype-suffixed kernel name the
+    // source-emit side produces. The function already had 6 args
+    // pre-WS-A4.
+    #[allow(clippy::too_many_arguments)]
     fn emit_reduce_launch(
         &mut self,
         id: usize,
@@ -1760,6 +1909,11 @@ impl HipEmitter {
         ty: &TensorType,
         dag: &Dag,
         kind: kernels::ReduceKind,
+        // WS-A4: accumulator dtype for Sum reductions (None for Max
+        // and other non-accumulator-carrying kinds). Used to compute
+        // the dtype-suffixed kernel name so it matches the
+        // kernel-source side.
+        accumulator: Option<Prim>,
     ) {
         let a = inputs[0].0;
         if matches!(kind, kernels::ReduceKind::Sum)
@@ -1792,7 +1946,24 @@ impl HipEmitter {
             );
             return;
         }
-        let kernel_name = Self::reduction_kernel_name(kind, axis, Self::elem_kind(ty));
+        // WS-A2 + WS-A4: kernel-name dispatch must match the
+        // kernel-source emission in `reduction_kernel_sources`. f32/f64
+        // use the `ElemKind`-suffixed naming (so existing tests + ABI
+        // stay byte-identical); the WS-A4 i8/i16 → i32 promoted path
+        // uses the typed-name encoding so its kernel string is deduped
+        // separately.
+        let kernel_name = match (kind, accumulator) {
+            (kernels::ReduceKind::Sum, Some(acc))
+                if matches!(
+                    dag.get(NodeId(a)).unwrap().output_type.precision,
+                    Prim::Int8 | Prim::Int16
+                ) && acc == Prim::Int32 =>
+            {
+                let src_prec = dag.get(NodeId(a)).unwrap().output_type.precision;
+                Self::reduction_kernel_name_typed(kind, axis, src_prec, acc)
+            }
+            _ => Self::reduction_kernel_name(kind, axis, Self::elem_kind(ty)),
+        };
 
         self.emit_slot_wrapper(id, ty);
         self.line("{");
@@ -1894,9 +2065,15 @@ impl HipEmitter {
     ) {
         let fused_node = dag.get(reduction_inputs[0]).unwrap();
         let ext_inputs = &fused_node.inputs;
-        let kind = match dag.get(NodeId(id)).unwrap().op {
-            RiscOp::Sum { .. } => kernels::ReduceKind::Sum,
-            RiscOp::MaxReduce { .. } => kernels::ReduceKind::Max,
+        // WS-A4: bind `accumulator` so the fused-reduce path explicitly
+        // names the field. The fused-reduce kernel template is f32-only
+        // in this cycle (its source comes from `kernels::reduce_fused`
+        // which still hardcodes `float`); when that template grows
+        // dtype variants the `_acc` binding here is the hook that wires
+        // accumulator into the fused-reduce kernel name.
+        let (kind, _acc) = match dag.get(NodeId(id)).unwrap().op {
+            RiscOp::Sum { accumulator, .. } => (kernels::ReduceKind::Sum, Some(accumulator)),
+            RiscOp::MaxReduce { .. } => (kernels::ReduceKind::Max, None),
             _ => unreachable!("emit_fused_reduce_launch called on non-reduction"),
         };
         let kernel_name = Self::fused_reduction_kernel_name(id, kind);
@@ -2243,6 +2420,36 @@ impl HipEmitter {
         format!("kernel_{op}_ax{axis}_{}", elem.suffix())
     }
 
+    /// WS-A4: dtype-aware variant of `reduction_kernel_name` for
+    /// reductions that need to specialize on either source precision
+    /// or accumulator precision. The unsuffixed name is preserved when
+    /// `src == acc == f32` so the legacy emit and existing tests
+    /// (`reduce_sum_kernel_has_axis_loop`, `gpu_correctness::*`) stay
+    /// byte-identical to their pre-WS-A4 output. Non-f32 paths get a
+    /// `_<src>_<acc>` suffix so the i8/i16 → i32 promoted-accumulator
+    /// kernels are deduplicated separately from any future i32 → i32
+    /// or f64 → f64 specialization.
+    fn reduction_kernel_name_typed(
+        kind: kernels::ReduceKind,
+        axis: usize,
+        src: Prim,
+        acc: Prim,
+    ) -> String {
+        let op = match kind {
+            kernels::ReduceKind::Sum => "sum",
+            kernels::ReduceKind::Max => "maxred",
+        };
+        if src == Prim::F32 && acc == Prim::F32 {
+            format!("kernel_{op}_ax{axis}")
+        } else {
+            format!(
+                "kernel_{op}_ax{axis}{src_sfx}{acc_sfx}",
+                src_sfx = Self::dtype_kernel_suffix(src),
+                acc_sfx = Self::dtype_kernel_suffix(acc),
+            )
+        }
+    }
+
     fn fused_reduction_kernel_name(id: usize, kind: kernels::ReduceKind) -> String {
         let op = match kind {
             kernels::ReduceKind::Sum => "fused_sum",
@@ -2433,6 +2640,9 @@ impl HipEmitter {
     #[allow(dead_code)]
     fn bytes_per_element(dtype: Prim) -> usize {
         match dtype {
+            // WS-A4: i8/i16 element widths.
+            Prim::Int8 => 1,
+            Prim::Int16 => 2,
             Prim::F32 | Prim::Bool | Prim::Int32 => 4,
             Prim::F64 | Prim::Int64 => 8,
             // WS-A3: bf16 / f16 storage is 2 bytes (same as the host
@@ -2584,6 +2794,14 @@ impl HipEmitter {
             Prim::F32 => "CHELIS_F32",
             Prim::F64 => "CHELIS_F64",
             Prim::Bool => "CHELIS_BOOL",
+            // WS-A4: admit narrow signed integer dtypes per spec/04-type-system.md §1.1.
+            // Element widths are honored by the runtime allocator
+            // (chelis-runtime/src/lib.rs), and i8/i16 elementwise / reduce_sum
+            // kernels are dispatched via the dtype-suffixed kernel-name path
+            // (kernel_add_i8, kernel_sum_ax0_i8_i32, …) so generated HIP
+            // source operates on the correct C++ type.
+            Prim::Int8 => "CHELIS_I8",
+            Prim::Int16 => "CHELIS_I16",
             Prim::Int32 => "CHELIS_I32",
             Prim::Int64 => "CHELIS_I64",
             // WS-A3: bf16 / f16 admitted alongside the f32 family.
@@ -2593,8 +2811,34 @@ impl HipEmitter {
             Prim::Bf16 => "CHELIS_BF16",
             Prim::F16 => "CHELIS_F16",
             other => panic!(
-                "HIP backend supports f32/f64/bf16/f16/bool/int32/int64 tensors today; \
-                 got `{}`. i8/i16 land in WS-A4.",
+                "HIP backend supports f32/f64/bf16/f16/bool/int8/int16/int32/int64 \
+                 tensors today; got `{}`.",
+                other.name()
+            ),
+        }
+    }
+
+    /// WS-A4: kernel-name suffix encoding the source-level dtype, used
+    /// when generating dtype-specialized HIP kernels. `f32` keeps an
+    /// empty suffix so the legacy kernel names (`kernel_add`,
+    /// `kernel_sum_ax0`, …) survive byte-identical to their pre-WS-A4
+    /// emit; non-f32 dtypes get `_<short>` (e.g. `_i8`, `_i16`,
+    /// `_i32`). Pin the mapping in one place so the kernel-name path
+    /// and the kernel-source path agree on what each suffix means.
+    fn dtype_kernel_suffix(p: Prim) -> &'static str {
+        match p {
+            Prim::F32 => "",
+            Prim::F64 => "_f64",
+            Prim::Bool => "_bool",
+            Prim::Int8 => "_i8",
+            Prim::Int16 => "_i16",
+            Prim::Int32 => "_i32",
+            Prim::Int64 => "_i64",
+            other => panic!(
+                "HIP kernel suffix not defined for `{}` (active dtype set per \
+                 spec/04-type-system.md §1.1: f32/f64/bool/int8/int16/int32/int64). \
+                 bf16/f16 dispatch is matmul-only (WS-A3) and does not flow \
+                 through this suffix path.",
                 other.name()
             ),
         }
@@ -2607,14 +2851,36 @@ impl HipEmitter {
     /// `float *` GPU buffer, and Cast-to-bool likewise materializes a
     /// 4-byte payload. f64 gets its own variant. Other precisions fall
     /// outside the WS-A2 scope (bf16/f16 elementwise kernels are
-    /// matmul-only via `hipblasGemmEx` in WS-A3; i8/i16 in WS-A4) and
-    /// panic so callers see the limit immediately.
+    /// matmul-only via `hipblasGemmEx` in WS-A3; i8/i16 routes through
+    /// the WS-A4 typed templates via [`Self::dtype_c_type`]) and panic
+    /// so callers see the limit immediately.
     fn elem_kind(ty: &TensorType) -> kernels::ElemKind {
         match ty.precision {
             Prim::F32 | Prim::Bool => kernels::ElemKind::F32,
             Prim::F64 => kernels::ElemKind::F64,
             other => panic!(
                 "HIP backend kernel emission expected a floating precision, got `{}`",
+                other.name()
+            ),
+        }
+    }
+
+    /// WS-A4: C++ element-type spelling for an active-set dtype. Used
+    /// by the typed kernel templates in `crate::kernels` so a single
+    /// kernel template can emit `int8_t *a, …` etc. instead of
+    /// duplicating per-dtype templates. Complements [`Self::elem_kind`]
+    /// for the dtypes that don't (yet) have an `ElemKind` variant.
+    fn dtype_c_type(p: Prim) -> &'static str {
+        match p {
+            Prim::F32 => "float",
+            Prim::F64 => "double",
+            Prim::Bool => "float", /* bool tensors store as float on the GPU lane */
+            Prim::Int8 => "int8_t",
+            Prim::Int16 => "int16_t",
+            Prim::Int32 => "int32_t",
+            Prim::Int64 => "int64_t",
+            other => panic!(
+                "HIP element type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
                 other.name()
             ),
         }
