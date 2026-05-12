@@ -593,14 +593,23 @@ int main() { return 0; }
 }
 
 // =====================================================================
-// WS-A1 acceptance oracle: f64 / mixed-dtype / integer reduce_sum / matmul
+// WS-A1 + WS-A4 acceptance oracle: f64 / mixed-dtype / integer
+// reduce_sum / matmul / i8 / i16 end-to-end tests.
 // =====================================================================
 //
-// These tests exercise the new f64 BlasMatmul + dgemm dispatch and the
-// dtype-parameterized ReduceSum accumulator. They compile generated C
-// against the runtime + BLAS, run it, and compare against a hand-
-// computed reference (the evaluator equivalent for the fixed-point
-// reduce_sum / matmul cases is the closed-form value).
+// These tests exercise:
+//   * WS-A1: f64 BlasMatmul + dgemm dispatch and the dtype-parameterized
+//     ReduceSum accumulator (f64 / mixed / integer paths).
+//   * WS-A4: i8 / i16 source data through the active dtype set per
+//     spec/04-type-system.md §1.1 plus the reduce_sum
+//     accumulator-promotion rule per §5.7.1 (i8/i16 → i32). The C
+//     backend's `dtype_macro` maps Int8/Int16 to CHELIS_I8 / CHELIS_I16
+//     and the runtime allocator sizes their buffers correctly.
+//
+// They compile generated C against the runtime + BLAS, run it, and
+// compare against a hand-computed reference (the evaluator equivalent
+// for the fixed-point reduce_sum / matmul cases is the closed-form
+// value).
 
 use chelis_ir::dag::DimExpr;
 
@@ -622,6 +631,20 @@ fn vec_i32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
         precision: Prim::Int32,
+    }
+}
+
+fn vec_i8(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int8,
+    }
+}
+
+fn vec_i16(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int16,
     }
 }
 
@@ -1334,4 +1357,400 @@ fn ws_a3_bf16_f16_matmul_admitted_at_ir_validation() {
              Got: {errors:?}"
         );
     }
+}
+
+/// Header for i8/i16-typed harnesses. Reuses the runtime tensor view
+/// shape but reinterprets `t->data` as the narrow integer pointer.
+const WS_A4_HARNESS_HEADER: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include "chelis_runtime.h"
+
+static chelis_tensor make_view_1d_i8(int8_t* data, int n) {
+    chelis_tensor t;
+    memset(&t, 0, sizeof(t));
+    t.data = (float*)data;
+    t.shape[0] = n;
+    t.strides[0] = 1;
+    t.ndim = 1;
+    t.dtype = CHELIS_I8;
+    t.size = n;
+    t.owns_data = 0;
+    return t;
+}
+
+static chelis_tensor make_view_1d_i16(int16_t* data, int n) {
+    chelis_tensor t;
+    memset(&t, 0, sizeof(t));
+    t.data = (float*)data;
+    t.shape[0] = n;
+    t.strides[0] = 1;
+    t.ndim = 1;
+    t.dtype = CHELIS_I16;
+    t.size = n;
+    t.owns_data = 0;
+    return t;
+}
+"#;
+
+/// Build a `Load → Op → Op` DAG with two same-precision i8 inputs and
+/// emit the C source. Covers the i8 add path through the dtype-aware
+/// `elem_type` and `dtype_macro`. Tensors are vec_i8(N) so the codegen
+/// reinterpret-casts `t->data` to `int8_t*`.
+#[test]
+fn exec_i8_add_correct_output() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i8(8), None);
+    dag.add_node(RiscOp::Add, vec![a, b], vec_i8(8), None);
+    let dag = fuse(&dag);
+
+    let result = chelis_backend_c::codegen(&dag, "test_i8_add");
+    let src = &result.c_source;
+
+    // The kernel must emit `int8_t*` access against `t->data` (not float*).
+    assert!(
+        src.contains("int8_t"),
+        "i8 add codegen must mention int8_t element type; got:\n{src}"
+    );
+    assert!(
+        src.contains("CHELIS_I8"),
+        "i8 add codegen must allocate output via CHELIS_I8; got:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{WS_A4_HARNESS_HEADER}
+extern void test_i8_add(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    int8_t a_data[8] = {{ 1, 2, 3, 4, -5, -6, 7, 8 }};
+    int8_t b_data[8] = {{ 10, 20, 30, 40, 50, 60, -70, -80 }};
+    int8_t expected[8];
+    for (int i = 0; i < 8; i++) {{
+        // Two's-complement wrapping at the i8 width; matches the
+        // backend's `int8_t + int8_t` semantics.
+        expected[i] = (int8_t)((int)a_data[i] + (int)b_data[i]);
+    }}
+    chelis_tensor at = make_view_1d_i8(a_data, 8);
+    chelis_tensor bt = make_view_1d_i8(b_data, 8);
+    chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
+    chelis_tensor* outs[1] = {{ NULL }};
+    test_i8_add(in_ptrs, 2, outs, 1);
+    int ok = 1;
+    for (int i = 0; i < 8; i++) {{
+        int8_t got = ((int8_t*)outs[0]->data)[i];
+        if (got != expected[i]) {{
+            printf("MISMATCH at %d: got %d expected %d\n", i, (int)got, (int)expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("ws_a4_i8_add", src, &harness) else {
+        panic!("i8 add kernel failed to compile/run");
+    };
+    assert!(output.contains("PASS"), "i8 add wrong output:\n{output}");
+}
+
+/// i8 + i8 wraparound at i8 width: `100 + 50 = 150` does NOT fit in i8.
+/// The C-emit lowers to `(int8_t)acc + (int8_t)acc`, which under the
+/// usual C arithmetic conversions promotes to `int`, adds, then the
+/// store-back to `int8_t` truncates. That is two's-complement
+/// wraparound by the spec/04-type-system.md §5.4 contract. Pin the
+/// expected wrapping so a future emit refactor (e.g. silently
+/// promoting to i32 at the source-load site) breaks this test loudly.
+#[test]
+fn exec_i8_add_overflow_wraps_two_complement() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(2), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i8(2), None);
+    dag.add_node(RiscOp::Add, vec![a, b], vec_i8(2), None);
+    let dag = fuse(&dag);
+
+    let result = chelis_backend_c::codegen(&dag, "test_i8_add_wrap");
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{WS_A4_HARNESS_HEADER}
+extern void test_i8_add_wrap(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    // 100 + 50 = 150, wraps to -106 in i8 two's-complement.
+    // 127 + 1   = 128, wraps to -128 in i8 two's-complement.
+    int8_t a_data[2] = {{ 100, 127 }};
+    int8_t b_data[2] = {{ 50, 1 }};
+    int8_t expected[2] = {{ (int8_t)-106, (int8_t)-128 }};
+    chelis_tensor at = make_view_1d_i8(a_data, 2);
+    chelis_tensor bt = make_view_1d_i8(b_data, 2);
+    chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
+    chelis_tensor* outs[1] = {{ NULL }};
+    test_i8_add_wrap(in_ptrs, 2, outs, 1);
+    int ok = 1;
+    for (int i = 0; i < 2; i++) {{
+        int8_t got = ((int8_t*)outs[0]->data)[i];
+        if (got != expected[i]) {{
+            printf("MISMATCH at %d: got %d expected %d\n", i, (int)got, (int)expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("ws_a4_i8_add_wrap", src, &harness) else {
+        panic!("i8 add overflow kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "i8 add overflow did not wrap as expected:\n{output}"
+    );
+}
+
+/// i8 mul correctness: 12 * 10 = 120 fits in i8; 16 * 8 = 128 wraps to
+/// -128. Pin the wrapping behavior the same way as the add test.
+#[test]
+fn exec_i8_mul_correct_output_with_wrap() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(2), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i8(2), None);
+    dag.add_node(RiscOp::Mul, vec![a, b], vec_i8(2), None);
+    let dag = fuse(&dag);
+
+    let result = chelis_backend_c::codegen(&dag, "test_i8_mul");
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{WS_A4_HARNESS_HEADER}
+extern void test_i8_mul(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    int8_t a_data[2] = {{ 12, 16 }};
+    int8_t b_data[2] = {{ 10, 8 }};
+    // 12*10 = 120 fits; 16*8 = 128 wraps to -128.
+    int8_t expected[2] = {{ 120, (int8_t)-128 }};
+    chelis_tensor at = make_view_1d_i8(a_data, 2);
+    chelis_tensor bt = make_view_1d_i8(b_data, 2);
+    chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
+    chelis_tensor* outs[1] = {{ NULL }};
+    test_i8_mul(in_ptrs, 2, outs, 1);
+    int ok = 1;
+    for (int i = 0; i < 2; i++) {{
+        int8_t got = ((int8_t*)outs[0]->data)[i];
+        if (got != expected[i]) {{
+            printf("MISMATCH at %d: got %d expected %d\n", i, (int)got, (int)expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("ws_a4_i8_mul", src, &harness) else {
+        panic!("i8 mul kernel failed to compile/run");
+    };
+    assert!(output.contains("PASS"), "i8 mul wrong output:\n{output}");
+}
+
+/// i16 add: pick values that exercise the int16_t path through the
+/// codegen without overflowing. Mirrors `exec_i8_add_correct_output`
+/// for the i16 dtype.
+#[test]
+fn exec_i16_add_correct_output() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i16(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i16(4), None);
+    dag.add_node(RiscOp::Add, vec![a, b], vec_i16(4), None);
+    let dag = fuse(&dag);
+
+    let result = chelis_backend_c::codegen(&dag, "test_i16_add");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("int16_t"),
+        "i16 add codegen must mention int16_t element type; got:\n{src}"
+    );
+    assert!(
+        src.contains("CHELIS_I16"),
+        "i16 add codegen must allocate output via CHELIS_I16; got:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{WS_A4_HARNESS_HEADER}
+extern void test_i16_add(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    int16_t a_data[4] = {{ 1000, -2000, 30000, -32000 }};
+    int16_t b_data[4] = {{ 500, -1000, -20000, 1000 }};
+    int16_t expected[4];
+    for (int i = 0; i < 4; i++) {{
+        expected[i] = (int16_t)((int)a_data[i] + (int)b_data[i]);
+    }}
+    chelis_tensor at = make_view_1d_i16(a_data, 4);
+    chelis_tensor bt = make_view_1d_i16(b_data, 4);
+    chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
+    chelis_tensor* outs[1] = {{ NULL }};
+    test_i16_add(in_ptrs, 2, outs, 1);
+    int ok = 1;
+    for (int i = 0; i < 4; i++) {{
+        int16_t got = ((int16_t*)outs[0]->data)[i];
+        if (got != expected[i]) {{
+            printf("MISMATCH at %d: got %d expected %d\n", i, (int)got, (int)expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("ws_a4_i16_add", src, &harness) else {
+        panic!("i16 add kernel failed to compile/run");
+    };
+    assert!(output.contains("PASS"), "i16 add wrong output:\n{output}");
+}
+
+/// i8 reduce_sum into the spec-default i32 accumulator (the WS-0
+/// pinned promotion rule per §5.7.1). 200 ones at i8 source overflows
+/// i8 (max +127); the i32 accumulator + i32 result must yield exactly
+/// 200, no overflow, no panic.
+#[test]
+fn exec_i8_reduce_sum_promotes_to_i32() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(200), None);
+    // Use the spec-default constructor so the IR carries the §5.7.1
+    // i32 accumulator, not an inline `Prim::Int8` that would fail the
+    // verifier's narrowness check.
+    let sum_op =
+        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
+    dag.add_node(sum_op, vec![a], scalar_i32(), None);
+    let dag = fuse(&dag);
+
+    let result = chelis_backend_c::codegen(&dag, "test_i8_reduce_sum");
+    let src = &result.c_source;
+
+    // The accumulator type in the emitted C must be int32_t — pinning
+    // this catches a regression where the codegen silently picks the
+    // operand precision (the F1 footgun class for reductions).
+    assert!(
+        src.contains("int32_t acc"),
+        "i8 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
+    );
+    assert!(
+        src.contains("CHELIS_I32"),
+        "i8 reduce_sum output tensor must be allocated via CHELIS_I32; got:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{WS_A4_HARNESS_HEADER}
+extern void test_i8_reduce_sum(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    int8_t in_data[200];
+    for (int i = 0; i < 200; i++) in_data[i] = 1;
+    chelis_tensor in_t = make_view_1d_i8(in_data, 200);
+    chelis_tensor* in_ptrs[1] = {{ &in_t }};
+    chelis_tensor* outs[1] = {{ NULL }};
+    test_i8_reduce_sum(in_ptrs, 1, outs, 1);
+
+    int32_t got = ((int32_t*)outs[0]->data)[0];
+    int32_t expected = 200;
+    printf("sum(200 i8 ones): got=%d expected=%d\n", got, expected);
+    printf("%s\n", got == expected ? "PASS" : "FAIL");
+    return got == expected ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("ws_a4_i8_reduce_sum_200", src, &harness) else {
+        panic!("i8 reduce_sum kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "i8 reduce_sum did not promote to i32 / produced wrong sum:\n{output}"
+    );
+}
+
+/// i16 reduce_sum into i32: same accumulator-promotion path as i8.
+/// 200 i16 values of 1000 each = 200000 — overflows i16 (max +32767)
+/// but fits in i32. Pin both the source-int16 path and the i32 result.
+#[test]
+fn exec_i16_reduce_sum_promotes_to_i32() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i16(200),
+        None,
+    );
+    let sum_op =
+        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int16).expect("i16 sum_default must succeed");
+    dag.add_node(sum_op, vec![a], scalar_i32(), None);
+    let dag = fuse(&dag);
+
+    let result = chelis_backend_c::codegen(&dag, "test_i16_reduce_sum");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("int32_t acc"),
+        "i16 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{WS_A4_HARNESS_HEADER}
+extern void test_i16_reduce_sum(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    int16_t in_data[200];
+    for (int i = 0; i < 200; i++) in_data[i] = 1000;
+    chelis_tensor in_t = make_view_1d_i16(in_data, 200);
+    chelis_tensor* in_ptrs[1] = {{ &in_t }};
+    chelis_tensor* outs[1] = {{ NULL }};
+    test_i16_reduce_sum(in_ptrs, 1, outs, 1);
+
+    int32_t got = ((int32_t*)outs[0]->data)[0];
+    int32_t expected = 200000; // overflows i16 (max +32767), fits in i32
+    printf("sum(200 i16 1000s): got=%d expected=%d\n", got, expected);
+    printf("%s\n", got == expected ? "PASS" : "FAIL");
+    return got == expected ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("ws_a4_i16_reduce_sum_200", src, &harness) else {
+        panic!("i16 reduce_sum kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "i16 reduce_sum did not promote to i32 / produced wrong sum:\n{output}"
+    );
+}
+
+/// Negative test: the spec/04-type-system.md §5.7.1 narrowness rule
+/// says a user cannot request a narrower-than-default accumulator.
+/// `sum_with_accumulator(_, Int8, Int8)` must error. This locks the
+/// IR-side rejection helper that the WS-A0-Fixups verifier installs;
+/// the codegen path never sees the malformed IR.
+#[test]
+fn ws_a4_i8_sum_with_narrower_accumulator_is_ir_error() {
+    let err = chelis_ir::dag::RiscOp::sum_with_accumulator(0, Prim::Int8, Prim::Int8)
+        .expect_err("i8 reduce_sum with i8 accumulator must be rejected by sum_with_accumulator");
+    assert!(
+        err.contains("narrower than"),
+        "i8 reduce_sum with i8 accumulator must reference the narrowness rule; got: {err}"
+    );
+    assert!(
+        err.contains("§5.7.1"),
+        "rejection diagnostic must cite spec §5.7.1; got: {err}"
+    );
 }

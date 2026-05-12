@@ -189,15 +189,20 @@ fn build_array(var_name: &str, prefix: &str, suffix: &str) -> String {
     format!("  int {var_name}[] = {{ {} }};", elems.join(", "))
 }
 
-/// Generate kernel source for a binary elementwise op (add, mul).
-pub fn binary_elementwise(kernel_name: &str, op: &str, kind: ElemKind) -> String {
-    let ty = kind.c_type();
+/// WS-A2 + WS-A4: dtype-parameterized binary elementwise op (add, mul).
+/// `elem_c_ty` is the C++ type spelling (e.g. `float`, `double`,
+/// `int8_t`, `int16_t`) used for both operand pointers and the result
+/// pointer. Same-precision arithmetic per spec/04-type-system.md §5.4
+/// (no implicit promotion); both inputs and the output share
+/// `elem_c_ty`. The accompanying kernel name should already encode the
+/// dtype suffix (e.g. `kernel_add_f64`, `kernel_add_i8`).
+pub fn binary_elementwise_typed(kernel_name: &str, op: &str, elem_c_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int a_ndim, int a_size,
-    const {ty} *b, {b_strides}, int b_ndim, int b_size,
-    {ty} *out, {out_shape}, int out_ndim, int out_size) {{
+    const {elem_c_ty} *a, {a_strides}, int a_ndim, int a_size,
+    const {elem_c_ty} *b, {b_strides}, int b_ndim, int b_size,
+    {elem_c_ty} *out, {out_shape}, int out_ndim, int out_size) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
@@ -217,6 +222,14 @@ extern \"C\" __global__ void {kernel_name}(
         build_b_s = build_array("b_s", "b", "s"),
         build_out_sh = build_array("out_sh", "out", "sh"),
     )
+}
+
+/// WS-A2 thin wrapper for the legacy `ElemKind`-based call sites and
+/// for callers that already have an `ElemKind` in hand. Forwards to the
+/// dtype-parameterized [`binary_elementwise_typed`] using the
+/// `ElemKind`'s C-type spelling (`float` or `double`).
+pub fn binary_elementwise(kernel_name: &str, op: &str, kind: ElemKind) -> String {
+    binary_elementwise_typed(kernel_name, op, kind.c_type())
 }
 
 /// Generate kernel source for a binary function op (fmaxf for max_elem).
@@ -367,7 +380,9 @@ extern \"C\" __global__ void {kernel_name}(
 /// spec/04-type-system.md §5.7.1: the result of `reduce_sum` IS the
 /// accumulator). For f32→f32 and f64→f64 the two coincide; for the cross
 /// case (f32 operand with f64 accumulator) the loaded value is promoted on
-/// read.
+/// read. The WS-A4 i8/i16 → i32 promoted integer path lives in
+/// [`reduce_sum_promoted`] because the integer dtypes are not (yet)
+/// admitted by `ElemKind`.
 pub fn reduce_sum(
     kernel_name: &str,
     axis: usize,
@@ -402,6 +417,55 @@ extern \"C\" __global__ void {kernel_name}(
     }}
     int src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     acc += ({acc_ty})a[src_idx];
+  }}
+  out[outer] = acc;
+}}
+",
+        a_strides = stride_params("a"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// WS-A4: integer reduce_sum with a wider accumulator dtype.
+/// `src_c_ty` is the element type of the input tensor (e.g. `int8_t`,
+/// `int16_t`); `acc_c_ty` is the running-sum AND output element type
+/// (e.g. `int32_t` for the spec/04-type-system.md §5.7.1 i8/i16 → i32
+/// promoted path). Each source element is widened to `acc_c_ty` before
+/// being added so partial sums of e.g. 200 i8 ones produce 200, not the
+/// wrap-around result of accumulating at the source width.
+pub fn reduce_sum_promoted(
+    kernel_name: &str,
+    axis: usize,
+    src_c_ty: &str,
+    acc_c_ty: &str,
+) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {src_c_ty} *a, {a_strides}, int a_ndim, int a_size,
+    {acc_c_ty} *out, {out_shape}, int out_ndim, int out_size, int axis_size) {{
+{build_a_s}
+{build_out_sh}
+  int outer = blockIdx.x * blockDim.x + threadIdx.x;
+  if (outer >= out_size) return;
+  int out_indices[{MAX_DIM}];
+  chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
+  {acc_c_ty} acc = 0;
+  for (int k = 0; k < axis_size; k++) {{
+    int full_indices[{MAX_DIM}];
+    int out_d = 0;
+    for (int d = 0; d < a_ndim; d++) {{
+      if (d == {axis}) {{
+        full_indices[d] = k;
+      }} else {{
+        full_indices[d] = out_indices[out_d];
+        out_d++;
+      }}
+    }}
+    int src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    acc += ({acc_c_ty})a[src_idx];
   }}
   out[outer] = acc;
 }}

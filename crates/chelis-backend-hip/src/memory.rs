@@ -406,6 +406,9 @@ impl MemoryPlan {
 
 fn bytes_per_element(dtype: Prim) -> usize {
     match dtype {
+        // WS-A4: i8/i16 element widths.
+        Prim::Int8 => 1,
+        Prim::Int16 => 2,
         Prim::F32 | Prim::Bool | Prim::Int32 => 4,
         Prim::F64 | Prim::Int64 => 8,
         // WS-A3: bf16 / f16 storage is 2 bytes; mirrors
@@ -413,8 +416,8 @@ fn bytes_per_element(dtype: Prim) -> usize {
         // matching arm in `HipEmitter::bytes_per_element`.
         Prim::Bf16 | Prim::F16 => 2,
         other => panic!(
-            "HIP memory planner supports f32/f64/bool/int32/int64/bf16/f16 tensors today; \
-             got `{}`. i8/i16 land in WS-A4.",
+            "HIP memory planner supports f32/f64/bool/int8/int16/int32/int64/bf16/f16 \
+             tensors today; got `{}`.",
             other.name()
         ),
     }

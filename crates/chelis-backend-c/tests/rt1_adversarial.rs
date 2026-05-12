@@ -65,12 +65,18 @@ fn c_backend_panics_on_bf16_tensor_no_silent_float_downgrade() {
     let _ = CEmitter::emit_dag(&dag, "test_fn");
 }
 
+/// WS-A4 lifts the WS-A0 panic-until-wired guard for i8 tensors:
+/// `dtype_macro` and `elem_type` now map `Prim::Int8 → CHELIS_I8 /
+/// int8_t`, the runtime allocator sizes the buffer at 1 byte per
+/// element, and `chelis_contiguous` mirrors the same per-dtype size.
+/// The C source generated for an i8 tensor must NO LONGER panic, and
+/// must mention `int8_t` so a future refactor that re-introduces the
+/// silent f32 downgrade is caught immediately.
 #[test]
-#[should_panic(expected = "int8")]
-fn c_backend_panics_on_int8_tensor_no_silent_int32_downgrade() {
+fn ws_a4_c_backend_emits_int8_tensor_via_int8_t_no_silent_downgrade() {
     let mut dag = Dag::new();
-    let _ = dag.add_node(
-        RiscOp::Const { value: 1.0 },
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
             dims: vec![DimInfo::Lit(4)],
@@ -78,7 +84,27 @@ fn c_backend_panics_on_int8_tensor_no_silent_int32_downgrade() {
         },
         None,
     );
-    let _ = CEmitter::emit_dag(&dag, "test_fn");
+    // A bare Load+root is not enough — `verify` rejects dangling
+    // loads — so wrap it in a Copy that consumes `a`.
+    dag.add_node(
+        RiscOp::Copy,
+        vec![a],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let src = CEmitter::emit_dag(&dag, "test_fn");
+    assert!(
+        src.contains("int8_t"),
+        "WS-A4: C backend must emit i8 tensors via `int8_t` (no silent \
+         float downgrade); got source:\n{src}"
+    );
+    assert!(
+        src.contains("CHELIS_I8"),
+        "WS-A4: C backend must allocate i8 tensors via `CHELIS_I8`; got source:\n{src}"
+    );
 }
 
 // ---------------------------------------------------------------
