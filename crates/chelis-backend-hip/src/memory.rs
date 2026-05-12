@@ -399,9 +399,10 @@ impl MemoryPlan {
 fn bytes_per_element(dtype: Prim) -> usize {
     match dtype {
         Prim::F32 | Prim::Bool | Prim::Int32 => 4,
-        Prim::Int64 => 8,
+        Prim::F64 | Prim::Int64 => 8,
         other => panic!(
-            "Phase 1c HIP memory planner only supports f32/bool/int32/int64 tensors, got {}",
+            "HIP memory planner supports f32/f64/bool/int32/int64 tensors today; \
+             got `{}`. bf16/f16 land in WS-A3; i8/i16 in WS-A4.",
             other.name()
         ),
     }
