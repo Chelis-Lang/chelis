@@ -4330,16 +4330,48 @@ fn infer_top_level(
         });
 
         let errors_before_body = errors.len();
-        let body_ty = infer_expr(
-            &kids[1],
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        // WS-A7: when the body is a bare-arg `(fn (params) body)` and the
+        // declared signature gives concrete param types, seed the body's
+        // params with the declared types BEFORE inferring the body. Without
+        // this seeding, bare params get fresh, unconstrained type variables.
+        // For callee schemes that share a tvar between an `&T` param and a
+        // non-borrow return position (e.g. `add: (&t, &t) -> t`), the
+        // call-site `auto_borrow_call_arg_types` wraps the actual param
+        // tvar in `Ref(...)` and unifies it with the formal `Ref(α)`,
+        // collapsing the param-side and return-side of the callee into
+        // the same equivalence class. The post-body sig-unify then drives
+        // the return position to `Ref(t)` instead of the declared `t`,
+        // surfacing as `def 'tadd' body doesn't match declared signature:
+        // body has type `(&t, &t) -> &t`, declared type is `(&t, &t) -> t``.
+        // Annotated params do not hit this because their concrete type
+        // (`&tensor[..]`) flows through the call site directly. Seeding
+        // bare params with the declared type here makes the bare-arg path
+        // behave the same as the annotated path. See
+        // `crates/chelis-cli/tests/wsa7_bareref_return_inference.rs`.
+        let body_ty = if let Some(decl_ty) = &declared_ty {
+            infer_def_body_with_sig(
+                &kids[1],
+                decl_ty,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                typed_nodes,
+                total_nodes,
+            )
+        } else {
+            infer_expr(
+                &kids[1],
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                typed_nodes,
+                total_nodes,
+            )
+        };
         // Did the body's inference report any UnboundVariable diagnostic?
         // We use this to discriminate WS-A5 RT-3a F1's masked-by-Error
         // case (where Error is a downstream consequence of a reportable
@@ -8954,6 +8986,139 @@ fn infer_fn(
     Type::Fn(resolved_params, Box::new(resolved_body))
 }
 
+/// WS-A7: infer a `def`'s body when a declared signature is available, seeding
+/// any bare-arg parameters of an outer `(fn ...)` body with the declared
+/// signature's param types. This eliminates the bare-arg + sig-with-borrows
+/// return-type miscompile where call-site auto-borrow on an unconstrained
+/// param tvar collapses the param-side and return-side of the callee scheme
+/// (e.g. `add: (&t, &t) -> t`) into the same equivalence class.
+///
+/// Falls back to the standard `infer_expr` path when the body is not a
+/// `(fn ...)` or the declared type is not a `Fn` of matching arity. Already-
+/// annotated params are not overridden.
+#[allow(clippy::too_many_arguments)]
+fn infer_def_body_with_sig(
+    body: &deep::Expr,
+    decl_ty: &Type,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    // Match: body is `(fn (params ...) body-expr)` AND decl is `Fn(args, ret)`.
+    let fn_list = match body {
+        deep::Expr::List(list, _) if get_tag(list) == Some("fn") => list,
+        _ => {
+            return infer_expr(
+                body,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                typed_nodes,
+                total_nodes,
+            );
+        }
+    };
+    let (decl_args, decl_ret) = match decl_ty {
+        Type::Fn(args, ret) => (args, ret.as_ref()),
+        _ => {
+            return infer_expr(
+                body,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                typed_nodes,
+                total_nodes,
+            );
+        }
+    };
+
+    let kids = children(fn_list);
+    if kids.len() < 2 {
+        return Type::Error;
+    }
+    let params = extract_params(&kids[0], vg, adt_reg);
+    if params.len() != decl_args.len() {
+        // Arity mismatch between params and sig: fall back so the post-body
+        // unify produces a clear ArityMismatch diagnostic.
+        return infer_expr(
+            body,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
+    let mut param_types = Vec::with_capacity(params.len());
+    let mut fn_env = env.clone();
+    for ((pname, ty_ann), decl_arg) in params.iter().zip(decl_args.iter()) {
+        // Annotated params keep their annotation; bare params get seeded with
+        // the declared sig type. The post-body unify still validates each
+        // path in the standard way.
+        let ty = ty_ann.clone().unwrap_or_else(|| decl_arg.clone());
+        fn_env.bind(pname.clone(), Scheme::mono(ty.clone()));
+        param_types.push(ty);
+    }
+
+    // Mirror infer_fn's polymorphic-dim self-pin check: if the body forces
+    // any declared dim variable to a concrete literal, surface it.
+    let mut declared_dvars: Vec<DimVar> = Vec::new();
+    for t in &param_types {
+        for dv in crate::env::free_dvars(t) {
+            if !declared_dvars.contains(&dv) {
+                declared_dvars.push(dv);
+            }
+        }
+    }
+
+    let body_expr = &kids[1];
+    let body_ty = infer_expr(
+        body_expr,
+        &mut fn_env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+
+    for dv in &declared_dvars {
+        let resolved = subst.apply_dim(&Dim::Var(*dv));
+        if let Dim::Lit(n) = resolved {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "polymorphic dim variable forced to concrete Lit({n}) by function body: \
+                     declared dim parameters must remain polymorphic"
+                ),
+                vec![
+                    "Replace the polymorphic dim with the concrete literal in the signature, or \
+                     ensure the body does not pin the dim to a specific size"
+                        .to_string(),
+                ],
+            ));
+        }
+    }
+
+    let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
+    let resolved_body = subst.apply(&body_ty);
+    let _ = decl_ret; // referenced for documentation; sig-unify happens at the call site
+
+    Type::Fn(resolved_params, Box::new(resolved_body))
+}
+
 /// Extract parameter names (and optional type annotations) from (params {} x1 ... xn).
 /// Each param can be a bare symbol, a metadata-annotated symbol, or a legacy
 /// `(name {type: T})` helper pair.
@@ -11111,6 +11276,17 @@ mod tests {
 
     #[test]
     fn vmap_grad_single_tensor_param_type_checks() {
+        // WS-A7: pre-fix, the bare-arg `x` in `def loss(x) = sum(x, 0)` was
+        // never seeded with the declared sig type (`tensor[features, f32]`)
+        // before body inference, so `sum`'s reduction-signature check
+        // early-returned an unconstrained result tvar (the input was still a
+        // free `Var(_)`). The post-body sig-unify could then pin that
+        // unconstrained tvar to the declared `f32` even though `sum` on a
+        // rank-1 tensor produces `tensor[, f32]` per the spec — masking the
+        // missing `tensor_to_scalar` coercion. Seeding bare params with the
+        // declared sig types now exposes the rank-0 result, so the fixture
+        // wraps the reduction in `tensor_to_scalar` to match the declared
+        // scalar return.
         check_ok(
             "(defsig {} loss
                 (t-fn {}
@@ -11118,7 +11294,10 @@ mod tests {
                     (t-prim {} f32)))
              (def {} loss
                 (fn {} (params {} x)
-                    (app {type: (t-prim {} f32)} (var {} sum) (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} x) (lit {type: (t-prim {} int32)} 0)))
+                    (app {type: (t-prim {} f32)} (var {} tensor_to_scalar)
+                        (app {type: (t-tensor {} (t-prim {} f32))} (var {} sum)
+                            (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} x)
+                            (lit {type: (t-prim {} int32)} 0))))
              )
              (defsig {} per_example_grad
                 (t-fn {}
@@ -11131,6 +11310,9 @@ mod tests {
 
     #[test]
     fn vmap_grad_multiple_params_type_checks_with_tuple_result() {
+        // WS-A7: see vmap_grad_single_tensor_param_type_checks — the same
+        // rank-0 vs `Prim(f32)` distinction applies; wrap `sum` in
+        // `tensor_to_scalar` to match the declared scalar return.
         check_ok(
             "(defsig {} loss
                 (t-fn {}
@@ -11139,11 +11321,12 @@ mod tests {
                     (t-prim {} f32)))
              (def {} loss
                 (fn {} (params {} x y)
-                        (app {type: (t-prim {} f32)} (var {} sum)
+                    (app {type: (t-prim {} f32)} (var {} tensor_to_scalar)
+                        (app {type: (t-tensor {} (t-prim {} f32))} (var {} sum)
                             (app {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} (var {} add)
                                 (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} x)
                                 (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} y))
-                        (lit {type: (t-prim {} int32)} 0)))
+                            (lit {type: (t-prim {} int32)} 0))))
              )
              (def {} per_example_grad
                 (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} int32)} 0)))",
