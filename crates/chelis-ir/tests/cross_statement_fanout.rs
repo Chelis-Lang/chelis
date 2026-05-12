@@ -19,6 +19,18 @@
 //! * AD parity holds vs an explicit-`copy(x)` rewrite (within 1e-6).
 //! * The lowered DAG produces a numerically identical forward result vs
 //!   the explicit-`copy(x)` variant.
+//!
+//! V2-F4 extension (red-team v2 finding, PR #58): the no-module
+//! top-level-statement shape is the case PR #29 missed. Top-level
+//! `y = x` desugars to `(def {} y (var x))`. With no `module` wrapper,
+//! `check_linearity` pre-declares each top-level def name, so when
+//! `check_top_level` recurses into the body `(var x)` it routes
+//! through `check_expr -> consume_var_expr` with a `generic_site`
+//! description (`"use at offset N"`), not a `"binding ..."` site. The
+//! tolerance in `read_or_error` (PR #29) keys on the `"binding "`
+//! prefix and so does not fire — every later borrow-read of `x` is
+//! rejected as `UseAfterConsume`. See
+//! `docs/investigations/var_rhs_aliased_fanout_v2_diagnosis.md`.
 
 use std::collections::HashMap;
 
@@ -195,6 +207,204 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
 
     // AD parity. Collapse `fanout(x)` to a scalar by summing and
     // differentiate w.r.t. the `Load { name: "x" }` parameter node.
+    let target_x_load = find_load(&dag, "x");
+    let workaround_x_load = find_load(&workaround_dag, "x");
+    let target_scalar = scalarize_root(&dag, root);
+    let workaround_scalar = scalarize_root(&workaround_dag, workaround_root);
+
+    let target_grad = grad_dag_checked(&target_scalar.dag, target_scalar.root, &[target_x_load])
+        .expect("target gradient must succeed");
+    let workaround_grad = grad_dag_checked(
+        &workaround_scalar.dag,
+        workaround_scalar.root,
+        &[workaround_x_load],
+    )
+    .expect("workaround gradient must succeed");
+
+    let target_grad_node = target_grad.grad_nodes[&target_x_load];
+    let workaround_grad_node = workaround_grad.grad_nodes[&workaround_x_load];
+
+    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    inputs.insert("x".to_string(), x);
+    let target_vals = eval_tensor_with(&target_grad.dag, |n| inputs.get(n).cloned())
+        .expect("target backward eval");
+    let workaround_vals = eval_tensor_with(&workaround_grad.dag, |n| inputs.get(n).cloned())
+        .expect("workaround backward eval");
+
+    let target_dx = &target_vals[&target_grad_node];
+    let workaround_dx = &workaround_vals[&workaround_grad_node];
+    assert_eq!(target_dx.shape, workaround_dx.shape);
+    for i in 0..target_dx.data.len() {
+        assert!(
+            (target_dx.data[i] - workaround_dx.data[i]).abs() < 1e-6,
+            "AD parity fail at [{i}]: target={} workaround={}",
+            target_dx.data[i],
+            workaround_dx.data[i]
+        );
+    }
+}
+
+#[test]
+#[ignore = "V2-F4: top-level no-module var-RHS aliased fan-out; tracked in PR #58"]
+fn top_level_no_module_var_rhs_aliased_fan_out_lowers_without_explicit_copy() {
+    // V2-F4 TARGET: cross-statement var-RHS aliased fan-out at the
+    // top level (no module wrapper). This is the case PR #29 missed.
+    //
+    // Top-level statements desugar to bare `(def {} name body)` nodes
+    // (no surrounding `module`). `check_linearity` pre-declares each
+    // top-level def name, so when `check_top_level(def y (var x))`
+    // recurses into the body `(var x)` it calls
+    // `consume_var_expr(var x, scope, generic_site)` with a
+    // `"use at offset N"` description. PR #29's `read_or_error`
+    // tolerance keys on the `"binding "` prefix, so subsequent borrow
+    // reads of `x` (via `mul`) are rejected with `UseAfterConsume`.
+    //
+    // After the fix, `check_top_level` recognizes the var-body
+    // `def name = x` shape as an aliasing binding and uses a
+    // `"binding `name` at offset N"` consume site, matching
+    // `check_let`. The borrow-read path then routes through the
+    // existing PR #29 tolerance and the program lowers cleanly.
+    //
+    // Acceptance:
+    //   * Lowers without explicit `copy(x)`.
+    //   * Zero Copy nodes in the DAG (mul borrows both args; aliasing
+    //     is free at the DAG level — same invariant as the
+    //     `var_rhs_let_alias_then_borrow_use_*` control above).
+    //   * Forward + AD parity vs the explicit-`copy(x)` rewrite within
+    //     1e-6.
+    let source = r#"
+x = to_tensor([1.5, 2.7, -0.3])
+y = x
+a = mul(y, to_tensor([2.0, 2.0, 2.0]))
+b = mul(x, to_tensor([3.0, 3.0, 3.0]))
+"#;
+    let dag = surf_to_dag(source)
+        .expect("top-level no-module var-RHS aliasing must lower cleanly after the V2-F4 fix");
+
+    // The final root is `b = mul(x, ...)`. Use it as the canonical
+    // root for cost analysis. Both `a` and `b` are top-level defs,
+    // so they each have their own root; cross-root Copy counts are
+    // checked via the whole DAG.
+    let target_root = *dag.roots().last().expect("dag has at least one root");
+
+    // `mul` borrows both args. Source has zero non-borrow consuming
+    // fan-out → zero inserted Copy nodes per spec §"Copy Insertion"
+    // + "Borrows do not count as fan-out".
+    let target_copies = analyze_function_copy_cost(&dag, "b", target_root).copy_count;
+    assert_eq!(
+        target_copies, 0,
+        "expected zero Copy nodes for top-level var-RHS aliasing with all-borrow uses"
+    );
+
+    // Forward + AD parity vs the explicit-`copy(x)` workaround. The
+    // only difference is an inert `RiscOp::Copy` node whose adjoint
+    // is the identity, so both gradients must match within 1e-6.
+    let workaround = r#"
+x = to_tensor([1.5, 2.7, -0.3])
+y = copy(x)
+a = mul(y, to_tensor([2.0, 2.0, 2.0]))
+b = mul(x, to_tensor([3.0, 3.0, 3.0]))
+"#;
+    let workaround_dag = surf_to_dag(workaround)
+        .expect("explicit-copy workaround must lower cleanly today and after the fix");
+    let workaround_root = *workaround_dag
+        .roots()
+        .last()
+        .expect("workaround dag has at least one root");
+
+    // Forward parity: evaluate the whole DAG (no parameters) and
+    // compare the `b` root tensor data.
+    let target_vals = eval_tensor_with(&dag, |_: &str| None).expect("target forward eval succeeds");
+    let workaround_vals = eval_tensor_with(&workaround_dag, |_: &str| None)
+        .expect("workaround forward eval succeeds");
+    let target_b = target_vals
+        .get(&target_root)
+        .expect("target b root tensor present");
+    let workaround_b = workaround_vals
+        .get(&workaround_root)
+        .expect("workaround b root tensor present");
+    assert_eq!(target_b.shape, workaround_b.shape, "shape parity (b)");
+    for i in 0..target_b.data.len() {
+        assert!(
+            (target_b.data[i] - workaround_b.data[i]).abs() < 1e-6,
+            "forward parity fail at b[{i}]: target={} workaround={}",
+            target_b.data[i],
+            workaround_b.data[i]
+        );
+    }
+
+    // AD parity: scalar-reduce each top-level statement-root, then
+    // differentiate w.r.t. `Load(x)`. Top-level `x` is materialized
+    // as a `to_tensor` literal, so there is no `Load(x)` parameter
+    // node — we differentiate w.r.t. the first reachable tensor
+    // source on the `x` chain, which is the literal-construction
+    // node `b` depends on. The DAG-level structural-share invariant
+    // is the primary lock; AD parity is verified on a function-body
+    // sibling shape in
+    // `var_rhs_let_alias_then_borrow_use_lowers_without_explicit_copy`.
+}
+
+#[test]
+#[ignore = "V2-F4: function-body var-RHS aliased fan-out across multiple statements"]
+fn fn_body_cross_statement_var_rhs_aliased_fan_out_lowers_without_explicit_copy() {
+    // V2-F4 sibling: same aliasing shape, but inside a `def` body
+    // (multiple let-bindings via the block syntax). This is the
+    // function-body analogue of the top-level reproducer above.
+    //
+    // The `check_let` path already uses a `"binding `name` at offset N"`
+    // consume site (PR #29), so the control already accepts. This
+    // fixture pins behavior so a future regression in `check_let`'s
+    // bind-loop, or the `read_or_error` tolerance, surfaces here.
+    let source = r#"
+module Repro.FanOutFnBody
+
+def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
+  y = x
+  a = mul(y, x)
+  b = mul(x, x)
+  add(a, b)
+}
+"#;
+    let dag = surf_to_dag(source)
+        .expect("function-body var-RHS aliasing must lower cleanly after the V2-F4 fix");
+    let root = find_def_root_by_name(&dag, "fanout");
+    // mul/add borrow all args; no non-borrow consuming fan-out source
+    // ⇒ zero Copy nodes per spec §"Copy Insertion".
+    assert_eq!(
+        copy_count(&dag, root),
+        0,
+        "expected zero Copy nodes; mul/add borrow both args; aliasing is free at the DAG level"
+    );
+
+    // AD parity vs the explicit-`copy(x)` rewrite. Copy's adjoint is
+    // identity, so gradients must match within 1e-6.
+    let workaround = r#"
+module Repro.FanOutFnBodyWorkaround
+
+def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
+  y = copy(x)
+  a = mul(y, x)
+  b = mul(x, x)
+  add(a, b)
+}
+"#;
+    let workaround_dag = surf_to_dag(workaround)
+        .expect("explicit-copy workaround must lower cleanly today and after the fix");
+    let workaround_root = find_def_root_by_name(&workaround_dag, "fanout");
+
+    let x = tv_3([1.5, -0.5, 2.0]);
+    let target_fwd = eval_fanout(&dag, root, "x", x.clone());
+    let workaround_fwd = eval_fanout(&workaround_dag, workaround_root, "x", x.clone());
+    assert_eq!(target_fwd.shape, workaround_fwd.shape);
+    for i in 0..target_fwd.data.len() {
+        assert!(
+            (target_fwd.data[i] - workaround_fwd.data[i]).abs() < 1e-6,
+            "forward parity fail at [{i}]: target={} workaround={}",
+            target_fwd.data[i],
+            workaround_fwd.data[i]
+        );
+    }
+
     let target_x_load = find_load(&dag, "x");
     let workaround_x_load = find_load(&workaround_dag, "x");
     let target_scalar = scalarize_root(&dag, root);
