@@ -1,3 +1,4 @@
 module Std.Nn.Embedding
 export (forward)
-def forward[batch, seq, vocab, hidden](ids: &tensor[batch, seq, int64], table: &tensor[vocab, hidden, f32]) -> tensor[batch, seq, hidden, f32] = gather(table, ids, 0)
+sig forward: &tensor[batch, seq, int64] -> &tensor[vocab, hidden, p] -> tensor[batch, seq, hidden, p]
+def forward[batch, seq, vocab, hidden, p](ids, table) = gather(table, ids, 0)

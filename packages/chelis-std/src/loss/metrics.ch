@@ -1,9 +1,9 @@
 module Std.Loss.Metrics
 export (accuracy, perplexity)
-def accuracy[batch, classes](logits: &tensor[batch, classes, f32], labels: &tensor[batch, int64]) -> f32 = {
+def accuracy[batch, classes, p](logits: &tensor[batch, classes, p], labels: &tensor[batch, int64]) -> f32 = {
   batch_size = cast(shape(logits, cast(0, int32)), int64)
   rows = split(logits, cast(0, int32), one_sizes_acc(batch_size))
-  preds = map(fn (row: tensor[piece, classes, f32]) -> {
+  preds = map(fn (row) -> {
     out = row_argmax(row)
     _ = drop(row)
     out
@@ -13,7 +13,7 @@ def accuracy[batch, classes](logits: &tensor[batch, classes, f32], labels: &tens
   div(cast(hits, f32), cast(batch_size, f32))
 }
 def perplexity(loss: f32) -> f32 = exp(loss)
-def row_argmax[piece, classes](row: &tensor[piece, classes, f32]) -> int64 = {
+def row_argmax[piece, classes, p](row: &tensor[piece, classes, p]) -> int64 = {
   pair = sort(row, cast(1, int32))
   ids = tensor_int_row_to_list(pair.1)
   index(ids, sub(len(ids), cast(1, int64)))
