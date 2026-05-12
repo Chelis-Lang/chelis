@@ -171,7 +171,7 @@ fn position_1_no_annotation_int_default_is_int32() {
     );
     assert!(
         !contains_lit_with_prim(&printed, "int64"),
-        "expected NO int64-typed literals — silent widening to int64 \
+        "expected NO int64-typed literals; silent widening to int64 \
          would violate the WS-0 pin per spec §5.3, got:\n{}",
         printed.join("\n")
     );
@@ -226,7 +226,7 @@ fn position_3_fn_return_tensor_f64_narrows_body_literals() {
     );
     assert!(
         !contains_lit_with_prim(&printed, "f32"),
-        "expected NO f32-typed literals — declared return type f64 \
+        "expected NO f32-typed literals; declared return type f64 \
          must override the §P10 default, got:\n{}",
         printed.join("\n")
     );
@@ -293,7 +293,7 @@ fn negative_bare_int_list_does_not_silently_default_to_int64() {
     assert!(
         !combined.contains("(t-prim {} int64)"),
         "bare unannotated [1, 2, 3] must not silently default to \
-         int64 — got:\n{}",
+         int64; got:\n{}",
         combined
     );
 }
@@ -310,7 +310,7 @@ fn negative_bare_float_list_does_not_silently_default_to_f64() {
     assert!(
         !combined.contains("(t-prim {} f64)"),
         "bare unannotated [1.0, 2.0, 3.0] must not silently default \
-         to f64 — got:\n{}",
+         to f64; got:\n{}",
         combined
     );
 }
