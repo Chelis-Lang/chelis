@@ -202,10 +202,30 @@ fn desugar_param(param: &Param) -> deep::Expr {
 }
 
 fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::Expr {
+    desugar_param_with_scope(param, dim_vars, &HashSet::new())
+}
+
+/// Desugar a parameter with both a declared dim-vars scope and a
+/// quantified type-variable scope. The tvar scope is non-empty for
+/// `def f[..](...)` parameters where the def's quantifier list (`[..]`)
+/// participates in the contextual precision rule of
+/// `spec/02-surf-syntax.md` §P4b: a name in the precision slot of a
+/// `tensor[..., <name>]` annotation that matches the def's quantifier
+/// list desugars to `(t-var {} <name>)` rather than
+/// `(t-prim {} <name>)`. This is the WS-A6 extension of the WS-A5 rule
+/// from sigs to def parameter annotations.
+fn desugar_param_with_scope(
+    param: &Param,
+    dim_vars: &HashSet<String>,
+    tvar_set: &HashSet<String>,
+) -> deep::Expr {
     match &param.ty {
         Some(ty) if typed_param_needs_meta_wrapper(&param.name) => deep::Expr::MetaExpr(
             deep::MetaExpr {
-                entries: vec![("type".to_string(), desugar_type_with_dims(ty, dim_vars))],
+                entries: vec![(
+                    "type".to_string(),
+                    desugar_type_with_scope(ty, dim_vars, tvar_set),
+                )],
                 expr: Box::new(sym(&param.name)),
             },
             sp(),
@@ -214,7 +234,7 @@ fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::E
             deep::List {
                 elements: vec![
                     sym(&param.name),
-                    meta_with_type(desugar_type_with_dims(ty, dim_vars)),
+                    meta_with_type(desugar_type_with_scope(ty, dim_vars, tvar_set)),
                 ],
             },
             sp(),
@@ -760,12 +780,26 @@ impl DesugarCtx {
         body: &Expr,
     ) -> Vec<deep::Expr> {
         // Function-level dim params are polymorphic d-vars, NOT module-level defdim.
-        // Build a set so desugar_type_with_dims treats them as d-var.
+        // Build a set so desugar_type_with_scope treats them as d-var.
         let dim_set: HashSet<String> = dim_params.iter().cloned().collect();
+
+        // WS-A6 (spec/02-surf-syntax.md §P4b): when a def declares an
+        // explicit quantifier list `def f[..](...)`, names in that list
+        // that appear in the precision slot of a `tensor[..., <name>]`
+        // parameter annotation desugar to `(t-var {} <name>)` rather
+        // than `(t-prim {} <name>)`. The same identifier may also act
+        // as a dim-var when it appears in a dim slot — the
+        // dim/precision distinction is determined by position inside
+        // the tensor type, not by per-name kind tracking. When
+        // `dim_params` is empty, the WS-A5 implicit collection on the
+        // synthesized sig is preserved and parameter annotations keep
+        // their pre-WS-A6 behavior (an unbound precision name surfaces
+        // a diagnostic via `validate_tensor_precisions_in_program`).
+        let param_ann_tvar_set: HashSet<String> = dim_set.clone();
 
         let param_names: Vec<deep::Expr> = params
             .iter()
-            .map(|param| desugar_param_with_dims(param, &dim_set))
+            .map(|param| desugar_param_with_scope(param, &dim_set, &param_ann_tvar_set))
             .collect();
         let params_node = node("params", param_names);
         let body_scope: Vec<String> = params.iter().map(|param| param.name.clone()).collect();
@@ -783,21 +817,32 @@ impl DesugarCtx {
         let def_node = node("def", vec![sym(name), fn_node]);
 
         if params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() {
-            // WS-A5: collect the union of implicit type variables over
-            // every typed parameter and the return type so the
-            // contextual precision rule (spec/04-type-system.md §5.8)
-            // can fire on tensor[..., p] anywhere in the sig. Without
-            // the union, a sig whose precision var appears only in the
-            // return type would mishandle the precision slot.
-            let mut tvar_set: HashSet<String> = HashSet::new();
-            for p in params {
-                if let Some(ty) = &p.ty {
-                    collect_sig_type_vars(ty, &mut tvar_set);
+            // Tvar set for the synthesized sig:
+            //
+            // - When the def declares an explicit quantifier list
+            //   (`def f[..]`), use that list as the authoritative source
+            //   of precision tvars. Names not in the list that appear
+            //   in a precision slot stay as `t-prim` and the validator
+            //   surfaces the unbound-name diagnostic; this matches the
+            //   WS-A6 rule in spec/02-surf-syntax.md §P4b.
+            // - When the def has no explicit quantifier list, fall back
+            //   to the WS-A5 implicit collection over typed params and
+            //   the return type (spec/04-type-system.md §5.8) so a
+            //   bare `def f(x: tensor[3, p])` continues to work.
+            let tvar_set: HashSet<String> = if !dim_params.is_empty() {
+                dim_params.iter().cloned().collect()
+            } else {
+                let mut acc: HashSet<String> = HashSet::new();
+                for p in params {
+                    if let Some(ty) = &p.ty {
+                        collect_sig_type_vars(ty, &mut acc);
+                    }
                 }
-            }
-            if let Some(ty) = ret_ty {
-                collect_sig_type_vars(ty, &mut tvar_set);
-            }
+                if let Some(ty) = ret_ty {
+                    collect_sig_type_vars(ty, &mut acc);
+                }
+                acc
+            };
             let mut type_parts: Vec<deep::Expr> = params
                 .iter()
                 .map(|p| match &p.ty {
@@ -1596,13 +1641,6 @@ fn binop_name(op: BinOp) -> &'static str {
 /// (module-level context).
 fn desugar_type(ty: &TypeExpr) -> deep::Expr {
     desugar_type_with_scope(ty, &HashSet::new(), &HashSet::new())
-}
-
-/// Desugar a type with declared dimension parameters but no quantified
-/// type variables. Kept as a thin wrapper for call sites that do not
-/// have an enclosing sig (e.g. let-typed bindings).
-fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
-    desugar_type_with_scope(ty, dim_vars, &HashSet::new())
 }
 
 /// True if `name` is a candidate quantified type variable per
