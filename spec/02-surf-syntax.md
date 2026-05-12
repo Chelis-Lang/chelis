@@ -181,26 +181,45 @@ The current shipped boundary-checking surface is narrower than the syntax:
 
 Omitting all types is valid: `def f(x, y) = add(x, y)`. The compiler emits a note recommending a `sig` for module-level definitions.
 
-#### P4b: Contextual Precision Polymorphism (WS-A5)
+#### P4b: Contextual Precision Polymorphism (WS-A5, WS-A6)
 
-In a sig with quantified type variables, names appearing in the
-precision slot of a `tensor[...]` type that match the sig's quantifier
-list become `(t-var {} <name>)`, not `(t-prim {} <name>)`. Names
-matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`, `i32`,
-`i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig (e.g., in
-a value-position type annotation), no quantifier exists, so the
-existing rule applies.
+In a sig OR def with quantified type variables, names appearing in
+the precision slot of a `tensor[...]` type that match the
+quantifier list become `(t-var {} <name>)`, not `(t-prim {} <name>)`.
+Names matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
+`i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig
+or def quantifier scope (e.g., in a let-typed binding), no
+quantifier exists, so the existing rule applies.
 
 Quantifiers in a sig are **implicit**: any lowercase identifier that
 appears in the sig's type expression and is not a primitive name is
-treated as an implicitly `forall`-quantified type variable. The
-`spec/04-type-system.md` §1.1.2 unsigned aliases (`u8`, `u16`, `u32`,
-`u64`, `uint8`, `uint16`, `uint32`, `uint64`) are explicitly excluded
-from this collection so they reach the type-checker's §1.1.2
-rejection path with a precise diagnostic, rather than being silently
-absorbed as quantifiers.
+treated as an implicitly `forall`-quantified type variable.
+Quantifiers in a def, by contrast, are **explicit**: a def's
+`[..]` clause is the authoritative source. A precision name in a
+def parameter annotation must appear in the def's `[..]` clause to
+be promoted to a `t-var`; an unbound precision name surfaces an
+`UnsupportedTensorPrecision` diagnostic per
+`spec/04-type-system.md` §5.8.
 
-Example:
+A def with no `[..]` clause falls back to WS-A5 implicit collection
+on its synthesized sig so that a bare
+`def f(x: tensor[3, p])` continues to behave as if the user had
+written the equivalent `sig f: tensor[3, p] -> ...` plus an
+untyped def.
+
+The `spec/04-type-system.md` §1.1.2 unsigned aliases (`u8`, `u16`,
+`u32`, `u64`, `uint8`, `uint16`, `uint32`, `uint64`) are explicitly
+excluded from implicit collection so they reach the type-checker's
+§1.1.2 rejection path with a precise diagnostic, rather than being
+silently absorbed as quantifiers.
+
+The same identifier in a def's `[..]` clause may act as either a
+dim-var or a precision tvar depending on its position inside a
+`tensor[..]` type: the dim slots resolve to `d-var` and the
+precision slot resolves to `t-var`. Position determines kind; the
+quantifier list is unkinded.
+
+Examples:
 
 ```text
 sig poly_id: tensor[d, p] -> tensor[d, p]
@@ -215,6 +234,16 @@ variable that unifies with the call's actual precision; calling
 `poly_id` with mismatched precisions across a single call (e.g.,
 input `tensor[3, int32]` declared output `tensor[3, f32]`) is a type
 error.
+
+Def-level explicit quantifier:
+
+```text
+def take[batch, hidden, p](x: &tensor[batch, hidden, p]) -> &tensor[batch, hidden, p] = x
+```
+
+`batch` and `hidden` resolve to `d-var`; `p` resolves to `t-var`.
+Writing `def f[a, b](x: &tensor[3, p])` (where `p` is not in
+`[a, b]`) is rejected.
 
 See `spec/04-type-system.md` §5.8 for the type-system semantics and
 the `TensorPrec` representation that backs this surface rule.
