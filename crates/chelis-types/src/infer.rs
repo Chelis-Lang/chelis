@@ -8921,16 +8921,41 @@ fn infer_pipe(
     );
 
     for stage in &kids[1..] {
-        let stage_ty = infer_expr(
-            stage,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        // If the stage is the canonical bare-keyword / `cast(type)` pipe-stage
+        // shape `(fn (params <single unannotated param>) body)` produced by
+        // `crates/chelis-surf/src/parser.rs::parse_pipe_stage` and
+        // `desugar_pipe_stage`, infer the lambda with its parameter bound to
+        // the upstream pipe value's type. Without this pre-binding, per-builtin
+        // inference gates inside the body (e.g. `infer_copy`, `infer_cast`)
+        // see a fresh type variable for the parameter and reject before the
+        // pipe loop's unification can bind it to `current_ty`. See
+        // `docs/investigations/pipe_copy_typecheck_diagnosis.md` for the trace.
+        let stage_ty = if let Some(param_name) = synthesized_unary_lambda_param(stage, adt_reg, vg)
+        {
+            infer_pipe_stage_lambda(
+                stage,
+                &param_name,
+                current_ty.clone(),
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                typed_nodes,
+                total_nodes,
+            )
+        } else {
+            infer_expr(
+                stage,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                typed_nodes,
+                total_nodes,
+            )
+        };
         let ret_tv = vg.fresh_type();
         let stage_arg_tys = auto_borrow_call_arg_types(&stage_ty, vec![current_ty.clone()], subst);
         let expected = Type::Fn(stage_arg_tys, Box::new(ret_tv.clone()));
@@ -8947,6 +8972,94 @@ fn infer_pipe(
     }
 
     current_ty
+}
+
+/// If `stage` is a `(fn (params x) body)` Deep node with exactly one
+/// unannotated parameter -- the canonical shape produced by the Surf
+/// parser's `parse_pipe_stage` and `desugar_pipe_stage` for bare
+/// unary-builtin keyword stages (`x |> copy`, `x |> realize`) and the
+/// one-arg `cast(type)` form (`x |> cast(f32)`) -- return the
+/// parameter's name. Otherwise return `None`.
+///
+/// Multi-arg lambdas, lambdas with annotated parameters, and any other
+/// pipe-stage form (named reference, partial application, etc.) fall
+/// through unchanged.
+fn synthesized_unary_lambda_param(
+    stage: &deep::Expr,
+    _adt_reg: &AdtRegistry,
+    _vg: &mut VarGen,
+) -> Option<String> {
+    let deep::Expr::List(list, _) = stage else {
+        return None;
+    };
+    if get_tag(list) != Some("fn") {
+        return None;
+    }
+    let kids = children(list);
+    let params_expr = kids.first()?;
+    let deep::Expr::List(params_list, _) = params_expr else {
+        return None;
+    };
+    if get_tag(params_list) != Some("params") {
+        return None;
+    }
+    let param_kids = children(params_list);
+    if param_kids.len() != 1 {
+        return None;
+    }
+    // Single param must be a bare symbol; an annotated form would
+    // surface as `MetaExpr` or a nested `List`, and the user-written
+    // annotation takes precedence over the upstream pipe value's type.
+    match &param_kids[0] {
+        deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// Infer a synthesized unary pipe-stage lambda with its parameter
+/// pre-bound to `param_ty`. Mirrors `infer_fn` but seeds the
+/// parameter's scheme from `param_ty` instead of allocating a fresh
+/// type variable, so per-builtin inference gates inside the body see
+/// the upstream pipe value's type.
+#[allow(clippy::too_many_arguments)]
+fn infer_pipe_stage_lambda(
+    stage: &deep::Expr,
+    param_name: &str,
+    param_ty: Type,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let deep::Expr::List(list, _) = stage else {
+        return Type::Error;
+    };
+    let kids = children(list);
+    let body = match kids.get(1) {
+        Some(body) => body,
+        None => return Type::Error,
+    };
+
+    let mut fn_env = env.clone();
+    fn_env.bind(param_name.to_string(), Scheme::mono(param_ty.clone()));
+
+    let body_ty = infer_expr(
+        body,
+        &mut fn_env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+
+    let resolved_param = subst.apply(&param_ty);
+    let resolved_body = subst.apply(&body_ty);
+    Type::Fn(vec![resolved_param], Box::new(resolved_body))
 }
 
 #[allow(clippy::too_many_arguments)]
