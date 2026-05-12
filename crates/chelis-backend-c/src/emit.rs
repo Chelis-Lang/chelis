@@ -597,14 +597,15 @@ impl CEmitter {
             }
 
             // F1 (WS-A0 RT-1 fixup, tactical) — partially lifted by
-            // WS-A1: the C backend now dispatches `cblas_sgemm` for f32
+            // WS-A1: the C backend dispatches `cblas_sgemm` for f32
             // and `cblas_dgemm` for f64 (see `emit_blas_matmul` /
-            // `MatmulEmitSpec::accumulator`). bf16/f16 BlasMatmul still
-            // has no C-backend dispatch and is rejected at IR validation
-            // by the matching guard in `crates/chelis-ir/src/verify.rs`.
-            // The literal "F1:" tag mirrors the verify.rs guard and
-            // makes the remaining (HIP/Metal/bf16/f16) lift greppable
-            // across the workspace.
+            // `MatmulEmitSpec::accumulator`). WS-A3 lifted the IR
+            // validation guard for bf16/f16 (admitted via the HIP
+            // backend's `hipblasGemmEx` path), but the C backend has
+            // no native bf16/f16 GEMM dispatch yet, so we still reject
+            // here at codegen. The literal "F1:" tag mirrors the
+            // verify.rs guard and makes the remaining (C/Metal/bf16/
+            // f16) lift greppable across the workspace.
             if matches!(node.op, RiscOp::BlasMatmul { .. })
                 && let Some(lhs) = dag.get(node.inputs[0])
                 && !matches!(lhs.output_type.precision, Prim::F32 | Prim::F64)
@@ -615,7 +616,8 @@ impl CEmitter {
                      spec/04-type-system.md §5.7.1 documents the per-precision \
                      accumulator defaults; the C backend dispatches \
                      `cblas_sgemm`/`cblas_dgemm` for f32/f64 (WS-A1). bf16/f16 \
-                     dispatch lifts in WS-A3.",
+                     dispatch lifted for the HIP backend in WS-A3 but is not yet \
+                     wired for the C backend.",
                     node.id.0,
                     lhs.output_type.precision.name(),
                 );

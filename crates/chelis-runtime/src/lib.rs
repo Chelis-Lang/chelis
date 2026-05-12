@@ -17,6 +17,11 @@ pub const CHELIS_F64: c_int = 1;
 pub const CHELIS_I32: c_int = 2;
 pub const CHELIS_BOOL: c_int = 3;
 pub const CHELIS_I64: c_int = 4;
+// WS-A3: bf16 / f16 dtype tags. Two-byte storage; the host runtime
+// does not implement bf16/f16 arithmetic in this cycle. Mirrors the
+// matching macros in `crates/chelis-runtime/include/chelis_runtime.h`.
+pub const CHELIS_BF16: c_int = 5;
+pub const CHELIS_F16: c_int = 6;
 const CHELIS_MAX_DIM: usize = 8;
 
 // `TensorElement` trait.  Closes the architectural piece of the
@@ -173,6 +178,12 @@ macro_rules! runtime_fail {
 fn tensor_elem_size(dtype: c_int) -> usize {
     if dtype == CHELIS_I64 || dtype == CHELIS_F64 {
         std::mem::size_of::<i64>()
+    } else if dtype == CHELIS_BF16 || dtype == CHELIS_F16 {
+        // WS-A3: bf16 / f16 storage is 2 bytes. The host runtime
+        // does not perform bf16/f16 arithmetic; the HIP backend is
+        // the only consumer in this cycle. Mirror the matching
+        // dispatch in `chelis_hip_runtime.h::chelis_gpu_dtype_size`.
+        2
     } else {
         std::mem::size_of::<f32>()
     }

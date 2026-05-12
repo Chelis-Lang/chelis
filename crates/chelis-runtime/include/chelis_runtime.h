@@ -14,6 +14,13 @@
 #define CHELIS_I32 2
 #define CHELIS_BOOL 3
 #define CHELIS_I64 4
+/* WS-A3: bf16 / f16 dtype tags. Two-byte storage. The host runtime
+ * (chelis-runtime) does not implement bf16/f16 arithmetic in this
+ * cycle — these tags are present so the HIP backend can size GPU
+ * allocations and shuttle bytes between host and device tensors
+ * without round-tripping through a wider type. */
+#define CHELIS_BF16 5
+#define CHELIS_F16 6
 #define CHELIS_MAX_DIM 8
 
 typedef struct {

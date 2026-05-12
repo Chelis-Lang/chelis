@@ -680,15 +680,47 @@ fn compute_adjoints(
         // --- Reduction ---
         RiscOp::Sum { axis, .. } => {
             // d/dx sum(x, axis) = expand(g, axis, original_size)
+            //
+            // WS-A3 fix: when the upstream gradient `g` has a different
+            // precision than the operand `x` (which happens whenever
+            // the Sum carries a wider accumulator per
+            // spec/04-type-system.md §5.7.1 — bf16/f16 operands sum
+            // into f32, integer-narrow operands sum into i32), insert
+            // an explicit cast back to the operand precision before
+            // the Expand. Without the cast, Expand would carry an
+            // input of one dtype and output of another, which IR
+            // validation rejects. The cast direction is from the wider
+            // accumulator back to the operand precision so the
+            // returned adjoint has `input_ty.precision`, matching the
+            // spec rule "gradient precision = operand precision".
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let original_size = DimExpr::from(&input_ty.dims[*axis]);
+            let g_node = dag
+                .get(g)
+                .expect("upstream adjoint must exist in the AD DAG");
+            let g_for_expand = if g_node.output_type.precision == input_ty.precision {
+                g
+            } else {
+                let g_ty = TensorType {
+                    dims: g_node.output_type.dims.clone(),
+                    precision: input_ty.precision,
+                };
+                dag.add_node(
+                    RiscOp::Cast {
+                        new_precision: input_ty.precision,
+                    },
+                    vec![g],
+                    g_ty,
+                    None,
+                )
+            };
             let dx = dag.add_node(
                 RiscOp::Expand {
                     axis: *axis,
                     size: original_size.clone(),
                 },
-                vec![g],
+                vec![g_for_expand],
                 input_ty,
                 None,
             );

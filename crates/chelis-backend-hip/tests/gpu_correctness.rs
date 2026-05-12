@@ -2151,10 +2151,16 @@ fn g21_matmul_f64_gpu_matches_cpu() {
     );
 }
 
-// Negative coverage: bf16 / f16 / i8 / i16 matmul still rejected by the
-// HIP-side F1 panic. WS-A3/A4 lift these arms.
+// WS-A3 lifted the HIP-side F1 panic for bf16 (and f16) matmul: the
+// backend now reads the `BlasMatmul.accumulator` field explicitly and
+// dispatches bf16 + spec-default f32 accumulator through
+// `hipblasGemmEx` per spec/04-type-system.md §5.7.1. Replaces the
+// prior `ws_a2_hip_f1_still_rejects_bf16_matmul` rejection assertion.
+// The numerical correctness path lives in
+// `crates/chelis-backend-hip/tests/ws_a3_bf16_f16_matmul.rs`; this
+// test pins only that codegen no longer panics.
 #[test]
-fn ws_a2_hip_f1_still_rejects_bf16_matmul() {
+fn ws_a3_hip_admits_bf16_matmul_at_codegen() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
     let bf16_ty = TensorType {
@@ -2173,9 +2179,6 @@ fn ws_a2_hip_f1_still_rejects_bf16_matmul() {
         bf16_ty.clone(),
         None,
     );
-    // Bypass the IR validator by constructing the BlasMatmul directly
-    // with an explicit accumulator (the matmul_default helper would
-    // reject bf16 as not-yet-supported via the spec table).
     let mm_op = RiscOp::BlasMatmul {
         batch_dims: vec![],
         m: DimExpr::Concrete(2),
@@ -2187,21 +2190,15 @@ fn ws_a2_hip_f1_still_rejects_bf16_matmul() {
     dag.add_root(mm);
 
     let result = std::panic::catch_unwind(|| {
-        let _ = chelis_backend_hip::codegen_hip(&dag, "ws_a2_hip_bf16");
+        let _ = chelis_backend_hip::codegen_hip(&dag, "ws_a3_hip_bf16");
     });
-    let payload = result.expect_err("HIP codegen must reject bf16 matmul");
-    let msg = payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&'static str>().copied())
-        .unwrap_or("<non-string panic payload>");
     assert!(
-        msg.contains("F1: HIP BlasMatmul"),
-        "expected F1 HIP rejection for bf16 matmul, got: {msg}"
-    );
-    assert!(
-        msg.contains("bf16"),
-        "F1 message should name the rejected precision; got: {msg}"
+        result.is_ok(),
+        "WS-A3 lifted bf16 matmul; HIP codegen must not panic. Got: {:?}",
+        result.err().and_then(|p| p
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| p.downcast_ref::<&'static str>().map(|s| s.to_string())))
     );
 }
 
@@ -2248,7 +2245,7 @@ fn ws_a2_hip_f1_still_rejects_i8_matmul() {
         .or_else(|| payload.downcast_ref::<&'static str>().copied())
         .unwrap_or("<non-string panic payload>");
     assert!(
-        msg.contains("F1: HIP BlasMatmul"),
+        msg.contains("F1: BlasMatmul on operand precision"),
         "expected F1 HIP rejection for i8 matmul, got: {msg}"
     );
     assert!(

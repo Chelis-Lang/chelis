@@ -10,5 +10,10 @@ chelis-types = { path = "../chelis-types" }
 
 [dev-dependencies]
 chelis-runtime = { path = "../chelis-runtime" }
+# WS-A3: bf16 / f16 acceptance tests use the `half` crate to emit the
+# correct 2-byte bit patterns for input tensors and read them back from
+# bf16 outputs. The runtime crate does not yet depend on `half`; this
+# is a test-only dependency to keep the runtime surface unchanged.
+half = "2"
 serde_json = "1"
 tempfile = "3"

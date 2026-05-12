@@ -21,24 +21,25 @@ fn matrix(rows: usize, cols: usize, prec: Prim) -> TensorType {
 }
 
 // ----------------------------------------------------------------
-// F1: BlasMatmul currently supports only f32 and f64 (post WS-A1)
+// F1: BlasMatmul supports f32 / f64 / bf16 / f16 (post WS-A1+A2+A3)
 // ----------------------------------------------------------------
 //
-// WS-A1 (commit `feat(backend-c,ir): WS-A1 lift F1 guard for f64 matmul`)
-// lifted the f64 arm of the F1 tactical guard once the C backend wired
-// `cblas_dgemm` dispatch through `MatmulEmitSpec::accumulator`. The
-// HIP/Metal backends still destructure `BlasMatmul` with `..` and call
-// single-precision GEMM, and bf16/f16 has no native dispatch on any
-// backend yet, so the F1 guard remains in place for those precisions.
-// WS-A2 lifts HIP f64; WS-A3 lifts bf16/f16.
+// WS-A1 lifted the f64 arm of the F1 tactical guard once the C
+// backend wired `cblas_dgemm` dispatch through
+// `MatmulEmitSpec::accumulator`. WS-A2 extended the HIP backend to
+// dispatch `hipblasSgemm`/`hipblasDgemm` for f32/f64. WS-A3 wired
+// bf16/f16 through `hipblasGemmEx` (HIPBLAS_COMPUTE_32F per
+// spec/04-type-system.md §5.7.1). The F1 guard now only blocks the
+// integer matmul arm (lifted in WS-A4 per spec §5.7.2).
 
 /// Negative-parity twin of the original f64-rejection test. After
-/// WS-A1, `RiscOp::BlasMatmul` on f64 operands MUST validate cleanly
-/// because the C backend dispatches `cblas_dgemm` (and reads/writes
-/// `double*` storage). Replaces the prior
-/// `blas_matmul_f64_rejected_with_f1_diagnostic` assertion per the
-/// WS-A1 brief contract that the test be REPLACED, not silently
-/// deleted.
+/// WS-A1 (C backend) and WS-A2 (HIP backend), `RiscOp::BlasMatmul`
+/// on f64 operands MUST validate cleanly because the C backend
+/// dispatches `cblas_dgemm` and the HIP backend dispatches
+/// `hipblasDgemm` (both reading/writing `double*` storage).
+/// Replaces the prior `blas_matmul_f64_rejected_with_f1_diagnostic`
+/// assertion per the WS-A1 brief contract that the test be
+/// REPLACED, not silently deleted.
 #[test]
 fn blas_matmul_f64_validates_cleanly_after_ws_a1_lift() {
     let mut dag = Dag::new();
@@ -68,8 +69,8 @@ fn blas_matmul_f64_validates_cleanly_after_ws_a1_lift() {
     assert!(
         !errors
             .iter()
-            .any(|m| m.contains("F1: BlasMatmul currently supports only f32")),
-        "f64 BlasMatmul must not trip the (now-lifted) F1 f32-only guard; got: {errors:?}"
+            .any(|m| m.contains("F1: BlasMatmul on operand precision `f64`")),
+        "f64 BlasMatmul must not trip the (now-lifted) F1 guard; got: {errors:?}"
     );
     assert!(
         !errors.iter().any(|m| m.contains("F1:")),
@@ -81,12 +82,14 @@ fn blas_matmul_f64_validates_cleanly_after_ws_a1_lift() {
     );
 }
 
-/// Same shape for `bf16`. The spec §5.7.1 row for bf16 has
-/// accumulator=f32, but the BlasMatmul backend dispatch still requires
-/// f32 operand storage; bf16 source data would be silently misread by
-/// the f32-only GEMM path. Reject at validation.
+/// WS-A3 admits `bf16` BlasMatmul: the HIP backend now binds the
+/// `accumulator` field explicitly (no more destructure-`..` footgun)
+/// and routes bf16 + f32-default-accumulator through `hipblasGemmEx`
+/// per spec/04-type-system.md §5.7.1. The C backend still rejects
+/// bf16 at its own F1 guard; this IR-level test pins that the
+/// validation guard no longer catches the bf16 case.
 #[test]
-fn blas_matmul_bf16_rejected_with_f1_diagnostic() {
+fn blas_matmul_bf16_admitted_after_ws_a3_lift() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::Const { value: 1.0 },
@@ -112,10 +115,45 @@ fn blas_matmul_bf16_rejected_with_f1_diagnostic() {
 
     let errors = verify::verify(&dag);
     assert!(
-        errors
-            .iter()
-            .any(|m| m.contains("F1: BlasMatmul currently supports only f32")),
-        "expected F1 diagnostic for bf16 operand; got: {errors:?}"
+        !errors.iter().any(|m| m.contains("F1: BlasMatmul")),
+        "WS-A3 lifted bf16 from the F1 guard; bf16 BlasMatmul must validate cleanly. \
+         Got: {errors:?}"
+    );
+}
+
+/// WS-A3 admits `f16` BlasMatmul on the same lift as bf16 (also
+/// dispatches through `hipblasGemmEx` with HIPBLAS_COMPUTE_32F per
+/// spec §5.7.1).
+#[test]
+fn blas_matmul_f16_admitted_after_ws_a3_lift() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        matrix(2, 3, Prim::F16),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        matrix(3, 4, Prim::F16),
+        None,
+    );
+    let matmul_op = RiscOp::matmul_default(
+        vec![],
+        DimExpr::Concrete(2),
+        DimExpr::Concrete(4),
+        DimExpr::Concrete(3),
+        Prim::F16,
+    )
+    .expect("f16 matmul constructs (per spec §5.7.1 default accumulator = f32)");
+    let _ = dag.add_node(matmul_op, vec![a, b], matrix(2, 4, Prim::F16), None);
+
+    let errors = verify::verify(&dag);
+    assert!(
+        !errors.iter().any(|m| m.contains("F1: BlasMatmul")),
+        "WS-A3 lifted f16 from the F1 guard; f16 BlasMatmul must validate cleanly. \
+         Got: {errors:?}"
     );
 }
 
@@ -148,9 +186,7 @@ fn blas_matmul_f32_validates_cleanly_under_f1_guard() {
 
     let errors = verify::verify(&dag);
     assert!(
-        !errors
-            .iter()
-            .any(|m| m.contains("F1: BlasMatmul currently supports only f32")),
+        !errors.iter().any(|m| m.contains("F1: BlasMatmul")),
         "f32 BlasMatmul must not trip the F1 guard; got: {errors:?}"
     );
 }

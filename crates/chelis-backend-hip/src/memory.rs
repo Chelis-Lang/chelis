@@ -408,9 +408,13 @@ fn bytes_per_element(dtype: Prim) -> usize {
     match dtype {
         Prim::F32 | Prim::Bool | Prim::Int32 => 4,
         Prim::F64 | Prim::Int64 => 8,
+        // WS-A3: bf16 / f16 storage is 2 bytes; mirrors
+        // `chelis_gpu_dtype_size` in `chelis_hip_runtime.h` and the
+        // matching arm in `HipEmitter::bytes_per_element`.
+        Prim::Bf16 | Prim::F16 => 2,
         other => panic!(
-            "HIP memory planner supports f32/f64/bool/int32/int64 tensors today; \
-             got `{}`. bf16/f16 land in WS-A3; i8/i16 in WS-A4.",
+            "HIP memory planner supports f32/f64/bool/int32/int64/bf16/f16 tensors today; \
+             got `{}`. i8/i16 land in WS-A4.",
             other.name()
         ),
     }

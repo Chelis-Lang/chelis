@@ -358,6 +358,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "half",
  "serde_json",
  "tempfile",
 ]
