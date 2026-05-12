@@ -347,18 +347,31 @@ pub enum HostExprKind {
 }
 
 pub fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
+    try_lower_compiled_program(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+}
+
+/// Fallible variant of [`lower_compiled_program`] that catches lowering
+/// panics (e.g. WS-A5 RT-3a F2: an unresolved tensor precision tvar
+/// reaching the `Type::Tensor` -> `HostType::Tensor` boundary, which
+/// `try_extract_tensor_type` panics on per spec/04-type-system.md
+/// \u{00a7}5.8.1) and returns them as `LowerDiagnostic` so the build
+/// CLI can surface a clean user-facing error rather than a thread
+/// panic.
+pub fn try_lower_compiled_program(
+    program: &CheckedProgram,
+) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
     let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
     let dag = crate::lower::try_lower_program(program).ok();
-    let host = lower_host_program(program, &lowered_names);
+    let host = crate::lower::catch_lowering_external(|| lower_host_program(program, &lowered_names))?;
 
-    CompiledProgram {
+    Ok(CompiledProgram {
         dag: dag.filter(|dag| !dag.roots().is_empty()),
         host: if host.globals.is_empty() && host.functions.is_empty() {
             None
         } else {
             Some(host)
         },
-    }
+    })
 }
 
 pub fn host_program_requires_host_backend(program: &HostProgram) -> bool {
@@ -4630,7 +4643,17 @@ fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) ->
             Some("string") => HostType::String,
             _ => HostType::Unknown,
         },
-        Some("t-tensor") => HostType::Tensor(crate::lower::tensor_type_from_deep(expr)),
+        Some("t-tensor") => {
+            // WS-A5 RT-3a F2: defer to `tensor_type_from_deep`, which
+            // panics with a monomorphization-bug diagnostic if it
+            // encounters a `(t-var {} ...)` precision slot per
+            // spec/04-type-system.md \u{00a7}5.8.1. Reaching this
+            // conversion with an unresolved precision tvar means the
+            // monomorphization stage missed a polymorphic sig that has
+            // no concrete instantiation site; backends must not silently
+            // emit code for such a sig.
+            HostType::Tensor(crate::lower::tensor_type_from_deep(expr))
+        }
         Some("t-ref") => list
             .elements
             .get(2)
