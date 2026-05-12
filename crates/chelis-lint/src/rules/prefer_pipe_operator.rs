@@ -44,8 +44,16 @@ impl Rule for PreferPipeOperator {
         let Some(source) = ctx.source else {
             return Vec::new();
         };
+        // Mirror the post-PR-55 `fix()` syntactic bail-out
+        // (`candidate_is_fmt_clean`) at the trigger so the rule does
+        // not propose violations the autofix would silently decline
+        // on shape grounds. This closes one half of the V2-F3
+        // trigger-emit asymmetry; the typed-pipeline half is closed
+        // by the CLI driver via `check_mirrors_fix`. See
+        // `docs/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
         find_pipe_candidates(source)
             .into_iter()
+            .filter(candidate_is_fmt_clean)
             .map(|candidate| {
                 let (line, col) = line_col(source, candidate.start);
                 Violation {
@@ -70,6 +78,21 @@ impl Rule for PreferPipeOperator {
         // `docs/investigations/redundant_linearity_autofix_architecture.md`
         // (Path 1B). The per-rule re-enable rationale is documented in
         // `docs/investigations/pipe_autofix_and_bare_keyword_extras_diagnosis.md`.
+        true
+    }
+
+    fn check_mirrors_fix(&self) -> bool {
+        // V2-F3 (PR #58): the warning is only actionable when the
+        // rule can offer a safe pipe rewrite. When the autofix bails
+        // out — either on syntactic emit-window grounds (filtered
+        // inside `check()` above by `candidate_is_fmt_clean`) or on
+        // typed-pipeline grounds (rewrite would consume a fan-out
+        // variable, etc.) — surfacing the warning is misleading and
+        // makes `chelis lint --fix` non-convergent. The CLI driver
+        // mirrors the typed-pipeline gate at the warning-emit path
+        // for rules that opt in here, so `--fix` reaches a fixpoint
+        // for this rule. See
+        // `docs/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
         true
     }
 
@@ -478,33 +501,33 @@ mod tests {
     }
 
     #[test]
-    fn check_still_flags_when_fmt_would_emit_multi_line() {
-        // The `check()` method's behavior is unchanged by the Finding 3b
-        // fix: a three-stage nested call still gets flagged so the user
-        // sees the warning and can rewrite manually. Only `fix()` bails
-        // out for shapes the formatter would emit multi-line.
+    fn check_suppresses_when_fmt_would_emit_multi_line() {
+        // V2-F3 (PR #58): the `check()` trigger mirrors the
+        // post-PR-55 `fix()` syntactic bail-out so the rule does not
+        // propose violations the autofix would silently decline on
+        // shape grounds. A four-part pipe (`sigmoid(relu(neg(x)))`
+        // -> `x |> neg |> relu |> sigmoid`) would format multi-line,
+        // so the trigger drops the candidate. The CLI driver further
+        // suppresses warnings whose autofix is rejected by the
+        // typed-pipeline gate via `check_mirrors_fix`. See
+        // `docs/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
         let src = "def f(x: f32) -> f32 = sigmoid(relu(neg(x)))\n";
         let violations = PreferPipeOperator.check(&ctx(src));
-        assert_eq!(violations.len(), 1);
+        assert!(
+            violations.is_empty(),
+            "expected check() to drop a four-part pipe candidate; got {violations:?}"
+        );
     }
 
     #[test]
-    fn fix_bails_out_when_fmt_would_emit_multi_line() {
-        // `sigmoid(relu(neg(x)))` would rewrite to `x |> neg |> relu |> sigmoid`,
-        // which is 4 pipe parts (1 seed + 3 stages). The formatter emits
-        // this as multi-line + brace-wrapped, so the autofix must not
-        // write the flat single-line form. Returning `None` from `fix()`
-        // is the conservative path: the warning stays, the source stays
-        // fmt-clean, and the user can rewrite manually. See
-        // `docs/investigations/prefer_pipe_autofix_output_diagnosis.md`.
-        let src = "def f(x: f32) -> f32 = sigmoid(relu(neg(x)))\n";
-        let violations = PreferPipeOperator.check(&ctx(src));
-        assert_eq!(violations.len(), 1);
-        let outcome = PreferPipeOperator.fix(&ctx(src), &violations[0]);
-        assert!(
-            outcome.is_none(),
-            "expected fix() to bail out for a four-part pipe; got {outcome:?}"
-        );
+    fn check_mirrors_fix_opts_in_for_prefer_pipe_operator() {
+        // V2-F3: `prefer-pipe-operator` opts in to the
+        // `check_mirrors_fix` filter so the CLI suppresses warnings
+        // whose autofix would be silently dropped by the typed-pipeline
+        // gate (e.g., fan-out re-use of the seed in
+        // `add(mul(x, x), x)`). This pins the opt-in.
+        let rule = PreferPipeOperator;
+        assert!(rule.check_mirrors_fix());
     }
 
     #[test]
