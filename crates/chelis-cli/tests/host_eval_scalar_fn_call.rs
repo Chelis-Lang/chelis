@@ -33,7 +33,6 @@ fn eval_file(path: &Path) -> assert_cmd::assert::Assert {
 }
 
 #[test]
-#[ignore = "HostEval-ScalarFn-F1, see f1aa52c (W3.1 reproduction)"]
 fn host_eval_scalar_f32_zero_arg_returns_body_literal() {
     // Primary reproduction. With the bug, this prints
     // `tensor(shape=[], data=[0.0])`; expected is the body literal 7.5.
@@ -47,7 +46,6 @@ fn host_eval_scalar_f32_zero_arg_returns_body_literal() {
 }
 
 #[test]
-#[ignore = "HostEval-ScalarFn-F1, see f1aa52c (W3.1 reproduction)"]
 fn host_eval_scalar_f64_zero_arg_returns_body_literal() {
     // f64 path. Surf float literals default to f32 so the body uses
     // an explicit `cast` to f64 to match the declared return type.
@@ -64,7 +62,6 @@ fn host_eval_scalar_f64_zero_arg_returns_body_literal() {
 }
 
 #[test]
-#[ignore = "HostEval-ScalarFn-F1, see f1aa52c (W3.1 reproduction)"]
 fn host_eval_scalar_i64_zero_arg_returns_body_literal() {
     // i64 path. Integer literal renders as `7.0` through the scalar
     // tensor formatter.
@@ -78,7 +75,6 @@ fn host_eval_scalar_i64_zero_arg_returns_body_literal() {
 }
 
 #[test]
-#[ignore = "HostEval-ScalarFn-F1, see f1aa52c (W3.1 reproduction)"]
 fn host_eval_scalar_bool_zero_arg_returns_body_literal() {
     // bool path. `true` renders as `1.0` through the scalar tensor
     // formatter.

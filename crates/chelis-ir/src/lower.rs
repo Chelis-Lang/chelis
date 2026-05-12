@@ -2710,7 +2710,16 @@ impl LowerCtx {
 
     /// `(app {meta...} func arg1 arg2 ...)`
     fn lower_app(&mut self, elems: &[Expr], app_span: Span) -> LoweredValue {
-        if elems.len() < 4 {
+        // A well-formed `(app)` has at minimum [tag, meta, func] (3
+        // elements) for a zero-arg call. The previous `< 4` guard
+        // rejected zero-arg user-def calls before any callable
+        // resolution and emitted `Const { value: 0.0 }`, dropping the
+        // fn body that would have been inlined -- this is
+        // HostEval-ScalarFn-F1's root cause. `&elems[3..]` yielding an
+        // empty slice is already handled by every downstream arm
+        // (`lower_builtin_app`, `try_lower_callable_app`, and the
+        // fallback "lower func and args, return last" path).
+        if elems.len() < 3 {
             return LoweredValue::Node(self.dag.add_node(
                 RiscOp::Const { value: 0.0 },
                 vec![],
