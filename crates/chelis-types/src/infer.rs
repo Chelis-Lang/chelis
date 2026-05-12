@@ -2332,6 +2332,38 @@ fn walk_for_tensor_precision(
                                 )],
                             ));
                         }
+                    } else if Prim::parse_name(name).is_none()
+                        && !is_unsigned_dtype_name(name)
+                        && seen.insert((def_context.to_string(), name.to_string()))
+                    {
+                        // WS-A5 RT-3a F3: an identifier in a `t-prim`
+                        // precision slot that is neither a known active
+                        // primitive nor a §1.1.2 unsigned alias is an
+                        // unbound name. Inside a sig the desugarer emits
+                        // such an identifier as `t-var`, so reaching this
+                        // arm with `t-prim` proves the name appears in a
+                        // value-position annotation (let binding, def
+                        // param without a surrounding sig that quantified
+                        // it) where the closed primitive set must apply.
+                        // Without this guard the name silently collapses
+                        // to `Type::Error` via `deep_type_to_type_inner`'s
+                        // `Prim::parse_name` fall-through and the
+                        // permissive unify rule absorbs the mismatch.
+                        errors.push(CheckError::new(
+                            CheckErrorKind::UnsupportedTensorPrecision,
+                            format!(
+                                "tensor element precision `{name}` is not a recognized \
+                                 primitive (active set: {active_set}); inside a sig an \
+                                 unbound lowercase name introduces a precision tvar per \
+                                 spec/04-type-system.md §5.8, but in this position the \
+                                 closed primitive set applies",
+                            ),
+                            vec![format!(
+                                "Use one of {active_set}, or move the annotation into a \
+                                 `sig` declaration that quantifies `{name}` as a precision \
+                                 type variable",
+                            )],
+                        ));
                     }
                 }
             }
@@ -4230,6 +4262,7 @@ fn infer_top_level(
             env.instantiate(&s, vg)
         });
 
+        let errors_before_body = errors.len();
         let body_ty = infer_expr(
             &kids[1],
             env,
@@ -4240,6 +4273,18 @@ fn infer_top_level(
             typed_nodes,
             total_nodes,
         );
+        // Did the body's inference report any UnboundVariable diagnostic?
+        // We use this to discriminate WS-A5 RT-3a F1's masked-by-Error
+        // case (where Error is a downstream consequence of a reportable
+        // cause that the user can act on) from cascades where Error
+        // emerges from an internal type-checker limitation that has no
+        // matching upstream diagnostic. Without this discriminator the
+        // F1 detector double-reports on legitimate code that exercises
+        // type-checker gaps (record construction, region effects) which
+        // the permissive unify rule was implicitly tolerating.
+        let body_has_unbound_diagnostic = errors[errors_before_body..]
+            .iter()
+            .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable));
 
         // Enforce defsig: body must match declared signature.
         //
@@ -4252,9 +4297,38 @@ fn infer_top_level(
         // template so the scheme registered for callers reflects the
         // declared concrete shape (#39).
         let scheme_body = if let Some(decl_ty) = declared_ty {
-            if let Err(_te) = unify(&body_ty, &decl_ty, subst) {
-                let resolved_body = subst.apply(&body_ty);
-                let resolved_decl = subst.apply(&decl_ty);
+            let unify_result = unify(&body_ty, &decl_ty, subst);
+            let resolved_body = subst.apply(&body_ty);
+            let resolved_decl = subst.apply(&decl_ty);
+            // WS-A5 RT-3a F1: the permissive `(Error, _)` unify rule lets
+            // a body whose return position collapses to `Type::Error`
+            // (e.g. `def use_mix(x: tensor[3, int32]) -> tensor[3, f32]
+            // = poly_id(nonexistent_function(x))`, where the outer call
+            // early-exits at `Type::Error` so the body's `fn` type is
+            // `Fn([tensor[3, int32]], Type::Error)`) silently satisfy a
+            // concrete declared signature, masking the precision/shape
+            // mismatch the user would otherwise see. Surface the masked
+            // mismatch here when the body collapses to `Type::Error` at
+            // the top level OR at the return position of a function
+            // type, and the corresponding declared slot is concrete.
+            // We deliberately do NOT recurse through tuples/ADTs/Fn
+            // arg positions: those would re-fire on cascade patterns
+            // (e.g. tuple destructuring on an unannotated parameter
+            // produces `Tuple([Error, Error, ...])` from a localized
+            // inference gap that has already been surfaced upstream
+            // and should not double-report the def-level diagnostic).
+            let body_return_collapsed = match (&resolved_body, &resolved_decl) {
+                (Type::Error, decl) => !matches!(decl, Type::Error),
+                (Type::Fn(_, ret), Type::Fn(_, decl_ret))
+                    if matches!(**ret, Type::Error) && !matches!(**decl_ret, Type::Error) =>
+                {
+                    true
+                }
+                _ => false,
+            };
+            let masked_by_error =
+                unify_result.is_ok() && body_return_collapsed && body_has_unbound_diagnostic;
+            if unify_result.is_err() || masked_by_error {
                 // RT-2 fixup B1: when the mismatch is a tensor
                 // precision mismatch (notably a `reduce_sum` body
                 // whose result precision differs from the declared
@@ -4289,8 +4363,6 @@ fn infer_top_level(
                     vec![],
                 ));
             }
-            let resolved_body = subst.apply(&body_ty);
-            let resolved_decl = subst.apply(&decl_ty);
             narrow_wildcards_with(&resolved_body, &resolved_decl)
         } else {
             body_ty

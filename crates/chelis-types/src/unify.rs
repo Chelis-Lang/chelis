@@ -366,7 +366,16 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
             Ok(())
         }
 
-        // Error propagation — unifying with Error always succeeds (partial inference)
+        // Error propagation: unifying with Error trivially succeeds so
+        // downstream call sites do not fan out a cascade of secondary
+        // diagnostics from a single upstream error. Call sites that
+        // require a precision/shape match against a non-Error declared
+        // type must check for the Error sentinel themselves and surface
+        // the mismatch explicitly (e.g. the def-body vs declared-sig
+        // unify in `infer.rs` does this for WS-A5 RT-3a F1: when the
+        // body collapses to Error but the declared type is concrete, we
+        // still emit a "body has type `<error>`, declared type is `T`"
+        // diagnostic so the user sees the unresolved declared shape).
         (Type::Error, _) | (_, Type::Error) => Ok(()),
 
         // Everything else is a mismatch
@@ -742,6 +751,12 @@ mod tests {
 
     #[test]
     fn error_type_unifies_with_anything() {
+        // Per WS-A5 RT-3a F1 escalation: the permissive rule is retained
+        // here so a single upstream error does not fan out a cascade of
+        // secondary diagnostics from one root cause; the silent
+        // passthrough at the def-body vs declared-sig boundary is
+        // closed at the call site in `infer.rs`, not by tightening the
+        // unification rule.
         let mut s = Subst::new();
         assert!(unify(&Type::Error, &Type::Prim(Prim::F32), &mut s).is_ok());
         assert!(unify(&Type::Prim(Prim::F32), &Type::Error, &mut s).is_ok());
