@@ -5600,6 +5600,113 @@ fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_mixed_outer_args() {
         .success();
 }
 
+// --- V2-F3 (PR #58 red-team): the `prefer-pipe-operator` trigger
+// fires on shapes the autofix declines to rewrite. PR #55 added the
+// fmt-clean bail-out inside `fix()`; the typed-pipeline gate in
+// `apply_lint_fixes` adds a second bail-out. The trigger does not
+// mirror either bail-out, so `chelis lint --fix` produces an
+// infinite-warning loop: the warning fires, the autofix declines,
+// the file is unchanged, and the next `lint --check` fires the same
+// warning again.
+//
+// The invariant the three fixtures below pin is convergence of
+// `lint --fix` for this rule: after one pass of `--fix`, running
+// `--check` again on the resulting file must not re-fire the same
+// `prefer-pipe-operator` warning. The rewrite is allowed to happen
+// (warning is moot), or the trigger is allowed to be tightened so
+// the warning never fires; either path satisfies the invariant.
+//
+// Gated `#[ignore]` until the fix lands.
+
+#[test]
+#[ignore = "V2-F3 (PR #58): prefer-pipe-operator trigger fires on shape the autofix declines (fan-out re-use of seed); fix pending"]
+fn lint_fix_prefer_pipe_operator_converges_on_fanout_seed_reuse() {
+    // Minimal V2-F3 reproducer: `add(mul(x, x), x)`. The autofix's
+    // syntactic rewrite would be `x |> mul(x) |> add(x)`, which the
+    // typed-pipeline gate rejects because the pipe seed consumes `x`
+    // and the trailing `add(x)` reuses it (linearity violation).
+    // `apply_lint_fixes` therefore silently drops the rewrite, but
+    // `check()` keeps firing on every subsequent invocation.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_fanout_seed.ch");
+    let original = "def h(x: tensor[3, f32]) -> tensor[3, f32] = add(mul(x, x), x)\n";
+    write_file(&path, original);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("prefer-pipe-operator").not())
+        .stderr(predicate::str::contains("prefer-pipe-operator").not());
+}
+
+#[test]
+#[ignore = "V2-F3 (PR #58): prefer-pipe-operator trigger fires on multi-line emit shape (PR #55 bail-out); fix pending"]
+fn lint_fix_prefer_pipe_operator_converges_on_multi_line_emit() {
+    // The PR #55 bail-out drops `fix()` when the rewrite would render
+    // multi-line (`total_stages > 3` or flat > 80 chars). `check()`
+    // keeps firing on the unchanged source, so repeat `--fix`
+    // invocations spin without progress. `sigmoid(relu(neg(x)))`
+    // rewrites to a four-part pipe that the formatter emits
+    // multi-line; the bail-out fires and the warning loops.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_multi_line.ch");
+    let original = "def s(x: tensor[3, f32]) -> tensor[3, f32] = sigmoid(relu(neg(x)))\n";
+    write_file(&path, original);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("prefer-pipe-operator").not())
+        .stderr(predicate::str::contains("prefer-pipe-operator").not());
+}
+
+#[test]
+#[ignore = "V2-F3 (PR #58): prefer-pipe-operator trigger fires on outer-arg fan-out shape; fix pending"]
+fn lint_fix_prefer_pipe_operator_converges_on_outer_arg_fanout() {
+    // V2-F3 secondary shape from the red-team report:
+    // `w = mul(relu(add(x, a)), a)`. The proposed rewrite is
+    // `x |> add(a) |> relu |> mul(a)`, which reuses `a` after it has
+    // been moved into the seed-consuming `add(a)` stage. The
+    // typed-pipeline gate rejects it the same way as the minimal
+    // fan-out case above. The warning still fires; `--fix` is
+    // non-convergent on this shape today.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_outer_arg_fanout.ch");
+    let original = "def w(x: tensor[3, f32], a: tensor[3, f32]) -> tensor[3, f32] = \
+                    mul(relu(add(x, a)), a)\n";
+    write_file(&path, original);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("prefer-pipe-operator").not())
+        .stderr(predicate::str::contains("prefer-pipe-operator").not());
+}
+
 #[test]
 fn lint_keep_preserves_fixable_linearity_call_but_still_warns() {
     let dir = tempdir().expect("tempdir");
