@@ -1238,6 +1238,14 @@ impl Parser {
                 let tok = self.advance();
                 Expr::Lit(Literal::Float(f), tok.span)
             }
+            TokenKind::TypedInt(n, suffix) => {
+                let tok = self.advance();
+                Expr::Lit(Literal::TypedInt(n, suffix), tok.span)
+            }
+            TokenKind::TypedFloat(f, suffix) => {
+                let tok = self.advance();
+                Expr::Lit(Literal::TypedFloat(f, suffix), tok.span)
+            }
             TokenKind::Str(s) => {
                 let tok = self.advance();
                 Expr::Lit(Literal::Str(s), tok.span)
@@ -1343,6 +1351,8 @@ impl Parser {
                 | TokenKind::TypeIdent(_)
                 | TokenKind::Int(_)
                 | TokenKind::Float(_)
+                | TokenKind::TypedInt(_, _)
+                | TokenKind::TypedFloat(_, _)
                 | TokenKind::Str(_)
                 | TokenKind::True
                 | TokenKind::False
@@ -1392,6 +1402,14 @@ impl Parser {
             TokenKind::Float(f) => {
                 let tok = self.advance();
                 Ok(Expr::Lit(Literal::Float(f), tok.span))
+            }
+            TokenKind::TypedInt(n, suffix) => {
+                let tok = self.advance();
+                Ok(Expr::Lit(Literal::TypedInt(n, suffix), tok.span))
+            }
+            TokenKind::TypedFloat(f, suffix) => {
+                let tok = self.advance();
+                Ok(Expr::Lit(Literal::TypedFloat(f, suffix), tok.span))
             }
             TokenKind::Str(s) => {
                 let tok = self.advance();
@@ -2033,6 +2051,14 @@ impl Parser {
                 let tok = self.advance();
                 Ok(Pattern::Lit(Literal::Float(f), tok.span))
             }
+            TokenKind::TypedInt(n, suffix) => {
+                let tok = self.advance();
+                Ok(Pattern::Lit(Literal::TypedInt(n, suffix), tok.span))
+            }
+            TokenKind::TypedFloat(f, suffix) => {
+                let tok = self.advance();
+                Ok(Pattern::Lit(Literal::TypedFloat(f, suffix), tok.span))
+            }
             TokenKind::Str(s) => {
                 let tok = self.advance();
                 Ok(Pattern::Lit(Literal::Str(s), tok.span))
@@ -2158,6 +2184,14 @@ impl Parser {
                 let tok = self.advance();
                 Ok(Pattern::Lit(Literal::Float(f), tok.span))
             }
+            TokenKind::TypedInt(n, suffix) => {
+                let tok = self.advance();
+                Ok(Pattern::Lit(Literal::TypedInt(n, suffix), tok.span))
+            }
+            TokenKind::TypedFloat(f, suffix) => {
+                let tok = self.advance();
+                Ok(Pattern::Lit(Literal::TypedFloat(f, suffix), tok.span))
+            }
             TokenKind::Str(s) => {
                 let tok = self.advance();
                 Ok(Pattern::Lit(Literal::Str(s), tok.span))
@@ -2204,6 +2238,8 @@ impl Parser {
                 | TokenKind::Ident(_)
                 | TokenKind::Int(_)
                 | TokenKind::Float(_)
+                | TokenKind::TypedInt(_, _)
+                | TokenKind::TypedFloat(_, _)
                 | TokenKind::Str(_)
                 | TokenKind::True
                 | TokenKind::False

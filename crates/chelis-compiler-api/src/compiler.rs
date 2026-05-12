@@ -2006,6 +2006,16 @@ fn wire_literal(lit: &Literal) -> WireLiteral {
     match lit {
         Literal::Int(value) => WireLiteral::Int { value: *value },
         Literal::Float(value) => WireLiteral::Float { value: *value },
+        // Typed-suffix literals (spec §5.5): preserve the suffix across
+        // the wire boundary so the receiving side sees the same type.
+        Literal::TypedInt(value, suffix) => WireLiteral::TypedInt {
+            value: *value,
+            suffix: suffix.as_str().to_string(),
+        },
+        Literal::TypedFloat(value, suffix) => WireLiteral::TypedFloat {
+            value: *value,
+            suffix: suffix.as_str().to_string(),
+        },
         Literal::Str(value) => WireLiteral::Str {
             value: value.clone(),
         },

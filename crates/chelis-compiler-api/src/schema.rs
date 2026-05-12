@@ -597,10 +597,28 @@ pub enum WireSurfExpr {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireLiteral {
-    Int { value: i64 },
-    Float { value: f64 },
-    Str { value: String },
-    Bool { value: bool },
+    Int {
+        value: i64,
+    },
+    Float {
+        value: f64,
+    },
+    /// Integer literal carrying an explicit precision suffix per spec
+    /// §5.5. Suffix is one of `i8`/`i16`/`i32`/`i64`/`f32`/`f64`/`bf16`/`f16`.
+    TypedInt {
+        value: i64,
+        suffix: String,
+    },
+    TypedFloat {
+        value: f64,
+        suffix: String,
+    },
+    Str {
+        value: String,
+    },
+    Bool {
+        value: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
