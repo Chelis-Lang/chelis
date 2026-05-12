@@ -591,3 +591,743 @@ int main() { return 0; }
         }
     }
 }
+
+// =====================================================================
+// WS-A1 acceptance oracle: f64 / mixed-dtype / integer reduce_sum / matmul
+// =====================================================================
+//
+// These tests exercise the new f64 BlasMatmul + dgemm dispatch and the
+// dtype-parameterized ReduceSum accumulator. They compile generated C
+// against the runtime + BLAS, run it, and compare against a hand-
+// computed reference (the evaluator equivalent for the fixed-point
+// reduce_sum / matmul cases is the closed-form value).
+
+use chelis_ir::dag::DimExpr;
+
+fn vec_f64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::F64,
+    }
+}
+
+fn mat_f64(r: usize, c: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
+        precision: Prim::F64,
+    }
+}
+
+fn vec_i32(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int32,
+    }
+}
+
+fn scalar_i32() -> TensorType {
+    TensorType {
+        dims: vec![],
+        precision: Prim::Int32,
+    }
+}
+
+fn scalar_f64() -> TensorType {
+    TensorType {
+        dims: vec![],
+        precision: Prim::F64,
+    }
+}
+
+/// Locate openblas / accelerate link flags so the matmul tests can
+/// link against `cblas_dgemm`. Returns None on platforms where BLAS
+/// isn't reachable; tests skip cleanly in that case.
+fn blas_link_flags() -> Option<Vec<String>> {
+    if cfg!(target_os = "macos") {
+        Some(vec!["-framework".into(), "Accelerate".into()])
+    } else {
+        Some(vec!["-lopenblas".into()])
+    }
+}
+
+/// Compile + run a kernel that uses BLAS. Same as
+/// `compile_and_run_kernel` but also passes the BLAS link flags. The
+/// generated C source is expected to have `#include "chelis_blas.h"`.
+/// Returns None on compile/run failure (e.g. openblas not installed).
+fn compile_and_run_kernel_with_blas(
+    test_name: &str,
+    c_source: &str,
+    harness: &str,
+) -> Option<String> {
+    let dir = std::env::temp_dir().join(format!("chelis_exec_{test_name}"));
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(dir.join("kernel.c"), c_source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+
+    let include_dir = runtime_include_dir();
+    for hdr in &[
+        "chelis_runtime.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
+        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
+        fs::write(dir.join(hdr), src).unwrap();
+    }
+
+    let bin = dir.join("test_bin");
+    let runtime_lib = runtime_lib_path();
+    let blas_flags = blas_link_flags().unwrap_or_default();
+
+    let mut args: Vec<String> = vec![
+        "-O2".into(),
+        "-mavx2".into(),
+        "-std=c11".into(),
+        "-I".into(),
+        dir.to_str().unwrap().into(),
+        dir.join("kernel.c").to_str().unwrap().into(),
+        dir.join("main.c").to_str().unwrap().into(),
+        "-o".into(),
+        bin.to_str().unwrap().into(),
+        runtime_lib.to_str().unwrap().into(),
+    ];
+    args.extend(blas_flags);
+    args.push("-lm".into());
+    args.push("-lpthread".into());
+    args.push("-ldl".into());
+
+    let compile = Command::new("gcc")
+        .args(&args)
+        .output()
+        .expect("failed to invoke gcc");
+
+    if !compile.status.success() {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        eprintln!("BLAS COMPILE FAILED [{test_name}]:\n{stderr}");
+        eprintln!("Kernel C:\n{c_source}");
+        return None;
+    }
+
+    let run = Command::new(&bin).output().expect("failed to run binary");
+    if !run.status.success() {
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        eprintln!("BLAS RUN FAILED [{test_name}]\nstdout: {stdout}\nstderr: {stderr}");
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&run.stdout).into_owned())
+}
+
+// ---- WS-A1 Test: f64 reduce_sum produces correct value ----
+//
+// Spec §5.7.1: f64 reduce_sum default accumulator is f64; result is f64.
+// Pre-WS-A1 the C backend emitted `chelis_fill_f32` and `float acc =
+// 0.0f` regardless of operand precision, silently truncating. After
+// WS-A1 the accumulator type and zero literal come from the IR Sum
+// node's accumulator (== output precision per §5.7.1), so the loop
+// is `double acc = 0.0;` and the fill is `chelis_fill_f64(_, 0.0)`.
+#[test]
+fn ws_a1_exec_f64_reduce_sum_matches_reference() {
+    let scalar_ty = scalar_f64();
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f64(100),
+        None,
+    );
+    dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F64,
+        },
+        vec![a],
+        scalar_ty,
+        None,
+    );
+    let dag = fuse(&dag);
+
+    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum_f64");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("CHELIS_F64"),
+        "f64 reduce_sum must allocate an f64 output tensor:\n{src}"
+    );
+    assert!(
+        src.contains("chelis_fill_f64"),
+        "f64 reduce_sum must zero with chelis_fill_f64, not chelis_fill_f32:\n{src}"
+    );
+    assert!(
+        !src.contains("chelis_fill_f32(t1"),
+        "f64 reduce_sum output tensor must NOT be zero-filled with f32:\n{src}"
+    );
+    assert!(
+        src.contains("double acc"),
+        "f64 reduce_sum accumulator must be a double, not float:\n{src}"
+    );
+    assert!(
+        !src.contains("chelis_sum_f32("),
+        "f64 reduce_sum must NOT route through the f32-only chelis_sum_f32 SIMD helper:\n{src}"
+    );
+
+    // Build harness: pass an f64 array with shape[100] of 1..=100, expect sum=5050.0
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void test_reduce_sum_f64(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    // Allocate f64-sized buffer (8 bytes per element) but expose as float*
+    // (the runtime stores all data through the float* pointer; see
+    // chelis_alloc which sizes by dtype).
+    double in_data[100];
+    double scalar_sum = 0.0;
+    for (int i = 0; i < 100; i++) {{
+        in_data[i] = (double)(i + 1);
+        scalar_sum += in_data[i];
+    }}
+    chelis_tensor in_t;
+    memset(&in_t, 0, sizeof(in_t));
+    in_t.data = (float*)in_data;
+    in_t.shape[0] = 100;
+    in_t.strides[0] = 1;
+    in_t.ndim = 1;
+    in_t.dtype = CHELIS_F64;
+    in_t.size = 100;
+    in_t.owns_data = 0;
+
+    chelis_tensor* in_ptr = &in_t;
+    chelis_tensor* inputs[1] = {{in_ptr}};
+    chelis_tensor* out_slot = NULL;
+    chelis_tensor* outputs[1] = {{out_slot}};
+
+    test_reduce_sum_f64(inputs, 1, outputs, 1);
+
+    double got = ((double*)outputs[0]->data)[0];
+    double diff = fabs(got - scalar_sum);
+    printf("sum_f64(1..100): got=%.6f expected=%.6f diff=%.12f\n", got, scalar_sum, diff);
+    printf("%s\n", diff < 1e-9 ? "PASS" : "FAIL");
+    return diff < 1e-9 ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("ws_a1_reduce_sum_f64", src, &harness) else {
+        panic!("WS-A1 f64 reduce_sum kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "WS-A1 f64 reduce_sum wrong output:\n{output}"
+    );
+}
+
+// ---- WS-A1 Test: i32 reduce_sum produces integer result ----
+//
+// Spec §5.7.1: i32 reduce_sum default accumulator is i32; result is i32.
+// Pre-WS-A1 the emitter would have emitted `float acc = 0.0f` and
+// silently truncated/cast the integer values. After WS-A1 the
+// accumulator type comes from the IR node, so the loop is
+// `int32_t acc = (int32_t)0;` with no float involvement. The result
+// must round-trip exact integers (no float widening that would lose
+// precision near 2^24).
+#[test]
+fn ws_a1_exec_i32_reduce_sum_produces_integer_result_no_float_cast() {
+    let scalar_ty = scalar_i32();
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(5), None);
+    dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::Int32,
+        },
+        vec![a],
+        scalar_ty,
+        None,
+    );
+    let dag = fuse(&dag);
+
+    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum_i32");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("CHELIS_I32"),
+        "i32 reduce_sum must allocate an i32 output tensor:\n{src}"
+    );
+    assert!(
+        src.contains("int32_t acc"),
+        "i32 reduce_sum accumulator must be int32_t (integer-exact), not float:\n{src}"
+    );
+    assert!(
+        !src.contains("float acc"),
+        "i32 reduce_sum must NOT use a float accumulator (silent precision change):\n{src}"
+    );
+    assert!(
+        !src.contains("chelis_sum_f32("),
+        "i32 reduce_sum must NOT route through the f32-only SIMD helper:\n{src}"
+    );
+
+    // Pick values whose i32 sum fits without overflow; verify exact integer round-trip.
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void test_reduce_sum_i32(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    // i32 storage in a 4-byte slot; runtime alloc treats CHELIS_I32 as 4 bytes.
+    int32_t in_data[5] = {{16777215, 16777215, 16777215, 16777215, 16777215}};
+    // Note: 16777215 = 2^24 - 1. f32 can represent this exactly, but
+    // sum * 5 = 83886075, which a float accumulator would round (since
+    // 83886075 != round-to-nearest-float). i32 accumulator returns the
+    // exact integer.
+    int32_t expected_sum = 16777215 * 5;
+
+    chelis_tensor in_t;
+    memset(&in_t, 0, sizeof(in_t));
+    in_t.data = (float*)in_data;
+    in_t.shape[0] = 5;
+    in_t.strides[0] = 1;
+    in_t.ndim = 1;
+    in_t.dtype = CHELIS_I32;
+    in_t.size = 5;
+    in_t.owns_data = 0;
+
+    chelis_tensor* in_ptr = &in_t;
+    chelis_tensor* inputs[1] = {{in_ptr}};
+    chelis_tensor* out_slot = NULL;
+    chelis_tensor* outputs[1] = {{out_slot}};
+
+    test_reduce_sum_i32(inputs, 1, outputs, 1);
+
+    if (outputs[0]->dtype != CHELIS_I32) {{
+        printf("FAIL: output dtype is %d, expected CHELIS_I32 (%d)\n",
+               outputs[0]->dtype, CHELIS_I32);
+        return 1;
+    }}
+    int32_t got = ((int32_t*)outputs[0]->data)[0];
+    printf("sum_i32(5x 2^24-1): got=%d expected=%d\n", got, expected_sum);
+    printf("%s\n", got == expected_sum ? "PASS" : "FAIL");
+    return got == expected_sum ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("ws_a1_reduce_sum_i32", src, &harness) else {
+        panic!("WS-A1 i32 reduce_sum kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "WS-A1 i32 reduce_sum wrong output (integer arithmetic must be exact):\n{output}"
+    );
+}
+
+// ---- WS-A1 Test: f64 matmul dispatches cblas_dgemm and matches reference ----
+//
+// Spec §5.7.1: f64 matmul accumulator is f64; result is f64. The C
+// backend now dispatches `cblas_dgemm` (not `cblas_sgemm`) for an f64
+// BlasMatmul. Reference is a hand-computed product where the values
+// are exactly representable in f64 but not in f32, so an accidental
+// sgemm dispatch would fail the tolerance check.
+#[test]
+fn ws_a1_exec_f64_matmul_dispatches_dgemm_and_matches_reference() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_f64(2, 3),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_f64(3, 4),
+        None,
+    );
+    let matmul_op = RiscOp::matmul_default(
+        vec![],
+        DimExpr::Concrete(2),
+        DimExpr::Concrete(4),
+        DimExpr::Concrete(3),
+        Prim::F64,
+    )
+    .expect("f64 matmul default constructs (spec §5.7.1)");
+    dag.add_node(matmul_op, vec![a, b], mat_f64(2, 4), None);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_matmul_f64",
+        CodegenOptions {
+            use_blas: true,
+            ..CodegenOptions::default()
+        },
+    );
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("cblas_dgemm("),
+        "f64 matmul MUST dispatch cblas_dgemm (the WS-A1 lift):\n{src}"
+    );
+    assert!(
+        !src.contains("cblas_sgemm("),
+        "f64 matmul MUST NOT silently dispatch cblas_sgemm (RT-1 F1 finding):\n{src}"
+    );
+    assert!(
+        src.contains("CHELIS_F64"),
+        "f64 matmul output tensor must use CHELIS_F64 dtype:\n{src}"
+    );
+    assert!(
+        src.contains("(double*)t"),
+        "f64 matmul must cast tensor data pointers to double*:\n{src}"
+    );
+    assert!(
+        result.requirements.needs_blas,
+        "f64 matmul codegen must surface needs_blas=true so the toolchain links openblas/Accelerate"
+    );
+
+    // A[2,3] = [[1.5, 2.5, 3.5], [4.5, 5.5, 6.5]]
+    // B[3,4] = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
+    // Reference C[2,4]: row-major matmul. f64 yields exact results for these
+    // operand magnitudes; an accidental sgemm dispatch would compute the same
+    // values but on truncated f32 inputs, and the test asserts cblas_dgemm
+    // appears in the source so that path is unreachable.
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void test_matmul_f64(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    double a_data[6] = {{1.5, 2.5, 3.5, 4.5, 5.5, 6.5}};
+    double b_data[12] = {{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0}};
+
+    chelis_tensor a_t;
+    memset(&a_t, 0, sizeof(a_t));
+    a_t.data = (float*)a_data;
+    a_t.shape[0] = 2;
+    a_t.shape[1] = 3;
+    a_t.strides[0] = 3;
+    a_t.strides[1] = 1;
+    a_t.ndim = 2;
+    a_t.dtype = CHELIS_F64;
+    a_t.size = 6;
+    a_t.owns_data = 0;
+
+    chelis_tensor b_t;
+    memset(&b_t, 0, sizeof(b_t));
+    b_t.data = (float*)b_data;
+    b_t.shape[0] = 3;
+    b_t.shape[1] = 4;
+    b_t.strides[0] = 4;
+    b_t.strides[1] = 1;
+    b_t.ndim = 2;
+    b_t.dtype = CHELIS_F64;
+    b_t.size = 12;
+    b_t.owns_data = 0;
+
+    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* out_slot = NULL;
+    chelis_tensor* outputs[1] = {{out_slot}};
+
+    test_matmul_f64(inputs, 2, outputs, 1);
+
+    // Reference: hand-computed row-major matmul.
+    double expected[8] = {{
+        // row 0
+        1.5*1 + 2.5*5 + 3.5*9,    // = 1.5 + 12.5 + 31.5 = 45.5
+        1.5*2 + 2.5*6 + 3.5*10,   // = 3 + 15 + 35 = 53
+        1.5*3 + 2.5*7 + 3.5*11,   // = 4.5 + 17.5 + 38.5 = 60.5
+        1.5*4 + 2.5*8 + 3.5*12,   // = 6 + 20 + 42 = 68
+        // row 1
+        4.5*1 + 5.5*5 + 6.5*9,    // = 4.5 + 27.5 + 58.5 = 90.5
+        4.5*2 + 5.5*6 + 6.5*10,   // = 9 + 33 + 65 = 107
+        4.5*3 + 5.5*7 + 6.5*11,   // = 13.5 + 38.5 + 71.5 = 123.5
+        4.5*4 + 5.5*8 + 6.5*12    // = 18 + 44 + 78 = 140
+    }};
+    if (outputs[0]->dtype != CHELIS_F64) {{
+        printf("FAIL: output dtype is %d, expected CHELIS_F64 (%d)\n",
+               outputs[0]->dtype, CHELIS_F64);
+        return 1;
+    }}
+    double* got = (double*)outputs[0]->data;
+    int ok = 1;
+    for (int i = 0; i < 8; i++) {{
+        double diff = fabs(got[i] - expected[i]);
+        if (diff > 1e-12) {{
+            printf("MISMATCH at %d: got %.15f expected %.15f diff %.15g\n",
+                   i, got[i], expected[i], diff);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel_with_blas("ws_a1_matmul_f64", src, &harness) else {
+        eprintln!("WS-A1 f64 matmul kernel failed to compile/run (openblas may be unavailable)");
+        // Don't panic if openblas is missing on the host; the source-level
+        // assertions above already pin the dgemm dispatch shape.
+        return;
+    };
+    assert!(
+        output.contains("PASS"),
+        "WS-A1 f64 matmul wrong output (cblas_dgemm dispatch) :\n{output}"
+    );
+}
+
+// ---- WS-A1 Test: mixed-dtype program (f64 tensor + i32 tensor side-by-side) ----
+//
+// Compiles a program with both f64 and i32 tensors live in the same
+// DAG, returning two outputs: an f64 reduce_sum and an i32 reduce_sum.
+// Pre-WS-A1 the elem_type fallback to "float" would have silently
+// downgraded every non-f32 path; post-WS-A0 elem_type panics on
+// unhandled dtypes and post-WS-A1 the f64 path is wired through the
+// dtype-parameterized accumulator. This test exercises both dtypes
+// round-tripping through the same compiled kernel without one
+// silently corrupting the other.
+//
+// (i32 *index*-indexed Gather is the obvious mixed-dtype shape but
+// the existing C-backend Gather code path treats non-i64 indices as
+// `float*`-typed data — a pre-WS-A1 limitation that would conflate
+// the i32 codegen with an unrelated bug. Side-by-side reductions
+// keep the test focused on WS-A1's actual guarantee: that f64 and
+// i32 dtype dispatch coexist without aliasing.)
+#[test]
+fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
+    let mut dag = Dag::new();
+    let f_values = dag.add_node(
+        RiscOp::Load {
+            name: "f_values".into(),
+        },
+        vec![],
+        vec_f64(4),
+        None,
+    );
+    let i_values = dag.add_node(
+        RiscOp::Load {
+            name: "i_values".into(),
+        },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    // Two reductions: one f64 (default f64 accumulator), one i32
+    // (default i32 accumulator). Both Stores so codegen marks both as
+    // outputs.
+    let f_sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F64,
+        },
+        vec![f_values],
+        scalar_f64(),
+        None,
+    );
+    let i_sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::Int32,
+        },
+        vec![i_values],
+        scalar_i32(),
+        None,
+    );
+    dag.add_node(
+        RiscOp::Store {
+            name: "f_out".into(),
+        },
+        vec![f_sum],
+        scalar_f64(),
+        None,
+    );
+    dag.add_node(
+        RiscOp::Store {
+            name: "i_out".into(),
+        },
+        vec![i_sum],
+        scalar_i32(),
+        None,
+    );
+
+    let result = chelis_backend_c::codegen(&dag, "test_mixed");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("CHELIS_F64"),
+        "mixed-dtype program must use CHELIS_F64 for f64 tensors:\n{src}"
+    );
+    assert!(
+        src.contains("CHELIS_I32"),
+        "mixed-dtype program must use CHELIS_I32 for i32 tensors:\n{src}"
+    );
+    assert!(
+        src.contains("double acc"),
+        "mixed-dtype program must use a double accumulator for the f64 sum:\n{src}"
+    );
+    assert!(
+        src.contains("int32_t acc"),
+        "mixed-dtype program must use an int32_t accumulator for the i32 sum:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void test_mixed(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    double f_data[4] = {{1.5, 2.5, 3.5, 4.5}};
+    int32_t i_data[4] = {{100, 200, 300, 400}};
+    double f_expected = 1.5 + 2.5 + 3.5 + 4.5;          // 12.0
+    int32_t i_expected = 100 + 200 + 300 + 400;         // 1000
+
+    chelis_tensor f_t;
+    memset(&f_t, 0, sizeof(f_t));
+    f_t.data = (float*)f_data; f_t.shape[0] = 4; f_t.strides[0] = 1;
+    f_t.ndim = 1; f_t.dtype = CHELIS_F64; f_t.size = 4; f_t.owns_data = 0;
+
+    chelis_tensor i_t;
+    memset(&i_t, 0, sizeof(i_t));
+    i_t.data = (float*)i_data; i_t.shape[0] = 4; i_t.strides[0] = 1;
+    i_t.ndim = 1; i_t.dtype = CHELIS_I32; i_t.size = 4; i_t.owns_data = 0;
+
+    chelis_tensor* inputs[2] = {{&f_t, &i_t}};
+    chelis_tensor* outputs[2] = {{NULL, NULL}};
+
+    test_mixed(inputs, 2, outputs, 2);
+
+    int ok = 1;
+    if (outputs[0]->dtype != CHELIS_F64) {{
+        printf("FAIL: f_out dtype is %d, expected CHELIS_F64\n", outputs[0]->dtype);
+        ok = 0;
+    }}
+    if (outputs[1]->dtype != CHELIS_I32) {{
+        printf("FAIL: i_out dtype is %d, expected CHELIS_I32\n", outputs[1]->dtype);
+        ok = 0;
+    }}
+    double f_got = ((double*)outputs[0]->data)[0];
+    int32_t i_got = ((int32_t*)outputs[1]->data)[0];
+    double f_diff = fabs(f_got - f_expected);
+    printf("mixed: f_got=%.6f expected=%.6f diff=%.12f i_got=%d expected=%d\n",
+           f_got, f_expected, f_diff, i_got, i_expected);
+    if (f_diff > 1e-9) {{ printf("FAIL: f64 sum off\n"); ok = 0; }}
+    if (i_got != i_expected) {{ printf("FAIL: i32 sum off\n"); ok = 0; }}
+    // Verify input storage was not cross-corrupted by the dual-dtype path.
+    if (i_data[0] != 100 || i_data[3] != 400) {{
+        printf("FAIL: i32 input storage corrupted\n"); ok = 0;
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("ws_a1_mixed_dtype", src, &harness) else {
+        panic!("WS-A1 mixed-dtype kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "WS-A1 mixed-dtype output wrong:\n{output}"
+    );
+}
+
+// ---- WS-A1 Negative parity: integer matmul errors with useful diagnostic ----
+//
+// Spec §5.7.2: integer matmul (i8/i16/i32/i64) is not admitted in this
+// cycle. The IR-level rejection lives in
+// `RiscOp::default_matmul_accumulator` (returns Err for integer
+// operands), so the matmul constructor cannot even build an integer
+// BlasMatmul; the error message must cite the spec and is the
+// negative-parity twin of the f64 acceptance test above.
+#[test]
+fn ws_a1_negative_integer_matmul_rejected_with_spec_citation() {
+    // i32 operand: matmul_default must error.
+    let err_i32 = RiscOp::matmul_default(
+        vec![],
+        DimExpr::Concrete(2),
+        DimExpr::Concrete(4),
+        DimExpr::Concrete(3),
+        Prim::Int32,
+    )
+    .expect_err("i32 matmul must be rejected per spec §5.7.2");
+    assert!(
+        err_i32.contains("spec/04-type-system.md §5.7.2"),
+        "i32 matmul rejection must cite §5.7.2; got: {err_i32}"
+    );
+    assert!(
+        err_i32.contains("integer"),
+        "i32 matmul rejection must say 'integer'; got: {err_i32}"
+    );
+
+    // i64 operand: matmul_default must error.
+    let err_i64 = RiscOp::matmul_default(
+        vec![],
+        DimExpr::Concrete(2),
+        DimExpr::Concrete(4),
+        DimExpr::Concrete(3),
+        Prim::Int64,
+    )
+    .expect_err("i64 matmul must be rejected per spec §5.7.2");
+    assert!(
+        err_i64.contains("spec/04-type-system.md §5.7.2"),
+        "i64 matmul rejection must cite §5.7.2; got: {err_i64}"
+    );
+
+    // i8 / i16 must also error.
+    for prim in [Prim::Int8, Prim::Int16] {
+        let err = RiscOp::matmul_default(
+            vec![],
+            DimExpr::Concrete(2),
+            DimExpr::Concrete(4),
+            DimExpr::Concrete(3),
+            prim,
+        )
+        .expect_err(&format!("{prim:?} matmul must be rejected per spec §5.7.2"));
+        assert!(
+            err.contains("§5.7.2"),
+            "{prim:?} matmul rejection must cite §5.7.2; got: {err}"
+        );
+    }
+}
+
+// ---- WS-A1 Negative parity: bf16/f16 matmul still blocked at validation ----
+//
+// Spec §5.7.1: bf16/f16 matmul accumulator default is f32. The C
+// backend in WS-A1 only wired f32/f64 dispatch; bf16/f16 has no
+// native dispatch on any backend yet, so the F1 IR validation guard
+// keeps rejecting bf16/f16 BlasMatmul. WS-A3 lifts this for HIP.
+#[test]
+fn ws_a1_negative_bf16_f16_matmul_still_blocked_by_f1_guard() {
+    use chelis_ir::verify;
+    for prim in [Prim::Bf16, Prim::F16] {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+            precision: prim,
+        };
+        let ty_b = TensorType {
+            dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
+            precision: prim,
+        };
+        let ty_out = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
+            precision: prim,
+        };
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty, None);
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty_b, None);
+        let matmul_op = RiscOp::matmul_default(
+            vec![],
+            DimExpr::Concrete(2),
+            DimExpr::Concrete(4),
+            DimExpr::Concrete(3),
+            prim,
+        )
+        .unwrap_or_else(|e| panic!("{prim:?} matmul default constructs (per spec §5.7.1): {e}"));
+        let _ = dag.add_node(matmul_op, vec![a, b], ty_out, None);
+
+        let errors = verify::verify(&dag);
+        assert!(
+            errors
+                .iter()
+                .any(|m| m.contains("F1: BlasMatmul currently supports only f32")),
+            "{prim:?} BlasMatmul must still trip the (post-WS-A1, partially-lifted) F1 guard; got: {errors:?}"
+        );
+    }
+}

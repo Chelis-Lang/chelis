@@ -85,27 +85,34 @@ fn c_backend_panics_on_int8_tensor_no_silent_int32_downgrade() {
 // F. BlasMatmul accumulator silent loss
 // ---------------------------------------------------------------
 
-/// F. The structural finding: `MatmulInfo` has no accumulator field,
-/// and the destructure in `emit_dag` discards the accumulator from
-/// `RiscOp::BlasMatmul { .. }`.
+/// F (post-WS-A1). The structural fix: `MatmulInfo` now carries an
+/// `accumulator: Prim` field per `spec/04-type-system.md` §5.7.1, and
+/// `emit.rs` no longer destructures `RiscOp::BlasMatmul { .. }` without
+/// binding `accumulator`. The pre-WS-A1 version of this test pinned
+/// the absence of the field as a structural-bug tripwire; WS-A1 added
+/// the field and wired it through to BLAS dispatch (sgemm vs dgemm).
 ///
-/// This test pins the type-level fact: try to construct MatmulInfo with
-/// an accumulator field — it will not compile. If a future fix adds the
-/// field, this test will fail to compile and must be updated.
+/// The test now pins the positive shape: the accumulator field IS
+/// present, must be set on construction, and is sourced from the
+/// originating Sum's `accumulator` per `detect_matmul_pattern`.
 #[test]
-fn matmul_info_struct_has_no_accumulator_field() {
+fn matmul_info_struct_carries_accumulator_field_post_ws_a1() {
     use chelis_backend_c::blas::MatmulInfo;
-    // Public struct literal — if `accumulator` is later added as a
-    // required field, this constructor errors at compile time and
-    // surfaces the structural change directly.
+    use chelis_types::types::Prim;
+    // Public struct literal — `accumulator` is now a required field.
+    // If a future change drops it, the constructor errors at compile
+    // time and surfaces the structural regression directly (the F1
+    // footgun would re-emerge if any backend path could read the spec
+    // without the accumulator).
     let info = MatmulInfo {
         a: chelis_ir::dag::NodeId(0),
         b: chelis_ir::dag::NodeId(1),
         m: 2,
         n: 4,
         k: 3,
+        accumulator: Prim::F64,
     };
-    let _ = info;
+    assert_eq!(info.accumulator, Prim::F64);
 }
 
 /// F. The runtime/codegen finding: build a DAG containing
