@@ -1560,33 +1560,60 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
+    // W2 PR 3 of the 0.7.8 compiler cleanup workstream
+    // (`CRuntime-F32Coupling`).  The four `*_elementwise` helpers
+    // below previously wrote `t->data[i]` directly.  `chelis_tensor`
+    // declares `data` as `float *` in the public runtime header so
+    // every such access decoded the buffer at the f32 4-byte stride
+    // regardless of `(*t).dtype` -- the same bug class closed by
+    // PR #64 (CastMemcpy), PR #67 (ReshapeMemcpy), and PR #72
+    // (PrintTensorF64) on the storage side, and by PR #84/#86 on the
+    // Rust runtime side.  These helpers now emit an outer
+    // `switch (target->dtype)` and read/write through typed pointer
+    // casts in every arm.
+    //
+    // Per `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract
+    // 2 the supported precisions are f32, f64, i32, i64, and bool.
+    // CHELIS_I32 and CHELIS_BOOL storage is 4-byte f32-encoded today
+    // (see `crates/chelis-runtime/src/lib.rs` `chelis_alloc` and the
+    // f32-routed runtime accessors at L2178-L2192 / L2222-L2223);
+    // their arms route through `(float*)t->data` to match the
+    // runtime convention.  CHELIS_F64 uses `(double*)` and
+    // CHELIS_I64 uses `(int64_t*)`.
+    //
+    // The four helpers split into two pairs:
+    //
+    //   * `assign_tensor_binary_elementwise` /
+    //     `assign_tensor_unary_elementwise` take a raw C operator
+    //     (`+`, `-`, `*`, `/`, `!`, unary `-`) and emit the operator
+    //     for every supported dtype arm.  All arms are semantically
+    //     well-defined for the supported operators.
+    //
+    //   * `assign_tensor_binary_func_elementwise` /
+    //     `assign_tensor_unary_func_elementwise` take a libm-style
+    //     function name (`fmaxf`, `expf`, `chelis_host_relu_f32`,
+    //     ...).  Today these helper names are all f32-only.  Calling
+    //     them on f64 data through a `(double*)` cast would
+    //     auto-convert at the call site but introduces precision
+    //     loss; calling them on `(int64_t*)` is meaningless.  The
+    //     dtype switch therefore routes f32 / i32 / bool through
+    //     `(float*)t->data` (the existing semantics) and emits a
+    //     `runtime_fail`-style abort for f64 and i64.  A future PR
+    //     can lift the precision domain into the IR layer and emit
+    //     `fmax` / `exp` / per-precision custom helpers in the
+    //     f64 / i64 arms; until that lands the abort is the
+    //     correct-by-construction surface.
     fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
         self.lines.push(format!(
             "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
             self.indent
         ));
-        self.lines.push(format!(
-            "{}for (int i = 0; i < {target}->size; i++) {{",
-            self.indent
-        ));
         self.lines
-            .push(format!("{}    int indices[CHELIS_MAX_DIM];", self.indent));
-        self.lines.push(format!(
-            "{}    chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    int idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    int idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    {target}->data[i] = {lhs}->data[idx_lhs] {op} {rhs}->data[idx_rhs];",
-            self.indent
-        ));
+            .push(format!("{}switch ({target}->dtype) {{", self.indent));
+        for arm in DtypeArm::all_operator_arms() {
+            self.emit_binary_elementwise_arm(target, lhs, rhs, op, *arm);
+        }
+        self.emit_default_runtime_fail_arm_for(target, "binary elementwise op");
         self.lines.push(format!("{}}}", self.indent));
     }
 
@@ -1601,28 +1628,21 @@ impl<'a> HostEmitter<'a> {
             "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
             self.indent
         ));
-        self.lines.push(format!(
-            "{}for (int i = 0; i < {target}->size; i++) {{",
-            self.indent
-        ));
         self.lines
-            .push(format!("{}    int indices[CHELIS_MAX_DIM];", self.indent));
-        self.lines.push(format!(
-            "{}    chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    int idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    int idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    {target}->data[i] = {func}({lhs}->data[idx_lhs], {rhs}->data[idx_rhs]);",
-            self.indent
-        ));
+            .push(format!("{}switch ({target}->dtype) {{", self.indent));
+        for arm in DtypeArm::all_f32_only_func_arms() {
+            self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, *arm);
+        }
+        // CHELIS_F64 and CHELIS_I64 abort: the func names threaded
+        // through this helper are all f32-only today.
+        self.emit_dtype_fail_arms(
+            &[DtypeArm::F64, DtypeArm::I64],
+            &format!("binary func elementwise ({func})"),
+        );
+        self.emit_default_runtime_fail_arm_for(
+            target,
+            &format!("binary func elementwise ({func})"),
+        );
         self.lines.push(format!("{}}}", self.indent));
     }
 
@@ -1631,24 +1651,12 @@ impl<'a> HostEmitter<'a> {
             "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
             self.indent
         ));
-        self.lines.push(format!(
-            "{}for (int i = 0; i < {target}->size; i++) {{",
-            self.indent
-        ));
         self.lines
-            .push(format!("{}    int indices[CHELIS_MAX_DIM];", self.indent));
-        self.lines.push(format!(
-            "{}    chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    int idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    {target}->data[i] = {op}{input}->data[idx];",
-            self.indent
-        ));
+            .push(format!("{}switch ({target}->dtype) {{", self.indent));
+        for arm in DtypeArm::all_operator_arms() {
+            self.emit_unary_elementwise_arm(target, input, op, *arm);
+        }
+        self.emit_default_runtime_fail_arm_for(target, "unary elementwise op");
         self.lines.push(format!("{}}}", self.indent));
     }
 
@@ -1657,25 +1665,201 @@ impl<'a> HostEmitter<'a> {
             "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
             self.indent
         ));
+        self.lines
+            .push(format!("{}switch ({target}->dtype) {{", self.indent));
+        for arm in DtypeArm::all_f32_only_func_arms() {
+            self.emit_unary_func_elementwise_arm(target, input, func, *arm);
+        }
+        self.emit_dtype_fail_arms(
+            &[DtypeArm::F64, DtypeArm::I64],
+            &format!("unary func elementwise ({func})"),
+        );
+        self.emit_default_runtime_fail_arm_for(target, &format!("unary func elementwise ({func})"));
+        self.lines.push(format!("{}}}", self.indent));
+    }
+
+    /// Emit one arm of the elementwise binary operator dispatch.
+    fn emit_binary_elementwise_arm(
+        &mut self,
+        target: &str,
+        lhs: &str,
+        rhs: &str,
+        op: &str,
+        arm: DtypeArm,
+    ) {
+        let ind = &self.indent;
+        let macro_name = arm.dtype_macro();
+        let elem_t = arm.elem_t();
+        self.lines.push(format!("{ind}    case {macro_name}: {{"));
         self.lines.push(format!(
-            "{}for (int i = 0; i < {target}->size; i++) {{",
-            self.indent
+            "{ind}        {elem_t} *__target_data = ({elem_t}*){target}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*){lhs}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*){rhs}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        for (int i = 0; i < {target}->size; i++) {{"
         ));
         self.lines
-            .push(format!("{}    int indices[CHELIS_MAX_DIM];", self.indent));
+            .push(format!("{ind}            int indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
-            "{}    chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);",
-            self.indent
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
         ));
         self.lines.push(format!(
-            "{}    int idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);",
-            self.indent
+            "{ind}            int idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
         ));
         self.lines.push(format!(
-            "{}    {target}->data[i] = {func}({input}->data[idx]);",
-            self.indent
+            "{ind}            int idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
         ));
-        self.lines.push(format!("{}}}", self.indent));
+        self.lines.push(format!(
+            "{ind}            __target_data[i] = __lhs_data[idx_lhs] {op} __rhs_data[idx_rhs];"
+        ));
+        self.lines.push(format!("{ind}        }}"));
+        self.lines.push(format!("{ind}        break;"));
+        self.lines.push(format!("{ind}    }}"));
+    }
+
+    /// Emit one arm of the elementwise binary func dispatch.
+    fn emit_binary_func_elementwise_arm(
+        &mut self,
+        target: &str,
+        lhs: &str,
+        rhs: &str,
+        func: &str,
+        arm: DtypeArm,
+    ) {
+        let ind = &self.indent;
+        let macro_name = arm.dtype_macro();
+        let elem_t = arm.elem_t();
+        self.lines.push(format!("{ind}    case {macro_name}: {{"));
+        self.lines.push(format!(
+            "{ind}        {elem_t} *__target_data = ({elem_t}*){target}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*){lhs}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*){rhs}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        for (int i = 0; i < {target}->size; i++) {{"
+        ));
+        self.lines
+            .push(format!("{ind}            int indices[CHELIS_MAX_DIM];"));
+        self.lines.push(format!(
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
+        ));
+        self.lines.push(format!(
+            "{ind}            __target_data[i] = {func}(__lhs_data[idx_lhs], __rhs_data[idx_rhs]);"
+        ));
+        self.lines.push(format!("{ind}        }}"));
+        self.lines.push(format!("{ind}        break;"));
+        self.lines.push(format!("{ind}    }}"));
+    }
+
+    /// Emit one arm of the elementwise unary operator dispatch.
+    fn emit_unary_elementwise_arm(&mut self, target: &str, input: &str, op: &str, arm: DtypeArm) {
+        let ind = &self.indent;
+        let macro_name = arm.dtype_macro();
+        let elem_t = arm.elem_t();
+        self.lines.push(format!("{ind}    case {macro_name}: {{"));
+        self.lines.push(format!(
+            "{ind}        {elem_t} *__target_data = ({elem_t}*){target}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        const {elem_t} *__input_data = (const {elem_t}*){input}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        for (int i = 0; i < {target}->size; i++) {{"
+        ));
+        self.lines
+            .push(format!("{ind}            int indices[CHELIS_MAX_DIM];"));
+        self.lines.push(format!(
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+        ));
+        self.lines.push(format!(
+            "{ind}            __target_data[i] = {op}__input_data[idx];"
+        ));
+        self.lines.push(format!("{ind}        }}"));
+        self.lines.push(format!("{ind}        break;"));
+        self.lines.push(format!("{ind}    }}"));
+    }
+
+    /// Emit one arm of the elementwise unary func dispatch.
+    fn emit_unary_func_elementwise_arm(
+        &mut self,
+        target: &str,
+        input: &str,
+        func: &str,
+        arm: DtypeArm,
+    ) {
+        let ind = &self.indent;
+        let macro_name = arm.dtype_macro();
+        let elem_t = arm.elem_t();
+        self.lines.push(format!("{ind}    case {macro_name}: {{"));
+        self.lines.push(format!(
+            "{ind}        {elem_t} *__target_data = ({elem_t}*){target}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        const {elem_t} *__input_data = (const {elem_t}*){input}->data;"
+        ));
+        self.lines.push(format!(
+            "{ind}        for (int i = 0; i < {target}->size; i++) {{"
+        ));
+        self.lines
+            .push(format!("{ind}            int indices[CHELIS_MAX_DIM];"));
+        self.lines.push(format!(
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+        ));
+        self.lines.push(format!(
+            "{ind}            __target_data[i] = {func}(__input_data[idx]);"
+        ));
+        self.lines.push(format!("{ind}        }}"));
+        self.lines.push(format!("{ind}        break;"));
+        self.lines.push(format!("{ind}    }}"));
+    }
+
+    /// Emit one or more `case CHELIS_*: { ... abort(); break; }` arms
+    /// for dtypes the surrounding switch cannot service.
+    fn emit_dtype_fail_arms(&mut self, arms: &[DtypeArm], site_name: &str) {
+        let ind = &self.indent;
+        for arm in arms {
+            let macro_name = arm.dtype_macro();
+            self.lines.push(format!("{ind}    case {macro_name}: {{"));
+            self.lines.push(format!(
+                "{ind}        fprintf(stderr, \"{site_name} unsupported for dtype {macro_name}\\n\");"
+            ));
+            self.lines.push(format!("{ind}        abort();"));
+            self.lines.push(format!("{ind}    }}"));
+        }
+    }
+
+    /// Emit the `default:` arm for an elementwise dtype switch.
+    /// `target` names the dispatched-on tensor so the stderr message
+    /// can include its actual dtype value at runtime.
+    fn emit_default_runtime_fail_arm_for(&mut self, target: &str, site_name: &str) {
+        let ind = &self.indent;
+        self.lines.push(format!("{ind}    default: {{"));
+        self.lines.push(format!(
+            "{ind}        fprintf(stderr, \"{site_name} unsupported dtype %d\\n\", (int){target}->dtype);"
+        ));
+        self.lines.push(format!("{ind}        abort();"));
+        self.lines.push(format!("{ind}    }}"));
     }
 
     fn assign_tensor_call(
@@ -1743,6 +1927,18 @@ impl<'a> HostEmitter<'a> {
                         .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
                     // Scalar inputs to tensor helpers use true rank-0 tensors so
                     // tensor[f32] keeps shape=[] across generated host/DAG calls.
+                    //
+                    // W2 PR 3 (CRuntime-F32Coupling): every arm casts
+                    // `->data` through a typed pointer before writing
+                    // the scalar.  The legacy bool / f32 arms wrote
+                    // through the public `float *data` declaration in
+                    // the C runtime header; mirror the int64 arm's
+                    // typed-cast pattern for the bool and f32 cases
+                    // so the bug class closes uniformly.  Bool
+                    // storage today is 4-byte f32-encoded (per
+                    // `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`),
+                    // so the bool arm casts to `(float*)` and writes
+                    // the 1.0f / 0.0f bit pattern.
                     let (dtype, store) = match inferred_ty {
                         HostType::Int64 => (
                             "CHELIS_I64",
@@ -1750,11 +1946,13 @@ impl<'a> HostEmitter<'a> {
                         ),
                         HostType::Bool => (
                             "CHELIS_BOOL",
-                            format!("{tensor_name}->data[0] = {value_name} ? 1.0f : 0.0f;"),
+                            format!(
+                                "((float*){tensor_name}->data)[0] = {value_name} ? 1.0f : 0.0f;"
+                            ),
                         ),
                         _ => (
                             "CHELIS_F32",
-                            format!("{tensor_name}->data[0] = (float)({value_name});"),
+                            format!("((float*){tensor_name}->data)[0] = (float)({value_name});"),
                         ),
                     };
                     self.lines.push(format!(
@@ -3470,6 +3668,76 @@ fn sparse_dtype_macro(prim: Prim) -> &'static str {
             "C backend sparse summary does not support {} tensors",
             other.name()
         ),
+    }
+}
+
+/// One arm of the runtime-dtype dispatch emitted by the elementwise
+/// host-emit helpers (`assign_tensor_*_elementwise`).  Each arm
+/// names a `CHELIS_*` constant and the C element type used to read
+/// and write the tensor's `data` buffer through a typed pointer.
+///
+/// The `Int32` and `Bool` arms reuse `float` as the element type
+/// because CHELIS_I32 and CHELIS_BOOL tensor storage today is
+/// 4-byte f32-encoded (see `crates/chelis-runtime/src/lib.rs`
+/// `chelis_alloc` and the f32-routed runtime accessors at
+/// L2178-L2192 / L2222-L2223 plus
+/// `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`).
+/// `i32::data_ptr_unchecked` exists for future storage migration
+/// but reading the current f32-encoded buffer through it would be
+/// the wrong decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DtypeArm {
+    F32,
+    F64,
+    I32,
+    I64,
+    Bool,
+}
+
+impl DtypeArm {
+    fn dtype_macro(self) -> &'static str {
+        match self {
+            DtypeArm::F32 => "CHELIS_F32",
+            DtypeArm::F64 => "CHELIS_F64",
+            DtypeArm::I32 => "CHELIS_I32",
+            DtypeArm::I64 => "CHELIS_I64",
+            DtypeArm::Bool => "CHELIS_BOOL",
+        }
+    }
+
+    fn elem_t(self) -> &'static str {
+        match self {
+            // f32 / int32 / bool storage is 4-byte f32-encoded
+            // today.  Reading through `float*` matches the runtime
+            // accessor convention; see the type doc-comment above.
+            DtypeArm::F32 | DtypeArm::I32 | DtypeArm::Bool => "float",
+            DtypeArm::F64 => "double",
+            DtypeArm::I64 => "int64_t",
+        }
+    }
+
+    /// Every supported precision the operator-form elementwise
+    /// helpers emit a typed arm for.  Maps the runtime's currently-
+    /// allocated dtypes onto the four C element types used by the
+    /// runtime accessor pattern.
+    fn all_operator_arms() -> &'static [DtypeArm] {
+        &[
+            DtypeArm::F32,
+            DtypeArm::F64,
+            DtypeArm::I32,
+            DtypeArm::I64,
+            DtypeArm::Bool,
+        ]
+    }
+
+    /// Subset of the operator arms covered by the libm-f32 func
+    /// form (`expf`, `sinf`, `fmaxf`, `chelis_host_relu_f32`, ...).
+    /// CHELIS_F64 and CHELIS_I64 cannot be covered by these names
+    /// without precision loss or type-mismatch; those arms emit a
+    /// `runtime_fail`-style `abort()` until per-precision helper
+    /// names land in a future PR.
+    fn all_f32_only_func_arms() -> &'static [DtypeArm] {
+        &[DtypeArm::F32, DtypeArm::I32, DtypeArm::Bool]
     }
 }
 

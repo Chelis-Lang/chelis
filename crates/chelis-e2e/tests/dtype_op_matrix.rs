@@ -369,8 +369,11 @@ fn data_ptr_match_succeeds() {
 // and I64 fixtures would have failed because the f32-strided read
 // silently truncated 8-byte storage to 4-byte chunks.
 //
-// PR 3 host_emit code-generation site fixtures and any matrix
-// completion remain on the W2 PR 3 / PR 4 plan.
+// PR 3 host_emit code-generation site fixtures live at
+// `crates/chelis-backend-c/tests/host_emit_dtype_dispatch.rs` because
+// they exercise the `host_emit::emit_host_program` pure-function
+// surface directly, separate from the runtime-symbol path covered
+// here.  Matrix completion remains on the W2 PR 4 plan.
 
 /// Allocate a rank-1 length-`n` tensor and fill it with values from
 /// `vals` interpreted as the tensor's storage convention for `dtype`:
@@ -1239,6 +1242,9 @@ fn einsum_dot_product_f32() {
 // catch the runtime_fail via end-to-end CLI exit-code checks; this
 // matrix locks the byte-exact passing arms only.
 //
-// PR 3 (host_emit code-generation site fixtures) and PR 4 (matrix
-// completion) may revisit the bool-rejection coverage if they need a
-// dedicated runtime_fail subprocess harness.
+// PR 4 (matrix completion) may revisit the bool-rejection coverage
+// if it needs a dedicated runtime_fail subprocess harness.  PR 3
+// (host_emit code-generation site fixtures) covers the emitted-C
+// pointer-typing invariant at
+// `crates/chelis-backend-c/tests/host_emit_dtype_dispatch.rs` and
+// does not need the subprocess harness.
