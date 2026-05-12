@@ -164,10 +164,13 @@ pub fn builtin_env() -> (Env, VarGen) {
     // bind dims element-wise.
     fn tensor_binop(name: &str, env: &mut Env, vg: &mut VarGen) {
         let dv = vg.fresh_dvar();
-        let pv = vg.fresh_tvar(); // precision as type var (will unify to Prim)
-        // We can't put a TypeVar inside Tensor's Prim slot directly.
-        // Instead, use a full TypeVar for the whole tensor type.
-        // The constraint is: both args and return are the SAME tensor type.
+        // Whole-tensor type variable: both args and return are the
+        // SAME tensor type. This continues to work post-WS-A5 because
+        // unifying two tensor types unifies both dim lists and the
+        // precision slot. Precision-slot polymorphism (TensorPrec::Var)
+        // is reserved for sig-quantified type variables in user-written
+        // Surf signatures — the builtin scheme keeps the simpler
+        // "whole tensor as one type variable" shape.
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
@@ -177,7 +180,6 @@ pub fn builtin_env() -> (Env, VarGen) {
                 Box::new(Type::Var(tv)),
             ),
         };
-        let _ = pv; // precision enforcement happens during unification
         env.bind(name.to_string(), scheme);
     }
 
@@ -1096,7 +1098,10 @@ mod tests {
         let add_ty = env.instantiate(add_scheme, &mut vg);
 
         // add should accept two tensors of the same type
-        let tensor_f32 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
+        let tensor_f32 = Type::Tensor(
+            vec![Dim::Name("batch".into())],
+            TensorPrec::Concrete(Prim::F32),
+        );
         let expected_fn = Type::Fn(
             vec![
                 Type::Ref(Box::new(tensor_f32.clone())),
@@ -1118,8 +1123,14 @@ mod tests {
         let add_ty = env.instantiate(add_scheme, &mut vg);
 
         // add(tensor[batch,f32], tensor[batch,bf16]) should fail
-        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
-        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::Bf16);
+        let t1 = Type::Tensor(
+            vec![Dim::Name("batch".into())],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let t2 = Type::Tensor(
+            vec![Dim::Name("batch".into())],
+            TensorPrec::Concrete(Prim::Bf16),
+        );
         let bad_fn = Type::Fn(
             vec![Type::Ref(Box::new(t1)), Type::Ref(Box::new(t2))],
             Box::new(Type::Var(vg.fresh_tvar())),
@@ -1138,7 +1149,10 @@ mod tests {
         let add_ty = env.instantiate(add_scheme, &mut vg);
 
         // add(tensor[batch,f32], int32) should fail
-        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
+        let t1 = Type::Tensor(
+            vec![Dim::Name("batch".into())],
+            TensorPrec::Concrete(Prim::F32),
+        );
         let t2 = Type::Prim(Prim::Int32);
         let bad_fn = Type::Fn(
             vec![Type::Ref(Box::new(t1)), Type::Ref(Box::new(t2))],
