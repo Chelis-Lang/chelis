@@ -5125,6 +5125,17 @@ fn cmd_lint(
         let raw_violations = chelis_lint::lint(target, &rules)?;
         let kept = chelis_lint::exceptions::apply_exceptions(&raw_violations, &exceptions, target);
         for v in &kept {
+            // V2-F3 (PR #58): suppress warnings for rules that opt in
+            // to `check_mirrors_fix` when the autofix would silently
+            // decline (or be rejected by the typed-pipeline gate).
+            // Without this filter, `chelis lint --fix` is
+            // non-convergent for those rules: the warning fires, the
+            // autofix declines, and the next `--check` run fires the
+            // same warning again. Inline `keep` directives are
+            // honored separately by `should_suppress_unfixable_violation`.
+            if should_suppress_unfixable_violation(target, &rules, v) {
+                continue;
+            }
             let severity = rule_severity(&rules, &v.rule_id);
             let suffix = if fix_available_for_violation(target, &rules, v) {
                 " [fix]"
@@ -5277,24 +5288,47 @@ fn fix_available_for_violation(
     let Some(surface) = chelis_lint::Surface::classify(&violation.path, false) else {
         return false;
     };
-    let ctx = chelis_lint::Context {
-        root: target,
-        path: &violation.path,
-        source: Some(&source),
-        surface,
-    };
     if violation.line.is_some_and(|line| {
         chelis_lint::inline_keeps(&source, surface, line, violation.rule_id.as_str())
     }) {
         return false;
     }
+    fix_would_apply_for_violation(target, rule.as_ref(), &source, surface, violation)
+}
+
+/// Does the rule propose a safe fix for `violation` against `source` —
+/// ignoring any `keep` directive on the violation's line?
+///
+/// `fix_available_for_violation` returns `false` when an inline `keep`
+/// directive suppresses the rewrite; that's the correct gate for
+/// printing the `[fix]` marker (no marker on kept-on-purpose
+/// violations) and for `apply_lint_fixes` (no rewrite on kept
+/// violations). The CLI's `check_mirrors_fix` warning suppression
+/// (V2-F3 / PR #58) needs to distinguish "fix unavailable because the
+/// user said keep" (warning should still print) from "fix unavailable
+/// because the rule declined or the typed-pipeline gate rejected"
+/// (warning should be suppressed; `--fix` is non-convergent
+/// otherwise). This helper exposes the latter predicate.
+fn fix_would_apply_for_violation(
+    target: &Path,
+    rule: &dyn chelis_lint::Rule,
+    source: &str,
+    surface: chelis_lint::Surface,
+    violation: &chelis_lint::Violation,
+) -> bool {
+    let ctx = chelis_lint::Context {
+        root: target,
+        path: &violation.path,
+        source: Some(source),
+        surface,
+    };
     let Some(replacement) = rule.fix(&ctx, violation) else {
         return false;
     };
     if rule.fix_requires_typed_pipeline_check()
         && matches!(surface, chelis_lint::Surface::SurfSource)
     {
-        let mut candidate = source.clone();
+        let mut candidate = source.to_string();
         if replacement.start > candidate.len() || replacement.end > candidate.len() {
             return false;
         }
@@ -5302,4 +5336,43 @@ fn fix_available_for_violation(
         return typed_pipeline_accepts_surf(&candidate);
     }
     true
+}
+
+/// Should the CLI suppress this violation's warning because the rule
+/// opted in to `check_mirrors_fix` and the autofix would silently
+/// decline (or be rejected by the typed-pipeline gate)?
+///
+/// V2-F3 (PR #58): a rule whose warning is only actionable when
+/// paired with a safe rewrite should not surface the warning when no
+/// rewrite is on offer; otherwise `chelis lint --fix` is
+/// non-convergent for that rule. The CLI applies this filter at the
+/// final warning-emit path. Explicit `keep` directives are honored:
+/// the user has opted to preserve the source and see the warning, so
+/// suppression does not apply.
+fn should_suppress_unfixable_violation(
+    target: &Path,
+    rules: &[Box<dyn chelis_lint::Rule>],
+    violation: &chelis_lint::Violation,
+) -> bool {
+    let Some(rule) = rules.iter().find(|rule| rule.id() == violation.rule_id) else {
+        return false;
+    };
+    if !rule.check_mirrors_fix() {
+        return false;
+    }
+    let Ok(source) = fs::read_to_string(&violation.path) else {
+        return false;
+    };
+    let Some(surface) = chelis_lint::Surface::classify(&violation.path, false) else {
+        return false;
+    };
+    if violation.line.is_some_and(|line| {
+        chelis_lint::inline_keeps(&source, surface, line, violation.rule_id.as_str())
+    }) {
+        // User explicitly asked to keep this occurrence; the warning
+        // continues to fire (without a `[fix]` marker) so the user
+        // can see the diagnostic they pinned.
+        return false;
+    }
+    !fix_would_apply_for_violation(target, rule.as_ref(), &source, surface, violation)
 }

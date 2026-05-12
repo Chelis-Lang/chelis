@@ -157,6 +157,30 @@ pub trait Rule: Send + Sync {
     fn fix_requires_typed_pipeline_check(&self) -> bool {
         false
     }
+
+    /// Whether the CLI lint driver should suppress this rule's warnings
+    /// when the autofix is unavailable for the violation (no fix
+    /// proposed, fix proposed but bailed out, or fix rejected by the
+    /// typed-pipeline gate).
+    ///
+    /// Default `false`: warnings fire even when no fix is offered, so
+    /// the user can see the diagnostic and rewrite manually. This is
+    /// the right behavior for advisory rules like
+    /// `redundant-linearity-call`, where the warning is informational
+    /// and the lack of a fix carries its own signal.
+    ///
+    /// Rules whose warning is only meaningful when paired with a safe
+    /// rewrite — currently `prefer-pipe-operator` — opt in to `true`.
+    /// `chelis lint --fix` then converges for those rules: either the
+    /// rewrite is applied (and the warning disappears with the
+    /// rewrite), or the warning is suppressed (because the rule
+    /// declines to propose an unsafe transformation).
+    ///
+    /// Architectural rationale in
+    /// `docs/investigations/prefer_pipe_trigger_emit_diagnosis.md`.
+    fn check_mirrors_fix(&self) -> bool {
+        false
+    }
 }
 
 /// A lint exception. Every entry must cross-reference a section of

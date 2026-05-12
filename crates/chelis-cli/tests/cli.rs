@@ -5619,7 +5619,6 @@ fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_mixed_outer_args() {
 // Gated `#[ignore]` until the fix lands.
 
 #[test]
-#[ignore = "V2-F3 (PR #58): prefer-pipe-operator trigger fires on shape the autofix declines (fan-out re-use of seed); fix pending"]
 fn lint_fix_prefer_pipe_operator_converges_on_fanout_seed_reuse() {
     // Minimal V2-F3 reproducer: `add(mul(x, x), x)`. The autofix's
     // syntactic rewrite would be `x |> mul(x) |> add(x)`, which the
@@ -5648,7 +5647,6 @@ fn lint_fix_prefer_pipe_operator_converges_on_fanout_seed_reuse() {
 }
 
 #[test]
-#[ignore = "V2-F3 (PR #58): prefer-pipe-operator trigger fires on multi-line emit shape (PR #55 bail-out); fix pending"]
 fn lint_fix_prefer_pipe_operator_converges_on_multi_line_emit() {
     // The PR #55 bail-out drops `fix()` when the rewrite would render
     // multi-line (`total_stages > 3` or flat > 80 chars). `check()`
@@ -5677,7 +5675,6 @@ fn lint_fix_prefer_pipe_operator_converges_on_multi_line_emit() {
 }
 
 #[test]
-#[ignore = "V2-F3 (PR #58): prefer-pipe-operator trigger fires on outer-arg fan-out shape; fix pending"]
 fn lint_fix_prefer_pipe_operator_converges_on_outer_arg_fanout() {
     // V2-F3 secondary shape from the red-team report:
     // `w = mul(relu(add(x, a)), a)`. The proposed rewrite is
