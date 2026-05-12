@@ -17,6 +17,11 @@ const CHELIS_F64: c_int = 1;
 const CHELIS_I32: c_int = 2;
 const CHELIS_BOOL: c_int = 3;
 const CHELIS_I64: c_int = 4;
+// WS-A3: bf16 / f16 dtype tags. Two-byte storage; the host runtime
+// does not implement bf16/f16 arithmetic in this cycle. Mirrors the
+// matching macros in `crates/chelis-runtime/include/chelis_runtime.h`.
+const CHELIS_BF16: c_int = 5;
+const CHELIS_F16: c_int = 6;
 const CHELIS_MAX_DIM: usize = 8;
 
 macro_rules! runtime_fail {
@@ -417,6 +422,12 @@ pub unsafe extern "C" fn chelis_alloc(
     }
     let elem_size = if dtype == CHELIS_I64 || dtype == CHELIS_F64 {
         std::mem::size_of::<i64>()
+    } else if dtype == CHELIS_BF16 || dtype == CHELIS_F16 {
+        // WS-A3: bf16 / f16 storage is 2 bytes. The host runtime
+        // does not perform bf16/f16 arithmetic; the HIP backend is
+        // the only consumer in this cycle. Mirror the matching
+        // dispatch in `chelis_hip_runtime.h::chelis_gpu_dtype_size`.
+        2
     } else {
         std::mem::size_of::<f32>()
     };
@@ -2479,6 +2490,8 @@ pub unsafe extern "C" fn chelis_mmap_len(mapped: *const chelis_mapped_file) -> i
 pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chelis_tensor {
     let elem_size = if (*t).dtype == CHELIS_I64 || (*t).dtype == CHELIS_F64 {
         std::mem::size_of::<i64>()
+    } else if (*t).dtype == CHELIS_BF16 || (*t).dtype == CHELIS_F16 {
+        2
     } else {
         std::mem::size_of::<f32>()
     };

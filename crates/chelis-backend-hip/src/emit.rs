@@ -51,6 +51,13 @@ struct MatmulEmitSpec {
     m: DimExpr,
     n: DimExpr,
     k: DimExpr,
+    /// Accumulator precision selected by the IR (`RiscOp::BlasMatmul`'s
+    /// `accumulator` field, or the spec-default resolved from the
+    /// detected matmul pattern's Sum-node accumulator). The HIP backend
+    /// dispatches per `(operand_dtype, accumulator)` pair so the
+    /// destructure-`..` F1 footgun (silent `hipblasSgemm` regardless
+    /// of accumulator) cannot recur for bf16/f16 in this cycle.
+    accumulator: Prim,
 }
 
 struct StridedBatchedMatmulPlan {
@@ -60,31 +67,100 @@ struct StridedBatchedMatmulPlan {
     out_batch_stride: usize,
 }
 
+/// Selected matmul-dispatch wrapper. Determined by the
+/// `(operand_dtype, accumulator)` pair, not by operand alone — see the
+/// dispatch table in `emit_blas_matmul`. The wrapper names mirror the
+/// inline functions in
+/// `crates/chelis-backend-hip/runtime/chelis_hip_runtime.h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatmulWrapper {
+    /// f32 operands + f32 accumulator → `chelis_hipblas_sgemm_*`.
+    Sgemm,
+    /// f64 operands + f64 accumulator → `chelis_hipblas_dgemm_*` (WS-A2).
+    Dgemm,
+    /// bf16 operands + f32 accumulator → `chelis_hipblas_bf16_gemm_f32_acc_*`.
+    Bf16GemmF32,
+    /// f16 operands + f32 accumulator → `chelis_hipblas_f16_gemm_f32_acc_*`.
+    F16GemmF32,
+}
+
+impl MatmulWrapper {
+    fn row_major_call_name(self) -> &'static str {
+        match self {
+            MatmulWrapper::Sgemm => "chelis_hipblas_sgemm_row_major",
+            MatmulWrapper::Dgemm => "chelis_hipblas_dgemm_row_major",
+            MatmulWrapper::Bf16GemmF32 => "chelis_hipblas_bf16_gemm_f32_acc_row_major",
+            MatmulWrapper::F16GemmF32 => "chelis_hipblas_f16_gemm_f32_acc_row_major",
+        }
+    }
+
+    /// Strided-batched wrapper (rank > 2). Only Sgemm/Dgemm support
+    /// strided-batched in this cycle; bf16/f16 strided-batched would
+    /// require `hipblasGemmStridedBatchedEx` plumbing.
+    fn strided_batched_row_major_call_name(self) -> Option<&'static str> {
+        match self {
+            MatmulWrapper::Sgemm => Some("chelis_hipblas_sgemm_strided_batched_row_major"),
+            MatmulWrapper::Dgemm => Some("chelis_hipblas_dgemm_strided_batched_row_major"),
+            MatmulWrapper::Bf16GemmF32 | MatmulWrapper::F16GemmF32 => None,
+        }
+    }
+
+    /// Batched (non-strided) wrapper (rank > 2 fallback). Only
+    /// Sgemm/Dgemm support batched in this cycle.
+    fn batched_row_major_call_name(self) -> Option<&'static str> {
+        match self {
+            MatmulWrapper::Sgemm => Some("chelis_hipblas_sgemm_batched_row_major"),
+            MatmulWrapper::Dgemm => Some("chelis_hipblas_dgemm_batched_row_major"),
+            MatmulWrapper::Bf16GemmF32 | MatmulWrapper::F16GemmF32 => None,
+        }
+    }
+}
+
 impl HipEmitter {
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(dag: &Dag, func_name: &str) -> (String, PeakDeviceBytesBreakdown) {
-        // F1 (WS-A2 partial lift): the HIP backend now plumbs the
-        // BlasMatmul accumulator field through and dispatches to either
-        // `hipblasSgemm` (f32) or `hipblasDgemm` (f64). bf16 / f16 / i8 /
-        // i16 are still WS-A3 / WS-A4 territory and are rejected here.
-        // The original tactical guard in crates/chelis-ir/src/verify.rs
-        // also restricts to f32; that guard is C-backend-shaped (mentions
-        // `cblas_sgemm`). The HIP-side check below is the operationally
-        // important one when only this backend is exercised.
+        // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A2 (HIP f32/f64)
+        // and WS-A3 (HIP bf16/f16).
+        //
+        // Original guard: every non-f32 BlasMatmul was rejected because
+        // the HIP backend destructured BlasMatmul with `..` and silently
+        // dispatched single-precision `hipblasSgemm` regardless of the
+        // operand precision (silent precision loss for f64 source, undefined
+        // behavior for narrower-than-f32 source). See
+        // `crates/chelis-ir/src/verify.rs` for the canonical guard and
+        // its `F1:` lift-target tag.
+        //
+        // The backend now reads `BlasMatmul.accumulator` (the F1
+        // footgun-fix) and dispatches:
+        //   - `hipblasSgemm` for f32 operands (WS-A2),
+        //   - `hipblasDgemm` for f64 operands (WS-A2),
+        //   - `hipblasGemmEx` with `HIPBLAS_COMPUTE_32F` for bf16/f16
+        //     operands + spec-default f32 accumulator (WS-A3) per
+        //     spec/04-type-system.md §5.7.1.
+        //
+        // Wider-than-default accumulators on bf16/f16 (e.g. f64
+        // accumulator) require an operand-promotion path and are
+        // rejected at codegen with a clean diagnostic in this cycle
+        // (see emit_blas_matmul). i8 / i16 / i64 matmul are out of
+        // scope for this guard per spec §5.7.2 (lifted in WS-A4).
         for node in dag.nodes() {
             if matches!(node.op, RiscOp::BlasMatmul { .. })
                 && let Some(lhs) = dag.get(node.inputs[0])
-                && !matches!(lhs.output_type.precision, Prim::F32 | Prim::F64)
             {
-                panic!(
-                    "F1: HIP BlasMatmul currently supports only f32 / f64; \
-                     node {} has operand precision `{}`. \
-                     spec/04-type-system.md §5.7.1 documents the per-precision \
-                     accumulator defaults; bf16/f16 dispatch lands in WS-A3 and \
-                     i8/i16 are out of scope for matmul per §5.7.2.",
-                    node.id.0,
-                    lhs.output_type.precision.name(),
-                );
+                let operand = lhs.output_type.precision;
+                if !matches!(operand, Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16) {
+                    panic!(
+                        "F1: BlasMatmul on operand precision `{}` is not yet \
+                         supported by the HIP backend; node {}. \
+                         spec/04-type-system.md §5.7.1 documents the per-precision \
+                         accumulator defaults; the HIP backend dispatches \
+                         `hipblasSgemm`/`hipblasDgemm` for f32/f64 (WS-A2) and \
+                         `hipblasGemmEx` for bf16/f16 (WS-A3). WS-A4 lifts the \
+                         integer matmul arm per spec §5.7.2.",
+                        operand.name(),
+                        node.id.0,
+                    );
+                }
             }
         }
 
@@ -1179,12 +1255,18 @@ impl HipEmitter {
                     &node.output_type,
                 );
             }
+            // F1 footgun fix (WS-A3): bind every BlasMatmul field
+            // explicitly so a future field addition (e.g. an alpha/beta
+            // scaling parameter) cannot be silently ignored by `..` the
+            // way the original `accumulator` field was. The accumulator
+            // is the precision the inner-product runs at, per
+            // spec/04-type-system.md §5.7.1.
             RiscOp::BlasMatmul {
                 batch_dims,
                 m,
                 n,
                 k,
-                ..
+                accumulator,
             } => {
                 self.emit_blas_matmul(
                     id,
@@ -1195,6 +1277,7 @@ impl HipEmitter {
                         m: m.clone(),
                         n: n.clone(),
                         k: k.clone(),
+                        accumulator: *accumulator,
                     },
                     &node.output_type,
                     dag,
@@ -1683,6 +1766,16 @@ impl HipEmitter {
             && let Some(matmul) = blas::detect_matmul_pattern(dag, NodeId(id))
             && Self::supports_static_hipblas_matmul(dag, &matmul, ty)
         {
+            // F1 footgun fix (WS-A3): the `Sum`-detected matmul carries
+            // the operand precision in `ty`; resolve the spec-default
+            // accumulator from it so the GEMM dispatch routes by the
+            // correct (operand, accumulator) pair. The detected pattern
+            // came from a Sum node, whose `accumulator` field is
+            // already populated to the spec default during IR
+            // construction; we use the same default here so detection
+            // and lowering agree.
+            let accumulator = RiscOp::default_matmul_accumulator(ty.precision)
+                .expect("matmul detection only fires on operand types admitted by the matmul rule");
             self.emit_blas_matmul(
                 id,
                 &MatmulEmitSpec {
@@ -1692,6 +1785,7 @@ impl HipEmitter {
                     m: DimExpr::Concrete(matmul.m),
                     n: DimExpr::Concrete(matmul.n),
                     k: DimExpr::Concrete(matmul.k),
+                    accumulator,
                 },
                 ty,
                 dag,
@@ -1864,6 +1958,46 @@ impl HipEmitter {
         let m_expr = Self::emit_dim_expr(&spec.m);
         let n_expr = Self::emit_dim_expr(&spec.n);
         let k_expr = Self::emit_dim_expr(&spec.k);
+        // F1 footgun fix (WS-A3): dispatch by `(operand, accumulator)`
+        // pair, not by operand alone. The original implementation
+        // unconditionally called `hipblasSgemm` regardless of the
+        // accumulator field — which silently miscompiled non-f32
+        // operands. The dispatch table below mirrors the wrapper
+        // surface in `crates/chelis-backend-hip/runtime/chelis_hip_runtime.h`.
+        let operand = ty.precision;
+        let acc = spec.accumulator;
+        let wrapper = match (operand, acc) {
+            (Prim::F32, Prim::F32) => MatmulWrapper::Sgemm,
+            (Prim::F64, Prim::F64) => MatmulWrapper::Dgemm,
+            (Prim::Bf16, Prim::F32) => MatmulWrapper::Bf16GemmF32,
+            (Prim::F16, Prim::F32) => MatmulWrapper::F16GemmF32,
+            // Wider-than-default accumulator on bf16/f16 (per
+            // spec/04-type-system.md §5.7.1 the request is admissible
+            // because f64 is wider than the f32 default) requires an
+            // operand-promotion compute path with explicit f64
+            // intermediate buffers; that path is not yet wired even
+            // after WS-A2 lands `chelis_hipblas_dgemm`. Reject at
+            // codegen with a clean diagnostic rather than silently
+            // downgrading the user's accumulator request to f32.
+            (Prim::Bf16, _) | (Prim::F16, _) => panic!(
+                "F1: HIP BlasMatmul on operand `{}` with accumulator `{}` requires a \
+                 wider-than-default GEMM compute path (operand promotion to `{}`); \
+                 the corresponding mixed-precision wrapper is not implemented in \
+                 this cycle. Omit the accumulator parameter to accept the \
+                 spec-default `f32` per spec/04-type-system.md §5.7.1.",
+                operand.name(),
+                acc.name(),
+                acc.name(),
+            ),
+            (other, _) => panic!(
+                "F1: HIP BlasMatmul on operand precision `{}` is not yet supported \
+                 by the HIP backend (accumulator `{}`); spec/04-type-system.md \
+                 §5.7.1 documents the per-precision dispatch. Reachable only via \
+                 the F1 partial-lift escape; tighten `emit_dag`'s F1 guard.",
+                other.name(),
+                acc.name(),
+            ),
+        };
         self.emit_slot_wrapper(id, ty);
 
         // WS-A2: dispatch on operand precision. The IR `BlasMatmul` node
@@ -1884,45 +2018,43 @@ impl HipEmitter {
             // ty.precision, so we read it here too rather than re-deriving.
             _ => (ty.precision, ty.precision),
         };
-        if operand_prec != declared_acc {
-            // Mixed-precision matmul (e.g. f64 operand with f32 acc) is
-            // not in the spec default table; if it appears here, the IR
-            // is doing something the WS-A2 backend has not modeled yet.
-            // bf16/f16 with f32 accumulator is WS-A3 territory.
-            panic!(
-                "HIP backend matmul cannot dispatch operand precision `{}` \
-                 with explicit accumulator `{}` at node {id}; \
-                 spec/04-type-system.md §5.7.1 default for f32/f64 is \
-                 operand-matching, and bf16/f16 mixed-precision lands in WS-A3.",
-                operand_prec.name(),
-                declared_acc.name(),
-            );
-        }
-
-        let helper_prefix = match operand_prec {
-            Prim::F32 => "chelis_hipblas_sgemm",
-            Prim::F64 => "chelis_hipblas_dgemm",
-            other => panic!(
-                "HIP backend matmul for operand precision `{}` is not implemented",
-                other.name()
-            ),
-        };
+        // Note: the `operand_prec`/`declared_acc` consistency check
+        // proper has already been encoded in the (operand, acc) match
+        // above that built `wrapper` — bf16/f16 with non-f32
+        // accumulators panic'd there with a spec-shaped diagnostic.
+        // The destructure here exists to keep the audit trail showing
+        // that the BlasMatmul.accumulator field is read, not ignored
+        // (the WS-A0 RT-1 F1 footgun was destructure-and-ignore).
+        let _ = (operand_prec, declared_acc);
 
         if spec.batch_dims.is_empty() {
             self.line(&format!(
-                "{helper_prefix}_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
+                "{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});",
+                call = wrapper.row_major_call_name(),
             ));
         } else if let Some(plan) = Self::strided_batched_hipblas_plan(dag, spec, ty) {
+            // Batched/strided-batched bf16/f16 wrappers are not yet
+            // present (would need `hipblasGemmStridedBatchedEx`
+            // plumbing). For this cycle, batched matmul is
+            // f32 (Sgemm) or f64 (Dgemm) only.
+            let call = wrapper.strided_batched_row_major_call_name().expect(
+                "WS-A3: batched bf16/f16 matmul is not yet wired (would require \
+                 `hipblasGemmStridedBatchedEx`); rank-2 only in this cycle",
+            );
             self.line(&format!(
-                "{helper_prefix}_strided_batched_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, {batch_count}, {a_stride}LL, {b_stride}LL, {out_stride}LL);",
+                "{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, {batch_count}, {a_stride}LL, {b_stride}LL, {out_stride}LL);",
                 batch_count = plan.batch_count_expr,
                 a_stride = plan.a_batch_stride,
                 b_stride = plan.b_batch_stride,
                 out_stride = plan.out_batch_stride,
             ));
         } else {
+            let call = wrapper.batched_row_major_call_name().expect(
+                "WS-A3: batched bf16/f16 matmul is not yet wired (would require \
+                 `hipblasGemmBatchedEx`); rank-2 only in this cycle",
+            );
             self.line(&format!(
-                "{helper_prefix}_batched_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
+                "{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
             ));
         }
     }
@@ -2125,12 +2257,19 @@ impl HipEmitter {
     /// the WS-A0 accumulator parameter is checked at the call site.
     #[allow(dead_code)]
     fn supports_static_hipblas_matmul(dag: &Dag, info: &blas::MatmulInfo, ty: &TensorType) -> bool {
-        if !matches!(ty.precision, Prim::F32 | Prim::F64) || ty.dims.len() != 2 {
-            return false;
-        }
-        let prec = ty.precision;
-        dag.get(info.a).map(|n| n.output_type.precision) == Some(prec)
-            && dag.get(info.b).map(|n| n.output_type.precision) == Some(prec)
+        // WS-A2 + WS-A3: f32 / f64 (Sgemm/Dgemm) and bf16 / f16
+        // (`hipblasGemmEx` with `HIPBLAS_COMPUTE_32F` per
+        // spec/04-type-system.md §5.7.1) all admitted by the static
+        // hipBLAS GEMM helper. Wider-accumulator requests (bf16/f16
+        // + f64 accumulator) hit the rejection in `emit_blas_matmul`,
+        // not here, so the detection still admits them and the caller
+        // gets a precise diagnostic instead of a silent fall-back
+        // into the elementwise reduce path.
+        let dtype_admits = matches!(ty.precision, Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16);
+        dtype_admits
+            && ty.dims.len() == 2
+            && dag.get(info.a).map(|n| n.output_type.precision) == Some(ty.precision)
+            && dag.get(info.b).map(|n| n.output_type.precision) == Some(ty.precision)
             && Self::node_is_statically_contiguous(dag, info.a)
             && Self::node_is_statically_contiguous(dag, info.b)
     }
@@ -2296,6 +2435,10 @@ impl HipEmitter {
         match dtype {
             Prim::F32 | Prim::Bool | Prim::Int32 => 4,
             Prim::F64 | Prim::Int64 => 8,
+            // WS-A3: bf16 / f16 storage is 2 bytes (same as the host
+            // runtime's `chelis_alloc` and the HIP runtime's
+            // `chelis_gpu_dtype_size`).
+            Prim::Bf16 | Prim::F16 => 2,
             other => panic!(
                 "unsupported HIP dtype in device-memory estimate: {}",
                 other.name()
@@ -2443,9 +2586,15 @@ impl HipEmitter {
             Prim::Bool => "CHELIS_BOOL",
             Prim::Int32 => "CHELIS_I32",
             Prim::Int64 => "CHELIS_I64",
+            // WS-A3: bf16 / f16 admitted alongside the f32 family.
+            // Maps to the matching `CHELIS_BF16` / `CHELIS_F16`
+            // constants in
+            // `crates/chelis-runtime/include/chelis_runtime.h`.
+            Prim::Bf16 => "CHELIS_BF16",
+            Prim::F16 => "CHELIS_F16",
             other => panic!(
-                "HIP backend supports f32/f64/bool/int32/int64 tensors today; \
-                 got `{}`. bf16/f16 land in WS-A3; i8/i16 in WS-A4.",
+                "HIP backend supports f32/f64/bf16/f16/bool/int32/int64 tensors today; \
+                 got `{}`. i8/i16 land in WS-A4.",
                 other.name()
             ),
         }
@@ -2457,7 +2606,8 @@ impl HipEmitter {
     /// `f32` path — the cmplt convention is `1.0f`/`0.0f` written into a
     /// `float *` GPU buffer, and Cast-to-bool likewise materializes a
     /// 4-byte payload. f64 gets its own variant. Other precisions fall
-    /// outside the WS-A2 scope (bf16/f16 in WS-A3; i8/i16 in WS-A4) and
+    /// outside the WS-A2 scope (bf16/f16 elementwise kernels are
+    /// matmul-only via `hipblasGemmEx` in WS-A3; i8/i16 in WS-A4) and
     /// panic so callers see the limit immediately.
     fn elem_kind(ty: &TensorType) -> kernels::ElemKind {
         match ty.precision {
