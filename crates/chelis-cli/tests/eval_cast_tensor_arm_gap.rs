@@ -17,9 +17,10 @@
 //!
 //! ## Fixtures
 //!
-//! All four fixtures fail today with `unsupported cast from Tensor(..)`. They
-//! are gated `#[ignore]` until the fix commit lands; the diagnosis commit
-//! documents the failure mode, and the fix commit flips the gate.
+//! All four fixtures failed before the fix commit with `unsupported cast
+//! from Tensor(..)`. The diagnosis commit documented the failure mode; the
+//! fix commit added the `RuntimeValue::Tensor` arm to `eval_cast` and
+//! flipped these fixtures from `#[ignore]` to running.
 //!
 //! * `eval_cast_tensor_f32_to_f64` -- f32 source widens to f64; element
 //!   values are preserved exactly because every f32 representable value is
@@ -72,7 +73,6 @@ fn parse_anonymous_tensor_data(stdout: &str) -> Option<Vec<f64>> {
 }
 
 #[test]
-#[ignore = "V2-F2: eval_cast missing Tensor arm; flipped on in the fix commit"]
 fn eval_cast_tensor_f32_to_f64() {
     // f32 source widens to f64. Every f32 representable value is also
     // representable as f64, so the data array is element-wise identical.
@@ -94,7 +94,6 @@ fn eval_cast_tensor_f32_to_f64() {
 }
 
 #[test]
-#[ignore = "V2-F2: eval_cast missing Tensor arm; flipped on in the fix commit"]
 fn eval_cast_tensor_f64_to_f32() {
     // f64 source narrows to f32. 1.5, 2.5, 3.5 are exactly representable in
     // both formats, so the assertion is exact. Source-side `cast(.., f64)`
@@ -116,7 +115,6 @@ fn eval_cast_tensor_f64_to_f32() {
 }
 
 #[test]
-#[ignore = "V2-F2: eval_cast missing Tensor arm; flipped on in the fix commit"]
 fn eval_cast_tensor_f32_to_int32() {
     // Float-to-int cast truncates toward zero: 1.5 -> 1, 2.5 -> 2, 3.5 -> 3.
     // This matches the C semantics `(int32_t)f` that the C/HIP backends
@@ -139,7 +137,6 @@ fn eval_cast_tensor_f32_to_int32() {
 }
 
 #[test]
-#[ignore = "V2-F2: eval_cast missing Tensor arm; flipped on in the fix commit"]
 fn eval_cast_tensor_int32_to_f32() {
     // Integer source widens to f32. `to_tensor([1, 2, 3])` produces int64
     // by default; the inner `cast(.., int32)` forces int32 source, the
