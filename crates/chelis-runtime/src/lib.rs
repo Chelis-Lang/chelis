@@ -19,22 +19,19 @@ pub const CHELIS_BOOL: c_int = 3;
 pub const CHELIS_I64: c_int = 4;
 const CHELIS_MAX_DIM: usize = 8;
 
-// `TensorElement` trait stub.  Closes the architectural piece of the
+// `TensorElement` trait.  Closes the architectural piece of the
 // `CRuntime-F32Coupling` §5 entry by giving each Rust primitive a
 // typed accessor on `chelis_tensor` and a `Result`-returning dtype
-// check.  The full trait surface (default `fill`, checked + unchecked
-// data_ptr, dtype-mismatch error type) lands in the same PR's fix
-// commit; this stub is the minimum needed to let the cross-validation
-// harness at `crates/chelis-e2e/tests/dtype_op_matrix.rs` compile in
-// the test-first commit.
+// check.  Migrated call sites read or write the data buffer through
+// `<T>::data_ptr_unchecked` after an outer match on `(*t).dtype`,
+// or through `<T>::data_ptr` when the dtype is not yet verified.
 //
-// All accessor bodies are stub `unimplemented!()` so any caller that
-// reaches them panics rather than silently producing wrong data.  The
-// fix commit replaces the bodies with the real cast-then-loop pattern
-// lifted from `chelis_fill_i64` (L489) and the checked dtype compare.
-//
-// See `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2 for
-// the locked surface.
+// See `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2
+// for the locked surface and
+// `docs/investigations/c_runtime_dtype_accessors_diagnosis.md` for
+// the migration-site inventory and routing convention for bool / i32
+// (today both 4-byte f32-encoded; trait impls exist but sites route
+// through `f32::data_ptr` to match the actual storage).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtypeMismatch {
@@ -60,9 +57,16 @@ pub unsafe trait TensorElement: Sized + Copy {
     ///
     /// `tensor` must point to a live `chelis_tensor` and remain
     /// valid for the lifetime of the returned pointer.
+    #[inline]
     unsafe fn data_ptr(tensor: *mut chelis_tensor) -> Result<*mut Self, DtypeMismatch> {
-        let _ = tensor;
-        unimplemented!("TensorElement::data_ptr: fix commit lands the body");
+        let actual = unsafe { (*tensor).dtype };
+        if actual != Self::DTYPE {
+            return Err(DtypeMismatch {
+                expected: Self::DTYPE,
+                actual,
+            });
+        }
+        Ok(unsafe { (*tensor).data as *mut Self })
     }
 
     /// Unchecked typed access for hot loops where the caller already
@@ -72,20 +76,27 @@ pub unsafe trait TensorElement: Sized + Copy {
     ///
     /// As `data_ptr`, plus: caller asserts `(*tensor).dtype ==
     /// Self::DTYPE`.
+    #[inline]
     unsafe fn data_ptr_unchecked(tensor: *mut chelis_tensor) -> *mut Self {
-        let _ = tensor;
-        unimplemented!("TensorElement::data_ptr_unchecked: fix commit lands the body");
+        debug_assert_eq!(unsafe { (*tensor).dtype }, Self::DTYPE);
+        unsafe { (*tensor).data as *mut Self }
     }
 
     /// Element-wise fill.  Default lifts the cast-then-loop pattern
-    /// from `chelis_fill_i64` once the fix commit lands real bodies.
+    /// from the pre-PR-1 `chelis_fill_i64` body.
     ///
     /// # Safety
     ///
     /// As `data_ptr_unchecked`.
+    #[inline]
     unsafe fn fill(tensor: *mut chelis_tensor, value: Self) {
-        let _ = (tensor, value);
-        unimplemented!("TensorElement::fill: fix commit lands the body");
+        let ptr = unsafe { Self::data_ptr_unchecked(tensor) };
+        let size = unsafe { (*tensor).size } as isize;
+        for i in 0..size {
+            unsafe {
+                *ptr.offset(i) = value;
+            }
+        }
     }
 }
 
@@ -102,6 +113,42 @@ unsafe impl TensorElement for i64 {
     const DTYPE: c_int = CHELIS_I64;
 }
 
+/// Transition shim used by the 31 access sites that PR 1 does NOT
+/// migrate.  Returns the buffer typed as `*mut f32`, preserving the
+/// pre-PR-1 read/write shape.  Agent B's PR 2 migrates each call
+/// site to use `<T>::data_ptr_unchecked` after an outer dtype
+/// match, then removes this helper.
+///
+/// Accepts `*mut chelis_tensor` only; for read-side `*const
+/// chelis_tensor` access, callers cast through `tensor as *mut
+/// chelis_tensor` at the call site (this preserves the pre-PR-1
+/// behavior where `(*const tensor).data` returned `*mut f32`).
+///
+/// **Public** (not `pub(crate)`) because the cross-validation
+/// harness at `crates/chelis-e2e/tests/dtype_op_matrix.rs` needs
+/// to write f32-encoded bytes into `CHELIS_BOOL` and `CHELIS_I32`
+/// tensors (the existing storage convention) without tripping the
+/// trait's dtype assertion.
+///
+/// # Safety
+///
+/// `tensor` must point to a live `chelis_tensor`.
+#[inline]
+pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
+    unsafe { (*tensor).data as *mut f32 }
+}
+
+/// Const-pointer variant of `data_as_f32` for read-side accesses
+/// on `*const chelis_tensor`.
+///
+/// # Safety
+///
+/// `tensor` must point to a live `chelis_tensor`.
+#[inline]
+pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *mut f32 {
+    unsafe { (*tensor).data as *mut f32 }
+}
+
 macro_rules! runtime_fail {
     ($($arg:tt)*) => {{
         eprintln!($($arg)*);
@@ -111,7 +158,14 @@ macro_rules! runtime_fail {
 
 #[repr(C)]
 pub struct chelis_tensor {
-    pub data: *mut f32,
+    /// Raw byte pointer to the tensor's data buffer.  Decode via
+    /// `TensorElement::data_ptr` or `TensorElement::data_ptr_unchecked`
+    /// after dispatching on `dtype`.  The pre-PR-1 typing as `*mut
+    /// f32` silently produced wrong reads for any dtype with element
+    /// size != 4 bytes (the `CRuntime-F32Coupling` bug class).  ABI
+    /// compatible with the C header's `float *data` (both 8-byte
+    /// pointers); the C side casts at use.
+    pub data: *mut u8,
     pub shape: [c_int; CHELIS_MAX_DIM],
     pub strides: [c_int; CHELIS_MAX_DIM],
     pub ndim: c_int,
@@ -419,7 +473,11 @@ unsafe fn tensor_normalize_axis(tensor: *const chelis_tensor, axis: i64, op: &st
 
 unsafe fn tensor_clone(tensor: *const chelis_tensor) -> *mut chelis_tensor {
     let out = chelis_alloc((*tensor).ndim, (*tensor).shape.as_ptr(), (*tensor).dtype);
-    ptr::copy_nonoverlapping((*tensor).data, (*out).data, (*tensor).size as usize);
+    ptr::copy_nonoverlapping(
+        data_as_f32_const(tensor),
+        data_as_f32(out),
+        (*tensor).size as usize,
+    );
     out
 }
 
@@ -512,7 +570,7 @@ pub unsafe extern "C" fn chelis_alloc(
     if bytes > 0 {
         libc::memset(ptr, 0, bytes);
     }
-    tensor.data = ptr as *mut f32;
+    tensor.data = ptr as *mut u8;
     Box::into_raw(tensor)
 }
 
@@ -523,8 +581,11 @@ pub unsafe extern "C" fn chelis_alloc_view(
     dtype: c_int,
     data: *mut f32,
 ) -> *mut chelis_tensor {
+    // The C-side signature keeps `float *data` (ABI compat with the
+    // `chelis_runtime.h` declaration); cast to the new `*mut u8`
+    // storage type internally.
     let mut tensor = Box::new(chelis_tensor {
-        data,
+        data: data as *mut u8,
         shape: [0; CHELIS_MAX_DIM],
         strides: [0; CHELIS_MAX_DIM],
         ndim,
@@ -563,38 +624,34 @@ pub unsafe extern "C" fn chelis_free(t: *mut chelis_tensor) {
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_fill_f32(t: *mut chelis_tensor, val: f32) {
-    for i in 0..(*t).size as isize {
-        *(*t).data.offset(i) = val;
-    }
+    f32::fill(t, val);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_fill_i64(t: *mut chelis_tensor, val: i64) {
-    let ptr = (*t).data as *mut i64;
-    for i in 0..(*t).size as isize {
-        *ptr.offset(i) = val;
-    }
+    i64::fill(t, val);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_fill_f64(t: *mut chelis_tensor, val: f64) {
-    let ptr = (*t).data as *mut f64;
-    for i in 0..(*t).size as isize {
-        *ptr.offset(i) = val;
-    }
+    f64::fill(t, val);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_scalar_tensor_from_i64(value: i64) -> *mut chelis_tensor {
+    // I32 storage today is 4-byte f32-encoded (see the diagnosis
+    // note at `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`).
+    // Stay on the f32-encoded convention until the recommended §5
+    // follow-on migrates I32 storage to genuine i32 bytes.
     let tensor = chelis_alloc(0, ptr::null(), CHELIS_I32);
-    *(*tensor).data = value as f32;
+    *data_as_f32(tensor) = value as f32;
     tensor
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_scalar_tensor_from_f64(value: f64) -> *mut chelis_tensor {
     let tensor = chelis_alloc(0, ptr::null(), CHELIS_F32);
-    *(*tensor).data = value as f32;
+    *f32::data_ptr_unchecked(tensor) = value as f32;
     tensor
 }
 
@@ -603,7 +660,29 @@ pub unsafe extern "C" fn chelis_tensor_to_f64(t: *const chelis_tensor) -> f64 {
     if t.is_null() || (*t).ndim != 0 {
         runtime_fail!("chelis_tensor_to_f64 expects a rank-0 tensor");
     }
-    *(*t).data as f64
+    let tm = t as *mut chelis_tensor;
+    match (*t).dtype {
+        CHELIS_F32 => *f32::data_ptr_unchecked(tm) as f64,
+        CHELIS_F64 => *f64::data_ptr_unchecked(tm),
+        CHELIS_I64 => *i64::data_ptr_unchecked(tm) as f64,
+        // I32 and BOOL storage today is 4-byte f32-encoded; the
+        // dtype tag is CHELIS_I32 / CHELIS_BOOL, not CHELIS_F32, so
+        // f32::data_ptr_unchecked's debug_assert would fire.
+        // Route through the transition shim instead until the
+        // recommended §5 follow-on migrates I32 / BOOL storage to
+        // their genuine byte representations.  See the diagnosis
+        // note at
+        // `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`.
+        CHELIS_I32 => *data_as_f32(tm) as f64,
+        CHELIS_BOOL => {
+            if *data_as_f32(tm) != 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        other => runtime_fail!("chelis_tensor_to_f64 unsupported dtype {}", other),
+    }
 }
 
 #[no_mangle]
@@ -1691,7 +1770,7 @@ pub unsafe extern "C" fn chelis_tensor_from_value_list(
     let out = chelis_alloc(ndim, shape.as_ptr(), dtype);
     if !list.is_null() && shape.iter().all(|&d| d > 0) {
         let mut flat_idx: isize = 0;
-        chelis_flatten_nested_list(list, &shape, 0, dtype, (*out).data, &mut flat_idx);
+        chelis_flatten_nested_list(list, &shape, 0, dtype, data_as_f32(out), &mut flat_idx);
     }
     out
 }
@@ -1706,7 +1785,7 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
     }
     let mut items = Vec::with_capacity((*tensor).shape[0] as usize);
     for i in 0..(*tensor).shape[0] as usize {
-        let raw = *(*tensor).data.add(i * (*tensor).strides[0] as usize);
+        let raw = *data_as_f32(tensor as *mut chelis_tensor).add(i * (*tensor).strides[0] as usize);
         let value = match (*tensor).dtype {
             CHELIS_BOOL => chelis_value_from_bool(raw != 0.0),
             CHELIS_I32 => chelis_value_from_int64(raw as i64),
@@ -1759,7 +1838,7 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                 } else {
                     pad
                 };
-                *(*out).data.add(flat) = value as f32;
+                *data_as_f32(out).add(flat) = value as f32;
             }
         }
     }
@@ -1806,7 +1885,7 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                 } else {
                     pad
                 };
-                *(*out).data.add(flat) = value as f32;
+                *data_as_f32(out).add(flat) = value as f32;
             }
         }
     }
@@ -1852,7 +1931,7 @@ pub unsafe extern "C" fn chelis_tensor_concat(
             indices[axis_i] += axis_offset;
             let out_linear =
                 chelis_indices_to_flat(indices.as_ptr(), (*out).strides.as_ptr(), (*out).ndim);
-            *(*out).data.add(out_linear as usize) = *(*tensor).data.add(linear as usize);
+            *data_as_f32(out).add(out_linear as usize) = *data_as_f32(tensor).add(linear as usize);
             indices[axis_i] -= axis_offset;
         }
         axis_offset += (*tensor).shape[axis_i];
@@ -1895,7 +1974,7 @@ pub unsafe extern "C" fn chelis_tensor_split(
                 (*tensor).strides.as_ptr(),
                 (*tensor).ndim,
             );
-            *(*part).data.add(linear as usize) = *(*tensor).data.add(src as usize);
+            *data_as_f32(part).add(linear as usize) = *data_as_f32_const(tensor).add(src as usize);
             indices[axis_i] -= axis_offset;
         }
         axis_offset += part_size;
@@ -1949,7 +2028,7 @@ pub unsafe extern "C" fn chelis_tensor_gather(
             (*indices).strides.as_ptr(),
             (*indices).ndim,
         );
-        let gathered = *(*indices).data.add(index_linear as usize) as i64;
+        let gathered = *data_as_f32_const(indices).add(index_linear as usize) as i64;
         if gathered < 0 || gathered >= (*tensor).shape[axis_i] as i64 {
             runtime_fail!("gather index {gathered} out of bounds");
         }
@@ -1964,7 +2043,8 @@ pub unsafe extern "C" fn chelis_tensor_gather(
             (*tensor).strides.as_ptr(),
             (*tensor).ndim,
         );
-        *(*out).data.add(linear as usize) = *(*tensor).data.add(src_linear as usize);
+        *data_as_f32(out).add(linear as usize) =
+            *data_as_f32_const(tensor).add(src_linear as usize);
     }
     out
 }
@@ -1977,11 +2057,12 @@ pub unsafe extern "C" fn chelis_tensor_cmplt(
     require_same_tensor_shape(lhs, rhs, "cmplt");
     let out = chelis_alloc((*lhs).ndim, (*lhs).shape.as_ptr(), CHELIS_BOOL);
     for i in 0..(*out).size as usize {
-        *(*out).data.add(i) = if *(*lhs).data.add(i) < *(*rhs).data.add(i) {
-            1.0
-        } else {
-            0.0
-        };
+        *data_as_f32(out).add(i) =
+            if *data_as_f32_const(lhs).add(i) < *data_as_f32_const(rhs).add(i) {
+                1.0
+            } else {
+                0.0
+            };
     }
     out
 }
@@ -2032,7 +2113,7 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
             (*indices).strides.as_ptr(),
             (*indices).ndim,
         );
-        let gathered = *(*indices).data.add(index_linear as usize) as i64;
+        let gathered = *data_as_f32_const(indices).add(index_linear as usize) as i64;
         if gathered < 0 || gathered >= (*base).shape[axis_i] as i64 {
             runtime_fail!("scatter index {gathered} out of bounds");
         }
@@ -2050,9 +2131,9 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
                 runtime_fail!("scatter replace mode rejects duplicate target index {out_linear}");
             }
             seen[out_linear] = true;
-            *(*out).data.add(out_linear) = *(*updates).data.add(linear as usize);
+            *data_as_f32(out).add(out_linear) = *data_as_f32_const(updates).add(linear as usize);
         } else {
-            *(*out).data.add(out_linear) += *(*updates).data.add(linear as usize);
+            *data_as_f32(out).add(out_linear) += *data_as_f32_const(updates).add(linear as usize);
         }
     }
     out
@@ -2072,10 +2153,10 @@ pub unsafe extern "C" fn chelis_tensor_where(
         (*then_tensor).dtype,
     );
     for i in 0..(*out).size as usize {
-        *(*out).data.add(i) = if *(*cond).data.add(i) != 0.0 {
-            *(*then_tensor).data.add(i)
+        *data_as_f32(out).add(i) = if *data_as_f32_const(cond).add(i) != 0.0 {
+            *data_as_f32_const(then_tensor).add(i)
         } else {
-            *(*else_tensor).data.add(i)
+            *data_as_f32_const(else_tensor).add(i)
         };
     }
     out
@@ -2102,8 +2183,8 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
             let mut running = 0.0f32;
             for axis_idx in 0..axis_size {
                 let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                running += *(*out).data.add(linear);
-                *(*out).data.add(linear) = running;
+                running += *data_as_f32(out).add(linear);
+                *data_as_f32(out).add(linear) = running;
             }
         }
     }
@@ -2131,22 +2212,22 @@ pub unsafe extern "C" fn chelis_tensor_sort(
         for inner_idx in 0..inner {
             for i in 0..axis_size {
                 let linear = (outer_idx * axis_size + i) * inner + inner_idx;
-                *(*indices).data.add(linear) = i as f32;
+                *data_as_f32(indices).add(linear) = i as f32;
             }
             for i in 1..axis_size {
                 let mut j = i;
                 while j > 0 {
                     let left = (outer_idx * axis_size + (j - 1)) * inner + inner_idx;
                     let right = (outer_idx * axis_size + j) * inner + inner_idx;
-                    if *(*values).data.add(left) <= *(*values).data.add(right) {
+                    if *data_as_f32(values).add(left) <= *data_as_f32(values).add(right) {
                         break;
                     }
-                    let tmpv = *(*values).data.add(left);
-                    *(*values).data.add(left) = *(*values).data.add(right);
-                    *(*values).data.add(right) = tmpv;
-                    let tmpi = *(*indices).data.add(left);
-                    *(*indices).data.add(left) = *(*indices).data.add(right);
-                    *(*indices).data.add(right) = tmpi;
+                    let tmpv = *data_as_f32(values).add(left);
+                    *data_as_f32(values).add(left) = *data_as_f32(values).add(right);
+                    *data_as_f32(values).add(right) = tmpv;
+                    let tmpi = *data_as_f32(indices).add(left);
+                    *data_as_f32(indices).add(left) = *data_as_f32(indices).add(right);
+                    *data_as_f32(indices).add(right) = tmpi;
                     j -= 1;
                 }
             }
@@ -2211,7 +2292,7 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
             (*tensor).strides.as_ptr(),
             (*tensor).ndim,
         );
-        *(*out).data.add(linear as usize) = *(*tensor).data.add(src as usize);
+        *data_as_f32(out).add(linear as usize) = *data_as_f32_const(tensor).add(src as usize);
     }
     out
 }
@@ -2247,9 +2328,9 @@ pub unsafe extern "C" fn chelis_tensor_trace(
             let mut sum = 0.0f32;
             for axis_idx in 0..axis_size {
                 let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                sum += *(*diag).data.add(linear);
+                sum += *data_as_f32(diag).add(linear);
             }
-            *(*out).data.add(outer_idx * inner + inner_idx) = sum;
+            *data_as_f32(out).add(outer_idx * inner + inner_idx) = sum;
         }
     }
     chelis_free(diag);
@@ -2268,18 +2349,18 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
     let out = chelis_alloc((*tensor).ndim, (*tensor).shape.as_ptr(), (*tensor).dtype);
     for i in 0..(*out).size as usize {
         let low = if (*lo).ndim == 0 {
-            *(*lo).data
+            *data_as_f32_const(lo)
         } else {
-            *(*lo).data.add(i)
+            *data_as_f32_const(lo).add(i)
         };
         let high = if (*hi).ndim == 0 {
-            *(*hi).data
+            *data_as_f32_const(hi)
         } else {
-            *(*hi).data.add(i)
+            *data_as_f32_const(hi).add(i)
         };
-        let mut value = *(*tensor).data.add(i);
+        let mut value = *data_as_f32_const(tensor).add(i);
         value = value.max(low).min(high);
-        *(*out).data.add(i) = value;
+        *data_as_f32(out).add(i) = value;
     }
     out
 }
@@ -2394,18 +2475,18 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
             for (i, &label) in rhs_chars.iter().enumerate() {
                 rhs_index[i] = label_values[label as usize];
             }
-            acc += *(*lhs).data.add(chelis_indices_to_flat(
+            acc += *data_as_f32_const(lhs).add(chelis_indices_to_flat(
                 lhs_index.as_ptr(),
                 (*lhs).strides.as_ptr(),
                 lhs_chars.len() as c_int,
             ) as usize)
-                * *(*rhs).data.add(chelis_indices_to_flat(
+                * *data_as_f32_const(rhs).add(chelis_indices_to_flat(
                     rhs_index.as_ptr(),
                     (*rhs).strides.as_ptr(),
                     rhs_chars.len() as c_int,
                 ) as usize);
         }
-        *(*out).data.add(out_linear) = acc;
+        *data_as_f32(out).add(out_linear) = acc;
     }
     out
 }
@@ -2568,7 +2649,10 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
     if chelis_is_contiguous(t) != 0 {
         let out = chelis_alloc((*t).ndim, (*t).shape.as_ptr(), (*t).dtype);
         let bytes = (*t).size as usize * elem_size;
-        ptr::copy_nonoverlapping((*t).data as *const u8, (*out).data as *mut u8, bytes);
+        // `(*t).data` and `(*out).data` are both `*mut u8`
+        // post-PR-1; cast the source to `*const u8` so
+        // `copy_nonoverlapping` infers the const-reduced type.
+        ptr::copy_nonoverlapping((*t).data as *const u8, (*out).data, bytes);
         return out;
     }
     let out = chelis_alloc((*t).ndim, (*t).shape.as_ptr(), (*t).dtype);
@@ -2576,7 +2660,9 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
     for i in 0..(*out).size {
         chelis_flat_to_indices(i, (*out).shape.as_ptr(), (*out).ndim, indices.as_mut_ptr());
         let src = chelis_indices_to_flat(indices.as_ptr(), (*t).strides.as_ptr(), (*t).ndim);
-        let dst_byte = ((*out).data as *mut u8).add(i as usize * elem_size);
+        // `chelis_tensor.data` is `*mut u8` post-PR-1; the casts
+        // previously normalized the field from `*mut f32`.
+        let dst_byte = (*out).data.add(i as usize * elem_size);
         let src_byte = ((*t).data as *const u8).add(src as usize * elem_size);
         ptr::copy_nonoverlapping(src_byte, dst_byte, elem_size);
     }
@@ -2662,7 +2748,7 @@ unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
     out.push_str("], data=[");
     let n = ((*t).size as usize).min(10);
     for i in 0..n {
-        let value = *(*t).data.add(i) as f64;
+        let value = *data_as_f32_const(t).add(i) as f64;
         if i > 0 {
             out.push_str(", ");
         }
@@ -2782,7 +2868,7 @@ mod tests {
                 "chelis_alloc must return non-null data"
             );
             assert_eq!(
-                (*result).data as usize % 32,
+                data_as_f32(result) as usize % 32,
                 0,
                 "chelis_alloc must return 32-byte aligned data"
             );

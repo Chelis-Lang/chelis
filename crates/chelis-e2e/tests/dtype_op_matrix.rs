@@ -42,7 +42,7 @@ use std::os::raw::c_int;
 use chelis_runtime::{
     CHELIS_BOOL, CHELIS_F32, CHELIS_F64, CHELIS_I32, CHELIS_I64, DtypeMismatch, TensorElement,
     chelis_alloc, chelis_fill_f32, chelis_fill_f64, chelis_fill_i64, chelis_free, chelis_tensor,
-    chelis_tensor_to_f64,
+    chelis_tensor_to_f64, data_as_f32,
 };
 
 /// Allocate a rank-0 (scalar) tensor of the given dtype.  Caller frees.
@@ -66,7 +66,6 @@ unsafe fn alloc_vec(n: c_int, dtype: c_int) -> *mut chelis_tensor {
 // `f32::data_ptr_unchecked`.
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn tensor_to_f64_f32() {
     unsafe {
         let t = alloc_scalar(CHELIS_F32);
@@ -81,7 +80,6 @@ fn tensor_to_f64_f32() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn tensor_to_f64_f64() {
     // Value chosen to exceed f32 precision (16 decimal digits) so
     // any f32-truncating read path fails the round-trip.
@@ -99,7 +97,6 @@ fn tensor_to_f64_f64() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn tensor_to_f64_i64() {
     unsafe {
         let t = alloc_scalar(CHELIS_I64);
@@ -114,13 +111,14 @@ fn tensor_to_f64_i64() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn tensor_to_f64_i32() {
     unsafe {
         let t = alloc_scalar(CHELIS_I32);
-        // I32 storage today is 4-byte f32-encoded.  Use f32 fill to
-        // write the canonical bit pattern the runtime expects.
-        f32::fill(t, 42.0);
+        // I32 storage today is 4-byte f32-encoded.  Write through
+        // `data_as_f32` (the transition shim) rather than
+        // `f32::fill` -- the latter would trip the trait's
+        // debug_assert (DTYPE mismatch: F32 vs I32).
+        *data_as_f32(t) = 42.0f32;
         let out = chelis_tensor_to_f64(t);
         assert_eq!(
             out, 42.0,
@@ -131,13 +129,13 @@ fn tensor_to_f64_i32() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn tensor_to_f64_bool_true() {
     unsafe {
         let t = alloc_scalar(CHELIS_BOOL);
-        // Bool storage today is 4-byte f32-encoded (1.0f32 / 0.0f32).
-        // Use f32 fill to match the runtime's storage convention.
-        f32::fill(t, 1.0);
+        // Bool storage today is 4-byte f32-encoded (1.0f32 /
+        // 0.0f32).  Write through `data_as_f32` to bypass the
+        // trait's dtype assertion.
+        *data_as_f32(t) = 1.0f32;
         let out = chelis_tensor_to_f64(t);
         assert_eq!(
             out, 1.0,
@@ -148,11 +146,10 @@ fn tensor_to_f64_bool_true() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn tensor_to_f64_bool_false() {
     unsafe {
         let t = alloc_scalar(CHELIS_BOOL);
-        f32::fill(t, 0.0);
+        *data_as_f32(t) = 0.0f32;
         let out = chelis_tensor_to_f64(t);
         assert_eq!(
             out, 0.0,
@@ -172,7 +169,6 @@ fn tensor_to_f64_bool_false() {
 // back as the filled value via the trait's typed pointer.
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn fill_f32_vector() {
     unsafe {
         let t = alloc_vec(8, CHELIS_F32);
@@ -186,7 +182,6 @@ fn fill_f32_vector() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn fill_f64_vector() {
     unsafe {
         let t = alloc_vec(8, CHELIS_F64);
@@ -200,7 +195,6 @@ fn fill_f64_vector() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn fill_i64_vector() {
     unsafe {
         let t = alloc_vec(8, CHELIS_I64);
@@ -214,7 +208,6 @@ fn fill_i64_vector() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn fill_i32_vector() {
     // i32 storage today is 4-byte f32-encoded.  The trait impl for
     // i32 has `DTYPE = CHELIS_I32`, so `i32::fill` writes i32 bytes
@@ -241,7 +234,6 @@ fn fill_i32_vector() {
 // pointer.
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn fill_f32_extern_matches_trait() {
     unsafe {
         let t = alloc_vec(4, CHELIS_F32);
@@ -255,7 +247,6 @@ fn fill_f32_extern_matches_trait() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn fill_f64_extern_matches_trait() {
     // Same f64 bit pattern used in `tensor_to_f64_f64` -- exceeds
     // f32 precision so any f32-truncating fill path would fail.
@@ -272,7 +263,6 @@ fn fill_f64_extern_matches_trait() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn fill_i64_extern_matches_trait() {
     unsafe {
         let t = alloc_vec(4, CHELIS_I64);
@@ -295,7 +285,6 @@ fn fill_i64_extern_matches_trait() {
 // of silently reading the wrong byte layout.
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn data_ptr_dtype_mismatch_f32_on_f64_tensor() {
     unsafe {
         let t = alloc_scalar(CHELIS_F64);
@@ -312,7 +301,6 @@ fn data_ptr_dtype_mismatch_f32_on_f64_tensor() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn data_ptr_dtype_mismatch_i64_on_i32_tensor() {
     unsafe {
         let t = alloc_scalar(CHELIS_I32);
@@ -329,7 +317,6 @@ fn data_ptr_dtype_mismatch_i64_on_i32_tensor() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn data_ptr_dtype_mismatch_f64_on_i64_tensor() {
     // f64 and i64 share an 8-byte storage cell, so the mismatch is
     // semantic (bit-layout differs) not size-related.  The trait must
@@ -349,7 +336,6 @@ fn data_ptr_dtype_mismatch_f64_on_i64_tensor() {
 }
 
 #[test]
-#[ignore = "blocked on TensorElement trait fix commit (W2 PR 1)"]
 fn data_ptr_match_succeeds() {
     // Positive control: the matching dtype returns Ok and reads back
     // the fill value byte-exact through the typed pointer.
