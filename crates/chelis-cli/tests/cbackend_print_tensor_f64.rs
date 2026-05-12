@@ -199,7 +199,7 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, fn_name: &str) -> Stri
 /// observable today as `[0.0, 1.9375, 0.0, 2.0625]` against the
 /// ground-truth `[1.5, 2.5, 3.5, 4.5]`.
 #[test]
-#[ignore = "chelis_print_tensor_stdout f64 misread; see commit <pending>"]
+#[ignore = "chelis_print_tensor_stdout f64 misread; see commit 5396292 and docs/investigations/cbackend_print_tensor_f64_diagnosis.md"]
 fn cbackend_print_tensor_f64() {
     let source = "def to_f64(x: tensor[4, f32]) -> tensor[4, f64] = cast(x, f64)\n\
                   src = to_tensor([1.5, 2.5, 3.5, 4.5])\n\
@@ -228,7 +228,7 @@ fn cbackend_print_tensor_f64() {
 /// must survive the int32 input stage (so they fit in int32) but the
 /// observation is on the int64 output tensor's print.
 #[test]
-#[ignore = "chelis_print_tensor_stdout f64 misread; see commit <pending>"]
+#[ignore = "chelis_print_tensor_stdout f64 misread; see commit 5396292 and docs/investigations/cbackend_print_tensor_f64_diagnosis.md"]
 fn cbackend_print_tensor_int64() {
     let source = "def to_i64(x: tensor[4, int32]) -> tensor[4, int64] = cast(x, int64)\n\
                   src = to_tensor([cast(100000, int32), cast(200000, int32), \
