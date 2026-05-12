@@ -578,6 +578,15 @@ fn typed_literal_lit_expr(value: Atom, suffix: lexer::LiteralSuffix, span: crate
 /// Walk the parsed tree and apply `collapse_typed_literal_lit` to every
 /// `lit`-tagged list. Done as a post-pass so it does not bloat the
 /// `parse_list` stack frame on the deep-recursion hot path.
+///
+/// Implemented as an explicit work-stack iteration rather than a
+/// recursive walk. This is foundational: the iterative collapse keeps
+/// the post-pass's stack growth O(1) per AST level, so the post-pass
+/// does not stack on top of the (already-recursive) `parse_list` and
+/// `print_canonical` walks for deeply-nested inputs (e.g. the
+/// 1000-nested-apps regression test). The previous recursive
+/// implementation pushed total stack use over the macOS Smoke CI
+/// thread-stack budget at depth ~1000.
 fn normalize_typed_literals(exprs: &mut [Expr]) -> Result<(), ParseError> {
     for expr in exprs {
         normalize_typed_literals_in_expr(expr)?;
@@ -586,34 +595,75 @@ fn normalize_typed_literals(exprs: &mut [Expr]) -> Result<(), ParseError> {
 }
 
 fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
-    if let Expr::List(list, span) = expr {
-        // Recurse first so nested forms are normalized before the parent
-        // checks for the (lit {} (lit {type:...} N)) shape.
-        normalize_typed_literals(&mut list.elements)?;
-        let needs_collapse = list.elements.len() == 3
-            && matches!(
-                &list.elements[0],
-                Expr::Atom(Atom::Symbol(s), _) if s == "lit"
-            );
-        if needs_collapse {
-            let span_copy = *span;
-            let taken = std::mem::replace(
-                list,
-                List {
-                    elements: Vec::new(),
-                },
-            );
-            *list = collapse_typed_literal_lit(taken, span_copy)?;
+    // Iterative post-order traversal: each work item is a raw pointer to
+    // an `Expr` along with a visited flag. On first visit we push the
+    // node back as visited and then push all of its children (so they
+    // are processed before we revisit the parent). On second visit we
+    // apply the per-node collapse, by which point every descendant has
+    // already been normalized — matching the post-order semantics of
+    // the prior recursive walk.
+    //
+    // Safety: we hold a unique `&mut Expr` borrow at entry and the only
+    // mutation we perform on a node is via `mem::replace` on the inner
+    // `List` of an `Expr::List` variant (the enum tag stays `List`, and
+    // the parent's Vec slot that addresses this node is not touched).
+    // Pointers to descendants are only used for their initial visit and
+    // their post-order revisit, both of which are scheduled before any
+    // ancestor mutation. After an ancestor's collapse runs, no pointers
+    // into that ancestor's subtree remain on the stack.
+    let mut stack: Vec<(*mut Expr, bool)> = Vec::new();
+    stack.push((expr as *mut Expr, false));
+
+    while let Some((ptr, visited)) = stack.pop() {
+        // SAFETY: the pointer was derived from a unique `&mut Expr` we
+        // own for the duration of this function. No aliasing borrows
+        // exist; no ancestor mutation has invalidated the slot (see the
+        // post-order argument above).
+        let node = unsafe { &mut *ptr };
+        if !visited {
+            // Re-enqueue self for post-order processing, then enqueue
+            // children for pre-order descent.
+            stack.push((ptr, true));
+            match node {
+                Expr::List(list, _) => {
+                    for child in list.elements.iter_mut() {
+                        stack.push((child as *mut Expr, false));
+                    }
+                }
+                Expr::Map(map, _) => {
+                    for (_, v) in map.entries.iter_mut() {
+                        stack.push((v as *mut Expr, false));
+                    }
+                }
+                Expr::MetaExpr(me, _) => {
+                    stack.push((&mut *me.expr as *mut Expr, false));
+                    for (_, v) in me.entries.iter_mut() {
+                        stack.push((v as *mut Expr, false));
+                    }
+                }
+                Expr::Atom(_, _) => {}
+            }
+        } else if let Expr::List(list, span) = node {
+            // All descendants already normalized. Check shape and
+            // collapse if applicable.
+            let needs_collapse = list.elements.len() == 3
+                && matches!(
+                    &list.elements[0],
+                    Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+                );
+            if needs_collapse {
+                let span_copy = *span;
+                let taken = std::mem::replace(
+                    list,
+                    List {
+                        elements: Vec::new(),
+                    },
+                );
+                *list = collapse_typed_literal_lit(taken, span_copy)?;
+            }
         }
-    } else if let Expr::Map(map, _) = expr {
-        for (_, v) in &mut map.entries {
-            normalize_typed_literals_in_expr(v)?;
-        }
-    } else if let Expr::MetaExpr(me, _) = expr {
-        normalize_typed_literals_in_expr(&mut me.expr)?;
-        for (_, v) in &mut me.entries {
-            normalize_typed_literals_in_expr(v)?;
-        }
+        // Atoms, Maps, and MetaExprs need no per-node action on the
+        // post-order revisit; their children have been handled above.
     }
     Ok(())
 }
