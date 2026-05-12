@@ -4320,8 +4320,7 @@ fn infer_top_level(
             let body_return_collapsed = match (&resolved_body, &resolved_decl) {
                 (Type::Error, decl) => !matches!(decl, Type::Error),
                 (Type::Fn(_, ret), Type::Fn(_, decl_ret))
-                    if matches!(**ret, Type::Error)
-                        && !matches!(**decl_ret, Type::Error) =>
+                    if matches!(**ret, Type::Error) && !matches!(**decl_ret, Type::Error) =>
                 {
                     true
                 }
@@ -7537,7 +7536,6 @@ fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
         other => other,
     }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn infer_permute_app(

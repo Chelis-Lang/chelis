@@ -362,7 +362,8 @@ pub fn try_lower_compiled_program(
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
     let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
     let dag = crate::lower::try_lower_program(program).ok();
-    let host = crate::lower::catch_lowering_external(|| lower_host_program(program, &lowered_names))?;
+    let host =
+        crate::lower::catch_lowering_external(|| lower_host_program(program, &lowered_names))?;
 
     Ok(CompiledProgram {
         dag: dag.filter(|dag| !dag.roots().is_empty()),
