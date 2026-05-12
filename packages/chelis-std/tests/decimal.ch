@@ -36,10 +36,12 @@ def test_to_float_half_exact() -> unit ! { Test } = {
   approx = decimal_to_float(decimal("0.5"))
   assert_close(cast(approx, f32), cast(0.5, f32), cast(0.0, f32), "decimal(0.5) -> f32 0.5 exactly")
 }
-def test_try_decimal_rejects_garbage() -> unit ! { Test } = { match try_decimal("not_a_number") with {
-  | Some(_) => assert_true(false, "try_decimal(\"not_a_number\") must return None")
-  | None => assert_true(true, "try_decimal(\"not_a_number\") returns None")
-} }
+def test_try_decimal_rejects_garbage() -> unit ! { Test } = {
+  match try_decimal("not_a_number") with {
+    | Some(_) => assert_true(false, "try_decimal(\"not_a_number\") must return None")
+    | None => assert_true(true, "try_decimal(\"not_a_number\") returns None")
+  }
+}
 def test_div_one_by_three_round_half_even() -> unit ! { Test } = {
   q = decimal_div(decimal("1"), decimal("3"), cast(0, int64), round_half_even())
   assert_true(decimal_eq(q, decimal_from_int(cast(0, int64))), "1 / 3 @ scale 0, half-even == 0")

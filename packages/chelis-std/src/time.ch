@@ -12,10 +12,12 @@ type Date =
   | Date { year: int64, month: int64, day: int64 }
 type Duration =
   | Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }
-def date(year: int64, month: int64, day: int64) -> Date = { match try_date(year, month, day) with {
-  | Some(value) => value
-  | None => fail("date: invalid calendar date")
-} }
+def date(year: int64, month: int64, day: int64) -> Date = {
+  match try_date(year, month, day) with {
+    | Some(value) => value
+    | None => fail("date: invalid calendar date")
+  }
+}
 def try_date(year: int64, month: int64, day: int64) -> Option[Date] = { if gt(cast(1, int64), month) then None else if gt(month, cast(12, int64)) then None else if gt(cast(1, int64), day) then None else if gt(day, days_in_month(year, month)) then None else Some(Date { year: year, month: month, day: day }) }
 def duration(days: int64, hours: int64, minutes: int64, seconds: int64) -> Duration = Duration { days: days, hours: hours, minutes: minutes, seconds: seconds }
 def is_leap_year(year: int64) -> bool = or(and(eq(mod(year, cast(4, int64)), cast(0, int64)), neq(mod(year, cast(100, int64)), cast(0, int64))), eq(mod(year, cast(400, int64)), cast(0, int64)))
@@ -27,16 +29,18 @@ def date_lte(lhs: Date, rhs: Date) -> bool = lte(date_to_ordinal(lhs), date_to_o
 def date_gt(lhs: Date, rhs: Date) -> bool = gt(date_to_ordinal(lhs), date_to_ordinal(rhs))
 def date_gte(lhs: Date, rhs: Date) -> bool = gte(date_to_ordinal(lhs), date_to_ordinal(rhs))
 def date_to_string(value: Date) -> string = string_concat(pad_left(value.year, cast(4, int64)), string_concat("-", string_concat(pad_left(value.month, cast(2, int64)), string_concat("-", pad_left(value.day, cast(2, int64))))))
-def parse_date(text: string) -> Option[Date] = { if neq(string_len(text), cast(10, int64)) then None else if neq(char_at(text, cast(4, int64)), "-") then None else if neq(char_at(text, cast(7, int64)), "-") then None else match to_int(string_slice(text, cast(0, int64), cast(4, int64))) with {
-  | Some(year) => match to_int(string_slice(text, cast(5, int64), cast(2, int64))) with {
-  | Some(month) => match to_int(string_slice(text, cast(8, int64), cast(2, int64))) with {
-  | Some(day) => try_date(year, month, day)
-  | None => None
+def parse_date(text: string) -> Option[Date] = {
+  if neq(string_len(text), cast(10, int64)) then None else if neq(char_at(text, cast(4, int64)), "-") then None else if neq(char_at(text, cast(7, int64)), "-") then None else match to_int(string_slice(text, cast(0, int64), cast(4, int64))) with {
+    | Some(year) => match to_int(string_slice(text, cast(5, int64), cast(2, int64))) with {
+    | Some(month) => match to_int(string_slice(text, cast(8, int64), cast(2, int64))) with {
+    | Some(day) => try_date(year, month, day)
+    | None => None
+  }
+    | None => None
+  }
+    | None => None
+  }
 }
-  | None => None
-}
-  | None => None
-} }
 def day_of_week(value: Date) -> DayOfWeek = {
   raw = mod(add(date_to_ordinal(value), cast(3, int64)), cast(7, int64))
   idx = if gt(cast(0, int64), raw) then add(raw, cast(7, int64)) else raw
@@ -50,30 +54,34 @@ def day_of_week(value: Date) -> DayOfWeek = {
     | _ => Sunday
   }
 }
-def day_of_week_name(value: Date) -> string = { match day_of_week(value) with {
-  | Monday => "monday"
-  | Tuesday => "tuesday"
-  | Wednesday => "wednesday"
-  | Thursday => "thursday"
-  | Friday => "friday"
-  | Saturday => "saturday"
-  | Sunday => "sunday"
-} }
+def day_of_week_name(value: Date) -> string = {
+  match day_of_week(value) with {
+    | Monday => "monday"
+    | Tuesday => "tuesday"
+    | Wednesday => "wednesday"
+    | Thursday => "thursday"
+    | Friday => "friday"
+    | Saturday => "saturday"
+    | Sunday => "sunday"
+  }
+}
 def day_of_year(value: Date) -> int64 = add(days_before_month(value.year, value.month), value.day)
-def days_in_month(year: int64, month: int64) -> int64 = { match month with {
-  | 1 => cast(31, int64)
-  | 2 => if is_leap_year(year) then cast(29, int64) else cast(28, int64)
-  | 3 => cast(31, int64)
-  | 4 => cast(30, int64)
-  | 5 => cast(31, int64)
-  | 6 => cast(30, int64)
-  | 7 => cast(31, int64)
-  | 8 => cast(31, int64)
-  | 9 => cast(30, int64)
-  | 10 => cast(31, int64)
-  | 11 => cast(30, int64)
-  | _ => cast(31, int64)
-} }
+def days_in_month(year: int64, month: int64) -> int64 = {
+  match month with {
+    | 1 => cast(31, int64)
+    | 2 => if is_leap_year(year) then cast(29, int64) else cast(28, int64)
+    | 3 => cast(31, int64)
+    | 4 => cast(30, int64)
+    | 5 => cast(31, int64)
+    | 6 => cast(30, int64)
+    | 7 => cast(31, int64)
+    | 8 => cast(31, int64)
+    | 9 => cast(30, int64)
+    | 10 => cast(31, int64)
+    | 11 => cast(30, int64)
+    | _ => cast(31, int64)
+  }
+}
 def days_before_month(year: int64, month: int64) -> int64 = { days_before_month_loop(year, cast(1, int64), month, cast(0, int64)) }
 def days_before_month_loop(year: int64, cursor: int64, limit: int64, acc: int64) -> int64 = { if gte(cursor, limit) then acc else days_before_month_loop(year, add(cursor, cast(1, int64)), limit, add(acc, days_in_month(year, cursor))) }
 def date_to_ordinal(value: Date) -> int64 = { add(days_before_year(value.year), sub(day_of_year(value), cast(1, int64))) }

@@ -598,21 +598,18 @@ fn assert_fmt_idempotent(label: &str, src: &str) {
 }
 
 #[test]
-#[ignore = "fmt non-idempotent on 3+ stage pipes, Finding 3a (PR #51); flips on in fix commit"]
 fn fmt_idempotent_three_stage_pipe() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> neg |> abs |> sigmoid\n";
     assert_fmt_idempotent("three-stage pipe", src);
 }
 
 #[test]
-#[ignore = "fmt non-idempotent on 3+ stage pipes, Finding 3a (PR #51); flips on in fix commit"]
 fn fmt_idempotent_four_stage_pipe() {
     let src = "def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> neg |> abs |> sigmoid |> tanh\n";
     assert_fmt_idempotent("four-stage pipe", src);
 }
 
 #[test]
-#[ignore = "fmt non-idempotent on 3+ stage pipes, Finding 3a (PR #51); flips on in fix commit"]
 fn fmt_idempotent_three_stage_pipe_with_sibling_decl() {
     // Mixed with a non-pipe top-level decl, to ensure the fix scopes to the
     // pipe layout and does not regress neighboring formatting.
@@ -621,4 +618,75 @@ def g(y: tensor[3, f32]) -> tensor[3, f32] = relu(y)
 def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> neg |> abs |> sigmoid
 ";
     assert_fmt_idempotent("three-stage pipe + sibling", src);
+}
+
+/// Corpus sweep: every `.ch` file under `examples/`, `packages/chelis-std/`,
+/// and `crates/chelis-surf/tests/fixtures/` must satisfy
+/// `fmt(fmt(src)) == fmt(src)`. Locks the formatter-idempotency contract
+/// across the executable and illustrative example surfaces so a future
+/// regression in `format_block`, `format_pipe_layout`, or a sibling path
+/// cannot reintroduce Finding 3a quietly.
+#[test]
+fn fmt_idempotent_on_repo_ch_corpus() {
+    use chelis_surf::format::format_program;
+    use std::path::PathBuf;
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+
+    let roots = [
+        repo_root.join("examples"),
+        repo_root.join("packages/chelis-std"),
+        repo_root.join("crates/chelis-surf/tests/fixtures"),
+    ];
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut stack: Vec<PathBuf> = roots.iter().filter(|p| p.exists()).cloned().collect();
+    while let Some(dir) = stack.pop() {
+        for entry in
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+        {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("ch") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(
+        !files.is_empty(),
+        "corpus sweep found zero .ch files; check root paths"
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    for path in &files {
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let Ok(decls1) = surf_parse(&src) else {
+            // Files that do not parse today are out of scope for the
+            // formatter contract. The dedicated parser tests cover them.
+            continue;
+        };
+        let pass1 = format_program(&decls1);
+        let Ok(decls2) = surf_parse(&pass1) else {
+            failures.push(format!(
+                "{}: pass-1 output failed to re-parse",
+                path.display()
+            ));
+            continue;
+        };
+        let pass2 = format_program(&decls2);
+        if pass1 != pass2 {
+            failures.push(format!("{}: fmt not idempotent", path.display()));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "fmt idempotency corpus sweep found {} failure(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
