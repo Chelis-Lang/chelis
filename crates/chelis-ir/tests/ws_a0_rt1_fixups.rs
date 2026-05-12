@@ -21,17 +21,26 @@ fn matrix(rows: usize, cols: usize, prec: Prim) -> TensorType {
 }
 
 // ----------------------------------------------------------------
-// F1: BlasMatmul currently supports only f32
+// F1: BlasMatmul currently supports only f32 and f64 (post WS-A1)
 // ----------------------------------------------------------------
+//
+// WS-A1 (commit `feat(backend-c,ir): WS-A1 lift F1 guard for f64 matmul`)
+// lifted the f64 arm of the F1 tactical guard once the C backend wired
+// `cblas_dgemm` dispatch through `MatmulEmitSpec::accumulator`. The
+// HIP/Metal backends still destructure `BlasMatmul` with `..` and call
+// single-precision GEMM, and bf16/f16 has no native dispatch on any
+// backend yet, so the F1 guard remains in place for those precisions.
+// WS-A2 lifts HIP f64; WS-A3 lifts bf16/f16.
 
-/// `RiscOp::BlasMatmul` on `tensor[m, k, f64] * tensor[k, n, f64]`
-/// must error at IR validation with the F1 diagnostic. The C/HIP
-/// backends destructure `BlasMatmul` with `..` and dispatch
-/// single-precision GEMM regardless of operand precision; allowing an
-/// f64 matmul into the IR would silently lower to `cblas_sgemm` reading
-/// `double*` storage. Reject at validation until WS-A1.
+/// Negative-parity twin of the original f64-rejection test. After
+/// WS-A1, `RiscOp::BlasMatmul` on f64 operands MUST validate cleanly
+/// because the C backend dispatches `cblas_dgemm` (and reads/writes
+/// `double*` storage). Replaces the prior
+/// `blas_matmul_f64_rejected_with_f1_diagnostic` assertion per the
+/// WS-A1 brief contract that the test be REPLACED, not silently
+/// deleted.
 #[test]
-fn blas_matmul_f64_rejected_with_f1_diagnostic() {
+fn blas_matmul_f64_validates_cleanly_after_ws_a1_lift() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::Const { value: 1.0 },
@@ -57,16 +66,18 @@ fn blas_matmul_f64_rejected_with_f1_diagnostic() {
 
     let errors = verify::verify(&dag);
     assert!(
-        errors
+        !errors
             .iter()
             .any(|m| m.contains("F1: BlasMatmul currently supports only f32")),
-        "expected F1 diagnostic; got: {errors:?}"
+        "f64 BlasMatmul must not trip the (now-lifted) F1 f32-only guard; got: {errors:?}"
     );
     assert!(
-        errors
-            .iter()
-            .any(|m| m.contains("spec/04-type-system.md §5.7.1")),
-        "F1 diagnostic must cite spec/04-type-system.md §5.7.1; got: {errors:?}"
+        !errors.iter().any(|m| m.contains("F1:")),
+        "f64 BlasMatmul must not trip any remaining F1 guard arm post WS-A1; got: {errors:?}"
+    );
+    assert!(
+        errors.is_empty(),
+        "f64 BlasMatmul with default (f64) accumulator must validate cleanly; got: {errors:?}"
     );
 }
 

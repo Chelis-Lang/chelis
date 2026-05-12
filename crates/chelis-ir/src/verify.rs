@@ -382,27 +382,32 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                         }
                         Err(msg) => errors.push(format!("matmul at node {}: {msg}", node.id.0)),
                     }
-                    // F1 (WS-A0 RT-1 fixup, tactical): the C/HIP/Metal
-                    // backends destructure BlasMatmul with `..` and call
-                    // single-precision GEMM (`cblas_sgemm` /
-                    // `hipblasSgemm`) regardless of operand precision,
-                    // so non-f32 matmul lowers to silent precision loss
-                    // (or, for f64 source data, undefined behavior:
-                    // single-precision GEMM reading `double*` storage).
-                    // Reject every non-f32 BlasMatmul at IR validation
-                    // time until WS-A1 plumbs the accumulator through
-                    // the backends and dispatches to `cblas_dgemm`/
-                    // `hipblasDgemm` per spec/04-type-system.md §5.7.1.
-                    // The literal "F1:" tag makes the WS-A1 lift trivial
-                    // to grep for.
-                    if operand != Prim::F32 {
+                    // F1 (WS-A0 RT-1 fixup, tactical) — partially lifted by
+                    // WS-A1: the C backend now dispatches `cblas_sgemm` for
+                    // f32 BlasMatmul and `cblas_dgemm` for f64 BlasMatmul,
+                    // so f32 + f64 are admitted at IR validation time. The
+                    // HIP and Metal backends still destructure BlasMatmul
+                    // with `..` and call single-precision GEMM regardless
+                    // of operand precision, and bf16/f16 source data has
+                    // no native dispatch on any backend yet, so non-{f32,
+                    // f64} matmul still lowers to silent precision loss
+                    // (or, for bf16/f16 source data, undefined behavior:
+                    // single-precision GEMM reading `__half*` storage).
+                    // Reject bf16/f16 at IR validation time until WS-A2
+                    // (HIP f64) and WS-A3 (HIP bf16/f16) plumb the
+                    // accumulator through the GPU backends and dispatch
+                    // to `hipblasDgemm` / native bf16/f16 kernels per
+                    // spec/04-type-system.md §5.7.1. The literal "F1:"
+                    // tag makes the remaining lift trivial to grep for.
+                    if !matches!(operand, Prim::F32 | Prim::F64) {
                         errors.push(format!(
-                            "F1: BlasMatmul currently supports only f32; node {} has \
-                             operand precision `{}` (accumulator `{}`). \
+                            "F1: BlasMatmul currently supports only f32 and f64; node {} \
+                             has operand precision `{}` (accumulator `{}`). \
                              spec/04-type-system.md §5.7.1 documents the per-precision \
-                             accumulator defaults, but the C/HIP/Metal backends in this \
-                             cycle dispatch only single-precision GEMM. WS-A1 lifts this \
-                             guard once `cblas_dgemm` / `hipblasDgemm` dispatch lands.",
+                             accumulator defaults; the C backend dispatches \
+                             `cblas_sgemm`/`cblas_dgemm` for f32/f64 (WS-A1), but the \
+                             HIP/Metal backends and bf16/f16 dispatch are not yet wired. \
+                             WS-A2/A3 lift this guard for the remaining precisions.",
                             node.id.0,
                             operand.name(),
                             accumulator.name(),
