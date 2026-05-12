@@ -7,10 +7,31 @@ use serde::{Deserialize, Serialize};
 use crate::CheckedProgram;
 use crate::errors::{CheckError, CheckErrorKind};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LinearityInfo {
     reusable_inputs_by_offset: HashMap<usize, usize>,
+    /// Linearity violations discovered through module-recursive checking
+    /// (Linearity-F3 PR 1). Held as warnings, not errors, until PR 2
+    /// fixes the surfaced violations and flips the severity. Skipped
+    /// from serde because `CheckError` does not derive
+    /// Serialize/Deserialize; rehydrating a `CheckedProgram` from JSON
+    /// loses warning detail, which is acceptable because warnings are
+    /// only consumed by the live CLI path that produced them.
+    #[serde(skip)]
+    warnings: Vec<CheckError>,
 }
+
+impl PartialEq for LinearityInfo {
+    fn eq(&self, other: &Self) -> bool {
+        // `warnings` is intentionally excluded — it is a transient
+        // diagnostic carrier and not part of the structural identity of
+        // `LinearityInfo`. The pre-warning shape compared only
+        // `reusable_inputs_by_offset`; this preserves that.
+        self.reusable_inputs_by_offset == other.reusable_inputs_by_offset
+    }
+}
+
+impl Eq for LinearityInfo {}
 
 impl LinearityInfo {
     pub fn reusable_input_for_span(&self, span: Span) -> Option<usize> {
@@ -21,6 +42,25 @@ impl LinearityInfo {
         self.reusable_inputs_by_offset
             .entry(span.offset)
             .or_insert(input_index);
+    }
+
+    /// Linearity violations discovered through module-recursive
+    /// checking. Linearity-F3 PR 1 emits these as warnings to give
+    /// existing module-wrapped programs time to fix latent violations.
+    /// PR 2 will flip the severity to errors once the corpus is clean.
+    pub fn warnings(&self) -> &[CheckError] {
+        &self.warnings
+    }
+
+    // Linearity-F3 PR 1: warning-mode plumbing. The mutator is wired
+    // into the checker in the same commit that flips module-wrapped
+    // linearity violations from "silently skipped" to "warned about",
+    // so it is unused as of the test-stub commit that introduces this
+    // field. Suppress the dead-code warning to keep the test-stub
+    // commit clippy-clean ahead of the fix commit.
+    #[allow(dead_code)]
+    fn push_warning(&mut self, warning: CheckError) {
+        self.warnings.push(warning);
     }
 }
 
