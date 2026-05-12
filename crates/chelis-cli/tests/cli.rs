@@ -5548,7 +5548,6 @@ fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_two_stage() {
 }
 
 #[test]
-#[ignore = "prefer-pipe-operator autofix output not fmt-clean for total_stages > 3; pending Finding 3b fix"]
 fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_three_stage() {
     // Three-stage pipe rewrite (`sigmoid(relu(neg(x)))` ->
     // `x |> neg |> relu |> sigmoid`). The formatter emits a multi-line
@@ -5576,7 +5575,6 @@ fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_three_stage() {
 }
 
 #[test]
-#[ignore = "prefer-pipe-operator autofix output not fmt-clean for total_stages > 3; pending Finding 3b fix"]
 fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_mixed_outer_args() {
     // Pipe rewrite mixed with a non-rewritable outer-call argument:
     // `add(sigmoid(relu(neg(x))), y)` rewrites to a four-stage pipe
