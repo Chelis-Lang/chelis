@@ -6,6 +6,61 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added - pipe-stage callable surface
+
+`chelis check`, `chelis eval`, and `chelis build` now accept callable
+shapes as pipe stages that previously required an explicit lambda or
+rewrote-to-application form:
+
+- `x |> grad(f)` and `xs |> vmap(grad(f))` lower through the existing
+  application path. Equivalent to `grad(f)(x)` and `vmap(grad(f))(xs)`.
+- `x |> f` where `f` is a function-valued parameter of a callable.
+- `x |> tensor_to_scalar` and other non-elementwise unary primitives
+  (the in-IR lowering now mirrors the host lane's beta-reduction path).
+- `x |> realize` as a bare-keyword pipe stage (parser synthesizes a
+  lambda; the existing realize inference accepts the resulting form).
+
+### Added - implicit-copy fan-out covers var-RHS let-bindings
+
+The linearity checker now permits implicit copy insertion for
+cross-statement var-RHS let-aliasing such as `let alias = x; mul(x, alias)`.
+The DAG-level Copy node is inserted automatically when fan-out across
+non-borrow consume sites is detected; explicit `copy(x)` is no longer
+required in this shape.
+
+### Added - lint allowlist now matches canonical sources
+
+- `deep-user-symbol-charset` accepts `t-ref` (the canonical compound
+  tag for read-only borrow types in §1.4 / §2.5). `chelis deep` output
+  no longer self-conflicts with `chelis lint --check`.
+- `module-pascal-components` accepts `Capstone` as a top-level
+  ecosystem module prefix; `spec/01-nomenclature.md` §2.6 documents it
+  alongside the other ecosystem packages.
+
+### Added - `chelis eval --file` warns when there is nothing to evaluate
+
+Programs whose `--file` contains only `def` declarations no longer
+silently return success with no output. A stderr warning is emitted
+(`warning: input contains only def declarations; nothing to evaluate`)
+and the process exits 0. Scripted consumers are unaffected.
+
+### Fixed - lint auto-fix re-enabled with typed-pipeline proof
+
+`chelis lint --fix` now applies `redundant-linearity-call` and
+`prefer-pipe-operator` rewrites again. The fixer drives proposed
+rewrites through the typed pipeline and only writes the result when
+parsing, type-checking, and linearity all accept it. The 0.7.6
+limitation that disabled these auto-fixes is closed.
+
+### Internal
+
+- `inlining_names` recursion guard narrowed: legitimate nested
+  fn-typed parameter applications (`f(f(x))`) no longer trip the
+  inlining guard's false-positive rejection. True self-recursion
+  still terminates with the documented fallback.
+- Dead `t-dims` parsing in `chelis-ir::lower` removed (vestige of the
+  pre-flattened `t-tensor` form).
+
 ## [0.7.6] - 2026-05-10
 
 ### Fixed - conservative lint auto-fix rollout
