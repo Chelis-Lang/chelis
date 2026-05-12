@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.7] — 2026-05-12
+
 ### Added - pipe-stage callable surface
 
 `chelis check`, `chelis eval`, and `chelis build` now accept callable
