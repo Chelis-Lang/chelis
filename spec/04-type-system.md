@@ -627,8 +627,7 @@ the caller sees a uniform-precision result tensor.
 At the IR level, the `Sum` node's output precision is always the
 accumulator precision; lowering inserts an explicit `Cast` for the
 `bf16`/`f16` row to recover the operand-precision result documented in
-the table. (Resolution of an RT-2 finding: the spec text and table
-disagreed about the `bf16`/`f16` row, and the table is canonical.)
+the table.
 
 The result precision of `matmul` matches the operand precision (the
 wider accumulator is consumed inside the op and downcast on output) so
