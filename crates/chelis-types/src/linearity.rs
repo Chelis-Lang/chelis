@@ -7,10 +7,31 @@ use serde::{Deserialize, Serialize};
 use crate::CheckedProgram;
 use crate::errors::{CheckError, CheckErrorKind};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LinearityInfo {
     reusable_inputs_by_offset: HashMap<usize, usize>,
+    /// Linearity violations discovered through module-recursive checking
+    /// (Linearity-F3 PR 1). Held as warnings, not errors, until PR 2
+    /// fixes the surfaced violations and flips the severity. Skipped
+    /// from serde because `CheckError` does not derive
+    /// Serialize/Deserialize; rehydrating a `CheckedProgram` from JSON
+    /// loses warning detail, which is acceptable because warnings are
+    /// only consumed by the live CLI path that produced them.
+    #[serde(skip)]
+    warnings: Vec<CheckError>,
 }
+
+impl PartialEq for LinearityInfo {
+    fn eq(&self, other: &Self) -> bool {
+        // `warnings` is intentionally excluded — it is a transient
+        // diagnostic carrier and not part of the structural identity of
+        // `LinearityInfo`. The pre-warning shape compared only
+        // `reusable_inputs_by_offset`; this preserves that.
+        self.reusable_inputs_by_offset == other.reusable_inputs_by_offset
+    }
+}
+
+impl Eq for LinearityInfo {}
 
 impl LinearityInfo {
     pub fn reusable_input_for_span(&self, span: Span) -> Option<usize> {
@@ -21,6 +42,18 @@ impl LinearityInfo {
         self.reusable_inputs_by_offset
             .entry(span.offset)
             .or_insert(input_index);
+    }
+
+    /// Linearity violations discovered through module-recursive
+    /// checking. Linearity-F3 PR 1 emits these as warnings to give
+    /// existing module-wrapped programs time to fix latent violations.
+    /// PR 2 will flip the severity to errors once the corpus is clean.
+    pub fn warnings(&self) -> &[CheckError] {
+        &self.warnings
+    }
+
+    fn push_warning(&mut self, warning: CheckError) {
+        self.warnings.push(warning);
     }
 }
 
@@ -113,6 +146,56 @@ struct Checker {
     errors: Vec<CheckError>,
     info: LinearityInfo,
     top_level_types: HashMap<String, Expr>,
+    /// Linearity-F3 PR 1: when true, diagnostics raised during the
+    /// current walk are routed into `info.warnings` instead of
+    /// `errors`. Set when descending through a `(module {} name ...)`
+    /// wrapper. PR 2 will remove the field and route all diagnostics
+    /// through `errors` once the corpus is clean.
+    in_module: bool,
+}
+
+impl Checker {
+    fn push_diagnostic(&mut self, error: CheckError) {
+        if self.in_module {
+            self.info.push_warning(error);
+        } else {
+            self.errors.push(error);
+        }
+    }
+}
+
+/// Pre-declare top-level def names into `scope`, descending through
+/// `(module {} name children...)` wrappers. Mirrors the
+/// `top_level_decl_items` pattern in `infer.rs:1056-1074` so module-
+/// wrapped defs participate in cross-statement linearity tracking.
+fn pre_declare_top_level_defs(
+    exprs: &[Expr],
+    type_env: &HashMap<String, Expr>,
+    scope: &mut LinearScope,
+) {
+    for expr in exprs {
+        pre_declare_one(expr, type_env, scope);
+    }
+}
+
+fn pre_declare_one(expr: &Expr, type_env: &HashMap<String, Expr>, scope: &mut LinearScope) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        Some("module") => {
+            // `(module {} name children...)` — skip tag, meta, name.
+            for child in list.elements.iter().skip(3) {
+                pre_declare_one(child, type_env, scope);
+            }
+        }
+        Some("def") => {
+            if let Some(name) = children(list).first().and_then(symbol_name) {
+                scope.declare(name, type_env.get(name).cloned());
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
@@ -120,17 +203,11 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: program.type_env().clone(),
+        in_module: false,
     };
     let mut scope = LinearScope::default();
 
-    for expr in program.annotated_exprs() {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-        {
-            scope.declare(name, program.type_env().get(name).cloned());
-        }
-    }
+    pre_declare_top_level_defs(program.annotated_exprs(), program.type_env(), &mut scope);
 
     for expr in program.annotated_exprs() {
         checker.check_top_level(expr, &mut scope);
@@ -201,6 +278,7 @@ pub fn check_linearity_with_context(
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
+        in_module: false,
     };
 
     let mut scope = LinearScope::default();
@@ -209,25 +287,22 @@ pub fn check_linearity_with_context(
     // new code resolve to a Live binding with the library's function
     // type. Function types are non-linear (no tensor content), so a
     // pure reference never triggers consumption of new-code locals.
-    for expr in library_program.annotated_exprs() {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-        {
-            scope.declare(name, new_program.type_env().get(name).cloned());
-        }
-    }
+    // Recurse through module wrappers so library .ch sources written
+    // with `module Foo` participate in pre-declaration the same as
+    // bare-top-level library sources (Linearity-F3 PR 1).
+    pre_declare_top_level_defs(
+        library_program.annotated_exprs(),
+        new_program.type_env(),
+        &mut scope,
+    );
 
     // Pre-declare new-code def names. New-code shadows library on
     // collision (declare last → top of stack wins).
-    for expr in new_program.annotated_exprs() {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-        {
-            scope.declare(name, new_program.type_env().get(name).cloned());
-        }
-    }
+    pre_declare_top_level_defs(
+        new_program.annotated_exprs(),
+        new_program.type_env(),
+        &mut scope,
+    );
 
     // Walk ONLY new-code bodies. Library bodies are never re-walked,
     // so library tensor parameters never enter the new-code scope.
@@ -244,6 +319,26 @@ pub fn check_linearity_with_context(
 
 impl Checker {
     fn check_top_level(&mut self, expr: &Expr, scope: &mut LinearScope) {
+        // Linearity-F3 PR 1: recurse through `(module {} name
+        // children...)` wrappers so module-wrapped top-level defs
+        // participate in cross-statement linearity tracking. When
+        // descending into a module body, mark `in_module` so any
+        // diagnostics raised during the walk are routed to
+        // `info.warnings` via `push_diagnostic`. PR 2 will flip this
+        // routing back to `errors` once the corpus is clean.
+        if let Expr::List(list, _) = expr
+            && get_tag(list) == Some("module")
+        {
+            let prev = self.in_module;
+            self.in_module = true;
+            // Skip tag, meta, name — walk every remaining child as a
+            // top-level expression.
+            for child in list.elements.iter().skip(3) {
+                self.check_top_level(child, scope);
+            }
+            self.in_module = prev;
+            return;
+        }
         if let Expr::List(list, _) = expr
             && get_tag(list) == Some("def")
         {
@@ -612,13 +707,14 @@ impl Checker {
                 if consumed_at.description.contains("closure capture")
                     || consumed_at.description.contains("match scrutinee") =>
             {
-                self.errors.push(CheckError::new(
+                let description = consumed_at.description.clone();
+                self.push_diagnostic(CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
                         expr,
                         format!(
                             "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
-                            consumed_at.description,
+                            description,
                             expr.span().offset
                         ),
                     ),
@@ -673,26 +769,30 @@ impl Checker {
         if site.description.starts_with("binding ") {
             return;
         }
-        self.errors.push(CheckError::new(
-            CheckErrorKind::UseAfterConsume,
-            with_macro_provenance(
-                expr,
-                format!(
-                    "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
-                    site.description,
-                    expr.span().offset
-                ),
+        let description = site.description.clone();
+        let message = with_macro_provenance(
+            expr,
+            format!(
+                "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
+                description,
+                expr.span().offset
             ),
-            vec![format!(
-                "Insert `copy({name})` before the first consuming use if you need to reuse it"
-            )],
+        );
+        let suggestion =
+            format!("Insert `copy({name})` before the first consuming use if you need to reuse it");
+        self.push_diagnostic(CheckError::new(
+            CheckErrorKind::UseAfterConsume,
+            message,
+            vec![suggestion],
         ));
     }
 
     fn invalid_borrow(&mut self, expr: &Expr, message: &str) {
-        self.errors.push(CheckError::new(
+        let formatted =
+            with_macro_provenance(expr, format!("{message} (offset {})", expr.span().offset));
+        self.push_diagnostic(CheckError::new(
             CheckErrorKind::InvalidBorrow,
-            with_macro_provenance(expr, format!("{message} (offset {})", expr.span().offset)),
+            formatted,
             vec!["Use `&x` only as a direct function-call argument".to_string()],
         ));
     }
