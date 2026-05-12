@@ -52,7 +52,6 @@ fn pipe_realize_with_statically_typed_tensor_typechecks() {
 /// value's type before the body is checked, so by the time `copy`
 /// resolves its inner type the parameter is already a `Tensor`.
 #[test]
-#[ignore = "Finding 4: x |> copy rejection; flipped to running by the fix commit"]
 fn pipe_copy_with_statically_typed_tensor_typechecks() {
     let result = typecheck_surf("def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> copy");
     assert!(
@@ -69,7 +68,6 @@ fn pipe_copy_with_statically_typed_tensor_typechecks() {
 /// pre-unification fix closes both the §5 entry and Finding 4. Kept
 /// ignored until the fix lands so a single fixture pins both.
 #[test]
-#[ignore = "TypeCheck-PipeCast-F1: cast(f32) pipe-stage rejection; flipped by the fix commit"]
 fn pipe_cast_with_statically_typed_tensor_typechecks() {
     let result = typecheck_surf("def f(x: tensor[3, f32]) -> tensor[3, f32] = x |> cast(f32)");
     assert!(
