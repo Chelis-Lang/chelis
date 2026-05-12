@@ -147,6 +147,70 @@ impl Prim {
                 | Prim::Int64
         )
     }
+
+    /// Resolve the spec/04-type-system.md §5.7.1 default reduce-sum
+    /// **accumulator** precision for this operand precision. Mirrors
+    /// `chelis_ir::dag::RiscOp::default_reduce_sum_accumulator` so the
+    /// type checker can resolve the same rule without a backward
+    /// dependency from `chelis-types` on `chelis-ir`.
+    ///
+    /// - bf16 / f16  → f32
+    /// - f32         → f32 (operand-matching)
+    /// - f64         → f64 (operand-matching)
+    /// - int8 / int16 → int32
+    /// - int32       → int32 (operand-matching)
+    /// - int64       → int64 (operand-matching)
+    ///
+    /// Returns `Err` for non-numeric operands and for the deferred
+    /// `f8e4m3` (§1.1.1).
+    pub fn default_reduce_sum_accumulator(self) -> Result<Prim, String> {
+        Ok(match self {
+            Prim::Bf16 | Prim::F16 => Prim::F32,
+            Prim::F32 => Prim::F32,
+            Prim::F64 => Prim::F64,
+            Prim::Int8 | Prim::Int16 => Prim::Int32,
+            Prim::Int32 => Prim::Int32,
+            Prim::Int64 => Prim::Int64,
+            Prim::Bool => {
+                return Err(
+                    "reduce_sum is not defined on bool tensors; cast to int32 first".to_string(),
+                );
+            }
+            Prim::F8e4m3 => {
+                return Err("reduce_sum: operand dtype `f8e4m3` is deferred per \
+                     spec/04-type-system.md §1.1.1 and is not part of the \
+                     active numeric primitive set"
+                    .to_string());
+            }
+            Prim::String => {
+                return Err("reduce_sum is not defined for string operands".to_string());
+            }
+        })
+    }
+
+    /// Resolve the spec/04-type-system.md §5.7.1 user-facing
+    /// **result** precision of `reduce_sum` for this operand precision,
+    /// per the "Result precision" column of the §5.7.1 table:
+    ///
+    /// - bf16 / f16  → operand precision (f32 accumulator consumed
+    ///                 inside the op and downcast on output)
+    /// - f32         → f32
+    /// - f64         → f64
+    /// - int8 / int16 → int32 (accumulator precision)
+    /// - int32       → int32
+    /// - int64       → int64
+    ///
+    /// This is the user-visible result precision. The IR-level Sum
+    /// node's `output_type.precision` is the accumulator precision;
+    /// lowering inserts a `Cast` for the bf16/f16 row to recover the
+    /// operand-precision result.
+    pub fn default_reduce_sum_result_precision(self) -> Result<Prim, String> {
+        match self {
+            Prim::Bf16 => Ok(Prim::Bf16),
+            Prim::F16 => Ok(Prim::F16),
+            other => other.default_reduce_sum_accumulator(),
+        }
+    }
 }
 
 /// A tensor dimension.
