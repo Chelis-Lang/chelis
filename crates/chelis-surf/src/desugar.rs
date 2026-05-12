@@ -1435,6 +1435,31 @@ impl DesugarCtx {
                 meta_with_type(node("t-prim", vec![sym(prec_name)])),
                 vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
             ),
+            // RT-2 fixup P2: the surface parser turns `-128` into
+            // `Unary(Neg, Lit(Int(128)))`. In a contextual tensor
+            // literal position we fold the sign into the literal so
+            // the WS-A0 D1 / WS-A0 D1-extension range checks see the
+            // user-facing value (`-128` for int8) rather than the
+            // raw inner literal (`128`, which overflows int8 max).
+            // The same applies to negative float literals.
+            Expr::Unary(UnaryOp::Neg, inner, _) => match inner.as_ref() {
+                Expr::Lit(Literal::Int(n), _) => node_meta(
+                    "lit",
+                    meta_with_type(node("t-prim", vec![sym(prec_name)])),
+                    vec![deep::Expr::Atom(deep::Atom::Int(-*n), sp())],
+                ),
+                Expr::Lit(Literal::Float(f), _) => node_meta(
+                    "lit",
+                    meta_with_type(node("t-prim", vec![sym(prec_name)])),
+                    vec![deep::Expr::Atom(deep::Atom::Float(-*f), sp())],
+                ),
+                // Non-literal `neg` operand falls through to the
+                // standard desugar; the type checker will validate
+                // the resulting expression's type against the
+                // contextual element type via the Cons unification
+                // path.
+                _ => self.desugar_expr_with_scope(item, local_fn_params),
+            },
             // Nested list — rank-N contextual tensor literal.
             Expr::List(nested_items, _) => {
                 // The inner list is itself a contextual tensor literal

@@ -4123,10 +4123,25 @@ impl LowerCtx {
             }
 
             // Tier 1: reductions
+            //
+            // RT-2 fixup B5: lowering used to hardcode
+            // `accumulator = out_ty.precision`, which assumed the
+            // type checker had already widened the result for narrow
+            // operand precisions. For int8/int16 the type checker now
+            // (B1) returns int32; for bf16/f16 the user-facing result
+            // is the operand precision (per the §5.7.1 result-precision
+            // table) but the IR Sum node outputs the f32 accumulator
+            // and we must insert a Cast back to the operand precision
+            // to recover the user-facing tensor type.
             "sum" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "sum input");
                 let axis = self.extract_axis(&args[1]);
-                let out_ty = if *ty == Self::default_type() {
+                let operand_prec = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.precision)
+                    .unwrap_or(ty.precision);
+                let out_dims = if *ty == Self::default_type() {
                     let x_ty = self
                         .dag
                         .get(x)
@@ -4136,23 +4151,61 @@ impl LowerCtx {
                     if axis < dims.len() {
                         dims.remove(axis);
                     }
-                    TensorType {
-                        dims,
-                        precision: x_ty.precision,
-                    }
+                    dims
                 } else {
-                    ty.clone()
+                    ty.dims.clone()
                 };
-                let acc = out_ty.precision;
-                self.dag.add_node(
+                let sum_op = RiscOp::sum_default(axis, operand_prec).unwrap_or_else(|msg| {
+                    // The type checker already rejects unsupported
+                    // operand precisions before lowering; fall back to
+                    // the operand precision so the resulting IR can
+                    // still surface the diagnostic via verify rather
+                    // than panicking the lowering pass.
+                    eprintln!(
+                        "internal: sum lowering fallback (operand `{}`): {msg}",
+                        operand_prec.name()
+                    );
                     RiscOp::Sum {
                         axis,
-                        accumulator: acc,
-                    },
-                    vec![x],
-                    out_ty,
-                    self.current_span_id.clone(),
-                )
+                        accumulator: operand_prec,
+                    }
+                });
+                let accumulator = match sum_op {
+                    RiscOp::Sum { accumulator, .. } => accumulator,
+                    _ => operand_prec,
+                };
+                let sum_node_ty = TensorType {
+                    dims: out_dims.clone(),
+                    precision: accumulator,
+                };
+                let sum_id =
+                    self.dag
+                        .add_node(sum_op, vec![x], sum_node_ty, self.current_span_id.clone());
+                // If the user-facing result precision differs from the
+                // accumulator (only the bf16/f16 row of the §5.7.1
+                // table), insert an explicit Cast back to the operand
+                // precision so downstream consumers see the documented
+                // result type.
+                if accumulator != operand_prec {
+                    let result_prec = operand_prec
+                        .default_reduce_sum_result_precision()
+                        .unwrap_or(operand_prec);
+                    if result_prec != accumulator {
+                        let cast_ty = TensorType {
+                            dims: out_dims,
+                            precision: result_prec,
+                        };
+                        return self.dag.add_node(
+                            RiscOp::Cast {
+                                new_precision: result_prec,
+                            },
+                            vec![sum_id],
+                            cast_ty,
+                            self.current_span_id.clone(),
+                        );
+                    }
+                }
+                sum_id
             }
             "tensor_to_scalar" if args.len() == 1 => {
                 self.lower_expr_node(&args[0], "tensor_to_scalar input")

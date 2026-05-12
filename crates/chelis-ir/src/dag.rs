@@ -645,41 +645,15 @@ pub enum RiscOp {
 
 impl RiscOp {
     /// Resolve the spec §5.7.1 default reduce-sum accumulator for the
-    /// given operand precision. Per the active dtype set
-    /// (`spec/04-type-system.md` §1.1):
-    ///
-    /// - bf16 / f16  → f32
-    /// - f32         → f32 (operand-matching)
-    /// - f64         → f64 (operand-matching)
-    /// - int8 / int16 → int32
-    /// - int32       → int32 (operand-matching)
-    /// - int64       → int64 (operand-matching)
-    ///
-    /// Returns an error for non-numeric operand precisions and for the
-    /// deferred f8e4m3 (§1.1.1).
+    /// given operand precision. Thin re-export of
+    /// [`Prim::default_reduce_sum_accumulator`] so call sites inside
+    /// `chelis-ir` and downstream backends can stay `RiscOp::*`
+    /// -namespaced. The canonical table lives on `Prim` so the type
+    /// checker (`chelis-types`) can resolve the same rule without a
+    /// backward dependency on `chelis-ir`. See the chelis-types
+    /// method for the per-row mapping.
     pub fn default_reduce_sum_accumulator(operand: Prim) -> Result<Prim, String> {
-        Ok(match operand {
-            Prim::Bf16 | Prim::F16 => Prim::F32,
-            Prim::F32 => Prim::F32,
-            Prim::F64 => Prim::F64,
-            Prim::Int8 | Prim::Int16 => Prim::Int32,
-            Prim::Int32 => Prim::Int32,
-            Prim::Int64 => Prim::Int64,
-            Prim::Bool => {
-                return Err(
-                    "reduce_sum is not defined on bool tensors; cast to int32 first".to_string(),
-                );
-            }
-            Prim::F8e4m3 => {
-                return Err("reduce_sum: operand dtype `f8e4m3` is deferred per \
-                     spec/04-type-system.md §1.1.1 and is not part of the \
-                     active numeric primitive set"
-                    .to_string());
-            }
-            Prim::String => {
-                return Err("reduce_sum is not defined for string operands".to_string());
-            }
-        })
+        operand.default_reduce_sum_accumulator()
     }
 
     /// Resolve the spec §5.7.1 default matmul accumulator for the given
@@ -718,6 +692,16 @@ impl RiscOp {
                 ));
             }
         })
+    }
+
+    /// Resolve the spec §5.7.1 user-facing result precision of
+    /// `reduce_sum` for the given operand precision. Thin re-export
+    /// of [`Prim::default_reduce_sum_result_precision`] so call sites
+    /// inside `chelis-ir` and downstream backends can stay
+    /// `RiscOp::*`-namespaced. See the chelis-types method for the
+    /// per-row table and the bf16/f16 downcast rationale.
+    pub fn default_reduce_sum_result_precision(operand: Prim) -> Result<Prim, String> {
+        operand.default_reduce_sum_result_precision()
     }
 
     /// Construct a `Sum` op with an explicit `accumulator` precision.

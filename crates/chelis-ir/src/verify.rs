@@ -346,15 +346,60 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         // default for that operand precision.
         match &node.op {
             RiscOp::Sum { accumulator, .. } => {
+                // IR invariant: Sum.output_type.precision must equal
+                // Sum.accumulator. The §5.7.1 result-precision-table
+                // column is the user-facing rule, and lowering inserts
+                // a downcast `Cast` node for the bf16/f16 row so the
+                // user-visible result returns to operand precision; at
+                // the IR level the Sum node itself outputs the
+                // accumulator precision.
                 if node.output_type.precision != *accumulator {
                     errors.push(format!(
                         "reduce_sum at node {} has output precision `{}` but \
                          accumulator `{}`; per spec/04-type-system.md §5.7.1 \
-                         the result precision must equal the accumulator",
+                         the IR-level result precision of `reduce_sum` is the \
+                         accumulator precision (lowering inserts an explicit \
+                         downcast for bf16/f16 to recover the operand-precision \
+                         result per the §5.7.1 table)",
                         node.id.0,
                         node.output_type.precision.name(),
                         accumulator.name()
                     ));
+                }
+                // RT-2 fixup B4: spec §5.7.1 narrowness rule for Sum.
+                // Symmetric with the BlasMatmul check below. The
+                // `sum_with_accumulator` constructor enforces the
+                // same rule, but any direct construction of
+                // `RiscOp::Sum { .. }` (e.g. by lowering or by a
+                // hand-built test) bypasses it; the verify-layer
+                // check is the defense-in-depth that prevents a
+                // narrow accumulator from reaching the backend.
+                if arity == 1
+                    && let Some(operand_node) = dag.get(node.inputs[0])
+                {
+                    let operand = operand_node.output_type.precision;
+                    match RiscOp::default_reduce_sum_accumulator(operand) {
+                        Ok(default) => {
+                            if !crate::dag::accumulator_at_least_as_wide(
+                                operand,
+                                *accumulator,
+                                default,
+                            ) {
+                                errors.push(format!(
+                                    "reduce_sum at node {} has accumulator `{}` narrower than \
+                                     the spec/04-type-system.md §5.7.1 default `{}` for \
+                                     operand precision `{}`",
+                                    node.id.0,
+                                    accumulator.name(),
+                                    default.name(),
+                                    operand.name(),
+                                ));
+                            }
+                        }
+                        Err(msg) => {
+                            errors.push(format!("reduce_sum at node {}: {msg}", node.id.0));
+                        }
+                    }
                 }
             }
             RiscOp::BlasMatmul { accumulator, .. } => {
@@ -408,14 +453,26 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     let backend_supported =
                         matches!(operand, Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16);
                     if !backend_supported {
+                        // RT-2 fixup P3 (comment): the integer-matmul
+                        // arm of this guard is permanent, not pending
+                        // a future "lift". Spec §5.7.2 declares
+                        // integer matmul not admitted, so the F1
+                        // guard's residual purpose is to keep
+                        // integer-precision BlasMatmul from ever
+                        // reaching a backend even if a hand-built or
+                        // future-pass IR slips one through. The
+                        // type-checker now rejects integer matmul
+                        // upfront with a §5.7.2-citing diagnostic
+                        // (RT-2 B6), so this branch is defense in
+                        // depth.
                         errors.push(format!(
-                            "F1: BlasMatmul on operand precision `{}` is not yet supported \
-                             by any chelis backend; node {} (accumulator `{}`). \
-                             spec/04-type-system.md §5.7.1 documents the per-precision \
-                             accumulator defaults; WS-A1/WS-A2 admit f32/f64 via \
-                             `cblas_dgemm`/`hipblasDgemm`, WS-A3 admits bf16/f16 via \
-                             `hipblasGemmEx`, and WS-A4 will lift the integer matmul arm \
-                             per spec/04-type-system.md §5.7.2.",
+                            "F1: BlasMatmul on operand precision `{}` is not admitted; \
+                             node {} (accumulator `{}`). \
+                             spec/04-type-system.md §5.7.2 declares integer matmul not \
+                             admitted in this cycle; the type checker rejects integer \
+                             operands upfront and this verify-level guard is defense in \
+                             depth. Float operand precisions f32/f64/bf16/f16 are \
+                             admitted; deferred dtype `f8e4m3` is rejected per §1.1.1.",
                             operand.name(),
                             node.id.0,
                             accumulator.name(),
