@@ -1123,6 +1123,7 @@ impl<'a> EvalContext<'a> {
             (RuntimeValue::Float(value), "int32" | "int64") => Ok(RuntimeValue::Int(value as i64)),
             (RuntimeValue::Bool(value), "bool") => Ok(RuntimeValue::Bool(value)),
             (RuntimeValue::String(value), "string") => Ok(RuntimeValue::String(value)),
+            (RuntimeValue::Tensor(tensor), target) => cast_tensor_value(tensor, target),
             (other, _) => Err(format!("unsupported cast from {other:?}")),
         }
     }
@@ -2744,6 +2745,102 @@ fn dict_lookup<'a>(
     dict.iter()
         .find(|(existing_key, _)| runtime_value_eq(existing_key, key))
         .map(|(_, value)| value)
+}
+
+/// V2-F2: element-wise precision conversion for `cast(tensor[..], q)` in
+/// the host runtime. Spec §2.7 lists `cast` as a first-class precision
+/// transform; the IR DAG and C backend already handle the tensor form
+/// (`crates/chelis-ir/src/lower.rs::lower_cast`,
+/// `crates/chelis-backend-c/src/emit.rs::emit_cast`). This helper closes
+/// the runtime/host-lane gap that PR #58's red-team v2 surfaced.
+///
+/// Storage for `IrTensorValue::data` is always `Vec<f64>` regardless of
+/// the logical tensor precision. Float<->float casts where the storage
+/// already covers both ranges (any `Prim::F64` source, or any `Prim::F32`
+/// source widening to `Prim::F64`) are identity at the data level. The
+/// `Prim::F64 -> Prim::F32` narrowing case rounds through `(x as f32) as
+/// f64` so the runtime honors the precision loss honestly. Integer
+/// targets truncate toward zero, matching the scalar arms above and
+/// `(int32_t)f` in the C backend. The output shape is preserved
+/// element-for-element (C8 in `crates/chelis-ir/src/verify.rs`: cast dims
+/// must not change).
+fn cast_tensor_value(tensor: RuntimeTensorValue, target: &str) -> Result<RuntimeValue, String> {
+    let target_prim = Prim::parse_name(target)
+        .ok_or_else(|| format!("unsupported cast target `{target}` for tensor input"))?;
+    let RuntimeTensorValue {
+        value: ir_value,
+        precision: src_prim,
+    } = tensor;
+    let IrTensorValue { data, shape } = ir_value;
+    let converted: Vec<f64> = data
+        .into_iter()
+        .map(|x| convert_scalar_data(x, src_prim, target_prim))
+        .collect();
+    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(shape, converted),
+        precision: target_prim,
+    }))
+}
+
+/// Element-wise scalar conversion for `cast_tensor_value`. Returns the
+/// converted value in `f64` storage. Float-to-float narrowing rounds
+/// through f32 to drop precision; float-to-int truncates; int-to-float
+/// preserves value; bool encodes as 0.0 / 1.0 and decodes via `!= 0.0`.
+fn convert_scalar_data(x: f64, src: Prim, dst: Prim) -> f64 {
+    if src == dst {
+        return x;
+    }
+    // Step 1: project the source storage into a normalized representation.
+    // Floats stay floats; ints route through i64; bools route through 0/1.
+    let as_int: Option<i64> = match src {
+        Prim::Int8 | Prim::Int32 | Prim::Int64 => Some(x as i64),
+        Prim::Bool => Some(if x != 0.0 { 1 } else { 0 }),
+        _ => None,
+    };
+    // Step 2: emit the value in the target precision's storage convention.
+    match dst {
+        Prim::F64 => match as_int {
+            Some(i) => i as f64,
+            None => x,
+        },
+        Prim::F32 => match as_int {
+            Some(i) => (i as f32) as f64,
+            None => (x as f32) as f64,
+        },
+        Prim::Int8 => match as_int {
+            Some(i) => (i as i8) as f64,
+            None => (x as i8) as f64,
+        },
+        Prim::Int32 => match as_int {
+            Some(i) => (i as i32) as f64,
+            None => (x as i32) as f64,
+        },
+        Prim::Int64 => match as_int {
+            Some(i) => i as f64,
+            None => (x as i64) as f64,
+        },
+        Prim::Bool => match as_int {
+            Some(i) => {
+                if i != 0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            None => {
+                if x != 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        },
+        // Reduced floats and `string` are not valid tensor element types
+        // (see `Prim::is_valid_tensor_precision`); the checker rejects
+        // them before this point. Fall back to identity rather than
+        // silently corrupting data.
+        _ => x,
+    }
 }
 
 /// Bucket 4b: recursively flatten a nested numeric/bool list into a
