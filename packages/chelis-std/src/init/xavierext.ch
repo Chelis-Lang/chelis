@@ -1,7 +1,8 @@
 module Std.Init.XavierExt
 import Std.Init.Random (normal_like)
 export (xavier_uniform, xavier_normal, trunc_normal)
-def xavier_uniform[n](template: &tensor[n, f32], fan_in: f32, fan_out: f32) -> tensor[n, f32] ! { Random } = {
+sig xavier_uniform: &tensor[n, f32] -> f32 -> f32 -> tensor[n, f32] ! { Random }
+def xavier_uniform(template, fan_in, fan_out) = {
   bound = sqrt(div(cast(6.0, f32), add(fan_in, fan_out)))
   raw = uniform_like(template, 0.0, 1.0)
   two = cast(2.0, f32)
@@ -10,11 +11,13 @@ def xavier_uniform[n](template: &tensor[n, f32], fan_in: f32, fan_out: f32) -> t
   _ = drop(raw)
   to_tensor(map(fn (x: f32) -> mul(sub(mul(two, x), one), bound), values))
 }
-def xavier_normal[n](template: &tensor[n, f32], fan_in: f32, fan_out: f32) -> tensor[n, f32] ! { Random } = {
+sig xavier_normal: &tensor[n, f32] -> f32 -> f32 -> tensor[n, f32] ! { Random }
+def xavier_normal(template, fan_in, fan_out) = {
   std = sqrt(div(cast(2.0, f32), add(fan_in, fan_out)))
   normal_like(template, cast(0.0, f32), std)
 }
-def trunc_normal[n](template: &tensor[n, f32], mean: f32, std: f32, a: f32, b: f32) -> tensor[n, f32] ! { Random } = {
+sig trunc_normal: &tensor[n, f32] -> f32 -> f32 -> f32 -> f32 -> tensor[n, f32] ! { Random }
+def trunc_normal(template, mean, std, a, b) = {
   raw = normal_like(template, mean, std)
   values = to_list(raw)
   _ = drop(raw)
