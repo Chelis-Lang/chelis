@@ -4267,7 +4267,7 @@ fn infer_top_level(
                             " (precision `{}` vs declared `{}`; if the body is a \
                              `reduce_sum`, see spec/04-type-system.md §5.7.1: \
                              narrow integer operands widen to int32 to prevent \
-                             silent overflow — use `tensor[{}]` or omit the result \
+                             silent overflow; use `tensor[{}]` or omit the result \
                              type)",
                             body_prec.name(),
                             decl_prec.name(),
