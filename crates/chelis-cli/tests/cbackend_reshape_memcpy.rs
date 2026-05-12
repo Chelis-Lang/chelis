@@ -221,7 +221,7 @@ static chelis_list* build_shape_list_i64(const int64_t* dims, int64_t len) {
 /// `sizeof(float)` memcpy bug, only the low 4 bytes of each source
 /// f64 are copied; reading the destination as f64 yields garbage.
 #[test]
-#[ignore = "C-backend reshape memcpy precision gap, see CBackend-ReshapeMemcpy"]
+#[ignore = "C-backend reshape memcpy precision gap, see 18e088a (CBackend-ReshapeMemcpy)"]
 fn cbackend_reshape_tensor_f64() {
     let build = chelis_build_c(
         "module Demo\n\
@@ -281,7 +281,7 @@ int main(void) {{
 /// or zero. We make the bug observable by using values whose upper
 /// 4 bytes are non-zero.
 #[test]
-#[ignore = "C-backend reshape memcpy precision gap, see CBackend-ReshapeMemcpy"]
+#[ignore = "C-backend reshape memcpy precision gap, see 18e088a (CBackend-ReshapeMemcpy)"]
 fn cbackend_reshape_tensor_int64() {
     let build = chelis_build_c(
         "module Demo\n\
