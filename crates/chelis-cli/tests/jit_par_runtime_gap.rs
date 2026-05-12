@@ -10,14 +10,13 @@
 //! whose top-level `def` classifies as "lowered" (DAG-evaluable) by
 //! `top_level_lowering_map`.
 //!
-//! What PR #40 did NOT do was extend the **runtime evaluator's** dispatch in
-//! `crates/chelis-compiler-api/src/runtime.rs::eval_list` and the C-backend's
-//! `lower_host_expr_kind` in `crates/chelis-ir/src/host.rs`. When a def's body
-//! reaches the host lane (typical for tensor-returning forms via `to_tensor`),
-//! the evaluator falls through to a default error
-//! `host runtime does not support 'jit'/'par'`, and the C-backend's
-//! `lower_host_expr_kind` falls through to its `_ => HostExpr::Unit` catch-all
-//! so the emitted binding silently drops the value (prints `()`).
+//! PR #40 did not extend the **runtime evaluator's** dispatch in
+//! `crates/chelis-compiler-api/src/runtime.rs::eval_list` or the C-backend's
+//! `lower_host_expr_kind` in `crates/chelis-ir/src/host.rs`. This branch's
+//! fix commit adds the missing arms in both layers, matching the IR
+//! semantics: jit is pass-through; par is sequential (last-yields). See
+//! `docs/investigations/jit_par_runtime_gaps_diagnosis.md` for the
+//! pre-fix diagnosis.
 //!
 //! Spec semantics (`spec/03-deep-syntax.md`):
 //!
@@ -28,24 +27,22 @@
 //!
 //! ## Fixtures
 //!
-//! These tests reproduce the gaps empirically. They are gated `#[ignore]`
-//! pending the fix commit on this branch (`fix/jit-par-runtime-arms`).
+//! These tests reproduce the gaps empirically. The fix landed in the same
+//! branch (`fix/jit-par-runtime-arms`), so all six run by default.
 //!
-//! * `eval_jit_scalar_returns_inner_value` — `result: f32 = jit(1.5)` should
-//!   eval to `1.5`. Today: passes (scalar `jit` routes through IR DAG).
-//!   Kept as a positive baseline so a regression that breaks the DAG path
-//!   is caught at the same surface.
+//! * `eval_jit_scalar_returns_inner_value` — `result: f32 = jit(1.5)` evals
+//!   to `1.5`. Scalar `jit` routes through IR DAG; baseline against a
+//!   DAG-side regression.
 //! * `eval_jit_tensor_returns_inner_value` — `result = jit(to_tensor([..]))`
-//!   should eval to the tensor. Today: `host runtime does not support 'jit'`.
+//!   evals to the tensor (host runtime `jit` arm).
 //! * `eval_par_scalar_returns_last_value` — `result: f32 = par {1.0;2.0;3.0}`
-//!   should eval to `3.0`. Today: passes via DAG.
+//!   evals to `3.0`. Baseline; routes through IR DAG.
 //! * `eval_par_tensor_returns_last_value` — `result = par {to_tensor(a);
-//!   to_tensor(b)}` should eval to the second tensor. Today:
-//!   `host runtime does not support 'par'`.
-//! * `build_c_jit_tensor_runs_and_prints_value` — generated C must print
-//!   the inner-tensor value, not `()`. Today: emits `result = ()`.
-//! * `build_c_par_tensor_runs_and_prints_last_value` — generated C must
-//!   print the last tensor's value, not `()`. Today: emits `result = ()`.
+//!   to_tensor(b)}` evals to the second tensor (host runtime `par` arm).
+//! * `build_c_jit_tensor_runs_and_prints_value` — generated C prints the
+//!   inner-tensor value (C-backend host-lane `jit` arm).
+//! * `build_c_par_tensor_runs_and_prints_last_value` — generated C prints
+//!   the last tensor's value (C-backend host-lane `par` arm).
 
 use assert_cmd::Command;
 use std::fs;
@@ -114,9 +111,9 @@ fn parse_anonymous_scalar(stdout: &str) -> Option<f32> {
 #[test]
 fn eval_jit_scalar_returns_inner_value() {
     // Scalar `jit`: spec §2.7 says jit is a compilation trigger and a no-op
-    // at evaluation. The scalar path routes through IR DAG lowering, so this
-    // passes today. Kept as a positive baseline so a DAG-side regression is
-    // caught at the same surface as the host-side gap.
+    // at evaluation. The scalar path routes through IR DAG lowering;
+    // baseline coverage so a DAG-side regression surfaces at the same
+    // place as the host-side one.
     let dir = tempdir().expect("tempdir");
     let path = write_program(dir.path(), "scalar_jit.ch", "result: f32 = jit(1.5)\n");
     let (ok, stdout, stderr) = eval_file(&path);
@@ -130,13 +127,12 @@ fn eval_jit_scalar_returns_inner_value() {
 }
 
 #[test]
-#[ignore = "Finding 1 (jit): runtime evaluator missing `jit` arm; fix in fix/jit-par-runtime-arms"]
 fn eval_jit_tensor_returns_inner_value() {
     // Tensor `jit`: body uses `to_tensor`, which forces host-runtime
-    // classification (see `expr_requires_host_runtime` in lower.rs). The
-    // runtime evaluator's `eval_list` falls through to the catch-all
-    // `host runtime does not support 'jit'`. Spec §2.7: jit is a no-op at
-    // eval, so the inner tensor must be returned.
+    // classification (see `expr_requires_host_runtime` in lower.rs). With
+    // the `Some("jit")` arm in `eval_list`, the runtime evaluates the
+    // inner expression and returns its tensor value. Spec §2.7: jit is a
+    // no-op at eval.
     let dir = tempdir().expect("tempdir");
     let path = write_program(
         dir.path(),
@@ -156,7 +152,8 @@ fn eval_jit_tensor_returns_inner_value() {
 #[test]
 fn eval_par_scalar_returns_last_value() {
     // Scalar `par`: spec §2.3 v1 sequential, last-yields. Scalar path routes
-    // through IR DAG, so this passes today (positive baseline).
+    // through IR DAG; baseline coverage so a DAG-side regression surfaces
+    // at the same place as the host-side one.
     let dir = tempdir().expect("tempdir");
     let path = write_program(
         dir.path(),
@@ -174,11 +171,11 @@ fn eval_par_scalar_returns_last_value() {
 }
 
 #[test]
-#[ignore = "Finding 2 (par): runtime evaluator missing `par` arm; fix in fix/jit-par-runtime-arms"]
 fn eval_par_tensor_returns_last_value() {
-    // Tensor `par`: hits host-runtime classification via `to_tensor`. Today
-    // errors with `host runtime does not support 'par'`. Spec §2.3 (v1
-    // sequential): the par's value is the value of the last child.
+    // Tensor `par`: hits host-runtime classification via `to_tensor`. With
+    // the `Some("par")` arm in `eval_list`, the runtime evaluates each
+    // child in order and returns the last child's tensor value. Spec §2.3
+    // (v1 sequential).
     let dir = tempdir().expect("tempdir");
     let path = write_program(
         dir.path(),
@@ -250,12 +247,11 @@ fn build_c_and_run(out_dir: &Path, src_path: &Path) -> String {
 }
 
 #[test]
-#[ignore = "Finding 1 (jit): C backend lower_host_expr_kind drops jit; fix in fix/jit-par-runtime-arms"]
 fn build_c_jit_tensor_runs_and_prints_value() {
     // The host-lane lowerer (`crates/chelis-ir/src/host.rs::lower_host_expr_kind`)
-    // has no `jit` arm, so it falls through to `_ => HostExpr::Unit` and the
-    // binding's value is silently dropped (`result = ()`). Spec §2.7: jit
-    // is a no-op at eval; the compiled binary must print the inner value.
+    // now has a `jit` arm that lowers the inner expression and returns its
+    // result, mirroring `realize`. Spec §2.7: jit is a no-op at eval; the
+    // compiled binary prints the inner tensor.
     let dir = tempdir().expect("tempdir");
     let src = write_program(
         dir.path(),
@@ -270,11 +266,10 @@ fn build_c_jit_tensor_runs_and_prints_value() {
 }
 
 #[test]
-#[ignore = "Finding 2 (par): C backend lower_host_expr_kind drops par; fix in fix/jit-par-runtime-arms"]
 fn build_c_par_tensor_runs_and_prints_last_value() {
-    // Same host-lane drop as `jit`: par falls through to `HostExpr::Unit`
-    // and the emitted C prints `result = ()`. Spec §2.3 v1 sequential:
-    // the value of `par` is the value of the last child.
+    // The host-lane lowerer now has a `par` arm that lowers each child in
+    // order and returns the last child's HostExpr. Spec §2.3 v1
+    // sequential: the value of `par` is the value of the last child.
     let dir = tempdir().expect("tempdir");
     let src = write_program(
         dir.path(),

@@ -3323,6 +3323,44 @@ fn lower_host_expr_kind(
                 .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
                 .unwrap_or(HostExpr::new(HostExprKind::Unit))
         }
+        Expr::List(list, _) if tag(list) == Some("jit") => {
+            // `spec/03-deep-syntax.md` §2.7: jit is a compilation trigger
+            // and a semantic no-op at evaluation. Host-lane lowering
+            // pass-through to the inner expression, mirroring `lower_jit`
+            // in `crates/chelis-ir/src/lower.rs` and the IR DAG behavior.
+            //
+            // Without this arm jit fell through to `HostExpr::Unit`, so a
+            // binding like `result = jit(to_tensor([...]))` emitted
+            // `int result = 0; printf("()\n");` — silent data loss
+            // (Finding 1 of red-team PR #51).
+            children(list)
+                .first()
+                .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
+                .unwrap_or(HostExpr::new(HostExprKind::Unit))
+        }
+        Expr::List(list, _) if tag(list) == Some("par") => {
+            // `spec/03-deep-syntax.md` §2.3: par v1 is sequential
+            // composition. Lower the children in order and bind the value
+            // of the last child as the par's value, mirroring `lower_par`
+            // in `crates/chelis-ir/src/lower.rs`. We do not currently
+            // thread intermediate children through a sequence node; if
+            // they have side effects (e.g. `print`, `realize`), those
+            // primitives have their own host-lane arms and the emitted C
+            // will reach them through whatever scope the par appears in.
+            // A future change can introduce a HostExpr::Sequence kind if
+            // par needs to preserve non-IO side effects across children.
+            //
+            // Without this arm par fell through to `HostExpr::Unit`, so
+            // `result = par {..; to_tensor(..)}` emitted
+            // `int result = 0; printf("()\n");` (Finding 2 of red-team
+            // PR #51).
+            let kids = children(list);
+            let mut last: Option<HostExpr> = None;
+            for child in kids {
+                last = Some(lower_host_expr(child, program, scope, tensor_helpers));
+            }
+            last.unwrap_or(HostExpr::new(HostExprKind::Unit))
+        }
         _ => HostExpr::new(HostExprKind::Unit),
     }
 }
