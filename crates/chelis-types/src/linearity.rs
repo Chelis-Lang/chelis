@@ -7,10 +7,35 @@ use serde::{Deserialize, Serialize};
 use crate::CheckedProgram;
 use crate::errors::{CheckError, CheckErrorKind};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LinearityInfo {
     reusable_inputs_by_offset: HashMap<usize, usize>,
+    /// Linearity violations surfaced as warnings during a
+    /// deprecation window (W1 PR 1: tuple-destructure consumes + the
+    /// aliased-consume bypass that compounds with them).  Mirrors the
+    /// F3 PR 1 plumbing introduced in PR #65: violations route through
+    /// `warnings` while the in-tree corpus is being cleaned up;
+    /// the W2-cascade PR flips routing back to `errors`.  Skipped
+    /// from serde because `CheckError` does not derive
+    /// Serialize/Deserialize; rehydrating a `CheckedProgram` from
+    /// JSON loses warning detail, which is acceptable because
+    /// warnings are only consumed by the live CLI path that produced
+    /// them.
+    #[serde(skip)]
+    warnings: Vec<CheckError>,
 }
+
+impl PartialEq for LinearityInfo {
+    fn eq(&self, other: &Self) -> bool {
+        // `warnings` is intentionally excluded; it is a transient
+        // diagnostic carrier and not part of the structural identity
+        // of `LinearityInfo`.  The pre-warning shape compared only
+        // `reusable_inputs_by_offset`; this preserves that.
+        self.reusable_inputs_by_offset == other.reusable_inputs_by_offset
+    }
+}
+
+impl Eq for LinearityInfo {}
 
 impl LinearityInfo {
     pub fn reusable_input_for_span(&self, span: Span) -> Option<usize> {
@@ -21,6 +46,24 @@ impl LinearityInfo {
         self.reusable_inputs_by_offset
             .entry(span.offset)
             .or_insert(input_index);
+    }
+
+    /// Linearity violations surfaced as warnings during a
+    /// deprecation window.  W1 PR 1 routes tuple-destructure consumes
+    /// and the aliased-consume bypass through this channel so the
+    /// existing in-tree corpus has time to be cleaned up; the
+    /// W2-cascade PR flips the routing back to
+    /// `Checker::push_diagnostic -> errors`.
+    pub fn warnings(&self) -> &[CheckError] {
+        &self.warnings
+    }
+
+    // Wired into `Checker::push_diagnostic` by the W1.3 fix commit.
+    // The accessor (`warnings`) is needed by the W1.1 fixtures so
+    // the warning-mode contract compiles ahead of the fix.
+    #[allow(dead_code)]
+    fn push_warning(&mut self, warning: CheckError) {
+        self.warnings.push(warning);
     }
 }
 
