@@ -4250,9 +4250,39 @@ fn infer_top_level(
         // declared concrete shape (#39).
         let scheme_body = if let Some(decl_ty) = declared_ty {
             if let Err(_te) = unify(&body_ty, &decl_ty, subst) {
+                let resolved_body = subst.apply(&body_ty);
+                let resolved_decl = subst.apply(&decl_ty);
+                // RT-2 fixup B1: when the mismatch is a tensor
+                // precision mismatch (notably a `reduce_sum` body
+                // whose result precision differs from the declared
+                // one), include a §5.7.1 cite directly in the message
+                // so the user sees the result-precision table rule
+                // rather than a generic "doesn't match declared
+                // signature".
+                let extra = match (&resolved_body, &resolved_decl) {
+                    (Type::Tensor(_, body_prec), Type::Tensor(_, decl_prec))
+                        if body_prec != decl_prec =>
+                    {
+                        format!(
+                            " (precision `{}` vs declared `{}`; if the body is a \
+                             `reduce_sum`, see spec/04-type-system.md §5.7.1: \
+                             narrow integer operands widen to int32 to prevent \
+                             silent overflow; use `tensor[{}]` or omit the result \
+                             type)",
+                            body_prec.name(),
+                            decl_prec.name(),
+                            body_prec.name(),
+                        )
+                    }
+                    _ => String::new(),
+                };
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    format!("def '{}' body doesn't match declared signature", name),
+                    format!(
+                        "def '{}' body doesn't match declared signature: \
+                         body has type `{}`, declared type is `{}`{}",
+                        name, resolved_body, resolved_decl, extra
+                    ),
                     vec![],
                 ));
             }
@@ -4630,39 +4660,85 @@ fn infer_lit(
     // i32. If it doesn't, emit the §5.3 diagnostic before defaulting
     // — silently wrapping to a negative i32 is the bug §5.3 was
     // written to prevent.
+    //
+    // RT-2 fixup B2/B3: extend the same range check to int8 and
+    // int16 contextual positions (spec §5.6 / §P10b). When the
+    // contextual tensor-literal rule (chelis-surf desugar) emits a
+    // `(lit {type: (t-prim {} int8)} N)` for an `xs: tensor[N, int8]
+    // = [..., 200]` source, the underlying i64 value (200) overflows
+    // int8 (range [-128, 127]) and silently wraps to -56 if not
+    // diagnosed here. Mirror the i32 check for the i8 and i16 rows.
     let value_atom = kids.first();
-    let meta_int32 = meta.is_some_and(|m| {
-        m.entries.iter().any(|(k, v)| {
-            k == "type" && {
-                if let deep::Expr::List(inner, _) = v
-                    && get_tag(inner) == Some("t-prim")
-                    && let Some(name) = children(inner).first().and_then(symbol_name)
-                {
-                    name == "int32"
-                } else {
-                    false
-                }
+    let meta_prim_name = meta.and_then(|m| {
+        m.entries.iter().find_map(|(k, v)| {
+            if k == "type"
+                && let deep::Expr::List(inner, _) = v
+                && get_tag(inner) == Some("t-prim")
+            {
+                children(inner).first().and_then(symbol_name)
+            } else {
+                None
             }
         })
     });
-    if meta_int32
+    if let Some(prim_name) = meta_prim_name
         && let Some(deep::Expr::Atom(deep::Atom::Int(n), _)) = value_atom
-        && i32::try_from(*n).is_err()
     {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!(
-                "literal {n} out of range for default int32; use the `i64` \
-                 suffix (`{n}i64`) or an explicit cast({n}, i64) \
-                 (spec/04-type-system.md §5.3, §5.5)"
-            ),
-            vec![format!(
-                "spec/04-type-system.md §5.3: integer literals default to int32; \
-                 the lexer parses at i64 so out-of-range tokens can be diagnosed \
-                 before the narrowing rather than wrapping silently"
-            )],
-        ));
-        return Type::Error;
+        // Per-prim range check. Only apply to integer prims; the float
+        // contextual cases admit the i64 directly (Surf's float lexer
+        // produces a Float atom; an Int atom in a float context is
+        // either an error caught elsewhere or a Cons-mismatch).
+        let range_check = match prim_name {
+            "int8" => Some(("int8", i8::MIN as i64, i8::MAX as i64)),
+            "int16" => Some(("int16", i16::MIN as i64, i16::MAX as i64)),
+            "int32" => Some(("int32", i32::MIN as i64, i32::MAX as i64)),
+            // int64 cannot overflow an i64 atom; bool/string don't
+            // accept Int atoms.
+            _ => None,
+        };
+        if let Some((dtype, lo, hi)) = range_check
+            && (*n < lo || *n > hi)
+        {
+            // The int32 default path keeps the WS-A0 D1 message
+            // shape (i64 suffix + cast(_, i64) hint) so existing
+            // diagnostics-pinning tests stay green; the int8/int16
+            // contextual paths cite §5.6 + §5.3 because the
+            // narrowing came from contextual inference, not the
+            // default.
+            if dtype == "int32" {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!(
+                        "literal {n} out of range for default int32; use the `i64` \
+                         suffix (`{n}i64`) or an explicit cast({n}, i64) \
+                         (spec/04-type-system.md §5.3, §5.5)"
+                    ),
+                    vec![format!(
+                        "spec/04-type-system.md §5.3: integer literals default to int32; \
+                         the lexer parses at i64 so out-of-range tokens can be diagnosed \
+                         before the narrowing rather than wrapping silently"
+                    )],
+                ));
+            } else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!(
+                        "literal {n} out of range for context-inferred {dtype} \
+                         [{lo}, {hi}]; use a wider integer type or an explicit \
+                         cast (spec/04-type-system.md §5.6, §5.3)"
+                    ),
+                    vec![format!(
+                        "spec/04-type-system.md §5.6 + §5.3: contextual tensor-literal \
+                         element-type inference (§P10b) narrows unsuffixed integer \
+                         literals to the declared element type ({dtype}). The lexer \
+                         parses at i64 so values outside the {dtype} range \
+                         [{lo}, {hi}] are diagnosed before the narrowing rather than \
+                         wrapping silently"
+                    )],
+                ));
+            }
+            return Type::Error;
+        }
     }
 
     // Check metadata for type annotation
@@ -8022,6 +8098,33 @@ fn check_matmul_signature(
         ));
         return Type::Error;
     }
+    // RT-2 fixup B6: per spec/04-type-system.md §5.7.2, the active
+    // matmul signature does not admit integer operand precisions
+    // (int8, int16, int32, int64). Reject upfront at the call site
+    // with a §5.7.2-citing diagnostic so users see the spec rule
+    // here, not as a downstream IR-verify or codegen failure. The
+    // verify-layer F1 guard remains as defense in depth.
+    if lhs_prec.is_integer() {
+        errors.push(CheckError::new(
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "matmul on integer operand precision `{}` is not admitted in this \
+                 cycle per spec/04-type-system.md §5.7.2: integer matmul not admitted \
+                 (the spec deliberately defers the integer-matmul accumulator rule; \
+                 use reduce_sum over an explicit expand+mul lowering for integer \
+                 inner products)",
+                lhs_prec.name()
+            ),
+            vec![format!(
+                "spec/04-type-system.md §5.7.2: there is no current backend that \
+                 supports integer BLAS, and an integer-matmul surface raises \
+                 questions (saturating vs wrapping accumulator, signed-vs-unsigned \
+                 interaction with §1.1.2) that are out of scope here. Integer \
+                 reduce_sum is supported per §5.7.1."
+            )],
+        ));
+        return Type::Error;
+    }
     if lhs_dims.len() < 2 || rhs_dims.len() < 2 {
         errors.push(CheckError::new(
             CheckErrorKind::DimensionMismatch,
@@ -8139,7 +8242,62 @@ fn check_reduction_signature(
 
     let mut out_dims = dims;
     out_dims.remove(axis);
-    let canonical = Type::Tensor(out_dims, prec);
+
+    // RT-2 fixup B1: per spec/04-type-system.md §5.7.1, the result
+    // precision of `reduce_sum` follows the §5.7.1 table — int8/int16
+    // operand → int32 result, int32/int64/f32/f64 → operand precision,
+    // bf16/f16 → operand precision (the f32 accumulator is consumed
+    // inside the op and downcast on output). For all other reductions
+    // (max_reduce, min_reduce, prod_reduce, argmax/argmin_reduce, mean)
+    // the result precision is the operand precision.
+    let result_prec = if name == "sum" {
+        match prec.default_reduce_sum_result_precision() {
+            Ok(p) => p,
+            Err(msg) => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("sum: {msg}"),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+        }
+    } else {
+        prec
+    };
+    // RT-2 fixup B1: emit a §5.7.1-citing diagnostic at the call site
+    // before falling back to the generic unify error, so users binding
+    // `sum(int8 tensor)` to `tensor[int8]` see the spec-row hint
+    // instead of the opaque "doesn't match declared signature" trail.
+    if name == "sum" && result_prec != prec {
+        let resolved_result = subst.apply(result_ty);
+        if let Type::Tensor(_, declared_prec) = resolved_result
+            && declared_prec != result_prec
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "sum on operand precision `{}` produces result precision `{}` per \
+                     spec/04-type-system.md §5.7.1 (the §5.7.1 result-precision table \
+                     widens narrow integer operands to int32 to prevent silent overflow); \
+                     declared result precision `{}` is incompatible. Use `tensor[{}]` or \
+                     omit the result type to accept the spec default.",
+                    prec.name(),
+                    result_prec.name(),
+                    declared_prec.name(),
+                    result_prec.name(),
+                ),
+                vec![format!(
+                    "spec/04-type-system.md §5.7.1: `reduce_sum` on `{}` operands \
+                     produces a `{}` result by default to prevent silent overflow",
+                    prec.name(),
+                    result_prec.name(),
+                )],
+            ));
+            return Type::Error;
+        }
+    }
+    let canonical = Type::Tensor(out_dims, result_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
         errors.push(te.into());
         return Type::Error;
