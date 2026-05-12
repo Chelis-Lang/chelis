@@ -881,6 +881,7 @@ fn run_eval_in_context(package_root: &Path, source: &str) -> Result<(), EvalInCo
     })?;
     let formatted = format_eval_result(&result);
     if formatted.is_empty() {
+        warn_eval_no_roots();
         return Ok(());
     }
     println!("{formatted}");
@@ -891,6 +892,7 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
     match outcome {
         Ok(result) => {
             if result.is_empty() {
+                warn_eval_no_roots();
                 return Ok(());
             }
             println!("{result}");
@@ -898,6 +900,18 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
         }
         Err(e) => Err(e.into()),
     }
+}
+
+// G7 CLI sub-bug: when `chelis eval --file <foo.ch>` is handed a Surf
+// input that contains only `def` declarations and no top-level
+// evaluable expression, `format_eval_result` returns an empty string
+// and both eval paths short-circuit with exit 0 and no output. That
+// silent success is a footgun for interactive users. Emit a stderr
+// warning at the short-circuit site so humans get a breadcrumb;
+// preserve exit 0 so scripted consumers that pipe stdout downstream
+// keep working. See `docs/investigations/cli_eval_empty_roots_diagnosis.md`.
+fn warn_eval_no_roots() {
+    eprintln!("warning: input contains only def declarations; nothing to evaluate");
 }
 
 fn cmd_cost(file: &Path, json: bool) -> Result<(), Box<dyn std::error::Error>> {

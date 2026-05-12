@@ -570,6 +570,34 @@ fn eval_rejects_unbound_runtime_names() {
         .stderr(predicate::str::contains("unbound variable: input"));
 }
 
+// G7 silent-no-output sub-bug pin: a Surf input that contains only
+// `def` declarations with no top-level evaluable expression must
+// surface a stderr warning so humans don't get a silent "success".
+// Exit code stays 0 to preserve backward compat for scripted
+// consumers. See `docs/investigations/item2_sibling_sweep_findings.md`
+// §G7 and `docs/investigations/cli_eval_empty_roots_diagnosis.md`.
+#[test]
+fn eval_def_only_emits_warning_on_stderr() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("def_only.ch");
+    write_file(
+        &path,
+        "def double(x: &tensor[3, f32]) -> tensor[3, f32] = x + x\n\
+         def triple(x: &tensor[3, f32]) -> tensor[3, f32] = x + x + x\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "input contains only def declarations; nothing to evaluate",
+        ));
+}
+
 #[test]
 fn eval_prints_labeled_tuple_components() {
     let dir = tempdir().expect("tempdir");
