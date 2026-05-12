@@ -400,7 +400,7 @@ impl CEmitter {
                 self.emit_stride(id, strides, &node.inputs, &node.output_type);
             }
             RiscOp::Realize => self.emit_realize(id, &node.inputs, &node.output_type),
-            RiscOp::Cast { .. } => self.emit_cast(id, &node.inputs, &node.output_type),
+            RiscOp::Cast { .. } => self.emit_cast(id, &node.inputs, &node.output_type, dag),
             RiscOp::Store { name } => self.emit_store(id, name.as_str(), &node.inputs),
             RiscOp::FusedElem { ops } => {
                 let in_place =
@@ -2856,13 +2856,54 @@ impl CEmitter {
     }
 
     // ---- Cast ----
-    fn emit_cast(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
-        // Phase 0f only supports casts to f32, validated before emission.
+    //
+    // `cast` is a precision conversion, not a bit-reinterpret. The previous
+    // implementation issued a `memcpy(dst, src, n * sizeof(float))` and was
+    // wrong on every cross-precision arm (f32<->f64, f32<->int32,
+    // int32<->int64, ...). See
+    // `docs/investigations/cbackend_cast_memcpy_diagnosis.md`. The host
+    // runtime parallel was fixed in PR #59
+    // (`crates/chelis-compiler-api/src/runtime.rs::cast_tensor_value` /
+    // `convert_scalar_data`); this site mirrors those semantics in emitted
+    // C.
+    //
+    // Validated precision set (see the validator around line 558):
+    //   F32 | F64 | Int32 | Int64. `bool` and reduced floats are not valid
+    // cast targets and panic before reaching this site.
+    fn emit_cast(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType, dag: &Dag) {
         let a = inputs[0].0;
+        let src_ty = &dag
+            .get(inputs[0])
+            .expect("cast input must resolve in dag")
+            .output_type;
+        let src_et = Self::elem_type(src_ty);
+        let dst_et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
+        // Strided element-wise loop. The output is freshly allocated and
+        // contiguous, so the destination index is the flat loop index. The
+        // source may be non-contiguous; resolve its element via the
+        // standard `chelis_flat_to_indices` + `chelis_indices_to_flat`
+        // dance used by `emit_realize` and friends. A C-level primitive
+        // cast `(dst_et)src` performs the precision conversion -- this is
+        // the canonical C semantics for f32<->f64 rounding,
+        // float->int truncate-toward-zero, and int->float widening, and
+        // matches the runtime evaluator's `convert_scalar_data` semantics
+        // on the validated precision set.
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "memcpy(t{id}->data, t{a}->data, t{id}->size * sizeof(float));"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
         ));
+        self.line(&format!(
+            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!(
+            "(({dst_et}*)t{id}->data)[i] = ({dst_et})(({src_et}*)t{a}->data)[idx];"
+        ));
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Store ----
@@ -3115,19 +3156,38 @@ mod tests {
     }
 
     #[test]
-    fn cast_emits_memcpy() {
+    fn cast_emits_elementwise_conversion_loop() {
+        // CBackend-CastMemcpy fix: cast no longer emits a bit-preserving
+        // `memcpy`. The new shape is a strided element-wise loop with a
+        // C-level primitive cast `(dst_et)src` performing the conversion.
+        // See `docs/investigations/cbackend_cast_memcpy_diagnosis.md`.
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let dst_ty = TensorType {
+            dims: vec![],
+            precision: Prim::F64,
+        };
         dag.add_node(
             RiscOp::Cast {
-                new_precision: Prim::F32,
+                new_precision: Prim::F64,
             },
             vec![a],
-            scalar_f32(),
+            dst_ty,
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
-        assert!(c.contains("memcpy"));
+        assert!(
+            c.contains("chelis_flat_to_indices"),
+            "cast must emit a strided element-wise loop, not memcpy; got:\n{c}"
+        );
+        assert!(
+            c.contains("(double)((float*)"),
+            "cast must emit a C-level primitive cast (dst_et)(src_et*)src; got:\n{c}"
+        );
+        assert!(
+            !c.contains("memcpy(t1->data, t0->data"),
+            "cast must not emit the legacy bit-preserving memcpy; got:\n{c}"
+        );
     }
 
     #[test]

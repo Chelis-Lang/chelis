@@ -35,8 +35,8 @@
 //!   * `cbackend_cast_tensor_int32_to_f32` -- integer widening to float.
 //!     memcpy reinterprets int32 bit patterns as f32s.
 //!
-//! Gated `#[ignore]` until the fix lands; the fix commit flips them to
-//! running.
+//! Originally gated `#[ignore]` in the failing-test commit; flipped to
+//! running in the fix commit on this branch.
 
 use assert_cmd::Command;
 use std::fs;
@@ -172,7 +172,6 @@ const HARNESS_INCLUDES: &str = r#"
 /// memcpy bug, the output is garbage (f32 bit patterns interpreted as
 /// f64s).
 #[test]
-#[ignore = "C-backend cast memcpy, see CBackend-CastMemcpy fix"]
 fn cbackend_cast_tensor_f32_to_f64() {
     let build = chelis_build_c(
         "def cast_demo(x: tensor[3, f32]) -> tensor[3, f64] = {\n  \
@@ -223,7 +222,6 @@ int main(void) {{
 /// formats. With the memcpy bug the output reads only the low 4 bytes
 /// of each f64, which is a different bit pattern from the rounded f32.
 #[test]
-#[ignore = "C-backend cast memcpy, see CBackend-CastMemcpy fix"]
 fn cbackend_cast_tensor_f64_to_f32() {
     let build = chelis_build_c(
         "def cast_demo(x: tensor[3, f64]) -> tensor[3, f32] = {\n  \
@@ -274,7 +272,6 @@ int main(void) {{
 /// truncates to `[1, 2, 3]`. With the memcpy bug, the int32 buffer
 /// contains the raw f32 bit patterns (1.5f -> 0x3FC00000 -> 1069547520).
 #[test]
-#[ignore = "C-backend cast memcpy, see CBackend-CastMemcpy fix"]
 fn cbackend_cast_tensor_f32_to_int32() {
     let build = chelis_build_c(
         "def cast_demo(x: tensor[3, f32]) -> tensor[3, int32] = {\n  \
@@ -325,7 +322,6 @@ int main(void) {{
 /// 3.0]`. With the memcpy bug, the f32 buffer contains the raw int32
 /// bit patterns (1 -> 0x00000001 -> ~1.4e-45 denormal).
 #[test]
-#[ignore = "C-backend cast memcpy, see CBackend-CastMemcpy fix"]
 fn cbackend_cast_tensor_int32_to_f32() {
     let build = chelis_build_c(
         "def cast_demo(x: tensor[3, int32]) -> tensor[3, f32] = {\n  \
