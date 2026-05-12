@@ -12,12 +12,95 @@ use std::fs;
 use std::fs::File;
 use std::ptr;
 
-const CHELIS_F32: c_int = 0;
-const CHELIS_F64: c_int = 1;
-const CHELIS_I32: c_int = 2;
-const CHELIS_BOOL: c_int = 3;
-const CHELIS_I64: c_int = 4;
+pub const CHELIS_F32: c_int = 0;
+pub const CHELIS_F64: c_int = 1;
+pub const CHELIS_I32: c_int = 2;
+pub const CHELIS_BOOL: c_int = 3;
+pub const CHELIS_I64: c_int = 4;
 const CHELIS_MAX_DIM: usize = 8;
+
+// `TensorElement` trait stub.  Closes the architectural piece of the
+// `CRuntime-F32Coupling` §5 entry by giving each Rust primitive a
+// typed accessor on `chelis_tensor` and a `Result`-returning dtype
+// check.  The full trait surface (default `fill`, checked + unchecked
+// data_ptr, dtype-mismatch error type) lands in the same PR's fix
+// commit; this stub is the minimum needed to let the cross-validation
+// harness at `crates/chelis-e2e/tests/dtype_op_matrix.rs` compile in
+// the test-first commit.
+//
+// All accessor bodies are stub `unimplemented!()` so any caller that
+// reaches them panics rather than silently producing wrong data.  The
+// fix commit replaces the bodies with the real cast-then-loop pattern
+// lifted from `chelis_fill_i64` (L489) and the checked dtype compare.
+//
+// See `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2 for
+// the locked surface.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DtypeMismatch {
+    pub expected: c_int,
+    pub actual: c_int,
+}
+
+/// Typed access to a `chelis_tensor`'s data buffer.
+///
+/// # Safety
+///
+/// Implementers assert that `DTYPE` names the byte layout
+/// `chelis_alloc` uses for the corresponding dtype constant.
+/// Misimplementation is the bug class this trait closes; the trait
+/// is `unsafe` so implementations must justify the dtype pairing.
+pub unsafe trait TensorElement: Sized + Copy {
+    const DTYPE: c_int;
+
+    /// Checked typed access.  Returns `Err` when the tensor's dtype
+    /// does not match `Self::DTYPE`.
+    ///
+    /// # Safety
+    ///
+    /// `tensor` must point to a live `chelis_tensor` and remain
+    /// valid for the lifetime of the returned pointer.
+    unsafe fn data_ptr(tensor: *mut chelis_tensor) -> Result<*mut Self, DtypeMismatch> {
+        let _ = tensor;
+        unimplemented!("TensorElement::data_ptr: fix commit lands the body");
+    }
+
+    /// Unchecked typed access for hot loops where the caller already
+    /// verified the dtype.
+    ///
+    /// # Safety
+    ///
+    /// As `data_ptr`, plus: caller asserts `(*tensor).dtype ==
+    /// Self::DTYPE`.
+    unsafe fn data_ptr_unchecked(tensor: *mut chelis_tensor) -> *mut Self {
+        let _ = tensor;
+        unimplemented!("TensorElement::data_ptr_unchecked: fix commit lands the body");
+    }
+
+    /// Element-wise fill.  Default lifts the cast-then-loop pattern
+    /// from `chelis_fill_i64` once the fix commit lands real bodies.
+    ///
+    /// # Safety
+    ///
+    /// As `data_ptr_unchecked`.
+    unsafe fn fill(tensor: *mut chelis_tensor, value: Self) {
+        let _ = (tensor, value);
+        unimplemented!("TensorElement::fill: fix commit lands the body");
+    }
+}
+
+unsafe impl TensorElement for f32 {
+    const DTYPE: c_int = CHELIS_F32;
+}
+unsafe impl TensorElement for f64 {
+    const DTYPE: c_int = CHELIS_F64;
+}
+unsafe impl TensorElement for i32 {
+    const DTYPE: c_int = CHELIS_I32;
+}
+unsafe impl TensorElement for i64 {
+    const DTYPE: c_int = CHELIS_I64;
+}
 
 macro_rules! runtime_fail {
     ($($arg:tt)*) => {{
