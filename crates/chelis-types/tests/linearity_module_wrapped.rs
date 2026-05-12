@@ -116,7 +116,6 @@ d = add(x, y)
 }
 
 #[test]
-#[ignore = "linearity skipped on module-wrapped defs; Linearity-F3 PR 1 enables warning emission. Remove this gate in the fix commit."]
 fn module_wrapped_realize_then_borrow_emits_warning() {
     // The same statements as `bare_top_level_realize_then_borrow_errors_today`,
     // but wrapped in `module Test`. After Linearity-F3 PR 1 the
@@ -146,7 +145,6 @@ b = add(x, y)
 }
 
 #[test]
-#[ignore = "linearity skipped on module-wrapped defs; Linearity-F3 PR 1 enables warning emission. Remove this gate in the fix commit."]
 fn module_wrapped_consuming_call_then_borrow_emits_warning() {
     // Mirrors `bare_top_level_consuming_call_then_borrow_errors_today`
     // but inside a module. The consume site is the call to
@@ -175,7 +173,6 @@ b = mul(x, y)
 }
 
 #[test]
-#[ignore = "linearity skipped on module-wrapped defs; Linearity-F3 PR 1 enables warning emission. Remove this gate in the fix commit."]
 fn module_wrapped_multi_realize_then_borrow_emits_warning() {
     // PR #60 (V2-F4) tightened the binding-aliasing path for bare
     // top-level statements (`y = x` chains). The same chain wrapped

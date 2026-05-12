@@ -161,38 +161,65 @@ PR 2 is the follow-on dispatch that closes the loop.
 
 Plan:
 
-1. Fix every linearity warning surfaced by PR 1. Each fix is a
-   targeted Surf-level edit: insert `copy(x)` before a borrow that
-   crosses a consume, switch a consuming primitive to a borrowing
-   one where the spec allows, or restructure the binding chain.
+1. The PR 1 corpus sweep found zero surfaced warnings (see
+   "Existing violations to fix in PR 2" below), so the "fix every
+   warning" step is a no-op for the in-tree corpus.
 2. Flip the severity. The simplest path: drop the `in_module` flag
    from `Checker` and have module-recursive linearity route through
    the same `errors` vec as bare-top-level linearity. The
    `LinearityInfo::warnings` field becomes vestigial and can be
    removed in the same commit, along with `push_warning` and the
-   manual `PartialEq` impl.
+   manual `PartialEq` impl. The CLI stderr emit in
+   `crates/chelis-cli/src/main.rs` is also dropped.
 3. Sweep the corpus once more under `cargo run -p chelis-cli --bin
-   chelis -- check` and `chelis lint --check .` to confirm no
-   warnings remain.
-4. Update `spec/01-nomenclature.md` and the V2-F4 closeout doc to
-   note that the latent gap is closed.
+   chelis -- check` and `chelis lint --check .` to confirm no new
+   errors appear.
+4. Update the V2-F4 closeout doc and the spec notes flagging the
+   latent gap to record that the gap is closed.
 
 PR 2 must NOT land before PR 1. The branch order is enforced by
-the dependency: PR 2's "delete the warning plumbing" step has nothing
-to delete until PR 1 adds it.
+the dependency: PR 2's "delete the warning plumbing" step has
+nothing to delete until PR 1 adds it.
 
 ## Existing violations to fix in PR 2
 
 Inventory captured by running `cargo run -p chelis-cli --bin chelis
--- check` against every `.ch` and `.dp` file in `examples/`,
-`examples/illustrative/`, `packages/chelis-std/`, and
-`crates/*/tests/fixtures/` after the PR 1 fix lands. The inventory
-table is filled in by the fix commit; it is left as a stub here so
-the diagnosis can land before the fix.
+-- check --allow-style-violations` against every `.ch` file in
+`examples/`, `examples/illustrative/`, `packages/` (chelis-std and
+its tests), and `crates/*/tests/` (103 files total) after the PR 1
+fix landed.
+
+**Inventory: 0 surfaced linearity warnings.**
+
+The executable corpus is already clean. Every `module Foo`-wrapped
+program in the repository either uses function-body scope
+(where intra-body linearity has always been intact) or uses safe
+binding-aliasing chains (where the V2-F4 binding-tolerance applies
+once the pre-declare loop sees the module-wrapped names).
+
+This is good news for the workstream: PR 2's "fix surfaced
+violations" step is a no-op, and PR 2 can collapse to a single
+commit that flips warnings to errors and removes the warning-mode
+plumbing.
+
+A non-empty inventory was not the goal of PR 1 — the goal is to
+remove the silent skip so that future module-wrapped programs that
+DO violate linearity surface a warning rather than slipping
+through. The corpus sweep confirms no in-tree program is hiding a
+latent violation behind the bug.
 
 | File | Line | Rule | Reason |
 | ---- | ---- | ---- | ------ |
-| _(filled in by the fix commit)_ | | | |
+| _(none)_ | | | The 103-file sweep found zero surfaced warnings. |
+
+Inventory script: `/tmp/lf3-pr1/sweep.py` in the local agent
+worktree, ad-hoc. The sweep is reproducible from this branch via
+`cargo build -p chelis-cli` followed by walking `find examples/
+packages/ crates/ -name '*.ch'` and running `chelis check
+--allow-style-violations <path>` on each, filtering stderr for
+lines starting with `warning: linearity:`. The script is not
+checked into the repo because the inventory step is a one-shot
+PR 1 validation, not a recurring CI artifact.
 
 ## Out-of-scope / escalations
 
