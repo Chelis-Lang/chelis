@@ -3513,9 +3513,7 @@ fn type_to_deep_expr(ty: &Type) -> deep::Expr {
             let mut children: Vec<deep::Expr> = dims.iter().map(dim_to_deep_expr).collect();
             children.push(match prec {
                 TensorPrec::Concrete(p) => type_to_deep_expr(&Type::Prim(*p)),
-                TensorPrec::Var(v) => {
-                    node_expr("t-var", vec![symbol_expr(&format!("t{}", v.0))])
-                }
+                TensorPrec::Var(v) => node_expr("t-var", vec![symbol_expr(&format!("t{}", v.0))]),
             });
             node_expr("t-tensor", children)
         }
@@ -4951,9 +4949,7 @@ fn infer_app(
             // the standard unification path (which will surface a
             // precise PrecisionMismatch if needed).
             match tensor_prec {
-                TensorPrec::Concrete(p) => {
-                    p == scalar_prec && (is_eq_family || p.is_numeric())
-                }
+                TensorPrec::Concrete(p) => p == scalar_prec && (is_eq_family || p.is_numeric()),
                 TensorPrec::Var(_) => false,
             }
         };

@@ -74,10 +74,7 @@ def use_mismatch(x: tensor[3, int32]) -> tensor[3, f32] = poly_id(x)
     // actually want a user to see; the kind tag is a downstream
     // implementation detail.
     let any_mentions_both_precisions = errors.iter().any(|e| {
-        let msg = e
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("");
+        let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
         msg.contains("f32") && msg.contains("int32")
     });
     assert!(

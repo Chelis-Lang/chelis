@@ -500,6 +500,22 @@ const PRIMITIVES: &[&str] = &[
     "unit",
 ];
 
+/// Unsigned dtype names per `spec/04-type-system.md` §1.1.2. These are
+/// not in the active numeric primitive set, but they are well-known
+/// dtype identifiers that users (especially LLMs translating from
+/// numpy/PyTorch) reach for. Treat them as "intended-precision"
+/// identifiers in desugar so they reach the type-checker's §1.1.2
+/// rejection path with a precise diagnostic, NOT as candidate
+/// quantified type variables.
+///
+/// Mirrors `chelis_types::infer::is_unsigned_dtype_name`. Kept as a
+/// parallel const here because chelis-surf does not depend on
+/// chelis-types and pulling in the dependency just for this list
+/// would invert the desugar / typecheck layering.
+const UNSIGNED_DTYPE_NAMES: &[&str] = &[
+    "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
+];
+
 // ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
@@ -1585,6 +1601,17 @@ fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Ex
     desugar_type_with_scope(ty, dim_vars, &HashSet::new())
 }
 
+/// True if `name` is a candidate quantified type variable per
+/// `spec/04-type-system.md` §5.8: lowercase, not a known active
+/// primitive, and not a §1.1.2 unsigned alias (those should reach the
+/// type-checker's rejection path as `(t-prim {} <name>)`, not be
+/// quietly absorbed as a quantifier).
+fn is_candidate_tvar_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_lowercase())
+        && !PRIMITIVES.contains(&name)
+        && !UNSIGNED_DTYPE_NAMES.contains(&name)
+}
+
 /// Compute the set of free, lowercase, non-primitive identifiers used
 /// as type names anywhere inside `ty` and its sub-types. These are the
 /// candidate quantified type variables for a sig per `spec/04-type-system.md`
@@ -1597,12 +1624,14 @@ fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Ex
 /// precision slot of a tensor type, when it appears in a sig, becomes
 /// a quantified type variable. That is the load-bearing change WS-A5
 /// makes possible.
+///
+/// Names listed in `UNSIGNED_DTYPE_NAMES` are EXCLUDED so the type
+/// checker still surfaces a `spec/04-type-system.md §1.1.2`-citing
+/// diagnostic for them via the `(t-prim {} u8)` path.
 fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
     match ty {
         TypeExpr::Named(name, _) => {
-            if !PRIMITIVES.contains(&name.as_str())
-                && name.starts_with(|c: char| c.is_lowercase())
-            {
+            if is_candidate_tvar_name(name) {
                 out.insert(name.clone());
             }
         }
@@ -1614,9 +1643,7 @@ fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
             // candidate quantified type variable per WS-A5. The dim
             // names themselves are handled by the d-name / d-var
             // contextual rules elsewhere and are not type variables.
-            if !PRIMITIVES.contains(&precision.as_str())
-                && precision.starts_with(|c: char| c.is_lowercase())
-            {
+            if is_candidate_tvar_name(precision) {
                 out.insert(precision.clone());
             }
         }
@@ -1675,12 +1702,17 @@ fn desugar_type_with_scope(
 ) -> deep::Expr {
     match ty {
         TypeExpr::Named(name, _) => {
+            // The contextual rule for type-name positions: a primitive
+            // name is a t-prim; a PascalCase name is an ADT; everything
+            // else is a t-var. Whether the t-var is bound by the
+            // surrounding sig (`tvar_set`) or unbound is decided
+            // downstream — the desugar layer just emits the t-var node
+            // and the type checker resolves the binding.
+            let _ = tvar_set; // contextual rule documented above
             if PRIMITIVES.contains(&name.as_str()) {
                 node("t-prim", vec![sym(name)])
             } else if name.starts_with(|c: char| c.is_uppercase()) {
                 node("t-adt", vec![sym(name)])
-            } else if tvar_set.contains(name.as_str()) {
-                node("t-var", vec![sym(name)])
             } else {
                 node("t-var", vec![sym(name)])
             }
@@ -1706,7 +1738,10 @@ fn desugar_type_with_scope(
                     }
                     // Everything else → d-name (concrete)
                     TypeExpr::Named(n, _) => node("d-name", vec![sym(n)]),
-                    _ => node("d-var", vec![desugar_type_with_scope(d, dim_vars, tvar_set)]),
+                    _ => node(
+                        "d-var",
+                        vec![desugar_type_with_scope(d, dim_vars, tvar_set)],
+                    ),
                 })
                 .collect();
             // WS-A5 contextual precision rule (spec/04-type-system.md §5.8,

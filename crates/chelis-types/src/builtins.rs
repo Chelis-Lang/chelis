@@ -1075,7 +1075,10 @@ mod tests {
         let add_ty = env.instantiate(add_scheme, &mut vg);
 
         // add should accept two tensors of the same type
-        let tensor_f32 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Concrete(Prim::F32));
+        let tensor_f32 = Type::Tensor(
+            vec![Dim::Name("batch".into())],
+            TensorPrec::Concrete(Prim::F32),
+        );
         let expected_fn = Type::Fn(
             vec![
                 Type::Ref(Box::new(tensor_f32.clone())),
@@ -1097,8 +1100,14 @@ mod tests {
         let add_ty = env.instantiate(add_scheme, &mut vg);
 
         // add(tensor[batch,f32], tensor[batch,bf16]) should fail
-        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Concrete(Prim::F32));
-        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Concrete(Prim::Bf16));
+        let t1 = Type::Tensor(
+            vec![Dim::Name("batch".into())],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let t2 = Type::Tensor(
+            vec![Dim::Name("batch".into())],
+            TensorPrec::Concrete(Prim::Bf16),
+        );
         let bad_fn = Type::Fn(
             vec![Type::Ref(Box::new(t1)), Type::Ref(Box::new(t2))],
             Box::new(Type::Var(vg.fresh_tvar())),
@@ -1117,7 +1126,10 @@ mod tests {
         let add_ty = env.instantiate(add_scheme, &mut vg);
 
         // add(tensor[batch,f32], int32) should fail
-        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Concrete(Prim::F32));
+        let t1 = Type::Tensor(
+            vec![Dim::Name("batch".into())],
+            TensorPrec::Concrete(Prim::F32),
+        );
         let t2 = Type::Prim(Prim::Int32);
         let bad_fn = Type::Fn(
             vec![Type::Ref(Box::new(t1)), Type::Ref(Box::new(t2))],
