@@ -141,7 +141,19 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
                 collect_tvars(t, vars);
             }
         }
-        Type::Tensor(_, _) | Type::Prim(_) | Type::Unit | Type::Error => {}
+        // WS-A5 (spec/04-type-system.md §5.8): the tensor precision
+        // slot may carry a TypeVar (precision polymorphism). The slot
+        // must participate in free-var collection so generalization
+        // can pin precision-quantified vars in the resulting Scheme;
+        // missing this means each call site reuses the SAME var
+        // across instantiations and the second call's precision
+        // collides with the first call's binding.
+        Type::Tensor(_, prec) => {
+            if let TensorPrec::Var(v) = prec {
+                vars.push(*v);
+            }
+        }
+        Type::Prim(_) | Type::Unit | Type::Error => {}
     }
 }
 
