@@ -255,7 +255,36 @@ impl Checker {
                     self.invalid_borrow(body, "borrow cannot be returned from a function");
                     return;
                 }
-                self.check_expr(body, scope);
+                // V2-F4: top-level `def name = x` where the body is a
+                // bare `(var x)` of an owned-linear type is an
+                // aliasing binding consume; at the IR level
+                // `lower_var` returns the cached `bindings["x"]` node
+                // for both `(var x)` and the new top-level `name`, so
+                // the value is structurally shared, not destroyed.
+                // Mirror the `check_let` path
+                // (`linearity.rs:397-407`) by tagging the consume
+                // with a `"binding `name` at offset N"` description.
+                // That feeds the PR #29 `read_or_error` tolerance
+                // (`linearity.rs:644`), letting subsequent borrow
+                // reads of the original variable succeed. Without
+                // this branch the body would fall through to
+                // `check_expr -> consume_var_expr(generic_site)` and
+                // tag the consume with `"use at offset N"`, which
+                // the tolerance does not match.
+                if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
+                    self.consume_var_expr(
+                        body,
+                        scope,
+                        ConsumeSite {
+                            description: format!(
+                                "binding `{name}` at offset {}",
+                                body.span().offset
+                            ),
+                        },
+                    );
+                } else {
+                    self.check_expr(body, scope);
+                }
             }
             return;
         }
