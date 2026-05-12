@@ -577,7 +577,6 @@ fn eval_rejects_unbound_runtime_names() {
 // consumers. See `docs/investigations/item2_sibling_sweep_findings.md`
 // §G7 and `docs/investigations/cli_eval_empty_roots_diagnosis.md`.
 #[test]
-#[ignore = "silent no-output on def-only programs; flipped on by the fix commit (G7 CLI)"]
 fn eval_def_only_emits_warning_on_stderr() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("def_only.ch");
