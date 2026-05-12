@@ -199,7 +199,6 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, fn_name: &str) -> Stri
 /// observable today as `[0.0, 1.9375, 0.0, 2.0625]` against the
 /// ground-truth `[1.5, 2.5, 3.5, 4.5]`.
 #[test]
-#[ignore = "chelis_print_tensor_stdout f64 misread; see commit 5396292 and docs/investigations/cbackend_print_tensor_f64_diagnosis.md"]
 fn cbackend_print_tensor_f64() {
     let source = "def to_f64(x: tensor[4, f32]) -> tensor[4, f64] = cast(x, f64)\n\
                   src = to_tensor([1.5, 2.5, 3.5, 4.5])\n\
@@ -221,19 +220,28 @@ fn cbackend_print_tensor_f64() {
     );
 }
 
-/// int64 print fixture.  The kernel function casts an int32 input to
-/// int64.  Same shape of bug as the f64 case: `data` typed as
-/// `float *` reads only 4 bytes per element.  Values are chosen large
-/// enough that the upper 4 bytes are not all zero; the values also
-/// must survive the int32 input stage (so they fit in int32) but the
-/// observation is on the int64 output tensor's print.
+/// int64 print fixture.  Same shape of bug as the f64 case: the print
+/// routine reads `data` as `float *` and decodes 8-byte int64
+/// elements at a 4-byte stride.
+///
+/// Source path is `f32 -> f64 -> int64` rather than `int32 -> int64`
+/// because the host runtime stores int32 tensors as f32 bit patterns
+/// (see `crates/chelis-runtime/src/lib.rs` line 1559); a cast from
+/// int32 would read those f32 bit patterns through `(int32_t*)
+/// src->data` and produce int64 elements that hold f32 bit patterns
+/// in their low 4 bytes.  That is a downstream same-class bug
+/// flagged in the diagnosis sibling sweep and out of scope for this
+/// PR.  Casting from f64 reads `(double*)src->data` correctly post-
+/// PR-#64 and yields the canonical 8-byte int64 bit pattern in the
+/// destination buffer, which is the input this fixture needs to
+/// exercise the print routine in isolation.
 #[test]
-#[ignore = "chelis_print_tensor_stdout f64 misread; see commit 5396292 and docs/investigations/cbackend_print_tensor_f64_diagnosis.md"]
 fn cbackend_print_tensor_int64() {
-    let source = "def to_i64(x: tensor[4, int32]) -> tensor[4, int64] = cast(x, int64)\n\
-                  src = to_tensor([cast(100000, int32), cast(200000, int32), \
-                  cast(300000, int32), cast(400000, int32)])\n\
-                  result = to_i64(src)\n";
+    let source = "def f32_to_f64(x: tensor[4, f32]) -> tensor[4, f64] = cast(x, f64)\n\
+                  def f64_to_i64(y: tensor[4, f64]) -> tensor[4, int64] = cast(y, int64)\n\
+                  src = to_tensor([100000.0, 200000.0, 300000.0, 400000.0])\n\
+                  mid = f32_to_f64(src)\n\
+                  result = f64_to_i64(mid)\n";
     let eval_out = chelis_eval(source, "print_i64");
     let (build, kernel_c) = chelis_build_c(source, "print_i64");
     let cbuild_out = gcc_compile_and_run(build.path(), &kernel_c, "print_i64");
@@ -244,6 +252,7 @@ fn cbackend_print_tensor_int64() {
     assert_eq!(
         eval_out,
         "src = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
+         mid = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
          result = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])",
         "eval ground truth changed; update fixture"
     );
