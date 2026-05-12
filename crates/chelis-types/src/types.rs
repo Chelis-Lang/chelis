@@ -193,7 +193,7 @@ impl Prim {
     /// per the "Result precision" column of the §5.7.1 table:
     ///
     /// - bf16 / f16  → operand precision (f32 accumulator consumed
-    ///                 inside the op and downcast on output)
+    ///   inside the op and downcast on output)
     /// - f32         → f32
     /// - f64         → f64
     /// - int8 / int16 → int32 (accumulator precision)

@@ -8098,6 +8098,33 @@ fn check_matmul_signature(
         ));
         return Type::Error;
     }
+    // RT-2 fixup B6: per spec/04-type-system.md §5.7.2, the active
+    // matmul signature does not admit integer operand precisions
+    // (int8, int16, int32, int64). Reject upfront at the call site
+    // with a §5.7.2-citing diagnostic so users see the spec rule
+    // here, not as a downstream IR-verify or codegen failure. The
+    // verify-layer F1 guard remains as defense in depth.
+    if lhs_prec.is_integer() {
+        errors.push(CheckError::new(
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "matmul on integer operand precision `{}` is not admitted in this \
+                 cycle per spec/04-type-system.md §5.7.2: integer matmul not admitted \
+                 (the spec deliberately defers the integer-matmul accumulator rule; \
+                 use reduce_sum over an explicit expand+mul lowering for integer \
+                 inner products)",
+                lhs_prec.name()
+            ),
+            vec![format!(
+                "spec/04-type-system.md §5.7.2: there is no current backend that \
+                 supports integer BLAS, and an integer-matmul surface raises \
+                 questions (saturating vs wrapping accumulator, signed-vs-unsigned \
+                 interaction with §1.1.2) that are out of scope here. Integer \
+                 reduce_sum is supported per §5.7.1."
+            )],
+        ));
+        return Type::Error;
+    }
     if lhs_dims.len() < 2 || rhs_dims.len() < 2 {
         errors.push(CheckError::new(
             CheckErrorKind::DimensionMismatch,

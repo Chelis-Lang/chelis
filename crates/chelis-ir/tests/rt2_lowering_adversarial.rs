@@ -33,7 +33,8 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
         )
     })?;
     let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
-    let checked = chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;
+    let checked =
+        chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;
     Ok(lower_program(&checked))
 }
 

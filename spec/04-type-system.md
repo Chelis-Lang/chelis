@@ -615,10 +615,24 @@ program that explicitly requests a narrower accumulator (e.g.
 diagnostic suggesting either omitting the parameter (which yields the i32
 default) or accepting the wider default explicitly.
 
-The result precision of `reduce_sum` is the accumulator precision. The
-result precision of `matmul` matches the operand precision (the wider
-accumulator is consumed inside the op and downcast on output) so that the
-caller sees a uniform-precision result tensor.
+The user-facing result precision of `reduce_sum` is given by the
+"Result precision" column of the §5.7.1 table above. For `int8` and
+`int16` operands the result widens to the accumulator (`int32`) to
+prevent silent overflow; for `int32`, `int64`, `f32`, and `f64`
+operands the result equals both operand and accumulator. For `bf16`
+and `f16` operands the result returns to the operand precision (the
+`f32` accumulator is consumed inside the op and downcast on output) so
+the caller sees a uniform-precision result tensor.
+
+At the IR level, the `Sum` node's output precision is always the
+accumulator precision; lowering inserts an explicit `Cast` for the
+`bf16`/`f16` row to recover the operand-precision result documented in
+the table. (Resolution of an RT-2 finding: the spec text and table
+disagreed about the `bf16`/`f16` row, and the table is canonical.)
+
+The result precision of `matmul` matches the operand precision (the
+wider accumulator is consumed inside the op and downcast on output) so
+that the caller sees a uniform-precision result tensor.
 
 #### 5.7.2 Integer matmul
 

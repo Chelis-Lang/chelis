@@ -152,8 +152,10 @@ fn c_backend_f64_matmul_emits_cblas_dgemm_not_sgemm() {
         None,
     );
     dag.add_root(mm);
-    let mut opts = CodegenOptions::default();
-    opts.use_blas = true;
+    let opts = CodegenOptions {
+        use_blas: true,
+        ..CodegenOptions::default()
+    };
     let result = codegen_with_options(&dag, "f64_mm", opts);
     let src = &result.c_source;
     assert!(

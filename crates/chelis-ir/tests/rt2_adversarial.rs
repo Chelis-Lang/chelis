@@ -171,7 +171,8 @@ fn ir_verify_rejects_blas_matmul_int8_per_spec_5_7_2() {
         "spec §5.7.2: integer matmul must be rejected at IR verify"
     );
     assert!(
-        errs.iter().any(|e| e.contains("F1") || e.contains("integer")),
+        errs.iter()
+            .any(|e| e.contains("F1") || e.contains("integer")),
         "IR verify rejection of int8 matmul must mention F1 or integer; got: {errs:?}"
     );
 }
@@ -314,10 +315,7 @@ fn matmul_with_accumulator_rejects_f32_when_default_is_f32() {
         Prim::F32,
     )
     .expect_err("f64 matmul with f32 accumulator must be rejected (narrower)");
-    assert!(
-        err.contains("§5.7.1"),
-        "must cite spec §5.7.1; got: {err}"
-    );
+    assert!(err.contains("§5.7.1"), "must cite spec §5.7.1; got: {err}");
 }
 
 // ----------------------------------------------------------------
