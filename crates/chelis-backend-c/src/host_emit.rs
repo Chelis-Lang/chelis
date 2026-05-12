@@ -213,12 +213,37 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
     out.push("    printf(\"], data=[\");".to_string());
     // Limit raised from 10 to 32 (a 4x4 tensor previously rendered only 10
     // of 16 elements with no marker, indistinguishable from a true 10-element
-    // tensor — red-team v0.2.6 MEDIUM). Also append "..." when truncated so
+    // tensor -- red-team v0.2.6 MEDIUM). Also append "..." when truncated so
     // the trailing-data case is visually unambiguous; downstream parsers
     // must tolerate the `...` token.
     out.push("    int64_t limit = t->size < 32 ? t->size : 32;".to_string());
     out.push("    for (int64_t i = 0; i < limit; ++i) {".to_string());
-    out.push("        double value = t->data[i];".to_string());
+    // CBackend-PrintTensorF64.  The `chelis_tensor.data` field is typed
+    // `float *` in `crates/chelis-runtime/include/chelis_runtime.h`, so
+    // `t->data[i]` is a 4-byte load regardless of dtype.  For f64 and
+    // int64 tensors that drops the upper half of every element and
+    // interleaves the halves of adjacent elements.  Mirrors PR #67's
+    // runtime-dtype dispatch (host reshape memcpy) and PR #64's typed-
+    // cast pattern (DAG emit_cast).  See
+    // `docs/investigations/cbackend_print_tensor_f64_diagnosis.md`.
+    //
+    // f32, int32, and bool are stored by `chelis_alloc` as 4-byte
+    // elements and the runtime writes int32 / bool values through the
+    // f32-typed `data` pointer
+    // (`crates/chelis-runtime/src/lib.rs` lines 1559, 1561-1567), so a
+    // float-typed load on those dtypes is correct and round-trips
+    // through `printf`.
+    out.push("        double value;".to_string());
+    out.push("        switch (t->dtype) {".to_string());
+    out.push(
+        "            case CHELIS_F64: value = ((const double*)t->data)[i]; break;".to_string(),
+    );
+    out.push(
+        "            case CHELIS_I64: value = (double)((const int64_t*)t->data)[i]; break;"
+            .to_string(),
+    );
+    out.push("            default: value = (double)((const float*)t->data)[i]; break;".to_string());
+    out.push("        }".to_string());
     out.push("        if (i > 0) { printf(\", \"); }".to_string());
     out.push("        if (fabs(value - round(value)) < 1e-9) {".to_string());
     out.push("            printf(\"%.1f\", value);".to_string());
