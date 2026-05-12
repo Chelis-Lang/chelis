@@ -471,7 +471,20 @@ fn format_handler_body(expr: &Expr) -> String {
 
 fn format_block(bindings: &[LetBinding], body: &Expr) -> String {
     if bindings.is_empty() {
-        return format!("{{ {} }}", format_expr(body));
+        // Single-line `{ body }` is only safe when `format_expr(body)` is
+        // itself single-line. For multi-line bodies (notably 3+ stage
+        // pipe chains, which format multi-line per `format_pipe_layout`),
+        // the single-line template glues the opening `{` to the seed and
+        // strips per-stage indentation, breaking `fmt` idempotency on
+        // re-parse. Mirror the non-empty path: indent each body line by
+        // two spaces and emit the braces on their own lines.
+        // Finding 3a (PR #51).
+        let rendered = format_expr(body);
+        if !rendered.contains('\n') {
+            return format!("{{ {rendered} }}");
+        }
+        let lines: Vec<String> = rendered.lines().map(|line| format!("  {line}")).collect();
+        return format!("{{\n{}\n}}", lines.join("\n"));
     }
     let mut lines = Vec::new();
     for binding in bindings {
