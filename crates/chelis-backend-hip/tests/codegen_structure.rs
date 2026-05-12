@@ -622,14 +622,16 @@ fn s11_launches_reset_and_check_failure_flag() {
         "Every kernel launch must check the debug failure flag"
     );
 
+    // WS-A2: kernel names are now precision-suffixed (`mod_kernel_fill_f32` /
+    // `mod_kernel_fill_f64`); the fixture is f32 so check that variant.
     let prepare_pos = src
-        .find("chelis_prepare_kernel_launch(mod_kernel_fill)")
+        .find("chelis_prepare_kernel_launch(mod_kernel_fill_f32)")
         .expect("fill reset present");
     let launch_pos = src
-        .find("chelis_launch_kernel(mod_kernel_fill")
+        .find("chelis_launch_kernel(mod_kernel_fill_f32")
         .expect("fill launch present");
     let finalize_pos = src
-        .find("chelis_finalize_kernel_launch(mod_kernel_fill")
+        .find("chelis_finalize_kernel_launch(mod_kernel_fill_f32")
         .expect("fill finalize present");
     assert!(
         prepare_pos < launch_pos && launch_pos < finalize_pos,

@@ -77,6 +77,9 @@ pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResu
     if c_source.contains("chelis_hipblas_sgemm_row_major(")
         || c_source.contains("chelis_hipblas_sgemm_batched_row_major(")
         || c_source.contains("chelis_hipblas_sgemm_strided_batched_row_major(")
+        || c_source.contains("chelis_hipblas_dgemm_row_major(")
+        || c_source.contains("chelis_hipblas_dgemm_batched_row_major(")
+        || c_source.contains("chelis_hipblas_dgemm_strided_batched_row_major(")
     {
         link_flags.push("-lhipblas".to_string());
     }

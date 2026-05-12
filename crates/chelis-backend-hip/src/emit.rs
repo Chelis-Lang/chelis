@@ -11,7 +11,6 @@ use chelis_types::types::Prim;
 use crate::blas;
 use crate::fusion::{FusedInPlaceSpec, fused_in_place_spec};
 use crate::kernels;
-use crate::launch;
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
 pub(crate) struct PeakDeviceBytesBreakdown {
@@ -65,23 +64,25 @@ struct StridedBatchedMatmulPlan {
 impl HipEmitter {
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(dag: &Dag, func_name: &str) -> (String, PeakDeviceBytesBreakdown) {
-        // F1 (WS-A0 RT-1 fixup, tactical): the HIP backend's BlasMatmul
-        // lowering destructures with `..` and unconditionally calls
-        // `hipblasSgemm`. Reject every non-f32 BlasMatmul here until
-        // WS-A1 plumbs the accumulator through and dispatches to
-        // `hipblasDgemm`. Mirrors the matching guard in
-        // crates/chelis-ir/src/verify.rs and the C backend.
+        // F1 (WS-A2 partial lift): the HIP backend now plumbs the
+        // BlasMatmul accumulator field through and dispatches to either
+        // `hipblasSgemm` (f32) or `hipblasDgemm` (f64). bf16 / f16 / i8 /
+        // i16 are still WS-A3 / WS-A4 territory and are rejected here.
+        // The original tactical guard in crates/chelis-ir/src/verify.rs
+        // also restricts to f32; that guard is C-backend-shaped (mentions
+        // `cblas_sgemm`). The HIP-side check below is the operationally
+        // important one when only this backend is exercised.
         for node in dag.nodes() {
             if matches!(node.op, RiscOp::BlasMatmul { .. })
                 && let Some(lhs) = dag.get(node.inputs[0])
-                && lhs.output_type.precision != Prim::F32
+                && !matches!(lhs.output_type.precision, Prim::F32 | Prim::F64)
             {
                 panic!(
-                    "F1: BlasMatmul currently supports only f32; node {} has \
-                     operand precision `{}`. spec/04-type-system.md §5.7.1 \
-                     documents the per-precision accumulator defaults, but the \
-                     HIP backend in this cycle dispatches only single-precision \
-                     GEMM. WS-A1 lifts this guard.",
+                    "F1: HIP BlasMatmul currently supports only f32 / f64; \
+                     node {} has operand precision `{}`. \
+                     spec/04-type-system.md §5.7.1 documents the per-precision \
+                     accumulator defaults; bf16/f16 dispatch lands in WS-A3 and \
+                     i8/i16 are out of scope for matmul per §5.7.2.",
                     node.id.0,
                     lhs.output_type.precision.name(),
                 );
@@ -395,10 +396,17 @@ impl HipEmitter {
                 | RiscOp::ProdReduce { .. }
                 | RiscOp::Argmax { .. }
                 | RiscOp::Argmin { .. } => {
-                    // Phase 3j-pre: these ops ship in the C backend only.
-                    // HIP backend support is explicitly deferred; calling
-                    // hip codegen on a DAG containing them should be a loud
-                    // failure, not silent miscompilation.
+                    // WS-A2 lift: these reductions now have HIP kernels
+                    // for f32 and f64. The kernel sources are emitted
+                    // here, then the standard `emit_node` dispatch in
+                    // `emit_dag` launches them via the same machinery as
+                    // the existing Sum/MaxReduce kernels.
+                    let sources = self.extra_reduction_kernel_sources(node, dag);
+                    for (name, source) in sources {
+                        if seen.insert(name.clone()) {
+                            self.kernel_sources.push((name, source));
+                        }
+                    }
                     continue;
                 }
                 _ => {}
@@ -637,9 +645,10 @@ impl HipEmitter {
         let input_id = node.inputs[0];
         if self.reduction_inlined.contains(&input_id.0) {
             let fused_node = dag.get(input_id).unwrap();
+            let elem = Self::elem_kind(&fused_node.output_type);
             let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
             let name = Self::fused_reduction_kernel_name(node.id.0, kind);
-            let source = kernels::reduce_fused(&name, axis, steps, n_ext, kind);
+            let source = kernels::reduce_fused(&name, axis, steps, n_ext, kind, elem);
             return vec![(name, source)];
         }
 
@@ -650,34 +659,86 @@ impl HipEmitter {
             return Vec::new();
         }
 
-        let name = Self::reduction_kernel_name(kind, axis);
+        // For Sum, the result precision IS the accumulator (spec §5.7.1)
+        // so we read the operand precision separately. For MaxReduce, the
+        // accumulator and result both match the operand precision.
+        let operand_ty = &dag.get(input_id).unwrap().output_type;
+        let operand_kind = Self::elem_kind(operand_ty);
+        let acc_kind = Self::elem_kind(&node.output_type);
+        let name = Self::reduction_kernel_name(kind, axis, acc_kind);
         let source = match kind {
-            kernels::ReduceKind::Sum => kernels::reduce_sum(&name, axis),
-            kernels::ReduceKind::Max => kernels::reduce_max(&name, axis),
+            kernels::ReduceKind::Sum => kernels::reduce_sum(&name, axis, operand_kind, acc_kind),
+            kernels::ReduceKind::Max => kernels::reduce_max(&name, axis, acc_kind),
         };
         vec![(name, source)]
     }
 
+    fn extra_reduction_kernel_sources(&self, node: &DagNode, dag: &Dag) -> Vec<(String, String)> {
+        // Kernel sources for the four reductions previously deferred to
+        // the C backend: Min / Prod / Argmax / Argmin. Argmax/Argmin emit
+        // an i64 result tensor; Min/Prod emit an in-precision result.
+        // For all four, kernel naming + body are driven by the OPERAND
+        // precision, which lives on the input tensor (Argmax/Argmin's
+        // output_type is `int64` and would otherwise tip elem_kind into
+        // its panic arm).
+        let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+        let elem = Self::elem_kind(input_ty);
+        match &node.op {
+            RiscOp::MinReduce { axis } => {
+                let name = Self::extra_reduction_kernel_name("min", *axis, elem);
+                let src = kernels::reduce_min(&name, *axis, elem);
+                vec![(name, src)]
+            }
+            RiscOp::ProdReduce { axis } => {
+                let name = Self::extra_reduction_kernel_name("prod", *axis, elem);
+                let src = kernels::reduce_prod(&name, *axis, elem);
+                vec![(name, src)]
+            }
+            RiscOp::Argmax { axis } => {
+                let name = Self::extra_reduction_kernel_name("argmax", *axis, elem);
+                let src = kernels::reduce_argmax(&name, *axis, elem);
+                vec![(name, src)]
+            }
+            RiscOp::Argmin { axis } => {
+                let name = Self::extra_reduction_kernel_name("argmin", *axis, elem);
+                let src = kernels::reduce_argmin(&name, *axis, elem);
+                vec![(name, src)]
+            }
+            _ => unreachable!("extra_reduction_kernel_sources expected Min/Prod/Argmax/Argmin"),
+        }
+    }
+
     fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, dag: &Dag) -> Option<String> {
+        let kind_for_node = |n: &DagNode| -> kernels::ElemKind { Self::elem_kind(&n.output_type) };
         match op {
-            RiscOp::Add => Some("kernel_add".into()),
-            RiscOp::Mul => Some("kernel_mul".into()),
-            RiscOp::MaxElem => Some("kernel_max_elem".into()),
-            RiscOp::CmpLt => Some("kernel_cmplt".into()),
-            RiscOp::Neg => Some("kernel_neg".into()),
-            RiscOp::Exp => Some("kernel_exp".into()),
-            RiscOp::Log => Some("kernel_log".into()),
-            RiscOp::Sin => Some("kernel_sin".into()),
-            RiscOp::Sqrt => Some("kernel_sqrt".into()),
-            RiscOp::Cos => Some("kernel_cos".into()),
-            RiscOp::Tan => Some("kernel_tan".into()),
-            RiscOp::Atan => Some("kernel_atan".into()),
-            RiscOp::Abs => Some("kernel_abs".into()),
-            RiscOp::Floor => Some("kernel_floor".into()),
-            RiscOp::Ceil => Some("kernel_ceil".into()),
-            RiscOp::UniformLike { .. } => Some("kernel_uniform_like".into()),
+            RiscOp::Add => Some(format!("kernel_add_{}", kind_for_node(node).suffix())),
+            RiscOp::Mul => Some(format!("kernel_mul_{}", kind_for_node(node).suffix())),
+            RiscOp::MaxElem => Some(format!("kernel_max_elem_{}", kind_for_node(node).suffix())),
+            RiscOp::CmpLt => {
+                // CmpLt has bool output but operand-precision storage;
+                // dispatch on the operand precision so the kernel name
+                // matches the kernel source emitted in
+                // `kernel_source_for_op`.
+                let operand_kind = Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type);
+                Some(format!("kernel_cmplt_{}", operand_kind.suffix()))
+            }
+            RiscOp::Neg => Some(format!("kernel_neg_{}", kind_for_node(node).suffix())),
+            RiscOp::Exp => Some(format!("kernel_exp_{}", kind_for_node(node).suffix())),
+            RiscOp::Log => Some(format!("kernel_log_{}", kind_for_node(node).suffix())),
+            RiscOp::Sin => Some(format!("kernel_sin_{}", kind_for_node(node).suffix())),
+            RiscOp::Sqrt => Some(format!("kernel_sqrt_{}", kind_for_node(node).suffix())),
+            RiscOp::Cos => Some(format!("kernel_cos_{}", kind_for_node(node).suffix())),
+            RiscOp::Tan => Some(format!("kernel_tan_{}", kind_for_node(node).suffix())),
+            RiscOp::Atan => Some(format!("kernel_atan_{}", kind_for_node(node).suffix())),
+            RiscOp::Abs => Some(format!("kernel_abs_{}", kind_for_node(node).suffix())),
+            RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node).suffix())),
+            RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node).suffix())),
+            RiscOp::UniformLike { .. } => Some(format!(
+                "kernel_uniform_like_{}",
+                kind_for_node(node).suffix()
+            )),
             RiscOp::Dropout { .. } | RiscOp::Drop => None,
-            RiscOp::Copy => Some("kernel_cast".into()),
+            RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)),
             RiscOp::Sum { axis, .. } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -686,7 +747,11 @@ impl HipEmitter {
                         kernels::ReduceKind::Sum,
                     ))
                 } else {
-                    Some(Self::reduction_kernel_name(kernels::ReduceKind::Sum, *axis))
+                    Some(Self::reduction_kernel_name(
+                        kernels::ReduceKind::Sum,
+                        *axis,
+                        Self::elem_kind(&node.output_type),
+                    ))
                 }
             }
             RiscOp::MaxReduce { axis } => {
@@ -697,17 +762,49 @@ impl HipEmitter {
                         kernels::ReduceKind::Max,
                     ))
                 } else {
-                    Some(Self::reduction_kernel_name(kernels::ReduceKind::Max, *axis))
+                    Some(Self::reduction_kernel_name(
+                        kernels::ReduceKind::Max,
+                        *axis,
+                        Self::elem_kind(&node.output_type),
+                    ))
                 }
             }
-            RiscOp::MinReduce { .. }
-            | RiscOp::ProdReduce { .. }
-            | RiscOp::Argmax { .. }
-            | RiscOp::Argmin { .. }
-            | RiscOp::OneHot { .. } => None,
-            RiscOp::Const { .. } => Some("kernel_fill".into()),
-            RiscOp::Realize => Some("kernel_cast".into()),
-            RiscOp::Cast { .. } => Some("kernel_cast".into()),
+            RiscOp::MinReduce { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                Some(Self::extra_reduction_kernel_name(
+                    "min",
+                    *axis,
+                    Self::elem_kind(input_ty),
+                ))
+            }
+            RiscOp::ProdReduce { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                Some(Self::extra_reduction_kernel_name(
+                    "prod",
+                    *axis,
+                    Self::elem_kind(input_ty),
+                ))
+            }
+            RiscOp::Argmax { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                Some(Self::extra_reduction_kernel_name(
+                    "argmax",
+                    *axis,
+                    Self::elem_kind(input_ty),
+                ))
+            }
+            RiscOp::Argmin { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                Some(Self::extra_reduction_kernel_name(
+                    "argmin",
+                    *axis,
+                    Self::elem_kind(input_ty),
+                ))
+            }
+            RiscOp::OneHot { .. } => None,
+            RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
+            RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)),
+            RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)),
             // Movement ops and Load/Store are not kernels
             RiscOp::Load { .. }
             | RiscOp::Store { .. }
@@ -720,17 +817,19 @@ impl HipEmitter {
             | RiscOp::BlasMatmul { .. } => None,
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                let elem = Self::elem_kind(&node.output_type);
                 Some(match indices_ty.precision {
-                    Prim::Int32 => "kernel_gather_i32".into(),
-                    Prim::Int64 => "kernel_gather_i64".into(),
+                    Prim::Int32 => format!("kernel_gather_i32_{}", elem.suffix()),
+                    Prim::Int64 => format!("kernel_gather_i64_{}", elem.suffix()),
                     _ => "kernel_gather_invalid".into(),
                 })
             }
             RiscOp::ScatterAdd { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
+                let elem = Self::elem_kind(&node.output_type);
                 Some(match indices_ty.precision {
-                    Prim::Int32 => "kernel_scatter_add_i32".into(),
-                    Prim::Int64 => "kernel_scatter_add_i64".into(),
+                    Prim::Int32 => format!("kernel_scatter_add_i32_{}", elem.suffix()),
+                    Prim::Int64 => format!("kernel_scatter_add_i64_{}", elem.suffix()),
                     _ => "kernel_scatter_add_invalid".into(),
                 })
             }
@@ -746,32 +845,63 @@ impl HipEmitter {
         }
     }
 
+    /// Build the cast kernel name. When src/dst precision agree, this is
+    /// the in-precision identity kernel; when they differ, it's the
+    /// cross-precision conversion kernel.
+    fn cast_kernel_name(node: &DagNode, dag: &Dag) -> String {
+        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+        let dst_kind = Self::elem_kind(&node.output_type);
+        let src_kind = Self::elem_kind(src_ty);
+        if src_kind == dst_kind {
+            format!("kernel_cast_{}", dst_kind.suffix())
+        } else {
+            format!("kernel_cast_{}_to_{}", src_kind.suffix(), dst_kind.suffix())
+        }
+    }
+
     fn kernel_source_for_op(&self, name: &str, op: &RiscOp, node: &DagNode, dag: &Dag) -> String {
+        // CmpLt's output type is `bool` (semantically) but the kernel
+        // writes 1.0/0.0 of operand precision to the GPU buffer. Use the
+        // operand precision for kernel emission; the rest of the
+        // floating ops have output_type == operand_type so the more
+        // common path uses output_type below.
+        let elem = match op {
+            RiscOp::CmpLt => Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+            _ => Self::elem_kind(&node.output_type),
+        };
         match op {
-            RiscOp::Add => kernels::binary_elementwise(name, "+"),
-            RiscOp::Mul => kernels::binary_elementwise(name, "*"),
-            RiscOp::MaxElem => kernels::binary_func(name, "fmaxf"),
-            RiscOp::CmpLt => kernels::cmplt(name),
-            RiscOp::Neg => kernels::unary_prefix(name, "-"),
-            RiscOp::Exp => kernels::unary_func(name, "expf"),
-            RiscOp::Log => kernels::unary_func(name, "logf"),
-            RiscOp::Sin => kernels::unary_func(name, "sinf"),
-            RiscOp::Sqrt => kernels::unary_func(name, "sqrtf"),
-            RiscOp::Cos => kernels::unary_func(name, "cosf"),
-            RiscOp::Tan => kernels::unary_func(name, "tanf"),
-            RiscOp::Atan => kernels::unary_func(name, "atanf"),
-            RiscOp::Abs => kernels::unary_func(name, "fabsf"),
-            RiscOp::Floor => kernels::unary_func(name, "floorf"),
-            RiscOp::Ceil => kernels::unary_func(name, "ceilf"),
-            RiscOp::UniformLike { .. } => kernels::uniform_like(name),
+            RiscOp::Add => kernels::binary_elementwise(name, "+", elem),
+            RiscOp::Mul => kernels::binary_elementwise(name, "*", elem),
+            RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem),
+            RiscOp::CmpLt => kernels::cmplt(name, elem),
+            RiscOp::Neg => kernels::unary_prefix(name, "-", elem),
+            RiscOp::Exp => kernels::unary_func(name, "expf", elem),
+            RiscOp::Log => kernels::unary_func(name, "logf", elem),
+            RiscOp::Sin => kernels::unary_func(name, "sinf", elem),
+            RiscOp::Sqrt => kernels::unary_func(name, "sqrtf", elem),
+            RiscOp::Cos => kernels::unary_func(name, "cosf", elem),
+            RiscOp::Tan => kernels::unary_func(name, "tanf", elem),
+            RiscOp::Atan => kernels::unary_func(name, "atanf", elem),
+            RiscOp::Abs => kernels::unary_func(name, "fabsf", elem),
+            RiscOp::Floor => kernels::unary_func(name, "floorf", elem),
+            RiscOp::Ceil => kernels::unary_func(name, "ceilf", elem),
+            RiscOp::UniformLike { .. } => kernels::uniform_like(name, elem),
             RiscOp::Sum { axis, .. } => {
                 let input_id = node.inputs[0];
+                let operand_kind = Self::elem_kind(&dag.get(input_id).unwrap().output_type);
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
-                    kernels::reduce_fused(name, *axis, steps, n_ext, kernels::ReduceKind::Sum)
+                    kernels::reduce_fused(
+                        name,
+                        *axis,
+                        steps,
+                        n_ext,
+                        kernels::ReduceKind::Sum,
+                        operand_kind,
+                    )
                 } else {
-                    kernels::reduce_sum(name, *axis)
+                    kernels::reduce_sum(name, *axis, operand_kind, elem)
                 }
             }
             RiscOp::MaxReduce { axis } => {
@@ -779,15 +909,39 @@ impl HipEmitter {
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
-                    kernels::reduce_fused(name, *axis, steps, n_ext, kernels::ReduceKind::Max)
+                    let inner_kind = Self::elem_kind(&fused_node.output_type);
+                    kernels::reduce_fused(
+                        name,
+                        *axis,
+                        steps,
+                        n_ext,
+                        kernels::ReduceKind::Max,
+                        inner_kind,
+                    )
                 } else {
-                    kernels::reduce_max(name, *axis)
+                    kernels::reduce_max(name, *axis, elem)
                 }
             }
-            RiscOp::Const { .. } => kernels::fill(name),
-            RiscOp::Realize => kernels::cast(name),
-            RiscOp::Cast { .. } => kernels::cast(name),
-            RiscOp::Copy => kernels::cast(name),
+            RiscOp::MinReduce { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                kernels::reduce_min(name, *axis, Self::elem_kind(input_ty))
+            }
+            RiscOp::ProdReduce { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                kernels::reduce_prod(name, *axis, Self::elem_kind(input_ty))
+            }
+            RiscOp::Argmax { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                kernels::reduce_argmax(name, *axis, Self::elem_kind(input_ty))
+            }
+            RiscOp::Argmin { axis } => {
+                let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                kernels::reduce_argmin(name, *axis, Self::elem_kind(input_ty))
+            }
+            RiscOp::Const { .. } => kernels::fill(name, elem),
+            RiscOp::Realize => Self::cast_kernel_source(name, node, dag),
+            RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag),
+            RiscOp::Copy => Self::cast_kernel_source(name, node, dag),
             RiscOp::FusedElem { ops } => {
                 let aliased_ext = fused_in_place_spec(node, dag).map(|reusable| {
                     node.inputs
@@ -795,13 +949,13 @@ impl HipEmitter {
                         .position(|&input| input == reusable)
                         .expect("reusable input must appear in node inputs")
                 });
-                kernels::fused_elementwise(name, ops, node.inputs.len(), aliased_ext)
+                kernels::fused_elementwise(name, ops, node.inputs.len(), aliased_ext, elem)
             }
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::gather(name, "int"),
-                    Prim::Int64 => kernels::gather(name, "long long"),
+                    Prim::Int32 => kernels::gather(name, "int", elem),
+                    Prim::Int64 => kernels::gather(name, "long long", elem),
                     other => panic!(
                         "HIP backend sparse gather requires int32/int64 indices, got {}",
                         other.name()
@@ -811,8 +965,8 @@ impl HipEmitter {
             RiscOp::ScatterAdd { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::scatter_add(name, "int"),
-                    Prim::Int64 => kernels::scatter_add(name, "long long"),
+                    Prim::Int32 => kernels::scatter_add(name, "int", elem),
+                    Prim::Int64 => kernels::scatter_add(name, "long long", elem),
                     other => panic!(
                         "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
                         other.name()
@@ -831,6 +985,19 @@ impl HipEmitter {
                 }
             }
             _ => unreachable!("no kernel for op: {op:?}"),
+        }
+    }
+
+    /// Cast / Realize / Copy kernel source: in-precision identity when
+    /// src and dst kinds agree, cross-precision conversion otherwise.
+    fn cast_kernel_source(name: &str, node: &DagNode, dag: &Dag) -> String {
+        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+        let dst_kind = Self::elem_kind(&node.output_type);
+        let src_kind = Self::elem_kind(src_ty);
+        if src_kind == dst_kind {
+            kernels::cast(name, dst_kind)
+        } else {
+            kernels::cast_convert(name, src_kind, dst_kind)
         }
     }
 
@@ -878,53 +1045,72 @@ impl HipEmitter {
 
     fn emit_node(&mut self, node: &DagNode, dag: &Dag) {
         let id = node.id.0;
+        // Resolve the precision-suffixed kernel name once, so the launch
+        // shims agree with the kernel-source emitter on the symbol the
+        // host references (e.g. `kernel_add_f32` vs `kernel_add_f64`).
+        let resolved_kernel_name = || -> String {
+            self.kernel_name_for_op(&node.op, node, dag)
+                .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op))
+        };
         match &node.op {
             RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type),
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
-            RiscOp::Add => {
-                self.emit_binary_launch(id, "kernel_add", &node.inputs, &node.output_type)
-            }
-            RiscOp::Mul => {
-                self.emit_binary_launch(id, "kernel_mul", &node.inputs, &node.output_type)
-            }
-            RiscOp::MaxElem => {
-                self.emit_binary_launch(id, "kernel_max_elem", &node.inputs, &node.output_type);
-            }
-            RiscOp::CmpLt => {
-                self.emit_binary_launch(id, "kernel_cmplt", &node.inputs, &node.output_type);
-            }
+            RiscOp::Add => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name(),
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Mul => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name(),
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::MaxElem => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name(),
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::CmpLt => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name(),
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::Neg => {
-                self.emit_unary_launch(id, "kernel_neg", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Exp => {
-                self.emit_unary_launch(id, "kernel_exp", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Log => {
-                self.emit_unary_launch(id, "kernel_log", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Sin => {
-                self.emit_unary_launch(id, "kernel_sin", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Sqrt => {
-                self.emit_unary_launch(id, "kernel_sqrt", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Cos => {
-                self.emit_unary_launch(id, "kernel_cos", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Tan => {
-                self.emit_unary_launch(id, "kernel_tan", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Atan => {
-                self.emit_unary_launch(id, "kernel_atan", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Abs => {
-                self.emit_unary_launch(id, "kernel_abs", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Floor => {
-                self.emit_unary_launch(id, "kernel_floor", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Ceil => {
-                self.emit_unary_launch(id, "kernel_ceil", &node.inputs, &node.output_type)
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::UniformLike { low, high, seed } => {
                 self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)
@@ -933,7 +1119,7 @@ impl HipEmitter {
                 unreachable!("dropout should be rejected before HIP code generation")
             }
             RiscOp::Copy => {
-                self.emit_unary_launch(id, "kernel_cast", &node.inputs, &node.output_type);
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Drop => {}
             RiscOp::Sum { axis, .. } => {
@@ -966,25 +1152,16 @@ impl HipEmitter {
                     );
                 }
             }
-            RiscOp::MinReduce { .. } => {
-                panic!(
-                    "HIP backend: MinReduce is not yet supported (Phase 3j-pre ships C backend only)"
-                );
-            }
-            RiscOp::ProdReduce { .. } => {
-                panic!(
-                    "HIP backend: ProdReduce is not yet supported (Phase 3j-pre ships C backend only)"
-                );
-            }
-            RiscOp::Argmax { .. } => {
-                panic!(
-                    "HIP backend: Argmax is not yet supported (Phase 3j-pre ships C backend only)"
-                );
-            }
-            RiscOp::Argmin { .. } => {
-                panic!(
-                    "HIP backend: Argmin is not yet supported (Phase 3j-pre ships C backend only)"
-                );
+            RiscOp::MinReduce { axis }
+            | RiscOp::ProdReduce { axis }
+            | RiscOp::Argmax { axis }
+            | RiscOp::Argmin { axis } => {
+                // WS-A2 lift: these four reductions previously panicked
+                // ("Phase 3j-pre ships C backend only"). The kernel
+                // launch shape mirrors `emit_reduce_launch` but the
+                // kernel source comes from `extra_reduction_kernel_sources`
+                // collected by the first pass.
+                self.emit_extra_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
             }
             RiscOp::OneHot { .. } => {
                 panic!(
@@ -1010,10 +1187,10 @@ impl HipEmitter {
                 self.emit_stride(id, strides, &node.inputs, &node.output_type);
             }
             RiscOp::Realize => {
-                self.emit_unary_launch(id, "kernel_cast", &node.inputs, &node.output_type);
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Cast { .. } => {
-                self.emit_unary_launch(id, "kernel_cast", &node.inputs, &node.output_type);
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
@@ -1156,16 +1333,27 @@ impl HipEmitter {
 
     fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) {
         self.emit_slot_wrapper(id, ty);
+        let elem = Self::elem_kind(ty);
+        let kernel = format!("kernel_fill_{}", elem.suffix());
         self.line("{");
         self.indent += 1;
-        self.line(&format!("float fill_val = {:.8}f;", value as f32));
+        match elem {
+            kernels::ElemKind::F32 => {
+                self.line(&format!("float fill_val = {:.8}f;", value as f32));
+            }
+            kernels::ElemKind::F64 => {
+                // emit a double literal (no `f` suffix); use 17 sig digits
+                // per IEEE-754 round-trip.
+                self.line(&format!("double fill_val = {value:.17e};"));
+            }
+        }
         self.line(&format!("int fill_size = d_t{id}->size;"));
         self.line(&format!(
             "void *fill_args[] = {{ &d_t{id}->data, &fill_val, &fill_size }};"
         ));
         self.emit_kernel_launch_expr(
-            "mod_kernel_fill",
-            "kernel_fill",
+            &format!("mod_{kernel}"),
+            &kernel,
             "(fill_size + 255) / 256",
             "256",
             "fill_args",
@@ -1315,8 +1503,12 @@ impl HipEmitter {
         ty: &TensorType,
     ) {
         self.emit_slot_wrapper(id, ty);
+        let elem = Self::elem_kind(ty);
+        let kernel = format!("kernel_uniform_like_{}", elem.suffix());
         self.line("{");
         self.indent += 1;
+        // The PRNG itself is f32; the f64 kernel widens at the final
+        // store. Emit `low` / `high` as `float` regardless of `ty.precision`.
         self.line(&format!("float t{id}_low = {:.8}f;", low as f32));
         self.line(&format!("float t{id}_high = {:.8}f;", high as f32));
         self.line(&format!("unsigned long long t{id}_seed = {seed}ULL;"));
@@ -1328,8 +1520,8 @@ impl HipEmitter {
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
         self.emit_kernel_launch_expr(
-            "mod_kernel_uniform_like",
-            "kernel_uniform_like",
+            &format!("mod_{kernel}"),
+            &kernel,
             &format!("(t{id}_size + 255) / 256"),
             "256",
             "args",
@@ -1350,8 +1542,15 @@ impl HipEmitter {
         let indices = inputs[1].0;
         let values_ty = &dag.get(inputs[0]).unwrap().output_type;
         let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
-        if values_ty.precision != Prim::F32 || ty.precision != Prim::F32 {
-            panic!("HIP backend sparse gather currently supports f32 payloads only");
+        if values_ty.precision != ty.precision
+            || !matches!(values_ty.precision, Prim::F32 | Prim::F64)
+        {
+            panic!(
+                "HIP backend sparse gather requires matching f32 or f64 payload precision; \
+                 values=`{}`, out=`{}`",
+                values_ty.precision.name(),
+                ty.precision.name(),
+            );
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
@@ -1362,9 +1561,10 @@ impl HipEmitter {
         let before = Self::dim_product_expr(&values_ty.dims[..axis]);
         let axis_size = Self::emit_dim_info(&values_ty.dims[axis]);
         let after = Self::dim_product_expr(&values_ty.dims[axis + 1..]);
+        let elem = Self::elem_kind(ty);
         let kernel_name = match indices_ty.precision {
-            Prim::Int32 => "kernel_gather_i32",
-            Prim::Int64 => "kernel_gather_i64",
+            Prim::Int32 => format!("kernel_gather_i32_{}", elem.suffix()),
+            Prim::Int64 => format!("kernel_gather_i64_{}", elem.suffix()),
             _ => unreachable!(),
         };
 
@@ -1381,7 +1581,7 @@ impl HipEmitter {
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
-            kernel_name,
+            &kernel_name,
             &format!("(t{id}_total + 255) / 256"),
             "256",
             "args",
@@ -1404,11 +1604,17 @@ impl HipEmitter {
         let target_ty = &dag.get(inputs[0]).unwrap().output_type;
         let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
         let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
-        if target_ty.precision != Prim::F32
-            || updates_ty.precision != Prim::F32
-            || ty.precision != Prim::F32
+        if target_ty.precision != ty.precision
+            || updates_ty.precision != ty.precision
+            || !matches!(ty.precision, Prim::F32 | Prim::F64)
         {
-            panic!("HIP backend sparse scatter_add currently supports f32 payloads only");
+            panic!(
+                "HIP backend sparse scatter_add requires matching f32 or f64 payload precision; \
+                 target=`{}`, updates=`{}`, out=`{}`",
+                target_ty.precision.name(),
+                updates_ty.precision.name(),
+                ty.precision.name(),
+            );
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
@@ -1419,9 +1625,10 @@ impl HipEmitter {
         let before = Self::dim_product_expr(&target_ty.dims[..axis]);
         let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
         let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
+        let elem = Self::elem_kind(ty);
         let kernel_name = match indices_ty.precision {
-            Prim::Int32 => "kernel_scatter_add_i32",
-            Prim::Int64 => "kernel_scatter_add_i64",
+            Prim::Int32 => format!("kernel_scatter_add_i32_{}", elem.suffix()),
+            Prim::Int64 => format!("kernel_scatter_add_i64_{}", elem.suffix()),
             _ => unreachable!(),
         };
 
@@ -1441,7 +1648,7 @@ impl HipEmitter {
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
-            kernel_name,
+            &kernel_name,
             &format!("(t{id}_total + 255) / 256"),
             "256",
             "args",
@@ -1665,7 +1872,66 @@ impl HipEmitter {
             );
             return;
         }
-        let kernel_name = Self::reduction_kernel_name(kind, axis);
+        let kernel_name = Self::reduction_kernel_name(kind, axis, Self::elem_kind(ty));
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
+        self.line(&format!("int t{id}_axis_size = d_t{a}->shape[{axis}];"));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
+        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
+            a_stride_refs = self.stride_arg_refs(id, "a"),
+            out_shape_refs = self.shape_arg_refs(id, "out"),
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            &kernel_name,
+            &format!("(t{id}_out_size + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Launch shape mirrors `emit_reduce_launch` for the four reductions
+    /// previously deferred to the C backend (Min / Prod / Argmax /
+    /// Argmin). The kernel signature is identical: per-output thread,
+    /// `axis_size` trailing parameter, in/out tensor pointers, strides
+    /// and shapes packed into `args`.
+    fn emit_extra_reduce_launch(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let a = inputs[0].0;
+        let input_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let node_op = &dag.get(NodeId(id)).unwrap().op;
+        // All four extra reductions name kernels by the operand
+        // precision: Min/Prod return the operand precision (so input ==
+        // output), and Argmax/Argmin's output is i64 even though the
+        // value being compared is the operand precision. Reading the
+        // input precision uniformly avoids the elem_kind panic on the
+        // i64 output of the arg-reductions.
+        let elem_for_naming = Self::elem_kind(input_ty);
+        let op_name = match node_op {
+            RiscOp::MinReduce { .. } => "min",
+            RiscOp::ProdReduce { .. } => "prod",
+            RiscOp::Argmax { .. } => "argmax",
+            RiscOp::Argmin { .. } => "argmin",
+            _ => unreachable!("emit_extra_reduce_launch called on non-extra reduction"),
+        };
+        let kernel_name = Self::extra_reduction_kernel_name(op_name, axis, elem_for_naming);
 
         self.emit_slot_wrapper(id, ty);
         self.line("{");
@@ -1788,13 +2054,56 @@ impl HipEmitter {
         let n_expr = Self::emit_dim_expr(&spec.n);
         let k_expr = Self::emit_dim_expr(&spec.k);
         self.emit_slot_wrapper(id, ty);
+
+        // WS-A2: dispatch on operand precision. The IR `BlasMatmul` node
+        // also carries a pinned `accumulator: Prim` field per WS-A0 spec;
+        // for f32 and f64 the accumulator is operand-matching by default
+        // (§5.7.1) and the host-side hipBLAS helpers compute
+        // alpha/beta/A/B/C in the operand precision. The per-precision
+        // accumulator is read here so that auditors can see that the
+        // field is consumed, not destructured-and-ignored as it was
+        // before WS-A0 RT-1 (the F1 footgun).
+        let node = dag.get(NodeId(id)).expect("matmul node exists");
+        let (operand_prec, declared_acc) = match &node.op {
+            RiscOp::BlasMatmul { accumulator, .. } => (ty.precision, *accumulator),
+            // emit_blas_matmul is also invoked from the matmul-pattern
+            // detector (Sum-of-Mul-of-Expand-Expand) — that path lowered
+            // through reduce_sum which carries its own accumulator. For
+            // f32/f64 operands the spec default makes them coincide with
+            // ty.precision, so we read it here too rather than re-deriving.
+            _ => (ty.precision, ty.precision),
+        };
+        if operand_prec != declared_acc {
+            // Mixed-precision matmul (e.g. f64 operand with f32 acc) is
+            // not in the spec default table; if it appears here, the IR
+            // is doing something the WS-A2 backend has not modeled yet.
+            // bf16/f16 with f32 accumulator is WS-A3 territory.
+            panic!(
+                "HIP backend matmul cannot dispatch operand precision `{}` \
+                 with explicit accumulator `{}` at node {id}; \
+                 spec/04-type-system.md §5.7.1 default for f32/f64 is \
+                 operand-matching, and bf16/f16 mixed-precision lands in WS-A3.",
+                operand_prec.name(),
+                declared_acc.name(),
+            );
+        }
+
+        let helper_prefix = match operand_prec {
+            Prim::F32 => "chelis_hipblas_sgemm",
+            Prim::F64 => "chelis_hipblas_dgemm",
+            other => panic!(
+                "HIP backend matmul for operand precision `{}` is not implemented",
+                other.name()
+            ),
+        };
+
         if spec.batch_dims.is_empty() {
             self.line(&format!(
-                "chelis_hipblas_sgemm_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
+                "{helper_prefix}_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
             ));
         } else if let Some(plan) = Self::strided_batched_hipblas_plan(dag, spec, ty) {
             self.line(&format!(
-                "chelis_hipblas_sgemm_strided_batched_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, {batch_count}, {a_stride}LL, {b_stride}LL, {out_stride}LL);",
+                "{helper_prefix}_strided_batched_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, {batch_count}, {a_stride}LL, {b_stride}LL, {out_stride}LL);",
                 batch_count = plan.batch_count_expr,
                 a_stride = plan.a_batch_stride,
                 b_stride = plan.b_batch_stride,
@@ -1802,95 +2111,9 @@ impl HipEmitter {
             ));
         } else {
             self.line(&format!(
-                "chelis_hipblas_sgemm_batched_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
+                "{helper_prefix}_batched_row_major(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
             ));
         }
-    }
-
-    #[allow(dead_code)]
-    fn emit_staged_scalar_reduce_launch(
-        &mut self,
-        id: usize,
-        input_id: usize,
-        input_node: &DagNode,
-        ty: &TensorType,
-        kind: kernels::ReduceKind,
-    ) {
-        let total_size = Self::total_size(&input_node.output_type);
-        let block = launch::reduction_block_size(total_size);
-        let counts = launch::staged_chain_partial_counts(total_size, block);
-        let scratch_elems = launch::staged_chain_scratch_elements(total_size, block);
-        self.extra_peak_device_bytes_estimate = self
-            .extra_peak_device_bytes_estimate
-            .max(scratch_elems * Self::bytes_per_element(ty.precision));
-        let stage1_name = Self::scalar_stage1_kernel_name(kind, block);
-        let stage_n_name = Self::scalar_stage_n_kernel_name(kind, block);
-
-        self.emit_slot_wrapper(id, ty);
-        self.line("{");
-        self.indent += 1;
-        self.line(&format!("int t{id}_stage0_total = {total_size};"));
-        for (stage, &partials) in counts.iter().take_while(|&&c| c > 1).enumerate() {
-            self.line(&format!("float *t{id}_partials{stage} = NULL;"));
-            self.line(&format!(
-                "CHELIS_HIP_CHECK(hipMalloc(&t{id}_partials{stage}, {partials} * sizeof(float)));"
-            ));
-        }
-        if counts[0] > 1 {
-            self.line(&format!(
-                "void *stage0_args[] = {{ &d_t{input_id}->data, &t{id}_partials0, &t{id}_stage0_total }};"
-            ));
-            self.emit_kernel_launch(
-                &format!("mod_{stage1_name}"),
-                &stage1_name,
-                counts[0],
-                block,
-                "stage0_args",
-            );
-            for stage in 1..counts.len() {
-                let in_count = counts[stage - 1];
-                let out_count = counts[stage];
-                self.line(&format!("int t{id}_stage{stage}_total = {in_count};"));
-                let in_ptr = if stage == 1 {
-                    format!("t{id}_partials0")
-                } else {
-                    format!("t{id}_partials{}", stage - 1)
-                };
-                let out_ptr = if out_count == 1 {
-                    format!("d_t{id}->data")
-                } else {
-                    format!("t{id}_partials{stage}")
-                };
-                self.line(&format!(
-                    "void *stage{stage}_args[] = {{ &{in_ptr}, &{out_ptr}, &t{id}_stage{stage}_total }};"
-                ));
-                self.emit_kernel_launch(
-                    &format!("mod_{stage_n_name}"),
-                    &stage_n_name,
-                    out_count,
-                    block,
-                    &format!("stage{stage}_args"),
-                );
-            }
-            for stage in 0..counts.iter().take_while(|&&c| c > 1).count() {
-                self.line(&format!(
-                    "CHELIS_HIP_CHECK(hipFree(t{id}_partials{stage}));"
-                ));
-            }
-        } else {
-            self.line(&format!(
-                "void *stage0_args[] = {{ &d_t{input_id}->data, &d_t{id}->data, &t{id}_stage0_total }};"
-            ));
-            self.emit_kernel_launch(
-                &format!("mod_{stage1_name}"),
-                &stage1_name,
-                1,
-                block,
-                "stage0_args",
-            );
-        }
-        self.indent -= 1;
-        self.line("}");
     }
 
     // ------------------------------------------------------------------
@@ -2040,24 +2263,6 @@ impl HipEmitter {
             .join(", ")
     }
 
-    #[allow(dead_code)]
-    fn emit_kernel_launch(
-        &mut self,
-        module_var: &str,
-        kernel_name: &str,
-        grid: usize,
-        block: usize,
-        args_var: &str,
-    ) {
-        self.emit_kernel_launch_expr(
-            module_var,
-            kernel_name,
-            &grid.to_string(),
-            &block.to_string(),
-            args_var,
-        );
-    }
-
     fn emit_kernel_launch_expr(
         &mut self,
         module_var: &str,
@@ -2075,12 +2280,24 @@ impl HipEmitter {
         ));
     }
 
-    fn reduction_kernel_name(kind: kernels::ReduceKind, axis: usize) -> String {
+    fn reduction_kernel_name(
+        kind: kernels::ReduceKind,
+        axis: usize,
+        elem: kernels::ElemKind,
+    ) -> String {
         let op = match kind {
             kernels::ReduceKind::Sum => "sum",
             kernels::ReduceKind::Max => "maxred",
         };
-        format!("kernel_{op}_ax{axis}")
+        format!("kernel_{op}_ax{axis}_{}", elem.suffix())
+    }
+
+    /// Kernel-name helper for the four reductions the HIP backend
+    /// previously deferred to the C backend (Min / Prod / Argmax /
+    /// Argmin). `op` is the short name (e.g. "min", "argmax"); `elem` is
+    /// the operand precision.
+    fn extra_reduction_kernel_name(op: &str, axis: usize, elem: kernels::ElemKind) -> String {
+        format!("kernel_{op}_ax{axis}_{}", elem.suffix())
     }
 
     fn fused_reduction_kernel_name(id: usize, kind: kernels::ReduceKind) -> String {
@@ -2091,30 +2308,18 @@ impl HipEmitter {
         format!("kernel_{op}_{id}")
     }
 
-    #[allow(dead_code)]
-    fn scalar_stage1_kernel_name(kind: kernels::ReduceKind, block: usize) -> String {
-        let op = match kind {
-            kernels::ReduceKind::Sum => "sum",
-            kernels::ReduceKind::Max => "maxred",
-        };
-        format!("kernel_{op}_scalar_stage1_bs{block}")
-    }
-
-    #[allow(dead_code)]
-    fn scalar_stage_n_kernel_name(kind: kernels::ReduceKind, block: usize) -> String {
-        let op = match kind {
-            kernels::ReduceKind::Sum => "sum",
-            kernels::ReduceKind::Max => "maxred",
-        };
-        format!("kernel_{op}_scalar_stage_n_bs{block}")
-    }
-
+    /// Predicate: is the matmul-pattern subgraph dispatchable via the
+    /// statically-shaped hipBLAS GEMM helper? Both f32 and f64 operands
+    /// are admitted (WS-A2). Operands and result must share precision —
+    /// the WS-A0 accumulator parameter is checked at the call site.
     #[allow(dead_code)]
     fn supports_static_hipblas_matmul(dag: &Dag, info: &blas::MatmulInfo, ty: &TensorType) -> bool {
-        ty.precision == Prim::F32
-            && ty.dims.len() == 2
-            && dag.get(info.a).map(|n| n.output_type.precision) == Some(Prim::F32)
-            && dag.get(info.b).map(|n| n.output_type.precision) == Some(Prim::F32)
+        if !matches!(ty.precision, Prim::F32 | Prim::F64) || ty.dims.len() != 2 {
+            return false;
+        }
+        let prec = ty.precision;
+        dag.get(info.a).map(|n| n.output_type.precision) == Some(prec)
+            && dag.get(info.b).map(|n| n.output_type.precision) == Some(prec)
             && Self::node_is_statically_contiguous(dag, info.a)
             && Self::node_is_statically_contiguous(dag, info.b)
     }
@@ -2125,7 +2330,7 @@ impl HipEmitter {
         ty: &TensorType,
     ) -> Option<StridedBatchedMatmulPlan> {
         if spec.batch_dims.is_empty()
-            || ty.precision != Prim::F32
+            || !matches!(ty.precision, Prim::F32 | Prim::F64)
             || !spec.batch_dims.iter().all(Self::is_simple_runtime_dim)
         {
             return None;
@@ -2141,8 +2346,9 @@ impl HipEmitter {
 
         let a_node = dag.get(spec.a)?;
         let b_node = dag.get(spec.b)?;
-        if a_node.output_type.precision != Prim::F32
-            || b_node.output_type.precision != Prim::F32
+        let prec = ty.precision;
+        if a_node.output_type.precision != prec
+            || b_node.output_type.precision != prec
             || a_node.output_type.dims.len() != batch_rank + 2
             || b_node.output_type.dims.len() != batch_rank + 2
             || !Self::node_is_statically_contiguous(dag, spec.a)
@@ -2279,7 +2485,7 @@ impl HipEmitter {
     fn bytes_per_element(dtype: Prim) -> usize {
         match dtype {
             Prim::F32 | Prim::Bool | Prim::Int32 => 4,
-            Prim::Int64 => 8,
+            Prim::F64 | Prim::Int64 => 8,
             other => panic!(
                 "unsupported HIP dtype in device-memory estimate: {}",
                 other.name()
@@ -2423,11 +2629,32 @@ impl HipEmitter {
     fn dtype_macro(ty: &TensorType) -> &'static str {
         match ty.precision {
             Prim::F32 => "CHELIS_F32",
+            Prim::F64 => "CHELIS_F64",
             Prim::Bool => "CHELIS_BOOL",
             Prim::Int32 => "CHELIS_I32",
             Prim::Int64 => "CHELIS_I64",
             other => panic!(
-                "Phase 1a HIP backend only supports f32/bool/int32/int64 tensors, got {}",
+                "HIP backend supports f32/f64/bool/int32/int64 tensors today; \
+                 got `{}`. bf16/f16 land in WS-A3; i8/i16 in WS-A4.",
+                other.name()
+            ),
+        }
+    }
+
+    /// Map a tensor's precision to a [`kernels::ElemKind`] for kernel
+    /// emission. The HIP runtime stores `bool` tensors as 4-byte values
+    /// (per `chelis_gpu_dtype_size`), so kernels emit them under the
+    /// `f32` path — the cmplt convention is `1.0f`/`0.0f` written into a
+    /// `float *` GPU buffer, and Cast-to-bool likewise materializes a
+    /// 4-byte payload. f64 gets its own variant. Other precisions fall
+    /// outside the WS-A2 scope (bf16/f16 in WS-A3; i8/i16 in WS-A4) and
+    /// panic so callers see the limit immediately.
+    fn elem_kind(ty: &TensorType) -> kernels::ElemKind {
+        match ty.precision {
+            Prim::F32 | Prim::Bool => kernels::ElemKind::F32,
+            Prim::F64 => kernels::ElemKind::F64,
+            other => panic!(
+                "HIP backend kernel emission expected a floating precision, got `{}`",
                 other.name()
             ),
         }
