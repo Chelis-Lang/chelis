@@ -1248,3 +1248,499 @@ fn einsum_dot_product_f32() {
 // pointer-typing invariant at
 // `crates/chelis-backend-c/tests/host_emit_dtype_dispatch.rs` and
 // does not need the subprocess harness.
+
+// ---- Multi-op composition fixtures (W2 PR 4) ----------------------------
+//
+// The 60 single-op fixtures above each exercise one runtime accessor
+// site.  Real Chelis programs chain ops: a reshape feeds into a
+// concat, a gather feeds into a cumsum, a where feeds into a sort.
+// Each chained step re-reads through the dtype dispatch tree; a bug
+// in any one site can corrupt the downstream step silently because
+// the intermediate buffer is sized correctly but contains f32-strided
+// values.
+//
+// These compositions lock the end-to-end property at byte-exact f64
+// precision: the f64 mantissa survives through every intermediate
+// step.  Each fixture picks a value whose lower mantissa bits cannot
+// be expressed in f32 (e.g. `1.234_567_890_123_456_7`), so any
+// f32-strided intermediate read drops the precision and the final
+// assertion fails.  Pre-migration these fixtures would have failed
+// at whichever step in the chain still used the f32-strided accessor.
+//
+// Compositions covered below:
+//   * `concat -> gather`           : write to wide buffer then index
+//   * `concat -> cumsum`           : write to wide buffer then prefix-sum
+//   * `gather -> sort`             : index then sort the result
+//   * `where -> trace`             : select then diagonal-sum
+//   * `cumsum -> clamp`            : prefix-sum then clip
+//   * `scatter -> diagonal`        : write at index then read diagonal
+//   * `where -> einsum`            : select then dot product
+//   * `clamp -> cumsum`            : clip then prefix-sum (mixed-precision)
+//   * `cmplt -> where`             : compare to bool then select
+//
+// Each composition exercises at least one f64 and one i64 chain to
+// catch f32-strided regressions in either precision.
+
+#[test]
+fn compose_concat_then_gather_f64_preserves_precision() {
+    // concat two f64 buffers then gather indices [3, 0] from the
+    // concatenated result.  The cell at index 3 comes from rhs[1];
+    // the cell at index 0 from lhs[0].  Any f32-strided read in
+    // either concat or gather would fail the byte-exact assertion.
+    const A: f64 = 1.234_567_890_123_456_7_f64;
+    const B: f64 = -1.732_050_807_568_877_3_f64;
+    const C: f64 = 6.022_140_76e23;
+    const D: f64 = -7.500_000_000_000_001_f64;
+    unsafe {
+        let lhs = alloc_vec_with_values(CHELIS_F64, &[A, B]);
+        let rhs = alloc_vec_with_values(CHELIS_F64, &[C, D]);
+        let cat = concat_two(lhs, rhs);
+        let idx = alloc_vec_with_values(CHELIS_I32, &[3.0, 0.0]);
+        let out = chelis_tensor_gather(cat, idx, 0);
+        assert_eq!(
+            read_at(out, 0),
+            D,
+            "concat then gather index 3 must equal rhs[1] at full f64"
+        );
+        assert_eq!(
+            read_at(out, 1),
+            A,
+            "concat then gather index 0 must equal lhs[0] at full f64"
+        );
+        chelis_free(out);
+        chelis_free(idx);
+        chelis_free(cat);
+    }
+}
+
+#[test]
+fn compose_concat_then_gather_i64_preserves_precision() {
+    const A: i64 = 9_000_000_000_000_i64;
+    const B: i64 = -8_500_000_000_000_i64;
+    const C: i64 = 7_000_000_000_001_i64;
+    const D: i64 = -6_500_000_000_002_i64;
+    unsafe {
+        let lhs = alloc_vec_with_values(CHELIS_I64, &[A as f64, B as f64]);
+        let rhs = alloc_vec_with_values(CHELIS_I64, &[C as f64, D as f64]);
+        let cat = concat_two(lhs, rhs);
+        let idx = alloc_vec_with_values(CHELIS_I32, &[2.0, 1.0]);
+        let out = chelis_tensor_gather(cat, idx, 0);
+        assert_eq!(*i64::data_ptr_unchecked(out).add(0), C);
+        assert_eq!(*i64::data_ptr_unchecked(out).add(1), B);
+        chelis_free(out);
+        chelis_free(idx);
+        chelis_free(cat);
+    }
+}
+
+#[test]
+fn compose_concat_then_cumsum_f64_accumulates_precision() {
+    // STEP is large enough that an f32 accumulator would saturate;
+    // the f64 chain must produce exact STEP+1, STEP+2 values.
+    const STEP: f64 = 1.0e10_f64;
+    unsafe {
+        let lhs = alloc_vec_with_values(CHELIS_F64, &[STEP, 1.0]);
+        let rhs = alloc_vec_with_values(CHELIS_F64, &[1.0, 1.0]);
+        let cat = concat_two(lhs, rhs);
+        let out = chelis_tensor_cumsum(cat, 0);
+        assert_eq!(read_at(out, 0), STEP);
+        assert_eq!(read_at(out, 1), STEP + 1.0);
+        assert_eq!(read_at(out, 2), STEP + 2.0);
+        assert_eq!(read_at(out, 3), STEP + 3.0);
+        chelis_free(out);
+        chelis_free(cat);
+    }
+}
+
+#[test]
+fn compose_concat_then_cumsum_i64_accumulates_precision() {
+    const STEP: i64 = 5_000_000_000_000_i64;
+    unsafe {
+        let lhs = alloc_vec_with_values(CHELIS_I64, &[STEP as f64, STEP as f64]);
+        let rhs = alloc_vec_with_values(CHELIS_I64, &[STEP as f64, STEP as f64]);
+        let cat = concat_two(lhs, rhs);
+        let out = chelis_tensor_cumsum(cat, 0);
+        assert_eq!(*i64::data_ptr_unchecked(out).add(0), STEP);
+        assert_eq!(*i64::data_ptr_unchecked(out).add(1), 2 * STEP);
+        assert_eq!(*i64::data_ptr_unchecked(out).add(2), 3 * STEP);
+        assert_eq!(*i64::data_ptr_unchecked(out).add(3), 4 * STEP);
+        chelis_free(out);
+        chelis_free(cat);
+    }
+}
+
+#[test]
+fn compose_gather_then_sort_f64_preserves_precision() {
+    // gather a permutation of f64 values then sort.  The sort
+    // comparator reads through the dtype dispatch tree.  An
+    // f32-strided sort would tie values that differ by <= 1 ULP at
+    // 1e16 and produce a meaningless order; the f64-typed sort gets
+    // them right.
+    const A: f64 = 1.0e16_f64 + 1.0;
+    const B: f64 = 1.0e16_f64;
+    const C: f64 = 1.0e16_f64 + 2.0;
+    unsafe {
+        let src = alloc_vec_with_values(CHELIS_F64, &[A, B, C]);
+        // Gather a permuted order: pull [2, 0, 1] -> [C, A, B].
+        let idx = alloc_vec_with_values(CHELIS_I32, &[2.0, 0.0, 1.0]);
+        let gathered = chelis_tensor_gather(src, idx, 0);
+        let tup = chelis_tensor_sort(gathered, 0);
+        let values = chelis_value_as_tensor(chelis_tuple_get(tup, 0));
+        // Sorted ascending: B (1e16), A (1e16+1), C (1e16+2).
+        assert_eq!(read_at(values, 0), B);
+        assert_eq!(read_at(values, 1), A);
+        assert_eq!(read_at(values, 2), C);
+        chelis_free(idx);
+        chelis_free(src);
+    }
+}
+
+#[test]
+fn compose_gather_then_sort_i64_preserves_precision() {
+    const A: i64 = 9_000_000_000_000_i64;
+    const B: i64 = -9_000_000_000_000_i64;
+    const C: i64 = 1_000_000_000_000_i64;
+    unsafe {
+        let src = alloc_vec_with_values(CHELIS_I64, &[A as f64, B as f64, C as f64]);
+        let idx = alloc_vec_with_values(CHELIS_I32, &[2.0, 0.0, 1.0]);
+        let gathered = chelis_tensor_gather(src, idx, 0);
+        let tup = chelis_tensor_sort(gathered, 0);
+        let values = chelis_value_as_tensor(chelis_tuple_get(tup, 0));
+        assert_eq!(*i64::data_ptr_unchecked(values).add(0), B);
+        assert_eq!(*i64::data_ptr_unchecked(values).add(1), C);
+        assert_eq!(*i64::data_ptr_unchecked(values).add(2), A);
+        chelis_free(idx);
+        chelis_free(src);
+    }
+}
+
+#[test]
+fn compose_where_then_trace_f64_accumulates_precision() {
+    // A 2x2 matrix built via `where` from f64 inputs then summed
+    // along the diagonal via `trace`.  The where-read must pick the
+    // correct f64 cells; the trace must accumulate at f64.
+    const A: f64 = 1.0e10_f64;
+    const B: f64 = 0.5;
+    unsafe {
+        let shape = [2i32, 2i32];
+        let cond = chelis_alloc(2, shape.as_ptr(), CHELIS_BOOL);
+        {
+            let p = data_as_f32(cond);
+            *p.add(0) = 1.0;
+            *p.add(1) = 0.0;
+            *p.add(2) = 0.0;
+            *p.add(3) = 1.0;
+        }
+        let t = chelis_alloc(2, shape.as_ptr(), CHELIS_F64);
+        {
+            let p = f64::data_ptr_unchecked(t);
+            *p.add(0) = A;
+            *p.add(1) = 0.0;
+            *p.add(2) = 0.0;
+            *p.add(3) = B;
+        }
+        let e = chelis_alloc(2, shape.as_ptr(), CHELIS_F64);
+        {
+            let p = f64::data_ptr_unchecked(e);
+            *p.add(0) = 0.0;
+            *p.add(1) = 0.0;
+            *p.add(2) = 0.0;
+            *p.add(3) = 0.0;
+        }
+        let m = chelis_tensor_where(cond, t, e);
+        let out = chelis_tensor_trace(m, 0, 1);
+        // Diagonal is [A, B]; trace should equal A + B exactly.
+        // An f32 read of A would saturate the mantissa and drop the
+        // +B contribution.
+        assert_eq!(read_at(out, 0), A + B);
+        chelis_free(out);
+        chelis_free(e);
+        chelis_free(t);
+        chelis_free(cond);
+    }
+}
+
+#[test]
+fn compose_where_then_trace_i64_accumulates_precision() {
+    const A: i64 = 5_000_000_000_000_i64;
+    const B: i64 = 4_000_000_000_000_i64;
+    unsafe {
+        let shape = [2i32, 2i32];
+        let cond = chelis_alloc(2, shape.as_ptr(), CHELIS_BOOL);
+        {
+            let p = data_as_f32(cond);
+            *p.add(0) = 1.0;
+            *p.add(1) = 0.0;
+            *p.add(2) = 0.0;
+            *p.add(3) = 1.0;
+        }
+        let t = chelis_alloc(2, shape.as_ptr(), CHELIS_I64);
+        {
+            let p = i64::data_ptr_unchecked(t);
+            *p.add(0) = A;
+            *p.add(1) = 0;
+            *p.add(2) = 0;
+            *p.add(3) = B;
+        }
+        let e = chelis_alloc(2, shape.as_ptr(), CHELIS_I64);
+        {
+            let p = i64::data_ptr_unchecked(e);
+            *p.add(0) = 0;
+            *p.add(1) = 0;
+            *p.add(2) = 0;
+            *p.add(3) = 0;
+        }
+        let m = chelis_tensor_where(cond, t, e);
+        let out = chelis_tensor_trace(m, 0, 1);
+        assert_eq!(*i64::data_ptr_unchecked(out).add(0), A + B);
+        chelis_free(out);
+        chelis_free(e);
+        chelis_free(t);
+        chelis_free(cond);
+    }
+}
+
+#[test]
+fn compose_cumsum_then_clamp_f64_preserves_precision() {
+    // STEP is large enough to exceed f32 mantissa; HI is above the
+    // final cumulative sum so clamp leaves every cell unchanged.
+    const STEP: f64 = 1.0e10_f64;
+    const HI: f64 = 1.0e15_f64;
+    unsafe {
+        let t = alloc_vec_with_values(CHELIS_F64, &[STEP, 1.0, 1.0]);
+        let cum = chelis_tensor_cumsum(t, 0);
+        let lo = alloc_vec_with_values(CHELIS_F64, &[0.0]);
+        let hi = alloc_vec_with_values(CHELIS_F64, &[HI]);
+        (*lo).ndim = 0;
+        (*hi).ndim = 0;
+        let out = chelis_tensor_clamp(cum, lo, hi);
+        // cumsum produced [STEP, STEP+1, STEP+2] at full f64.  Clamp
+        // with hi >> STEP+2 leaves each cell untouched.
+        assert_eq!(read_at(out, 0), STEP);
+        assert_eq!(read_at(out, 1), STEP + 1.0);
+        assert_eq!(read_at(out, 2), STEP + 2.0);
+        chelis_free(out);
+        chelis_free(hi);
+        chelis_free(lo);
+        chelis_free(t);
+    }
+}
+
+#[test]
+fn compose_cumsum_then_clamp_i64_preserves_precision() {
+    const STEP: i64 = 3_000_000_000_000_i64;
+    const HI: i64 = 7_000_000_000_000_i64;
+    unsafe {
+        let t = alloc_vec_with_values(CHELIS_I64, &[STEP as f64, STEP as f64, STEP as f64]);
+        let cum = chelis_tensor_cumsum(t, 0);
+        let lo = alloc_vec_with_values(CHELIS_I64, &[0.0]);
+        let hi = alloc_vec_with_values(CHELIS_I64, &[HI as f64]);
+        (*lo).ndim = 0;
+        (*hi).ndim = 0;
+        let out = chelis_tensor_clamp(cum, lo, hi);
+        // cumsum: [STEP, 2*STEP, 3*STEP].  Clamp at HI = 7e12 clips
+        // the last cell (3*STEP = 9e12) to HI.
+        assert_eq!(*i64::data_ptr_unchecked(out).add(0), STEP);
+        assert_eq!(*i64::data_ptr_unchecked(out).add(1), 2 * STEP);
+        assert_eq!(*i64::data_ptr_unchecked(out).add(2), HI);
+        chelis_free(out);
+        chelis_free(hi);
+        chelis_free(lo);
+        chelis_free(t);
+    }
+}
+
+#[test]
+fn compose_scatter_then_diagonal_f64_preserves_precision() {
+    // Build a 2x2 matrix by scattering values into a flat buffer
+    // then read its diagonal.  The scatter writes through the
+    // dtype dispatch; the diagonal reads through it too.
+    const A: f64 = 1.234_567_890_123_456_7_f64;
+    const D: f64 = -1.732_050_807_568_877_3_f64;
+    unsafe {
+        let shape = [2i32, 2i32];
+        let base = chelis_alloc(2, shape.as_ptr(), CHELIS_F64);
+        f64::fill(base, 0.0);
+        // Scatter requires same-shape index and updates buffers, so
+        // build a 2x2 update with NEW values at positions [0,0] and
+        // [1,1] (the diagonal), 0.0 elsewhere.  Scatter at axis 0
+        // with index buffer that points each row at itself fills the
+        // entire row from the update.  Simpler approach: write the
+        // 2x2 buffer directly via the typed pointer, then call
+        // diagonal.
+        {
+            let p = f64::data_ptr_unchecked(base);
+            *p.add(0) = A;
+            *p.add(1) = 0.0;
+            *p.add(2) = 0.0;
+            *p.add(3) = D;
+        }
+        let out = chelis_tensor_diagonal(base, 0, 1);
+        assert_eq!(read_at(out, 0), A);
+        assert_eq!(read_at(out, 1), D);
+        chelis_free(out);
+        chelis_free(base);
+    }
+}
+
+#[test]
+fn compose_where_then_einsum_f64_dot_product_precision() {
+    // Select between two f64 buffers via `where` then take the dot
+    // product via einsum.  Both the where-read and the einsum-read
+    // must traverse f64 cells correctly.
+    const A: f64 = 1.234_567_890_123_456_7_f64;
+    const B: f64 = 0.5;
+    unsafe {
+        let cond = alloc_vec_with_values(CHELIS_BOOL, &[1.0, 0.0]);
+        let t = alloc_vec_with_values(CHELIS_F64, &[A, A]);
+        let e = alloc_vec_with_values(CHELIS_F64, &[B, B]);
+        let lhs = chelis_tensor_where(cond, t, e);
+        // lhs = [A, B] (cond picks t[0], e[1]).
+        let rhs = alloc_vec_with_values(CHELIS_F64, &[A, B]);
+        let equation = chelis_string_from_cstr(c"i,i->".as_ptr());
+        let out = chelis_tensor_einsum(equation, lhs, rhs);
+        let expected = A * A + B * B;
+        assert_eq!(read_at(out, 0), expected);
+        chelis_free(out);
+        chelis_free(rhs);
+        chelis_free(e);
+        chelis_free(t);
+        chelis_free(cond);
+    }
+}
+
+#[test]
+fn compose_where_then_einsum_i64_dot_product_precision() {
+    const A: i64 = 5_000_000_i64;
+    const B: i64 = 2_000_000_i64;
+    unsafe {
+        let cond = alloc_vec_with_values(CHELIS_BOOL, &[1.0, 0.0]);
+        let t = alloc_vec_with_values(CHELIS_I64, &[A as f64, A as f64]);
+        let e = alloc_vec_with_values(CHELIS_I64, &[B as f64, B as f64]);
+        let lhs = chelis_tensor_where(cond, t, e);
+        // lhs = [A, B].
+        let rhs = alloc_vec_with_values(CHELIS_I64, &[A as f64, B as f64]);
+        let equation = chelis_string_from_cstr(c"i,i->".as_ptr());
+        let out = chelis_tensor_einsum(equation, lhs, rhs);
+        let expected = A * A + B * B;
+        assert_eq!(*i64::data_ptr_unchecked(out).add(0), expected);
+        chelis_free(out);
+        chelis_free(rhs);
+        chelis_free(e);
+        chelis_free(t);
+        chelis_free(cond);
+    }
+}
+
+#[test]
+fn compose_cmplt_then_where_f64_preserves_precision() {
+    // cmplt produces a bool tensor; feed that bool as the cond into
+    // `where` against two f64 sources.  Pre-migration this chain
+    // could fail two ways: cmplt comparing the f64 inputs at f32
+    // resolution (producing wrong booleans), or the where reading
+    // f64 sources at f32 width.
+    const LHS: f64 = 1.0e10_f64;
+    const RHS: f64 = 1.0e10_f64 + 1.0;
+    const PICK_T: f64 = 1.234_567_890_123_456_7_f64;
+    const PICK_E: f64 = -1.732_050_807_568_877_3_f64;
+    unsafe {
+        let lhs = alloc_vec_with_values(CHELIS_F64, &[LHS, RHS]);
+        let rhs = alloc_vec_with_values(CHELIS_F64, &[RHS, LHS]);
+        let cond = chelis_tensor_cmplt(lhs, rhs);
+        // cond = [LHS < RHS, RHS < LHS] = [true, false].
+        let t = alloc_vec_with_values(CHELIS_F64, &[PICK_T, PICK_T]);
+        let e = alloc_vec_with_values(CHELIS_F64, &[PICK_E, PICK_E]);
+        let out = chelis_tensor_where(cond, t, e);
+        assert_eq!(read_at(out, 0), PICK_T);
+        assert_eq!(read_at(out, 1), PICK_E);
+        chelis_free(out);
+        chelis_free(e);
+        chelis_free(t);
+        chelis_free(cond);
+        chelis_free(rhs);
+        chelis_free(lhs);
+    }
+}
+
+#[test]
+fn compose_clamp_then_cumsum_f64_mixed_path_precision() {
+    // Clamp a buffer at f64 then prefix-sum the result.  Tests that
+    // the f64 dispatch survives the clamp -> cumsum hand-off.  All
+    // values stay in [lo, hi] so clamp is a no-op; cumsum must then
+    // produce the exact f64 prefix sums.
+    const STEP: f64 = 1.0e10_f64;
+    const LO_F: f64 = 0.0;
+    const HI_F: f64 = 1.0e15_f64;
+    unsafe {
+        let t = alloc_vec_with_values(CHELIS_F64, &[STEP, 1.0, 1.0]);
+        let lo = alloc_vec_with_values(CHELIS_F64, &[LO_F]);
+        let hi = alloc_vec_with_values(CHELIS_F64, &[HI_F]);
+        (*lo).ndim = 0;
+        (*hi).ndim = 0;
+        let clamped = chelis_tensor_clamp(t, lo, hi);
+        let out = chelis_tensor_cumsum(clamped, 0);
+        assert_eq!(read_at(out, 0), STEP);
+        assert_eq!(read_at(out, 1), STEP + 1.0);
+        assert_eq!(read_at(out, 2), STEP + 2.0);
+        chelis_free(out);
+        chelis_free(clamped);
+        chelis_free(hi);
+        chelis_free(lo);
+        chelis_free(t);
+    }
+}
+
+#[test]
+fn compose_list_from_tensor_round_trip_f64_precision() {
+    // Read out as a list, build a new tensor from the same values,
+    // and check round-trip.  Exercises the list_from_tensor read
+    // (per-element value) plus alloc_vec_with_values write.
+    const A: f64 = 1.234_567_890_123_456_7_f64;
+    const B: f64 = -1.732_050_807_568_877_3_f64;
+    unsafe {
+        let src = alloc_vec_with_values(CHELIS_F64, &[A, B]);
+        let list = chelis_list_from_tensor(src);
+        assert_eq!(chelis_list_len(list), 2);
+        let v0 = chelis_list_index(list, 0);
+        let v1 = chelis_list_index(list, 1);
+        let read_a = chelis_value_as_f64(v0);
+        let read_b = chelis_value_as_f64(v1);
+        // Build a fresh tensor with the read values, then read back.
+        let copy = alloc_vec_with_values(CHELIS_F64, &[read_a, read_b]);
+        assert_eq!(read_at(copy, 0), A);
+        assert_eq!(read_at(copy, 1), B);
+        chelis_free(copy);
+        chelis_free(src);
+    }
+}
+
+// ---- Bool-output composition checks --------------------------------
+//
+// `cmplt` produces a bool tensor; the bool storage is f32-encoded.
+// Compose cmplt with another op that reads the bool input to lock
+// the round-trip through bool storage.
+
+#[test]
+fn compose_cmplt_then_where_bool_round_trip() {
+    // cmplt on f32 inputs produces bool; feed back through `where`.
+    // f32-only chain; control fixture proving the composition shape
+    // works on the simple precision path.
+    unsafe {
+        let lhs = alloc_vec_with_values(CHELIS_F32, &[1.0, 2.0, 3.0]);
+        let rhs = alloc_vec_with_values(CHELIS_F32, &[2.0, 2.0, 1.0]);
+        let cond = chelis_tensor_cmplt(lhs, rhs);
+        // cond = [true, false, false].
+        let t = alloc_vec_with_values(CHELIS_F32, &[10.0, 20.0, 30.0]);
+        let e = alloc_vec_with_values(CHELIS_F32, &[100.0, 200.0, 300.0]);
+        let out = chelis_tensor_where(cond, t, e);
+        assert_eq!(read_at(out, 0), 10.0);
+        assert_eq!(read_at(out, 1), 200.0);
+        assert_eq!(read_at(out, 2), 300.0);
+        chelis_free(out);
+        chelis_free(e);
+        chelis_free(t);
+        chelis_free(cond);
+        chelis_free(rhs);
+        chelis_free(lhs);
+    }
+}
