@@ -522,6 +522,37 @@ impl<'a> EvalContext<'a> {
                     captured_env: self.bindings.clone(),
                 })
             }
+            Some("jit") => {
+                // `spec/03-deep-syntax.md` §2.7: `jit` is a compilation
+                // trigger and a semantic no-op at evaluation. The host
+                // runtime evaluates the inner expression and returns its
+                // value, mirroring `lower_jit` in
+                // `crates/chelis-ir/src/lower.rs` and the IR DAG behavior.
+                self.eval_expr(
+                    children(list)
+                        .first()
+                        .ok_or_else(|| "jit missing value".to_string())?,
+                )
+            }
+            Some("par") => {
+                // `spec/03-deep-syntax.md` §2.3: `par` v1 is sequential
+                // composition; evaluate each child in order and return the
+                // value of the last child. Mirrors `lower_par` in
+                // `crates/chelis-ir/src/lower.rs`. Intermediate children
+                // are evaluated for their side effects (any
+                // `handle-effect` / `realize` / IO primitive in a child
+                // routes through its own host arm). If `par` has zero
+                // children, the spec doesn't define a v1 value; we return
+                // an error rather than synthesizing a zero default, since
+                // the parser/check layers should not have admitted an
+                // empty par body.
+                let kids = children(list);
+                let mut last: Option<RuntimeValue> = None;
+                for child in kids {
+                    last = Some(self.eval_expr(child)?);
+                }
+                last.ok_or_else(|| "par has no children to evaluate".to_string())
+            }
             Some("handle-effect") => {
                 let kids = children(list);
                 let effect = get_meta(list)
