@@ -7,10 +7,35 @@ use serde::{Deserialize, Serialize};
 use crate::CheckedProgram;
 use crate::errors::{CheckError, CheckErrorKind};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LinearityInfo {
     reusable_inputs_by_offset: HashMap<usize, usize>,
+    /// Linearity violations surfaced as warnings during a
+    /// deprecation window (W1 PR 1: tuple-destructure consumes + the
+    /// aliased-consume bypass that compounds with them).  Mirrors the
+    /// F3 PR 1 plumbing introduced in PR #65: violations route through
+    /// `warnings` while the in-tree corpus is being cleaned up;
+    /// the W2-cascade PR flips routing back to `errors`.  Skipped
+    /// from serde because `CheckError` does not derive
+    /// Serialize/Deserialize; rehydrating a `CheckedProgram` from
+    /// JSON loses warning detail, which is acceptable because
+    /// warnings are only consumed by the live CLI path that produced
+    /// them.
+    #[serde(skip)]
+    warnings: Vec<CheckError>,
 }
+
+impl PartialEq for LinearityInfo {
+    fn eq(&self, other: &Self) -> bool {
+        // `warnings` is intentionally excluded; it is a transient
+        // diagnostic carrier and not part of the structural identity
+        // of `LinearityInfo`.  The pre-warning shape compared only
+        // `reusable_inputs_by_offset`; this preserves that.
+        self.reusable_inputs_by_offset == other.reusable_inputs_by_offset
+    }
+}
+
+impl Eq for LinearityInfo {}
 
 impl LinearityInfo {
     pub fn reusable_input_for_span(&self, span: Span) -> Option<usize> {
@@ -22,6 +47,20 @@ impl LinearityInfo {
             .entry(span.offset)
             .or_insert(input_index);
     }
+
+    /// Linearity violations surfaced as warnings during a
+    /// deprecation window.  W1 PR 1 routes tuple-destructure consumes
+    /// and the aliased-consume bypass through this channel so the
+    /// existing in-tree corpus has time to be cleaned up; the
+    /// W2-cascade PR flips the routing back to
+    /// `Checker::push_diagnostic -> errors`.
+    pub fn warnings(&self) -> &[CheckError] {
+        &self.warnings
+    }
+
+    fn push_warning(&mut self, warning: CheckError) {
+        self.warnings.push(warning);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -30,15 +69,53 @@ enum BindingState {
     Consumed(ConsumeSite),
 }
 
+/// Discrimination axis on a consume site (Linearity-F1).
+///
+/// Replaces the string-prefix check on `ConsumeSite::description`
+/// (formerly at `read_or_error`) with a typed field. Phase 0 spec
+/// lock (`docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 1)
+/// pins this as two variants; tuple-destructure tmp bindings are
+/// handled as `Aliasing` (for the `let __chelis_tmp = (var ...)`
+/// shape) or `Structural` (for the `(tuple-get ...)` reads) by the
+/// same rules as any other consume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumeKind {
+    /// `let alias = x` and similar var-RHS bindings.  At the IR
+    /// level `lower_let` maps `alias` to the same NodeId as `x`,
+    /// so the value is structurally shared rather than destroyed.
+    /// Later borrow-reads of `x` must succeed.  See
+    /// `spec/design/implicit_linearity.md` "Copy Insertion" and
+    /// "Borrows do not count as fan-out".
+    Aliasing,
+    /// Every other consume site: realize / drop / store, app-arg,
+    /// pipe-stage, closure capture, match scrutinee, etc.  The
+    /// value is gone after this point and later borrow-reads are
+    /// `UseAfterConsume`.
+    Structural,
+}
+
 #[derive(Debug, Clone)]
 struct ConsumeSite {
     description: String,
+    kind: ConsumeKind,
 }
 
 #[derive(Debug, Clone, Default)]
 struct LinearScope {
     bindings: HashMap<String, Vec<BindingState>>,
     types: HashMap<String, Vec<Option<Expr>>>,
+    /// Alias chain map (Linearity-AliasedConsume-F1).  When
+    /// `check_let` records a `let y = (var x)` binding as an
+    /// `Aliasing` consume, it also pushes `x` onto the alias stack
+    /// at `aliases["y"]`.  When `consume_var_expr` resolves a
+    /// `Structural` consume on `y` it walks the alias chain via
+    /// `resolve_alias_chain` and forwards the consume to the
+    /// underlying source name's scope entry.  Multi-level chains
+    /// (`let z = y; let y = x`) are walked iteratively until the
+    /// resolved name has no alias.  Stacks parallel `bindings` so
+    /// scoping (`pop`) keeps the alias map consistent with the
+    /// shadowing semantics already in place for names and types.
+    aliases: HashMap<String, Vec<Option<String>>>,
 }
 
 impl LinearScope {
@@ -50,7 +127,12 @@ impl LinearScope {
             .push(BindingState::Live {
                 borrow_sites: Vec::new(),
             });
-        self.types.entry(name).or_default().push(ty);
+        self.types.entry(name.clone()).or_default().push(ty);
+        // Push a `None` onto the alias stack so a re-let of `name`
+        // with a non-var RHS shadows any prior alias.  Callers that
+        // record an alias must follow with `record_alias` to flip
+        // the top of the stack from `None` to `Some(source)`.
+        self.aliases.entry(name).or_default().push(None);
     }
 
     fn pop(&mut self, name: &str) -> Option<(Option<Expr>, BindingState)> {
@@ -73,6 +155,13 @@ impl LinearScope {
         } else {
             None
         };
+
+        if let Some(stack) = self.aliases.get_mut(name) {
+            stack.pop();
+            if stack.is_empty() {
+                self.aliases.remove(name);
+            }
+        }
 
         state.map(|state| (ty.flatten(), state))
     }
@@ -107,21 +196,83 @@ impl LinearScope {
     fn visible_names(&self) -> Vec<String> {
         self.bindings.keys().cloned().collect()
     }
+
+    /// Record that the top-of-stack binding for `alias` is an
+    /// aliasing copy of `source`.  Must be called after `declare`
+    /// for `alias` (the alias stack carries a `None` at the top
+    /// after `declare`; this flips it to `Some(source)`).  Used by
+    /// the `Aliasing` consume producers in `check_let` and
+    /// `check_def_body` per Linearity-AliasedConsume-F1.
+    fn record_alias(&mut self, alias: &str, source: &str) {
+        if let Some(stack) = self.aliases.get_mut(alias)
+            && let Some(top) = stack.last_mut()
+        {
+            *top = Some(source.to_string());
+        }
+    }
+
+    /// Walk the alias chain for `name` to the underlying non-alias
+    /// source.  Returns `None` if `name` is not an alias today;
+    /// returns `Some(source)` if `name` aliases `source` (possibly
+    /// through one or more intermediate names).  Bounded by chain
+    /// length, which is bounded by source-program nesting depth.
+    ///
+    /// Cycles are guarded against by a visited set; an alias chain
+    /// that closes a cycle is treated as terminating at the first
+    /// re-visited node (defensive guard; the desugarer should never
+    /// produce a cycle in practice).
+    fn resolve_alias_chain(&self, name: &str) -> Option<String> {
+        let mut current = name.to_string();
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut walked = false;
+        loop {
+            if !visited.insert(current.clone()) {
+                return None;
+            }
+            match self
+                .aliases
+                .get(&current)
+                .and_then(|stack| stack.last())
+                .and_then(|entry| entry.as_ref())
+            {
+                Some(source) => {
+                    current = source.clone();
+                    walked = true;
+                }
+                None => return if walked { Some(current) } else { None },
+            }
+        }
+    }
 }
 
 struct Checker {
     errors: Vec<CheckError>,
     info: LinearityInfo,
     top_level_types: HashMap<String, Expr>,
+    /// W1 PR 1 destructure-cascade warning mode (Linearity-F2).
+    /// When `> 0`, diagnostics raised during the current walk route
+    /// through `info.warnings` instead of `errors`.  Incremented by
+    /// `check_let` when entering a binding whose value is a
+    /// destructure-synthesized tmp (tagged by the desugarer with
+    /// `destructure: true` in the bind's meta-map) and decremented
+    /// on return.  The W2-cascade PR will remove the field and
+    /// unify routing once the in-tree corpus is clean.
+    destructure_warning_depth: usize,
 }
 
 impl Checker {
     fn push_diagnostic(&mut self, error: CheckError) {
-        // Linearity-F3 PR 2: all diagnostics — including those raised
-        // during module-recursive walks — route through `errors`. The
-        // PR 1 warning-mode plumbing has been removed now that the
-        // in-repo corpus is clean.
-        self.errors.push(error);
+        // Linearity-F3 PR 2: most diagnostics route through `errors`.
+        // W1 PR 1 reintroduces a narrow warning channel for the
+        // tuple-destructure cascade; the surfaced violations route
+        // through `info.warnings` during a deprecation window so the
+        // existing in-tree corpus has time to be cleaned up.  The
+        // W2-cascade PR flips routing back to `errors`.
+        if self.destructure_warning_depth > 0 {
+            self.info.push_warning(error);
+        } else {
+            self.errors.push(error);
+        }
     }
 }
 
@@ -164,6 +315,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: program.type_env().clone(),
+        destructure_warning_depth: 0,
     };
     let mut scope = LinearScope::default();
 
@@ -238,6 +390,7 @@ pub fn check_linearity_with_context(
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
+        destructure_warning_depth: 0,
     };
 
     let mut scope = LinearScope::default();
@@ -332,8 +485,12 @@ impl Checker {
                                 "binding `{name}` at offset {}",
                                 body.span().offset
                             ),
+                            kind: ConsumeKind::Aliasing,
                         },
                     );
+                    if let Some(source) = var_name(body) {
+                        scope.record_alias(name, source);
+                    }
                 } else {
                     self.check_expr(body, scope);
                 }
@@ -365,6 +522,17 @@ impl Checker {
                 Some("fn") => self.check_fn(expr, list, scope),
                 Some("if") => self.check_if(list, scope),
                 Some("match") => self.check_match(list, scope),
+                // `tuple-get(t, i)` is a read of `t`, not a
+                // consume.  The implicit-linearity IR pass inserts a
+                // Copy where needed.  Pre Linearity-F2 the
+                // distinction was invisible because destructure tmp
+                // bindings were untyped and the consume was skipped
+                // via `expr_is_owned_linear`; now that the type
+                // metadata threads onto the tmps, `(var __chelis_tmpN)`
+                // would otherwise consume through `generic_site` and
+                // forward (via the alias chain) to the underlying
+                // tuple source.  Treat the var argument as a borrow.
+                Some("tuple-get") => self.check_tuple_get(list, scope),
                 _ => {
                     for child in children(list) {
                         self.check_expr(child, scope);
@@ -383,6 +551,29 @@ impl Checker {
             } else {
                 self.check_expr(child, scope);
             }
+        }
+    }
+
+    /// `tuple-get(t, i)` reads the i-th element of `t` without
+    /// consuming `t`.  Treat the var argument as a borrow read so
+    /// the surrounding destructure desugar of `let (a, b) = pair`
+    /// (which produces two tuple-gets on the same source tmp) does
+    /// not double-consume.  Linearity-F2: this method is added here
+    /// because the destructure type-metadata threading made the
+    /// previously-untyped tmp consumes visible.
+    fn check_tuple_get(&mut self, list: &List, scope: &mut LinearScope) {
+        let kids = children(list);
+        if let Some(target) = kids.first() {
+            if is_var_expr(target) && self.expr_is_owned_linear(target, scope) {
+                self.read_var_expr(target, scope);
+            } else {
+                self.check_expr(target, scope);
+            }
+        }
+        // Walk remaining children (the index lit) so any nested
+        // expressions inside the index are still checked.
+        for child in kids.iter().skip(1) {
+            self.check_expr(child, scope);
         }
     }
 
@@ -466,6 +657,20 @@ impl Checker {
             return;
         }
         let mut pushed = Vec::new();
+        // Linearity-F2 destructure-cascade warning mode: when any
+        // bind in this let chain is the desugarer-synthesized
+        // destructure intermediate (`__chelis_tmp_N`, tagged with
+        // `destructure: true` in the bind's meta-map), surfaced
+        // linearity violations route through `LinearityInfo::warnings`
+        // for the duration of the body walk.  Mirrors the F3 PR 1
+        // deprecation-window pattern.
+        let bind_introduces_destructure = match &kids[0] {
+            Expr::List(bind_list, _) => bind_introduces_destructure_tmp(bind_list),
+            _ => false,
+        };
+        if bind_introduces_destructure {
+            self.destructure_warning_depth += 1;
+        }
         if let Expr::List(bind_list, _) = &kids[0] {
             let bind_kids = children(bind_list);
             let mut index = 0;
@@ -475,7 +680,9 @@ impl Checker {
                     continue;
                 };
                 let value = &bind_kids[index + 1];
+                let mut alias_source: Option<String> = None;
                 if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
+                    alias_source = var_name(value).map(str::to_string);
                     self.consume_var_expr(
                         value,
                         scope,
@@ -484,6 +691,7 @@ impl Checker {
                                 "binding `{name}` at offset {}",
                                 value.span().offset
                             ),
+                            kind: ConsumeKind::Aliasing,
                         },
                     );
                 } else if matches!(get_tag_expr(value), Some("borrow")) {
@@ -492,6 +700,9 @@ impl Checker {
                     self.check_expr(value, scope);
                 }
                 scope.declare(name, self.expr_type(value, scope).cloned());
+                if let Some(source) = alias_source {
+                    scope.record_alias(name, &source);
+                }
                 pushed.push(name.to_string());
                 index += 2;
             }
@@ -499,6 +710,9 @@ impl Checker {
         self.check_expr(&kids[1], scope);
         for name in pushed.into_iter().rev() {
             self.pop_and_check(scope, &name, expr_scope_end(&kids[1]));
+        }
+        if bind_introduces_destructure {
+            self.destructure_warning_depth -= 1;
         }
     }
 
@@ -518,6 +732,7 @@ impl Checker {
                     &name,
                     ConsumeSite {
                         description: format!("closure capture at offset {}", expr.span().offset),
+                        kind: ConsumeKind::Structural,
                     },
                 );
                 inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
@@ -574,6 +789,7 @@ impl Checker {
                 scope,
                 ConsumeSite {
                     description: format!("match scrutinee at offset {}", kids[0].span().offset),
+                    kind: ConsumeKind::Structural,
                 },
             );
         } else {
@@ -658,11 +874,25 @@ impl Checker {
         if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
-        match scope.top(name) {
-            Some(BindingState::Live { .. }) => scope.consume(name, site),
+        // Linearity-AliasedConsume-F1: a `Structural` consume on an
+        // aliased name forwards to the underlying source name's
+        // scope entry, so a later borrow of the source trips
+        // `read_or_error` correctly.  `Aliasing` consumes do not
+        // forward; they stay pinned to the alias's own entry because
+        // the alias bind itself is what introduces the aliasing
+        // relationship in the IR.
+        let target: String = match site.kind {
+            ConsumeKind::Structural => scope
+                .resolve_alias_chain(name)
+                .unwrap_or_else(|| name.to_string()),
+            ConsumeKind::Aliasing => name.to_string(),
+        };
+        match scope.top(&target) {
+            Some(BindingState::Live { .. }) => scope.consume(&target, site),
             Some(BindingState::Consumed(consumed_at))
-                if consumed_at.description.contains("closure capture")
-                    || consumed_at.description.contains("match scrutinee") =>
+                if matches!(consumed_at.kind, ConsumeKind::Structural)
+                    && (consumed_at.description.contains("closure capture")
+                        || consumed_at.description.contains("match scrutinee")) =>
             {
                 let description = consumed_at.description.clone();
                 self.push_diagnostic(CheckError::new(
@@ -670,8 +900,7 @@ impl Checker {
                     with_macro_provenance(
                         expr,
                         format!(
-                            "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
-                            description,
+                            "variable `{target}` was already consumed by {description}; later use at offset {} is invalid",
                             expr.span().offset
                         ),
                     ),
@@ -680,10 +909,49 @@ impl Checker {
                     )],
                 ));
             }
+            Some(BindingState::Consumed(consumed_at))
+                if matches!(consumed_at.kind, ConsumeKind::Aliasing)
+                    && matches!(site.kind, ConsumeKind::Structural) =>
+            {
+                // The target was previously aliased (e.g. `let y = x`
+                // recorded an `Aliasing` consume on `x`); a later
+                // `Structural` consume forwarded through the alias
+                // chain replaces the aliasing record so subsequent
+                // borrows of the target trip `read_or_error`.
+                scope.consume(&target, site);
+            }
+            Some(BindingState::Consumed(consumed_at)) if self.destructure_warning_depth > 0 => {
+                // Linearity-F2 deprecation window.  Inside a
+                // destructure-let scope, a consume-after-consume
+                // surfaces as a warning so the in-tree corpus can
+                // be cleaned up before the W2-cascade PR flips this
+                // to an error.  Outside the destructure scope the
+                // implicit-linearity pass inserts a Copy for
+                // consuming fan-out, matching the spec's
+                // "Copy Insertion" semantics; per the existing
+                // baseline we do not flag this shape.
+                let description = consumed_at.description.clone();
+                // Use the user-facing alias name in the message; the
+                // forwarding through the alias chain is an internal
+                // detail.
+                self.push_diagnostic(CheckError::new(
+                    CheckErrorKind::UseAfterConsume,
+                    with_macro_provenance(
+                        expr,
+                        format!(
+                            "variable `{name}` (from a destructured binding) was already consumed by {description}; later use at offset {} is invalid",
+                            expr.span().offset
+                        ),
+                    ),
+                    vec![format!(
+                        "Insert `copy({name})` before the first consuming use if you need to reuse it"
+                    )],
+                ));
+            }
             Some(BindingState::Consumed(_)) => {
-                // The implicit-linearity pass will insert a Copy for consuming
-                // fan-out. Borrow-after-consume remains an error through
-                // `read_or_error`.
+                // The implicit-linearity pass will insert a Copy for
+                // consuming fan-out.  Borrow-after-consume remains an
+                // error through `read_or_error`.
             }
             None => {}
         }
@@ -701,29 +969,38 @@ impl Checker {
     }
 
     fn read_or_error(&mut self, name: &str, expr: &Expr, scope: &LinearScope) {
-        let Some(BindingState::Consumed(site)) = scope.top(name) else {
+        // Linearity-AliasedConsume-F1: when `name` is an alias, the
+        // structural consume on it would have forwarded to the
+        // underlying source (see `consume_var_expr`).  Check the
+        // alias chain's terminal source first so borrows of either
+        // the alias or the source surface the violation
+        // symmetrically.
+        let resolved = scope
+            .resolve_alias_chain(name)
+            .unwrap_or_else(|| name.to_string());
+        let Some(BindingState::Consumed(site)) = scope.top(&resolved) else {
             return;
         };
-        // Var-RHS let-bindings (`alias = x`) are aliasing consumes: at the
-        // IR level `lower_let` maps `alias` to the same NodeId as `x`
-        // (the `Load { name: "x" }` node), so the value is structurally
-        // shared, not destroyed. Per `spec/design/implicit_linearity.md`
-        // §"Copy Insertion" + "Borrows do not count as fan-out", later
-        // borrow-reads (mul, add, matmul, ...) of `x` must succeed: the
-        // DAG keeps `x` and `alias` pointing to the same source and the
-        // Copy-insertion pass at `crates/chelis-ir/src/lower.rs:364` only
-        // forks values reached by multiple `Realize | Drop | Store`
-        // consumers. Real consumes (realize/drop/store, app-arg,
-        // pipe-stage, closure capture, match scrutinee) remain hard
-        // errors here — once a value is truly gone, borrow-reads of it
-        // would alias freed storage at runtime.
+        // Var-RHS let-bindings (`alias = x`) are `ConsumeKind::Aliasing`
+        // consumes: at the IR level `lower_let` maps `alias` to the
+        // same NodeId as `x` (the `Load { name: "x" }` node), so the
+        // value is structurally shared, not destroyed.  Per
+        // `spec/design/implicit_linearity.md` §"Copy Insertion" and
+        // "Borrows do not count as fan-out", later borrow-reads
+        // (`mul`, `add`, `matmul`, ...) of `x` must succeed: the DAG
+        // keeps `x` and `alias` pointing to the same source and the
+        // Copy-insertion pass at `crates/chelis-ir/src/lower.rs:364`
+        // only forks values reached by multiple `Realize | Drop |
+        // Store` consumers.  Real consumes (realize / drop / store,
+        // app-arg, pipe-stage, closure capture, match scrutinee)
+        // remain hard errors here: once a value is truly gone,
+        // borrow-reads of it would alias freed storage at runtime.
         //
-        // Discrimination is by site description, mirroring the pattern
-        // already used in `consume_var_expr` (lines 580-607). A typed
-        // `ConsumeKind { Aliasing, Structural }` refactor is a candidate
-        // §5 follow-up; see
-        // `docs/investigations/var_rhs_let_fanout_diagnosis.md`.
-        if site.description.starts_with("binding ") {
+        // Linearity-F1 (`docs/gap_synthesis.md`) replaced the prior
+        // string-prefix check on the description with this typed
+        // discrimination via `ConsumeKind`.  The description text
+        // stays for diagnostic rendering only.
+        if matches!(site.kind, ConsumeKind::Aliasing) {
             return;
         }
         let description = site.description.clone();
@@ -789,6 +1066,18 @@ impl Checker {
         type_metadata(expr).or_else(|| {
             var_name(expr)
                 .and_then(|name| scope.ty(name).or_else(|| self.top_level_types.get(name)))
+                .or_else(|| {
+                    // Linearity-F2: `(tuple-get (var t) i)` does not
+                    // carry `:type` metadata because the `tuple-get`
+                    // tag is in `should_attach_type_metadata`'s deny
+                    // list.  Recover the element type by inspecting
+                    // the underlying tuple var's `:type` and indexing
+                    // into its `t-tuple` children.  Used by the
+                    // destructure-let desugar path where the
+                    // synthesized tmp bind's value is the unannotated
+                    // tuple-get.
+                    tuple_get_element_type(expr, scope, self)
+                })
         })
     }
 
@@ -1157,6 +1446,66 @@ fn get_meta(list: &List) -> Option<&MetaMap> {
     }
 }
 
+/// Linearity-F2 helper: resolve the element type of a
+/// `(tuple-get (var t) i)` expression by looking up the tuple var
+/// `t`'s scope-type and indexing into its `t-tuple` children.
+/// Returns `None` if any part of the lookup fails.  Used by
+/// `Checker::expr_type` when the synthesized destructure-tmp bind
+/// value is an unannotated tuple-get.
+fn tuple_get_element_type<'a>(
+    expr: &'a Expr,
+    scope: &'a LinearScope,
+    checker: &'a Checker,
+) -> Option<&'a Expr> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("tuple-get") {
+        return None;
+    }
+    let kids = children(list);
+    let tuple_expr = kids.first()?;
+    let tuple_ty = type_metadata(tuple_expr).or_else(|| {
+        var_name(tuple_expr)
+            .and_then(|name| scope.ty(name).or_else(|| checker.top_level_types.get(name)))
+    })?;
+    let index_expr = kids.get(1)?;
+    let index = match index_expr {
+        Expr::List(idx_list, _) if get_tag(idx_list) == Some("lit") => {
+            children(idx_list).first().and_then(|child| match child {
+                Expr::Atom(Atom::Int(n), _) => Some(*n as usize),
+                _ => None,
+            })
+        }
+        Expr::Atom(Atom::Int(n), _) => Some(*n as usize),
+        _ => None,
+    }?;
+    let Expr::List(tuple_ty_list, _) = tuple_ty else {
+        return None;
+    };
+    if get_tag(tuple_ty_list) != Some("t-tuple") {
+        return None;
+    }
+    let tys = children(tuple_ty_list);
+    tys.get(index)
+}
+
+/// Linearity-F2 destructure-cascade gate.  Returns `true` if `bind_list`
+/// is a `(bind {meta} name value ...)` whose meta-map contains the
+/// `destructure: true` marker injected by `chelis_surf::desugar`
+/// when synthesizing the `__chelis_tmp_N` intermediates for
+/// `let (a, b) = ...` patterns.  Used by `Checker::check_let` to
+/// route surfaced violations through `LinearityInfo::warnings`
+/// during the W1 PR 1 deprecation window.
+fn bind_introduces_destructure_tmp(bind_list: &List) -> bool {
+    let Some(meta) = get_meta(bind_list) else {
+        return false;
+    };
+    meta.entries.iter().any(|(key, value)| {
+        key == "destructure" && matches!(value, Expr::Atom(Atom::Bool(true), _))
+    })
+}
+
 fn type_expr_contains_tensor(expr: &Expr) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
@@ -1205,18 +1554,21 @@ fn app_site(expr: &Expr, list: &List) -> ConsumeSite {
         .unwrap_or_else(|| "call".to_string());
     ConsumeSite {
         description: format!("{name} at offset {}", expr.span().offset),
+        kind: ConsumeKind::Structural,
     }
 }
 
 fn generic_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
         description: format!("use at offset {}", expr.span().offset),
+        kind: ConsumeKind::Structural,
     }
 }
 
 fn realize_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
         description: format!("realize at offset {}", expr.span().offset),
+        kind: ConsumeKind::Structural,
     }
 }
 
@@ -1227,6 +1579,7 @@ fn pipe_site(current: &Expr, stage: &Expr) -> ConsumeSite {
             stage.span().offset,
             current.span().offset
         ),
+        kind: ConsumeKind::Structural,
     }
 }
 
