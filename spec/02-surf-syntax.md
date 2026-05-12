@@ -181,6 +181,44 @@ The current shipped boundary-checking surface is narrower than the syntax:
 
 Omitting all types is valid: `def f(x, y) = add(x, y)`. The compiler emits a note recommending a `sig` for module-level definitions.
 
+#### P4b: Contextual Precision Polymorphism (WS-A5)
+
+In a sig with quantified type variables, names appearing in the
+precision slot of a `tensor[...]` type that match the sig's quantifier
+list become `(t-var {} <name>)`, not `(t-prim {} <name>)`. Names
+matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`, `i32`,
+`i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig (e.g., in
+a value-position type annotation), no quantifier exists, so the
+existing rule applies.
+
+Quantifiers in a sig are **implicit**: any lowercase identifier that
+appears in the sig's type expression and is not a primitive name is
+treated as an implicitly `forall`-quantified type variable. The
+`spec/04-type-system.md` §1.1.2 unsigned aliases (`u8`, `u16`, `u32`,
+`u64`, `uint8`, `uint16`, `uint32`, `uint64`) are explicitly excluded
+from this collection so they reach the type-checker's §1.1.2
+rejection path with a precise diagnostic, rather than being silently
+absorbed as quantifiers.
+
+Example:
+
+```text
+sig poly_id: tensor[d, p] -> tensor[d, p]
+def poly_id(x) = x
+def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
+def use_int32(x: tensor[3, int32]) -> tensor[3, int32] = poly_id(x)
+```
+
+The sig has implicit quantifiers `d` (a `DimVar`) and `p` (a precision
+`TypeVar`). Each call site instantiates `p` with a fresh precision
+variable that unifies with the call's actual precision; calling
+`poly_id` with mismatched precisions across a single call (e.g.,
+input `tensor[3, int32]` declared output `tensor[3, f32]`) is a type
+error.
+
+See `spec/04-type-system.md` §5.8 for the type-system semantics and
+the `TensorPrec` representation that backs this surface rule.
+
 ### P4a: Preferred Surf Style
 
 The parser accepts both `def f(x: T): U = ...` and `def f(x: T) -> U = ...`.

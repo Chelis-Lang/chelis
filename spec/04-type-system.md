@@ -677,6 +677,49 @@ coverage: every public tensor op must be usable at every dtype in §1.1 that
 its §5.4 row admits. A stdlib op that fails for a §5.4-admissible dtype is a
 spec compliance bug, not a documentation bug.
 
+#### 5.8.1 Contextual Precision Desugar (WS-A5)
+
+The Surf surface admits precision polymorphism in user-written sigs by
+treating identifiers in the precision slot of a `tensor[...]` type
+contextually:
+
+> In a sig with quantified type variables, names appearing in the
+> precision slot of a `tensor[...]` type that match the sig's quantifier
+> list become `(t-var {} <name>)`, not `(t-prim {} <name>)`. Names
+> matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
+> `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig
+> (e.g., in a value-position type annotation), no quantifier exists,
+> so the existing rule applies.
+
+Quantifiers in a sig are **implicit**: any lowercase, non-primitive,
+non-`spec/04-type-system.md` §1.1.2-unsigned identifier that appears in
+the sig's type expression is treated as a `forall`-quantified type
+variable. The §1.1.2 unsigned aliases (`u8`, `u16`, `u32`, `u64`,
+`uint8`, `uint16`, `uint32`, `uint64`) are explicitly excluded so they
+reach the type-checker's §1.1.2 rejection path with a precise
+diagnostic, not silently absorbed as quantifiers.
+
+The internal type representation carries this through `TensorPrec`:
+
+```rust
+pub enum TensorPrec {
+    Concrete(Prim), // resolved or user-written concrete primitive
+    Var(TypeVar),   // sig-quantified precision polymorphism
+}
+```
+
+Unification of two tensor types unifies their precision slots:
+`Concrete(p) ~ Var(v)` binds `v ↦ p`; `Var(v1) ~ Var(v2)` links the
+two vars; `Concrete(p1) ~ Concrete(p2)` succeeds only when `p1 == p2`
+(the existing `PrecisionMismatch` rule). Generalization
+(`Env::generalize`) collects free precision-slot vars so each call
+site instantiates the sig with a fresh precision variable.
+
+After monomorphization, every reachable tensor type at lowering time
+must carry `TensorPrec::Concrete(_)`. Backends assert this invariant
+at the lowering match arm; a `TensorPrec::Var(_)` reaching a backend
+is a monomorphization bug, not user error.
+
 ---
 
 ## 6. Fitness Scoring
