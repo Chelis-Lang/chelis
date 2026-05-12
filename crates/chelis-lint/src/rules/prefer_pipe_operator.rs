@@ -3,6 +3,20 @@
 
 use crate::{Context, Replacement, Rule, Severity, Surface, Violation};
 
+/// Mirror of `chelis_surf::format::format_pipe_layout`'s flat-shape gate.
+/// The formatter emits the flat single-line `seed |> stage1 |> ...` form
+/// only when `total_stages = 1 + stages.len()` is at most 3 and the flat
+/// rendering fits in `FMT_LINE_WIDTH` characters. Outside that window the
+/// formatter emits one element per line and `format_function_body` wraps
+/// the result in `{ ... }` with 2-space indent. The autofix here would
+/// only be replacing the call expression's byte span, so it cannot emit
+/// the brace-wrapped multi-line form without widening the replacement
+/// surface; instead, we restrict the autofix to candidates whose flat
+/// shape the formatter would also emit. See
+/// `docs/investigations/prefer_pipe_autofix_output_diagnosis.md`.
+const FMT_LINE_WIDTH: usize = 80;
+const FMT_FLAT_MAX_STAGES: usize = 3;
+
 pub struct PreferPipeOperator;
 
 impl Rule for PreferPipeOperator {
@@ -63,6 +77,16 @@ impl Rule for PreferPipeOperator {
         let source = ctx.source?;
         let start = offset_from_line_col(source, violation.line?, violation.col?)?;
         let candidate = pipe_candidate_at(source, start)?;
+        if !candidate_is_fmt_clean(&candidate) {
+            // The candidate's flat single-line text would not survive
+            // `chelis fmt --check`: the formatter would re-emit the pipe
+            // as a brace-wrapped multi-line form, which the autofix
+            // cannot produce inside its call-expression-only replacement
+            // span. Drop the autofix; the `check()` warning still fires
+            // so the user can rewrite manually. See Finding 3b at
+            // `docs/investigations/prefer_pipe_autofix_output_diagnosis.md`.
+            return None;
+        }
         Some(Replacement {
             path: ctx.path.to_path_buf(),
             start: candidate.start,
@@ -72,11 +96,26 @@ impl Rule for PreferPipeOperator {
     }
 }
 
+/// Predict whether `chelis_surf::format::format_pipe_layout` would emit
+/// the flat single-line form for the assembled pipe replacement. The
+/// formatter gates the flat shape on
+/// `total_stages <= FMT_FLAT_MAX_STAGES && flat.chars().count() <= FMT_LINE_WIDTH`,
+/// where `total_stages = 1 + stages.len()`.
+fn candidate_is_fmt_clean(candidate: &Candidate) -> bool {
+    let total_stages = 1 + candidate.stage_count;
+    total_stages <= FMT_FLAT_MAX_STAGES && candidate.replacement.chars().count() <= FMT_LINE_WIDTH
+}
+
 #[derive(Debug, Clone)]
 struct Candidate {
     start: usize,
     end: usize,
     replacement: String,
+    /// Number of pipe stages following the seed (so total parts in the
+    /// pipe expression is `1 + stage_count`). Tracked separately from
+    /// the replacement text so the fmt-clean predicate does not have to
+    /// re-parse ` |> ` separators out of string-argument contents.
+    stage_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -131,15 +170,17 @@ fn pipe_candidate_at(source: &str, start: usize) -> Option<Candidate> {
             let seed = first.text.trim().to_string();
             stages.push(render_stage(&current));
             stages.reverse();
+            let stage_count = stages.len();
             let mut replacement = seed;
-            for stage in stages {
+            for stage in &stages {
                 replacement.push_str(" |> ");
-                replacement.push_str(&stage);
+                replacement.push_str(stage);
             }
             return Some(Candidate {
                 start: call.start,
                 end: call.end,
                 replacement,
+                stage_count,
             });
         };
         stages.push(render_stage(&current));
@@ -434,5 +475,49 @@ mod tests {
             .fix(&ctx(src), &violations[0])
             .expect("fix should propose the rewrite");
         assert_eq!(replacement.text, "2.0 |> cast(f32) |> beta(cast(3.0, f32))");
+    }
+
+    #[test]
+    fn check_still_flags_when_fmt_would_emit_multi_line() {
+        // The `check()` method's behavior is unchanged by the Finding 3b
+        // fix: a three-stage nested call still gets flagged so the user
+        // sees the warning and can rewrite manually. Only `fix()` bails
+        // out for shapes the formatter would emit multi-line.
+        let src = "def f(x: f32) -> f32 = sigmoid(relu(neg(x)))\n";
+        let violations = PreferPipeOperator.check(&ctx(src));
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn fix_bails_out_when_fmt_would_emit_multi_line() {
+        // `sigmoid(relu(neg(x)))` would rewrite to `x |> neg |> relu |> sigmoid`,
+        // which is 4 pipe parts (1 seed + 3 stages). The formatter emits
+        // this as multi-line + brace-wrapped, so the autofix must not
+        // write the flat single-line form. Returning `None` from `fix()`
+        // is the conservative path: the warning stays, the source stays
+        // fmt-clean, and the user can rewrite manually. See
+        // `docs/investigations/prefer_pipe_autofix_output_diagnosis.md`.
+        let src = "def f(x: f32) -> f32 = sigmoid(relu(neg(x)))\n";
+        let violations = PreferPipeOperator.check(&ctx(src));
+        assert_eq!(violations.len(), 1);
+        let outcome = PreferPipeOperator.fix(&ctx(src), &violations[0]);
+        assert!(
+            outcome.is_none(),
+            "expected fix() to bail out for a four-part pipe; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn fix_emits_flat_form_at_exactly_three_pipe_parts() {
+        // `relu(neg(x))` rewrites to a 3-part pipe (`x |> neg |> relu`),
+        // which the formatter does emit flat. The autofix proposes the
+        // flat text verbatim.
+        let src = "def f(x: f32) -> f32 = relu(neg(x))\n";
+        let violations = PreferPipeOperator.check(&ctx(src));
+        assert_eq!(violations.len(), 1);
+        let replacement = PreferPipeOperator
+            .fix(&ctx(src), &violations[0])
+            .expect("fix should propose the three-part pipe");
+        assert_eq!(replacement.text, "x |> neg |> relu");
     }
 }

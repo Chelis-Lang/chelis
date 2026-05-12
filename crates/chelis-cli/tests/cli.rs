@@ -5512,6 +5512,94 @@ fn lint_fix_prefer_pipe_operator_rewrites_multi_arg_outer_stage() {
     );
 }
 
+// --- Finding 3b (PR #51 red-team): the `prefer-pipe-operator` autofix
+// re-enabled in PR #42 emits replacement text that is not fmt-clean,
+// so `chelis lint --fix` followed by `chelis fmt --check` fails.
+//
+// The three fixtures below pin the invariant: for any input where the
+// autofix accepts the rewrite, the post-fix file must also pass
+// `chelis fmt --check`. Gated `#[ignore]` until the fix lands.
+
+#[test]
+fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_two_stage() {
+    // Two-stage pipe rewrite (`relu(neg(x))` -> `x |> neg |> relu`).
+    // Formatter emits the flat single-line form for total_stages <= 3,
+    // so the autofix text must match. This case is already fmt-clean
+    // today; it serves as a regression guard so the fix for the
+    // three-stage / mixed cases does not break the two-stage path.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_fmt_two.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[2, f32]) -> tensor[2, f32] = relu(neg(x))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", "--check", path.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_three_stage() {
+    // Three-stage pipe rewrite (`sigmoid(relu(neg(x)))` ->
+    // `x |> neg |> relu |> sigmoid`). The formatter emits a multi-line
+    // brace-wrapped form here because total_stages > 3. The autofix
+    // must either match that exact output OR skip the fix; either way,
+    // the post-fix file must pass `fmt --check`.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_fmt_three.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[3, f32]) -> tensor[3, f32] = sigmoid(relu(neg(x)))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", "--check", path.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn lint_fix_prefer_pipe_operator_output_is_fmt_clean_mixed_outer_args() {
+    // Pipe rewrite mixed with a non-rewritable outer-call argument:
+    // `add(sigmoid(relu(neg(x))), y)` rewrites to a four-stage pipe
+    // ending in `add(y)`, which the formatter again emits multi-line.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_fmt_mixed.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, f32] = \
+         add(sigmoid(relu(neg(x))), y)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--fix", path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", "--check", path.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
 #[test]
 fn lint_keep_preserves_fixable_linearity_call_but_still_warns() {
     let dir = tempdir().expect("tempdir");
