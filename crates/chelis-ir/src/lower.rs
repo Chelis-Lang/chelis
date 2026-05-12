@@ -218,6 +218,18 @@ fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R
     std::panic::catch_unwind(f).map_err(|payload| panic_payload_to_lower_diagnostic(&*payload))
 }
 
+/// Public alias for [`catch_lowering`] so other modules in this crate
+/// (e.g. `host`) can wrap their own lowering entry points and surface
+/// panics from `try_extract_tensor_type` (WS-A5 RT-3a F2: unresolved
+/// `TensorPrec::Var` reaching the conversion boundary) as
+/// `LowerDiagnostic`. Crate-internal only by design; the build CLI
+/// goes through `host::try_lower_compiled_program` instead.
+pub(crate) fn catch_lowering_external<R>(
+    f: impl FnOnce() -> R + std::panic::UnwindSafe,
+) -> Result<R, LowerDiagnostic> {
+    catch_lowering(f)
+}
+
 static CHELIS_PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 /// Install a one-time global panic hook that suppresses panic output when the
@@ -2211,6 +2223,36 @@ impl LowerCtx {
             let children = &list.elements[2..];
             if children.is_empty() {
                 return None;
+            }
+            // WS-A5 RT-3a F2: backends require a concrete tensor
+            // precision per spec/04-type-system.md §5.8.1. If the
+            // precision slot is a `(t-var {} ...)` here we are looking
+            // at an unresolved precision tvar that escaped
+            // monomorphization. Surface this as a hard lowering panic
+            // rather than silently degrading to the default scalar f32
+            // type and emitting nonsense backend code; the build CLI
+            // catches the panic via `try_lower_subexpr_program` and
+            // turns it into a user-facing diagnostic naming the §5.8.1
+            // monomorphization invariant.
+            if let Some(last_child) = children.last()
+                && let Expr::List(prec_list, _) = last_child
+                && prec_list.elements.len() >= 3
+                && let Expr::Atom(Atom::Symbol(prec_tag), _) = &prec_list.elements[0]
+                && prec_tag == "t-var"
+            {
+                let var_name = match &prec_list.elements[2] {
+                    Expr::Atom(Atom::Symbol(name), _) => name.clone(),
+                    _ => "?".to_string(),
+                };
+                panic!(
+                    "internal: backend lowering reached an unresolved tensor \
+                     precision variable `{var_name}`; spec/04-type-system.md \
+                     \u{00a7}5.8.1 requires every reachable tensor type to carry \
+                     `TensorPrec::Concrete(_)` after monomorphization. Reaching \
+                     this point with `TensorPrec::Var(_)` is a monomorphization \
+                     bug, not user error. Likely cause: the polymorphic sig has \
+                     no concrete call site to instantiate the precision tvar."
+                );
             }
             // Last child is the precision (t-prim {} name).
             let prim = Self::try_extract_prim(children.last()?)?;

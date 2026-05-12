@@ -495,9 +495,13 @@ fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
 // Primitive type names
 // ---------------------------------------------------------------------------
 
+// `f8e4m3` is intentionally absent: spec/04-type-system.md §1.1.1
+// rejects it as a deferred precision. Keeping the name out of the
+// primitives list prevents the implicit-quantifier collector from
+// treating `f8e4m3` as a fresh tvar candidate, so the type-checker's
+// §1.1.1 rejection path fires with the correct diagnostic.
 const PRIMITIVES: &[&str] = &[
-    "f32", "f64", "f16", "bf16", "f8e4m3", "int8", "int16", "int32", "int64", "bool", "string",
-    "unit",
+    "f32", "f64", "f16", "bf16", "int8", "int16", "int32", "int64", "bool", "string", "unit",
 ];
 
 /// Unsigned dtype names per `spec/04-type-system.md` §1.1.2. These are

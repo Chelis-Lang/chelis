@@ -1495,7 +1495,8 @@ fn cmd_build(
         if target == "c" && pruned_deep_exprs.len() != full_deep_exprs.len() {
             let full_checked = checked_program_with_effects(&full_deep_exprs)
                 .map_err(|e| format!("Check errors: {e}"))?;
-            chelis_ir::host::lower_compiled_program(&full_checked)
+            chelis_ir::host::try_lower_compiled_program(&full_checked)
+                .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
                 .host
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
@@ -1513,7 +1514,8 @@ fn cmd_build(
         checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
-    let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
+    let mut compiled_program = chelis_ir::host::try_lower_compiled_program(&checked)
+        .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
     let all_root_names = lowered_root_names_from_exprs(&deep_exprs, checked.type_env());
@@ -1734,7 +1736,8 @@ fn cmd_build_deep(
         if target == "c" && pruned_deep_exprs.len() != deep_exprs.len() {
             let full_checked = checked_program_with_effects(&deep_exprs)
                 .map_err(|e| format!("Check errors: {e}"))?;
-            chelis_ir::host::lower_compiled_program(&full_checked)
+            chelis_ir::host::try_lower_compiled_program(&full_checked)
+                .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
                 .host
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
@@ -1752,7 +1755,8 @@ fn cmd_build_deep(
         .map_err(|e| format!("Check errors: {e}"))?;
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
-    let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
+    let mut compiled_program = chelis_ir::host::try_lower_compiled_program(&checked)
+        .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
     let all_root_names = lowered_root_names_from_exprs(&final_deep_exprs, checked.type_env());
