@@ -7,31 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::CheckedProgram;
 use crate::errors::{CheckError, CheckErrorKind};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
     reusable_inputs_by_offset: HashMap<usize, usize>,
-    /// Linearity violations discovered through module-recursive checking
-    /// (Linearity-F3 PR 1). Held as warnings, not errors, until PR 2
-    /// fixes the surfaced violations and flips the severity. Skipped
-    /// from serde because `CheckError` does not derive
-    /// Serialize/Deserialize; rehydrating a `CheckedProgram` from JSON
-    /// loses warning detail, which is acceptable because warnings are
-    /// only consumed by the live CLI path that produced them.
-    #[serde(skip)]
-    warnings: Vec<CheckError>,
 }
-
-impl PartialEq for LinearityInfo {
-    fn eq(&self, other: &Self) -> bool {
-        // `warnings` is intentionally excluded — it is a transient
-        // diagnostic carrier and not part of the structural identity of
-        // `LinearityInfo`. The pre-warning shape compared only
-        // `reusable_inputs_by_offset`; this preserves that.
-        self.reusable_inputs_by_offset == other.reusable_inputs_by_offset
-    }
-}
-
-impl Eq for LinearityInfo {}
 
 impl LinearityInfo {
     pub fn reusable_input_for_span(&self, span: Span) -> Option<usize> {
@@ -42,18 +21,6 @@ impl LinearityInfo {
         self.reusable_inputs_by_offset
             .entry(span.offset)
             .or_insert(input_index);
-    }
-
-    /// Linearity violations discovered through module-recursive
-    /// checking. Linearity-F3 PR 1 emits these as warnings to give
-    /// existing module-wrapped programs time to fix latent violations.
-    /// PR 2 will flip the severity to errors once the corpus is clean.
-    pub fn warnings(&self) -> &[CheckError] {
-        &self.warnings
-    }
-
-    fn push_warning(&mut self, warning: CheckError) {
-        self.warnings.push(warning);
     }
 }
 
@@ -146,21 +113,15 @@ struct Checker {
     errors: Vec<CheckError>,
     info: LinearityInfo,
     top_level_types: HashMap<String, Expr>,
-    /// Linearity-F3 PR 1: when true, diagnostics raised during the
-    /// current walk are routed into `info.warnings` instead of
-    /// `errors`. Set when descending through a `(module {} name ...)`
-    /// wrapper. PR 2 will remove the field and route all diagnostics
-    /// through `errors` once the corpus is clean.
-    in_module: bool,
 }
 
 impl Checker {
     fn push_diagnostic(&mut self, error: CheckError) {
-        if self.in_module {
-            self.info.push_warning(error);
-        } else {
-            self.errors.push(error);
-        }
+        // Linearity-F3 PR 2: all diagnostics — including those raised
+        // during module-recursive walks — route through `errors`. The
+        // PR 1 warning-mode plumbing has been removed now that the
+        // in-repo corpus is clean.
+        self.errors.push(error);
     }
 }
 
@@ -203,7 +164,6 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: program.type_env().clone(),
-        in_module: false,
     };
     let mut scope = LinearScope::default();
 
@@ -278,7 +238,6 @@ pub fn check_linearity_with_context(
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
-        in_module: false,
     };
 
     let mut scope = LinearScope::default();
@@ -319,24 +278,22 @@ pub fn check_linearity_with_context(
 
 impl Checker {
     fn check_top_level(&mut self, expr: &Expr, scope: &mut LinearScope) {
-        // Linearity-F3 PR 1: recurse through `(module {} name
+        // Linearity-F3 PR 1 + PR 2: recurse through `(module {} name
         // children...)` wrappers so module-wrapped top-level defs
-        // participate in cross-statement linearity tracking. When
-        // descending into a module body, mark `in_module` so any
-        // diagnostics raised during the walk are routed to
-        // `info.warnings` via `push_diagnostic`. PR 2 will flip this
-        // routing back to `errors` once the corpus is clean.
+        // participate in cross-statement linearity tracking. PR 1
+        // routed diagnostics raised inside this recursion to a
+        // warning channel for a deprecation window; PR 2 removed that
+        // channel and unified the severity with bare-top-level
+        // violations, so all `push_diagnostic` calls route to
+        // `Checker::errors`.
         if let Expr::List(list, _) = expr
             && get_tag(list) == Some("module")
         {
-            let prev = self.in_module;
-            self.in_module = true;
             // Skip tag, meta, name — walk every remaining child as a
             // top-level expression.
             for child in list.elements.iter().skip(3) {
                 self.check_top_level(child, scope);
             }
-            self.in_module = prev;
             return;
         }
         if let Expr::List(list, _) = expr

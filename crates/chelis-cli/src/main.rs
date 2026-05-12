@@ -1210,31 +1210,22 @@ fn cmd_check_one(
     } else {
         String::new()
     };
-    let (effect_errors, linearity_errors, linearity_warnings) = match &typed_program {
+    // Linearity-F3 PR 2: `check_linearity` now returns module-wrapped
+    // violations as errors (the PR 1 warning channel was removed once
+    // the in-repo corpus was confirmed clean), so this is a flat
+    // Ok/Err dispatch with no separate warnings vector.
+    let (effect_errors, linearity_errors) = match &typed_program {
         Ok(checked) => match chelis_effects::check_program(checked) {
-            Ok(checked) => match chelis_types::check_linearity(&checked) {
-                Ok(checked) => (
-                    Vec::new(),
-                    Vec::new(),
-                    checked.linearity().warnings().to_vec(),
-                ),
-                Err(errors) => (Vec::new(), errors, Vec::new()),
-            },
-            Err(errors) => (errors, Vec::new(), Vec::new()),
+            Ok(checked) => (
+                Vec::new(),
+                chelis_types::check_linearity(&checked)
+                    .err()
+                    .unwrap_or_default(),
+            ),
+            Err(errors) => (errors, Vec::new()),
         },
-        Err(_) => (Vec::new(), Vec::new(), Vec::new()),
+        Err(_) => (Vec::new(), Vec::new()),
     };
-    // Linearity-F3 PR 1: surface module-recursive linearity warnings
-    // to stderr. They do NOT subtract from `report.score` and they do
-    // NOT enter the JSON `errors` array; PR 2 flips this routing to
-    // errors once the corpus is clean. Tests that parse `chelis check`
-    // JSON (cli.rs corpus) must not see these warnings inside `errors`.
-    for warning in &linearity_warnings {
-        eprintln!(
-            "warning: linearity: {} ({:?})",
-            warning.message, warning.kind
-        );
-    }
     if !effect_errors.is_empty() {
         report.score = (report.score - 0.2 * effect_errors.len() as f64).max(0.0);
     }
