@@ -272,9 +272,21 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push(
         "    chelis_tensor* out_tensor = chelis_alloc(ndim, shape, input->dtype);".to_string(),
     );
+    // dtype-aware byte count. Mirrors `chelis_alloc` (crates/chelis-runtime/
+    // src/lib.rs::chelis_alloc lines 418-422) and `chelis_contiguous`
+    // (lines 2480-2484): CHELIS_F64 and CHELIS_I64 are 8-byte elements,
+    // every other supported dtype is 4 bytes. Previously hard-coded to
+    // `sizeof(float)`, which silently dropped the upper four bytes of
+    // every f64 or int64 element on reshape. See
+    // `docs/investigations/cbackend_reshape_memcpy_diagnosis.md`
+    // (CBackend-ReshapeMemcpy; sibling-sweep follow-on to PR #64
+    // CBackend-CastMemcpy).
     out.push(
-        "    memcpy(out_tensor->data, input->data, (size_t)input->size * sizeof(float));"
+        "    size_t elem_size = (input->dtype == CHELIS_F64 || input->dtype == CHELIS_I64) ? sizeof(int64_t) : sizeof(float);"
             .to_string(),
+    );
+    out.push(
+        "    memcpy(out_tensor->data, input->data, (size_t)input->size * elem_size);".to_string(),
     );
     out.push("    return out_tensor;".to_string());
     out.push("}".to_string());
