@@ -4652,9 +4652,9 @@ fn infer_lit(
         errors.push(CheckError::new(
             CheckErrorKind::TypeMismatch,
             format!(
-                "literal {n} out of range for default int32; suggest `i64` \
-                 suffix (after WS-B1) or explicit cast({n}, i64) \
-                 (spec/04-type-system.md §5.3)"
+                "literal {n} out of range for default int32; use the `i64` \
+                 suffix (`{n}i64`) or an explicit cast({n}, i64) \
+                 (spec/04-type-system.md §5.3, §5.5)"
             ),
             vec![format!(
                 "spec/04-type-system.md §5.3: integer literals default to int32; \
@@ -4687,9 +4687,9 @@ fn infer_lit(
                     errors.push(CheckError::new(
                         CheckErrorKind::TypeMismatch,
                         format!(
-                            "literal {n} out of range for default int32; suggest \
-                             `i64` suffix (after WS-B1) or explicit cast({n}, i64) \
-                             (spec/04-type-system.md §5.3)"
+                            "literal {n} out of range for default int32; use the \
+                             `{n}i64` literal suffix or an explicit cast({n}, i64) \
+                             (spec/04-type-system.md §5.3, §5.5)"
                         ),
                         vec![format!(
                             "spec/04-type-system.md §5.3: integer literals default \

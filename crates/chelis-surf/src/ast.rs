@@ -161,10 +161,24 @@ pub enum LetPattern {
     Tuple(Vec<LetPattern>, Span),
 }
 
+/// Closed set of literal-suffix dtypes per `spec/02-surf-syntax.md` §P10a.
+/// Re-exported from `chelis_deep::lexer::LiteralSuffix` so the surf and
+/// deep grammars share the same enum.
+pub use chelis_deep::LiteralSuffix;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Literal {
+    /// Bare integer literal. Defaults to `int32` per spec §5.3 unless
+    /// disambiguated by a suffix variant or surrounding context.
     Int(i64),
+    /// Bare float literal. Defaults to `f32` per spec §5.3.
     Float(f64),
+    /// Integer literal carrying an explicit precision suffix per spec §5.5.
+    /// Suffix is part of the literal token; binds at exactly that
+    /// precision with no inference, no widening, no narrowing.
+    TypedInt(i64, LiteralSuffix),
+    /// Float literal carrying an explicit precision suffix per spec §5.5.
+    TypedFloat(f64, LiteralSuffix),
     Str(String),
     Bool(bool),
 }

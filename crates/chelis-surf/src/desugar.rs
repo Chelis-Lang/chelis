@@ -1297,6 +1297,20 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
             meta_with_type(node("t-prim", vec![sym("f32")])),
             vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
         ),
+        // Typed-suffix literals (spec/02-surf-syntax.md §P10a /
+        // spec/04-type-system.md §5.5): bind at exactly the suffix
+        // precision with no inference, no widening, no narrowing. The
+        // type metadata is the user-facing contract.
+        Literal::TypedInt(n, suffix) => node_meta(
+            "lit",
+            meta_with_type(node("t-prim", vec![sym(suffix.t_prim_name())])),
+            vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
+        ),
+        Literal::TypedFloat(f, suffix) => node_meta(
+            "lit",
+            meta_with_type(node("t-prim", vec![sym(suffix.t_prim_name())])),
+            vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
+        ),
         Literal::Bool(b) => node_meta(
             "lit",
             meta_with_type(node("t-prim", vec![sym("bool")])),
@@ -1595,10 +1609,17 @@ fn desugar_pattern(pat: &Pattern) -> deep::Expr {
         Pattern::Wildcard(_) => node("pat-wild", vec![]),
         Pattern::Var(name, _) => node("pat-var", vec![sym(name)]),
         Pattern::Lit(lit, _) => {
-            // pat-lit contains the raw literal value, NOT a typed (lit ...) node
+            // pat-lit contains the raw literal value, NOT a typed (lit ...) node.
+            // Typed-suffix patterns desugar to the bare value: pattern matching
+            // does not enforce the suffix dtype at the pattern level (the
+            // checker reconciles it via the surrounding scrutinee type).
             let val = match lit {
-                Literal::Int(n) => deep::Expr::Atom(deep::Atom::Int(*n), sp()),
-                Literal::Float(f) => deep::Expr::Atom(deep::Atom::Float(*f), sp()),
+                Literal::Int(n) | Literal::TypedInt(n, _) => {
+                    deep::Expr::Atom(deep::Atom::Int(*n), sp())
+                }
+                Literal::Float(f) | Literal::TypedFloat(f, _) => {
+                    deep::Expr::Atom(deep::Atom::Float(*f), sp())
+                }
                 Literal::Bool(b) => deep::Expr::Atom(deep::Atom::Bool(*b), sp()),
                 Literal::Str(s) => deep::Expr::Atom(deep::Atom::Str(s.clone()), sp()),
             };
