@@ -124,13 +124,15 @@ def f(w: tensor[4, f32]): tensor[4, f32] =
 /// `LinearityInfo::warnings` (warning-mode, deprecation window);
 /// W2-cascade flips it to an error.
 ///
-/// Today this fixture silently passes because the destructured
-/// `(var __chelis_tmp_N)` references have no `:type` metadata, so
-/// `expr_is_owned_linear` returns false and the linearity check
-/// skips both `realize(a)` calls. Gated `#[ignore]` until W1.3
-/// threads the type metadata onto the destructured tmp bindings.
+/// Today this fixture silently passed because the destructured
+/// `(var __chelis_tmp_N)` references had no `:type` metadata, so
+/// `expr_is_owned_linear` returned false and the linearity check
+/// skipped both `realize(a)` calls.  After W1.3 threads the type
+/// metadata via `tuple_get_element_type` resolution in
+/// `linearity.rs:expr_type` and routes the surfaced violation
+/// through `LinearityInfo::warnings` while the bind chain is
+/// destructure-marked, this fires as a warning.
 #[test]
-#[ignore = "blocked on destructure type-metadata threading (Linearity-F2)"]
 fn tuple_destructure_double_realize_warns_after_fix() {
     let info = linearity_info(
         r#"

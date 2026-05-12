@@ -1132,6 +1132,28 @@ fn bind_name_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Exp
     node("let", vec![bind_node, body])
 }
 
+/// Synthesized destructure bind (Linearity-F2).  Marks the `bind`
+/// node with `destructure: true` in its meta-map so:
+/// (i) `chelis_types::annotate_let_children` knows to inject the
+/// inferred type of the bind value into the value's meta-map (the
+/// `(tuple-get ...)` and `(var __chelis_tmp_N)` shapes do not carry
+/// `:type` by default per the `should_attach_type_metadata` deny
+/// list), and
+/// (ii) the linearity checker routes surfaced violations on the
+/// destructured tmp scope through `LinearityInfo::warnings` during
+/// the W1 PR 1 deprecation window.
+fn bind_destructure_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Expr {
+    let bind_node = node_meta(
+        "bind",
+        meta_with_entries(vec![(
+            "destructure".to_string(),
+            deep::Expr::Atom(deep::Atom::Bool(true), sp()),
+        )]),
+        vec![sym(name), value],
+    );
+    node("let", vec![bind_node, body])
+}
+
 fn destructure_pattern(
     pattern: &LetPattern,
     source_name: &str,
@@ -1139,7 +1161,12 @@ fn destructure_pattern(
     next_tmp: &mut usize,
 ) -> deep::Expr {
     match pattern {
-        LetPattern::Var(name, _) => bind_name_value(name, dvar(source_name), body),
+        // The user-visible component binding (`a` in `let (a, b)
+        // = pair`) is also tagged `destructure: true` so its type
+        // gets injected by `annotate_let_children`; downstream
+        // linearity inherits the type via `scope.declare` from
+        // `check_let`.
+        LetPattern::Var(name, _) => bind_destructure_value(name, dvar(source_name), body),
         LetPattern::Wildcard(_) => body,
         LetPattern::Tuple(parts, _) => {
             let mut out = body;
@@ -1148,7 +1175,7 @@ fn destructure_pattern(
                 let tmp_name = format!("__chelis_tmp{}", *next_tmp);
                 *next_tmp += 1;
                 out = destructure_pattern(part, &tmp_name, out, next_tmp);
-                out = bind_name_value(&tmp_name, tuple_value, out);
+                out = bind_destructure_value(&tmp_name, tuple_value, out);
             }
             out
         }
@@ -1176,8 +1203,15 @@ impl DesugarCtx {
                 pattern => {
                     let temp_name = format!("__chelis_tmp{}", next_tmp);
                     next_tmp += 1;
+                    let value = self.desugar_expr(&binding.value);
                     out = destructure_pattern(pattern, &temp_name, out, &mut next_tmp);
-                    out = bind_name_value(&temp_name, self.desugar_expr(&binding.value), out);
+                    // The top-level destructure source bind is also
+                    // tagged so the linearity walk routes surfaced
+                    // violations on the synthesized scope through
+                    // the warning channel.  Type metadata for the
+                    // source is attached by
+                    // `annotate_let_children`.
+                    out = bind_destructure_value(&temp_name, value, out);
                 }
             }
         }

@@ -49,11 +49,12 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 /// `UseAfterConsume` on `w`. Today the consume on `y` does not
 /// propagate to `w`'s scope entry, so the check silently passes.
 ///
-/// Gated `#[ignore]` until the lineage-forwarding fix lands; the
-/// W1.3 commit removes the gate. The bug reproduces today as a
-/// silent pass.
+/// After W1.3, `LinearScope.aliases` records `y -> w` from the
+/// `let y = w` bind; `consume_var_expr` forwards the structural
+/// consume on `y` through `resolve_alias_chain` to `w`; the
+/// borrow of `w` in `add(w, z)` then trips `read_or_error` on the
+/// underlying source.
 #[test]
-#[ignore = "blocked on aliased-consume lineage tracking (Linearity-AliasedConsume-F1)"]
 fn aliased_consume_bypass_errors_after_fix() {
     let errors = linearity_errors(
         r#"
@@ -79,13 +80,15 @@ def f(w: tensor[4, f32]): tensor[4, f32] =
 /// PR 1 routes the violation through `LinearityInfo::warnings`;
 /// W2-cascade flips it to error.
 ///
-/// Today this fixture silently passes for two compounding reasons:
-/// (i) destructured `a` has no type metadata, so the consume on
-/// `realize(y)` is dispatched through the untyped path; (ii) the
-/// aliased-consume bypass is independent of destructure and tracks
-/// per-name. Both must be fixed by W1.3 for this to fire.
+/// Pre-W1.3 this fixture silently passed for two compounding
+/// reasons: (i) destructured `a` had no type metadata, so the
+/// consume on `realize(y)` was dispatched through the untyped
+/// path; (ii) the aliased-consume bypass was independent of
+/// destructure and tracked per-name.  After W1.3 wires both
+/// `tuple_get_element_type` and `LinearScope.aliases`, the
+/// violation surfaces as a warning while the destructure-let
+/// chain holds `destructure_warning_depth > 0`.
 #[test]
-#[ignore = "blocked on destructure type-metadata + aliased-consume lineage tracking"]
 fn destructure_then_alias_consume_warns_after_fix() {
     let info = linearity_info(
         r#"
