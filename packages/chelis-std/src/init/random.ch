@@ -1,6 +1,7 @@
 module Std.Init.Random
 export (normal_like)
-def normal_like[n](template: &tensor[n, f32], mean: f32, std: f32) -> tensor[n, f32] ! { Random } = {
+sig normal_like: &tensor[n, f32] -> f32 -> f32 -> tensor[n, f32] ! { Random }
+def normal_like(template, mean, std) = {
   u1 = uniform_like(template, 0.0000001, 1.0)
   u2 = uniform_like(template, 0.0, 1.0)
   u1_values = to_list(u1)

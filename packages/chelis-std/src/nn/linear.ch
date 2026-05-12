@@ -1,7 +1,8 @@
 module Std.Nn.Linear
 export (forward)
-def forward[batch, in_dim, out_dim](x: &tensor[batch, in_dim, f32], w: &tensor[in_dim, out_dim, f32], b: &tensor[out_dim, f32]) -> tensor[batch, out_dim, f32] = {
-  bias = expand(b, 0, batch)
+sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+def forward(x, w, b) = {
+  bias = expand(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
   out = add(wx, bias)
   _ = drop(bias)

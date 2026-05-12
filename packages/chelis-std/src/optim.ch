@@ -105,10 +105,10 @@ def lamb_step[n](params: tensor[n, f32], grads: &tensor[n, f32], state: LAMBStat
 }
 def zeros_like[n](value: &tensor[n, f32]) -> tensor[n, f32] = to_tensor(map(fn (x) -> cast(0.0, f32), to_list(value)))
 def tensor_scale[n](value: &tensor[n, f32], factor: f32) -> tensor[n, f32] = to_tensor(map(fn (x: f32) -> mul(x, factor), to_list(value)))
-def tensor_add[n](lhs: &tensor[n, f32], rhs: &tensor[n, f32]) -> tensor[n, f32] = add(lhs, rhs)
-def tensor_sub[n](lhs: &tensor[n, f32], rhs: &tensor[n, f32]) -> tensor[n, f32] = sub(lhs, rhs)
-def tensor_mul[n](lhs: &tensor[n, f32], rhs: &tensor[n, f32]) -> tensor[n, f32] = mul(lhs, rhs)
-def tensor_div[n](lhs: &tensor[n, f32], rhs: &tensor[n, f32]) -> tensor[n, f32] = div(lhs, rhs)
+def tensor_add[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
+def tensor_sub[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = sub(lhs, rhs)
+def tensor_mul[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = mul(lhs, rhs)
+def tensor_div[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = div(lhs, rhs)
 def tensor_add_scalar[n](value: &tensor[n, f32], scalar: f32) -> tensor[n, f32] = to_tensor(map(fn (x: f32) -> add(x, scalar), to_list(value)))
 def tensor_sqrt[n](value: &tensor[n, f32]) -> tensor[n, f32] = sqrt(value)
 def l2_norm[n](value: &tensor[n, f32]) -> f32 = { sqrt(fold(fn (acc: f32, x: f32) -> add(acc, mul(x, x)), cast(0.0, f32), to_list(value))) }
