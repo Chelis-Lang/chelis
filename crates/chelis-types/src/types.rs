@@ -226,6 +226,99 @@ pub enum Dim {
     Wildcard,
 }
 
+/// Tensor element precision slot.
+///
+/// Per `spec/04-type-system.md` §5.8 and `spec/02-surf-syntax.md`, the
+/// precision slot of a tensor type may be either a concrete primitive
+/// (e.g. `f32`, `int32`) or a sig-bound type variable (precision
+/// polymorphism, WS-A5). After monomorphization every reachable
+/// tensor must carry `TensorPrec::Concrete(_)`; backends assert this
+/// invariant at lowering time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TensorPrec {
+    /// A concrete numeric primitive; the only shape backends accept.
+    Concrete(Prim),
+    /// A sig-quantified type variable. Resolved by unification, then
+    /// substituted to `Concrete(_)` by `Subst::apply` once bound.
+    Var(TypeVar),
+}
+
+impl TensorPrec {
+    /// Returns the concrete primitive if this slot is already resolved,
+    /// or `None` if it is still a type variable. Backends and IR
+    /// builders that must have a concrete dtype call this and treat
+    /// `None` as a monomorphization bug.
+    pub fn as_concrete(&self) -> Option<Prim> {
+        match self {
+            TensorPrec::Concrete(p) => Some(*p),
+            TensorPrec::Var(_) => None,
+        }
+    }
+
+    /// Convenience: short rendering of the slot, suitable for diagnostics.
+    /// Concrete precisions render as their canonical name; vars render
+    /// as `?N` matching `Type::Var` formatting.
+    pub fn render(&self) -> String {
+        match self {
+            TensorPrec::Concrete(p) => p.name().to_string(),
+            TensorPrec::Var(v) => format!("?{}", v.0),
+        }
+    }
+
+    /// Diagnostic-only alias for [`TensorPrec::render`]; matches the
+    /// `Prim::name()` ergonomic for call sites that previously took a
+    /// bare `Prim`. Returns an owned `String` because var precisions
+    /// have no `'static` representation.
+    pub fn name(&self) -> String {
+        self.render()
+    }
+
+    /// True iff this precision is concretely a float per
+    /// [`Prim::is_float`]. A polymorphic precision var returns `false`:
+    /// a not-yet-resolved precision is not yet known to be float, so
+    /// any "this op needs a float" check should not silently accept a
+    /// `Var` slot.
+    pub fn is_float(&self) -> bool {
+        matches!(self, TensorPrec::Concrete(p) if p.is_float())
+    }
+
+    /// True iff this precision is concretely an integer per
+    /// [`Prim::is_integer`]. `Var` returns `false` for the same reason
+    /// as [`TensorPrec::is_float`].
+    pub fn is_integer(&self) -> bool {
+        matches!(self, TensorPrec::Concrete(p) if p.is_integer())
+    }
+
+    /// True iff this precision is concretely numeric per
+    /// [`Prim::is_numeric`]. `Var` returns `false`.
+    pub fn is_numeric(&self) -> bool {
+        matches!(self, TensorPrec::Concrete(p) if p.is_numeric())
+    }
+
+    /// Resolve the spec/04-type-system.md §5.7.1 reduce_sum result
+    /// precision. Forwards to [`Prim::default_reduce_sum_result_precision`]
+    /// for `Concrete`. For `Var`, returns an error: a polymorphic
+    /// precision must be resolved (or rejected) before the reduce-sum
+    /// resolution rule applies.
+    pub fn default_reduce_sum_result_precision(self) -> Result<Prim, String> {
+        match self {
+            TensorPrec::Concrete(p) => p.default_reduce_sum_result_precision(),
+            TensorPrec::Var(v) => Err(format!(
+                "reduce_sum: operand precision is still polymorphic (?{}); a sig-bound \
+                 type variable in the precision slot must be resolved by unification \
+                 before reduce_sum's accumulator/result rule can be applied",
+                v.0
+            )),
+        }
+    }
+}
+
+impl From<Prim> for TensorPrec {
+    fn from(p: Prim) -> Self {
+        TensorPrec::Concrete(p)
+    }
+}
+
 /// Chelis type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
@@ -235,8 +328,11 @@ pub enum Type {
     Fn(Vec<Type>, Box<Type>),
     /// Read-only non-owning borrow of a value.
     Ref(Box<Type>),
-    /// Tensor type: dimensions + precision.
-    Tensor(Vec<Dim>, Prim),
+    /// Tensor type: dimensions + precision slot. Precision is
+    /// `TensorPrec::Concrete(_)` for fully-monomorphized tensors and
+    /// `TensorPrec::Var(_)` for sig-quantified precision polymorphism
+    /// per `spec/04-type-system.md` §5.8 (WS-A5).
+    Tensor(Vec<Dim>, TensorPrec),
     /// Algebraic data type: name + type arguments.
     Adt(String, Vec<Type>),
     /// Type variable (for inference).
@@ -356,7 +452,7 @@ impl fmt::Display for Type {
             Type::Ref(inner) => write!(f, "&{inner}"),
             Type::Tensor(dims, prec) => {
                 let dim_strs: Vec<String> = dims.iter().map(|d| format!("{d:?}")).collect();
-                write!(f, "tensor[{}, {}]", dim_strs.join(", "), prec.name())
+                write!(f, "tensor[{}, {}]", dim_strs.join(", "), prec.render())
             }
             Type::Adt(name, args) if args.is_empty() => write!(f, "{name}"),
             Type::Adt(name, args) => {

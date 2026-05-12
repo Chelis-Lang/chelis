@@ -496,7 +496,8 @@ fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 const PRIMITIVES: &[&str] = &[
-    "f32", "f64", "f16", "bf16", "f8e4m3", "int8", "int32", "int64", "bool", "string", "unit",
+    "f32", "f64", "f16", "bf16", "f8e4m3", "int8", "int16", "int32", "int64", "bool", "string",
+    "unit",
 ];
 
 // ---------------------------------------------------------------------------
@@ -681,7 +682,14 @@ impl DesugarCtx {
                 name, ty, effects, ..
             } => vec![node(
                 "defsig",
-                vec![sym(name), apply_effect_metadata(desugar_type(ty), effects)],
+                vec![
+                    sym(name),
+                    // WS-A5: standalone sigs use the contextual rule so a
+                    // lowercase non-primitive name in the precision slot
+                    // becomes a quantified type variable per
+                    // spec/04-type-system.md §5.8.
+                    apply_effect_metadata(desugar_sig_type(ty, &HashSet::new()), effects),
+                ],
             )],
 
             Decl::Dim { names, .. } => names
@@ -755,15 +763,30 @@ impl DesugarCtx {
         let def_node = node("def", vec![sym(name), fn_node]);
 
         if params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() {
+            // WS-A5: collect the union of implicit type variables over
+            // every typed parameter and the return type so the
+            // contextual precision rule (spec/04-type-system.md §5.8)
+            // can fire on tensor[..., p] anywhere in the sig. Without
+            // the union, a sig whose precision var appears only in the
+            // return type would mishandle the precision slot.
+            let mut tvar_set: HashSet<String> = HashSet::new();
+            for p in params {
+                if let Some(ty) = &p.ty {
+                    collect_sig_type_vars(ty, &mut tvar_set);
+                }
+            }
+            if let Some(ty) = ret_ty {
+                collect_sig_type_vars(ty, &mut tvar_set);
+            }
             let mut type_parts: Vec<deep::Expr> = params
                 .iter()
                 .map(|p| match &p.ty {
-                    Some(ty) => desugar_type_with_dims(ty, &dim_set),
+                    Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
                     None => node("t-var", vec![sym("_")]),
                 })
                 .collect();
             type_parts.push(match ret_ty {
-                Some(ty) => desugar_type_with_dims(ty, &dim_set),
+                Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
                 None => node("t-var", vec![sym("_")]),
             });
             let sig = node(
@@ -1549,20 +1572,115 @@ fn binop_name(op: BinOp) -> &'static str {
 // Type Expressions
 // ---------------------------------------------------------------------------
 
-/// Desugar a type with no declared dim params (module-level context).
+/// Desugar a type with no declared dim params or quantified type vars
+/// (module-level context).
 fn desugar_type(ty: &TypeExpr) -> deep::Expr {
-    desugar_type_with_dims(ty, &HashSet::new())
+    desugar_type_with_scope(ty, &HashSet::new(), &HashSet::new())
 }
 
-/// Desugar a type with declared dimension parameters.
-/// Names in `dim_vars` become d-var regardless of length.
+/// Desugar a type with declared dimension parameters but no quantified
+/// type variables. Kept as a thin wrapper for call sites that do not
+/// have an enclosing sig (e.g. let-typed bindings).
 fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
+    desugar_type_with_scope(ty, dim_vars, &HashSet::new())
+}
+
+/// Compute the set of free, lowercase, non-primitive identifiers used
+/// as type names anywhere inside `ty` and its sub-types. These are the
+/// candidate quantified type variables for a sig per `spec/04-type-system.md`
+/// §5.8: an unbound lowercase name in a `sig` is treated as a `forall`-
+/// quantified type variable.
+///
+/// The set INCLUDES the precision slot of `tensor[..., <ident>]`
+/// because WS-A5 (`spec/04-type-system.md` §5.8 / `spec/02-surf-syntax.md`)
+/// pins the contextual rule: a lowercase non-primitive name in the
+/// precision slot of a tensor type, when it appears in a sig, becomes
+/// a quantified type variable. That is the load-bearing change WS-A5
+/// makes possible.
+fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
+    match ty {
+        TypeExpr::Named(name, _) => {
+            if !PRIMITIVES.contains(&name.as_str())
+                && name.starts_with(|c: char| c.is_lowercase())
+            {
+                out.insert(name.clone());
+            }
+        }
+        TypeExpr::Tensor(dims, precision, _) => {
+            for d in dims {
+                collect_sig_type_vars(d, out);
+            }
+            // Precision slot: a lowercase non-primitive name here is a
+            // candidate quantified type variable per WS-A5. The dim
+            // names themselves are handled by the d-name / d-var
+            // contextual rules elsewhere and are not type variables.
+            if !PRIMITIVES.contains(&precision.as_str())
+                && precision.starts_with(|c: char| c.is_lowercase())
+            {
+                out.insert(precision.clone());
+            }
+        }
+        TypeExpr::Arrow(params, ret, _) => {
+            for p in params {
+                collect_sig_type_vars(p, out);
+            }
+            collect_sig_type_vars(ret, out);
+        }
+        TypeExpr::Ref(inner, _) => collect_sig_type_vars(inner, out),
+        TypeExpr::App(_, args, _) => {
+            for a in args {
+                collect_sig_type_vars(a, out);
+            }
+        }
+        TypeExpr::Tuple(elems, _) => {
+            for e in elems {
+                collect_sig_type_vars(e, out);
+            }
+        }
+        TypeExpr::Infer(_) => {}
+    }
+}
+
+/// Desugar a sig's type, computing the implicit quantifier set for the
+/// sig and applying the WS-A5 contextual precision rule.
+///
+/// Per `spec/04-type-system.md` §5.8 and `spec/02-surf-syntax.md`:
+/// inside a sig, an identifier in the precision slot of a `tensor[...]`
+/// type is desugared to `(t-var {} <name>)` when it is one of the sig's
+/// implicitly quantified type variables, and to `(t-prim {} <name>)`
+/// when it is a primitive. Outside a sig the same desugar is invoked
+/// with an empty quantifier set, so only primitive names are accepted.
+fn desugar_sig_type(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
+    let mut tvars = HashSet::new();
+    collect_sig_type_vars(ty, &mut tvars);
+    desugar_type_with_scope(ty, dim_vars, &tvars)
+}
+
+/// Desugar a type with declared dimension parameters and a set of
+/// in-scope quantified type variable names. `tvar_set` is non-empty
+/// only when desugaring inside a sig that declared (or implicitly
+/// introduced) quantified type variables. The contextual rule for the
+/// tensor precision slot lives here:
+///
+/// - A primitive name (`f32`, `int32`, ...) becomes `(t-prim {} <name>)`.
+/// - A name found in `tvar_set` becomes `(t-var {} <name>)`.
+/// - Any other name in the precision slot is encoded as `(t-prim {} <name>)`
+///   so the type checker can surface a precise diagnostic
+///   (`unbound type variable in precision slot`) via the existing
+///   `Prim::parse_name` rejection path.
+fn desugar_type_with_scope(
+    ty: &TypeExpr,
+    dim_vars: &HashSet<String>,
+    tvar_set: &HashSet<String>,
+) -> deep::Expr {
     match ty {
         TypeExpr::Named(name, _) => {
             if PRIMITIVES.contains(&name.as_str()) {
                 node("t-prim", vec![sym(name)])
             } else if name.starts_with(|c: char| c.is_uppercase()) {
                 node("t-adt", vec![sym(name)])
+            } else if tvar_set.contains(name.as_str()) {
+                node("t-var", vec![sym(name)])
             } else {
                 node("t-var", vec![sym(name)])
             }
@@ -1588,27 +1706,45 @@ fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Ex
                     }
                     // Everything else → d-name (concrete)
                     TypeExpr::Named(n, _) => node("d-name", vec![sym(n)]),
-                    _ => node("d-var", vec![desugar_type_with_dims(d, dim_vars)]),
+                    _ => node("d-var", vec![desugar_type_with_scope(d, dim_vars, tvar_set)]),
                 })
                 .collect();
-            children.push(node("t-prim", vec![sym(precision)]));
+            // WS-A5 contextual precision rule (spec/04-type-system.md §5.8,
+            // spec/02-surf-syntax.md): the precision slot is a t-var when
+            // its name is in `tvar_set` (a sig-quantified type variable),
+            // otherwise it stays as t-prim and the type checker validates
+            // it against the closed primitive set via Prim::parse_name.
+            let prec_node = if tvar_set.contains(precision.as_str())
+                && !PRIMITIVES.contains(&precision.as_str())
+            {
+                node("t-var", vec![sym(precision)])
+            } else {
+                node("t-prim", vec![sym(precision)])
+            };
+            children.push(prec_node);
             node("t-tensor", children)
         }
 
         TypeExpr::Arrow(params, ret, _) => {
             let mut children: Vec<deep::Expr> = params
                 .iter()
-                .map(|p| desugar_type_with_dims(p, dim_vars))
+                .map(|p| desugar_type_with_scope(p, dim_vars, tvar_set))
                 .collect();
-            children.push(desugar_type_with_dims(ret, dim_vars));
+            children.push(desugar_type_with_scope(ret, dim_vars, tvar_set));
             node("t-fn", children)
         }
 
-        TypeExpr::Ref(inner, _) => node("t-ref", vec![desugar_type_with_dims(inner, dim_vars)]),
+        TypeExpr::Ref(inner, _) => node(
+            "t-ref",
+            vec![desugar_type_with_scope(inner, dim_vars, tvar_set)],
+        ),
 
         TypeExpr::App(name, args, _) => {
             let mut children = vec![sym(name)];
-            children.extend(args.iter().map(|a| desugar_type_with_dims(a, dim_vars)));
+            children.extend(
+                args.iter()
+                    .map(|a| desugar_type_with_scope(a, dim_vars, tvar_set)),
+            );
             node("t-adt", children)
         }
 
@@ -1617,7 +1753,7 @@ fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Ex
             "t-tuple",
             elems
                 .iter()
-                .map(|e| desugar_type_with_dims(e, dim_vars))
+                .map(|e| desugar_type_with_scope(e, dim_vars, tvar_set))
                 .collect(),
         ),
 

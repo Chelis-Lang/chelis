@@ -3509,9 +3509,14 @@ fn type_to_deep_expr(ty: &Type) -> deep::Expr {
             node_expr("t-fn", children)
         }
         Type::Ref(inner) => node_expr("t-ref", vec![type_to_deep_expr(inner)]),
-        Type::Tensor(dims, prim) => {
+        Type::Tensor(dims, prec) => {
             let mut children: Vec<deep::Expr> = dims.iter().map(dim_to_deep_expr).collect();
-            children.push(type_to_deep_expr(&Type::Prim(*prim)));
+            children.push(match prec {
+                TensorPrec::Concrete(p) => type_to_deep_expr(&Type::Prim(*p)),
+                TensorPrec::Var(v) => {
+                    node_expr("t-var", vec![symbol_expr(&format!("t{}", v.0))])
+                }
+            });
             node_expr("t-tensor", children)
         }
         Type::Adt(name, args) => {
@@ -3922,7 +3927,7 @@ fn narrow_wildcards_with(ty: &Type, template: &Type) -> Type {
                     _ => d.clone(),
                 })
                 .collect();
-            Type::Tensor(new_dims, *prec)
+            Type::Tensor(new_dims, prec.clone())
         }
         (Type::Fn(args, ret), Type::Fn(t_args, t_ret)) if args.len() == t_args.len() => {
             let new_args = args
@@ -3965,7 +3970,7 @@ fn tensor_concat_result_type(element_ty: &Type) -> Result<Type, String> {
     let mut out_dims = dims.clone();
     let last_axis = out_dims.len() - 1;
     out_dims[last_axis] = Dim::Wildcard;
-    Ok(Type::Tensor(out_dims, *precision))
+    Ok(Type::Tensor(out_dims, precision.clone()))
 }
 
 fn infer_gather_result_type(
@@ -3996,7 +4001,7 @@ fn infer_gather_result_type(
     let mut out_dims = tensor_dims[..axis].to_vec();
     out_dims.extend(index_dims.clone());
     out_dims.extend_from_slice(&tensor_dims[axis + 1..]);
-    Ok(Type::Tensor(out_dims, *tensor_precision))
+    Ok(Type::Tensor(out_dims, tensor_precision.clone()))
 }
 
 fn infer_trace_result_type(tensor_ty: &Type, axis1: usize, axis2: usize) -> Result<Type, String> {
@@ -4014,7 +4019,7 @@ fn infer_trace_result_type(tensor_ty: &Type, axis1: usize, axis2: usize) -> Resu
         .enumerate()
         .filter_map(|(index, dim)| ((index != axis1) && (index != axis2)).then_some(dim.clone()))
         .collect();
-    Ok(Type::Tensor(out_dims, *precision))
+    Ok(Type::Tensor(out_dims, precision.clone()))
 }
 
 fn infer_diagonal_result_type(
@@ -4043,7 +4048,7 @@ fn infer_diagonal_result_type(
             out_dims.push(dim.clone());
         }
     }
-    Ok(Type::Tensor(out_dims, *precision))
+    Ok(Type::Tensor(out_dims, precision.clone()))
 }
 
 fn macro_source(expr: &deep::Expr) -> Option<String> {
@@ -4938,20 +4943,31 @@ fn infer_app(
         let lhs_resolved = type_for_readonly_check(&arg_tys[0], subst);
         let rhs_resolved = type_for_readonly_check(&arg_tys[1], subst);
         let is_eq_family = matches!(fname.as_str(), "eq" | "neq");
-        let precisions_compatible = |tensor_prec: &Prim, scalar_prec: &Prim| -> bool {
-            tensor_prec == scalar_prec && (is_eq_family || tensor_prec.is_numeric())
+        let precisions_compatible = |tensor_prec: &TensorPrec, scalar_prec: &Prim| -> bool {
+            // Polymorphic-precision tensors (TensorPrec::Var) are not
+            // eligible for the scalar-broadcast rewrite: the rewrite
+            // requires a known precision so the rewritten arg type can
+            // unify against the actual scalar argument. Leave them to
+            // the standard unification path (which will surface a
+            // precise PrecisionMismatch if needed).
+            match tensor_prec {
+                TensorPrec::Concrete(p) => {
+                    p == scalar_prec && (is_eq_family || p.is_numeric())
+                }
+                TensorPrec::Var(_) => false,
+            }
         };
         match (&lhs_resolved, &rhs_resolved) {
             (Type::Tensor(dims, tensor_prec), Type::Prim(scalar_prec))
                 if precisions_compatible(tensor_prec, scalar_prec) =>
             {
-                let tensor_ty = Type::Tensor(dims.clone(), *tensor_prec);
+                let tensor_ty = Type::Tensor(dims.clone(), tensor_prec.clone());
                 vec![arg_tys[0].clone(), tensor_ty]
             }
             (Type::Prim(scalar_prec), Type::Tensor(dims, tensor_prec))
                 if precisions_compatible(tensor_prec, scalar_prec) =>
             {
-                let tensor_ty = Type::Tensor(dims.clone(), *tensor_prec);
+                let tensor_ty = Type::Tensor(dims.clone(), tensor_prec.clone());
                 vec![tensor_ty, arg_tys[1].clone()]
             }
             _ => arg_tys.clone(),
@@ -5033,7 +5049,9 @@ fn infer_app(
                         "and" | "or" | "not" => {
                             matches!(
                                 resolved,
-                                Type::Tensor(_, Prim::Bool) | Type::Var(_) | Type::Error
+                                Type::Tensor(_, TensorPrec::Concrete(Prim::Bool))
+                                    | Type::Var(_)
+                                    | Type::Error
                             ) || matches!(resolved, Type::Prim(Prim::Bool))
                         }
                         _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error),
@@ -5381,7 +5399,7 @@ fn infer_app(
                 for arg_ty in &arg_tys {
                     let resolved = type_for_readonly_check(arg_ty, subst);
                     match &resolved {
-                        Type::Tensor(_, Prim::Bool)
+                        Type::Tensor(_, TensorPrec::Concrete(Prim::Bool))
                         | Type::Prim(Prim::Bool)
                         | Type::Var(_)
                         | Type::Error => {} // OK
@@ -5431,7 +5449,7 @@ fn infer_app(
                     _ => None,
                 });
                 if let Some(dims) = tensor_dims {
-                    return Type::Tensor(dims, Prim::Bool);
+                    return Type::Tensor(dims, TensorPrec::Concrete(Prim::Bool));
                 }
                 // No tensor arg → scalar comparison, returns scalar bool.
                 if let Some(first_arg) = arg_tys.first() {
@@ -5774,7 +5792,14 @@ fn infer_app(
                                         ));
                                         return Type::Error;
                                     }
-                                    return Type::Prim(precision);
+                                    // tensor_to_scalar requires a fully
+                                    // resolved precision. Polymorphic precision
+                                    // must be resolved by unification before
+                                    // this op can name a host scalar type.
+                                    return match precision {
+                                        TensorPrec::Concrete(p) => Type::Prim(p),
+                                        TensorPrec::Var(_) => result_ty,
+                                    };
                                 }
                                 Type::Var(_) | Type::Error => return result_ty,
                                 other => {
@@ -5797,7 +5822,7 @@ fn infer_app(
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
                                 Type::Prim(precision) if !matches!(precision, Prim::String) => {
-                                    return Type::Tensor(vec![], precision);
+                                    return Type::Tensor(vec![], TensorPrec::Concrete(precision));
                                 }
                                 Type::Var(_) | Type::Error => return result_ty,
                                 other => {
@@ -5876,7 +5901,7 @@ fn infer_app(
                         let else_ty = type_for_readonly_check(&arg_tys[2], subst);
                         match (&cond_ty, &then_ty, &else_ty) {
                             (
-                                Type::Tensor(cond_dims, Prim::Bool),
+                                Type::Tensor(cond_dims, TensorPrec::Concrete(Prim::Bool)),
                                 Type::Tensor(then_dims, then_prec),
                                 Type::Tensor(else_dims, else_prec),
                             ) => {
@@ -5896,7 +5921,7 @@ fn infer_app(
                                     ));
                                     return Type::Error;
                                 }
-                                return Type::Tensor(then_dims.clone(), *then_prec);
+                                return Type::Tensor(then_dims.clone(), then_prec.clone());
                             }
                             (Type::Var(_), _, _)
                             | (_, Type::Var(_), _)
@@ -6084,7 +6109,7 @@ fn infer_app(
                                 }
                                 return Type::Tuple(vec![
                                     Type::Tensor(dims.clone(), precision),
-                                    Type::Tensor(dims, Prim::Int64),
+                                    Type::Tensor(dims, TensorPrec::Concrete(Prim::Int64)),
                                 ]);
                             }
                             Type::Var(_) | Type::Error => return result_ty,
@@ -7144,7 +7169,7 @@ fn infer_app(
                                         return Type::Error;
                                     }
                                     let dims = vec![Dim::Wildcard; rank];
-                                    return Type::Tensor(dims, precision);
+                                    return Type::Tensor(dims, TensorPrec::Concrete(precision));
                                 }
                                 ToTensorPeel::Pending => return result_ty,
                                 ToTensorPeel::BadInner(inner) => {
@@ -7192,6 +7217,15 @@ fn infer_app(
                                         ));
                                         return Type::Error;
                                     }
+                                    // to_list requires a fully resolved
+                                    // precision: a polymorphic precision must
+                                    // be resolved before to_list can name a
+                                    // concrete element type. Defer if the
+                                    // precision is still a var.
+                                    let precision = match precision {
+                                        TensorPrec::Concrete(p) => p,
+                                        TensorPrec::Var(_) => return result_ty,
+                                    };
                                     if !precision.is_numeric() && !matches!(precision, Prim::Bool) {
                                         errors.push(CheckError::new(
                                             CheckErrorKind::TypeMismatch,
@@ -7247,7 +7281,7 @@ fn infer_app(
                                             Type::Prim(precision) if precision.is_numeric() => {
                                                 return Type::Tensor(
                                                     vec![Dim::Wildcard, Dim::Wildcard],
-                                                    precision,
+                                                    TensorPrec::Concrete(precision),
                                                 );
                                             }
                                             Type::Var(_) | Type::Error => return result_ty,
@@ -7327,7 +7361,7 @@ fn infer_app(
                                             Type::Prim(precision) if precision.is_numeric() => {
                                                 return Type::Tensor(
                                                     vec![Dim::Wildcard, Dim::Wildcard],
-                                                    precision,
+                                                    TensorPrec::Concrete(precision),
                                                 );
                                             }
                                             Type::Var(_) | Type::Error => return result_ty,
@@ -7642,10 +7676,10 @@ fn infer_reshape_app(
                     let rank = list_literal_len(shape_expr).unwrap_or(1);
                     vec![Dim::Wildcard; rank]
                 });
-                return Type::Tensor(dims, precision);
+                return Type::Tensor(dims, TensorPrec::Concrete(precision));
             }
 
-            Type::Tensor(vec![Dim::Wildcard], precision)
+            Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision))
         }
         Type::Tensor(_, precision) => {
             if let Some(shape_expr) = kids.get(2) {
@@ -8006,7 +8040,7 @@ fn check_conv2d_signature(
             Dim::Var(vg.fresh_dvar()),
             Dim::Var(vg.fresh_dvar()),
         ],
-        input_prec,
+        input_prec.clone(),
     );
     if let Err(te) = unify(result_ty, &output_template, subst) {
         errors.push(te.into());
@@ -8250,20 +8284,29 @@ fn check_reduction_signature(
     // inside the op and downcast on output). For all other reductions
     // (max_reduce, min_reduce, prod_reduce, argmax/argmin_reduce, mean)
     // the result precision is the operand precision.
-    let result_prec = if name == "sum" {
-        match prec.default_reduce_sum_result_precision() {
-            Ok(p) => p,
-            Err(msg) => {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!("sum: {msg}"),
-                    vec![],
-                ));
-                return Type::Error;
-            }
+    //
+    // WS-A5: the §5.7.1 widening rule is defined over a known operand
+    // precision. If the operand precision is still polymorphic
+    // (TensorPrec::Var), defer the decision until the precision is
+    // resolved by unification — return the canonical-but-still-poly
+    // result type and let the standard unify path proceed.
+    let result_prec: TensorPrec = if name == "sum" {
+        match &prec {
+            TensorPrec::Concrete(p) => match p.default_reduce_sum_result_precision() {
+                Ok(rp) => TensorPrec::Concrete(rp),
+                Err(msg) => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!("sum: {msg}"),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+            },
+            TensorPrec::Var(_) => prec.clone(),
         }
     } else {
-        prec
+        prec.clone()
     };
     // RT-2 fixup B1: emit a §5.7.1-citing diagnostic at the call site
     // before falling back to the generic unify error, so users binding
@@ -8282,16 +8325,16 @@ fn check_reduction_signature(
                      widens narrow integer operands to int32 to prevent silent overflow); \
                      declared result precision `{}` is incompatible. Use `tensor[{}]` or \
                      omit the result type to accept the spec default.",
-                    prec.name(),
-                    result_prec.name(),
-                    declared_prec.name(),
-                    result_prec.name(),
+                    prec.render(),
+                    result_prec.render(),
+                    declared_prec.render(),
+                    result_prec.render(),
                 ),
                 vec![format!(
                     "spec/04-type-system.md §5.7.1: `reduce_sum` on `{}` operands \
                      produces a `{}` result by default to prevent silent overflow",
-                    prec.name(),
-                    result_prec.name(),
+                    prec.render(),
+                    result_prec.render(),
                 )],
             ));
             return Type::Error;
@@ -9243,7 +9286,7 @@ fn infer_cast(
                 push_unsupported_precision_error(errors, new_prec, /* tensor = */ true);
                 return Type::Error;
             }
-            Type::Tensor(dims, new_prec)
+            Type::Tensor(dims, TensorPrec::Concrete(new_prec))
         }
         Type::Prim(_) => {
             if !new_prec.is_valid_scalar_cast_target() {
@@ -9506,7 +9549,13 @@ fn grad_wrt_indices(list: &deep::List, errors: &mut Vec<CheckError>) -> Option<O
 fn grad_argument_type(arg: &Type) -> Option<Type> {
     match arg {
         Type::Prim(prim) if prim.is_float() => Some(Type::Prim(*prim)),
-        Type::Tensor(dims, prim) if prim.is_float() => Some(Type::Tensor(dims.clone(), *prim)),
+        // WS-A5: a polymorphic precision (TensorPrec::Var) is not yet
+        // known to be float, so reject it here. Once monomorphization
+        // resolves the precision, the rule re-fires on the concrete
+        // instantiation. `is_float()` returns false for Var precisions.
+        Type::Tensor(dims, prec) if prec.is_float() => {
+            Some(Type::Tensor(dims.clone(), prec.clone()))
+        }
         Type::Ref(inner) => grad_argument_type(inner),
         _ => None,
     }
@@ -9600,7 +9649,7 @@ fn vmap_transform_param_type(ty: &Type, axis: usize, batch_dim: &Dim) -> Result<
             }
             let mut dims = dims.clone();
             dims.insert(axis, batch_dim.clone());
-            Ok(Type::Tensor(dims, *precision))
+            Ok(Type::Tensor(dims, precision.clone()))
         }
         Type::Tuple(elements) => Ok(Type::Tuple(
             elements
@@ -9617,7 +9666,10 @@ fn vmap_transform_result_type(ty: &Type, axis: usize, batch_dim: &Dim) -> Result
         Type::Ref(inner) => Ok(Type::Ref(Box::new(vmap_transform_result_type(
             inner, axis, batch_dim,
         )?))),
-        Type::Prim(precision) => Ok(Type::Tensor(vec![batch_dim.clone()], *precision)),
+        Type::Prim(precision) => Ok(Type::Tensor(
+            vec![batch_dim.clone()],
+            TensorPrec::Concrete(*precision),
+        )),
         Type::Tensor(dims, precision) => {
             if axis > dims.len() {
                 return Err(format!(
@@ -9627,7 +9679,7 @@ fn vmap_transform_result_type(ty: &Type, axis: usize, batch_dim: &Dim) -> Result
             }
             let mut dims = dims.clone();
             dims.insert(axis, batch_dim.clone());
-            Ok(Type::Tensor(dims, *precision))
+            Ok(Type::Tensor(dims, precision.clone()))
         }
         Type::Tuple(elements) => Ok(Type::Tuple(
             elements
@@ -9748,8 +9800,15 @@ fn deep_type_to_type_inner(
                         return Type::Error;
                     }
                     let prec_expr = &kids[kids.len() - 1];
+                    // WS-A5 (spec/04-type-system.md §5.8): the precision
+                    // slot may be a concrete primitive (`(t-prim {} f32)`)
+                    // or a sig-quantified type variable (`(t-var {} p)`).
+                    // Both shapes are well-formed; any other shape (e.g.,
+                    // a `t-fn` or a `t-prim` with an unknown name) is an
+                    // ill-formed tensor and is reduced to `Type::Error`.
                     let prec = match deep_type_to_type_inner(prec_expr, vg, tvar_map, dvar_map) {
-                        Type::Prim(p) => p,
+                        Type::Prim(p) => TensorPrec::Concrete(p),
+                        Type::Var(v) => TensorPrec::Var(v),
                         _ => return Type::Error,
                     };
                     let dims: Vec<Dim> = kids[..kids.len() - 1]

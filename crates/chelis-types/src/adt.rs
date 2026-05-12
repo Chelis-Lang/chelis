@@ -391,8 +391,13 @@ fn deep_type_to_type_with_params(expr: &deep::Expr, param_map: &HashMap<String, 
                         return Type::Error;
                     }
                     let prec_expr = &children[children.len() - 1];
+                    // Per WS-A5 (spec/04-type-system.md §5.8) the precision
+                    // slot may be either a concrete primitive or a type
+                    // variable (within a sig). Translate both shapes; any
+                    // other shape is an ill-formed tensor.
                     let prec = match deep_type_to_type_with_params(prec_expr, param_map) {
-                        Type::Prim(p) => p,
+                        Type::Prim(p) => TensorPrec::Concrete(p),
+                        Type::Var(v) => TensorPrec::Var(v),
                         _ => return Type::Error,
                     };
                     let dims: Vec<Dim> = children[..children.len() - 1]
