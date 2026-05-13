@@ -5102,11 +5102,37 @@ fn cmd_lint(
             return Err(format!("no rule with id(s) '{}'", missing.join(",")).into());
         }
     }
-    let targets = if paths.is_empty() {
+    let raw_targets = if paths.is_empty() {
         vec![PathBuf::from(".")]
     } else {
         paths
     };
+    // Normalize each user-supplied target to an absolute path before
+    // passing it to the lint walker. Several rules classify files by
+    // matching substrings against the path (e.g.,
+    // `doc-filename-convention` looks for `/docs/`, `/spec/`,
+    // `/spec/design/` in `path.to_string_lossy()`). Without
+    // normalization, the same file tree produces different violations
+    // depending on whether the user typed `chelis lint --check .` or
+    // `chelis lint --check docs/`: WalkDir prefixes yielded paths with
+    // the literal target argument, so `.` yields `./docs/...` (substring
+    // `/docs/` matches) while `docs/` yields `docs/...` (no leading
+    // slash, no match). Canonicalizing at the CLI boundary unifies the
+    // two walks and forecloses the bug class for any future rule that
+    // does path-segment dispatch.
+    let targets: Vec<PathBuf> = raw_targets
+        .into_iter()
+        .map(|p| match std::fs::canonicalize(&p) {
+            Ok(abs) => abs,
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to canonicalize {}: {err}; using as-is",
+                    p.display()
+                );
+                p
+            }
+        })
+        .collect();
     // The exception list is sourced from `style_gate::exceptions()` so
     // the standalone `chelis lint` subcommand and the build-time style
     // gate filter against one shared registry. Rule-internal allowlists

@@ -26,9 +26,10 @@ pub struct Entry {
 /// directory naming (e.g., Rust crate dirs must be kebab-case).
 pub fn walk(root: &std::path::Path) -> Result<Vec<Result<Entry, walkdir::Error>>, walkdir::Error> {
     let mut out = Vec::new();
+    let root_for_filter = root.to_path_buf();
     let walker = WalkDir::new(root)
         .into_iter()
-        .filter_entry(|e| !is_skip_dir(e));
+        .filter_entry(move |e| !is_skip_dir(e, &root_for_filter));
     for result in walker {
         match result {
             Ok(entry) => {
@@ -49,8 +50,17 @@ pub fn walk(root: &std::path::Path) -> Result<Vec<Result<Entry, walkdir::Error>>
     Ok(out)
 }
 
-fn is_skip_dir(entry: &walkdir::DirEntry) -> bool {
+fn is_skip_dir(entry: &walkdir::DirEntry, root: &std::path::Path) -> bool {
     if !entry.file_type().is_dir() {
+        return false;
+    }
+    // Never skip the walk root itself: the user explicitly asked for
+    // this directory. The substring filters below are for filtering
+    // nested clutter inside the walked tree; if the user runs lint
+    // from inside (e.g.) a worktree, that worktree IS their target
+    // and must not be skipped just because its absolute path contains
+    // a `/.claude/worktrees/` segment.
+    if entry.depth() == 0 {
         return false;
     }
     let Some(name) = entry.file_name().to_str() else {
@@ -64,9 +74,14 @@ fn is_skip_dir(entry: &walkdir::DirEntry) -> bool {
     }
     // Skip the agent worktree tree wholesale; per
     // feedback_skip_worktrees_in_ecosystem_survey.md these are not
-    // separate repos and shouldn't be re-linted.
-    let path_str = entry.path().to_string_lossy();
-    if path_str.contains("/.claude/worktrees/") {
+    // separate repos and shouldn't be re-linted. Match against the
+    // path relative to the walk root rather than the full path, so
+    // running lint from inside a worktree (where the absolute path
+    // contains `/.claude/worktrees/` at the top) is not misclassified
+    // as nested-worktree clutter to be skipped wholesale.
+    let rel = entry.path().strip_prefix(root).unwrap_or(entry.path());
+    let rel_str = rel.to_string_lossy();
+    if rel_str.contains(".claude/worktrees/") || rel_str.starts_with(".claude/worktrees/") {
         return true;
     }
     false

@@ -53,7 +53,6 @@ fn run_lint(cwd: &std::path::Path, extra_args: &[&str]) -> (i32, String) {
 /// driver). Concretely: the `doc-filename-convention` violation on
 /// `docs/0_leading_digit.md` must fire in BOTH invocations.
 #[test]
-#[ignore = "lint CLI path-walk inconsistency, see fix/lint-cli-path-walk-consistency"]
 fn lint_cli_explicit_path_and_cwd_walk_produce_identical_violations() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();

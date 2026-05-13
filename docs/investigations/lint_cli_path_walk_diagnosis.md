@@ -99,9 +99,38 @@ path-segment dispatch.
 
 - Other lint rules that do `path.to_string_lossy()` substring matching:
   ripgrep confirms `doc_filename_convention.rs` is the only rule using
-  the pattern today. `exceptions.rs` also uses `to_string_lossy()` but
-  on the path-relative-to-root, which is independent of the user's CLI
-  path spelling.
+  the pattern today.
+
+- Exception-pattern matching in `crates/chelis-lint/src/exceptions.rs::is_excepted`:
+  the function computes `violation.path.strip_prefix(root)` to obtain a
+  path that exception globs match against. When the CLI passes a
+  sub-directory as the walk root (e.g., `chelis lint --check crates`),
+  the strip-prefix produces paths like `chelis-surf/tests/fixtures/x.ch`
+  that no longer match workspace-rooted patterns like
+  `crates/chelis-surf/tests/fixtures/*.ch`. This is a parallel
+  bug-class to the rule-classification divergence: same root cause
+  (CLI spelling of paths leaks into downstream matching), different
+  consequence (exception patterns silently fail to apply for
+  sub-directory walks instead of doc-filename-convention silently
+  failing to fire). Confirmed in chelis-macro-fix's own corpus today:
+  `chelis lint --check crates docs examples packages` from the
+  workspace root reports 6 `surf-def-arrow-form` errors against
+  `crates/chelis-surf/tests/fixtures/*.ch`, while `chelis lint --check .`
+  excepts them. Out of scope for this PR (the brief targets Item 7's
+  doc-filename-convention divergence); recommended as a follow-on §5
+  entry. The clean fix is to root all exception matching against the
+  detected workspace root rather than the CLI-supplied walk root.
+
+- Walker root-skip filter at `crates/chelis-lint/src/walker.rs::is_skip_dir`:
+  the `/.claude/worktrees/` substring filter was added defensively for
+  the case where lint is run on the canonical repo and would otherwise
+  descend into nested worktrees. After canonicalize-at-CLI-boundary,
+  running lint from inside a worktree means the canonicalized walk
+  root itself contains `/.claude/worktrees/`, and every descendant
+  matches the substring filter. Fix included in this PR: also skip the
+  filter for the walk-root entry itself (depth 0), and use the
+  path-relative-to-root for the substring check so the filter only
+  matches entries that are NESTED inside the walk, not the walk root.
 
 - Other CLI subcommands with `paths: Vec<PathBuf>` arguments:
   - `chelis fmt PATH` — operates on a single user-supplied file/dir;
