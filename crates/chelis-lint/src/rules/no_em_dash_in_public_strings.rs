@@ -35,10 +35,25 @@ impl Rule for NoEmDashInPublicStrings {
         let Some(source) = ctx.source else {
             return Vec::new();
         };
+        // §8.6 scope: the rule targets user-facing strings (diagnostics,
+        // raised-error text, log messages). Python module/function/class
+        // docstrings are narrative prose, not user-facing strings, so we
+        // detect them up front and skip any em-dash that falls inside one.
+        let docstring_skip_ranges: Vec<(usize, usize)> = if ctx.surface == Surface::PythonSource {
+            python_docstring_ranges(source)
+        } else {
+            Vec::new()
+        };
         let mut out = Vec::new();
         for span in quoted_spans(source, ctx.surface) {
             for (relative, _) in source[span.start..span.end].match_indices('—') {
                 let absolute = span.start + relative;
+                if docstring_skip_ranges
+                    .iter()
+                    .any(|(s, e)| *s <= absolute && absolute < *e)
+                {
+                    continue;
+                }
                 let (line, col) = line_col(source, absolute);
                 out.push(Violation {
                     rule_id: self.id().to_string(),
@@ -173,6 +188,91 @@ fn quoted_spans(source: &str, surface: Surface) -> Vec<StringSpan> {
         cursor += ch.len_utf8();
     }
     spans
+}
+
+/// Return the byte ranges of Python docstring spans in `source`.
+///
+/// A docstring is heuristically defined as a triple-quoted string
+/// (`"""..."""` or `'''...'''`) whose **opening triple-quote is the
+/// first non-whitespace token on its line**. This catches the three
+/// canonical docstring shapes:
+///
+/// - Module docstring: triple-quote at column 0 of an early line.
+/// - Function/method/class docstring: triple-quote at the indent column
+///   immediately after a `def`/`class` header line, with no other
+///   code preceding it on that line.
+///
+/// String literals that appear mid-line (`print("""x""")`,
+/// `raise ValueError("""x""")`, a triple-quoted assignment RHS that
+/// shares the line with the `=`) are NOT docstrings under this rule
+/// and are not skipped.
+///
+/// Each returned range is `(start, end)` where `start` is the byte
+/// position of the first character inside the opening triple-quote and
+/// `end` is the byte position of the first character of the closing
+/// triple-quote. Em-dashes whose absolute offset falls in `[start, end)`
+/// are inside the docstring's content and excluded from the rule.
+fn python_docstring_ranges(source: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut at_line_start = true;
+    while cursor < bytes.len() {
+        if at_line_start {
+            // Skip leading whitespace.
+            let mut scan = cursor;
+            while scan < bytes.len() && (bytes[scan] == b' ' || bytes[scan] == b'\t') {
+                scan += 1;
+            }
+            if scan + 3 <= bytes.len() {
+                let head = &bytes[scan..scan + 3];
+                if head == b"\"\"\"" || head == b"'''" {
+                    let quote_byte = head[0];
+                    let content_start = scan + 3;
+                    if let Some(close) = find_triple_close(bytes, content_start, quote_byte) {
+                        ranges.push((content_start, close));
+                        cursor = close + 3;
+                        // After the closing triple-quote, the rest of
+                        // the line is post-string content — treat that
+                        // line end as a new line start.
+                        at_line_start = false;
+                        continue;
+                    }
+                }
+            }
+        }
+        // Advance one byte. Track line-start across newlines.
+        let b = bytes[cursor];
+        if b == b'\n' {
+            at_line_start = true;
+        } else if b != b' ' && b != b'\t' && b != b'\r' {
+            at_line_start = false;
+        }
+        cursor += 1;
+    }
+    ranges
+}
+
+/// Locate the byte offset of the closing triple-quote of the given
+/// `quote_byte` (b'"' or b'\'') starting from `from`. Returns the byte
+/// offset of the opening of the close triple. Returns `None` if no
+/// close triple is found before end-of-source (treat as unterminated).
+fn find_triple_close(bytes: &[u8], from: usize, quote_byte: u8) -> Option<usize> {
+    let mut cursor = from;
+    while cursor + 3 <= bytes.len() {
+        if bytes[cursor] == b'\\' {
+            cursor += 2;
+            continue;
+        }
+        if bytes[cursor] == quote_byte
+            && bytes[cursor + 1] == quote_byte
+            && bytes[cursor + 2] == quote_byte
+        {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
 }
 
 fn starts_rust_char_literal(source: &str, quote: usize) -> bool {
