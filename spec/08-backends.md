@@ -260,11 +260,16 @@ model that mirrors HIP.
 
 `chelis build --target metal` is wired in `crates/chelis-cli/src/main.rs` alongside
 `--target c` and `--target hip`. Reject passes deny `pad`/`shrink` (the IR ops
-the M-phase emitter doesn't yet handle) and non-{f32, bool} precisions,
-mirroring HIP's deny-list. Sort/argsort/cumsum/cumprod don't exist as IR
-variants today — when they're added, both backends' reject passes will need
-the corresponding arms; documented as a follow-up rather than a current
-guarantee.
+the M-phase emitter doesn't yet handle). Per-dtype admit/reject decisions for
+the Metal backend are pinned in `spec/04-type-system.md` §1.1.3 (the
+per-backend dtype matrix); the CLI gate, the IR validation pass, and the
+codegen entry point each consult that matrix. f64 is **hard-rejected** on
+Metal with the FP64-ALU hardware diagnostic per §1.1.3; bf16 admits at
+codegen but pipeline creation surfaces the Apple7+ requirement at runtime
+on pre-Apple7 devices, also per §1.1.3. Sort/argsort/cumsum/cumprod don't
+exist as IR variants today — when they're added, both backends' reject
+passes will need the corresponding arms; documented as a follow-up rather
+than a current guarantee.
 
 Authoritative oracle:
 
@@ -371,9 +376,20 @@ cargo test -p chelis-backend-metal --test redteam_adversarial
 
 - `pad` and `shrink` deferred (mirrors HIP's deferral); enforce via the reject pass
 - `sort`, `argsort`, `cumsum`, `cumprod`, `diagonal`, `trace` not on the GPU path
-- f64 not supported (Apple Silicon GPU has limited f64 support); enforce via the
-  reject pass
-- MPS integration deferred; custom tiled matmul is the M5 first cut
+- f64 is **hard-rejected** on Metal because Apple Silicon GPUs have no FP64 ALUs;
+  software emulation is out of scope. The diagnostic and rationale are pinned in
+  `spec/04-type-system.md` §1.1.3. f64 workloads must use `--target c` or
+  `--target hip`.
+- bf16 on Metal requires Apple7+ GPU family (M3 or later); the kernel template
+  guards `bfloat` on `__METAL_VERSION__ >= 320`, and runtime pipeline creation
+  surfaces a clean diagnostic on M1/M2 devices. See `spec/04-type-system.md`
+  §1.1.3 for both surfaces.
+- MPS integration for f32 and f16 matmul is the wrapper-helper plan from
+  WS-M1; `chelis_metal_runtime.h` exposes the helpers under the ARC
+  ownership model pinned in `spec/04-type-system.md` §1.1.3 ("Metal runtime
+  header: ARC vs MRC and MPS wrapper ownership model"). bf16, int8, int16,
+  int32, and int64 matmul (where admitted by §5.7.2) routes through the
+  parameterized 16x16 tiled MSL kernel rather than MPS.
 - Async dispatch deferred; M-phase uses `waitUntilCompleted` for synchronous launches
 - `peak_device_bytes_formula` semantically reports peak system RAM for tensor
   storage on Apple Silicon (no separate VRAM); the CLI prefixes the formula with

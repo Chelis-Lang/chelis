@@ -38,7 +38,7 @@ catalog item.
 | 4f | Pipe-stage host-runtime fallback unwinds through `chelis test` instead of reporting/handling unsupported DAG lowering | **CLOSED** | current | `phase3t_test_smoke::chelis_test_pipe_stage_host_runtime_fallback_does_not_panic`, `chelis_ir::lower::regression_tests::unsupported_pipe_stage_returns_diagnostic_without_panicking_public_api`, release workflow `Release binary test fixture` |
 | 5 | `with seed(...)` rejected by C backend (project-wide blocker) | **CLOSED** | d22d4a0 + follow-up fix | `cli::build_c_with_seed_uniform_like_succeeds`, `cli::build_c_with_seed_is_deterministic_across_runs`, `cli::build_c_with_seed_no_longer_blocks_sibling_build`, `phase3j_pre_oracle_build_path_repros_uniform_like_seed_succeeds`, `phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ` |
 | 5 | `with seed(...)` over function calls (`with seed { kaiming_uniform(...) }` where stdlib calls `uniform_like`) | **CLOSED (C host path)** | follow-up fix | `cli::cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend`, `phase3j_pre_std::cross_function_seed_stdlib_kaiming_uniform_uses_handler_seed`, `phase3j_pre_std::cross_function_seed_stdlib_normal_like_advances_rng_per_random_op` |
-| 6a | `cast(t, bf16)` rejected | **DEFERRED** | n/a | bf16 end-to-end is genuine multi-day cross-backend work (types + IR evaluator + C/HIP/Metal codegen + spec + examples). Not attempted in this campaign |
+| 6a | `cast(t, bf16)` rejected | **CLOSED on language + HIP + Metal lanes** | numeric-dtype cycle (HIP, merged at `82283e1`) + WS-M1 (Metal, this cycle) | bf16 end-to-end ships on the language, IR evaluator, and HIP backend in the numeric-dtype cycle, and on the Metal backend in WS-M1 (per `spec/04-type-system.md` §1.1.3 and `spec/design/chelis_metal_backend_plan.md` §9 M1). bf16 on the C backend remains deferred (per the §1.1.3 matrix); the original "multi-day cross-backend" framing is no longer accurate as a single-bucket deferral. |
 | 6b | `chelis check` is single-file only | **CLOSED** | d2cb0ed | `cli::check_directory_walks_ch_files_and_aggregates_json`, `cli::check_empty_directory_emits_empty_files_array`, `cli::check_single_file_keeps_legacy_report_shape` |
 | 6c | `chelis test` requires repo-root cwd | **CLOSED** | d2cb0ed | `phase3t_test_smoke::chelis_test_resolves_reef_root_from_target_file_path`, `phase3t_test_smoke::chelis_test_errors_clearly_when_no_reef_anywhere` |
 
@@ -71,8 +71,12 @@ non-numeric temporary.
 
 ## Follow-up work
 
-1. **Bucket 6a — bf16 end-to-end.** Multi-day cross-backend
-   implementation. Not attempted; tracked as separate work.
+1. **Bucket 6a — bf16 end-to-end.** Closed on the language, IR evaluator,
+   HIP backend (via the numeric-dtype cycle), and Metal backend (via WS-M1,
+   under the per-backend dtype matrix in `spec/04-type-system.md` §1.1.3).
+   bf16 on the C backend remains the only outstanding lane and is tracked
+   independently per the §1.1.3 matrix; the C-backend lift is not part of
+   the WS-M0/WS-M1 Metal scope.
 2. **Bucket 5 — cross-function seed plumbing.** Closed for the C host
    path by moving random-handler state into the generated host runtime.
    A `with seed(...)` scope now activates per-handler RNG state, and
