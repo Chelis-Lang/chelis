@@ -1,48 +1,40 @@
 //! Linearity-F1 + Linearity-F2 fixtures: pin the typed `ConsumeKind`
 //! discrimination contract and the tuple-destructure linearity gap.
 //!
-//! Background. Today the linearity checker discriminates aliasing
-//! consumes (`alias = x`) from structural consumes (realize / app-arg /
-//! pipe-stage / closure-capture / match-scrutinee) by string-prefixing
-//! the `ConsumeSite::description` on `"binding "` at
-//! `crates/chelis-types/src/linearity.rs:726`. The brittleness was
-//! filed as `Linearity-F1` in `docs/gap_synthesis.md`. The fix replaces
-//! the string check with a typed `enum ConsumeKind { Aliasing,
-//! Structural }` field on `ConsumeSite`.
+//! Background. Before Linearity-F1 (W1 PR #83) the linearity checker
+//! discriminated aliasing consumes (`alias = x`) from structural
+//! consumes (realize / app-arg / pipe-stage / closure-capture /
+//! match-scrutinee) by string-prefixing the `ConsumeSite::description`
+//! on `"binding "` at `crates/chelis-types/src/linearity.rs:726`. The
+//! brittleness was filed as `Linearity-F1` in `docs/gap_synthesis.md`.
+//! The fix replaces the string check with a typed
+//! `enum ConsumeKind { Aliasing, Structural }` field on `ConsumeSite`.
 //!
 //! Tuple destructure (`let (a, b) = pair`) synthesizes
 //! `__chelis_tmp_N` bindings at
-//! `crates/chelis-surf/src/desugar.rs:1135-1156` without calling
-//! `inject_type_metadata`. The resulting `(var __chelis_tmp_N)`
-//! references have no `:type` entry in the meta-map, so
-//! `Checker::expr_is_owned_linear` at L811-814 returns `false` and
-//! every consume on a destructured component is silently skipped
-//! (`Linearity-F2`).
+//! `crates/chelis-surf/src/desugar.rs:1135-1156`. Before W1 the
+//! resulting `(var __chelis_tmp_N)` references had no `:type` entry
+//! in the meta-map, so `Checker::expr_is_owned_linear` at L811-814
+//! returned `false` and every consume on a destructured component
+//! was silently skipped (`Linearity-F2`).
 //!
-//! PR 1 of the W1 cascade (this commit) threads the tuple element
-//! type onto the tmp-binding value so the references infer as owned
-//! linear. The surfaced violations route through
-//! `LinearityInfo::warnings` (mirroring the F3 PR 1 deprecation-window
-//! pattern) pending W2-cascade flip to errors.
+//! W1 PR #83 closed the false-negative by resolving destructured
+//! tuple-component types at linearity-check time via a local
+//! `tuple_get_element_type` helper. PR #83 also reintroduced
+//! `LinearityInfo::warnings` to route surfaced violations during a
+//! deprecation window. The W2-cascade PR (this commit) closes the
+//! deprecation window: the corpus survey
+//! (`docs/investigations/linearity_destructure_cleanup_survey.md`)
+//! confirmed zero in-tree warnings, so the channel removal is total
+//! and violations on destructured components surface as errors.
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::errors::CheckErrorKind;
-use chelis_types::{LinearityInfo, check_linearity, check_typed_program};
+use chelis_types::{check_linearity, check_typed_program};
 
-/// Run linearity and return the resulting `LinearityInfo`. Fixtures
-/// that expect a warning (not an error) call this to inspect
-/// `LinearityInfo::warnings`.
-fn linearity_info(source: &str) -> LinearityInfo {
-    let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
-    let checked = check_typed_program(&deep).expect("type check should succeed");
-    let result = check_linearity(&checked).expect("linearity check should not error");
-    result.linearity().clone()
-}
-
-/// Run linearity and return the surfaced errors. Fixtures that expect
-/// a hard error call this.
+/// Run linearity and return the surfaced errors. Fixtures that
+/// expect a hard error call this.
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let decls = parse_str(source).expect("surf parse should succeed");
     let deep = desugar_program(&decls);
@@ -50,25 +42,22 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     check_linearity(&checked).expect_err("linearity check must error")
 }
 
-/// Run linearity and assert no errors and no warnings. Used by positive
-/// controls that must stay clean before and after the fix.
+/// Run linearity and assert no errors. Used by positive controls
+/// that must stay clean.
 fn assert_linearity_clean(source: &str) {
-    let info = linearity_info(source);
-    assert!(
-        info.warnings().is_empty(),
-        "expected zero warnings; got {:?}",
-        info.warnings()
-    );
+    let decls = parse_str(source).expect("surf parse should succeed");
+    let deep = desugar_program(&decls);
+    let checked = check_typed_program(&deep).expect("type check should succeed");
+    check_linearity(&checked).expect("linearity check should not error");
 }
 
 /// Fixture 1: aliasing-consume control. `y = w` is an aliasing consume;
 /// the only later use of either name is `realize(y)`. Must pass.
 ///
-/// Before the fix: passes via the string-prefix check at L726.
-/// After the fix: passes because the consume on `w` carries
+/// After Linearity-F1: passes because the consume on `w` carries
 /// `ConsumeKind::Aliasing` and `read_or_error` returns early on that
 /// variant. The pinned outcome does not change; what changes is the
-/// discrimination mechanism.
+/// discrimination mechanism (typed field, not string prefix).
 #[test]
 fn aliasing_consume_control_passes() {
     assert_linearity_clean(
@@ -85,16 +74,10 @@ def f(w: tensor[4, f32]): tensor[4, f32] =
 /// Fixture 2: structural-consume control. `a = realize(w)` is a
 /// structural consume of `w`; a later borrow-read of `w` (passing
 /// `w` to a read-only primitive like `add`) must fail.  The
-/// discrimination axis is exercised inside `read_or_error` at
-/// `linearity.rs:726`: today the string-prefix check on
-/// `"binding "` distinguishes Aliasing from Structural consumes;
-/// after Linearity-F1 the discrimination is by typed
-/// `ConsumeKind::Structural` instead.
-///
-/// Before the fix: fails (the consume tag is `realize at offset N`,
-/// not `binding ...`, so the string-prefix check does not exempt
-/// it).  After the fix: fails for the same reason expressed via
-/// `ConsumeKind::Structural`.  This mirrors the existing
+/// discrimination axis is exercised inside `read_or_error`: after
+/// Linearity-F1 the discrimination is by typed
+/// `ConsumeKind::Structural` (replacing the prior string-prefix
+/// check on the description). This mirrors the existing
 /// `detects_use_after_consume` fixture in `linearity.rs:22-39`.
 #[test]
 fn structural_consume_control_errors() {
@@ -119,22 +102,14 @@ def f(w: tensor[4, f32]): tensor[4, f32] =
 }
 
 /// Fixture 4: tuple-destructure linearity (Linearity-F2). After
-/// destructuring `(a, b) = pair`, a double `realize(a)` must be
-/// flagged. PR 1 routes the violation through
-/// `LinearityInfo::warnings` (warning-mode, deprecation window);
-/// W2-cascade flips it to an error.
-///
-/// Today this fixture silently passed because the destructured
-/// `(var __chelis_tmp_N)` references had no `:type` metadata, so
-/// `expr_is_owned_linear` returned false and the linearity check
-/// skipped both `realize(a)` calls.  After W1.3 threads the type
-/// metadata via `tuple_get_element_type` resolution in
-/// `linearity.rs:expr_type` and routes the surfaced violation
-/// through `LinearityInfo::warnings` while the bind chain is
-/// destructure-marked, this fires as a warning.
+/// destructuring `(a, b) = pair`, a double `realize(a)` is flagged
+/// as a hard error. PR #83 closed the false-negative; the W2
+/// cascade flips the surfaced violation from warning to error
+/// after the corpus survey confirmed zero in-tree warnings to
+/// clean up.
 #[test]
-fn tuple_destructure_double_realize_warns_after_fix() {
-    let info = linearity_info(
+fn tuple_destructure_double_realize_errors() {
+    let errors = linearity_errors(
         r#"
 def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
   {
@@ -145,18 +120,19 @@ def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
 "#,
     );
     assert!(
-        info.warnings().iter().any(|w| {
-            matches!(w.kind, CheckErrorKind::UseAfterConsume) && w.message.contains("variable `a`")
+        errors.iter().any(|e| {
+            matches!(e.kind, CheckErrorKind::UseAfterConsume)
+                && e.message.contains("variable `a`")
+                && e.message.contains("destructured")
         }),
-        "expected a UseAfterConsume warning on `a` after double realize on a destructured \
-         tuple component; got {:?}",
-        info.warnings()
+        "expected UseAfterConsume on `a` after double realize on a destructured \
+         tuple component; got {errors:?}"
     );
 }
 
 /// Fixture 5: tuple-destructure positive control. `add(realize(a),
 /// realize(b))` consumes each destructured component exactly once.
-/// Must pass before and after the fix with zero warnings.
+/// Must pass with no errors.
 #[test]
 fn tuple_destructure_single_consume_each_passes() {
     assert_linearity_clean(

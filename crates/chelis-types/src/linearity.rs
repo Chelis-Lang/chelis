@@ -7,35 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::CheckedProgram;
 use crate::errors::{CheckError, CheckErrorKind};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
     reusable_inputs_by_offset: HashMap<usize, usize>,
-    /// Linearity violations surfaced as warnings during a
-    /// deprecation window (W1 PR 1: tuple-destructure consumes + the
-    /// aliased-consume bypass that compounds with them).  Mirrors the
-    /// F3 PR 1 plumbing introduced in PR #65: violations route through
-    /// `warnings` while the in-tree corpus is being cleaned up;
-    /// the W2-cascade PR flips routing back to `errors`.  Skipped
-    /// from serde because `CheckError` does not derive
-    /// Serialize/Deserialize; rehydrating a `CheckedProgram` from
-    /// JSON loses warning detail, which is acceptable because
-    /// warnings are only consumed by the live CLI path that produced
-    /// them.
-    #[serde(skip)]
-    warnings: Vec<CheckError>,
 }
-
-impl PartialEq for LinearityInfo {
-    fn eq(&self, other: &Self) -> bool {
-        // `warnings` is intentionally excluded; it is a transient
-        // diagnostic carrier and not part of the structural identity
-        // of `LinearityInfo`.  The pre-warning shape compared only
-        // `reusable_inputs_by_offset`; this preserves that.
-        self.reusable_inputs_by_offset == other.reusable_inputs_by_offset
-    }
-}
-
-impl Eq for LinearityInfo {}
 
 impl LinearityInfo {
     pub fn reusable_input_for_span(&self, span: Span) -> Option<usize> {
@@ -46,20 +21,6 @@ impl LinearityInfo {
         self.reusable_inputs_by_offset
             .entry(span.offset)
             .or_insert(input_index);
-    }
-
-    /// Linearity violations surfaced as warnings during a
-    /// deprecation window.  W1 PR 1 routes tuple-destructure consumes
-    /// and the aliased-consume bypass through this channel so the
-    /// existing in-tree corpus has time to be cleaned up; the
-    /// W2-cascade PR flips the routing back to
-    /// `Checker::push_diagnostic -> errors`.
-    pub fn warnings(&self) -> &[CheckError] {
-        &self.warnings
-    }
-
-    fn push_warning(&mut self, warning: CheckError) {
-        self.warnings.push(warning);
     }
 }
 
@@ -249,30 +210,28 @@ struct Checker {
     errors: Vec<CheckError>,
     info: LinearityInfo,
     top_level_types: HashMap<String, Expr>,
-    /// W1 PR 1 destructure-cascade warning mode (Linearity-F2).
-    /// When `> 0`, diagnostics raised during the current walk route
-    /// through `info.warnings` instead of `errors`.  Incremented by
-    /// `check_let` when entering a binding whose value is a
-    /// destructure-synthesized tmp (tagged by the desugarer with
-    /// `destructure: true` in the bind's meta-map) and decremented
-    /// on return.  The W2-cascade PR will remove the field and
-    /// unify routing once the in-tree corpus is clean.
-    destructure_warning_depth: usize,
+    /// Depth counter for desugarer-synthesized destructure scopes
+    /// (`__chelis_tmp_N` bind chains tagged with `destructure: true`
+    /// in their meta-map). Incremented by `check_let` when entering
+    /// a destructure-marked bind and decremented on return. The
+    /// `consume_var_expr` already-consumed arm uses this to gate
+    /// the Linearity-F2 use-after-consume diagnostic: implicit
+    /// Copy insertion does not apply to destructured components
+    /// (tuple-get produces a fresh owned value, not an aliased
+    /// borrow), so double-consume on a destructured name is a
+    /// hard error rather than the silent fallthrough used by
+    /// regular bindings.
+    destructure_scope_depth: usize,
 }
 
 impl Checker {
     fn push_diagnostic(&mut self, error: CheckError) {
-        // Linearity-F3 PR 2: most diagnostics route through `errors`.
-        // W1 PR 1 reintroduces a narrow warning channel for the
-        // tuple-destructure cascade; the surfaced violations route
-        // through `info.warnings` during a deprecation window so the
-        // existing in-tree corpus has time to be cleaned up.  The
-        // W2-cascade PR flips routing back to `errors`.
-        if self.destructure_warning_depth > 0 {
-            self.info.push_warning(error);
-        } else {
-            self.errors.push(error);
-        }
+        // Linearity-F2 / F3 W2 cascade close: every linearity
+        // violation is an error.  W1 PR 1's destructure-cascade
+        // warning channel closed once the corpus survey confirmed
+        // zero surfaced warnings (see
+        // `docs/investigations/linearity_destructure_cleanup_survey.md`).
+        self.errors.push(error);
     }
 }
 
@@ -315,7 +274,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: program.type_env().clone(),
-        destructure_warning_depth: 0,
+        destructure_scope_depth: 0,
     };
     let mut scope = LinearScope::default();
 
@@ -390,7 +349,7 @@ pub fn check_linearity_with_context(
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
-        destructure_warning_depth: 0,
+        destructure_scope_depth: 0,
     };
 
     let mut scope = LinearScope::default();
@@ -657,19 +616,20 @@ impl Checker {
             return;
         }
         let mut pushed = Vec::new();
-        // Linearity-F2 destructure-cascade warning mode: when any
-        // bind in this let chain is the desugarer-synthesized
-        // destructure intermediate (`__chelis_tmp_N`, tagged with
-        // `destructure: true` in the bind's meta-map), surfaced
-        // linearity violations route through `LinearityInfo::warnings`
-        // for the duration of the body walk.  Mirrors the F3 PR 1
-        // deprecation-window pattern.
+        // Linearity-F2 destructure-scope tracking.  When the bind
+        // is one of the desugarer-synthesized destructure
+        // intermediates (`__chelis_tmp_N` or a user-visible
+        // destructure component, tagged with `destructure: true`),
+        // bump the destructure-scope depth so the
+        // `consume_var_expr` already-consumed arm fires as an
+        // error rather than the silent fallthrough used by regular
+        // bindings.
         let bind_introduces_destructure = match &kids[0] {
             Expr::List(bind_list, _) => bind_introduces_destructure_tmp(bind_list),
             _ => false,
         };
         if bind_introduces_destructure {
-            self.destructure_warning_depth += 1;
+            self.destructure_scope_depth += 1;
         }
         if let Expr::List(bind_list, _) = &kids[0] {
             let bind_kids = children(bind_list);
@@ -712,7 +672,7 @@ impl Checker {
             self.pop_and_check(scope, &name, expr_scope_end(&kids[1]));
         }
         if bind_introduces_destructure {
-            self.destructure_warning_depth -= 1;
+            self.destructure_scope_depth -= 1;
         }
     }
 
@@ -920,20 +880,19 @@ impl Checker {
                 // borrows of the target trip `read_or_error`.
                 scope.consume(&target, site);
             }
-            Some(BindingState::Consumed(consumed_at)) if self.destructure_warning_depth > 0 => {
-                // Linearity-F2 deprecation window.  Inside a
-                // destructure-let scope, a consume-after-consume
-                // surfaces as a warning so the in-tree corpus can
-                // be cleaned up before the W2-cascade PR flips this
-                // to an error.  Outside the destructure scope the
+            Some(BindingState::Consumed(consumed_at)) if self.destructure_scope_depth > 0 => {
+                // Linearity-F2: inside a destructure-let scope a
+                // consume-after-consume on a destructured component
+                // is an error.  Implicit Copy insertion does not
+                // apply because tuple-get produces a fresh owned
+                // value rather than an aliased borrow, so reuse of
+                // a destructured tensor name must be made explicit
+                // via `copy()`.  Outside the destructure scope the
                 // implicit-linearity pass inserts a Copy for
                 // consuming fan-out, matching the spec's
                 // "Copy Insertion" semantics; per the existing
-                // baseline we do not flag this shape.
+                // baseline we do not flag that shape.
                 let description = consumed_at.description.clone();
-                // Use the user-facing alias name in the message; the
-                // forwarding through the alias chain is an internal
-                // detail.
                 self.push_diagnostic(CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
@@ -1490,13 +1449,16 @@ fn tuple_get_element_type<'a>(
     tys.get(index)
 }
 
-/// Linearity-F2 destructure-cascade gate.  Returns `true` if `bind_list`
+/// Linearity-F2 destructure-scope gate.  Returns `true` if `bind_list`
 /// is a `(bind {meta} name value ...)` whose meta-map contains the
 /// `destructure: true` marker injected by `chelis_surf::desugar`
 /// when synthesizing the `__chelis_tmp_N` intermediates for
 /// `let (a, b) = ...` patterns.  Used by `Checker::check_let` to
-/// route surfaced violations through `LinearityInfo::warnings`
-/// during the W1 PR 1 deprecation window.
+/// bump `destructure_scope_depth`, which gates the
+/// `consume_var_expr` already-consumed arm so use-after-consume on
+/// a destructured component surfaces as an error rather than the
+/// silent fallthrough used by regular bindings (where implicit
+/// Copy insertion covers consuming fan-out).
 fn bind_introduces_destructure_tmp(bind_list: &List) -> bool {
     let Some(meta) = get_meta(bind_list) else {
         return false;

@@ -27,24 +27,28 @@ the warning channel to errors and remove the plumbing.
 
 ## Survey method
 
-The CLI's `chelis check` does not surface `LinearityInfo::warnings`;
-that channel is internal to `chelis-types` and is only inspected by
-the chelis-types test fixtures (`linearity_typed_consumekind.rs`,
-`linearity_aliased_consume.rs`) and this survey. Survey driver:
-`crates/chelis-cli/tests/linearity_destructure_corpus_survey.rs`.
+The CLI's `chelis check` did not surface `LinearityInfo::warnings`;
+that channel was internal to `chelis-types` and was only inspected
+by the chelis-types test fixtures (`linearity_typed_consumekind.rs`,
+`linearity_aliased_consume.rs`) and the W2-cascade survey driver.
+The survey driver lived at
+`crates/chelis-cli/tests/linearity_destructure_corpus_survey.rs`
+during W2-cascade.1 and was removed alongside the warnings channel
+in W2-cascade.3 (the same commit that flipped the surfaced
+violations from warnings to errors).
 
-The driver walks every `.ch` file under `examples/` and `packages/`,
-runs the full front-end pipeline (reef import resolution where
-applicable, parse, desugar, macro expansion, type check, effect
-check, linearity check), and collects every entry returned by
-`LinearityInfo::warnings()`.
+The driver walked every `.ch` file under `examples/` and
+`packages/`, ran the full front-end pipeline (reef import
+resolution where applicable, parse, desugar, macro expansion, type
+check, effect check, linearity check), and collected every entry
+returned by `LinearityInfo::warnings()`.
 
-`crates/*/tests/` is excluded because those `.ch` fixtures are
+`crates/*/tests/` was excluded because those `.ch` fixtures are
 intentionally adversarial (linearity negative controls) and would
 not represent a production-corpus signal.
 
-Manual gate (the survey driver runs past the inner-loop budget, so
-it sits behind `#[ignore]`):
+Manual gate that produced the recorded result (run against the
+W2-cascade.1 commit before the channel was removed):
 
 ```
 cargo test --package chelis-cli --test linearity_destructure_corpus_survey \
@@ -119,6 +123,8 @@ upgrade to a chelis release that includes this cascade.
 - F3 closeout reference: `docs/investigations/linearity_f3_pr2_closeout.md`
 - §5 entry: `docs/gap_synthesis.md` row for `Linearity-F2`
 - Survey driver: `crates/chelis-cli/tests/linearity_destructure_corpus_survey.rs`
+  (lived during W2-cascade.1; removed in W2-cascade.3 alongside the
+  warnings channel)
 - W1 PR 1 fixture references: `crates/chelis-types/tests/linearity_typed_consumekind.rs`
   (Fixture 4 — `tuple_destructure_double_realize_warns_after_fix`)
   and `crates/chelis-types/tests/linearity_aliased_consume.rs`
