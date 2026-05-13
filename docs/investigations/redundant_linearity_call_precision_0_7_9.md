@@ -176,3 +176,36 @@ Other rules in the registry are either:
 
 No other rule has the trigger-emit asymmetry shape. Sibling sweep
 green for this PR.
+
+## Item 3 closure is subsumed by Item 1's mechanism
+
+Validated empirically with two pin tests:
+
+- `f12_warning_suppressed_on_2arg_list_drop_in_pipe_form` (F12):
+  asserts `xs |> drop(n)` produces no `redundant-linearity-call`
+  warning. The strip `drop(n) -> n` fails typed pipeline because the
+  pipe seed becomes `xs |> n` (parser/type error). The CLI driver's
+  gate rejects the strip; `check_mirrors_fix=true` suppresses the
+  warning.
+
+- `f13_warning_still_fires_on_legitimate_redundant_drop` (F13):
+  negative control. Asserts `drop(realize(w))` on a tensor argument
+  still produces a `redundant-linearity-call` warning with a `[fix]`
+  marker (the strip is safe under implicit linearity).
+
+Both pin tests pass after commit 3 (the `check_mirrors_fix` opt-in)
+with no further code changes. The original Item 3 fix shape ("symbol
+resolution to discriminate linearity primitive from library calls")
+is unnecessary: the typed-pipeline gate already discriminates
+correctly because the library-call shapes that look like linearity
+primitives all fail the strip-then-type-check probe.
+
+The brief named "fallback allowlist" as the secondary option. That
+path is also avoided: no allowlist is needed because the gate handles
+the discrimination structurally. Future workstreams that need
+stricter precision in the legitimate-strip case (where the strip
+would type-check but the user wants to keep the source explicit) can
+revisit the symbol-resolution path; this PR does not.
+
+Commit 6 carries only the CHANGELOG updates; no Item-3-specific code
+change is required.
