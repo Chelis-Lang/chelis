@@ -34,11 +34,193 @@ pub(crate) enum TransformKind {
     Vmap,
 }
 
+/// Per-dtype scalar storage used by [`RuntimeValue::Scalar`].
+///
+/// The variant carries the value at exactly the precision the program
+/// has assigned. Construction goes through
+/// [`RuntimeValue::scalar`]/[`RuntimeValue::int`]/[`RuntimeValue::float`]
+/// (or one of the typed `int_*`/`float_*` constructors) so the
+/// `dtype`-vs-`bits` invariant cannot be silently violated. See
+/// `spec/04-type-system.md` §1.1 for the active dtype set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ScalarBits {
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    F16(half::f16),
+    Bf16(half::bf16),
+    F32(f32),
+    F64(f64),
+}
+
+impl ScalarBits {
+    /// The Prim that **must** match the surrounding `Scalar { dtype, bits }`
+    /// payload's `dtype` field. The constructor [`RuntimeValue::scalar`]
+    /// enforces that invariant.
+    pub(crate) fn dtype(&self) -> Prim {
+        match self {
+            ScalarBits::I8(_) => Prim::Int8,
+            ScalarBits::I16(_) => Prim::Int16,
+            ScalarBits::I32(_) => Prim::Int32,
+            ScalarBits::I64(_) => Prim::Int64,
+            ScalarBits::F16(_) => Prim::F16,
+            ScalarBits::Bf16(_) => Prim::Bf16,
+            ScalarBits::F32(_) => Prim::F32,
+            ScalarBits::F64(_) => Prim::F64,
+        }
+    }
+
+    /// View any integer scalar as i64. Float scalars truncate toward zero
+    /// (same convention as the existing `as i64` cast paths the host lane
+    /// already used pre-refactor).
+    pub(crate) fn as_i64(&self) -> i64 {
+        match self {
+            ScalarBits::I8(v) => *v as i64,
+            ScalarBits::I16(v) => *v as i64,
+            ScalarBits::I32(v) => *v as i64,
+            ScalarBits::I64(v) => *v,
+            ScalarBits::F16(v) => f32::from(*v) as i64,
+            ScalarBits::Bf16(v) => f32::from(*v) as i64,
+            ScalarBits::F32(v) => *v as i64,
+            ScalarBits::F64(v) => *v as i64,
+        }
+    }
+
+    /// View any numeric scalar as f64. Integer scalars widen losslessly
+    /// up to i32; i64 may lose precision past 2^53 (matches IEEE-754
+    /// double semantics, which is what the pre-refactor host lane did).
+    pub(crate) fn as_f64(&self) -> f64 {
+        match self {
+            ScalarBits::I8(v) => *v as f64,
+            ScalarBits::I16(v) => *v as f64,
+            ScalarBits::I32(v) => *v as f64,
+            ScalarBits::I64(v) => *v as f64,
+            ScalarBits::F16(v) => f32::from(*v) as f64,
+            ScalarBits::Bf16(v) => f32::from(*v) as f64,
+            ScalarBits::F32(v) => *v as f64,
+            ScalarBits::F64(v) => *v,
+        }
+    }
+
+    /// Re-pack an `f64` as the same dtype as `self`. Used by binary ops
+    /// that compute in `f64` and need to stash the result back at the
+    /// operand's dtype.
+    pub(crate) fn from_f64_as(dtype: Prim, value: f64) -> Result<Self, String> {
+        Ok(match dtype {
+            Prim::Int8 => ScalarBits::I8(value as i8),
+            Prim::Int16 => ScalarBits::I16(value as i16),
+            Prim::Int32 => ScalarBits::I32(value as i32),
+            Prim::Int64 => ScalarBits::I64(value as i64),
+            Prim::F16 => ScalarBits::F16(half::f16::from_f32(value as f32)),
+            Prim::Bf16 => ScalarBits::Bf16(half::bf16::from_f32(value as f32)),
+            Prim::F32 => ScalarBits::F32(value as f32),
+            Prim::F64 => ScalarBits::F64(value),
+            other => {
+                return Err(format!(
+                    "cannot pack scalar bits at non-numeric dtype `{}`",
+                    other.name()
+                ));
+            }
+        })
+    }
+
+    /// Re-pack an `i64` as the same dtype as `self`.
+    pub(crate) fn from_i64_as(dtype: Prim, value: i64) -> Result<Self, String> {
+        Ok(match dtype {
+            Prim::Int8 => ScalarBits::I8(value as i8),
+            Prim::Int16 => ScalarBits::I16(value as i16),
+            Prim::Int32 => ScalarBits::I32(value as i32),
+            Prim::Int64 => ScalarBits::I64(value),
+            Prim::F16 => ScalarBits::F16(half::f16::from_f32(value as f32)),
+            Prim::Bf16 => ScalarBits::Bf16(half::bf16::from_f32(value as f32)),
+            Prim::F32 => ScalarBits::F32(value as f32),
+            Prim::F64 => ScalarBits::F64(value as f64),
+            other => {
+                return Err(format!(
+                    "cannot pack scalar bits at non-numeric dtype `{}`",
+                    other.name()
+                ));
+            }
+        })
+    }
+}
+
+/// Sealed payload for [`RuntimeValue::Scalar`] (WS-A0 RT-1 fixup C1).
+///
+/// The dtype/bits pairing is enforced inside [`ScalarPayload::new`] —
+/// the inner fields are private so no caller (in or out of this crate)
+/// can construct a payload via struct-literal syntax that bypasses the
+/// invariant. This is the structural fix for the silent-init pattern
+/// the RT-1 review found: with a `pub(crate) Scalar { dtype, bits }`
+/// variant, any in-crate caller could write
+/// `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
+/// directly and skip the `RuntimeValue::scalar()` invariant check.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ScalarPayload {
+    dtype: Prim,
+    bits: ScalarBits,
+}
+
+/// Error returned by [`ScalarPayload::new`] when the requested dtype
+/// disagrees with the bits-variant's intrinsic dtype. Replaces the
+/// stringly-typed error returned by the old `RuntimeValue::scalar`
+/// constructor so the C1 invariant has a typed failure path.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScalarMismatchError {
+    pub dtype: Prim,
+    pub bits_dtype: Prim,
+}
+
+impl std::fmt::Display for ScalarMismatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ScalarPayload dtype/bits mismatch: dtype={} but bits carry dtype {} \
+             (spec/04-type-system.md §1.1)",
+            self.dtype.name(),
+            self.bits_dtype.name(),
+        )
+    }
+}
+
+impl std::error::Error for ScalarMismatchError {}
+
+impl ScalarPayload {
+    /// Construct a payload with the dtype/bits invariant enforced.
+    /// Returns [`ScalarMismatchError`] for mismatched pairs (e.g.
+    /// `dtype = F16, bits = F32(_)`).
+    pub(crate) fn new(dtype: Prim, bits: ScalarBits) -> Result<Self, ScalarMismatchError> {
+        if dtype != bits.dtype() {
+            return Err(ScalarMismatchError {
+                dtype,
+                bits_dtype: bits.dtype(),
+            });
+        }
+        Ok(Self { dtype, bits })
+    }
+
+    /// Read the source-level dtype.
+    pub(crate) fn dtype(&self) -> Prim {
+        self.dtype
+    }
+
+    /// Read the dtype-tagged storage.
+    pub(crate) fn bits(&self) -> ScalarBits {
+        self.bits
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum RuntimeValue {
     Tensor(RuntimeTensorValue),
-    Int(i64),
-    Float(f64),
+    /// First-class numeric scalar tagged with its source-level dtype.
+    /// Construction must go through [`RuntimeValue::scalar`] (or one of
+    /// the convenience constructors) so the `dtype`-vs-`bits` invariant
+    /// holds. The variant is now a tuple over the sealed
+    /// [`ScalarPayload`] (C1) so struct-literal initialization can no
+    /// longer bypass the invariant. See `spec/04-type-system.md` §1.1.
+    Scalar(ScalarPayload),
     Bool(bool),
     String(String),
     List(Vec<RuntimeValue>),
@@ -68,6 +250,131 @@ pub(crate) enum RuntimeValue {
         captured_env: HashMap<String, RuntimeValue>,
     },
     Unit,
+}
+
+impl RuntimeValue {
+    /// Construct a `Scalar` payload, asserting that `dtype` matches the
+    /// `bits` variant. Returns an error for mismatched pairs (e.g.
+    /// `dtype = F16, bits = F32(_)`) so the WS-A0 invariant from
+    /// `spec/04-type-system.md` §1.1 is enforced at every construction
+    /// site, not silently elided. Used by every typed-literal lowering
+    /// path; ad-hoc internal sites that already have the dtype + bits
+    /// in sync should prefer one of the typed `int_*` / `float_*`
+    /// constructors below.
+    #[allow(
+        dead_code,
+        reason = "WS-A0 invariant constructor; used by acceptance tests"
+    )]
+    pub(crate) fn scalar(dtype: Prim, bits: ScalarBits) -> Result<Self, String> {
+        ScalarPayload::new(dtype, bits)
+            .map(RuntimeValue::Scalar)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Default-narrowed integer literal per spec §5.3: bare integer
+    /// values default to `int32` unless the surrounding context says
+    /// otherwise.
+    pub(crate) fn int_lit(value: i64) -> Self {
+        // C1 (WS-A0 RT-1 fixup): route every internal construction
+        // through `ScalarPayload::new` so the dtype/bits invariant is
+        // enforced uniformly. The pair is hardcoded matching, so
+        // `expect` here is a structural assertion, not a runtime check.
+        RuntimeValue::Scalar(
+            ScalarPayload::new(Prim::Int32, ScalarBits::I32(value as i32))
+                .expect("int_lit pair is invariant-correct by construction"),
+        )
+    }
+
+    /// Default-narrowed float literal per spec §5.3: bare float values
+    /// default to `f32`.
+    pub(crate) fn float_lit(value: f64) -> Self {
+        RuntimeValue::Scalar(
+            ScalarPayload::new(Prim::F32, ScalarBits::F32(value as f32))
+                .expect("float_lit pair is invariant-correct by construction"),
+        )
+    }
+
+    /// Computed integer value preserving full i64 precision (e.g. `len`,
+    /// shape sizes, parsed `to_int` results). Carries dtype `int64`.
+    pub(crate) fn int64(value: i64) -> Self {
+        RuntimeValue::Scalar(
+            ScalarPayload::new(Prim::Int64, ScalarBits::I64(value))
+                .expect("int64 pair is invariant-correct by construction"),
+        )
+    }
+
+    /// Computed float value preserving full f64 precision (e.g. `to_float`
+    /// parse results, scalar reductions over f64 tensors). Carries dtype
+    /// `f64`.
+    pub(crate) fn float64(value: f64) -> Self {
+        RuntimeValue::Scalar(
+            ScalarPayload::new(Prim::F64, ScalarBits::F64(value))
+                .expect("float64 pair is invariant-correct by construction"),
+        )
+    }
+
+    /// Construct a scalar at the dtype of an existing scalar (used by
+    /// arithmetic ops to keep result-precision = operand-precision).
+    pub(crate) fn scalar_like_int(template_dtype: Prim, value: i64) -> Result<Self, String> {
+        let bits = ScalarBits::from_i64_as(template_dtype, value)?;
+        ScalarPayload::new(template_dtype, bits)
+            .map(RuntimeValue::Scalar)
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn scalar_like_float(template_dtype: Prim, value: f64) -> Result<Self, String> {
+        let bits = ScalarBits::from_f64_as(template_dtype, value)?;
+        ScalarPayload::new(template_dtype, bits)
+            .map(RuntimeValue::Scalar)
+            .map_err(|e| e.to_string())
+    }
+
+    /// True for any [`RuntimeValue::Scalar`] whose dtype is integer-typed
+    /// per `Prim::is_integer`. Used by dispatch sites that previously
+    /// matched `RuntimeValue::Int(_)`.
+    #[allow(
+        dead_code,
+        reason = "downstream wave-2 will route through these classification helpers"
+    )]
+    pub(crate) fn is_int_scalar(&self) -> bool {
+        matches!(self, RuntimeValue::Scalar(payload) if payload.dtype().is_integer())
+    }
+
+    /// True for any [`RuntimeValue::Scalar`] whose dtype is float-typed
+    /// per `Prim::is_float`. Used by dispatch sites that previously
+    /// matched `RuntimeValue::Float(_)`.
+    #[allow(
+        dead_code,
+        reason = "downstream wave-2 will route through these classification helpers"
+    )]
+    pub(crate) fn is_float_scalar(&self) -> bool {
+        matches!(self, RuntimeValue::Scalar(payload) if payload.dtype().is_float())
+    }
+
+    /// View this value as i64 if it is an integer-typed scalar.
+    pub(crate) fn as_i64(&self) -> Option<i64> {
+        match self {
+            RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+                Some(payload.bits().as_i64())
+            }
+            _ => None,
+        }
+    }
+
+    /// View this value as f64 if it is a float-typed scalar. Mirrors
+    /// `as_i64` for the float row.
+    #[allow(
+        dead_code,
+        reason = "test surface mirror of as_i64; used by acceptance tests"
+    )]
+    pub(crate) fn as_f64(&self) -> Option<f64> {
+        match self {
+            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
+                Some(payload.bits().as_f64())
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -306,8 +613,24 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
                 data: tensor.value.data.clone(),
             },
         },
-        RuntimeValue::Int(value) => ExecutionValue::Int64 { value: *value },
-        RuntimeValue::Float(value) => ExecutionValue::Float64 { value: *value },
+        RuntimeValue::Scalar(payload) => {
+            let dtype = payload.dtype();
+            let bits = payload.bits();
+            if dtype.is_integer() {
+                ExecutionValue::Int64 {
+                    value: bits.as_i64(),
+                }
+            } else if dtype.is_float() {
+                ExecutionValue::Float64 {
+                    value: bits.as_f64(),
+                }
+            } else {
+                return Err(format!(
+                    "non-numeric scalar dtype `{}` cannot be encoded into ExecutionValue",
+                    dtype.name()
+                ));
+            }
+        }
         RuntimeValue::Bool(value) => ExecutionValue::Bool { value: *value },
         RuntimeValue::String(value) => ExecutionValue::String {
             value: value.clone(),
@@ -568,10 +891,10 @@ impl<'a> EvalContext<'a> {
                         kids.first()
                             .ok_or_else(|| "handle-effect missing seed".to_string())?,
                     )?;
-                    let seed = match seed {
-                        RuntimeValue::Int(value) => value as u64,
-                        other => {
-                            return Err(format!("with seed expects int seed, got {other:?}"));
+                    let seed = match seed.as_i64() {
+                        Some(value) => value as u64,
+                        None => {
+                            return Err(format!("with seed expects int seed, got {seed:?}"));
                         }
                     };
                     let saved_seed = self.random_seed;
@@ -688,9 +1011,26 @@ impl<'a> EvalContext<'a> {
         let value = children(list)
             .first()
             .ok_or_else(|| "lit missing value".to_string())?;
+        // Per spec/04-type-system.md §5.3, the desugarer narrows
+        // unsuffixed integer literals to int32 and unsuffixed float
+        // literals to f32. The type checker writes the resolved
+        // primitive into the lit's `type` meta as `(t-prim {} <name>)`.
+        // Honor that meta where present so a context-typed literal
+        // (e.g. `(lit {type: (t-prim {} int64)} 42)`) carries the
+        // surrounding-position dtype, not just the bare default.
+        let meta_dtype = get_meta(list).and_then(lit_meta_prim);
         match value {
-            Expr::Atom(Atom::Int(value), _) => Ok(RuntimeValue::Int(*value)),
-            Expr::Atom(Atom::Float(value), _) => Ok(RuntimeValue::Float(*value)),
+            Expr::Atom(Atom::Int(value), _) => match meta_dtype {
+                Some(dtype) if dtype.is_integer() => RuntimeValue::scalar_like_int(dtype, *value),
+                Some(dtype) if dtype.is_float() => {
+                    RuntimeValue::scalar_like_float(dtype, *value as f64)
+                }
+                _ => Ok(RuntimeValue::int_lit(*value)),
+            },
+            Expr::Atom(Atom::Float(value), _) => match meta_dtype {
+                Some(dtype) if dtype.is_float() => RuntimeValue::scalar_like_float(dtype, *value),
+                _ => Ok(RuntimeValue::float_lit(*value)),
+            },
             Expr::Atom(Atom::Bool(value), _) => Ok(RuntimeValue::Bool(*value)),
             Expr::Atom(Atom::Str(value), _) => Ok(RuntimeValue::String(value.clone())),
             // Unit literal `()` desugars to `(lit {type: (t-unit {})} ())` where the
@@ -1116,15 +1456,32 @@ impl<'a> EvalContext<'a> {
             .and_then(|ty| children(ty).first())
             .and_then(symbol_name)
             .ok_or_else(|| "cast missing target type".to_string())?;
-        match (value, target) {
-            (RuntimeValue::Int(value), "int32" | "int64") => Ok(RuntimeValue::Int(value)),
-            (RuntimeValue::Int(value), "f32" | "f64") => Ok(RuntimeValue::Float(value as f64)),
-            (RuntimeValue::Float(value), "f32" | "f64") => Ok(RuntimeValue::Float(value)),
-            (RuntimeValue::Float(value), "int32" | "int64") => Ok(RuntimeValue::Int(value as i64)),
-            (RuntimeValue::Bool(value), "bool") => Ok(RuntimeValue::Bool(value)),
-            (RuntimeValue::String(value), "string") => Ok(RuntimeValue::String(value)),
-            (RuntimeValue::Tensor(tensor), target) => cast_tensor_value(tensor, target),
-            (other, _) => Err(format!("unsupported cast from {other:?}")),
+        // Resolve the textual target into a Prim using the canonical
+        // active dtype map. The type checker has already rejected
+        // f8e4m3 (spec/04-type-system.md §1.1.1) at this point so the
+        // host eval lane just needs to pick the right re-pack.
+        let target_prim = prim_from_name(target)
+            .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
+        match (value, target_prim) {
+            (RuntimeValue::Bool(value), Prim::Bool) => Ok(RuntimeValue::Bool(value)),
+            (RuntimeValue::String(value), Prim::String) => Ok(RuntimeValue::String(value)),
+            (RuntimeValue::Scalar(payload), dst_dtype) if dst_dtype.is_integer() => {
+                RuntimeValue::scalar_like_int(dst_dtype, payload.bits().as_i64())
+            }
+            (RuntimeValue::Scalar(payload), dst_dtype) if dst_dtype.is_float() => {
+                RuntimeValue::scalar_like_float(dst_dtype, payload.bits().as_f64())
+            }
+            (RuntimeValue::Bool(value), dst_dtype) if dst_dtype.is_integer() => {
+                RuntimeValue::scalar_like_int(dst_dtype, if value { 1 } else { 0 })
+            }
+            (RuntimeValue::Bool(value), dst_dtype) if dst_dtype.is_float() => {
+                RuntimeValue::scalar_like_float(dst_dtype, if value { 1.0 } else { 0.0 })
+            }
+            (RuntimeValue::Tensor(tensor), _) => cast_tensor_value(tensor, target),
+            (other, _) => Err(format!(
+                "unsupported cast from {other:?} to {}",
+                target_prim.name()
+            )),
         }
     }
 
@@ -1193,7 +1550,7 @@ impl<'a> EvalContext<'a> {
             "shr" => int_shift_binop(args, |lhs, rhs| lhs >> rhs),
             "string_len" => {
                 let value = expect_string_arg(args, 0)?;
-                Ok(RuntimeValue::Int(value.chars().count() as i64))
+                Ok(RuntimeValue::int64(value.chars().count() as i64))
             }
             "string_concat" => Ok(RuntimeValue::String(format!(
                 "{}{}",
@@ -1237,7 +1594,7 @@ impl<'a> EvalContext<'a> {
                 Ok(match value.trim().parse::<i64>() {
                     Ok(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
-                        fields: vec![RuntimeValue::Int(parsed)],
+                        fields: vec![RuntimeValue::int64(parsed)],
                         field_names: None,
                     },
                     Err(_) => RuntimeValue::Adt {
@@ -1252,7 +1609,7 @@ impl<'a> EvalContext<'a> {
                 Ok(match value.trim().parse::<f64>() {
                     Ok(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
-                        fields: vec![RuntimeValue::Float(parsed)],
+                        fields: vec![RuntimeValue::float64(parsed)],
                         field_names: None,
                     },
                     Err(_) => RuntimeValue::Adt {
@@ -1263,8 +1620,8 @@ impl<'a> EvalContext<'a> {
                 })
             }
             "len" => match args.first() {
-                Some(RuntimeValue::List(list)) => Ok(RuntimeValue::Int(list.len() as i64)),
-                Some(RuntimeValue::Dict(entries)) => Ok(RuntimeValue::Int(entries.len() as i64)),
+                Some(RuntimeValue::List(list)) => Ok(RuntimeValue::int64(list.len() as i64)),
+                Some(RuntimeValue::Dict(entries)) => Ok(RuntimeValue::int64(entries.len() as i64)),
                 other => Err(format!("len expects list or dict arg, got {other:?}")),
             },
             "index" => {
@@ -1286,13 +1643,13 @@ impl<'a> EvalContext<'a> {
                 );
                 Ok(RuntimeValue::List(list))
             }
-            "concat" => match (args.first(), args.get(1)) {
-                (Some(RuntimeValue::List(parts)), Some(RuntimeValue::Int(axis)))
+            "concat" => match (args.first(), args.get(1).and_then(RuntimeValue::as_i64)) {
+                (Some(RuntimeValue::List(parts)), Some(axis))
                     if parts
                         .iter()
                         .all(|item| matches!(item, RuntimeValue::Tensor(_))) =>
                 {
-                    tensor_concat_value(parts, *axis)
+                    tensor_concat_value(parts, axis)
                 }
                 _ => {
                     let mut lhs = expect_list_arg(args, 0)?;
@@ -1341,7 +1698,7 @@ impl<'a> EvalContext<'a> {
                 let start = expect_int_arg(args, 0)?;
                 let end = expect_int_arg(args, 1)?;
                 Ok(RuntimeValue::List(
-                    (start..end).map(RuntimeValue::Int).collect(),
+                    (start..end).map(RuntimeValue::int64).collect(),
                 ))
             }
             "map" => {
@@ -1481,7 +1838,7 @@ impl<'a> EvalContext<'a> {
                         .into_iter()
                         .enumerate()
                         .map(|(index, value)| {
-                            RuntimeValue::Tuple(vec![RuntimeValue::Int(index as i64), value])
+                            RuntimeValue::Tuple(vec![RuntimeValue::int64(index as i64), value])
                         })
                         .collect(),
                 ))
@@ -1665,7 +2022,7 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::List(
                     bytes
                         .into_iter()
-                        .map(|byte| RuntimeValue::Int(i64::from(byte)))
+                        .map(|byte| RuntimeValue::int64(i64::from(byte)))
                         .collect(),
                 ))
             }
@@ -1714,12 +2071,14 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::List(
                     bytes[offset..end]
                         .iter()
-                        .map(|byte| RuntimeValue::Int(i64::from(*byte)))
+                        .map(|byte| RuntimeValue::int64(i64::from(*byte)))
                         .collect(),
                 ))
             }
             "mmap_len" => match args.first() {
-                Some(RuntimeValue::MappedFile(bytes)) => Ok(RuntimeValue::Int(bytes.len() as i64)),
+                Some(RuntimeValue::MappedFile(bytes)) => {
+                    Ok(RuntimeValue::int64(bytes.len() as i64))
+                }
                 other => Err(format!("mmap_len expects MappedFile, got {other:?}")),
             },
             "split" => {
@@ -1785,7 +2144,7 @@ impl<'a> EvalContext<'a> {
             }
             "rank" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                Ok(RuntimeValue::Int(tensor.value.shape.len() as i64))
+                Ok(RuntimeValue::int64(tensor.value.shape.len() as i64))
             }
             "shape" => {
                 let tensor = expect_tensor_arg(args, 0)?;
@@ -1800,7 +2159,7 @@ impl<'a> EvalContext<'a> {
                     .get(axis)
                     .copied()
                     .ok_or_else(|| format!("shape axis {axis} out of bounds"))?;
-                Ok(RuntimeValue::Int(dim as i64))
+                Ok(RuntimeValue::int64(dim as i64))
             }
             "numel" => {
                 let tensor = expect_tensor_arg(args, 0)?;
@@ -1812,7 +2171,7 @@ impl<'a> EvalContext<'a> {
                 // Runtime-EmptyTensorNumel-F1: `numel(to_tensor([]))`
                 // returning 1 instead of 0.
                 let numel = tensor.value.shape.iter().product::<usize>();
-                Ok(RuntimeValue::Int(numel as i64))
+                Ok(RuntimeValue::int64(numel as i64))
             }
             "tensor_to_scalar" => {
                 let tensor = expect_tensor_arg(args, 0)?;
@@ -1822,19 +2181,27 @@ impl<'a> EvalContext<'a> {
                 let value = tensor.value.data.first().copied().unwrap_or(0.0);
                 match tensor.precision {
                     Prim::Bool => Ok(RuntimeValue::Bool(value != 0.0)),
-                    Prim::Int8 | Prim::Int32 | Prim::Int64 => Ok(RuntimeValue::Int(value as i64)),
-                    _ => Ok(RuntimeValue::Float(value)),
+                    p if p.is_integer() => RuntimeValue::scalar_like_int(p, value as i64),
+                    p if p.is_float() => RuntimeValue::scalar_like_float(p, value),
+                    other => Err(format!(
+                        "tensor_to_scalar: unsupported tensor element dtype `{}`",
+                        other.name()
+                    )),
                 }
             }
             "scalar_to_tensor" => match args.first() {
-                Some(RuntimeValue::Int(value)) => Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::scalar(*value as f64),
-                    precision: Prim::Int64,
-                })),
-                Some(RuntimeValue::Float(value)) => Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::scalar(*value),
-                    precision: Prim::F32,
-                })),
+                Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
+                    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                        value: IrTensorValue::scalar(payload.bits().as_i64() as f64),
+                        precision: payload.dtype(),
+                    }))
+                }
+                Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+                    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                        value: IrTensorValue::scalar(payload.bits().as_f64()),
+                        precision: payload.dtype(),
+                    }))
+                }
                 Some(RuntimeValue::Bool(value)) => Ok(RuntimeValue::Tensor(RuntimeTensorValue {
                     value: IrTensorValue::scalar(if *value { 1.0 } else { 0.0 }),
                     precision: Prim::Bool,
@@ -2123,8 +2490,16 @@ fn pattern_matches(
                 .first()
                 .ok_or_else(|| "pat-lit missing value".to_string())?;
             Ok(match (value, lit) {
-                (RuntimeValue::Int(lhs), Expr::Atom(Atom::Int(rhs), _)) => lhs == rhs,
-                (RuntimeValue::Float(lhs), Expr::Atom(Atom::Float(rhs), _)) => lhs == rhs,
+                (RuntimeValue::Scalar(payload), Expr::Atom(Atom::Int(rhs), _))
+                    if payload.dtype().is_integer() =>
+                {
+                    payload.bits().as_i64() == *rhs
+                }
+                (RuntimeValue::Scalar(payload), Expr::Atom(Atom::Float(rhs), _))
+                    if payload.dtype().is_float() =>
+                {
+                    payload.bits().as_f64() == *rhs
+                }
                 (RuntimeValue::Bool(lhs), Expr::Atom(Atom::Bool(rhs), _)) => lhs == rhs,
                 (RuntimeValue::String(lhs), Expr::Atom(Atom::Str(rhs), _)) => lhs == rhs,
                 _ => false,
@@ -2270,6 +2645,67 @@ fn terminal_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// Per-dtype dispatch helper for two-argument numeric ops on host
+/// scalars. WS-A0: each dtype gets the same code path but the result
+/// dtype matches the operand dtype (per spec §5.1 "no implicit precision
+/// promotion"). The closure is invoked at f64 precision and re-packed
+/// at the operand dtype on the way out.
+fn dispatch_scalar_binop(
+    lhs: &RuntimeValue,
+    rhs: &RuntimeValue,
+    op: &impl Fn(f64, f64) -> f64,
+) -> Result<RuntimeValue, String> {
+    match (lhs, rhs) {
+        (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
+            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
+        {
+            // Mirror pre-WS-A0 behavior: integer scalar ops compute the
+            // result in f64 and truncate. Result dtype is the operand
+            // dtype; if dtypes differ, widen to int64.
+            let (ldt, rdt) = (lp.dtype(), rp.dtype());
+            let (lb, rb) = (lp.bits(), rp.bits());
+            let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
+            let value = op(lb.as_f64(), rb.as_f64()) as i64;
+            RuntimeValue::scalar_like_int(result_dtype, value)
+        }
+        (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
+            if lp.dtype().is_float() && rp.dtype().is_float() =>
+        {
+            // Float-float: pick the wider of the two operand dtypes (no
+            // implicit promotion when they match — but keep f64 if either
+            // side is f64 so we don't downgrade an f64-typed value).
+            //
+            // E1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.1
+            // there is no implicit precision promotion. The mixed
+            // narrow-float case (`(Bf16, F16)` and `(F16, Bf16)`) must
+            // be rejected by the type checker before reaching this
+            // dispatch; if the runtime ever observes it the type
+            // checker has a hole. Replace the silent `_ => Prim::F32`
+            // re-precisioning fallback with an `unreachable!` that
+            // names the spec invariant.
+            let (ldt, rdt) = (lp.dtype(), rp.dtype());
+            let (lb, rb) = (lp.bits(), rp.bits());
+            let result_dtype = match (ldt, rdt) {
+                (Prim::F64, _) | (_, Prim::F64) => Prim::F64,
+                (Prim::F32, _) | (_, Prim::F32) => Prim::F32,
+                (Prim::Bf16, Prim::Bf16) => Prim::Bf16,
+                (Prim::F16, Prim::F16) => Prim::F16,
+                _ => unreachable!(
+                    "type checker must reject mismatched float precisions per \
+                     spec/04-type-system.md §5.1 (no implicit precision promotion); \
+                     reached float-binop fallback with ({:?}, {:?})",
+                    ldt, rdt
+                ),
+            };
+            let value = op(lb.as_f64(), rb.as_f64());
+            RuntimeValue::scalar_like_float(result_dtype, value)
+        }
+        _ => Err(format!(
+            "numeric op expects matching int or float args, got ({lhs:?}, {rhs:?})"
+        )),
+    }
+}
+
 fn numeric_binop(
     args: &[RuntimeValue],
     op: impl Fn(f64, f64) -> f64,
@@ -2280,12 +2716,7 @@ fn numeric_binop(
         }
         (Some(RuntimeValue::Tensor(lhs)), Some(rhs)) => tensor_scalar_binop(lhs, rhs, &op),
         (Some(lhs), Some(RuntimeValue::Tensor(rhs))) => scalar_tensor_binop(lhs, rhs, &op),
-        (Some(RuntimeValue::Int(lhs)), Some(RuntimeValue::Int(rhs))) => {
-            Ok(RuntimeValue::Int(op(*lhs as f64, *rhs as f64) as i64))
-        }
-        (Some(RuntimeValue::Float(lhs)), Some(RuntimeValue::Float(rhs))) => {
-            Ok(RuntimeValue::Float(op(*lhs, *rhs)))
-        }
+        (Some(lhs), Some(rhs)) => dispatch_scalar_binop(lhs, rhs, &op),
         other => Err(format!(
             "numeric op expects matching int or float args, got {other:?}"
         )),
@@ -2295,8 +2726,12 @@ fn numeric_binop(
 fn numeric_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeValue, String> {
     match args.first() {
         Some(RuntimeValue::Tensor(tensor)) => tensor_numeric_unop(tensor, &op),
-        Some(RuntimeValue::Int(value)) => Ok(RuntimeValue::Int(op(*value as f64) as i64)),
-        Some(RuntimeValue::Float(value)) => Ok(RuntimeValue::Float(op(*value))),
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
+            RuntimeValue::scalar_like_int(payload.dtype(), op(payload.bits().as_f64()) as i64)
+        }
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.bits().as_f64()))
+        }
         other => Err(format!(
             "numeric op expects int or float arg, got {other:?}"
         )),
@@ -2462,8 +2897,7 @@ fn activation_gelu_f32(x: f32) -> f32 {
 
 fn runtime_scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
     match value {
-        RuntimeValue::Int(value) => Some(*value as f64),
-        RuntimeValue::Float(value) => Some(*value),
+        RuntimeValue::Scalar(payload) => Some(payload.bits().as_f64()),
         RuntimeValue::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
         _ => None,
     }
@@ -2471,8 +2905,17 @@ fn runtime_scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
 
 fn int_binop(args: &[RuntimeValue], op: impl Fn(i64, i64) -> i64) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Int(lhs)), Some(RuntimeValue::Int(rhs))) => {
-            Ok(RuntimeValue::Int(op(*lhs, *rhs)))
+        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
+            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
+        {
+            // Pre-WS-A0 stored every int as i64; preserve i64-precision
+            // arithmetic but pin the result dtype to the operand dtype
+            // when both sides agree, else widen to int64. Matches the
+            // §5.1 "no implicit precision promotion" rule for matched
+            // operands, and fails closed for mixed widths.
+            let (ldt, rdt) = (lp.dtype(), rp.dtype());
+            let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
+            RuntimeValue::scalar_like_int(result_dtype, op(lp.bits().as_i64(), rp.bits().as_i64()))
         }
         other => Err(format!("integer op expects int args, got {other:?}")),
     }
@@ -2483,11 +2926,14 @@ fn int_shift_binop(
     op: impl Fn(i64, u32) -> i64,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Int(lhs)), Some(RuntimeValue::Int(rhs))) if *rhs >= 0 => {
-            Ok(RuntimeValue::Int(op(*lhs, *rhs as u32)))
-        }
-        (Some(RuntimeValue::Int(_)), Some(RuntimeValue::Int(rhs))) => {
-            Err(format!("shift amount must be non-negative, got {rhs}"))
+        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
+            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
+        {
+            let rhs = rp.bits().as_i64();
+            if rhs < 0 {
+                return Err(format!("shift amount must be non-negative, got {rhs}"));
+            }
+            RuntimeValue::scalar_like_int(lp.dtype(), op(lp.bits().as_i64(), rhs as u32))
         }
         other => Err(format!("shift op expects int args, got {other:?}")),
     }
@@ -2495,7 +2941,9 @@ fn int_shift_binop(
 
 fn float_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeValue, String> {
     match args.first() {
-        Some(RuntimeValue::Float(value)) => Ok(RuntimeValue::Float(op(*value))),
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.bits().as_f64()))
+        }
         other => Err(format!("float op expects float arg, got {other:?}")),
     }
 }
@@ -2503,21 +2951,20 @@ fn float_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeV
 /// Coerce a scalar `RuntimeValue` to its `f64` representation for
 /// comparison with a tensor element. Returns `None` for non-scalar values.
 fn scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
-    match value {
-        RuntimeValue::Int(value) => Some(*value as f64),
-        RuntimeValue::Float(value) => Some(*value),
-        RuntimeValue::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
-        _ => None,
-    }
+    runtime_scalar_as_f64(value)
 }
 
 fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Int(lhs)), Some(RuntimeValue::Int(rhs))) => {
-            Ok(RuntimeValue::Bool(lhs == rhs))
+        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
+            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
+        {
+            Ok(RuntimeValue::Bool(lp.bits().as_i64() == rp.bits().as_i64()))
         }
-        (Some(RuntimeValue::Float(lhs)), Some(RuntimeValue::Float(rhs))) => {
-            Ok(RuntimeValue::Bool(lhs == rhs))
+        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
+            if lp.dtype().is_float() && rp.dtype().is_float() =>
+        {
+            Ok(RuntimeValue::Bool(lp.bits().as_f64() == rp.bits().as_f64()))
         }
         (Some(RuntimeValue::Bool(lhs)), Some(RuntimeValue::Bool(rhs))) => {
             Ok(RuntimeValue::Bool(lhs == rhs))
@@ -2551,11 +2998,21 @@ fn ordered_compare(
     cmp: impl Fn(f64, f64) -> bool,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Int(lhs)), Some(RuntimeValue::Int(rhs))) => {
-            Ok(RuntimeValue::Bool(cmp(*lhs as f64, *rhs as f64)))
+        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
+            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
+        {
+            Ok(RuntimeValue::Bool(cmp(
+                lp.bits().as_f64(),
+                rp.bits().as_f64(),
+            )))
         }
-        (Some(RuntimeValue::Float(lhs)), Some(RuntimeValue::Float(rhs))) => {
-            Ok(RuntimeValue::Bool(cmp(*lhs, *rhs)))
+        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
+            if lp.dtype().is_float() && rp.dtype().is_float() =>
+        {
+            Ok(RuntimeValue::Bool(cmp(
+                lp.bits().as_f64(),
+                rp.bits().as_f64(),
+            )))
         }
         // Element-wise tensor-tensor ordering. Mirrors the build-target lane
         // and unblocks the same downstream tensor-level boolean ops.
@@ -2682,7 +3139,9 @@ fn expect_dict_arg(
 
 fn expect_int_arg(args: &[RuntimeValue], index: usize) -> Result<i64, String> {
     match args.get(index) {
-        Some(RuntimeValue::Int(value)) => Ok(*value),
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
+            Ok(payload.bits().as_i64())
+        }
         other => Err(format!("expected int arg at index {index}, got {other:?}")),
     }
 }
@@ -2696,8 +3155,12 @@ fn expect_bool_arg(args: &[RuntimeValue], index: usize) -> Result<bool, String> 
 
 fn expect_float_arg(args: &[RuntimeValue], index: usize) -> Result<f64, String> {
     match args.get(index) {
-        Some(RuntimeValue::Float(value)) => Ok(*value),
-        Some(RuntimeValue::Int(value)) => Ok(*value as f64),
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+            Ok(payload.bits().as_f64())
+        }
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
+            Ok(payload.bits().as_f64())
+        }
         other => Err(format!(
             "expected float arg at index {index}, got {other:?}"
         )),
@@ -2706,7 +3169,8 @@ fn expect_float_arg(args: &[RuntimeValue], index: usize) -> Result<f64, String> 
 
 fn ensure_dict_key_supported(value: &RuntimeValue) -> Result<(), String> {
     match value {
-        RuntimeValue::Int(_) | RuntimeValue::String(_) => Ok(()),
+        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => Ok(()),
+        RuntimeValue::String(_) => Ok(()),
         other => Err(format!(
             "dict keys must be int64 or string in 3d, got {other:?}"
         )),
@@ -2715,8 +3179,16 @@ fn ensure_dict_key_supported(value: &RuntimeValue) -> Result<(), String> {
 
 fn runtime_value_eq(lhs: &RuntimeValue, rhs: &RuntimeValue) -> bool {
     match (lhs, rhs) {
-        (RuntimeValue::Int(lhs), RuntimeValue::Int(rhs)) => lhs == rhs,
-        (RuntimeValue::Float(lhs), RuntimeValue::Float(rhs)) => lhs == rhs,
+        (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
+            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
+        {
+            lp.bits().as_i64() == rp.bits().as_i64()
+        }
+        (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
+            if lp.dtype().is_float() && rp.dtype().is_float() =>
+        {
+            lp.bits().as_f64() == rp.bits().as_f64()
+        }
         (RuntimeValue::Bool(lhs), RuntimeValue::Bool(rhs)) => lhs == rhs,
         (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => lhs == rhs,
         (RuntimeValue::Tuple(lhs), RuntimeValue::Tuple(rhs)) => {
@@ -2914,27 +3386,31 @@ fn nested_list_to_tensor_data(
 }
 
 fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), String> {
+    // Element classification: integer scalars → Int64-precision tensor;
+    // float scalars → F32-precision tensor; bools → Bool tensor. The
+    // homogeneity check below pins the precision to whatever the first
+    // typed element advertised.
     let mut precision = None;
     let mut data = Vec::with_capacity(values.len());
     for value in values {
         match value {
-            RuntimeValue::Int(value) => {
+            RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
                 precision.get_or_insert(Prim::Int64);
                 if precision != Some(Prim::Int64) {
                     return Err(
                         "to_tensor requires homogeneous numeric or bool list elements".to_string(),
                     );
                 }
-                data.push(*value as f64);
+                data.push(payload.bits().as_f64());
             }
-            RuntimeValue::Float(value) => {
+            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
                 precision.get_or_insert(Prim::F32);
                 if precision != Some(Prim::F32) {
                     return Err(
                         "to_tensor requires homogeneous numeric or bool list elements".to_string(),
                     );
                 }
-                data.push(*value);
+                data.push(payload.bits().as_f64());
             }
             RuntimeValue::Bool(value) => {
                 precision.get_or_insert(Prim::Bool);
@@ -2964,18 +3440,17 @@ fn tensor_to_list_values(tensor: &RuntimeTensorValue) -> Result<Vec<RuntimeValue
     }
     let mut values = Vec::with_capacity(tensor.value.data.len());
     for value in &tensor.value.data {
-        values.push(match tensor.precision {
+        let element = match tensor.precision {
             Prim::Bool => RuntimeValue::Bool(*value != 0.0),
-            Prim::Int8 | Prim::Int32 | Prim::Int64 => RuntimeValue::Int(*value as i64),
-            Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64 | Prim::F8e4m3 => {
-                RuntimeValue::Float(*value)
-            }
+            p if p.is_integer() => RuntimeValue::scalar_like_int(p, *value as i64)?,
+            p if p.is_float() => RuntimeValue::scalar_like_float(p, *value)?,
             other => {
                 return Err(format!(
                     "to_list expects numeric or bool tensor input, got {other:?}"
                 ));
             }
-        });
+        };
+        values.push(element);
     }
     Ok(values)
 }
@@ -2984,9 +3459,13 @@ fn pad_sequences_value(
     sequences: &[RuntimeValue],
     pad: &RuntimeValue,
 ) -> Result<(Prim, Vec<f64>, usize, usize), String> {
-    let pad_precision = match pad {
-        RuntimeValue::Int(_) => Prim::Int64,
-        RuntimeValue::Float(_) => Prim::F32,
+    let (pad_precision, pad_value) = match pad {
+        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+            (Prim::Int64, payload.bits().as_f64())
+        }
+        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
+            (Prim::F32, payload.bits().as_f64())
+        }
         other => {
             return Err(format!(
                 "pad_sequences expects numeric pad value, got {other:?}"
@@ -3008,11 +3487,6 @@ fn pad_sequences_value(
         width = width.max(row.len());
         rows.push(row);
     }
-    let pad_value = match pad {
-        RuntimeValue::Int(value) => *value as f64,
-        RuntimeValue::Float(value) => *value,
-        _ => unreachable!(),
-    };
     let batch = rows.len();
     let mut data = Vec::with_capacity(batch * width);
     for row in rows {
@@ -3035,9 +3509,13 @@ fn pad_sequences_to_value(
             "pad_sequences_to requires non-negative width, got {width}"
         ));
     }
-    let pad_precision = match pad {
-        RuntimeValue::Int(_) => Prim::Int64,
-        RuntimeValue::Float(_) => Prim::F32,
+    let (pad_precision, pad_value) = match pad {
+        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+            (Prim::Int64, payload.bits().as_f64())
+        }
+        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
+            (Prim::F32, payload.bits().as_f64())
+        }
         other => {
             return Err(format!(
                 "pad_sequences_to expects numeric pad value, got {other:?}"
@@ -3058,11 +3536,6 @@ fn pad_sequences_to_value(
         }
         rows.push(row);
     }
-    let pad_value = match pad {
-        RuntimeValue::Int(value) => *value as f64,
-        RuntimeValue::Float(value) => *value,
-        _ => unreachable!(),
-    };
     let batch = rows.len();
     let mut data = Vec::with_capacity(batch * width);
     for row in rows {
@@ -3113,9 +3586,13 @@ fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<usize>, Stri
     values
         .iter()
         .map(|value| match value {
-            RuntimeValue::Int(value) if *value >= 0 => Ok(*value as usize),
-            RuntimeValue::Int(value) => {
-                Err(format!("{op} expects non-negative sizes, got {value}"))
+            RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+                let v = payload.bits().as_i64();
+                if v >= 0 {
+                    Ok(v as usize)
+                } else {
+                    Err(format!("{op} expects non-negative sizes, got {v}"))
+                }
             }
             other => Err(format!("{op} expects int64 sizes, got {other:?}")),
         })
@@ -3981,8 +4458,19 @@ fn render_value(value: &RuntimeValue) -> String {
             "tensor(shape={:?}, data={:?})",
             tensor.value.shape, tensor.value.data
         ),
-        RuntimeValue::Int(value) => value.to_string(),
-        RuntimeValue::Float(value) => value.to_string(),
+        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+            payload.bits().as_i64().to_string()
+        }
+        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
+            payload.bits().as_f64().to_string()
+        }
+        RuntimeValue::Scalar(payload) => {
+            format!(
+                "<scalar dtype={} bits={:?}>",
+                payload.dtype().name(),
+                payload.bits()
+            )
+        }
         RuntimeValue::Bool(value) => value.to_string(),
         RuntimeValue::String(value) => value.clone(),
         RuntimeValue::List(items) => format!(
@@ -4088,24 +4576,24 @@ fn runtime_value_to_dag_input(
             };
             Ok((tensor.value.clone(), ty))
         }
-        RuntimeValue::Float(value) => {
+        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
             let precision = fn_expr
                 .and_then(|e| param_precision_at(e, index))
-                .unwrap_or(Prim::F32);
+                .unwrap_or(payload.dtype());
             Ok((
-                IrTensorValue::scalar(*value),
+                IrTensorValue::scalar(payload.bits().as_f64()),
                 TensorType {
                     dims: vec![],
                     precision,
                 },
             ))
         }
-        RuntimeValue::Int(value) => {
+        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
             let precision = fn_expr
                 .and_then(|e| param_precision_at(e, index))
-                .unwrap_or(Prim::Int32);
+                .unwrap_or(payload.dtype());
             Ok((
-                IrTensorValue::scalar(*value as f64),
+                IrTensorValue::scalar(payload.bits().as_i64() as f64),
                 TensorType {
                     dims: vec![],
                     precision,
@@ -4178,8 +4666,18 @@ fn prim_from_name(name: &str) -> Option<Prim> {
         "f64" => Prim::F64,
         "f16" => Prim::F16,
         "bf16" => Prim::Bf16,
-        "f8e4m3" => Prim::F8e4m3,
+        // E2 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.1
+        // f8e4m3 is deferred and the type checker rejects every cast
+        // and tensor-element use upstream. If the host runtime ever
+        // resolves an `f8e4m3` token here, the upstream rejection has
+        // a hole — panic loudly rather than carrying the deferred
+        // dtype into runtime classification.
+        "f8e4m3" => panic!(
+            "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
+             should have been rejected upstream"
+        ),
         "int8" => Prim::Int8,
+        "int16" => Prim::Int16,
         "int32" => Prim::Int32,
         "int64" => Prim::Int64,
         "bool" => Prim::Bool,
@@ -4197,8 +4695,18 @@ fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Expr {
         Prim::F64 => "f64",
         Prim::F16 => "f16",
         Prim::Bf16 => "bf16",
-        Prim::F8e4m3 => "f8e4m3",
+        // E2 (WS-A0 RT-1 fixup, sibling sweep): per
+        // spec/04-type-system.md §1.1.1 f8e4m3 is deferred and the
+        // type checker rejects it upstream. If a TensorType reaches
+        // this Deep re-encoder with f8e4m3 precision, the upstream
+        // rejection has a hole — panic rather than emit a
+        // `(t-prim {} f8e4m3)` node into a synthesized Deep var.
+        Prim::F8e4m3 => panic!(
+            "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
+             should have been rejected upstream"
+        ),
         Prim::Int8 => "int8",
+        Prim::Int16 => "int16",
         Prim::Int32 => "int32",
         Prim::Int64 => "int64",
         Prim::Bool => "bool",
@@ -4346,6 +4854,15 @@ fn get_meta(list: &List) -> Option<&MetaMap> {
     }
 }
 
+/// Extract the primitive dtype written into a `(lit {type: ...})` meta
+/// by the type checker, if any. Returns `None` for non-primitive type
+/// metadata (e.g. tensor literal types) or missing metadata; eval_lit
+/// then falls back to the spec §5.3 literal default.
+fn lit_meta_prim(meta: &MetaMap) -> Option<Prim> {
+    let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
+    extract_prim_from_type_expr(ty_expr)
+}
+
 fn children(list: &List) -> &[Expr] {
     if list.elements.len() > 2 {
         &list.elements[2..]
@@ -4397,9 +4914,9 @@ x = with seed(7) {
         let outcome = evaluate_host_program(&checked, &HashMap::new())
             .expect("seeded host program should evaluate");
         let value = outcome.host_bindings.get("x").expect("x binding");
-        match value {
-            RuntimeValue::Float(v) => assert!((*v >= 0.0) && (*v <= 1.0), "got {v}"),
-            other => panic!("expected float result, got {other:?}"),
+        match value.as_f64() {
+            Some(v) => assert!((0.0..=1.0).contains(&v), "got {v}"),
+            None => panic!("expected float result, got {value:?}"),
         }
     }
 
@@ -4421,13 +4938,16 @@ y = index(drop([cast(10, int64), cast(20, int64)], cast(1, int64)), cast(0, int6
         let outcome = evaluate_host_program(&checked, &HashMap::new())
             .expect("ownership drop and list drop should both evaluate");
         assert!(matches!(
-            outcome.host_bindings.get("x"),
-            Some(RuntimeValue::Float(v)) if (*v - 1.0).abs() < f64::EPSILON
+            outcome.host_bindings.get("x").and_then(RuntimeValue::as_f64),
+            Some(v) if (v - 1.0).abs() < f64::EPSILON
         ));
-        assert!(matches!(
-            outcome.host_bindings.get("y"),
-            Some(RuntimeValue::Int(20))
-        ));
+        assert_eq!(
+            outcome
+                .host_bindings
+                .get("y")
+                .and_then(RuntimeValue::as_i64),
+            Some(20),
+        );
     }
 
     // ----- Phase 3t.1: test_assert_* builtins -----
@@ -5079,5 +5599,233 @@ y = softmax(x, cast(5, int32))
             err.contains("softmax") && err.contains("out of bounds"),
             "expected softmax axis-bounds diagnostic, got: {err}"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // WS-A0 acceptance test (c): the dtype-tagged Scalar payload must
+    // reject mismatched (dtype, bits) pairs at construction time. The
+    // public constructor `RuntimeValue::scalar` is the only checked
+    // path; the typed convenience constructors (`int_lit`, `float_lit`,
+    // `int64`, `float64`, `scalar_like_*`) are implementation-internal
+    // and statically-correct by construction.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn scalar_constructor_rejects_dtype_bits_mismatch() {
+        // Every cross-pair of `dtype != bits.dtype()` must error.
+        let mismatches: &[(Prim, ScalarBits)] = &[
+            (Prim::F16, ScalarBits::F32(0.0)),
+            (Prim::Bf16, ScalarBits::F64(0.0)),
+            (Prim::F32, ScalarBits::F64(0.0)),
+            (Prim::F64, ScalarBits::F32(0.0)),
+            (Prim::Int8, ScalarBits::I32(0)),
+            (Prim::Int16, ScalarBits::I64(0)),
+            (Prim::Int32, ScalarBits::I64(0)),
+            (Prim::Int64, ScalarBits::I8(0)),
+            (Prim::F32, ScalarBits::I32(0)),
+            (Prim::Int32, ScalarBits::F32(0.0)),
+        ];
+        for (dtype, bits) in mismatches {
+            let result = RuntimeValue::scalar(*dtype, *bits);
+            let err = result.unwrap_err_or_else(|_| {
+                panic!(
+                    "RuntimeValue::scalar({}, {bits:?}) must reject the \
+                     dtype/bits mismatch (bits dtype is {})",
+                    dtype.name(),
+                    bits.dtype().name()
+                )
+            });
+            assert!(
+                err.contains("dtype/bits mismatch"),
+                "rejection diagnostic must mention dtype/bits mismatch, got: {err}"
+            );
+        }
+    }
+
+    /// Tiny helper: `Result::unwrap_err` panics on `Ok` with `Debug`
+    /// formatting, but `RuntimeValue` doesn't implement `Debug` cleanly
+    /// for a small printout here. This wrapper takes a closure for the
+    /// panic message instead.
+    trait UnwrapErrOr<T, E> {
+        fn unwrap_err_or_else(self, on_ok: impl FnOnce(T) -> E) -> E;
+    }
+
+    impl<T, E> UnwrapErrOr<T, E> for Result<T, E> {
+        fn unwrap_err_or_else(self, on_ok: impl FnOnce(T) -> E) -> E {
+            match self {
+                Ok(v) => on_ok(v),
+                Err(e) => e,
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // RT-1 finding (C1): the original RT-1 test landed in
+    // origin/rt1-redteam-findings exercised
+    //
+    //     RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }
+    //
+    // directly — that struct-literal form bypassed the
+    // `RuntimeValue::scalar()` invariant check. Post-C1 the variant is
+    // a tuple over the sealed `ScalarPayload` newtype; the same code
+    // would no longer compile because the variant is no longer
+    // struct-shaped and the payload's fields are private. Pin the
+    // closed-finding evidence directly: the only construction path
+    // (`ScalarPayload::new`) returns the typed mismatch error rather
+    // than silently constructing an invariant-broken value.
+    // ----------------------------------------------------------------
+
+    /// RT-1 closed finding C1: post-fix evidence that the only
+    /// in-tree construction path enforces the dtype/bits invariant.
+    #[test]
+    fn rt1_struct_literal_for_mismatched_scalar_payload_is_blocked_post_c1() {
+        // The pre-fix RT-1 test built
+        //     RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(1.5) }
+        // verbatim. With the C1 refactor that line no longer compiles
+        // because `RuntimeValue::Scalar` is now `Scalar(ScalarPayload)`
+        // and `ScalarPayload` has private fields.
+        //
+        // The runtime-side invariant pin: the only legal construction
+        // path (`ScalarPayload::new`) rejects the same mismatched pair
+        // with the typed `ScalarMismatchError`.
+        let err = ScalarPayload::new(Prim::F16, ScalarBits::F32(1.5))
+            .expect_err("post-C1: every Scalar construction path enforces the invariant");
+        assert_eq!(err.dtype, Prim::F16);
+        assert_eq!(err.bits_dtype, Prim::F32);
+        assert_eq!(
+            err.dtype,
+            Prim::F16,
+            "post-C1: the requested dtype field is preserved in the error"
+        );
+        assert_ne!(
+            err.dtype, err.bits_dtype,
+            "post-C1: the typed error names both sides of the contradiction"
+        );
+    }
+
+    /// C1 (WS-A0 RT-1 fixup): `ScalarPayload::new` rejects every
+    /// mismatched dtype/bits pair. Before C1, an in-crate caller could
+    /// write `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
+    /// directly and bypass the constructor's invariant check; the
+    /// `Scalar(ScalarPayload)` tuple variant + private payload fields
+    /// make struct-literal initialization syntactically impossible.
+    /// Pin the rejection at the typed-error boundary.
+    #[test]
+    fn scalar_payload_rejects_mismatched_dtype_bits_pair() {
+        // The only legal construction path is `ScalarPayload::new`.
+        // Hand-build a mismatched (F16 dtype, F32 bits) pair and assert
+        // it errors with the typed `ScalarMismatchError`.
+        let err = ScalarPayload::new(Prim::F16, ScalarBits::F32(1.5))
+            .expect_err("mismatched dtype/bits pair must error");
+        assert_eq!(err.dtype, Prim::F16);
+        assert_eq!(err.bits_dtype, Prim::F32);
+        // The display form names the spec invariant so the diagnostic
+        // is greppable.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ScalarPayload dtype/bits mismatch"),
+            "diagnostic must name the invariant; got: {msg}"
+        );
+        assert!(
+            msg.contains("spec/04-type-system.md §1.1"),
+            "diagnostic must cite the §1.1 spec invariant; got: {msg}"
+        );
+    }
+
+    /// C1: the convenience constructor `RuntimeValue::scalar` routes
+    /// through `ScalarPayload::new` and lifts the error to a stringly
+    /// API for compat. Pin that the mismatched pair still errors.
+    #[test]
+    fn runtime_value_scalar_constructor_rejects_mismatched_pair() {
+        let err = RuntimeValue::scalar(Prim::F16, ScalarBits::F32(1.5))
+            .expect_err("constructor must propagate ScalarPayload::new rejection");
+        assert!(
+            err.contains("dtype/bits mismatch"),
+            "constructor error must propagate the invariant; got: {err}"
+        );
+    }
+
+    /// E2 (WS-A0 RT-1 fixup): `prim_from_name` must panic on the
+    /// `"f8e4m3"` token with the §1.1.1 message rather than producing
+    /// `Some(Prim::F8e4m3)` and letting the deferred dtype flow into
+    /// runtime classification.
+    #[test]
+    #[should_panic(expected = "f8e4m3 is deferred per spec/04-type-system.md §1.1.1")]
+    fn prim_from_name_panics_on_f8e4m3_per_spec_1_1_1() {
+        let _ = prim_from_name("f8e4m3");
+    }
+
+    /// Negative-parity twin: the active dtype names still resolve.
+    #[test]
+    fn prim_from_name_resolves_active_dtype_names() {
+        for (name, expected) in &[
+            ("f32", Prim::F32),
+            ("f64", Prim::F64),
+            ("f16", Prim::F16),
+            ("bf16", Prim::Bf16),
+            ("int8", Prim::Int8),
+            ("int16", Prim::Int16),
+            ("int32", Prim::Int32),
+            ("int64", Prim::Int64),
+            ("bool", Prim::Bool),
+        ] {
+            assert_eq!(
+                prim_from_name(name),
+                Some(*expected),
+                "active dtype name `{name}` must still resolve"
+            );
+        }
+    }
+
+    /// E1 (WS-A0 RT-1 fixup): the float-binop dispatch's mixed
+    /// narrow-float fallback used to silently re-precision to F32. The
+    /// type checker must reject `(Bf16, F16)` and `(F16, Bf16)` per
+    /// spec/04-type-system.md §5.1 (no implicit precision promotion);
+    /// pin that the type checker still rejects so the unreachable!
+    /// arm in `dispatch_scalar_binop` cannot be reached from any
+    /// in-tree program.
+    #[test]
+    fn type_checker_rejects_mixed_narrow_float_binop_per_spec_5_1() {
+        let src = r#"
+def main -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
+"#;
+        let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(src).expect("surf parse"),
+        ));
+        assert!(
+            res.is_err(),
+            "spec §5.1 forbids implicit precision promotion; \
+             `add(_:bf16, _:f16)` must be rejected by the type checker so the \
+             E1 unreachable! in `dispatch_scalar_binop` cannot be reached"
+        );
+    }
+
+    #[test]
+    fn scalar_constructor_accepts_matching_dtype_bits_pairs() {
+        // Sanity sibling: every matching pair across the active dtype
+        // set must succeed and round-trip the dtype back through
+        // `bits.dtype()`.
+        let pairs: &[(Prim, ScalarBits)] = &[
+            (Prim::Int8, ScalarBits::I8(7)),
+            (Prim::Int16, ScalarBits::I16(123)),
+            (Prim::Int32, ScalarBits::I32(-42)),
+            (Prim::Int64, ScalarBits::I64(1_000_000)),
+            (Prim::F32, ScalarBits::F32(1.5)),
+            (Prim::F64, ScalarBits::F64(2.5)),
+            (Prim::F16, ScalarBits::F16(half::f16::from_f32(0.25))),
+            (Prim::Bf16, ScalarBits::Bf16(half::bf16::from_f32(0.25))),
+        ];
+        for (dtype, bits) in pairs {
+            let v = RuntimeValue::scalar(*dtype, *bits)
+                .expect("matching dtype/bits pair must construct cleanly");
+            match v {
+                RuntimeValue::Scalar(payload) => {
+                    assert_eq!(payload.dtype(), *dtype);
+                    assert_eq!(payload.bits().dtype(), *dtype);
+                    assert_eq!(payload.bits(), *bits);
+                }
+                other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
+            }
+        }
     }
 }

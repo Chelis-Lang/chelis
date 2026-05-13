@@ -909,18 +909,32 @@ pub enum HostExprKind {
 }
 
 pub fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
+    try_lower_compiled_program(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+}
+
+/// Fallible variant of [`lower_compiled_program`] that catches lowering
+/// panics (e.g. WS-A5 RT-3a F2: an unresolved tensor precision tvar
+/// reaching the `Type::Tensor` -> `HostType::Tensor` boundary, which
+/// `try_extract_tensor_type` panics on per spec/04-type-system.md
+/// \u{00a7}5.8.1) and returns them as `LowerDiagnostic` so the build
+/// CLI can surface a clean user-facing error rather than a thread
+/// panic.
+pub fn try_lower_compiled_program(
+    program: &CheckedProgram,
+) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
     let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
     let dag = crate::lower::try_lower_program(program).ok();
-    let host = lower_host_program(program, &lowered_names);
+    let host =
+        crate::lower::catch_lowering_external(|| lower_host_program(program, &lowered_names))?;
 
-    CompiledProgram {
+    Ok(CompiledProgram {
         dag: dag.filter(|dag| !dag.roots().is_empty()),
         host: if host.globals.is_empty() && host.functions.is_empty() {
             None
         } else {
             Some(host)
         },
-    }
+    })
 }
 
 pub fn host_program_requires_host_backend(program: &HostProgram) -> bool {
@@ -1083,6 +1097,19 @@ fn lower_host_program(
             continue;
         };
         let ty_expr = lookup_declared_type_expr(program, name);
+        // WS-A8: skip polymorphic-precision sigs at host emission time.
+        // A `t-fn` whose tensor types carry `(t-var {} _)` precision
+        // slots has no concrete monomorphization on its own; reaching
+        // `parse_host_type` for its parameters trips the F2 backend
+        // tripwire panic per spec/04-type-system.md §5.8.1. Such a def
+        // is reachable from concrete client code via call-site inlining
+        // (the inliner threads the call site's concrete precision into
+        // the body); the standalone host symbol is intentionally
+        // omitted because no caller can use it without supplying the
+        // monomorphization binding the inliner provides.
+        if ty_expr.is_some_and(crate::lower::type_expr_has_precision_var) {
+            continue;
+        }
         // Pure-tensor top-level function defs are normally lowered to the
         // DAG. But when the program also has host-lane bindings (i.e. some
         // def is NOT DAG-lowerable), downstream host-lane callers still
@@ -1230,14 +1257,37 @@ fn lower_host_program(
             // to the value node's `merged_spans` so the def's source region
             // doesn't drop out of the audit chain.
             value.append_merged_span(expr.span_id());
-            let ty = host_expr_type(&value);
+            let inferred_ty = host_expr_type(&value);
+            // RT-4 F1: respect the surface-level type annotation on a
+            // global binding. Without this the type-checker-validated
+            // declaration `x: tensor[3, f64] = [1.0, 2.0, 3.0]` was
+            // silently lowered with the inferred f32 type because the
+            // `to_tensor` builtin's return type defaults to f32 for any
+            // float-tagged list. The downstream host emitter uses this
+            // type to dispatch the typed runtime call so the storage
+            // matches the declared dtype.
+            let declared_ty = ty_expr
+                .map(parse_host_type)
+                .filter(|ty| !matches!(ty, HostType::Unknown));
+            let ty = declared_ty.clone().unwrap_or_else(|| inferred_ty.clone());
+            // When the declared type sharpens the inferred type (e.g.
+            // declared f64, inferred f32), retag the outermost value
+            // type so downstream host emit sees the right precision
+            // for the typed to_tensor runtime call. This is a
+            // structural retag; the type checker has already validated
+            // that the literal assignment is sound.
+            if let Some(declared) = declared_ty.as_ref()
+                && declared != &inferred_ty
+            {
+                value = force_host_expr_type(value, declared.clone());
+            }
             host.globals.push(HostBinding {
                 name: name.to_string(),
                 display_name: None,
-                ty,
+                ty: ty.clone(),
                 value: value.clone(),
             });
-            global_scope.insert(name.to_string(), host_expr_type(&value));
+            global_scope.insert(name.to_string(), ty);
         }
     }
     loop {
@@ -2246,7 +2296,7 @@ fn try_summarize_blas_helper(
     // shape) nor a `Sum(Mul(Expand, Expand))` pattern (the
     // matmul-near shape that `specialize_for_blas` keeps as-is when
     // it cannot replace, e.g. non-F32 precision), the recognizer
-    // should NOT emit a diagnostic — this is just a non-BLAS helper.
+    // should NOT emit a diagnostic; this is just a non-BLAS helper.
     //
     // `is_matmul_near` returns `true` for both BLAS-shaped and
     // matmul-pattern-shaped specialized roots, so we can distinguish
@@ -2281,7 +2331,13 @@ fn try_summarize_blas_helper(
     }
     // From here we are committed: the specialized DAG is BLAS-near
     // and has exactly one root. Output-precision is the next gate.
-    if output.precision != Prim::F32 {
+    // WS-A1/A2/A3 lift: f32 (sgemm), f64 (dgemm), bf16/f16 (hipblasGemmEx
+    // with f32 accumulator) are all admitted; integer matmul is rejected
+    // upstream at the type checker per spec §5.7.2.
+    if !matches!(
+        output.precision,
+        Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
+    ) {
         return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
             rejection_class: SummaryRejectionClass::BlasOutputPrecisionMismatch,
             helper_body_span: body_span,
@@ -2304,6 +2360,7 @@ fn try_summarize_blas_helper(
             m,
             n,
             k,
+            ..
         } => (batch_dims.clone(), m.clone(), n.clone(), k.clone()),
         other => {
             return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
@@ -2315,10 +2372,14 @@ fn try_summarize_blas_helper(
             }));
         }
     };
-    if root_node.output_type.precision != Prim::F32 || root_node.inputs.len() != 2 {
+    let root_precision_admitted = matches!(
+        root_node.output_type.precision,
+        Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
+    );
+    if !root_precision_admitted || root_node.inputs.len() != 2 {
         // Root IS BlasMatmul but its rank/precision doesn't match
         // the recognized shape. Still a BlasNotMatmulPattern
-        // rejection — the variant name covers both "wrong op" and
+        // rejection; the variant name covers both "wrong op" and
         // "right op, wrong shape".
         return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
             rejection_class: SummaryRejectionClass::BlasNotMatmulPattern,
@@ -2352,10 +2413,13 @@ fn try_summarize_blas_helper(
         .iter()
         .map(|input| input.ty.clone())
         .collect::<Vec<_>>();
+    // WS-A1/A2/A3: admit f32 (sgemm), f64 (dgemm), bf16/f16 (hipblasGemmEx
+    // with f32 accumulator). Integer matmul is rejected upstream at the
+    // type checker per spec §5.7.2 so it never reaches here.
     if let Some((input_index, ty)) = input_tys
         .iter()
         .enumerate()
-        .find(|(_, ty)| ty.precision != Prim::F32)
+        .find(|(_, ty)| !matches!(ty.precision, Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16))
     {
         return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
             rejection_class: SummaryRejectionClass::BlasInputPrecisionMismatch,
@@ -3903,7 +3967,14 @@ fn refine_host_expr_types(
             for arg in args.iter_mut() {
                 changed |= refine_host_expr_types(arg, scope, signatures);
             }
-            if let Some(inferred) = infer_builtin_host_type(name, args)
+            // RT-4 F1: only override `ty` when the current value has
+            // unresolved type variables. Previously this clobbered any
+            // declared-type retag (e.g. a global binding annotated as
+            // `tensor[3, f64]` would be overwritten back to the
+            // builtin's default `tensor[list, f32]` inferred return
+            // type, defeating the F1 fix's typed runtime dispatch).
+            if host_type_has_unknown(ty)
+                && let Some(inferred) = infer_builtin_host_type(name, args)
                 && !host_type_has_unknown(&inferred)
                 && *ty != inferred
             {
@@ -4945,6 +5016,25 @@ fn lower_app_host_expr(
         .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostType::Fn(..))));
     let tensor_result = matches!(explicit_ty, HostType::Tensor(_))
         || matches!(inferred_ret_ty, HostType::Tensor(_));
+    // WS-A8: if the callee is a polymorphic-precision sig, the host
+    // emitter elided its standalone definition (per the
+    // `type_expr_has_precision_var` skip in `lower_host_program`).
+    // Calling such a name in C produces an undefined-symbol link
+    // error; the only legal lowering is to inline the body at the
+    // call site so the precision is supplied from the call's
+    // concrete arg types. Force inlining for this case.
+    let callee_is_polymorphic_precision = lookup_declared_type_expr(program, &name)
+        .is_some_and(crate::lower::type_expr_has_precision_var);
+    if callee_is_polymorphic_precision
+        && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
+    {
+        let pushed = push_inlining(&name);
+        let lowered = lower_host_expr(&specialized, program, scope, tensor_helpers);
+        if pushed {
+            pop_inlining(&name);
+        }
+        return lowered;
+    }
     if has_callable_params
         && tensor_result
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
@@ -5754,7 +5844,7 @@ fn actualize_tensor_helper_types(
                 .first()
                 .and_then(|id| inferred.get(id))
                 .map(|input| precision_like(input, node.output_type.precision)),
-            crate::dag::RiscOp::Sum { axis }
+            crate::dag::RiscOp::Sum { axis, .. }
             | crate::dag::RiscOp::MaxReduce { axis }
             | crate::dag::RiscOp::MinReduce { axis }
             | crate::dag::RiscOp::ProdReduce { axis }
@@ -6293,7 +6383,25 @@ fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) ->
             Some("string") => HostType::String,
             _ => HostType::Unknown,
         },
-        Some("t-tensor") => HostType::Tensor(crate::lower::tensor_type_from_deep(expr)),
+        Some("t-tensor") => {
+            // WS-A5 RT-3a F2 / WS-A8: a `t-tensor` whose precision slot
+            // is `(t-var {} _)` is precision-polymorphic and has no
+            // concrete `HostType::Tensor` representation by itself per
+            // spec/04-type-system.md \u{00a7}5.8.1. Surface that as
+            // `HostType::Unknown` here so the host emitter falls back
+            // to call-site inlining (which carries the concrete
+            // precision) rather than panicking on the bare sig parse.
+            // The standalone-emit gate in `lower_host_program` already
+            // skips the def itself; this guard handles every secondary
+            // sig-parse path (e.g. `lookup_declared_fn_type` reached
+            // from a call-site lookup of a polymorphic callee's
+            // signature).
+            if crate::lower::type_expr_has_precision_var(expr) {
+                HostType::Unknown
+            } else {
+                HostType::Tensor(crate::lower::tensor_type_from_deep(expr))
+            }
+        }
         Some("t-ref") => list
             .elements
             .get(2)
@@ -6761,13 +6869,23 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                 let element_ty = match tensor.precision {
                     chelis_types::types::Prim::Bool => HostType::Bool,
                     chelis_types::types::Prim::Int8
+                    | chelis_types::types::Prim::Int16
                     | chelis_types::types::Prim::Int32
                     | chelis_types::types::Prim::Int64 => HostType::Int64,
                     chelis_types::types::Prim::F16
                     | chelis_types::types::Prim::Bf16
                     | chelis_types::types::Prim::F32
-                    | chelis_types::types::Prim::F64
-                    | chelis_types::types::Prim::F8e4m3 => HostType::Float64,
+                    | chelis_types::types::Prim::F64 => HostType::Float64,
+                    // E2 (WS-A0 RT-1 fixup): per spec/04-type-system.md
+                    // §1.1.1 f8e4m3 is deferred and the type checker
+                    // must reject it upstream. If it ever reaches this
+                    // host-classification site there is a hole in the
+                    // upstream rejection — do not silently re-classify
+                    // as Float64.
+                    chelis_types::types::Prim::F8e4m3 => panic!(
+                        "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 \
+                         and should have been rejected upstream"
+                    ),
                     _ => HostType::Unknown,
                 };
                 Some(HostType::List(Box::new(element_ty)))
@@ -7072,6 +7190,19 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
+    }
+
+    /// E2 (WS-A0 RT-1 fixup): the `to_list` host classification arm
+    /// must panic on an f8e4m3-precision tensor with the §1.1.1
+    /// message rather than silently classifying as Float64.
+    #[test]
+    #[should_panic(expected = "f8e4m3 is deferred per spec/04-type-system.md §1.1.1")]
+    fn to_list_classifier_panics_on_f8e4m3_tensor_per_spec_1_1_1() {
+        let f8_tensor = HostType::Tensor(crate::dag::TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F8e4m3,
+        });
+        let _ = infer_builtin_host_type_from_arg_tys("to_list", &[f8_tensor]);
     }
 
     #[test]
@@ -7382,7 +7513,10 @@ mod tests {
             None,
         );
         let root = dag.add_node(
-            RiscOp::Sum { axis: 1 },
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
             vec![product],
             TensorType {
                 dims: vec![batch.clone(), out_dim.clone()],

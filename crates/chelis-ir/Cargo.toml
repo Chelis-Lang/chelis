@@ -15,5 +15,6 @@ thiserror.workspace = true
 [dev-dependencies]
 chelis-effects.workspace = true
 chelis-surf.workspace = true
+chelis-macros.workspace = true
 bincode = "1"
 serde_json = "1"

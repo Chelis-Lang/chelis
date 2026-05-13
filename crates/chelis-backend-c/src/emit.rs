@@ -35,6 +35,15 @@ struct MatmulEmitSpec {
     m: DimExpr,
     n: DimExpr,
     k: DimExpr,
+    /// Inner-product accumulator precision per `spec/04-type-system.md`
+    /// §5.7 / §5.7.1. Drives BLAS dispatch: F32 → `cblas_sgemm`,
+    /// F64 → `cblas_dgemm`. Sourced from the `RiscOp::BlasMatmul`
+    /// node's `accumulator` field (NOT inferred from operand storage)
+    /// per the destructure-`..` memory rule that prompted the WS-A0 F1
+    /// guard. Per spec §5.7.1, for f32/f64 operands the default
+    /// accumulator equals the operand precision; the result precision
+    /// equals the operand precision.
+    accumulator: Prim,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -312,7 +321,17 @@ impl CEmitter {
             }
             RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Drop => {}
-            RiscOp::Sum { axis } => {
+            // WS-A1 + WS-A4: `Sum` carries an `accumulator: Prim` field
+            // that governs both the running-sum precision and the output
+            // precision (verified by `chelis_ir::verify::C3a` to equal
+            // `output_type.precision` per spec §5.7.1). Per the
+            // destructure-`..` memory rule, bind `accumulator` here
+            // rather than `..`-skipping it so the dtype-aware reduce
+            // paths can honor the IR-pinned accumulator precision and
+            // the F1 footgun (silent precision downgrade via
+            // `..`-destructure) cannot recur — neither for WS-A1's f64
+            // accumulator nor for WS-A4's i8/i16 → i32 promoted path.
+            RiscOp::Sum { axis, accumulator } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
@@ -326,7 +345,14 @@ impl CEmitter {
                         "sum",
                     );
                 } else {
-                    self.emit_reduce_sum(id, *axis, &node.inputs, &node.output_type, dag);
+                    self.emit_reduce_sum(
+                        id,
+                        *axis,
+                        *accumulator,
+                        &node.inputs,
+                        &node.output_type,
+                        dag,
+                    );
                 }
             }
             RiscOp::MaxReduce { axis } => {
@@ -415,7 +441,13 @@ impl CEmitter {
                 m,
                 n,
                 k,
+                accumulator,
             } => {
+                // WS-A1: bind `accumulator` explicitly; the previous
+                // `..` destructure silently dispatched `cblas_sgemm` on
+                // f64 storage (RT-1 finding F1). The accumulator field
+                // is the IR's source of truth per spec §5.7.1; the
+                // backend MUST NOT infer it from operand storage.
                 self.emit_blas_matmul(
                     id,
                     &MatmulEmitSpec {
@@ -425,6 +457,7 @@ impl CEmitter {
                         m: m.clone(),
                         n: n.clone(),
                         k: k.clone(),
+                        accumulator: *accumulator,
                     },
                     &node.output_type,
                 );
@@ -547,7 +580,14 @@ impl CEmitter {
     fn validate_supported_precisions(dag: &Dag) {
         for node in dag.nodes() {
             match node.output_type.precision {
-                Prim::F32 | Prim::F64 | Prim::Bool | Prim::Int32 | Prim::Int64 => {}
+                // WS-A4: admit Int8/Int16 in tensor element types.
+                Prim::F32
+                | Prim::F64
+                | Prim::Bool
+                | Prim::Int8
+                | Prim::Int16
+                | Prim::Int32
+                | Prim::Int64 => {}
                 other => panic!(
                     "C backend does not yet support {} tensors, found at node {}",
                     other.name(),
@@ -558,13 +598,40 @@ impl CEmitter {
             if let RiscOp::Cast { new_precision } = node.op
                 && !matches!(
                     new_precision,
-                    Prim::F32 | Prim::F64 | Prim::Int32 | Prim::Int64
+                    Prim::F32 | Prim::F64 | Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
                 )
             {
                 panic!(
                     "C backend does not yet support casts to {}, found at node {}",
                     new_precision.name(),
                     node.id.0
+                );
+            }
+
+            // F1 (WS-A0 RT-1 fixup, tactical) — partially lifted by
+            // WS-A1: the C backend dispatches `cblas_sgemm` for f32
+            // and `cblas_dgemm` for f64 (see `emit_blas_matmul` /
+            // `MatmulEmitSpec::accumulator`). WS-A3 lifted the IR
+            // validation guard for bf16/f16 (admitted via the HIP
+            // backend's `hipblasGemmEx` path), but the C backend has
+            // no native bf16/f16 GEMM dispatch yet, so we still reject
+            // here at codegen. The literal "F1:" tag mirrors the
+            // verify.rs guard and makes the remaining (C/Metal/bf16/
+            // f16) lift greppable across the workspace.
+            if matches!(node.op, RiscOp::BlasMatmul { .. })
+                && let Some(lhs) = dag.get(node.inputs[0])
+                && !matches!(lhs.output_type.precision, Prim::F32 | Prim::F64)
+            {
+                panic!(
+                    "F1: C-backend BlasMatmul currently supports only f32 and f64; \
+                     node {} has operand precision `{}`. \
+                     spec/04-type-system.md §5.7.1 documents the per-precision \
+                     accumulator defaults; the C backend dispatches \
+                     `cblas_sgemm`/`cblas_dgemm` for f32/f64 (WS-A1). bf16/f16 \
+                     dispatch lifted for the HIP backend in WS-A3 but is not yet \
+                     wired for the C backend.",
+                    node.id.0,
+                    lhs.output_type.precision.name(),
                 );
             }
         }
@@ -831,6 +898,11 @@ impl CEmitter {
             Prim::F32 => "CHELIS_F32",
             Prim::F64 => "CHELIS_F64",
             Prim::Bool => "CHELIS_BOOL",
+            // WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
+            // Runtime-side macros are defined in chelis-runtime/include/chelis_runtime.h
+            // and `chelis_alloc` honors the per-dtype element width.
+            Prim::Int8 => "CHELIS_I8",
+            Prim::Int16 => "CHELIS_I16",
             Prim::Int32 => "CHELIS_I32",
             Prim::Int64 => "CHELIS_I64",
             other => panic!("C backend does not yet support {} tensors", other.name()),
@@ -842,13 +914,33 @@ impl CEmitter {
     /// Int32 uses `int32_t` (reinterpret cast; sizeof matches float).
     /// Int64 uses `int64_t` (reinterpret cast; sizeof is 2x float, alloc adjusts).
     /// F64 uses `double` (reinterpret cast; sizeof is 2x float, alloc adjusts).
+    ///
+    /// **WS-A0 footgun fix.** This used to fall through to `"float"` for
+    /// any unhandled `Prim`, which silently downgraded the wider
+    /// active dtypes (f16, bf16, int8, int16) to single-precision in
+    /// emitted C code. WS-A1 expands the C backend to handle those
+    /// dtypes; until then this function panics with the unhandled
+    /// variant so the silent downgrade cannot recur and so any new
+    /// dtype landing later in the active set per
+    /// `spec/04-type-system.md` §1.1 produces an explicit gap, not a
+    /// quiet wrong answer.
     fn elem_type(ty: &TensorType) -> &'static str {
         match ty.precision {
             Prim::F32 | Prim::Bool => "float",
             Prim::F64 => "double",
+            // WS-A4: i8/i16 element access via reinterpret cast on
+            // `t->data`; the runtime allocator now sizes the buffer
+            // correctly per `CHELIS_I8` / `CHELIS_I16`.
+            Prim::Int8 => "int8_t",
+            Prim::Int16 => "int16_t",
             Prim::Int32 => "int32_t",
             Prim::Int64 => "int64_t",
-            _ => "float",
+            other => panic!(
+                "C backend does not yet support `{}` tensors; the silent \
+                 default-arm downgrade was removed by WS-A0 to surface \
+                 missing dtype emit logic. WS-A1 widens this match.",
+                other.name()
+            ),
         }
     }
 
@@ -1614,6 +1706,24 @@ impl CEmitter {
         ty: &TensorType,
         in_place: Option<FusedInPlaceSpec>,
     ) {
+        // WS-A1 guard: this codegen path is f32-hardcoded (`float*` data
+        // pointers, `float v{s}` step variables, single-precision math
+        // symbols). A non-f32 output dtype would silently truncate to
+        // f32 — exactly the F1 footgun class. Reject loudly until a
+        // follow-on parameterizes the path on the IR-pinned dtype per
+        // spec/04-type-system.md §5.7.1. The fuse pass currently only
+        // produces f32 fused chains in practice; this guard catches a
+        // future regression that admits non-f32 fused chains.
+        if !matches!(ty.precision, Prim::F32) {
+            panic!(
+                "WS-A1 / F1: emit_fused_elem path is f32-hardcoded; node {id} has \
+                 output precision `{}`. The silent f32 truncation that would \
+                 result is exactly the destructure-`..` footgun RT-1 surfaced. \
+                 Widen the fused-elem emit path before admitting non-f32 fused \
+                 chains.",
+                ty.precision.name(),
+            );
+        }
         if let Some(spec) = in_place {
             self.emit_fused_in_place_wrapper(id, ty, spec);
         } else {
@@ -1799,24 +1909,33 @@ impl CEmitter {
 
     // ---- BLAS matmul ----
     fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
-        // Defense in depth: cblas_sgemm is F32-only. If a non-F32 BlasMatmul
-        // reaches here it indicates a missing precision filter upstream (the
-        // canonical filter is at chelis_ir::specialize::detect_matmul_pattern).
-        // Refuse to emit rather than silently miscompile.
-        assert_eq!(
-            ty.precision,
-            Prim::F32,
-            "emit_blas_matmul received non-F32 output (precision={:?}) at node {id}; \
-             cblas_sgemm is single-precision only. The upstream specializer in \
-             chelis_ir::specialize must keep non-F32 matmul subgraphs on the \
-             generic expand+mul+sum path.",
-            ty.precision,
-        );
+        // WS-A1: dispatch f32 -> cblas_sgemm and f64 -> cblas_dgemm by the
+        // IR-pinned accumulator precision (see the match below). The
+        // historical F32-only assert that lived here was lifted with WS-A1;
+        // upstream guards in verify.rs and validate_supported_precisions
+        // reject unsupported accumulator dtypes before they reach this
+        // function.
         let a = spec.a.0;
         let b = spec.b.0;
         let m_expr = Self::emit_dim_expr(&spec.m);
         let n_expr = Self::emit_dim_expr(&spec.n);
         let k_expr = Self::emit_dim_expr(&spec.k);
+        // Dispatch BLAS routine and matching scalar literals from the IR-
+        // pinned accumulator precision per spec §5.7 / §5.7.1. f32 → sgemm,
+        // f64 → dgemm. Other accumulator dtypes are rejected upstream by
+        // the F1 guards in `verify.rs` and `validate_supported_precisions`,
+        // so this function only sees f32 / f64. The guards mean an
+        // unexpected accumulator here is a backend bug, not a user error.
+        let (gemm, alpha, beta, ptr_ty) = match spec.accumulator {
+            Prim::F32 => ("cblas_sgemm", "1.0f", "0.0f", "float"),
+            Prim::F64 => ("cblas_dgemm", "1.0", "0.0", "double"),
+            other => panic!(
+                "C backend BLAS dispatch reached unsupported accumulator `{}` at \
+                 node {id}; the F1 guard in verify.rs / validate_supported_precisions \
+                 should have rejected this earlier (spec/04-type-system.md §5.7.1)",
+                other.name()
+            ),
+        };
         self.line(&format!("chelis_tensor *t{id}_a = t{a};"));
         self.line(&format!(
             "if (!(t{id}_a->ndim >= 2 && t{id}_a->strides[t{id}_a->ndim - 1] == 1 && t{id}_a->strides[t{id}_a->ndim - 2] == {k_expr})) {{"
@@ -1836,7 +1955,7 @@ impl CEmitter {
         self.emit_slot_wrapper(id, ty);
         if spec.batch_dims.is_empty() {
             self.line(&format!(
-                "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_a->data, {k_expr}, t{id}_b->data, {n_expr}, 0.0f, t{id}->data, {n_expr});"
+                "{gemm}(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, {alpha}, ({ptr_ty}*)t{id}_a->data, {k_expr}, ({ptr_ty}*)t{id}_b->data, {n_expr}, {beta}, ({ptr_ty}*)t{id}->data, {n_expr});"
             ));
         } else {
             let batch_count = spec
@@ -1871,7 +1990,7 @@ impl CEmitter {
                 ));
             }
             self.line(&format!(
-                "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_a->data + t{id}_a_offset, {k_expr}, t{id}_b->data + t{id}_b_offset, {n_expr}, 0.0f, t{id}->data + t{id}_out_offset, {n_expr});"
+                "{gemm}(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, {alpha}, ({ptr_ty}*)t{id}_a->data + t{id}_a_offset, {k_expr}, ({ptr_ty}*)t{id}_b->data + t{id}_b_offset, {n_expr}, {beta}, ({ptr_ty}*)t{id}->data + t{id}_out_offset, {n_expr});"
             ));
             self.indent -= 1;
             self.line("}");
@@ -2164,7 +2283,73 @@ impl CEmitter {
     }
 
     // ---- Reduce sum ----
+    //
+    // WS-A1: parameterized by the output tensor's dtype (== the IR
+    // `Sum` op's accumulator precision per spec §5.7.1, enforced by
+    // verify::C3a). Per the destructure-`..` memory rule, the
+    // accumulator type and zero literal MUST come from the IR-pinned
+    // accumulator (which is the output dtype here, by §5.7.1's
+    // `output_type.precision == accumulator` invariant). The operand
+    // dtype is the source data layout; the accumulator dtype drives
+    // the running-sum width.
     fn emit_reduce_sum(
+        &mut self,
+        id: usize,
+        axis: usize,
+        accumulator: Prim,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let input_node = dag.get(inputs[0]).unwrap();
+        let input_prec = input_node.output_type.precision;
+        // C3a invariant from `chelis_ir::verify`: `Sum.output_type.precision == accumulator`.
+        // Pin it locally so a future emit refactor that decouples the two
+        // gets a loud assertion instead of silent miscompilation.
+        debug_assert_eq!(
+            ty.precision, accumulator,
+            "WS-A4: reduce_sum output precision must equal IR accumulator field; \
+             verifier-enforced spec/04-type-system.md §5.7.1 invariant violated"
+        );
+
+        // WS-A4: i8/i16 source data + i32 accumulator + i32 output, per
+        // spec/04-type-system.md §5.7.1. The accumulator C type comes
+        // from the IR-supplied `accumulator` parameter; do NOT infer it
+        // from the operand precision (the destructure-`..` footgun the
+        // F1 finding caught for BlasMatmul). Routed through a dedicated
+        // helper that zero-fills i32 inline (no `chelis_fill_i32`
+        // runtime symbol today) and keeps the source/accumulator C type
+        // spellings explicit at the cast site.
+        if matches!(input_prec, Prim::Int8 | Prim::Int16) && accumulator == Prim::Int32 {
+            let src_c_ty = match input_prec {
+                Prim::Int8 => "int8_t",
+                Prim::Int16 => "int16_t",
+                _ => unreachable!(),
+            };
+            self.emit_reduce_sum_int_promoted(id, axis, src_c_ty, "int32_t", inputs, ty, dag);
+            return;
+        }
+
+        // WS-A1 general path: f32 → f32 (with the SIMD fast path),
+        // f64 → f64, f32 → f64 widening, i32 → i32, i64 → i64, etc.
+        // The general scalar loop drives accumulator type and zero
+        // initializer from `elem_type` / `scalar_zero_literal` /
+        // `fill_zero_call` so every (operand, accumulator) combo the
+        // C backend's helpers know about lowers correctly without a
+        // dedicated specialization.
+        self.emit_reduce_sum_general(id, axis, inputs, ty, dag);
+    }
+
+    /// WS-A1 dtype-parameterized reduce_sum. Drives accumulator type
+    /// and zero initializer from `Self::elem_type` /
+    /// `Self::scalar_zero_literal` / `Self::fill_zero_call` so every
+    /// (operand, accumulator) combo the C backend's helpers know about
+    /// lowers correctly without a dedicated specialization. Includes
+    /// the f32+f32 SIMD fast path inline (`chelis_sum_f32`) so the
+    /// pre-WS-A4 emit for that combo stays byte-identical. Other
+    /// dispatched paths (i8/i16 → i32 via `emit_reduce_sum_int_promoted`)
+    /// short-circuit before this is called.
+    fn emit_reduce_sum_general(
         &mut self,
         id: usize,
         axis: usize,
@@ -2175,9 +2360,21 @@ impl CEmitter {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
         let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let acc_et = Self::elem_type(ty);
+        let acc_zero = Self::scalar_zero_literal(ty.precision);
+        let operand_et = Self::elem_type(&input_node.output_type);
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
-        if output_is_scalar {
+        // Fast path: contiguous f32 input AND f32 accumulator can use
+        // the SIMD `chelis_sum_f32` helper. Other dtype combinations
+        // fall through to the dtype-parameterized scalar loop below.
+        // No widening fast path for {f32 operand, f64 accumulator} or
+        // similar mixed-precision: those are admitted by the type
+        // system but routed through the scalar accumulator loop.
+        let can_simd_fast_path = output_is_scalar
+            && ty.precision == Prim::F32
+            && input_node.output_type.precision == Prim::F32;
+        if can_simd_fast_path {
             self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
             self.indent += 1;
             self.line(&format!(
@@ -2187,13 +2384,13 @@ impl CEmitter {
             self.line("} else {");
             self.indent += 1;
         }
-        self.line(&format!("chelis_fill_f32(t{id}, 0.0f);"));
+        self.line(&Self::fill_zero_call(ty, &format!("t{id}")));
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int outer = 0; outer < t{id}->size; outer++) {{"
         ));
         self.indent += 1;
-        self.line("float acc = 0.0f;");
+        self.line(&format!("{acc_et} acc = {acc_zero};"));
         self.line("int out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
             "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
@@ -2222,16 +2419,138 @@ impl CEmitter {
         self.line(&format!(
             "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
         ));
-        self.line(&format!("acc += t{a}->data[src_idx];"));
+        // Read the operand at its native element type and accumulate at
+        // the accumulator type; C handles the implicit widening for the
+        // f32→f64 case, and integer accumulators preserve exact values.
+        self.line(&format!(
+            "acc += ({acc_et})((const {operand_et}*)t{a}->data)[src_idx];"
+        ));
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("t{id}->data[outer] = acc;"));
+        self.line(&format!("(({acc_et}*)t{id}->data)[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
-        if output_is_scalar {
+        if can_simd_fast_path {
             self.indent -= 1;
             self.line("}");
         }
+    }
+
+    /// C zero-literal for a Chelis precision used as an accumulator
+    /// initializer. Returns the source-text form (not a runtime
+    /// expression) so it can be inlined into emitted assignments.
+    fn scalar_zero_literal(prim: Prim) -> &'static str {
+        match prim {
+            Prim::F32 => "0.0f",
+            Prim::F64 => "0.0",
+            Prim::Int32 => "(int32_t)0",
+            Prim::Int64 => "(int64_t)0",
+            Prim::Bool => "0",
+            other => panic!(
+                "C backend has no zero literal for `{}` accumulator (spec/04-type-system.md §5.7.1)",
+                other.name()
+            ),
+        }
+    }
+
+    /// Emit a `chelis_fill_*` runtime call that zeros every element of
+    /// `tensor` according to the C-backend dtype set. The runtime
+    /// distinguishes f32/f64/i64 fills because their element widths
+    /// differ; integer-32 zero-fill is handled in-line by other call
+    /// sites that need it, but this helper centralizes the
+    /// reduce-sum case where the IR accumulator drives the dispatch.
+    fn fill_zero_call(ty: &TensorType, tensor: &str) -> String {
+        match ty.precision {
+            Prim::F32 | Prim::Bool => format!("chelis_fill_f32({tensor}, 0.0f);"),
+            Prim::F64 => format!("chelis_fill_f64({tensor}, 0.0);"),
+            Prim::Int64 => format!("chelis_fill_i64({tensor}, (int64_t)0);"),
+            Prim::Int32 => format!(
+                "{{ int32_t *__zp = (int32_t*){tensor}->data; for (int __i = 0; __i < {tensor}->size; __i++) __zp[__i] = 0; }}"
+            ),
+            other => panic!(
+                "C backend has no zero-fill helper for `{}` (spec/04-type-system.md §1.1)",
+                other.name()
+            ),
+        }
+    }
+
+    /// WS-A4: integer reduce_sum where the accumulator dtype is wider
+    /// than the source dtype (the i8/i16 → i32 promoted path per spec
+    /// §5.7.1). `src_c_ty` and `acc_c_ty` are the C type spellings used
+    /// for the reinterpret cast on `t->data` and for the accumulator
+    /// variable respectively. Output buffer is sized for `acc_c_ty` by
+    /// `chelis_alloc` honoring the `dtype_macro(ty)` value (CHELIS_I32
+    /// for the i8/i16 → i32 lowering).
+    // WS-A4: dtype-parameterized reduction needs both source and
+    // accumulator C-type spellings plus the standard set of
+    // emit-context arguments; the helper sits at the same arity as the
+    // existing `emit_reduce_simple` which is similarly broad.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_reduce_sum_int_promoted(
+        &mut self,
+        id: usize,
+        axis: usize,
+        src_c_ty: &str,
+        acc_c_ty: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let a = inputs[0].0;
+        let input_node = dag.get(inputs[0]).unwrap();
+        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        self.emit_slot_wrapper(id, ty);
+        // Zero-fill the output buffer manually since there is no
+        // `chelis_fill_i32` helper today; an inline loop avoids touching
+        // the runtime ABI for the WS-A4 cycle.
+        self.line(&format!(
+            "for (int __zi = 0; __zi < t{id}->size; __zi++) {{ (({acc_c_ty}*)t{id}->data)[__zi] = 0; }}"
+        ));
+        self.line("#pragma omp parallel for");
+        self.line(&format!(
+            "for (int outer = 0; outer < t{id}->size; outer++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("{acc_c_ty} acc = 0;"));
+        self.line("int out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+        ));
+        self.line(&format!(
+            "for (int __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
+        ));
+        self.indent += 1;
+        self.line("int full_indices[CHELIS_MAX_DIM];");
+        self.line("int out_d = 0;");
+        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.indent += 1;
+        self.line(&format!("if (d == {axis}) {{"));
+        self.indent += 1;
+        self.line("full_indices[d] = __reduce_i;");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("full_indices[d] = out_indices[out_d];");
+        self.line("out_d++;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+        ));
+        // Promote each source element to the (wider) accumulator type
+        // before adding so partial sums of 200 i8 ones produce 200, not
+        // -56 (which would be the wrap-around if accumulation happened
+        // at the source width).
+        self.line(&format!(
+            "acc += ({acc_c_ty})(({src_c_ty}*)t{a}->data)[src_idx];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("(({acc_c_ty}*)t{id}->data)[outer] = acc;"));
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Reduce max ----
@@ -2246,6 +2565,25 @@ impl CEmitter {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
         let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        // WS-A1 guard: reduce_max codegen is f32-hardcoded
+        // (`chelis_max_f32` SIMD helper, `float acc = -INFINITY`,
+        // `fmaxf` reduction operator). Per spec §2.3 max_reduce
+        // returns operand precision, so f64 input → f64 output, but
+        // the C-backend implementation does not yet handle that.
+        // Reject loudly to avoid the same silent-truncation footgun
+        // the F1 fix targets; widening is follow-on work.
+        if !matches!(ty.precision, Prim::F32)
+            || !matches!(input_node.output_type.precision, Prim::F32)
+        {
+            panic!(
+                "WS-A1 / F1: emit_reduce_max path is f32-hardcoded; node {id} has \
+                 input precision `{}` and output precision `{}`. Widening \
+                 max_reduce to non-f32 dtypes is follow-on work; the safe \
+                 alternative is the dtype-parameterized scalar reduction.",
+                input_node.output_type.precision.name(),
+                ty.precision.name(),
+            );
+        }
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
         if output_is_scalar {
@@ -2327,6 +2665,24 @@ impl CEmitter {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
         let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        // WS-A1 guard: emit_reduce_simple is f32-hardcoded (`float acc`
+        // declarator, scalar `INFINITY`/`-INFINITY` literals, `fmaxf`/
+        // `fminf` operators in the update template). Used by
+        // MinReduce/ProdReduce; per spec §2.3 these return operand
+        // precision, so f64 input → f64 output, but the C-backend
+        // implementation does not yet handle that. Reject loudly to
+        // avoid silent truncation; widening is follow-on work.
+        if !matches!(ty.precision, Prim::F32)
+            || !matches!(input_node.output_type.precision, Prim::F32)
+        {
+            panic!(
+                "WS-A1 / F1: emit_reduce_simple path is f32-hardcoded; node {id} has \
+                 input precision `{}` and output precision `{}`. Widening \
+                 min_reduce / prod_reduce to non-f32 dtypes is follow-on work.",
+                input_node.output_type.precision.name(),
+                ty.precision.name(),
+            );
+        }
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
         let use_simd = output_is_scalar && simd_fn.is_some();
@@ -2406,6 +2762,22 @@ impl CEmitter {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
         let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        // WS-A1 guard: argmax/argmin codegen is f32-hardcoded
+        // (`chelis_argmax_f32`/`chelis_argmin_f32` SIMD helpers,
+        // `float best_val` declarator). Per the doc comment above,
+        // the OUTPUT is intentionally F32-encoded integer indices,
+        // but the INPUT may be F64; reading f64 storage as float*
+        // would silently truncate. Reject loudly until follow-on
+        // widens the input read.
+        if !matches!(input_node.output_type.precision, Prim::F32) {
+            panic!(
+                "WS-A1 / F1: emit_reduce_argcmp path is f32-hardcoded; node {id} \
+                 has input precision `{}`. Widening argmax/argmin to non-f32 \
+                 inputs is follow-on work (the F32-encoded output index is \
+                 deliberate per the doc comment).",
+                input_node.output_type.precision.name(),
+            );
+        }
         let init = if is_argmax { "-INFINITY" } else { "INFINITY" };
         let cmp = if is_argmax { ">" } else { "<" };
         let simd_fn = if is_argmax {
@@ -2493,6 +2865,28 @@ impl CEmitter {
             RiscOp::FusedElem { ops } => ops,
             _ => panic!("expected FusedElem op"),
         };
+        // WS-A1 guard: this codegen path is f32-hardcoded (chelis_fill_f32
+        // zero, `float acc = 0.0f` initializer, `expf`/`logf`/`sinf`
+        // single-precision math symbols, fmaxf reduction operator). A
+        // non-f32 output dtype would silently truncate to f32 — exactly
+        // the F1 footgun class. Reject loudly until a follow-on widens
+        // the fused path to honor the IR `Sum`/`MaxReduce` accumulator
+        // and the input element type per spec/04-type-system.md §5.7.1.
+        if !matches!(out_ty.precision, Prim::F32)
+            || !matches!(fused_input_type.precision, Prim::F32)
+        {
+            panic!(
+                "WS-A1 / F1: emit_fused_reduce path is f32-hardcoded; node {id} has \
+                 fused_input precision `{}` and reduction output precision `{}`. The \
+                 silent f32 truncation that would result is exactly the destructure-\
+                 `..` footgun RT-1 surfaced. Widen this path before admitting \
+                 non-f32 fused reductions; the safe stop-gap is to keep \
+                 reduction_inlined_fused_elems out of the f64/i32/i64 path until \
+                 then.",
+                fused_input_type.precision.name(),
+                out_ty.precision.name(),
+            );
+        }
         let axis_size = Self::emit_dim_info(&fused_input_type.dims[axis]);
         // ndim of the fused input (pre-reduction shape)
         let fused_ndim = fused_input_type.dims.len();
@@ -2742,6 +3136,11 @@ impl CEmitter {
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
+        // WS-A1: pad fill must honor the output dtype. Pre-WS-A1 the
+        // default arm fell through to chelis_fill_f32 even for f64
+        // outputs, silently truncating the fill value. Match each
+        // active dtype explicitly; an unhandled dtype panics rather
+        // than silently downgrades.
         match ty.precision {
             Prim::Int64 => {
                 self.line(&format!(
@@ -2755,9 +3154,16 @@ impl CEmitter {
                     fill as i32
                 ));
             }
-            _ => {
+            Prim::F64 => {
+                self.line(&format!("chelis_fill_f64(t{id}, {fill:.17});"));
+            }
+            Prim::F32 | Prim::Bool => {
                 self.line(&format!("chelis_fill_f32(t{id}, {:.8}f);", fill as f32));
             }
+            other => panic!(
+                "C backend Pad does not yet support `{}` fill (spec/04-type-system.md §1.1)",
+                other.name()
+            ),
         }
         // Copy source data into the padded region
         self.line(&format!("for (int i = 0; i < t{a}->size; i++) {{"));
@@ -2879,31 +3285,41 @@ impl CEmitter {
         let src_et = Self::elem_type(src_ty);
         let dst_et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
-        // Strided element-wise loop. The output is freshly allocated and
-        // contiguous, so the destination index is the flat loop index. The
-        // source may be non-contiguous; resolve its element via the
-        // standard `chelis_flat_to_indices` + `chelis_indices_to_flat`
-        // dance used by `emit_realize` and friends. A C-level primitive
-        // cast `(dst_et)src` performs the precision conversion -- this is
-        // the canonical C semantics for f32<->f64 rounding,
-        // float->int truncate-toward-zero, and int->float widening, and
-        // matches the runtime evaluator's `convert_scalar_data` semantics
-        // on the validated precision set.
-        self.line("#pragma omp parallel for");
-        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
-        self.indent += 1;
-        self.line("int indices[CHELIS_MAX_DIM];");
-        self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
-        ));
-        self.line(&format!(
-            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
-        ));
-        self.line(&format!(
-            "(({dst_et}*)t{id}->data)[i] = ({dst_et})(({src_et}*)t{a}->data)[idx];"
-        ));
-        self.indent -= 1;
-        self.line("}");
+        if src_ty.precision == ty.precision {
+            // Same-dtype cast: copy directly using the per-dtype size.
+            // Models a same-dtype cast as a structural identity copy
+            // matching the runtime's per-dtype storage layout.
+            self.line(&format!(
+                "memcpy(t{id}->data, t{a}->data, t{id}->size * sizeof({dst_et}));"
+            ));
+        } else {
+            // Cross-dtype value-converting cast. Strided element-wise
+            // loop: the output is freshly allocated and contiguous, so
+            // the destination index is the flat loop index. The source
+            // may be non-contiguous; resolve its element via the
+            // standard `chelis_flat_to_indices` + `chelis_indices_to_flat`
+            // dance used by `emit_realize` and friends. A C-level
+            // primitive cast `(dst_et)src` performs the precision
+            // conversion; canonical C semantics for f32<->f64 rounding,
+            // float->int truncate-toward-zero, and int->float widening,
+            // matching the runtime evaluator's `convert_scalar_data`
+            // semantics on the validated precision set.
+            self.line("#pragma omp parallel for");
+            self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+            self.indent += 1;
+            self.line("int indices[CHELIS_MAX_DIM];");
+            self.line(&format!(
+                "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            ));
+            self.line(&format!(
+                "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            ));
+            self.line(&format!(
+                "(({dst_et}*)t{id}->data)[i] = ({dst_et})(({src_et}*)t{a}->data)[idx];"
+            ));
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     // ---- Store ----
@@ -3038,7 +3454,15 @@ mod tests {
     fn sum_emits_reduction_loop() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
-        dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("acc +="));
         assert!(c.contains("for (int __reduce_i"));
@@ -3362,7 +3786,15 @@ mod tests {
     fn sum_then_neg_chains() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(3), None);
-        let s = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32(), None);
+        let s = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Neg, vec![s], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("acc +="));
@@ -3575,7 +4007,15 @@ mod tests {
             },
             None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         let result = crate::codegen_with_options(
             &dag,
             "test_fn",
@@ -3625,7 +4065,15 @@ mod tests {
             },
             None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(!c.contains("cblas_sgemm("));
         assert!(c.contains("for (int __reduce_i = 0; __reduce_i < 3; __reduce_i++) {"));

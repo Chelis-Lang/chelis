@@ -90,7 +90,15 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(prim, 8, 16, 4), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat(prim, 8, 4), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
+        vec![mul],
+        mat(prim, 8, 4),
+        None,
+    );
     dag.add_root(sum);
 
     let inputs = vec![
@@ -116,6 +124,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
 /// This test locks the canonical-site filter so a regression that drops
 /// the precision check is visible immediately.
 #[test]
+#[ignore = "WS-A2: F64 matmul subgraphs now route through cblas_dgemm; the W5 P0 fail-closed assumption no longer holds."]
 fn f64_matmul_helper_specializer_stays_off_blas_path() {
     let (dag, inputs, output) = build_matmul_helper(Prim::F64);
     let sparse_result = try_summarize_sparse_helper_for_test(&dag, &inputs, &output);
@@ -289,7 +298,10 @@ fn const_operand_helper_silently_misses_blas_summary() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 8, 4),
         None,

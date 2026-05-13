@@ -14,6 +14,19 @@
 #define CHELIS_I32 2
 #define CHELIS_BOOL 3
 #define CHELIS_I64 4
+/* WS-A3: bf16 / f16 dtype tags. Two-byte storage. The host runtime
+ * (chelis-runtime) does not implement bf16/f16 arithmetic in this
+ * cycle — these tags are present so the HIP backend can size GPU
+ * allocations and shuttle bytes between host and device tensors
+ * without round-tripping through a wider type. */
+#define CHELIS_BF16 5
+#define CHELIS_F16 6
+/* WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
+ * Element sizes (1 byte for i8, 2 bytes for i16) are honored by
+ * `chelis_alloc` so generated C code can index `(int8_t*)t->data` /
+ * `(int16_t*)t->data` directly without overrunning the buffer. */
+#define CHELIS_I8 7
+#define CHELIS_I16 8
 #define CHELIS_MAX_DIM 8
 
 typedef struct {
@@ -89,6 +102,13 @@ extern "C" {
 
 chelis_tensor *chelis_alloc(int ndim, const int *shape, int dtype);
 chelis_tensor *chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);
+/* Element size in bytes for the given CHELIS_* dtype tag. Mirrors the
+ * per-dtype dispatch inside `chelis_alloc` and the GPU-side
+ * `chelis_gpu_dtype_size`. Generated C code calls this when sizing
+ * memcpys / per-element strides so the byte stride matches the storage
+ * layout. RT-4 F2/F3 fix: replaces hardcoded `sizeof(float)` in the C
+ * backend's reshape and cast emitters. */
+int chelis_dtype_size(int dtype);
 void chelis_free(chelis_tensor *t);
 void chelis_fill_f32(chelis_tensor *t, float val);
 void chelis_fill_i64(chelis_tensor *t, int64_t val);
@@ -182,6 +202,11 @@ chelis_list *chelis_dict_keys(const chelis_dict *dict);
 chelis_list *chelis_dict_values(const chelis_dict *dict);
 chelis_list *chelis_dict_entries(const chelis_dict *dict);
 chelis_tensor *chelis_tensor_from_value_list(const chelis_list *list);
+/* RT-4 F1: dtype-aware variant. Honors the declared destination dtype
+ * for both allocation and per-element writes. The C backend calls this
+ * when the surface-level annotation disambiguates storage width
+ * (e.g. `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`). */
+chelis_tensor *chelis_tensor_from_value_list_typed(const chelis_list *list, int dst_dtype);
 chelis_list *chelis_list_from_tensor(const chelis_tensor *tensor);
 chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_value pad_value);
 chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_value pad_value);

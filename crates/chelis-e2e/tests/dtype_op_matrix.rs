@@ -120,16 +120,10 @@ fn tensor_to_f64_i64() {
 fn tensor_to_f64_i32() {
     unsafe {
         let t = alloc_scalar(CHELIS_I32);
-        // I32 storage today is 4-byte f32-encoded.  Write through
-        // `data_as_f32` (the transition shim) rather than
-        // `f32::fill` -- the latter would trip the trait's
-        // debug_assert (DTYPE mismatch: F32 vs I32).
-        *data_as_f32(t) = 42.0f32;
+        // RT-4 F1: int32 tensors now use genuine int32 storage.
+        *i32::data_ptr_unchecked(t) = 42;
         let out = chelis_tensor_to_f64(t);
-        assert_eq!(
-            out, 42.0,
-            "i32 rank-0 tensor (f32-encoded storage) must read back as f64"
-        );
+        assert_eq!(out, 42.0, "i32 rank-0 tensor must read back as f64");
         chelis_free(t);
     }
 }
@@ -404,7 +398,15 @@ unsafe fn alloc_vec_with_values(dtype: c_int, vals: &[f64]) -> *mut chelis_tenso
                     *p.add(i) = *v as i64;
                 }
             }
-            CHELIS_I32 | CHELIS_BOOL => {
+            CHELIS_I32 => {
+                // RT-4 F1: int32 tensors now use genuine int32 storage
+                // (4 bytes), not the legacy f32-encoded convention.
+                let p = i32::data_ptr_unchecked(t);
+                for (i, v) in vals.iter().enumerate() {
+                    *p.add(i) = *v as i32;
+                }
+            }
+            CHELIS_BOOL => {
                 let p = data_as_f32(t);
                 for (i, v) in vals.iter().enumerate() {
                     *p.add(i) = *v as f32;
@@ -425,7 +427,8 @@ unsafe fn read_at(t: *mut chelis_tensor, i: usize) -> f64 {
             CHELIS_F32 => *f32::data_ptr_unchecked(t).add(i) as f64,
             CHELIS_F64 => *f64::data_ptr_unchecked(t).add(i),
             CHELIS_I64 => *i64::data_ptr_unchecked(t).add(i) as f64,
-            CHELIS_I32 | CHELIS_BOOL => *data_as_f32(t).add(i) as f64,
+            CHELIS_I32 => *i32::data_ptr_unchecked(t).add(i) as f64,
+            CHELIS_BOOL => *data_as_f32(t).add(i) as f64,
             other => panic!("read_at: unsupported dtype {other}"),
         }
     }
@@ -1008,7 +1011,13 @@ unsafe fn alloc_2x2(dtype: c_int, a: f64, b: f64, c: f64, d: f64) -> *mut chelis
                     *p.add(i) = *v as i64;
                 }
             }
-            CHELIS_I32 | CHELIS_BOOL => {
+            CHELIS_I32 => {
+                let p = i32::data_ptr_unchecked(t);
+                for (i, v) in vals.iter().enumerate() {
+                    *p.add(i) = *v as i32;
+                }
+            }
+            CHELIS_BOOL => {
                 let p = data_as_f32(t);
                 for (i, v) in vals.iter().enumerate() {
                     *p.add(i) = *v as f32;

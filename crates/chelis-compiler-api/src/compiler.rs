@@ -2006,6 +2006,16 @@ fn wire_literal(lit: &Literal) -> WireLiteral {
     match lit {
         Literal::Int(value) => WireLiteral::Int { value: *value },
         Literal::Float(value) => WireLiteral::Float { value: *value },
+        // Typed-suffix literals (spec §5.5): preserve the suffix across
+        // the wire boundary so the receiving side sees the same type.
+        Literal::TypedInt(value, suffix) => WireLiteral::TypedInt {
+            value: *value,
+            suffix: suffix.as_str().to_string(),
+        },
+        Literal::TypedFloat(value, suffix) => WireLiteral::TypedFloat {
+            value: *value,
+            suffix: suffix.as_str().to_string(),
+        },
         Literal::Str(value) => WireLiteral::Str {
             value: value.clone(),
         },
@@ -2273,7 +2283,10 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             rate: *rate,
             seed: *seed,
         },
-        RiscOp::Sum { axis } => WireRiscOp::Sum { axis: *axis },
+        RiscOp::Sum { axis, accumulator } => WireRiscOp::Sum {
+            axis: *axis,
+            accumulator: accumulator.name().to_string(),
+        },
         RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce { axis: *axis },
         RiscOp::MinReduce { axis } => WireRiscOp::MinReduce { axis: *axis },
         RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce { axis: *axis },
@@ -2352,11 +2365,13 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             m,
             n,
             k,
+            accumulator,
         } => WireRiscOp::BlasMatmul {
             batch_dims: batch_dims.iter().map(wire_dim_expr).collect(),
             m: wire_dim_expr(m),
             n: wire_dim_expr(n),
             k: wire_dim_expr(k),
+            accumulator: accumulator.name().to_string(),
         },
         RiscOp::Gather { axis } => WireRiscOp::Gather { axis: *axis },
         RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd { axis: *axis },

@@ -41,6 +41,7 @@ use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::lower::try_lower_program;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
+use chelis_types::types::Prim;
 use chelis_types::{check_linearity, check_typed_program};
 
 /// Full Surf-to-DAG pipeline: parse Surf → desugar to Deep → typecheck →
@@ -427,7 +428,10 @@ fn scalarize_root(dag: &Dag, root: NodeId) -> Scalarized {
     use chelis_ir::dag::TensorType;
     let mut out = dag.clone();
     let scalar = out.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
         vec![root],
         TensorType::scalar_f32(),
         None,

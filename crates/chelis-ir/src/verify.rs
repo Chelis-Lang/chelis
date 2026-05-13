@@ -102,6 +102,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 m,
                 n,
                 k,
+                ..
             } => {
                 if arity != 2 {
                     errors.push(format!(
@@ -316,7 +317,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
 
         // C3: validate reduction axis bounds.
         match &node.op {
-            RiscOp::Sum { axis }
+            RiscOp::Sum { axis, .. }
             | RiscOp::MaxReduce { axis }
             | RiscOp::MinReduce { axis }
             | RiscOp::ProdReduce { axis }
@@ -330,6 +331,151 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                         errors.push(format!(
                             "reduction op at node {} has axis {} but input has {} dimensions",
                             node.id.0, axis, ndims
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // C3a (WS-A0): per spec/04-type-system.md §5.7.1 the result
+        // precision of `reduce_sum` IS the accumulator precision; the
+        // IR invariant is `Sum.output_type.precision == accumulator`.
+        // For BlasMatmul, the accumulator must be at least as wide as
+        // the operand precision and at least as wide as the spec
+        // default for that operand precision.
+        match &node.op {
+            RiscOp::Sum { accumulator, .. } => {
+                // IR invariant: Sum.output_type.precision must equal
+                // Sum.accumulator. The §5.7.1 result-precision-table
+                // column is the user-facing rule, and lowering inserts
+                // a downcast `Cast` node for the bf16/f16 row so the
+                // user-visible result returns to operand precision; at
+                // the IR level the Sum node itself outputs the
+                // accumulator precision.
+                if node.output_type.precision != *accumulator {
+                    errors.push(format!(
+                        "reduce_sum at node {} has output precision `{}` but \
+                         accumulator `{}`; per spec/04-type-system.md §5.7.1 \
+                         the IR-level result precision of `reduce_sum` is the \
+                         accumulator precision (lowering inserts an explicit \
+                         downcast for bf16/f16 to recover the operand-precision \
+                         result per the §5.7.1 table)",
+                        node.id.0,
+                        node.output_type.precision.name(),
+                        accumulator.name()
+                    ));
+                }
+                // RT-2 fixup B4: spec §5.7.1 narrowness rule for Sum.
+                // Symmetric with the BlasMatmul check below. The
+                // `sum_with_accumulator` constructor enforces the
+                // same rule, but any direct construction of
+                // `RiscOp::Sum { .. }` (e.g. by lowering or by a
+                // hand-built test) bypasses it; the verify-layer
+                // check is the defense-in-depth that prevents a
+                // narrow accumulator from reaching the backend.
+                if arity == 1
+                    && let Some(operand_node) = dag.get(node.inputs[0])
+                {
+                    let operand = operand_node.output_type.precision;
+                    match RiscOp::default_reduce_sum_accumulator(operand) {
+                        Ok(default) => {
+                            if !crate::dag::accumulator_at_least_as_wide(
+                                operand,
+                                *accumulator,
+                                default,
+                            ) {
+                                errors.push(format!(
+                                    "reduce_sum at node {} has accumulator `{}` narrower than \
+                                     the spec/04-type-system.md §5.7.1 default `{}` for \
+                                     operand precision `{}`",
+                                    node.id.0,
+                                    accumulator.name(),
+                                    default.name(),
+                                    operand.name(),
+                                ));
+                            }
+                        }
+                        Err(msg) => {
+                            errors.push(format!("reduce_sum at node {}: {msg}", node.id.0));
+                        }
+                    }
+                }
+            }
+            RiscOp::BlasMatmul { accumulator, .. } => {
+                if arity == 2
+                    && let Some(lhs) = dag.get(node.inputs[0])
+                {
+                    let operand = lhs.output_type.precision;
+                    match RiscOp::default_matmul_accumulator(operand) {
+                        Ok(default) => {
+                            if !crate::dag::accumulator_at_least_as_wide(
+                                operand,
+                                *accumulator,
+                                default,
+                            ) {
+                                errors.push(format!(
+                                    "matmul at node {} has accumulator `{}` narrower than \
+                                     the spec/04-type-system.md §5.7.1 default `{}` for \
+                                     operand precision `{}`",
+                                    node.id.0,
+                                    accumulator.name(),
+                                    default.name(),
+                                    operand.name(),
+                                ));
+                            }
+                        }
+                        Err(msg) => errors.push(format!("matmul at node {}: {msg}", node.id.0)),
+                    }
+                    // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A1
+                    // (C backend f64), WS-A2 (HIP backend f64), and
+                    // WS-A3 (HIP backend bf16/f16).
+                    //
+                    // Original guard: every non-f32 BlasMatmul was
+                    // rejected because the C/HIP/Metal backends
+                    // destructured BlasMatmul with `..` and called
+                    // single-precision GEMM regardless of operand
+                    // precision, producing silent precision loss for
+                    // non-f32 source. The C backend now dispatches
+                    // `cblas_sgemm`/`cblas_dgemm` for f32/f64 (WS-A1).
+                    // The HIP backend binds the accumulator field
+                    // explicitly and routes f32/f64 through
+                    // `hipblasSgemm`/`hipblasDgemm` (WS-A2) and bf16/f16
+                    // through `hipblasGemmEx` (WS-A3) per
+                    // spec/04-type-system.md §5.7.1.
+                    //
+                    // This IR guard's remaining job is to keep the
+                    // still-unsupported operand precisions (integer
+                    // matmul per §5.7.2, lifted in WS-A4) from ever
+                    // reaching any backend's destructure-`..` footgun.
+                    // The literal "F1:" tag keeps the remaining lift
+                    // trivial to grep for.
+                    let backend_supported =
+                        matches!(operand, Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16);
+                    if !backend_supported {
+                        // RT-2 fixup P3 (comment): the integer-matmul
+                        // arm of this guard is permanent, not pending
+                        // a future "lift". Spec §5.7.2 declares
+                        // integer matmul not admitted, so the F1
+                        // guard's residual purpose is to keep
+                        // integer-precision BlasMatmul from ever
+                        // reaching a backend even if a hand-built or
+                        // future-pass IR slips one through. The
+                        // type-checker now rejects integer matmul
+                        // upfront with a §5.7.2-citing diagnostic
+                        // (RT-2 B6), so this branch is defense in
+                        // depth.
+                        errors.push(format!(
+                            "F1: BlasMatmul on operand precision `{}` is not admitted; \
+                             node {} (accumulator `{}`). \
+                             spec/04-type-system.md §5.7.2 declares integer matmul not \
+                             admitted in this cycle; the type checker rejects integer \
+                             operands upfront and this verify-level guard is defense in \
+                             depth. Float operand precisions f32/f64/bf16/f16 are \
+                             admitted; deferred dtype `f8e4m3` is rejected per §1.1.1.",
+                            operand.name(),
+                            node.id.0,
+                            accumulator.name(),
                         ));
                     }
                 }
@@ -1038,6 +1184,46 @@ mod tests {
         assert!(verify(&dag).is_empty());
     }
 
+    /// WS-A4 negative coverage: i8 + i32 add must be rejected by the
+    /// IR verifier per spec/04-type-system.md §5.1 (no implicit
+    /// precision promotion). This is the i8-specific instance of the
+    /// generic `c1_mismatched_precision_binary_op` test above; pinning
+    /// it explicitly so a future refactor that special-cases narrow
+    /// integers cannot silently widen i8 to i32 at the binary-op site.
+    #[test]
+    fn ws_a4_i8_plus_i32_add_is_precision_mismatch() {
+        let mut dag = Dag::new();
+        let i8_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int8,
+        };
+        let i32_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int32,
+        };
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            i8_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            i32_ty.clone(),
+            None,
+        );
+        // The output type doesn't matter — the verifier rejects on the
+        // operand mismatch first.
+        dag.add_node(RiscOp::Add, vec![a, b], i32_ty, None);
+        let errs = verify(&dag);
+        assert!(
+            errs.iter().any(|e| e.contains("mismatched precisions")),
+            "i8 + i32 add must be rejected with a precision-mismatch \
+             diagnostic per spec §5.1; got: {errs:?}"
+        );
+    }
+
     // --- C2: dimension matching ---
 
     #[test]
@@ -1092,7 +1278,15 @@ mod tests {
             precision: Prim::F32,
         };
         let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone(), None);
-        dag.add_node(RiscOp::Sum { axis: 5 }, vec![x], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 5,
+                accumulator: Prim::F32,
+            },
+            vec![x],
+            scalar_f32(),
+            None,
+        );
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("axis 5")));
     }
@@ -1121,7 +1315,15 @@ mod tests {
             precision: Prim::F32,
         };
         let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty, None);
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], out_ty, None);
+        dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![x],
+            out_ty,
+            None,
+        );
         assert!(verify(&dag).is_empty());
     }
 

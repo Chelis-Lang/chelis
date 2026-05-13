@@ -53,7 +53,15 @@ fn vmap_reduction_shifts_the_reduced_axis() {
         mat_f32(2, 3),
         None,
     );
-    let y = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(2), None);
+    let y = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(2),
+        None,
+    );
     dag.add_root(y);
 
     let vmapped = vectorize_axis0(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
@@ -140,7 +148,15 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
         },
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![prod], mat_f32(2, 4), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![prod],
+        mat_f32(2, 4),
+        None,
+    );
     dag.add_root(out);
 
     let vmapped = vectorize_axis0(&dag, DimInfo::Lit(5)).expect("vmap should succeed");

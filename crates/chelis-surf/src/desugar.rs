@@ -33,16 +33,29 @@ pub fn desugar_expr_only(expr: &Expr) -> deep::Expr {
 #[derive(Default)]
 struct DesugarCtx {
     top_level_fn_params: HashMap<String, Vec<String>>,
+    /// Per-function tensor element types declared in the function's
+    /// signature, indexed by parameter position. `None` for non-tensor
+    /// parameters or parameters with no declared type.
+    ///
+    /// Used by the contextual tensor-literal inference rule
+    /// (`spec/02-surf-syntax.md` §P10b, `spec/04-type-system.md` §5.6),
+    /// position 2: the corresponding argument position of a call whose
+    /// callee has a declared signature with a tensor parameter at that
+    /// position.
+    top_level_fn_tensor_param_prec: HashMap<String, Vec<Option<String>>>,
 }
 
 impl DesugarCtx {
     fn new(decls: &[Decl]) -> Self {
         let mut top_level_fn_params = HashMap::new();
+        let mut top_level_fn_tensor_param_prec = HashMap::new();
         for decl in decls {
             collect_top_level_fn_params(decl, &mut top_level_fn_params);
+            collect_top_level_fn_tensor_param_prec(decl, &mut top_level_fn_tensor_param_prec);
         }
         Self {
             top_level_fn_params,
+            top_level_fn_tensor_param_prec,
         }
     }
 }
@@ -189,10 +202,30 @@ fn desugar_param(param: &Param) -> deep::Expr {
 }
 
 fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::Expr {
+    desugar_param_with_scope(param, dim_vars, &HashSet::new())
+}
+
+/// Desugar a parameter with both a declared dim-vars scope and a
+/// quantified type-variable scope. The tvar scope is non-empty for
+/// `def f[..](...)` parameters where the def's quantifier list (`[..]`)
+/// participates in the contextual precision rule of
+/// `spec/02-surf-syntax.md` §P4b: a name in the precision slot of a
+/// `tensor[..., <name>]` annotation that matches the def's quantifier
+/// list desugars to `(t-var {} <name>)` rather than
+/// `(t-prim {} <name>)`. This is the WS-A6 extension of the WS-A5 rule
+/// from sigs to def parameter annotations.
+fn desugar_param_with_scope(
+    param: &Param,
+    dim_vars: &HashSet<String>,
+    tvar_set: &HashSet<String>,
+) -> deep::Expr {
     match &param.ty {
         Some(ty) if typed_param_needs_meta_wrapper(&param.name) => deep::Expr::MetaExpr(
             deep::MetaExpr {
-                entries: vec![("type".to_string(), desugar_type_with_dims(ty, dim_vars))],
+                entries: vec![(
+                    "type".to_string(),
+                    desugar_type_with_scope(ty, dim_vars, tvar_set),
+                )],
                 expr: Box::new(sym(&param.name)),
             },
             sp(),
@@ -201,7 +234,7 @@ fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::E
             deep::List {
                 elements: vec![
                     sym(&param.name),
-                    meta_with_type(desugar_type_with_dims(ty, dim_vars)),
+                    meta_with_type(desugar_type_with_scope(ty, dim_vars, tvar_set)),
                 ],
             },
             sp(),
@@ -482,8 +515,29 @@ fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
 // Primitive type names
 // ---------------------------------------------------------------------------
 
+// `f8e4m3` is intentionally absent: spec/04-type-system.md §1.1.1
+// rejects it as a deferred precision. Keeping the name out of the
+// primitives list prevents the implicit-quantifier collector from
+// treating `f8e4m3` as a fresh tvar candidate, so the type-checker's
+// §1.1.1 rejection path fires with the correct diagnostic.
 const PRIMITIVES: &[&str] = &[
-    "f32", "f64", "f16", "bf16", "f8e4m3", "int8", "int32", "int64", "bool", "string", "unit",
+    "f32", "f64", "f16", "bf16", "int8", "int16", "int32", "int64", "bool", "string", "unit",
+];
+
+/// Unsigned dtype names per `spec/04-type-system.md` §1.1.2. These are
+/// not in the active numeric primitive set, but they are well-known
+/// dtype identifiers that users (especially LLMs translating from
+/// numpy/PyTorch) reach for. Treat them as "intended-precision"
+/// identifiers in desugar so they reach the type-checker's §1.1.2
+/// rejection path with a precise diagnostic, NOT as candidate
+/// quantified type variables.
+///
+/// Mirrors `chelis_types::infer::is_unsigned_dtype_name`. Kept as a
+/// parallel const here because chelis-surf does not depend on
+/// chelis-types and pulling in the dependency just for this list
+/// would invert the desugar / typecheck layering.
+const UNSIGNED_DTYPE_NAMES: &[&str] = &[
+    "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
 ];
 
 // ---------------------------------------------------------------------------
@@ -504,6 +558,62 @@ fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String
             }
         }
         _ => {}
+    }
+}
+
+/// Collect per-position tensor element-prim names from each top-level
+/// function's declared signature. Used by the contextual tensor-literal
+/// inference rule (spec §P10b / §5.6) to narrow numeric literals in
+/// argument positions whose declared parameter type is a tensor.
+///
+/// `Decl::Sig` (a separate signature declaration) is also collected so
+/// `sig f: tensor[3, f64] -> ...` followed by an untyped `def f` participates.
+fn collect_top_level_fn_tensor_param_prec(
+    decl: &Decl,
+    out: &mut HashMap<String, Vec<Option<String>>>,
+) {
+    match decl {
+        Decl::FunDef { name, params, .. } => {
+            let entry: Vec<Option<String>> = params
+                .iter()
+                .map(|p| p.ty.as_ref().and_then(tensor_element_prim_name))
+                .collect();
+            // Only insert if at least one parameter has a tensor element
+            // type — otherwise an entry would still be returned but with
+            // all-None which the lookup harmlessly ignores. Cheap
+            // pre-filter to keep the map sparse.
+            if entry.iter().any(Option::is_some) {
+                out.insert(name.clone(), entry);
+            }
+        }
+        Decl::Sig {
+            name,
+            ty: TypeExpr::Arrow(args, _ret, _),
+            ..
+        } => {
+            // sig f: A -> B -> C is a flat Arrow; collect each non-return
+            // arrow position.
+            let entry: Vec<Option<String>> = args.iter().map(tensor_element_prim_name).collect();
+            if entry.iter().any(Option::is_some) {
+                out.insert(name.clone(), entry);
+            }
+        }
+        Decl::Module { decls, .. } => {
+            for decl in decls {
+                collect_top_level_fn_tensor_param_prec(decl, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Return the precision name (e.g. `"f64"`, `"int32"`) for a tensor type
+/// expression, or `None` for any other shape. Tensor type expressions in
+/// Surf carry the precision as a `String` in `TypeExpr::Tensor`.
+fn tensor_element_prim_name(ty: &TypeExpr) -> Option<String> {
+    match ty {
+        TypeExpr::Tensor(_, prec, _) => Some(prec.clone()),
+        _ => None,
     }
 }
 
@@ -557,9 +667,18 @@ impl DesugarCtx {
                 value,
                 ..
             } => {
+                // Position 1 (spec §P10b / §5.6): RHS of a let-binding
+                // whose declared type is a tensor type. Narrow numeric
+                // literals in `value` to the tensor element type.
+                let body = match (tensor_element_prim_name(t), value) {
+                    (Some(prec), Expr::List(items, _)) => {
+                        self.desugar_list_as_tensor_literal(items, &prec, &[])
+                    }
+                    _ => self.desugar_expr(value),
+                };
                 vec![
                     node("defsig", vec![sym(name), desugar_type(t)]),
-                    node("def", vec![sym(name), self.desugar_expr(value)]),
+                    node("def", vec![sym(name), body]),
                 ]
             }
 
@@ -603,7 +722,14 @@ impl DesugarCtx {
                 name, ty, effects, ..
             } => vec![node(
                 "defsig",
-                vec![sym(name), apply_effect_metadata(desugar_type(ty), effects)],
+                vec![
+                    sym(name),
+                    // WS-A5: standalone sigs use the contextual rule so a
+                    // lowercase non-primitive name in the precision slot
+                    // becomes a quantified type variable per
+                    // spec/04-type-system.md §5.8.
+                    apply_effect_metadata(desugar_sig_type(ty, &HashSet::new()), effects),
+                ],
             )],
 
             Decl::Dim { names, .. } => names
@@ -654,39 +780,78 @@ impl DesugarCtx {
         body: &Expr,
     ) -> Vec<deep::Expr> {
         // Function-level dim params are polymorphic d-vars, NOT module-level defdim.
-        // Build a set so desugar_type_with_dims treats them as d-var.
+        // Build a set so desugar_type_with_scope treats them as d-var.
         let dim_set: HashSet<String> = dim_params.iter().cloned().collect();
+
+        // WS-A6 (spec/02-surf-syntax.md §P4b): when a def declares an
+        // explicit quantifier list `def f[..](...)`, names in that list
+        // that appear in the precision slot of a `tensor[..., <name>]`
+        // parameter annotation desugar to `(t-var {} <name>)` rather
+        // than `(t-prim {} <name>)`. The same identifier may also act
+        // as a dim-var when it appears in a dim slot — the
+        // dim/precision distinction is determined by position inside
+        // the tensor type, not by per-name kind tracking. When
+        // `dim_params` is empty, the WS-A5 implicit collection on the
+        // synthesized sig is preserved and parameter annotations keep
+        // their pre-WS-A6 behavior (an unbound precision name surfaces
+        // a diagnostic via `validate_tensor_precisions_in_program`).
+        let param_ann_tvar_set: HashSet<String> = dim_set.clone();
 
         let param_names: Vec<deep::Expr> = params
             .iter()
-            .map(|param| desugar_param_with_dims(param, &dim_set))
+            .map(|param| desugar_param_with_scope(param, &dim_set, &param_ann_tvar_set))
             .collect();
         let params_node = node("params", param_names);
-        let fn_node = node(
-            "fn",
-            vec![
-                params_node,
-                self.desugar_expr_with_scope(
-                    body,
-                    &params
-                        .iter()
-                        .map(|param| param.name.clone())
-                        .collect::<Vec<_>>(),
-                ),
-            ],
-        );
+        let body_scope: Vec<String> = params.iter().map(|param| param.name.clone()).collect();
+        // Position 3 (spec §P10b / §5.6): body expression of a function
+        // whose declared return type is a tensor type and whose body is
+        // itself a tensor literal. Narrow numeric literals in `body` to
+        // the tensor element type.
+        let desugared_body = match (ret_ty.as_ref().and_then(tensor_element_prim_name), body) {
+            (Some(prec), Expr::List(items, _)) => {
+                self.desugar_list_as_tensor_literal(items, &prec, &body_scope)
+            }
+            _ => self.desugar_expr_with_scope(body, &body_scope),
+        };
+        let fn_node = node("fn", vec![params_node, desugared_body]);
         let def_node = node("def", vec![sym(name), fn_node]);
 
         if params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() {
+            // Tvar set for the synthesized sig:
+            //
+            // - When the def declares an explicit quantifier list
+            //   (`def f[..]`), use that list as the authoritative source
+            //   of precision tvars. Names not in the list that appear
+            //   in a precision slot stay as `t-prim` and the validator
+            //   surfaces the unbound-name diagnostic; this matches the
+            //   WS-A6 rule in spec/02-surf-syntax.md §P4b.
+            // - When the def has no explicit quantifier list, fall back
+            //   to the WS-A5 implicit collection over typed params and
+            //   the return type (spec/04-type-system.md §5.8) so a
+            //   bare `def f(x: tensor[3, p])` continues to work.
+            let tvar_set: HashSet<String> = if !dim_params.is_empty() {
+                dim_params.iter().cloned().collect()
+            } else {
+                let mut acc: HashSet<String> = HashSet::new();
+                for p in params {
+                    if let Some(ty) = &p.ty {
+                        collect_sig_type_vars(ty, &mut acc);
+                    }
+                }
+                if let Some(ty) = ret_ty {
+                    collect_sig_type_vars(ty, &mut acc);
+                }
+                acc
+            };
             let mut type_parts: Vec<deep::Expr> = params
                 .iter()
                 .map(|p| match &p.ty {
-                    Some(ty) => desugar_type_with_dims(ty, &dim_set),
+                    Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
                     None => node("t-var", vec![sym("_")]),
                 })
                 .collect();
             type_parts.push(match ret_ty {
-                Some(ty) => desugar_type_with_dims(ty, &dim_set),
+                Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
                 None => node("t-var", vec![sym("_")]),
             });
             let sig = node(
@@ -1030,13 +1195,22 @@ impl DesugarCtx {
                     .collect(),
             ),
 
-            Expr::Cast(e, prec, _) => node(
-                "cast",
-                vec![
-                    self.desugar_expr_with_scope(e, local_fn_params),
-                    node("t-prim", vec![sym(prec)]),
-                ],
-            ),
+            Expr::Cast(e, prec, _) => {
+                // Position 4 (spec §P10b / §5.6): first argument of a
+                // `cast(literal, p)` expression. When the inner is a
+                // bare list literal, narrow numeric entries to `p` and
+                // produce a tensor literal. The outer `cast` then
+                // becomes a no-op precision-confirm at the type level
+                // (tensor[N, p] cast to p), which `infer_cast` accepts
+                // because the precision matches.
+                let inner = match e.as_ref() {
+                    Expr::List(items, _) => {
+                        self.desugar_list_as_tensor_literal(items, prec, local_fn_params)
+                    }
+                    other => self.desugar_expr_with_scope(other, local_fn_params),
+                };
+                node("cast", vec![inner, node("t-prim", vec![sym(prec)])])
+            }
 
             Expr::Grad(f, wrt, _) => self.desugar_grad(f, wrt.as_deref(), local_fn_params),
 
@@ -1182,7 +1356,21 @@ impl DesugarCtx {
         for binding in bindings.iter().rev() {
             match &binding.pattern {
                 LetPattern::Var(name, _) => {
-                    let value = self.desugar_expr(&binding.value);
+                    // Position 1 (spec §P10b / §5.6) at block scope:
+                    // `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]` inside
+                    // a block uses the same contextual rule as the
+                    // top-level form. Module-level LetDef and
+                    // block-level let bindings are both let-bindings
+                    // per §5.6 enumerated position 1.
+                    let value = match (
+                        binding.ty.as_ref().and_then(tensor_element_prim_name),
+                        &binding.value,
+                    ) {
+                        (Some(prec), Expr::List(items, _)) => {
+                            self.desugar_list_as_tensor_literal(items, &prec, &[])
+                        }
+                        _ => self.desugar_expr(&binding.value),
+                    };
                     if let Some(ty) = &binding.ty {
                         out = bind_name_value(
                             name,
@@ -1218,6 +1406,20 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
             meta_with_type(node("t-prim", vec![sym("f32")])),
             vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
         ),
+        // Typed-suffix literals (spec/02-surf-syntax.md §P10a /
+        // spec/04-type-system.md §5.5): bind at exactly the suffix
+        // precision with no inference, no widening, no narrowing. The
+        // type metadata is the user-facing contract.
+        Literal::TypedInt(n, suffix) => node_meta(
+            "lit",
+            meta_with_type(node("t-prim", vec![sym(suffix.t_prim_name())])),
+            vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
+        ),
+        Literal::TypedFloat(f, suffix) => node_meta(
+            "lit",
+            meta_with_type(node("t-prim", vec![sym(suffix.t_prim_name())])),
+            vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
+        ),
         Literal::Bool(b) => node_meta(
             "lit",
             meta_with_type(node("t-prim", vec![sym("bool")])),
@@ -1239,30 +1441,193 @@ fn desugar_list_literal(items: &[deep::Expr]) -> deep::Expr {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Contextual tensor-literal inference (spec §P10b / §5.6)
+// ---------------------------------------------------------------------------
+//
+// When a tensor literal `[e1, e2, ...]` appears in a position with a known
+// element type, the numeric literals in the body adopt that element type
+// instead of the §5.3 / §P10 literal default (int32 for integer literals,
+// f32 for float literals).
+//
+// The closed set of "known-element-type" positions is exactly four,
+// per spec §5.6:
+//
+//   1. RHS of a `let`-binding whose declared type is a tensor type
+//      `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
+//   2. Argument position of a call whose callee has a declared signature
+//      with a tensor parameter at that position
+//      `f(xs)` where `f : tensor[3, f64] -> ...`
+//   3. Body expression of a function with a declared return type that is
+//      a tensor type, when the body is itself a tensor literal
+//   4. First argument of an explicit `cast(literal, p)`
+//
+// Outside this closed set, numeric literals fall back to the §5.3 / §P10
+// defaults; this is the WS-0 / D1 default and is implemented by
+// `desugar_literal` above.
+//
+// The helpers here transform `Expr::List` into a `to_tensor` call wrapping
+// a `Cons/Nil` chain whose numeric literal entries carry the contextual
+// element type instead of the default. Non-literal entries (variables,
+// function calls, ...) pass through unchanged; type unification at
+// `Cons`/`to_tensor` will reject them if their inferred type does not
+// match the contextual element type.
+//
+// Future agents reading this code: do NOT silently extend the closed
+// set. Adding new positions (e.g. "any context where a tensor type might
+// be inferred backward") is a spec change requiring an amendment to
+// §5.6 / §P10b.
+
+impl DesugarCtx {
+    /// Desugar `items` as the body of a contextual tensor literal whose
+    /// element type is `prec_name` (a precision name like `"f64"` or
+    /// `"int32"`). Numeric literals in `items` are emitted with
+    /// `(lit {type: (t-prim {} <prec_name>)} value)` instead of the
+    /// default int32/f32. Non-literal entries are desugared normally.
+    /// The chain is wrapped in `to_tensor` so type inference resolves
+    /// the result as a tensor.
+    fn desugar_list_as_tensor_literal(
+        &self,
+        items: &[Expr],
+        prec_name: &str,
+        local_fn_params: &[String],
+    ) -> deep::Expr {
+        let desugared_items: Vec<deep::Expr> = items
+            .iter()
+            .map(|item| self.desugar_tensor_literal_item(item, prec_name, local_fn_params))
+            .collect();
+        let list = desugar_list_literal(&desugared_items);
+        node("app", vec![dvar("to_tensor"), list])
+    }
+
+    /// Desugar a single entry of a contextual tensor literal. Numeric
+    /// literals are narrowed to the contextual element prim. Nested
+    /// `Expr::List` entries (rank > 1) recurse with the same element
+    /// type. Anything else falls back to the standard expression
+    /// desugarer; the type checker will validate compatibility via
+    /// the `Cons` element-type unification path.
+    fn desugar_tensor_literal_item(
+        &self,
+        item: &Expr,
+        prec_name: &str,
+        local_fn_params: &[String],
+    ) -> deep::Expr {
+        match item {
+            Expr::Lit(Literal::Int(n), _) => node_meta(
+                "lit",
+                meta_with_type(node("t-prim", vec![sym(prec_name)])),
+                vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
+            ),
+            Expr::Lit(Literal::Float(f), _) => node_meta(
+                "lit",
+                meta_with_type(node("t-prim", vec![sym(prec_name)])),
+                vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
+            ),
+            // RT-2 fixup P2: the surface parser turns `-128` into
+            // `Unary(Neg, Lit(Int(128)))`. In a contextual tensor
+            // literal position we fold the sign into the literal so
+            // the WS-A0 D1 / WS-A0 D1-extension range checks see the
+            // user-facing value (`-128` for int8) rather than the
+            // raw inner literal (`128`, which overflows int8 max).
+            // The same applies to negative float literals.
+            Expr::Unary(UnaryOp::Neg, inner, _) => match inner.as_ref() {
+                Expr::Lit(Literal::Int(n), _) => node_meta(
+                    "lit",
+                    meta_with_type(node("t-prim", vec![sym(prec_name)])),
+                    vec![deep::Expr::Atom(deep::Atom::Int(-*n), sp())],
+                ),
+                Expr::Lit(Literal::Float(f), _) => node_meta(
+                    "lit",
+                    meta_with_type(node("t-prim", vec![sym(prec_name)])),
+                    vec![deep::Expr::Atom(deep::Atom::Float(-*f), sp())],
+                ),
+                // Non-literal `neg` operand falls through to the
+                // standard desugar; the type checker will validate
+                // the resulting expression's type against the
+                // contextual element type via the Cons unification
+                // path.
+                _ => self.desugar_expr_with_scope(item, local_fn_params),
+            },
+            // Nested list — rank-N contextual tensor literal.
+            Expr::List(nested_items, _) => {
+                // The inner list is itself a contextual tensor literal
+                // body: numeric literals at every depth adopt the same
+                // element type. We do NOT wrap each inner level in
+                // to_tensor (only the outermost wrap is needed).
+                let inner_items: Vec<deep::Expr> = nested_items
+                    .iter()
+                    .map(|n| self.desugar_tensor_literal_item(n, prec_name, local_fn_params))
+                    .collect();
+                desugar_list_literal(&inner_items)
+            }
+            // Anything else: normal desugar. Type unification at Cons
+            // will catch a mismatch.
+            other => self.desugar_expr_with_scope(other, local_fn_params),
+        }
+    }
+}
+
 impl DesugarCtx {
     fn desugar_apply(&self, func: &Expr, args: &[Expr], local_fn_params: &[String]) -> deep::Expr {
-        // Flatten nested Apply chains
-        let mut all_args = Vec::new();
-        let base_func = self.collect_apply_chain(func, &mut all_args, local_fn_params);
+        // Flatten nested Apply chains. We collect the original surface
+        // arguments (not their pre-desugared forms) so the contextual
+        // tensor-literal rule (position 2, spec §P10b / §5.6) can inspect
+        // each argument against the callee's declared signature.
+        let mut surf_args: Vec<&Expr> = Vec::new();
+        let base_func = self.collect_apply_chain_surf(func, &mut surf_args);
         for arg in args {
-            all_args.push(self.desugar_expr_with_scope(arg, local_fn_params));
+            surf_args.push(arg);
         }
+
+        // Position 2 (spec §P10b / §5.6): if the callee is a top-level
+        // function with a declared signature whose i-th parameter is a
+        // tensor type with element prim P, and the i-th argument is a
+        // bare list literal, narrow the literal entries to P.
+        //
+        // The callee must be a `Var` for the lookup to apply — function
+        // values from local bindings, partial applications, and lambda
+        // returns do not carry a declared signature at desugar time.
+        // The type checker still validates non-direct-call positions
+        // through the standard `Cons`/`to_tensor` element-type
+        // unification path; the contextual narrowing here is the
+        // ergonomic affordance for the named-callee case.
+        let callee_param_prec: Option<&Vec<Option<String>>> =
+            if let Expr::Var(callee_name, _) = base_func {
+                self.top_level_fn_tensor_param_prec.get(callee_name)
+            } else {
+                None
+            };
+
+        let desugared_args: Vec<deep::Expr> = surf_args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+                let prec = callee_param_prec
+                    .and_then(|v| v.get(i))
+                    .and_then(|opt| opt.as_deref());
+                match (prec, arg) {
+                    (Some(prec_name), Expr::List(items, _)) => {
+                        self.desugar_list_as_tensor_literal(items, prec_name, local_fn_params)
+                    }
+                    _ => self.desugar_expr_with_scope(arg, local_fn_params),
+                }
+            })
+            .collect();
+
         let mut children = vec![self.desugar_expr_with_scope(base_func, local_fn_params)];
-        children.extend(all_args);
+        children.extend(desugared_args);
         node("app", children)
     }
 
-    fn collect_apply_chain<'a>(
-        &self,
-        expr: &'a Expr,
-        args: &mut Vec<deep::Expr>,
-        local_fn_params: &[String],
-    ) -> &'a Expr {
+    /// Like `collect_apply_chain` but returns surface-level argument
+    /// references so contextual tensor-literal inference can inspect
+    /// the arg AST against the callee's signature before desugar.
+    fn collect_apply_chain_surf<'a>(&self, expr: &'a Expr, args: &mut Vec<&'a Expr>) -> &'a Expr {
         match expr {
             Expr::Apply(inner_func, inner_args, _) => {
-                let base = self.collect_apply_chain(inner_func, args, local_fn_params);
+                let base = self.collect_apply_chain_surf(inner_func, args);
                 for arg in inner_args {
-                    args.push(self.desugar_expr_with_scope(arg, local_fn_params));
+                    args.push(arg);
                 }
                 base
             }
@@ -1293,16 +1658,120 @@ fn binop_name(op: BinOp) -> &'static str {
 // Type Expressions
 // ---------------------------------------------------------------------------
 
-/// Desugar a type with no declared dim params (module-level context).
+/// Desugar a type with no declared dim params or quantified type vars
+/// (module-level context).
 fn desugar_type(ty: &TypeExpr) -> deep::Expr {
-    desugar_type_with_dims(ty, &HashSet::new())
+    desugar_type_with_scope(ty, &HashSet::new(), &HashSet::new())
 }
 
-/// Desugar a type with declared dimension parameters.
-/// Names in `dim_vars` become d-var regardless of length.
-fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
+/// True if `name` is a candidate quantified type variable per
+/// `spec/04-type-system.md` §5.8: lowercase, not a known active
+/// primitive, and not a §1.1.2 unsigned alias (those should reach the
+/// type-checker's rejection path as `(t-prim {} <name>)`, not be
+/// quietly absorbed as a quantifier).
+fn is_candidate_tvar_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_lowercase())
+        && !PRIMITIVES.contains(&name)
+        && !UNSIGNED_DTYPE_NAMES.contains(&name)
+}
+
+/// Compute the set of free, lowercase, non-primitive identifiers used
+/// as type names anywhere inside `ty` and its sub-types. These are the
+/// candidate quantified type variables for a sig per `spec/04-type-system.md`
+/// §5.8: an unbound lowercase name in a `sig` is treated as a `forall`-
+/// quantified type variable.
+///
+/// The set INCLUDES the precision slot of `tensor[..., <ident>]`
+/// because WS-A5 (`spec/04-type-system.md` §5.8 / `spec/02-surf-syntax.md`)
+/// pins the contextual rule: a lowercase non-primitive name in the
+/// precision slot of a tensor type, when it appears in a sig, becomes
+/// a quantified type variable. That is the load-bearing change WS-A5
+/// makes possible.
+///
+/// Names listed in `UNSIGNED_DTYPE_NAMES` are EXCLUDED so the type
+/// checker still surfaces a `spec/04-type-system.md §1.1.2`-citing
+/// diagnostic for them via the `(t-prim {} u8)` path.
+fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
     match ty {
         TypeExpr::Named(name, _) => {
+            if is_candidate_tvar_name(name) {
+                out.insert(name.clone());
+            }
+        }
+        TypeExpr::Tensor(dims, precision, _) => {
+            for d in dims {
+                collect_sig_type_vars(d, out);
+            }
+            // Precision slot: a lowercase non-primitive name here is a
+            // candidate quantified type variable per WS-A5. The dim
+            // names themselves are handled by the d-name / d-var
+            // contextual rules elsewhere and are not type variables.
+            if is_candidate_tvar_name(precision) {
+                out.insert(precision.clone());
+            }
+        }
+        TypeExpr::Arrow(params, ret, _) => {
+            for p in params {
+                collect_sig_type_vars(p, out);
+            }
+            collect_sig_type_vars(ret, out);
+        }
+        TypeExpr::Ref(inner, _) => collect_sig_type_vars(inner, out),
+        TypeExpr::App(_, args, _) => {
+            for a in args {
+                collect_sig_type_vars(a, out);
+            }
+        }
+        TypeExpr::Tuple(elems, _) => {
+            for e in elems {
+                collect_sig_type_vars(e, out);
+            }
+        }
+        TypeExpr::Infer(_) => {}
+    }
+}
+
+/// Desugar a sig's type, computing the implicit quantifier set for the
+/// sig and applying the WS-A5 contextual precision rule.
+///
+/// Per `spec/04-type-system.md` §5.8 and `spec/02-surf-syntax.md`:
+/// inside a sig, an identifier in the precision slot of a `tensor[...]`
+/// type is desugared to `(t-var {} <name>)` when it is one of the sig's
+/// implicitly quantified type variables, and to `(t-prim {} <name>)`
+/// when it is a primitive. Outside a sig the same desugar is invoked
+/// with an empty quantifier set, so only primitive names are accepted.
+fn desugar_sig_type(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
+    let mut tvars = HashSet::new();
+    collect_sig_type_vars(ty, &mut tvars);
+    desugar_type_with_scope(ty, dim_vars, &tvars)
+}
+
+/// Desugar a type with declared dimension parameters and a set of
+/// in-scope quantified type variable names. `tvar_set` is non-empty
+/// only when desugaring inside a sig that declared (or implicitly
+/// introduced) quantified type variables. The contextual rule for the
+/// tensor precision slot lives here:
+///
+/// - A primitive name (`f32`, `int32`, ...) becomes `(t-prim {} <name>)`.
+/// - A name found in `tvar_set` becomes `(t-var {} <name>)`.
+/// - Any other name in the precision slot is encoded as `(t-prim {} <name>)`
+///   so the type checker can surface a precise diagnostic
+///   (`unbound type variable in precision slot`) via the existing
+///   `Prim::parse_name` rejection path.
+fn desugar_type_with_scope(
+    ty: &TypeExpr,
+    dim_vars: &HashSet<String>,
+    tvar_set: &HashSet<String>,
+) -> deep::Expr {
+    match ty {
+        TypeExpr::Named(name, _) => {
+            // The contextual rule for type-name positions: a primitive
+            // name is a t-prim; a PascalCase name is an ADT; everything
+            // else is a t-var. Whether the t-var is bound by the
+            // surrounding sig (`tvar_set`) or unbound is decided
+            // downstream — the desugar layer just emits the t-var node
+            // and the type checker resolves the binding.
+            let _ = tvar_set; // contextual rule documented above
             if PRIMITIVES.contains(&name.as_str()) {
                 node("t-prim", vec![sym(name)])
             } else if name.starts_with(|c: char| c.is_uppercase()) {
@@ -1332,27 +1801,48 @@ fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Ex
                     }
                     // Everything else → d-name (concrete)
                     TypeExpr::Named(n, _) => node("d-name", vec![sym(n)]),
-                    _ => node("d-var", vec![desugar_type_with_dims(d, dim_vars)]),
+                    _ => node(
+                        "d-var",
+                        vec![desugar_type_with_scope(d, dim_vars, tvar_set)],
+                    ),
                 })
                 .collect();
-            children.push(node("t-prim", vec![sym(precision)]));
+            // WS-A5 contextual precision rule (spec/04-type-system.md §5.8,
+            // spec/02-surf-syntax.md): the precision slot is a t-var when
+            // its name is in `tvar_set` (a sig-quantified type variable),
+            // otherwise it stays as t-prim and the type checker validates
+            // it against the closed primitive set via Prim::parse_name.
+            let prec_node = if tvar_set.contains(precision.as_str())
+                && !PRIMITIVES.contains(&precision.as_str())
+            {
+                node("t-var", vec![sym(precision)])
+            } else {
+                node("t-prim", vec![sym(precision)])
+            };
+            children.push(prec_node);
             node("t-tensor", children)
         }
 
         TypeExpr::Arrow(params, ret, _) => {
             let mut children: Vec<deep::Expr> = params
                 .iter()
-                .map(|p| desugar_type_with_dims(p, dim_vars))
+                .map(|p| desugar_type_with_scope(p, dim_vars, tvar_set))
                 .collect();
-            children.push(desugar_type_with_dims(ret, dim_vars));
+            children.push(desugar_type_with_scope(ret, dim_vars, tvar_set));
             node("t-fn", children)
         }
 
-        TypeExpr::Ref(inner, _) => node("t-ref", vec![desugar_type_with_dims(inner, dim_vars)]),
+        TypeExpr::Ref(inner, _) => node(
+            "t-ref",
+            vec![desugar_type_with_scope(inner, dim_vars, tvar_set)],
+        ),
 
         TypeExpr::App(name, args, _) => {
             let mut children = vec![sym(name)];
-            children.extend(args.iter().map(|a| desugar_type_with_dims(a, dim_vars)));
+            children.extend(
+                args.iter()
+                    .map(|a| desugar_type_with_scope(a, dim_vars, tvar_set)),
+            );
             node("t-adt", children)
         }
 
@@ -1361,7 +1851,7 @@ fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Ex
             "t-tuple",
             elems
                 .iter()
-                .map(|e| desugar_type_with_dims(e, dim_vars))
+                .map(|e| desugar_type_with_scope(e, dim_vars, tvar_set))
                 .collect(),
         ),
 
@@ -1378,10 +1868,17 @@ fn desugar_pattern(pat: &Pattern) -> deep::Expr {
         Pattern::Wildcard(_) => node("pat-wild", vec![]),
         Pattern::Var(name, _) => node("pat-var", vec![sym(name)]),
         Pattern::Lit(lit, _) => {
-            // pat-lit contains the raw literal value, NOT a typed (lit ...) node
+            // pat-lit contains the raw literal value, NOT a typed (lit ...) node.
+            // Typed-suffix patterns desugar to the bare value: pattern matching
+            // does not enforce the suffix dtype at the pattern level (the
+            // checker reconciles it via the surrounding scrutinee type).
             let val = match lit {
-                Literal::Int(n) => deep::Expr::Atom(deep::Atom::Int(*n), sp()),
-                Literal::Float(f) => deep::Expr::Atom(deep::Atom::Float(*f), sp()),
+                Literal::Int(n) | Literal::TypedInt(n, _) => {
+                    deep::Expr::Atom(deep::Atom::Int(*n), sp())
+                }
+                Literal::Float(f) | Literal::TypedFloat(f, _) => {
+                    deep::Expr::Atom(deep::Atom::Float(*f), sp())
+                }
                 Literal::Bool(b) => deep::Expr::Atom(deep::Atom::Bool(*b), sp()),
                 Literal::Str(s) => deep::Expr::Atom(deep::Atom::Str(s.clone()), sp()),
             };
@@ -1852,6 +2349,7 @@ mod tests {
                 "loss".to_string(),
                 vec!["x".to_string(), "w".to_string(), "b".to_string()],
             )]),
+            top_level_fn_tensor_param_prec: HashMap::new(),
         };
         let actual = print_expr(&ctx.desugar_expr(&expr))
             .split_whitespace()

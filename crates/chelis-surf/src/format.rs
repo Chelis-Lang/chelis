@@ -375,6 +375,19 @@ fn format_lit(lit: &Literal) -> String {
                 format!("{text}.0")
             }
         }
+        // Typed-suffix literals (spec/02-surf-syntax.md §P10a): the
+        // canonical formatter preserves the suffix on the literal token
+        // since dropping it would change the program's typing.
+        Literal::TypedInt(value, suffix) => format!("{value}{}", suffix.as_str()),
+        Literal::TypedFloat(value, suffix) => {
+            let text = value.to_string();
+            let body = if text.contains('.') || text.contains('e') || text.contains('E') {
+                text
+            } else {
+                format!("{text}.0")
+            };
+            format!("{body}{}", suffix.as_str())
+        }
         Literal::Str(value) => format!("{value:?}"),
         Literal::Bool(value) => value.to_string(),
     }

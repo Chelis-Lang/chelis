@@ -17,14 +17,24 @@ pub struct TypeVar(pub u32);
 pub struct DimVar(pub u32);
 
 /// Numeric precision types.
+///
+/// The active numeric primitive set is pinned by `spec/04-type-system.md` §1.1:
+/// `f32`, `f64`, `bf16`, `f16`, `int8`, `int16`, `int32`, `int64`, plus `bool`
+/// and `string`. The `f8e4m3` variant is reserved per §1.1.1 but is **not
+/// active** in this dtype build-out cycle: parse paths still produce
+/// `Prim::F8e4m3` so producers can be diagnosed precisely, but every
+/// admissibility predicate below excludes it. See [`Prim::is_admissible_active`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Prim {
     F32,
     F64,
     F16,
     Bf16,
+    /// Deferred per `spec/04-type-system.md` §1.1.1. Not part of the active
+    /// numeric primitive set; rejected at check time wherever it appears.
     F8e4m3,
     Int8,
+    Int16,
     Int32,
     Int64,
     Bool,
@@ -41,6 +51,7 @@ impl Prim {
             "bf16" => Some(Prim::Bf16),
             "f8e4m3" => Some(Prim::F8e4m3),
             "int8" => Some(Prim::Int8),
+            "int16" => Some(Prim::Int16),
             "int32" => Some(Prim::Int32),
             "int64" => Some(Prim::Int64),
             "bool" => Some(Prim::Bool),
@@ -57,6 +68,7 @@ impl Prim {
             Prim::Bf16 => "bf16",
             Prim::F8e4m3 => "f8e4m3",
             Prim::Int8 => "int8",
+            Prim::Int16 => "int16",
             Prim::Int32 => "int32",
             Prim::Int64 => "int64",
             Prim::Bool => "bool",
@@ -64,45 +76,140 @@ impl Prim {
         }
     }
 
+    /// True for the active float dtypes per `spec/04-type-system.md` §1.1.
+    /// `f8e4m3` is deferred (§1.1.1) and is NOT a float for any active
+    /// classification purpose.
     pub fn is_float(&self) -> bool {
-        matches!(
-            self,
-            Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16 | Prim::F8e4m3
-        )
+        matches!(self, Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16)
     }
 
+    /// True for any numeric precision in the active set, including `f8e4m3`
+    /// (so deferred-dtype rejection sites can still treat it as numeric for
+    /// surface diagnostics). `Bool` and `String` are not numeric.
     pub fn is_numeric(&self) -> bool {
         !matches!(self, Prim::Bool | Prim::String)
     }
 
+    /// True for all signed integer dtypes in the active set per §1.1.
     pub fn is_integer(&self) -> bool {
-        matches!(self, Prim::Int8 | Prim::Int32 | Prim::Int64)
+        matches!(self, Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64)
     }
 
-    /// Whether this precision is valid as the element type of a tensor in
-    /// the current Phase 0f backend. The C/HIP backends support f32, f64,
-    /// bool, and integer precisions; reduced floats (f16, bf16, f8e4m3) are
-    /// not supported as tensor element types and must be rejected at check
-    /// time per the "no implicit precision promotion" rule.
+    /// True if this primitive is in the **active** numeric/scalar set per
+    /// `spec/04-type-system.md` §1.1. Excludes the deferred `f8e4m3`
+    /// (§1.1.1). Use this predicate as the canonical "is this dtype
+    /// admitted in this cycle?" check across the type checker, IR builder,
+    /// and backends.
+    pub fn is_admissible_active(&self) -> bool {
+        !matches!(self, Prim::F8e4m3)
+    }
+
+    /// Whether this precision is valid as the element type of a tensor.
+    /// Per spec §1.1 the active tensor element set is f32, f64, bf16, f16,
+    /// int8, int16, int32, int64, and bool. The deferred `f8e4m3` (§1.1.1)
+    /// is rejected.
     ///
-    /// This intentionally does not affect host scalar precisions — only
-    /// tensor precisions are constrained here.
+    /// Note: backend support for the reduced floats (`f16`, `bf16`) is
+    /// staged separately in WS-A1/A2/A3; the type checker admits them here
+    /// because the spec lists them as active dtypes. Backends that cannot
+    /// yet emit them are expected to produce their own targeted diagnostic
+    /// rather than let them slip through silently.
     pub fn is_valid_tensor_precision(&self) -> bool {
         matches!(
             self,
-            Prim::F32 | Prim::F64 | Prim::Bool | Prim::Int8 | Prim::Int32 | Prim::Int64
+            Prim::F32
+                | Prim::F64
+                | Prim::Bf16
+                | Prim::F16
+                | Prim::Bool
+                | Prim::Int8
+                | Prim::Int16
+                | Prim::Int32
+                | Prim::Int64
         )
     }
 
     /// Whether this precision is a legitimate target for `cast(scalar, p)`.
-    /// The host scalar lane supports full f64 plus everything tensors can
-    /// hold; reduced floats (f16, bf16, f8e4m3) have no scalar
-    /// representation and must be rejected at check time.
+    /// Mirrors `is_valid_tensor_precision` in this cycle: the host scalar
+    /// lane carries the same active dtype set per spec §1.1, and the
+    /// deferred `f8e4m3` (§1.1.1) is rejected here too.
     pub fn is_valid_scalar_cast_target(&self) -> bool {
         matches!(
             self,
-            Prim::F32 | Prim::F64 | Prim::Bool | Prim::Int8 | Prim::Int32 | Prim::Int64
+            Prim::F32
+                | Prim::F64
+                | Prim::Bf16
+                | Prim::F16
+                | Prim::Bool
+                | Prim::Int8
+                | Prim::Int16
+                | Prim::Int32
+                | Prim::Int64
         )
+    }
+
+    /// Resolve the spec/04-type-system.md §5.7.1 default reduce-sum
+    /// **accumulator** precision for this operand precision. Mirrors
+    /// `chelis_ir::dag::RiscOp::default_reduce_sum_accumulator` so the
+    /// type checker can resolve the same rule without a backward
+    /// dependency from `chelis-types` on `chelis-ir`.
+    ///
+    /// - bf16 / f16  → f32
+    /// - f32         → f32 (operand-matching)
+    /// - f64         → f64 (operand-matching)
+    /// - int8 / int16 → int32
+    /// - int32       → int32 (operand-matching)
+    /// - int64       → int64 (operand-matching)
+    ///
+    /// Returns `Err` for non-numeric operands and for the deferred
+    /// `f8e4m3` (§1.1.1).
+    pub fn default_reduce_sum_accumulator(self) -> Result<Prim, String> {
+        Ok(match self {
+            Prim::Bf16 | Prim::F16 => Prim::F32,
+            Prim::F32 => Prim::F32,
+            Prim::F64 => Prim::F64,
+            Prim::Int8 | Prim::Int16 => Prim::Int32,
+            Prim::Int32 => Prim::Int32,
+            Prim::Int64 => Prim::Int64,
+            Prim::Bool => {
+                return Err(
+                    "reduce_sum is not defined on bool tensors; cast to int32 first".to_string(),
+                );
+            }
+            Prim::F8e4m3 => {
+                return Err("reduce_sum: operand dtype `f8e4m3` is deferred per \
+                     spec/04-type-system.md §1.1.1 and is not part of the \
+                     active numeric primitive set"
+                    .to_string());
+            }
+            Prim::String => {
+                return Err("reduce_sum is not defined for string operands".to_string());
+            }
+        })
+    }
+
+    /// Resolve the spec/04-type-system.md §5.7.1 user-facing
+    /// **result** precision of `reduce_sum` for this operand precision,
+    /// per the "Result precision" column of the §5.7.1 table:
+    ///
+    /// - bf16 / f16  → operand precision (f32 accumulator consumed
+    ///   inside the op and downcast on output)
+    /// - f32         → f32
+    /// - f64         → f64
+    /// - int8 / int16 → int32 (accumulator precision)
+    /// - int32       → int32
+    /// - int64       → int64
+    ///
+    /// This is the user-visible result precision. The IR-level Sum
+    /// node's `output_type.precision` is the accumulator precision;
+    /// lowering inserts a `Cast` for the bf16/f16 row to recover the
+    /// operand-precision result.
+    pub fn default_reduce_sum_result_precision(self) -> Result<Prim, String> {
+        match self {
+            Prim::Bf16 => Ok(Prim::Bf16),
+            Prim::F16 => Ok(Prim::F16),
+            other => other.default_reduce_sum_accumulator(),
+        }
     }
 }
 
@@ -119,6 +226,99 @@ pub enum Dim {
     Wildcard,
 }
 
+/// Tensor element precision slot.
+///
+/// Per `spec/04-type-system.md` §5.8 and `spec/02-surf-syntax.md`, the
+/// precision slot of a tensor type may be either a concrete primitive
+/// (e.g. `f32`, `int32`) or a sig-bound type variable (precision
+/// polymorphism, WS-A5). After monomorphization every reachable
+/// tensor must carry `TensorPrec::Concrete(_)`; backends assert this
+/// invariant at lowering time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TensorPrec {
+    /// A concrete numeric primitive; the only shape backends accept.
+    Concrete(Prim),
+    /// A sig-quantified type variable. Resolved by unification, then
+    /// substituted to `Concrete(_)` by `Subst::apply` once bound.
+    Var(TypeVar),
+}
+
+impl TensorPrec {
+    /// Returns the concrete primitive if this slot is already resolved,
+    /// or `None` if it is still a type variable. Backends and IR
+    /// builders that must have a concrete dtype call this and treat
+    /// `None` as a monomorphization bug.
+    pub fn as_concrete(&self) -> Option<Prim> {
+        match self {
+            TensorPrec::Concrete(p) => Some(*p),
+            TensorPrec::Var(_) => None,
+        }
+    }
+
+    /// Convenience: short rendering of the slot, suitable for diagnostics.
+    /// Concrete precisions render as their canonical name; vars render
+    /// as `?N` matching `Type::Var` formatting.
+    pub fn render(&self) -> String {
+        match self {
+            TensorPrec::Concrete(p) => p.name().to_string(),
+            TensorPrec::Var(v) => format!("?{}", v.0),
+        }
+    }
+
+    /// Diagnostic-only alias for [`TensorPrec::render`]; matches the
+    /// `Prim::name()` ergonomic for call sites that previously took a
+    /// bare `Prim`. Returns an owned `String` because var precisions
+    /// have no `'static` representation.
+    pub fn name(&self) -> String {
+        self.render()
+    }
+
+    /// True iff this precision is concretely a float per
+    /// [`Prim::is_float`]. A polymorphic precision var returns `false`:
+    /// a not-yet-resolved precision is not yet known to be float, so
+    /// any "this op needs a float" check should not silently accept a
+    /// `Var` slot.
+    pub fn is_float(&self) -> bool {
+        matches!(self, TensorPrec::Concrete(p) if p.is_float())
+    }
+
+    /// True iff this precision is concretely an integer per
+    /// [`Prim::is_integer`]. `Var` returns `false` for the same reason
+    /// as [`TensorPrec::is_float`].
+    pub fn is_integer(&self) -> bool {
+        matches!(self, TensorPrec::Concrete(p) if p.is_integer())
+    }
+
+    /// True iff this precision is concretely numeric per
+    /// [`Prim::is_numeric`]. `Var` returns `false`.
+    pub fn is_numeric(&self) -> bool {
+        matches!(self, TensorPrec::Concrete(p) if p.is_numeric())
+    }
+
+    /// Resolve the spec/04-type-system.md §5.7.1 reduce_sum result
+    /// precision. Forwards to [`Prim::default_reduce_sum_result_precision`]
+    /// for `Concrete`. For `Var`, returns an error: a polymorphic
+    /// precision must be resolved (or rejected) before the reduce-sum
+    /// resolution rule applies.
+    pub fn default_reduce_sum_result_precision(self) -> Result<Prim, String> {
+        match self {
+            TensorPrec::Concrete(p) => p.default_reduce_sum_result_precision(),
+            TensorPrec::Var(v) => Err(format!(
+                "reduce_sum: operand precision is still polymorphic (?{}); a sig-bound \
+                 type variable in the precision slot must be resolved by unification \
+                 before reduce_sum's accumulator/result rule can be applied",
+                v.0
+            )),
+        }
+    }
+}
+
+impl From<Prim> for TensorPrec {
+    fn from(p: Prim) -> Self {
+        TensorPrec::Concrete(p)
+    }
+}
+
 /// Chelis type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
@@ -128,8 +328,11 @@ pub enum Type {
     Fn(Vec<Type>, Box<Type>),
     /// Read-only non-owning borrow of a value.
     Ref(Box<Type>),
-    /// Tensor type: dimensions + precision.
-    Tensor(Vec<Dim>, Prim),
+    /// Tensor type: dimensions + precision slot. Precision is
+    /// `TensorPrec::Concrete(_)` for fully-monomorphized tensors and
+    /// `TensorPrec::Var(_)` for sig-quantified precision polymorphism
+    /// per `spec/04-type-system.md` §5.8 (WS-A5).
+    Tensor(Vec<Dim>, TensorPrec),
     /// Algebraic data type: name + type arguments.
     Adt(String, Vec<Type>),
     /// Type variable (for inference).
@@ -249,7 +452,7 @@ impl fmt::Display for Type {
             Type::Ref(inner) => write!(f, "&{inner}"),
             Type::Tensor(dims, prec) => {
                 let dim_strs: Vec<String> = dims.iter().map(|d| format!("{d:?}")).collect();
-                write!(f, "tensor[{}, {}]", dim_strs.join(", "), prec.name())
+                write!(f, "tensor[{}, {}]", dim_strs.join(", "), prec.render())
             }
             Type::Adt(name, args) if args.is_empty() => write!(f, "{name}"),
             Type::Adt(name, args) => {
@@ -264,6 +467,174 @@ impl fmt::Display for Type {
             Type::Unit => write!(f, "unit"),
             Type::Error => write!(f, "<error>"),
         }
+    }
+}
+
+#[cfg(test)]
+mod prim_classification_tests {
+    //! Pin every `Prim` variant against the active-set classification rules
+    //! in `spec/04-type-system.md` §1.1 and §1.1.1. Acceptance test (a) of
+    //! WS-A0; protects against an active dtype silently sliding back into
+    //! the deferred set or vice versa.
+    use super::*;
+
+    /// Closed enumeration of every `Prim` variant. If a variant is added
+    /// or removed and this list is not updated, every per-variant test
+    /// below fails — that is the intended invariant lock.
+    const ALL_PRIMS: &[Prim] = &[
+        Prim::F32,
+        Prim::F64,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F8e4m3,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::Bool,
+        Prim::String,
+    ];
+
+    #[test]
+    fn is_float_matches_active_float_set() {
+        for prim in ALL_PRIMS {
+            let expected = matches!(prim, Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16);
+            assert_eq!(
+                prim.is_float(),
+                expected,
+                "is_float({prim:?}) disagrees with §1.1 active float set; \
+                 f8e4m3 is deferred per §1.1.1 and must NOT be a float here"
+            );
+        }
+    }
+
+    #[test]
+    fn is_integer_matches_active_integer_set() {
+        for prim in ALL_PRIMS {
+            let expected = matches!(prim, Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64);
+            assert_eq!(
+                prim.is_integer(),
+                expected,
+                "is_integer({prim:?}) disagrees with §1.1 active integer set"
+            );
+        }
+    }
+
+    #[test]
+    fn is_numeric_excludes_bool_and_string() {
+        for prim in ALL_PRIMS {
+            let expected = !matches!(prim, Prim::Bool | Prim::String);
+            assert_eq!(
+                prim.is_numeric(),
+                expected,
+                "is_numeric({prim:?}) disagrees with §1.1 numeric set"
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_tensor_precision_matches_active_set() {
+        // Active dtype set per §1.1, including f16/bf16 (active per WS-0
+        // spec lock cc47e6d). Excludes the deferred f8e4m3 (§1.1.1) and
+        // String (no tensor element representation).
+        for prim in ALL_PRIMS {
+            let expected = matches!(
+                prim,
+                Prim::F32
+                    | Prim::F64
+                    | Prim::Bf16
+                    | Prim::F16
+                    | Prim::Bool
+                    | Prim::Int8
+                    | Prim::Int16
+                    | Prim::Int32
+                    | Prim::Int64
+            );
+            assert_eq!(
+                prim.is_valid_tensor_precision(),
+                expected,
+                "is_valid_tensor_precision({prim:?}) disagrees with §1.1 \
+                 active tensor element set"
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_scalar_cast_target_matches_active_set() {
+        // Per §1.1: scalar cast targets mirror the tensor element set in
+        // this cycle (no host-only widths beyond the active dtype set).
+        // Deferred f8e4m3 is rejected per §1.1.1.
+        for prim in ALL_PRIMS {
+            let expected = matches!(
+                prim,
+                Prim::F32
+                    | Prim::F64
+                    | Prim::Bf16
+                    | Prim::F16
+                    | Prim::Bool
+                    | Prim::Int8
+                    | Prim::Int16
+                    | Prim::Int32
+                    | Prim::Int64
+            );
+            assert_eq!(
+                prim.is_valid_scalar_cast_target(),
+                expected,
+                "is_valid_scalar_cast_target({prim:?}) disagrees with §1.1 \
+                 active scalar cast set"
+            );
+        }
+    }
+
+    #[test]
+    fn is_admissible_active_excludes_only_f8e4m3() {
+        for prim in ALL_PRIMS {
+            let expected = !matches!(prim, Prim::F8e4m3);
+            assert_eq!(
+                prim.is_admissible_active(),
+                expected,
+                "is_admissible_active({prim:?}) disagrees with §1.1.1: only \
+                 f8e4m3 is deferred, every other variant is admitted"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_name_round_trips_through_name() {
+        for prim in ALL_PRIMS {
+            let name = prim.name();
+            assert_eq!(
+                Prim::parse_name(name),
+                Some(*prim),
+                "parse_name({name:?}) must round-trip {prim:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn int16_is_an_active_dtype() {
+        // Pin the new variant explicitly so a refactor cannot silently
+        // remove it without removing this assertion.
+        assert!(Prim::Int16.is_admissible_active());
+        assert!(Prim::Int16.is_integer());
+        assert!(Prim::Int16.is_numeric());
+        assert!(Prim::Int16.is_valid_tensor_precision());
+        assert!(Prim::Int16.is_valid_scalar_cast_target());
+        assert!(!Prim::Int16.is_float());
+        assert_eq!(Prim::Int16.name(), "int16");
+        assert_eq!(Prim::parse_name("int16"), Some(Prim::Int16));
+    }
+
+    #[test]
+    fn f8e4m3_is_deferred_not_active() {
+        // §1.1.1 invariants: f8e4m3 still parses (so producers can be
+        // diagnosed) but no admissibility predicate accepts it.
+        assert_eq!(Prim::parse_name("f8e4m3"), Some(Prim::F8e4m3));
+        assert!(!Prim::F8e4m3.is_admissible_active());
+        assert!(!Prim::F8e4m3.is_float());
+        assert!(!Prim::F8e4m3.is_integer());
+        assert!(!Prim::F8e4m3.is_valid_tensor_precision());
+        assert!(!Prim::F8e4m3.is_valid_scalar_cast_target());
     }
 }
 

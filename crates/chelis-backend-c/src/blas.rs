@@ -4,8 +4,16 @@
 //! Actual BLAS emission deferred to when OpenBLAS is available.
 
 use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp};
+use chelis_types::types::Prim;
 
 /// Information about a detected matmul pattern.
+///
+/// WS-A1: carries the inner-product accumulator precision sourced from
+/// the parent `Sum`'s `accumulator` field per
+/// `spec/04-type-system.md` §5.7.1. This mirrors the
+/// `MatmulEmitSpec::accumulator` plumbing in `emit.rs` so any consumer
+/// of `detect_matmul_pattern` that wires through to BLAS dispatch can
+/// tell sgemm from dgemm without reaching back into the DAG.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatmulInfo {
     /// NodeId of the left matrix operand.
@@ -18,6 +26,11 @@ pub struct MatmulInfo {
     pub n: usize,
     /// Inner/contraction dimension (K dimension).
     pub k: usize,
+    /// Accumulator precision for the inner product per
+    /// `spec/04-type-system.md` §5.7.1. Sourced from the originating
+    /// `RiscOp::Sum`'s `accumulator` field. Drives BLAS dispatch
+    /// (F32 → cblas_sgemm, F64 → cblas_dgemm).
+    pub accumulator: Prim,
 }
 
 /// Try to detect a matmul pattern rooted at the given Sum node.
@@ -27,9 +40,13 @@ pub struct MatmulInfo {
 pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
 
-    // Must be a Sum node
-    let axis = match &sum_node.op {
-        RiscOp::Sum { axis } => *axis,
+    // Must be a Sum node. Bind both `axis` and `accumulator` explicitly
+    // (no `..` destructure) so the parent Sum's accumulator precision
+    // is carried into MatmulInfo per WS-A1; downstream BLAS dispatch
+    // (sgemm vs dgemm) reads this field rather than re-deriving from
+    // operand storage.
+    let (axis, accumulator) = match &sum_node.op {
+        RiscOp::Sum { axis, accumulator } => (*axis, *accumulator),
         _ => return None,
     };
 
@@ -70,9 +87,19 @@ pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
 
     // Extract dimensions: for a standard matmul A[M,K] @ B[K,N] -> C[M,N]
     // Sum reduces the K axis after expand+mul creates a [M,K,N] intermediate
-    extract_matmul_dims(a_node, b_node, axis, axis_a, axis_b, a_id, b_id)
+    extract_matmul_dims(
+        a_node,
+        b_node,
+        axis,
+        axis_a,
+        axis_b,
+        a_id,
+        b_id,
+        accumulator,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_matmul_dims(
     a_node: &DagNode,
     b_node: &DagNode,
@@ -81,6 +108,7 @@ fn extract_matmul_dims(
     _expand_axis_b: usize,
     a_id: NodeId,
     b_id: NodeId,
+    accumulator: Prim,
 ) -> Option<MatmulInfo> {
     // A should be 2D [M, K], B should be 2D [K, N]
     if a_node.output_type.dims.len() != 2 || b_node.output_type.dims.len() != 2 {
@@ -116,6 +144,7 @@ fn extract_matmul_dims(
         m,
         n,
         k: k_a,
+        accumulator,
     })
 }
 
@@ -169,7 +198,15 @@ mod tests {
             None,
         );
         let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
 
         let info = detect_matmul_pattern(&dag, sum).unwrap();
         assert_eq!(info.a, a);
@@ -198,7 +235,15 @@ mod tests {
             },
             None,
         );
-        let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32(), None);
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
         assert!(detect_matmul_pattern(&dag, sum).is_none());
     }
 
@@ -227,7 +272,15 @@ mod tests {
             None,
         );
         let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![mul],
+            mat_f32(2, 4),
+            None,
+        );
         assert!(detect_matmul_pattern(&dag, sum).is_none());
     }
 

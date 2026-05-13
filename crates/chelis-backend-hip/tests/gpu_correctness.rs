@@ -91,6 +91,32 @@ impl TestInput {
         }
     }
 
+    /// WS-A4: i8 input. Stored as f32 in the carrier `data` field for
+    /// API symmetry; the harness reinterpret-casts to `int8_t*` before
+    /// writing into the runtime-allocated buffer, and `chelis_alloc`
+    /// is called with `CHELIS_I8` so the buffer is sized at 1 byte
+    /// per element.
+    #[allow(dead_code, reason = "WS-A4 manual HIP gate; constructed by i8 tests")]
+    fn int8(name: &str, shape: &[usize], data: &[i8]) -> Self {
+        Self {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            data: data.iter().map(|value| *value as f32).collect(),
+            dtype: Prim::Int8,
+        }
+    }
+
+    /// WS-A4: i16 input. Same packing convention as `int8`.
+    #[allow(dead_code, reason = "WS-A4 manual HIP gate; constructed by i16 tests")]
+    fn int16(name: &str, shape: &[usize], data: &[i16]) -> Self {
+        Self {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            data: data.iter().map(|value| *value as f32).collect(),
+            dtype: Prim::Int16,
+        }
+    }
+
     fn int32(name: &str, shape: &[usize], data: &[i32]) -> Self {
         Self {
             name: name.to_string(),
@@ -294,6 +320,9 @@ fn append_case_lines(
                 "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
                 dtype = match input.dtype {
                     Prim::F32 => "CHELIS_F32",
+                    // WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
+                    Prim::Int8 => "CHELIS_I8",
+                    Prim::Int16 => "CHELIS_I16",
                     Prim::Int32 => "CHELIS_I32",
                     Prim::Int64 => "CHELIS_I64",
                     other => panic!("unsupported manual HIP test dtype {}", other.name()),
@@ -304,6 +333,17 @@ fn append_case_lines(
                     Prim::F32 => lines.push(format!(
                         "    {prefix}_input_storage[{slot}]->data[{idx}] = {:.8}f;",
                         value
+                    )),
+                    // WS-A4: i8/i16 inputs are written via reinterpret cast on
+                    // `t->data` so the harness exercises the same memory layout
+                    // the generated HIP code reads from.
+                    Prim::Int8 => lines.push(format!(
+                        "    ((int8_t*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
+                        *value as i8
+                    )),
+                    Prim::Int16 => lines.push(format!(
+                        "    ((int16_t*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
+                        *value as i16
                     )),
                     Prim::Int32 => lines.push(format!(
                         "    ((int*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
@@ -776,7 +816,15 @@ fn g4_sum_reduction_gpu_matches_cpu() {
         mat_f32(2, 3),
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], vec_f32(3), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -828,7 +876,15 @@ fn g4_symbolic_row_sum_gpu_matches_cpu() {
         precision: Prim::F32,
     };
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], out_ty, None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        out_ty,
+        None,
+    );
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1243,7 +1299,15 @@ fn g13_tiny_segmented_sum_matches_eval() {
         mat_f32(3, 8),
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(3), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(out);
 
     assert_gpu_matches_eval(
@@ -1291,7 +1355,15 @@ fn g13_large_segmented_sum_matches_eval() {
         mat_f32(2, 128),
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(2), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        vec_f32(2),
+        None,
+    );
     dag.add_root(out);
 
     let data: Vec<f32> = (0..256).map(|i| ((i % 17) as f32) - 8.0).collect();
@@ -1316,7 +1388,15 @@ fn g14_staged_scalar_sum_matches_eval() {
         vec_f32(1024),
         None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], scalar_f32(), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![x],
+        scalar_f32(),
+        None,
+    );
     dag.add_root(out);
 
     let data: Vec<f32> = (0..1024).map(|i| ((i % 9) as f32) - 4.0).collect();
@@ -1366,7 +1446,15 @@ fn g15_hipblas_matmul_matches_eval() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(2, 4),
+        None,
+    );
     dag.add_root(out);
 
     assert_gpu_matches_eval(
@@ -1408,6 +1496,7 @@ fn g15_hipblas_batched_matmul_matches_eval() {
             m: chelis_ir::dag::DimExpr::Concrete(2),
             n: chelis_ir::dag::DimExpr::Concrete(2),
             k: chelis_ir::dag::DimExpr::Concrete(3),
+            accumulator: chelis_types::types::Prim::F32,
         },
         vec![a, b],
         tensor4_f32(2, 2, 2, 2),
@@ -1475,6 +1564,7 @@ fn g15_hipblas_strided_batched_symbolic_batch_matches_eval() {
             m: chelis_ir::dag::DimExpr::Concrete(2),
             n: chelis_ir::dag::DimExpr::Concrete(2),
             k: chelis_ir::dag::DimExpr::Concrete(3),
+            accumulator: chelis_types::types::Prim::F32,
         },
         vec![a, b],
         out_ty,
@@ -1549,7 +1639,15 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
+    let out = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![mul],
+        mat_f32(2, 4),
+        None,
+    );
     dag.add_root(out);
 
     assert_gpu_matches_eval(
@@ -1658,5 +1756,1066 @@ fn g16_sparse_scatter_add_i32_matches_eval_with_duplicate_indices() {
                 &[0.5, 1.0, 2.0, 3.0, -4.0, 5.0, 6.0, -7.0],
             ),
         ],
+    );
+}
+
+// ===========================================================================
+// G17+ : f64 acceptance suite (WS-A2)
+//
+// The original `TestInput` is f32-pinned (data is `Vec<f32>`). Rather than
+// retrofit every f32 helper, the f64 path uses a parallel small harness
+// below. Each f64 test parallels an existing f32 G* test so the coverage
+// matrix is documented by name (`g17_add_consts_f64_gpu` mirrors
+// `g1_add_consts_gpu`, etc.).
+//
+// The f64 stdout parser tolerates the wider dynamic range (`%.10f` print
+// in the harness vs `%.6f` in the f32 path).
+// ===========================================================================
+
+#[derive(Clone)]
+struct TestInputF64 {
+    name: String,
+    shape: Vec<usize>,
+    data: Vec<f64>,
+    dtype: Prim,
+}
+
+impl TestInputF64 {
+    fn f64(name: &str, shape: &[usize], data: &[f64]) -> Self {
+        Self {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            data: data.to_vec(),
+            dtype: Prim::F64,
+        }
+    }
+
+    fn evaluator_value(&self) -> TensorValue {
+        TensorValue::from_vec(self.shape.clone(), self.data.clone())
+    }
+}
+
+fn vec_f64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::F64,
+    }
+}
+
+fn scalar_f64() -> TensorType {
+    TensorType {
+        dims: vec![],
+        precision: Prim::F64,
+    }
+}
+
+fn mat_f64(rows: usize, cols: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+        precision: Prim::F64,
+    }
+}
+
+fn append_case_lines_f64(
+    lines: &mut Vec<String>,
+    func_name: &str,
+    input_labels: &[String],
+    n_out: usize,
+    inputs: &[TestInputF64],
+    prefix: &str,
+) {
+    if input_labels.is_empty() {
+        lines.push(format!("    chelis_tensor **{prefix}_inputs = NULL;"));
+    } else {
+        lines.push(format!(
+            "    chelis_tensor *{prefix}_input_storage[{}] = {{0}};",
+            input_labels.len(),
+        ));
+        lines.push(format!(
+            "    chelis_tensor **{prefix}_inputs = {prefix}_input_storage;"
+        ));
+        for (slot, label) in input_labels.iter().enumerate() {
+            let input = inputs
+                .iter()
+                .find(|candidate| &candidate.name == label)
+                .unwrap_or_else(|| panic!("missing test input '{label}'"));
+            let (ndim, c_dims) = c_shape(&input.shape);
+            let dims = c_dims
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!(
+                "    int {prefix}_shape_{slot}[{ndim}] = {{ {dims} }};"
+            ));
+            lines.push(format!(
+                "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
+                dtype = match input.dtype {
+                    Prim::F64 => "CHELIS_F64",
+                    other => panic!("f64 harness expected f64 input, got {}", other.name()),
+                }
+            ));
+            for (idx, value) in input.data.iter().enumerate() {
+                // Cast through `double *` because chelis_tensor.data is
+                // typed `float *` historically; the wheel runtime stores
+                // f64 in 8-byte slots (`chelis_dtype_size`).
+                lines.push(format!(
+                    "    ((double*){prefix}_input_storage[{slot}]->data)[{idx}] = {:.17e};",
+                    value
+                ));
+            }
+        }
+    }
+
+    lines.push(format!(
+        "    chelis_tensor *{prefix}_outputs[{n_out}] = {{0}};"
+    ));
+    lines.push(format!(
+        "    {func_name}({prefix}_inputs, {}, {prefix}_outputs, {n_out});",
+        input_labels.len()
+    ));
+    lines.push(format!(
+        "    for (int {prefix}_out_idx = 0; {prefix}_out_idx < {n_out}; {prefix}_out_idx++) {{"
+    ));
+    lines.push(format!(
+        "        for (int {prefix}_i = 0; {prefix}_i < {prefix}_outputs[{prefix}_out_idx]->size; {prefix}_i++) {{"
+    ));
+    lines.push(format!("            if ({prefix}_i > 0) printf(\" \");"));
+    lines.push(format!(
+        "            printf(\"%.17e\", ((double*){prefix}_outputs[{prefix}_out_idx]->data)[{prefix}_i]);"
+    ));
+    lines.push("        }".to_string());
+    lines.push("        printf(\"\\n\");".to_string());
+    lines.push(format!(
+        "        chelis_free({prefix}_outputs[{prefix}_out_idx]);"
+    ));
+    lines.push("    }".to_string());
+    for slot in 0..input_labels.len() {
+        lines.push(format!("    chelis_free({prefix}_input_storage[{slot}]);"));
+    }
+}
+
+fn build_main_cpp_f64(
+    func_name: &str,
+    input_labels: &[String],
+    n_out: usize,
+    inputs: &[TestInputF64],
+) -> String {
+    let mut lines = Vec::new();
+    append_case_lines_f64(&mut lines, func_name, input_labels, n_out, inputs, "case0");
+    format!(
+        r#"#include "chelis_runtime.h"
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+
+int main(void) {{
+{body}
+    return 0;
+}}
+"#,
+        body = lines.join("\n")
+    )
+}
+
+fn compile_and_run_single_output_f64(
+    dag: &Dag,
+    func_name: &str,
+    inputs: &[TestInputF64],
+) -> Vec<f64> {
+    require_hipcc();
+    let result = codegen_hip(dag, func_name);
+    assert_eq!(
+        result.output_labels.len(),
+        1,
+        "manual harness currently expects a single output"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hip_rt = hip_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_hip_runtime.h",
+        &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
+    );
+    copy_runtime_artifacts(tmp.path());
+    write_temp_file(tmp.path(), "model.cpp", &result.c_source);
+    write_temp_file(
+        tmp.path(),
+        "main.cpp",
+        &build_main_cpp_f64(
+            func_name,
+            &result.input_labels,
+            result.output_labels.len(),
+            inputs,
+        ),
+    );
+
+    let bin_path = tmp.path().join("gpu_correctness_bin_f64");
+    let mut compile_cmd = Command::new("hipcc");
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("main.cpp"));
+    compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run hipcc");
+    assert!(
+        compile.status.success(),
+        "hipcc failed:\nstderr: {}\nsource:\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.c_source
+    );
+
+    let run = Command::new(&bin_path).output().expect("run gpu binary");
+    assert!(
+        run.status.success(),
+        "GPU binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8(run.stdout).expect("utf8 stdout");
+    stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|token| token.parse::<f64>().expect("parse output double"))
+        .collect()
+}
+
+fn expected_single_output_f64(dag: &Dag, inputs: &[TestInputF64]) -> Vec<f64> {
+    let input_map: HashMap<String, TensorValue> = inputs
+        .iter()
+        .map(|input| (input.name.clone(), input.evaluator_value()))
+        .collect();
+    let values =
+        eval_tensor_roots_with_strict(dag, dag.roots(), |name| input_map.get(name).cloned())
+            .expect("evaluator should succeed");
+    let root = *dag.roots().first().expect("single root expected");
+    values[&root].data.clone()
+}
+
+fn assert_close_vec_f64(actual: &[f64], expected: &[f64], tol: f64) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "output length mismatch: actual={actual:?} expected={expected:?}"
+    );
+    for (idx, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (a - e).abs() <= tol,
+            "mismatch at index {idx}: expected {e}, got {a}, tol={tol}"
+        );
+    }
+}
+
+fn assert_gpu_matches_eval_f64(dag: &Dag, func_name: &str, inputs: &[TestInputF64], tol: f64) {
+    let actual = compile_and_run_single_output_f64(dag, func_name, inputs);
+    let expected = expected_single_output_f64(dag, inputs);
+    assert_close_vec_f64(&actual, &expected, tol);
+}
+
+// G17 mirrors G1: const + const → 3.0, but in f64.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g17_add_consts_f64_gpu() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f64(), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f64(), None);
+    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f64(), None);
+    dag.add_root(c);
+    assert_gpu_matches_eval_f64(&dag, "g17_add_consts_f64", &[], 1e-12);
+}
+
+// G18 mirrors G2: unary exp on f64 (uses `exp(double)`, not `expf`).
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g18_exp_f64_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
+    let y = dag.add_node(RiscOp::Exp, vec![x], vec_f64(4), None);
+    dag.add_root(y);
+    assert_gpu_matches_eval_f64(
+        &dag,
+        "g18_exp_f64",
+        &[TestInputF64::f64("x", &[4], &[0.5, 1.0, 2.0, -1.0])],
+        1e-12,
+    );
+}
+
+// G19 mirrors G3: binary mul on f64.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g19_mul_f64_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f64(4), None);
+    let z = dag.add_node(RiscOp::Mul, vec![x, y], vec_f64(4), None);
+    dag.add_root(z);
+    assert_gpu_matches_eval_f64(
+        &dag,
+        "g19_mul_f64",
+        &[
+            TestInputF64::f64("x", &[4], &[1.0, 2.5, -3.0, 1e10]),
+            TestInputF64::f64("y", &[4], &[4.0, 0.25, -2.0, 1e-10]),
+        ],
+        1e-12,
+    );
+}
+
+// G20 mirrors G4: reduce_sum on f64. Tests the WS-A0 default accumulator
+// resolution: f64 operand → f64 accumulator → f64 result.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g20_sum_reduction_f64_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(8), None);
+    let s = dag.add_node(
+        RiscOp::sum_default(0, Prim::F64).expect("f64 reduce_sum"),
+        vec![x],
+        scalar_f64(),
+        None,
+    );
+    dag.add_root(s);
+    assert_gpu_matches_eval_f64(
+        &dag,
+        "g20_sum_f64",
+        &[TestInputF64::f64(
+            "x",
+            &[8],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        )],
+        1e-12,
+    );
+}
+
+// G20b: max-reduce on f64 — verifies `fmax` (not `fmaxf`) is dispatched.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g20b_max_reduce_f64_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(5), None);
+    let m = dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], scalar_f64(), None);
+    dag.add_root(m);
+    assert_gpu_matches_eval_f64(
+        &dag,
+        "g20b_max_f64",
+        &[TestInputF64::f64("x", &[5], &[1.0, -2.0, 3.5, 0.0, 2.5])],
+        1e-12,
+    );
+}
+
+// G20c: min-reduce on f64. The kernel was previously panic("Phase 3j-pre");
+// WS-A2 lifts to a real kernel for f32 + f64.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g20c_min_reduce_f64_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(5), None);
+    let m = dag.add_node(RiscOp::MinReduce { axis: 0 }, vec![x], scalar_f64(), None);
+    dag.add_root(m);
+    assert_gpu_matches_eval_f64(
+        &dag,
+        "g20c_min_f64",
+        &[TestInputF64::f64("x", &[5], &[1.0, -2.0, 3.5, 0.0, 2.5])],
+        1e-12,
+    );
+}
+
+// G20d: prod-reduce on f64. Similarly lifted in WS-A2.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g20d_prod_reduce_f64_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
+    let m = dag.add_node(RiscOp::ProdReduce { axis: 0 }, vec![x], scalar_f64(), None);
+    dag.add_root(m);
+    assert_gpu_matches_eval_f64(
+        &dag,
+        "g20d_prod_f64",
+        &[TestInputF64::f64("x", &[4], &[1.5, 2.0, -0.5, 4.0])],
+        1e-12,
+    );
+}
+
+// G21 mirrors G4-symbolic-matmul on f64. Exercises the
+// `chelis_hipblas_dgemm_row_major` dispatch path.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g21_matmul_f64_gpu_matches_cpu() {
+    use chelis_ir::dag::DimExpr;
+
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_f64(2, 3),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_f64(3, 4),
+        None,
+    );
+    let mm = dag.add_node(
+        RiscOp::matmul_default(
+            vec![],
+            DimExpr::Concrete(2),
+            DimExpr::Concrete(4),
+            DimExpr::Concrete(3),
+            Prim::F64,
+        )
+        .expect("f64 matmul default"),
+        vec![a, b],
+        mat_f64(2, 4),
+        None,
+    );
+    dag.add_root(mm);
+    assert_gpu_matches_eval_f64(
+        &dag,
+        "g21_matmul_f64",
+        &[
+            TestInputF64::f64("a", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            TestInputF64::f64(
+                "b",
+                &[3, 4],
+                &[1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            ),
+        ],
+        1e-10,
+    );
+}
+
+// WS-A3 lifted the HIP-side F1 panic for bf16 (and f16) matmul: the
+// backend now reads the `BlasMatmul.accumulator` field explicitly and
+// dispatches bf16 + spec-default f32 accumulator through
+// `hipblasGemmEx` per spec/04-type-system.md §5.7.1. Replaces the
+// prior `ws_a2_hip_f1_still_rejects_bf16_matmul` rejection assertion.
+// The numerical correctness path lives in
+// `crates/chelis-backend-hip/tests/ws_a3_bf16_f16_matmul.rs`; this
+// test pins only that codegen no longer panics.
+#[test]
+fn ws_a3_hip_admits_bf16_matmul_at_codegen() {
+    use chelis_ir::dag::DimExpr;
+    let mut dag = Dag::new();
+    let bf16_ty = TensorType {
+        dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+        precision: Prim::Bf16,
+    };
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        bf16_ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        bf16_ty.clone(),
+        None,
+    );
+    let mm_op = RiscOp::BlasMatmul {
+        batch_dims: vec![],
+        m: DimExpr::Concrete(2),
+        n: DimExpr::Concrete(2),
+        k: DimExpr::Concrete(2),
+        accumulator: Prim::F32,
+    };
+    let mm = dag.add_node(mm_op, vec![a, b], bf16_ty, None);
+    dag.add_root(mm);
+
+    let result = std::panic::catch_unwind(|| {
+        let _ = chelis_backend_hip::codegen_hip(&dag, "ws_a3_hip_bf16");
+    });
+    assert!(
+        result.is_ok(),
+        "WS-A3 lifted bf16 matmul; HIP codegen must not panic. Got: {:?}",
+        result.err().and_then(|p| p
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| p.downcast_ref::<&'static str>().map(|s| s.to_string())))
+    );
+}
+
+// Negative coverage parallel to the bf16 case: i8 matmul stays rejected
+// (WS-A4 admits i8 reduce_sum, but spec/04-type-system.md §5.7.2
+// explicitly excludes integer matmul).
+#[test]
+fn ws_a2_hip_f1_still_rejects_i8_matmul() {
+    use chelis_ir::dag::DimExpr;
+    let mut dag = Dag::new();
+    let i8_ty = TensorType {
+        dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+        precision: Prim::Int8,
+    };
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        i8_ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        i8_ty.clone(),
+        None,
+    );
+    let mm_op = RiscOp::BlasMatmul {
+        batch_dims: vec![],
+        m: DimExpr::Concrete(2),
+        n: DimExpr::Concrete(2),
+        k: DimExpr::Concrete(2),
+        accumulator: Prim::Int32,
+    };
+    let mm = dag.add_node(mm_op, vec![a, b], i8_ty, None);
+    dag.add_root(mm);
+
+    let result = std::panic::catch_unwind(|| {
+        let _ = chelis_backend_hip::codegen_hip(&dag, "ws_a2_hip_i8");
+    });
+    let payload = result.expect_err("HIP codegen must reject i8 matmul");
+    let msg = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied())
+        .unwrap_or("<non-string panic payload>");
+    assert!(
+        msg.contains("F1: BlasMatmul on operand precision"),
+        "expected F1 HIP rejection for i8 matmul, got: {msg}"
+    );
+    assert!(
+        msg.contains("int8"),
+        "F1 message should name the rejected precision; got: {msg}"
+    );
+}
+
+// Positive coverage that codegen runs to completion for f64 matmul (so
+// the F1 lift actually admits f64). The kernel is not launched here —
+// a full GPU run is the manual gate above. This test just probes that
+// the host-source emitter reaches the dgemm helper without panicking.
+#[test]
+fn ws_a2_hip_f1_admits_f64_matmul_at_codegen() {
+    use chelis_ir::dag::DimExpr;
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_f64(2, 3),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_f64(3, 4),
+        None,
+    );
+    let mm = dag.add_node(
+        RiscOp::matmul_default(
+            vec![],
+            DimExpr::Concrete(2),
+            DimExpr::Concrete(4),
+            DimExpr::Concrete(3),
+            Prim::F64,
+        )
+        .expect("f64 matmul default"),
+        vec![a, b],
+        mat_f64(2, 4),
+        None,
+    );
+    dag.add_root(mm);
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_codegen_f64_matmul");
+    assert!(
+        result.c_source.contains("chelis_hipblas_dgemm_row_major("),
+        "f64 matmul must dispatch to dgemm"
+    );
+    assert!(
+        !result.c_source.contains("chelis_hipblas_sgemm_row_major("),
+        "f64 matmul must not silently fall back to sgemm"
+    );
+    assert!(
+        result.link_flags.iter().any(|f| f == "-lhipblas"),
+        "dgemm dispatch must request hipBLAS link"
+    );
+}
+
+// Positive coverage that f64 reduce_sum kernel string is actually
+// emitted with the f64 accumulator type. Cheaper than a GPU run; pairs
+// with the manual gate above to lock the f32→f64 codegen split.
+#[test]
+fn ws_a2_hip_reduce_sum_f64_emits_double_accumulator() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
+    let s = dag.add_node(
+        RiscOp::sum_default(0, Prim::F64).expect("f64 reduce_sum"),
+        vec![x],
+        scalar_f64(),
+        None,
+    );
+    dag.add_root(s);
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_reduce_sum_f64");
+    assert!(
+        result.c_source.contains("kernel_sum_ax0_f64"),
+        "f64 reduce_sum must use the f64-suffixed kernel name"
+    );
+    assert!(
+        result.c_source.contains("double acc = 0.0;"),
+        "f64 reduce_sum kernel must declare a double accumulator"
+    );
+    assert!(
+        result.c_source.contains("const double *a"),
+        "f64 reduce_sum kernel must read from a double * input"
+    );
+}
+
+// Positive coverage that lifted reductions emit f64 kernels.
+#[test]
+fn ws_a2_hip_min_reduce_f64_kernel_emitted() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
+    let m = dag.add_node(RiscOp::MinReduce { axis: 0 }, vec![x], scalar_f64(), None);
+    dag.add_root(m);
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_min_reduce_f64");
+    assert!(
+        result.c_source.contains("kernel_min_ax0_f64"),
+        "f64 min_reduce must use the f64-suffixed kernel name"
+    );
+    assert!(
+        result.c_source.contains("fmin(acc"),
+        "f64 min_reduce kernel must use fmin (not fminf)"
+    );
+}
+
+#[test]
+fn ws_a2_hip_argmax_f64_kernel_emitted() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
+    let m = dag.add_node(
+        RiscOp::Argmax { axis: 0 },
+        vec![x],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    dag.add_root(m);
+    let result = chelis_backend_hip::codegen_hip(&dag, "ws_a2_argmax_f64");
+    assert!(
+        result.c_source.contains("kernel_argmax_ax0_f64"),
+        "f64 argmax must use the f64-suffixed kernel name"
+    );
+    assert!(
+        result.c_source.contains("long long *out"),
+        "argmax output must be long long *"
+    );
+}
+
+// ============================================================================
+// WS-A4: i8 / i16 end-to-end execution tests on GPU.
+//
+// These mirror the C-backend WS-A4 tests in
+// crates/chelis-backend-c/tests/redteam_exec_compile.rs. The
+// `gpu_*` tests are `#[ignore]` so they only run under the manual
+// HIP gate (see file header). The codegen-shape tests below run by
+// default in CI so a kernel-name regression is caught without
+// requiring a HIP toolchain.
+// ============================================================================
+
+/// WS-A4: dtype-aware single-output runner. The output is read as the
+/// requested `out_c_ty` (e.g. `int8_t`, `int32_t`) and parsed back as
+/// `i64` so callers can assert exact integer equality. This sits next
+/// to the f32 `compile_and_run_single_output` rather than retrofitting
+/// it so the f32 callers stay byte-identical and the WS-A4 lift stays
+/// localized to this section.
+#[allow(dead_code, reason = "WS-A4 manual HIP gate; called from i8/i16 tests")]
+fn compile_and_run_single_output_typed_i64(
+    dag: &Dag,
+    func_name: &str,
+    inputs: &[TestInput],
+    out_c_ty: &str,
+    out_printf_spec: &str,
+) -> Vec<i64> {
+    require_hipcc();
+    let result = codegen_hip(dag, func_name);
+    assert_eq!(
+        result.output_labels.len(),
+        1,
+        "WS-A4 manual harness expects a single output"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hip_rt = hip_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_hip_runtime.h",
+        &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
+    );
+    copy_runtime_artifacts(tmp.path());
+    write_temp_file(tmp.path(), "model.cpp", &result.c_source);
+
+    let mut input_setup = Vec::new();
+    append_case_lines(
+        &mut input_setup,
+        func_name,
+        &result.input_labels,
+        result.output_labels.len(),
+        inputs,
+        "case0",
+    );
+    // Reuse `append_case_lines`'s prefix (input init + call invocation)
+    // and then append a typed read-and-print block. The float-formatted
+    // tail emitted by `append_case_lines` is dropped because we only
+    // copy lines through the call invocation line.
+    let mut prefix_lines = Vec::new();
+    for line in &input_setup {
+        prefix_lines.push(line.clone());
+        if line.contains(&format!("{func_name}(")) {
+            break;
+        }
+    }
+    prefix_lines.push("    for (int i = 0; i < case0_outputs[0]->size; i++) {".to_string());
+    prefix_lines.push("        if (i > 0) printf(\" \");".to_string());
+    prefix_lines.push(format!(
+        "        printf(\"{out_printf_spec}\", (long long)(({out_c_ty}*)case0_outputs[0]->data)[i]);"
+    ));
+    prefix_lines.push("    }".to_string());
+    prefix_lines.push("    printf(\"\\n\");".to_string());
+    prefix_lines.push("    chelis_free(case0_outputs[0]);".to_string());
+    for slot in 0..result.input_labels.len() {
+        prefix_lines.push(format!("    chelis_free(case0_input_storage[{slot}]);"));
+    }
+
+    let main_src = format!(
+        r#"#include "chelis_runtime.h"
+#include <stdint.h>
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+
+int main(void) {{
+{body}
+    return 0;
+}}
+"#,
+        body = prefix_lines.join("\n")
+    );
+    write_temp_file(tmp.path(), "main.cpp", &main_src);
+
+    let bin_path = tmp.path().join("gpu_correctness_bin");
+    let mut compile_cmd = Command::new("hipcc");
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("main.cpp"));
+    compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run hipcc");
+    assert!(
+        compile.status.success(),
+        "hipcc failed (WS-A4 typed):\nstderr: {}\nsource:\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.c_source
+    );
+
+    let run = Command::new(&bin_path).output().expect("run gpu binary");
+    assert!(
+        run.status.success(),
+        "GPU binary failed (WS-A4 typed):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8(run.stdout).expect("utf8 stdout");
+    stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|token| token.parse::<i64>().expect("parse output i64"))
+        .collect()
+}
+
+/// WS-A4: i8 add on GPU. Picks values that exercise the i8 elementwise
+/// kernel path, including a planned wrap (127 + 1 = -128).
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn ws_a4_i8_add_gpu_matches_two_complement_wrap() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Add,
+        vec![a, b],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "ws_a4_i8_add",
+        &[
+            TestInput::int8("a", &[4], &[1, 100, 127, -50]),
+            TestInput::int8("b", &[4], &[2, 50, 1, -80]),
+        ],
+        "int8_t",
+        "%lld",
+    );
+    // i8 wrap-around: 100+50 = 150 → -106; 127+1 = 128 → -128;
+    // -50 + -80 = -130 → +126.
+    assert_eq!(actual, vec![3, -106, -128, 126]);
+}
+
+/// WS-A4: i16 mul on GPU. 1000 * 1000 = 1_000_000 wraps in i16 to
+/// 16960 (1_000_000 mod 65536, with high bit clear).
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn ws_a4_i16_mul_gpu_matches_two_complement_wrap() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int16,
+        },
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int16,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Mul,
+        vec![a, b],
+        TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int16,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "ws_a4_i16_mul",
+        &[
+            TestInput::int16("a", &[2], &[100, 1000]),
+            TestInput::int16("b", &[2], &[100, 1000]),
+        ],
+        "int16_t",
+        "%lld",
+    );
+    assert_eq!(actual, vec![10000, 16960]);
+}
+
+/// WS-A4: i8 reduce_sum on GPU promotes accumulator to i32 per spec
+/// §5.7.1. 200 ones at i8 source produce 200 at i32 output (no wrap).
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn ws_a4_i8_reduce_sum_gpu_promotes_to_i32() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(200)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let sum_op =
+        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
+    let out = dag.add_node(
+        sum_op,
+        vec![a],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int32,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let data: Vec<i8> = vec![1; 200];
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "ws_a4_i8_reduce_sum",
+        &[TestInput::int8("a", &[200], &data)],
+        "int32_t",
+        "%lld",
+    );
+    assert_eq!(actual, vec![200], "200 i8 ones must sum to 200 in i32");
+}
+
+/// WS-A4: i16 reduce_sum on GPU. 200 i16 1000s = 200_000 (overflows
+/// i16 but fits in i32). Mirrors `ws_a4_i8_reduce_sum_gpu_promotes_to_i32`.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn ws_a4_i16_reduce_sum_gpu_promotes_to_i32() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(200)],
+            precision: Prim::Int16,
+        },
+        None,
+    );
+    let sum_op =
+        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int16).expect("i16 sum_default must succeed");
+    let out = dag.add_node(
+        sum_op,
+        vec![a],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int32,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let data: Vec<i16> = vec![1000; 200];
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "ws_a4_i16_reduce_sum",
+        &[TestInput::int16("a", &[200], &data)],
+        "int32_t",
+        "%lld",
+    );
+    assert_eq!(
+        actual,
+        vec![200_000],
+        "200 i16 1000s must sum to 200_000 in i32 (overflows i16)"
+    );
+}
+
+/// WS-A4 codegen-shape test (no GPU required): the dtype-suffixed
+/// kernel name appears in the generated HIP source for an i8 add.
+/// Runs by default so a kernel-name regression is caught without a
+/// HIP toolchain.
+#[test]
+fn ws_a4_i8_add_emits_dtype_suffixed_kernel_name() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Add,
+        vec![a, b],
+        TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "ws_a4_i8_add_codegen");
+    assert!(
+        result.c_source.contains("kernel_add_i8"),
+        "i8 add must emit `kernel_add_i8`; got source:\n{}",
+        result.c_source
+    );
+    assert!(
+        result.c_source.contains("int8_t"),
+        "i8 add kernel source must mention int8_t; got source:\n{}",
+        result.c_source
+    );
+}
+
+/// WS-A4 codegen-shape test (no GPU required): i8 reduce_sum emits a
+/// (source, accumulator) suffixed kernel name that resolves at
+/// kernel-source-emit time to the integer-promoted template.
+#[test]
+fn ws_a4_i8_reduce_sum_emits_promoted_kernel_name() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(200)],
+            precision: Prim::Int8,
+        },
+        None,
+    );
+    let sum_op =
+        chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
+    let out = dag.add_node(
+        sum_op,
+        vec![a],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int32,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "ws_a4_i8_reduce_sum_codegen");
+    // Kernel name encodes both source dtype (`_i8`) and accumulator
+    // dtype (`_i32`). The unsuffixed `kernel_sum_ax0` would be the f32
+    // → f32 path, so its absence is the regression-shield.
+    assert!(
+        result.c_source.contains("kernel_sum_ax0_i8_i32"),
+        "i8 reduce_sum must emit `kernel_sum_ax0_i8_i32`; got source:\n{}",
+        result.c_source
+    );
+    assert!(
+        result.c_source.contains("int32_t acc"),
+        "i8 reduce_sum kernel source must use int32_t accumulator (per spec §5.7.1); got source:\n{}",
+        result.c_source
+    );
+    assert!(
+        result.c_source.contains("(int32_t)a[src_idx]"),
+        "i8 reduce_sum kernel source must widen each source element to int32_t before summing; got source:\n{}",
+        result.c_source
     );
 }

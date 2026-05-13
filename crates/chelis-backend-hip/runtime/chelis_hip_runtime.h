@@ -7,6 +7,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* WS-A3: route bf16 / f16 matmul through `hipblasGemmEx` per
+ * spec/04-type-system.md §5.7.1 (bf16/f16 forward + f32 accumulator).
+ * We use the **legacy** hipblasGemmEx signature
+ * (`hipblasDatatype_t` parameters, not `hipDataType`) because the
+ * wheel-library hipBLAS shipped with `_rocm_sdk_libraries_gfx1151` on
+ * this workstation only exports the unsuffixed `hipblasGemmEx`
+ * symbol — defining `HIPBLAS_V2` would rewrite calls to
+ * `hipblasGemmEx_v2`, an alias the wheel library does not provide,
+ * producing an undefined-symbol link error at the manual HIP gate.
+ * The legacy API is deprecated but still supported; switching to V2
+ * is a separate ROCm-stack-upgrade story. */
 #if __has_include(<hipblas/hipblas.h>)
 #include <hipblas/hipblas.h>
 #define CHELIS_HAS_HIPBLAS_HEADER 1
@@ -59,6 +70,78 @@ extern hipblasStatus_t hipblasSgemmStridedBatched(
     long long strideC,
     int batchCount
 );
+extern hipblasStatus_t hipblasDgemm(
+    hipblasHandle_t handle,
+    hipblasOperation_t transa,
+    hipblasOperation_t transb,
+    int m,
+    int n,
+    int k,
+    const double *alpha,
+    const double *A,
+    int lda,
+    const double *B,
+    int ldb,
+    const double *beta,
+    double *C,
+    int ldc
+);
+extern hipblasStatus_t hipblasDgemmStridedBatched(
+    hipblasHandle_t handle,
+    hipblasOperation_t transa,
+    hipblasOperation_t transb,
+    int m,
+    int n,
+    int k,
+    const double *alpha,
+    const double *A,
+    int lda,
+    long long strideA,
+    const double *B,
+    int ldb,
+    long long strideB,
+    const double *beta,
+    double *C,
+    int ldc,
+    long long strideC,
+    int batchCount
+);
+/* WS-A3 fallback: minimal legacy hipblasGemmEx surface so generated
+ * bf16/f16 matmul code still compiles when the hipblas header is
+ * absent. Real builds resolve these symbols against libhipblas at
+ * link time. The legacy signature carries `hipblasDatatype_t`
+ * (instead of `hipDataType`) — see the rationale at the top of this
+ * file for why we avoid the V2 alias. */
+typedef enum {
+    HIPBLAS_R_16F = 150,    /* 16-bit float, real */
+    HIPBLAS_R_16B = 168,    /* 16-bit bfloat, real */
+    HIPBLAS_R_32F = 151,    /* 32-bit float, real */
+    HIPBLAS_R_64F = 152     /* 64-bit float, real */
+} hipblasDatatype_t;
+typedef enum {
+    HIPBLAS_GEMM_DEFAULT = 160
+} hipblasGemmAlgo_t;
+extern hipblasStatus_t hipblasGemmEx(
+    hipblasHandle_t handle,
+    hipblasOperation_t transA,
+    hipblasOperation_t transB,
+    int m,
+    int n,
+    int k,
+    const void *alpha,
+    const void *A,
+    hipblasDatatype_t aType,
+    int lda,
+    const void *B,
+    hipblasDatatype_t bType,
+    int ldb,
+    const void *beta,
+    void *C,
+    hipblasDatatype_t cType,
+    int ldc,
+    hipblasDatatype_t computeType,
+    hipblasGemmAlgo_t algo
+);
 #endif
 
 /* Re-use the CPU tensor struct for host-side data. */
@@ -104,7 +187,15 @@ typedef struct {
 /* ---- Allocation / deallocation ---- */
 
 static inline size_t chelis_gpu_dtype_size(int dtype) {
-    return (dtype == CHELIS_I64 || dtype == CHELIS_F64) ? sizeof(int64_t) : sizeof(float);
+    if (dtype == CHELIS_I64 || dtype == CHELIS_F64) {
+        return sizeof(int64_t);
+    }
+    if (dtype == CHELIS_BF16 || dtype == CHELIS_F16) {
+        /* WS-A3: bf16 / f16 storage is 2 bytes. Mirrors the host
+         * runtime's `chelis_alloc` dispatch. */
+        return 2;
+    }
+    return sizeof(float);
 }
 
 static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {
@@ -248,6 +339,91 @@ static inline int chelis_gpu_matrix_slices_contiguous(
         && t->strides[t->ndim - 2] == trailing_cols;
 }
 
+/* WS-A3: bf16 matmul with f32 accumulator per spec/04-type-system.md
+ * §5.7.1. Operand storage is bf16; alpha/beta and the GEMM accumulate
+ * happen at f32; the result is downcast back to bf16 by hipblasGemmEx
+ * (cType == HIPBLAS_R_16B, computeType == HIPBLAS_R_32F). hipBLAS is
+ * column-major; we swap A/B and m/n to preserve row-major semantics
+ * (same trick as `chelis_hipblas_sgemm_row_major`).
+ *
+ * The `compute_type` parameter on the legacy hipblasGemmEx signature
+ * is also a `hipblasDatatype_t` (matching the data-type parameters);
+ * `HIPBLAS_R_32F` selects f32 accumulation. */
+static inline void chelis_hipblas_bf16_gemm_f32_acc_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k
+) {
+    hipblasHandle_t handle;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    CHELIS_HIPBLAS_CHECK(hipblasGemmEx(
+        handle,
+        HIPBLAS_OP_N,
+        HIPBLAS_OP_N,
+        n,
+        m,
+        k,
+        &alpha,
+        b->data,
+        HIPBLAS_R_16B,
+        n,
+        a->data,
+        HIPBLAS_R_16B,
+        k,
+        &beta,
+        out->data,
+        HIPBLAS_R_16B,
+        n,
+        HIPBLAS_R_32F,
+        HIPBLAS_GEMM_DEFAULT
+    ));
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
+}
+
+/* WS-A3: f16 matmul with f32 accumulator per spec §5.7.1. Same shape
+ * as the bf16 wrapper above; differs only in the operand/result data
+ * type (HIPBLAS_R_16F). */
+static inline void chelis_hipblas_f16_gemm_f32_acc_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k
+) {
+    hipblasHandle_t handle;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    CHELIS_HIPBLAS_CHECK(hipblasGemmEx(
+        handle,
+        HIPBLAS_OP_N,
+        HIPBLAS_OP_N,
+        n,
+        m,
+        k,
+        &alpha,
+        b->data,
+        HIPBLAS_R_16F,
+        n,
+        a->data,
+        HIPBLAS_R_16F,
+        k,
+        &beta,
+        out->data,
+        HIPBLAS_R_16F,
+        n,
+        HIPBLAS_R_32F,
+        HIPBLAS_GEMM_DEFAULT
+    ));
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
+}
+
 static inline void chelis_hipblas_sgemm_batched_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
@@ -345,6 +521,153 @@ static inline void chelis_hipblas_sgemm_strided_batched_row_major(
         a_batch_stride,
         &beta,
         out->data,
+        n,
+        out_batch_stride,
+        batch_count
+    ));
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
+}
+
+/* ---- f64 hipBLAS helpers (WS-A2) ---- */
+
+/* The chelis_gpu_tensor struct's `data` field is typed as `float *`
+ * historically, but the underlying device allocation is sized via
+ * `chelis_gpu_dtype_size(dtype)` so the same struct holds f32 (4 B) and
+ * f64 (8 B) elements. The f64 helpers below cast through `void *` to
+ * the right pointer type before calling hipblasDgemm; arithmetic on the
+ * cast `double *` advances by 8 bytes per element, so the existing
+ * row-major-via-column-major-swap convention is preserved. */
+
+static inline void chelis_hipblas_dgemm_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k
+) {
+    hipblasHandle_t handle;
+    const double alpha = 1.0;
+    const double beta = 0.0;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    CHELIS_HIPBLAS_CHECK(hipblasDgemm(
+        handle,
+        HIPBLAS_OP_N,
+        HIPBLAS_OP_N,
+        n,
+        m,
+        k,
+        &alpha,
+        (const double *)(const void *)b->data,
+        n,
+        (const double *)(const void *)a->data,
+        k,
+        &beta,
+        (double *)(void *)out->data,
+        n
+    ));
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
+}
+
+static inline void chelis_hipblas_dgemm_batched_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k
+) {
+    if (!chelis_gpu_matrix_slices_contiguous(a, k)
+        || !chelis_gpu_matrix_slices_contiguous(b, n)
+        || !chelis_gpu_matrix_slices_contiguous(out, n)) {
+        fprintf(stderr, "chelis_hipblas_dgemm_batched_row_major: matrix slices must be contiguous\n");
+        abort();
+    }
+
+    int batch_ndim = out->ndim - 2;
+    int batch_count = 1;
+    for (int d = 0; d < batch_ndim; d++) {
+        batch_count *= out->shape[d];
+    }
+
+    hipblasHandle_t handle;
+    const double alpha = 1.0;
+    const double beta = 0.0;
+    const double *a_base = (const double *)(const void *)a->data;
+    const double *b_base = (const double *)(const void *)b->data;
+    double *out_base = (double *)(void *)out->data;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    for (int batch = 0; batch < batch_count; batch++) {
+        int rem = batch;
+        long long a_offset = 0;
+        long long b_offset = 0;
+        long long out_offset = 0;
+        for (int d = batch_ndim - 1; d >= 0; d--) {
+            int coord = rem % out->shape[d];
+            rem /= out->shape[d];
+            a_offset += (long long)coord * a->strides[d];
+            b_offset += (long long)coord * b->strides[d];
+            out_offset += (long long)coord * out->strides[d];
+        }
+        CHELIS_HIPBLAS_CHECK(hipblasDgemm(
+            handle,
+            HIPBLAS_OP_N,
+            HIPBLAS_OP_N,
+            n,
+            m,
+            k,
+            &alpha,
+            b_base + b_offset,
+            n,
+            a_base + a_offset,
+            k,
+            &beta,
+            out_base + out_offset,
+            n
+        ));
+    }
+    CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
+}
+
+static inline void chelis_hipblas_dgemm_strided_batched_row_major(
+    const chelis_gpu_tensor *a,
+    const chelis_gpu_tensor *b,
+    chelis_gpu_tensor *out,
+    int m,
+    int n,
+    int k,
+    int batch_count,
+    long long a_batch_stride,
+    long long b_batch_stride,
+    long long out_batch_stride
+) {
+    if (!chelis_gpu_matrix_slices_contiguous(a, k)
+        || !chelis_gpu_matrix_slices_contiguous(b, n)
+        || !chelis_gpu_matrix_slices_contiguous(out, n)) {
+        fprintf(stderr, "chelis_hipblas_dgemm_strided_batched_row_major: matrix slices must be contiguous\n");
+        abort();
+    }
+
+    hipblasHandle_t handle;
+    const double alpha = 1.0;
+    const double beta = 0.0;
+    CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
+    CHELIS_HIPBLAS_CHECK(hipblasDgemmStridedBatched(
+        handle,
+        HIPBLAS_OP_N,
+        HIPBLAS_OP_N,
+        n,
+        m,
+        k,
+        &alpha,
+        (const double *)(const void *)b->data,
+        n,
+        b_batch_stride,
+        (const double *)(const void *)a->data,
+        k,
+        a_batch_stride,
+        &beta,
+        (double *)(void *)out->data,
         n,
         out_batch_stride,
         batch_count

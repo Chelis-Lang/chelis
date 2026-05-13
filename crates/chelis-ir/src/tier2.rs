@@ -621,7 +621,8 @@ pub fn lower_matmul(
 
     add_synth(
         dag,
-        RiscOp::Sum { axis: lead_len + 1 },
+        RiscOp::sum_default(lead_len + 1, a_ty.precision)
+            .expect("lower_matmul operand precision should accept reduce_sum"),
         vec![product],
         result_ty,
         parent_span,
@@ -777,7 +778,8 @@ pub fn lower_softmax(
     // 5. sum(exp, axis)
     let sum_exp = add_synth(
         dag,
-        RiscOp::Sum { axis },
+        RiscOp::sum_default(axis, ty.precision)
+            .expect("softmax operand precision should accept reduce_sum"),
         vec![exp_shifted],
         red_ty,
         parent_span,
@@ -812,7 +814,8 @@ pub fn lower_mean(
     // sum(x, axis)
     let sum_node = add_synth(
         dag,
-        RiscOp::Sum { axis },
+        RiscOp::sum_default(axis, ty.precision)
+            .expect("mean operand precision should accept reduce_sum"),
         vec![x],
         red_ty.clone(),
         parent_span,
@@ -1530,7 +1533,8 @@ mod tests {
             "expected a Mul node"
         );
         assert!(
-            ops.iter().any(|op| matches!(op, RiscOp::Sum { axis: 1 })),
+            ops.iter()
+                .any(|op| matches!(op, RiscOp::Sum { axis: 1, .. })),
             "expected a Sum{{axis:1}} node"
         );
 
@@ -1585,7 +1589,7 @@ mod tests {
                 DimInfo::Lit(11)
             ]
         );
-        assert!(matches!(result_node.op, RiscOp::Sum { axis: 3 }));
+        assert!(matches!(result_node.op, RiscOp::Sum { axis: 3, .. }));
     }
 
     #[test]
@@ -1607,7 +1611,8 @@ mod tests {
             "expected Exp"
         );
         assert!(
-            ops.iter().any(|op| matches!(op, RiscOp::Sum { axis: 0 })),
+            ops.iter()
+                .any(|op| matches!(op, RiscOp::Sum { axis: 0, .. })),
             "expected Sum"
         );
         // Sub produces Add+Neg, Div produces Log+Neg+Exp+Mul
@@ -1631,7 +1636,8 @@ mod tests {
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
         // Should have Sum
         assert!(
-            ops.iter().any(|op| matches!(op, RiscOp::Sum { axis: 0 })),
+            ops.iter()
+                .any(|op| matches!(op, RiscOp::Sum { axis: 0, .. })),
             "expected Sum"
         );
         // Should have Const(5.0) for dim size
@@ -1684,7 +1690,8 @@ mod tests {
 
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
         assert!(
-            ops.iter().any(|op| matches!(op, RiscOp::Sum { axis: 1 })),
+            ops.iter()
+                .any(|op| matches!(op, RiscOp::Sum { axis: 1, .. })),
             "expected a reduction over the hidden axis"
         );
         assert!(

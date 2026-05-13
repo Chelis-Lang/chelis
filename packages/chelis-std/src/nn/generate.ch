@@ -4,15 +4,15 @@ type GenerateConfig =
   | GenerateConfig { max_tokens: int64, temperature: f32, top_k: int64, top_p: f32 }
 type KVCache[a] =
   | KVCache(List[a])
-sig generate: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]) -> tensor[batch, seq, int64] -> int64 -> tensor[batch, seq, int64]
-sig generate_with: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]) -> tensor[batch, seq, int64] -> GenerateConfig -> tensor[batch, seq, int64]
-sig generate_greedy_loop: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]) -> tensor[batch, seq, int64] -> Option[KVCache[p]] -> int64 -> tensor[batch, seq, int64]
-sig generate_loop: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]) -> tensor[batch, seq, int64] -> Option[KVCache[p]] -> int64 -> GenerateConfig -> tensor[batch, seq, int64]
-sig generate_loop_step: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]) -> tensor[batch, seq, int64] -> Option[KVCache[p]] -> int64 -> GenerateConfig -> tensor[batch, seq, int64]
+sig generate: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> int64 -> tensor[batch, seq, int64]
+sig generate_with: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> GenerateConfig -> tensor[batch, seq, int64]
+sig generate_greedy_loop: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> Option[KVCache[kv]] -> int64 -> tensor[batch, seq, int64]
+sig generate_loop: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> Option[KVCache[kv]] -> int64 -> GenerateConfig -> tensor[batch, seq, int64]
+sig generate_loop_step: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> Option[KVCache[kv]] -> int64 -> GenerateConfig -> tensor[batch, seq, int64]
 sig ids_to_batch_tensor: List[int64] -> tensor[rows, cols, int64]
-def generate[batch, seq, vocab, p](model: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]), context: tensor[batch, seq, int64], max_tokens: int64) = generate_greedy_loop(model, context, None, max_tokens)
-def generate_with[batch, seq, vocab, p](model: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]), context: tensor[batch, seq, int64], config: GenerateConfig) = generate_loop(model, context, None, config.max_tokens, config)
-def generate_greedy_loop[batch, seq, vocab, p](model: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]), current: tensor[batch, seq, int64], cache: Option[KVCache[p]], remaining: int64) = {
+def generate[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), context: tensor[batch, seq, int64], max_tokens: int64) = generate_greedy_loop(model, context, None, max_tokens)
+def generate_with[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), context: tensor[batch, seq, int64], config: GenerateConfig) = generate_loop(model, context, None, config.max_tokens, config)
+def generate_greedy_loop[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), current: tensor[batch, seq, int64], cache: Option[KVCache[kv]], remaining: int64) = {
   if lte(remaining, cast(0, int64)) then current else {
     step = model(copy(current), cache)
     next_ids = greedy_next_tokens(step.0)
@@ -37,8 +37,8 @@ def sample_next_tokens[batch, vocab](logits: &tensor[batch, vocab, f32], config:
     out
   }, rows)
 }
-def generate_loop[batch, seq, vocab, p](model: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]), current: tensor[batch, seq, int64], cache: Option[KVCache[p]], remaining: int64, config: GenerateConfig) = { if lte(remaining, cast(0, int64)) then current else generate_loop_step(model, current, cache, remaining, config) }
-def generate_loop_step[batch, seq, vocab, p](model: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]), current: tensor[batch, seq, int64], cache: Option[KVCache[p]], remaining: int64, config: GenerateConfig) = {
+def generate_loop[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), current: tensor[batch, seq, int64], cache: Option[KVCache[kv]], remaining: int64, config: GenerateConfig) = { if lte(remaining, cast(0, int64)) then current else generate_loop_step(model, current, cache, remaining, config) }
+def generate_loop_step[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), current: tensor[batch, seq, int64], cache: Option[KVCache[kv]], remaining: int64, config: GenerateConfig) = {
   step = model(copy(current), cache)
   next_ids = if lte(config.temperature, cast(0.0, f32)) then greedy_next_tokens(step.0) else sample_next_tokens(step.0, config)
   generate_loop(model, concat([current, ids_to_batch_tensor(next_ids)], cast(1, int32)), Some(step.1), sub(remaining, cast(1, int64)), config)

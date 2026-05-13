@@ -597,10 +597,28 @@ pub enum WireSurfExpr {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireLiteral {
-    Int { value: i64 },
-    Float { value: f64 },
-    Str { value: String },
-    Bool { value: bool },
+    Int {
+        value: i64,
+    },
+    Float {
+        value: f64,
+    },
+    /// Integer literal carrying an explicit precision suffix per spec
+    /// §5.5. Suffix is one of `i8`/`i16`/`i32`/`i64`/`f32`/`f64`/`bf16`/`f16`.
+    TypedInt {
+        value: i64,
+        suffix: String,
+    },
+    TypedFloat {
+        value: f64,
+        suffix: String,
+    },
+    Str {
+        value: String,
+    },
+    Bool {
+        value: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -855,6 +873,11 @@ pub enum WireRiscOp {
     },
     Sum {
         axis: usize,
+        /// Accumulator precision, populated per spec/04-type-system.md
+        /// §5.7.1. Defaults are resolved before lowering, so this is
+        /// always concrete in the wire schema.
+        #[serde(default = "default_sum_accumulator_name")]
+        accumulator: String,
     },
     MaxReduce {
         axis: usize,
@@ -917,6 +940,11 @@ pub enum WireRiscOp {
         m: WireDimExpr,
         n: WireDimExpr,
         k: WireDimExpr,
+        /// Accumulator precision per spec/04-type-system.md §5.7.1.
+        /// Result precision matches operand precision; the wider
+        /// accumulator is consumed inside the op.
+        #[serde(default = "default_matmul_accumulator_name")]
+        accumulator: String,
     },
     Gather {
         axis: usize,
@@ -927,6 +955,21 @@ pub enum WireRiscOp {
     Scatter {
         axis: usize,
     },
+}
+
+/// Backwards-compat default for the `accumulator` field on
+/// [`WireRiscOp::Sum`]. Old wire payloads predate the WS-A0 spec lock
+/// (cc47e6d) and don't carry the field; default to `f32`, the
+/// pre-WS-A0 implicit accumulator.
+fn default_sum_accumulator_name() -> String {
+    "f32".to_string()
+}
+
+/// Backwards-compat default for the `accumulator` field on
+/// [`WireRiscOp::BlasMatmul`]. Same rationale as
+/// [`default_sum_accumulator_name`].
+fn default_matmul_accumulator_name() -> String {
+    "f32".to_string()
 }
 
 fn default_true() -> bool {

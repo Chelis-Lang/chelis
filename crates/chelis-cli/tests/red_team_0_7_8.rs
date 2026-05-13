@@ -118,7 +118,7 @@ fn host_eval_zero_arg_bool() {
 fn host_eval_zero_arg_i64_large_value() {
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("zero_arg_i64_large.ch");
-    write_file(&fixture, "def go -> i64 = 9999999999\nresult = go()\n");
+    write_file(&fixture, "def go -> i64 = 9999999999i64\nresult = go()\n");
 
     eval_file(&fixture)
         .success()

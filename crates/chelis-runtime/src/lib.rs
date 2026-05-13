@@ -17,6 +17,18 @@ pub const CHELIS_F64: c_int = 1;
 pub const CHELIS_I32: c_int = 2;
 pub const CHELIS_BOOL: c_int = 3;
 pub const CHELIS_I64: c_int = 4;
+// WS-A3: bf16 / f16 dtype tags. Two-byte storage; the host runtime
+// does not implement bf16/f16 arithmetic in this cycle. Mirrors the
+// matching macros in `crates/chelis-runtime/include/chelis_runtime.h`.
+pub const CHELIS_BF16: c_int = 5;
+pub const CHELIS_F16: c_int = 6;
+// WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
+// `chelis_alloc` consults these so the backing buffer is sized at the
+// correct element width (1 byte for i8, 2 bytes for i16) rather than the
+// f32-default 4 bytes. Generated C code reinterprets `t->data` to
+// `int8_t*` / `int16_t*` for direct element access.
+pub const CHELIS_I8: c_int = 7;
+pub const CHELIS_I16: c_int = 8;
 const CHELIS_MAX_DIM: usize = 8;
 
 // `TensorElement` trait.  Closes the architectural piece of the
@@ -106,6 +118,12 @@ unsafe impl TensorElement for f32 {
 unsafe impl TensorElement for f64 {
     const DTYPE: c_int = CHELIS_F64;
 }
+unsafe impl TensorElement for i8 {
+    const DTYPE: c_int = CHELIS_I8;
+}
+unsafe impl TensorElement for i16 {
+    const DTYPE: c_int = CHELIS_I16;
+}
 unsafe impl TensorElement for i32 {
     const DTYPE: c_int = CHELIS_I32;
 }
@@ -173,6 +191,17 @@ macro_rules! runtime_fail {
 fn tensor_elem_size(dtype: c_int) -> usize {
     if dtype == CHELIS_I64 || dtype == CHELIS_F64 {
         std::mem::size_of::<i64>()
+    } else if dtype == CHELIS_BF16 || dtype == CHELIS_F16 || dtype == CHELIS_I16 {
+        // WS-A3: bf16 / f16 storage is 2 bytes. The host runtime
+        // does not perform bf16/f16 arithmetic; the HIP backend is
+        // the only consumer in this cycle. Mirror the matching
+        // dispatch in `chelis_hip_runtime.h::chelis_gpu_dtype_size`.
+        // WS-A4: i16 storage is also 2 bytes; the C backend reads
+        // / writes via reinterpret cast on `t->data` so the slot
+        // sizing matches `int16_t`.
+        2
+    } else if dtype == CHELIS_I8 {
+        std::mem::size_of::<i8>()
     } else {
         std::mem::size_of::<f32>()
     }
@@ -248,6 +277,25 @@ unsafe fn chelis_indices_to_flat(
         flat += *indices.offset(d) * *strides.offset(d);
     }
     flat
+}
+
+/// Read a signed-integer-valued slot from a tensor at logical offset
+/// `linear`, dispatching on the tensor's declared dtype. RT-4 F1
+/// sibling: gather/scatter previously read indices via `*data.add(i)`
+/// which assumes f32 storage; with int64 indices now sized at 8
+/// bytes/elem this needs to dispatch on dtype.
+unsafe fn read_index_slot(t: *const chelis_tensor, linear: usize) -> i64 {
+    match (*t).dtype {
+        CHELIS_I64 => *((*t).data as *const i64).add(linear),
+        CHELIS_I32 => *((*t).data as *const i32).add(linear) as i64,
+        CHELIS_I16 => *((*t).data as *const i16).add(linear) as i64,
+        CHELIS_I8 => *((*t).data as *const i8).add(linear) as i64,
+        // Legacy f32-stored indices (gather output, dynamic generators).
+        // Round-to-i64 from the float bytes; matches the previous
+        // implicit `as i64` behavior. The `data` field is `*mut u8`
+        // post-PR-1, so the cast routes through `*const f32`.
+        _ => *((*t).data as *const f32).add(linear) as i64,
+    }
 }
 
 unsafe fn chelis_is_contiguous(t: *const chelis_tensor) -> c_int {
@@ -579,6 +627,10 @@ pub unsafe extern "C" fn chelis_alloc(
     // a zero size correctly (0..0 is a no-op, memset of 0 bytes is a no-op).
     // Scalars (ndim == 0) keep the initializer's size = 1 via the skipped
     // multiplication loop, which matches the empty-product identity.
+    //
+    // WS-A4: dtype-aware element sizing for narrow integers (CHELIS_I8,
+    // CHELIS_I16) is handled inside `tensor_elem_size`; the f32 default
+    // would have over-allocated 4 bytes per slot.
     let elem_size = tensor_elem_size(dtype);
     let bytes = tensor.size as usize * elem_size;
     let mut ptr: *mut libc::c_void = std::ptr::null_mut();
@@ -591,6 +643,27 @@ pub unsafe extern "C" fn chelis_alloc(
     }
     tensor.data = ptr as *mut u8;
     Box::into_raw(tensor)
+}
+
+/// Element size in bytes for the given dtype tag.
+///
+/// Mirrors the per-dtype dispatch inside [`chelis_alloc`] and the GPU-side
+/// `chelis_gpu_dtype_size`. Generated C code calls this when sizing
+/// memcpys / per-element casts so the byte stride matches the storage
+/// layout of `chelis_tensor::data`. RT-4 F2/F3 fix: replaces hardcoded
+/// `sizeof(float)` in the C backend's reshape and cast emitters.
+#[no_mangle]
+pub extern "C" fn chelis_dtype_size(dtype: c_int) -> c_int {
+    if dtype == CHELIS_I64 || dtype == CHELIS_F64 {
+        std::mem::size_of::<i64>() as c_int
+    } else if dtype == CHELIS_BF16 || dtype == CHELIS_F16 || dtype == CHELIS_I16 {
+        2
+    } else if dtype == CHELIS_I8 {
+        std::mem::size_of::<i8>() as c_int
+    } else {
+        // CHELIS_F32, CHELIS_I32, CHELIS_BOOL all use 4 bytes.
+        std::mem::size_of::<f32>() as c_int
+    }
 }
 
 #[no_mangle]
@@ -659,19 +732,26 @@ pub unsafe extern "C" fn chelis_fill_f64(t: *mut chelis_tensor, val: f64) {
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_scalar_tensor_from_i64(value: i64) -> *mut chelis_tensor {
-    // I32 storage today is 4-byte f32-encoded (see the diagnosis
-    // note at `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`).
-    // Stay on the f32-encoded convention until the recommended §5
-    // follow-on migrates I32 storage to genuine i32 bytes.
+    // RT-4 F1 sibling: write through `(int32_t*)` so the slot stores
+    // int32 bytes that match the declared CHELIS_I32 dtype. The
+    // previous `value as f32` write left the slot holding float bit
+    // patterns that downstream readers interpreted as junk integers.
     let tensor = chelis_alloc(0, ptr::null(), CHELIS_I32);
-    *data_as_f32(tensor) = value as f32;
+    let ptr = (*tensor).data as *mut i32;
+    *ptr = value as i32;
     tensor
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_scalar_tensor_from_f64(value: f64) -> *mut chelis_tensor {
-    let tensor = chelis_alloc(0, ptr::null(), CHELIS_F32);
-    *f32::data_ptr_unchecked(tensor) = value as f32;
+    // RT-4 F1: allocate at f64 storage so a scalar literal declared as
+    // `f64` round-trips without truncation. The C backend's emitter
+    // writes through `(double*)t->data` for f64 nodes; the previous
+    // f32 allocation truncated the source value before the kernel
+    // ever read it.
+    let tensor = chelis_alloc(0, ptr::null(), CHELIS_F64);
+    let ptr = (*tensor).data as *mut f64;
+    *ptr = value;
     tensor
 }
 
@@ -680,28 +760,19 @@ pub unsafe extern "C" fn chelis_tensor_to_f64(t: *const chelis_tensor) -> f64 {
     if t.is_null() || (*t).ndim != 0 {
         runtime_fail!("chelis_tensor_to_f64 expects a rank-0 tensor");
     }
-    let tm = t as *mut chelis_tensor;
+    // RT-4 F1 sibling: dispatch on dtype so a rank-0 i32/i64/f64
+    // tensor's value is read at the correct slot width. Previous
+    // `*(*t).data as f64` assumed every tensor was f32-backed.
     match (*t).dtype {
-        CHELIS_F32 => *f32::data_ptr_unchecked(tm) as f64,
-        CHELIS_F64 => *f64::data_ptr_unchecked(tm),
-        CHELIS_I64 => *i64::data_ptr_unchecked(tm) as f64,
-        // I32 and BOOL storage today is 4-byte f32-encoded; the
-        // dtype tag is CHELIS_I32 / CHELIS_BOOL, not CHELIS_F32, so
-        // f32::data_ptr_unchecked's debug_assert would fire.
-        // Route through the transition shim instead until the
-        // recommended §5 follow-on migrates I32 / BOOL storage to
-        // their genuine byte representations.  See the diagnosis
-        // note at
-        // `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`.
-        CHELIS_I32 => *data_as_f32(tm) as f64,
-        CHELIS_BOOL => {
-            if *data_as_f32(tm) != 0.0 {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        other => runtime_fail!("chelis_tensor_to_f64 unsupported dtype {}", other),
+        CHELIS_F64 => *((*t).data as *const f64),
+        CHELIS_I64 => *((*t).data as *const i64) as f64,
+        CHELIS_I32 => *((*t).data as *const i32) as f64,
+        CHELIS_I16 => *((*t).data as *const i16) as f64,
+        CHELIS_I8 => *((*t).data as *const i8) as f64,
+        // F32 / Bool / default: 4-byte float slot. The `data` field is
+        // `*mut u8` post-PR-1; cast through `*const f32` to read the
+        // float bit pattern at the correct width.
+        _ => *((*t).data as *const f32) as f64,
     }
 }
 
@@ -1710,26 +1781,24 @@ unsafe fn chelis_nested_list_shape(list: *const chelis_list) -> (Vec<c_int>, c_i
 }
 
 /// Recursively flatten the values into the contiguous buffer `out`
-/// starting at offset `*flat_idx`. Validates uniform shape against
+/// at the dtype-aware element width. Validates uniform shape against
 /// the precomputed `shape[depth..]`.
 ///
-/// `out` is typed `*mut f32` because `chelis_nested_list_shape` only
-/// ever deduces `CHELIS_I32`, `CHELIS_F32`, or `CHELIS_BOOL` as
-/// `leaf_dtype` (the three numeric/bool dtypes that
-/// `chelis_value_tag` covers).  All three use 4-byte f32-encoded
-/// storage today, so this routine writes f32 values into the buffer
-/// regardless of the leaf dtype.
-unsafe fn chelis_flatten_nested_list(
+/// RT-4 F1 fix path: callers pass an explicit destination dtype so the
+/// per-element write width matches the storage layout. The legacy
+/// `chelis_flatten_nested_list` always wrote 4-byte slots regardless of
+/// declared dtype; that silently truncated f64/i64/i16/i8 storage to
+/// f32 (4 bytes/elem) and produced garbage from any downstream kernel
+/// that read back through the correct stride.
+unsafe fn chelis_flatten_nested_list_typed(
     list: *const chelis_list,
     shape: &[c_int],
     depth: usize,
-    leaf_dtype: c_int,
-    out: *mut f32,
+    dst_dtype: c_int,
+    out_bytes: *mut u8,
     flat_idx: &mut isize,
 ) {
     if list.is_null() {
-        // Length-0 leaf: nothing to copy. Caller's bookkeeping
-        // already accounted for `shape[depth] == 0`.
         return;
     }
     let items = &(*list).items;
@@ -1742,37 +1811,137 @@ unsafe fn chelis_flatten_nested_list(
         runtime_fail!("to_tensor requires uniform inner-list length");
     }
     if depth + 1 == shape.len() {
-        // Leaf level: write scalars.
         for item in items {
-            let value: f32 = match (leaf_dtype, item.tag) {
-                (CHELIS_I32, chelis_value_tag::CHELIS_VALUE_INT64) => item.as_.i64_ as f32,
-                (CHELIS_F32, chelis_value_tag::CHELIS_VALUE_FLOAT64) => item.as_.f64_ as f32,
-                (CHELIS_BOOL, chelis_value_tag::CHELIS_VALUE_BOOL) => {
-                    if item.as_.boolean {
-                        1.0
-                    } else {
-                        0.0
-                    }
+            // Per-element write at the declared destination dtype.
+            // Conversions follow C semantics: int-to-float = standard
+            // rounding, float-to-int = truncation toward zero. bf16/f16
+            // host writes are not supported; the runtime does not yet
+            // implement bf16/f16 arithmetic in this cycle, so a
+            // bf16/f16 destination is rejected here loudly rather than
+            // silently truncating.
+            let i = *flat_idx as usize;
+            match dst_dtype {
+                CHELIS_F32 => {
+                    let value: f32 = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_INT64 => item.as_.i64_ as f32,
+                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_ as f32,
+                        chelis_value_tag::CHELIS_VALUE_BOOL => {
+                            if item.as_.boolean {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        _ => {
+                            runtime_fail!("to_tensor leaf element type cannot lower to f32 storage")
+                        }
+                    };
+                    *(out_bytes as *mut f32).add(i) = value;
+                }
+                CHELIS_F64 => {
+                    let value: f64 = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_INT64 => item.as_.i64_ as f64,
+                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_,
+                        chelis_value_tag::CHELIS_VALUE_BOOL => {
+                            if item.as_.boolean {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        _ => {
+                            runtime_fail!("to_tensor leaf element type cannot lower to f64 storage")
+                        }
+                    };
+                    *(out_bytes as *mut f64).add(i) = value;
+                }
+                CHELIS_I64 => {
+                    let value: i64 = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_INT64 => item.as_.i64_,
+                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_ as i64,
+                        chelis_value_tag::CHELIS_VALUE_BOOL => i64::from(item.as_.boolean),
+                        _ => runtime_fail!(
+                            "to_tensor leaf element type cannot lower to int64 storage"
+                        ),
+                    };
+                    *(out_bytes as *mut i64).add(i) = value;
+                }
+                CHELIS_I32 => {
+                    let value: i32 = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_INT64 => item.as_.i64_ as i32,
+                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_ as i32,
+                        chelis_value_tag::CHELIS_VALUE_BOOL => i32::from(item.as_.boolean),
+                        _ => runtime_fail!(
+                            "to_tensor leaf element type cannot lower to int32 storage"
+                        ),
+                    };
+                    *(out_bytes as *mut i32).add(i) = value;
+                }
+                CHELIS_I16 => {
+                    let value: i16 = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_INT64 => item.as_.i64_ as i16,
+                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_ as i16,
+                        chelis_value_tag::CHELIS_VALUE_BOOL => i16::from(item.as_.boolean),
+                        _ => runtime_fail!(
+                            "to_tensor leaf element type cannot lower to int16 storage"
+                        ),
+                    };
+                    *(out_bytes as *mut i16).add(i) = value;
+                }
+                CHELIS_I8 => {
+                    let value: i8 = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_INT64 => item.as_.i64_ as i8,
+                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_ as i8,
+                        chelis_value_tag::CHELIS_VALUE_BOOL => i8::from(item.as_.boolean),
+                        _ => runtime_fail!(
+                            "to_tensor leaf element type cannot lower to int8 storage"
+                        ),
+                    };
+                    *(out_bytes as *mut i8).add(i) = value;
+                }
+                CHELIS_BOOL => {
+                    // bool tensors store as 4-byte 1.0/0.0 floats per
+                    // chelis_alloc's bool-arm sizing (4 bytes/elem).
+                    let value: f32 = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_BOOL => {
+                            if item.as_.boolean {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        chelis_value_tag::CHELIS_VALUE_INT64 => {
+                            if item.as_.i64_ != 0 {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        _ => runtime_fail!(
+                            "to_tensor leaf element type cannot lower to bool storage"
+                        ),
+                    };
+                    *(out_bytes as *mut f32).add(i) = value;
                 }
                 _ => runtime_fail!(
-                    "to_tensor leaf element type does not match the deduced tensor dtype"
+                    "to_tensor: unsupported destination dtype `{}` for host-lane literal storage; \
+                     bf16/f16/f8e4m3 are not implemented on the host runtime",
+                    dst_dtype
                 ),
-            };
-            *out.offset(*flat_idx) = value;
+            }
             *flat_idx += 1;
         }
     } else {
-        // Inner level: descend.
         for item in items {
             if item.tag != chelis_value_tag::CHELIS_VALUE_LIST {
                 runtime_fail!("to_tensor expects nested-list elements at this depth");
             }
-            chelis_flatten_nested_list(
+            chelis_flatten_nested_list_typed(
                 item.as_.list as *const chelis_list,
                 shape,
                 depth + 1,
-                leaf_dtype,
-                out,
+                dst_dtype,
+                out_bytes,
                 flat_idx,
             );
         }
@@ -1783,29 +1952,44 @@ unsafe fn chelis_flatten_nested_list(
 pub unsafe extern "C" fn chelis_tensor_from_value_list(
     list: *const chelis_list,
 ) -> *mut chelis_tensor {
-    // The C backend stores raw f32 floats into `out->data` regardless of
-    // the incoming list tag, so the allocation must match that byte layout.
-    // Previously this returned a CHELIS_F64-dtyped tensor that was written
-    // as f32, corrupting every subsequent reader (most visibly as `-nan`
-    // or `inf` from `Std.Nn.Gelu.forward` / `Std.Nn.RmsNorm.forward`).
+    // Legacy entry point kept for compatibility with generated C that
+    // doesn't yet know the destination dtype. Deduces dtype from the
+    // first leaf's value-tag; behavior matches the pre-RT-4 emit.
     //
-    // Bucket 4b: also walk nested-list inputs to support
-    // `to_tensor([[1.0, 2.0], [3.0, 4.0]])` and higher-rank
-    // homogeneous nested literals.
+    // RT-4 F1 fix: prefer `chelis_tensor_from_value_list_typed` when
+    // the caller has the declared destination dtype available — it
+    // honors that dtype for both allocation and per-element writes.
     let (shape, dtype) = chelis_nested_list_shape(list);
     let ndim = shape.len() as c_int;
     let out = chelis_alloc(ndim, shape.as_ptr(), dtype);
     if !list.is_null() && shape.iter().all(|&d| d > 0) {
         let mut flat_idx: isize = 0;
-        // `chelis_nested_list_shape` only deduces I32/F32/BOOL leaf
-        // dtypes; all three use 4-byte f32-encoded storage today.
-        // Routing through `data_as_f32` matches the storage encoding
-        // for every arm `chelis_flatten_nested_list` accepts.
-        let buf = match dtype {
-            CHELIS_F32 | CHELIS_I32 | CHELIS_BOOL => data_as_f32(out),
-            other => runtime_fail!("to_tensor unsupported leaf dtype {}", other),
-        };
-        chelis_flatten_nested_list(list, &shape, 0, dtype, buf, &mut flat_idx);
+        chelis_flatten_nested_list_typed(list, &shape, 0, dtype, (*out).data, &mut flat_idx);
+    }
+    out
+}
+
+/// Allocate a tensor from a nested chelis_list with an explicit destination
+/// dtype. The C backend calls this when the surface-level type annotation
+/// disambiguates the storage width: `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
+/// must be backed by 8-byte f64 slots even though every list element arrives
+/// tagged `CHELIS_VALUE_FLOAT64` (the same tag the legacy path uses for f32).
+///
+/// RT-4 F1 fix: previously the runtime had no dtype hint and silently
+/// allocated at f32 width (4 bytes/elem) for every float-tagged list,
+/// truncating declared f64/i64/i16/i8 storage. Downstream kernels then
+/// read back through the correct stride and produced garbage.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_from_value_list_typed(
+    list: *const chelis_list,
+    dst_dtype: c_int,
+) -> *mut chelis_tensor {
+    let (shape, _deduced_dtype) = chelis_nested_list_shape(list);
+    let ndim = shape.len() as c_int;
+    let out = chelis_alloc(ndim, shape.as_ptr(), dst_dtype);
+    if !list.is_null() && shape.iter().all(|&d| d > 0) {
+        let mut flat_idx: isize = 0;
+        chelis_flatten_nested_list_typed(list, &shape, 0, dst_dtype, (*out).data, &mut flat_idx);
     }
     out
 }
@@ -1818,52 +2002,45 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
     if (*tensor).ndim != 1 {
         runtime_fail!("to_list expects a rank-1 tensor");
     }
-    let n = (*tensor).shape[0] as usize;
-    let stride = (*tensor).strides[0] as usize;
-    let mut items = Vec::with_capacity(n);
-    let tm = tensor as *mut chelis_tensor;
-    // Dispatch on dtype outside the loop.  F64 and I64 read through
-    // their native typed pointers (previous f32-strided read produced
-    // silent corruption on those storage layouts).  I32 and BOOL stay
-    // on f32-encoded storage today; route through `data_as_f32`.
-    match (*tensor).dtype {
-        CHELIS_F32 => {
-            let p = f32::data_ptr_unchecked(tm);
-            for i in 0..n {
-                let raw = *p.add(i * stride);
-                items.push(chelis_value_from_f64(raw as f64));
+    let mut items = Vec::with_capacity((*tensor).shape[0] as usize);
+    for i in 0..(*tensor).shape[0] as usize {
+        // RT-4 F1 sibling: read each slot at the right width per dtype
+        // so non-f32 tensors don't get reinterpreted as float bytes.
+        let stride = (*tensor).strides[0] as usize;
+        let value = match (*tensor).dtype {
+            CHELIS_BOOL => {
+                // Bool storage is f32-encoded (4-byte slots) in the
+                // current runtime; route through `*const f32`.
+                let raw = *((*tensor).data as *const f32).add(i * stride);
+                chelis_value_from_bool(raw != 0.0)
             }
-        }
-        CHELIS_F64 => {
-            let p = f64::data_ptr_unchecked(tm);
-            for i in 0..n {
-                items.push(chelis_value_from_f64(*p.add(i * stride)));
+            CHELIS_I64 => {
+                let v = *((*tensor).data as *const i64).add(i * stride);
+                chelis_value_from_int64(v)
             }
-        }
-        CHELIS_I64 => {
-            let p = i64::data_ptr_unchecked(tm);
-            for i in 0..n {
-                items.push(chelis_value_from_int64(*p.add(i * stride)));
+            CHELIS_I32 => {
+                let v = *((*tensor).data as *const i32).add(i * stride);
+                chelis_value_from_int64(v as i64)
             }
-        }
-        CHELIS_I32 => {
-            let p = data_as_f32(tm);
-            for i in 0..n {
-                let raw = *p.add(i * stride);
-                items.push(chelis_value_from_int64(raw as i64));
+            CHELIS_I16 => {
+                let v = *((*tensor).data as *const i16).add(i * stride);
+                chelis_value_from_int64(v as i64)
             }
-        }
-        CHELIS_BOOL => {
-            let p = data_as_f32(tm);
-            for i in 0..n {
-                let raw = *p.add(i * stride);
-                items.push(chelis_value_from_bool(raw != 0.0));
+            CHELIS_I8 => {
+                let v = *((*tensor).data as *const i8).add(i * stride);
+                chelis_value_from_int64(v as i64)
             }
-        }
-        other => runtime_fail!(
-            "to_list expects numeric or bool tensor input (dtype={})",
-            other
-        ),
+            CHELIS_F64 => {
+                let v = *((*tensor).data as *const f64).add(i * stride);
+                chelis_value_from_f64(v)
+            }
+            CHELIS_F32 => {
+                let raw = *((*tensor).data as *const f32).add(i * stride);
+                chelis_value_from_f64(raw as f64)
+            }
+            _ => runtime_fail!("to_list expects numeric or bool tensor input"),
+        };
+        items.push(value);
     }
     Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
 }
@@ -1895,9 +2072,9 @@ pub unsafe extern "C" fn chelis_pad_sequences(
     } else {
         pad_value.as_.f64_
     };
-    // The output dtype is always either CHELIS_I32 (f32-encoded
-    // storage) or CHELIS_F32; both write through `data_as_f32`.
-    let buf = data_as_f32(out);
+    // RT-4 F1 sibling: pad_sequences writes per-element through the
+    // dtype-correct pointer below; the legacy `let buf = data_as_f32(..)`
+    // shortcut is no longer used because i32 and f32 dispatch differently.
     if !sequences.is_null() {
         for (row, item) in (*sequences).items.iter().enumerate() {
             let seq = item.as_.list;
@@ -1912,7 +2089,17 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                 } else {
                     pad
                 };
-                *buf.add(flat) = value as f32;
+                // RT-4 F1 sibling: write through the dtype-correct
+                // pointer so a CHELIS_I32 tensor stores int32 bytes,
+                // not float bytes. Previously this wrote `value as f32`
+                // unconditionally, leaving the int32-tagged tensor
+                // holding float bit patterns that downstream readers
+                // interpreted as junk integers.
+                if dtype == CHELIS_I32 {
+                    *((*out).data as *mut i32).add(flat) = value as i32;
+                } else {
+                    *((*out).data as *mut f32).add(flat) = value as f32;
+                }
             }
         }
     }
@@ -1942,9 +2129,9 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
     } else {
         pad_value.as_.f64_
     };
-    // The output dtype is always either CHELIS_I32 (f32-encoded
-    // storage) or CHELIS_F32; both write through `data_as_f32`.
-    let buf = data_as_f32(out);
+    // RT-4 F1 sibling: writes occur per-element through the
+    // dtype-correct pointer below; legacy `data_as_f32` shortcut is
+    // no longer used because i32 and f32 dispatch differently.
     if !sequences.is_null() {
         for (row, item) in (*sequences).items.iter().enumerate() {
             if item.tag != chelis_value_tag::CHELIS_VALUE_LIST {
@@ -1962,7 +2149,11 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                 } else {
                     pad
                 };
-                *buf.add(flat) = value as f32;
+                if dtype == CHELIS_I32 {
+                    *((*out).data as *mut i32).add(flat) = value as i32;
+                } else {
+                    *((*out).data as *mut f32).add(flat) = value as f32;
+                }
             }
         }
     }
@@ -2097,10 +2288,8 @@ pub unsafe extern "C" fn chelis_tensor_gather(
     }
     let out = chelis_alloc(out_ndim as c_int, out_shape.as_ptr(), (*tensor).dtype);
     let elem_size = tensor_elem_size((*tensor).dtype);
-    // Indices tensor is allocated as CHELIS_I32 (f32-encoded storage)
-    // upstream; reading through `data_as_f32_const` is correct for the
-    // current storage convention.
-    let idx_ptr = data_as_f32_const(indices);
+    // Indices read at the correct dtype width via `read_index_slot`
+    // (RT-4 F1 sibling). Eliminates the previous f32-only assumption.
     let mut out_index = [0; CHELIS_MAX_DIM];
     let mut src_index = [0; CHELIS_MAX_DIM];
     let mut gather_index = [0; CHELIS_MAX_DIM];
@@ -2123,7 +2312,7 @@ pub unsafe extern "C" fn chelis_tensor_gather(
             (*indices).strides.as_ptr(),
             (*indices).ndim,
         );
-        let gathered = *idx_ptr.add(index_linear as usize) as i64;
+        let gathered = read_index_slot(indices, index_linear as usize);
         if gathered < 0 || gathered >= (*tensor).shape[axis_i] as i64 {
             runtime_fail!("gather index {gathered} out of bounds");
         }
@@ -2223,9 +2412,8 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
         Vec::new()
     };
     let elem_size = tensor_elem_size((*out).dtype);
-    // Indices tensor is f32-encoded CHELIS_I32; read through the
-    // f32 routing.
-    let idx_ptr = data_as_f32_const(indices);
+    // Indices read via `read_index_slot` (RT-4 F1 sibling); dispatch on
+    // the actual dtype rather than assuming f32 storage.
     let mut update_index = [0; CHELIS_MAX_DIM];
     let mut out_index = [0; CHELIS_MAX_DIM];
     let mut gather_index = [0; CHELIS_MAX_DIM];
@@ -2252,7 +2440,7 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
             (*indices).strides.as_ptr(),
             (*indices).ndim,
         );
-        let gathered = *idx_ptr.add(index_linear as usize) as i64;
+        let gathered = read_index_slot(indices, index_linear as usize);
         if gathered < 0 || gathered >= (*base).shape[axis_i] as i64 {
             runtime_fail!("scatter index {gathered} out of bounds");
         }
@@ -2453,10 +2641,9 @@ pub unsafe extern "C" fn chelis_tensor_sort(
 ) -> *mut chelis_tuple {
     let axis_i = tensor_normalize_axis(tensor, axis, "sort");
     let values = tensor_clone(tensor);
-    // Indices tensor is CHELIS_I32 with f32-encoded storage; written
-    // through `data_as_f32`.
+    // Indices tensor is CHELIS_I32; written through the typed
+    // `(int32_t*)` pointer (RT-4 F1 sibling) inside `sort_loop`.
     let indices = chelis_alloc((*tensor).ndim, (*tensor).shape.as_ptr(), CHELIS_I32);
-    let idx_buf = data_as_f32(indices);
     let axis_size = (*tensor).shape[axis_i] as usize;
     let mut inner = 1usize;
     let mut outer = 1usize;
@@ -2466,13 +2653,16 @@ pub unsafe extern "C" fn chelis_tensor_sort(
     for i in 0..axis_i {
         outer *= (*tensor).shape[i] as usize;
     }
+    // RT-4 F1 sibling: indices is allocated as CHELIS_I32, so writes
+    // must go through `(int32_t*)` to match the storage layout.
     // Dispatch on values' dtype outside the loops so each precision
-    // compares and swaps at its native width.  Pre-migration f32-only
-    // read silently corrupted F64 / I64 sort orderings.  Bool is
+    // compares and swaps at its native width. Pre-migration f32-only
+    // read silently corrupted F64 / I64 sort orderings. Bool is
     // semantically undefined per Contract 3.
+    let indices_data = (*indices).data as *mut i32;
     unsafe fn sort_loop<T: TensorElement + Copy + PartialOrd>(
         values: *mut chelis_tensor,
-        idx_buf: *mut f32,
+        indices_data: *mut i32,
         outer: usize,
         axis_size: usize,
         inner: usize,
@@ -2482,7 +2672,7 @@ pub unsafe extern "C" fn chelis_tensor_sort(
             for inner_idx in 0..inner {
                 for i in 0..axis_size {
                     let linear = (outer_idx * axis_size + i) * inner + inner_idx;
-                    *idx_buf.add(linear) = i as f32;
+                    *indices_data.add(linear) = i as i32;
                 }
                 for i in 1..axis_size {
                     let mut j = i;
@@ -2495,9 +2685,9 @@ pub unsafe extern "C" fn chelis_tensor_sort(
                         let tmpv = *p.add(left);
                         *p.add(left) = *p.add(right);
                         *p.add(right) = tmpv;
-                        let tmpi = *idx_buf.add(left);
-                        *idx_buf.add(left) = *idx_buf.add(right);
-                        *idx_buf.add(right) = tmpi;
+                        let tmpi = *indices_data.add(left);
+                        *indices_data.add(left) = *indices_data.add(right);
+                        *indices_data.add(right) = tmpi;
                         j -= 1;
                     }
                 }
@@ -2505,39 +2695,12 @@ pub unsafe extern "C" fn chelis_tensor_sort(
         }
     }
     match (*tensor).dtype {
-        CHELIS_F32 => sort_loop::<f32>(values, idx_buf, outer, axis_size, inner),
-        CHELIS_F64 => sort_loop::<f64>(values, idx_buf, outer, axis_size, inner),
-        CHELIS_I64 => sort_loop::<i64>(values, idx_buf, outer, axis_size, inner),
-        CHELIS_I32 => {
-            // f32-encoded i32 storage: compare as f32 (matches the
-            // pre-migration semantics for I32 inputs).
-            let p = data_as_f32(values);
-            for outer_idx in 0..outer {
-                for inner_idx in 0..inner {
-                    for i in 0..axis_size {
-                        let linear = (outer_idx * axis_size + i) * inner + inner_idx;
-                        *idx_buf.add(linear) = i as f32;
-                    }
-                    for i in 1..axis_size {
-                        let mut j = i;
-                        while j > 0 {
-                            let left = (outer_idx * axis_size + (j - 1)) * inner + inner_idx;
-                            let right = (outer_idx * axis_size + j) * inner + inner_idx;
-                            if *p.add(left) <= *p.add(right) {
-                                break;
-                            }
-                            let tmpv = *p.add(left);
-                            *p.add(left) = *p.add(right);
-                            *p.add(right) = tmpv;
-                            let tmpi = *idx_buf.add(left);
-                            *idx_buf.add(left) = *idx_buf.add(right);
-                            *idx_buf.add(right) = tmpi;
-                            j -= 1;
-                        }
-                    }
-                }
-            }
-        }
+        CHELIS_F32 => sort_loop::<f32>(values, indices_data, outer, axis_size, inner),
+        CHELIS_F64 => sort_loop::<f64>(values, indices_data, outer, axis_size, inner),
+        CHELIS_I64 => sort_loop::<i64>(values, indices_data, outer, axis_size, inner),
+        CHELIS_I32 => sort_loop::<i32>(values, indices_data, outer, axis_size, inner),
+        CHELIS_I16 => sort_loop::<i16>(values, indices_data, outer, axis_size, inner),
+        CHELIS_I8 => sort_loop::<i8>(values, indices_data, outer, axis_size, inner),
         CHELIS_BOOL => runtime_fail!("sort is undefined for bool tensors"),
         other => runtime_fail!("sort unsupported dtype {}", other),
     }
@@ -3173,6 +3336,14 @@ pub unsafe extern "C" fn chelis_mmap_len(mapped: *const chelis_mapped_file) -> i
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chelis_tensor {
+    // WS-A4: dtype-aware element sizing must mirror `chelis_alloc` exactly.
+    // Pre-WS-A4 the allocator and this routine both treated narrow dtypes as
+    // 4 bytes, so the source (4 bytes per i8 element) and destination (4
+    // bytes per i8 element) were nominally consistent. Now `chelis_alloc`
+    // sizes i8 buffers at 1 byte and i16 buffers at 2 bytes via
+    // `tensor_elem_size`, so this routine reuses the same helper; otherwise
+    // a copy of `size * 4` bytes would overrun a 1-byte-per-element
+    // destination buffer and corrupt the heap.
     let elem_size = tensor_elem_size((*t).dtype);
     if chelis_is_contiguous(t) != 0 {
         let out = chelis_alloc((*t).ndim, (*t).shape.as_ptr(), (*t).dtype);

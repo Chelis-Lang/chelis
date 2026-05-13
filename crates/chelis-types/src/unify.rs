@@ -185,7 +185,8 @@ impl Subst {
             Type::Ref(inner) => Type::Ref(Box::new(self.apply(inner))),
             Type::Tensor(dims, prec) => {
                 let dims = dims.iter().map(|d| self.apply_dim(d)).collect();
-                Type::Tensor(dims, *prec)
+                let prec = self.apply_tensor_prec(prec);
+                Type::Tensor(dims, prec)
             }
             Type::Adt(name, args) => {
                 let args = args.iter().map(|a| self.apply(a)).collect();
@@ -204,6 +205,30 @@ impl Subst {
         match dim {
             Dim::Var(v) => self.resolve_dvar(*v),
             _ => dim.clone(),
+        }
+    }
+
+    /// Apply this substitution to a tensor precision slot.
+    ///
+    /// Resolves a `TensorPrec::Var` through the type-variable
+    /// substitution chain. If the resolved binding is a concrete
+    /// primitive, the slot collapses to `TensorPrec::Concrete(_)`. If
+    /// the binding is itself another type variable, we keep the slot
+    /// as `TensorPrec::Var(target_var)` so the tensor stays
+    /// well-formed (the precision slot must be a precision, not an
+    /// arbitrary `Type`). Any non-prim, non-var binding (e.g. a
+    /// downstream unification error that bound the slot var to
+    /// `Type::Fn` or `Type::Tensor`) collapses to `Type::Error` at
+    /// the surrounding `Type` level — but here we conservatively
+    /// retain the original var; the unifier surfaces the mismatch.
+    pub fn apply_tensor_prec(&self, prec: &TensorPrec) -> TensorPrec {
+        match prec {
+            TensorPrec::Concrete(_) => prec.clone(),
+            TensorPrec::Var(v) => match self.resolve_tvar(*v) {
+                Type::Prim(p) => TensorPrec::Concrete(p),
+                Type::Var(v2) => TensorPrec::Var(v2),
+                _ => prec.clone(),
+            },
         }
     }
 
@@ -286,12 +311,7 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
 
         // Tensor types
         (Type::Tensor(dims1, p1), Type::Tensor(dims2, p2)) => {
-            if p1 != p2 {
-                return Err(TypeError {
-                    kind: TypeErrorKind::PrecisionMismatch,
-                    message: format!("tensor precision mismatch: {} vs {}", p1.name(), p2.name()),
-                });
-            }
+            unify_tensor_prec(p1, p2, subst)?;
             if dims1.len() != dims2.len() {
                 return Err(TypeError {
                     kind: TypeErrorKind::DimensionMismatch,
@@ -346,7 +366,16 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
             Ok(())
         }
 
-        // Error propagation — unifying with Error always succeeds (partial inference)
+        // Error propagation: unifying with Error trivially succeeds so
+        // downstream call sites do not fan out a cascade of secondary
+        // diagnostics from a single upstream error. Call sites that
+        // require a precision/shape match against a non-Error declared
+        // type must check for the Error sentinel themselves and surface
+        // the mismatch explicitly (e.g. the def-body vs declared-sig
+        // unify in `infer.rs` does this for WS-A5 RT-3a F1: when the
+        // body collapses to Error but the declared type is concrete, we
+        // still emit a "body has type `<error>`, declared type is `T`"
+        // diagnostic so the user sees the unresolved declared shape).
         (Type::Error, _) | (_, Type::Error) => Ok(()),
 
         // Everything else is a mismatch
@@ -354,6 +383,41 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
             kind: TypeErrorKind::TypeMismatch,
             message: format!("type mismatch: {t1} vs {t2}"),
         }),
+    }
+}
+
+/// Unify two tensor precision slots per `spec/04-type-system.md` §5.8
+/// (WS-A5 precision polymorphism).
+///
+/// - `Concrete(p1)` and `Concrete(p2)` unify only when `p1 == p2`.
+/// - `Var(v)` unifies with `Concrete(p)` by binding `v` to `Type::Prim(p)`
+///   in the substitution; further references through that var resolve to
+///   the concrete prim via `Subst::apply_tensor_prec`.
+/// - Two `Var`s unify by linking them at the type-variable level
+///   (delegated to `bind_tvar`), keeping the precision slot's monomorphic
+///   structure consistent with the rest of the type system.
+pub fn unify_tensor_prec(
+    p1: &TensorPrec,
+    p2: &TensorPrec,
+    subst: &mut Subst,
+) -> Result<(), TypeError> {
+    let p1 = subst.apply_tensor_prec(p1);
+    let p2 = subst.apply_tensor_prec(p2);
+    match (&p1, &p2) {
+        (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) if a == b => Ok(()),
+        (TensorPrec::Concrete(a), TensorPrec::Concrete(b)) => Err(TypeError {
+            kind: TypeErrorKind::PrecisionMismatch,
+            message: format!("tensor precision mismatch: {} vs {}", a.name(), b.name()),
+        }),
+        (TensorPrec::Var(v), TensorPrec::Concrete(p)) => bind_tvar(*v, &Type::Prim(*p), subst),
+        (TensorPrec::Concrete(p), TensorPrec::Var(v)) => bind_tvar(*v, &Type::Prim(*p), subst),
+        (TensorPrec::Var(v1), TensorPrec::Var(v2)) => {
+            if v1 == v2 {
+                Ok(())
+            } else {
+                bind_tvar(*v1, &Type::Var(*v2), subst)
+            }
+        }
     }
 }
 
@@ -415,7 +479,14 @@ fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
             args.iter().any(|a| occurs_in(v, a, subst)) || occurs_in(v, ret, subst)
         }
         Type::Ref(inner) => occurs_in(v, inner, subst),
-        Type::Tensor(_, _) => false, // tensors don't contain type vars in dims
+        Type::Tensor(_, prec) => match prec {
+            // Dims do not carry type vars (they have their own DimVar lane).
+            // Precision slot CAN carry a TypeVar (WS-A5 precision polymorphism);
+            // include it in the occurs check so an attempt to unify
+            // ?v with `tensor[..., ?v]` is caught as an infinite type.
+            TensorPrec::Concrete(_) => false,
+            TensorPrec::Var(v2) => *v2 == v,
+        },
         Type::Adt(_, args) => args.iter().any(|a| occurs_in(v, a, subst)),
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t, subst)),
         Type::Prim(_) | Type::Unit | Type::Error => false,
@@ -477,16 +548,20 @@ mod tests {
         assert!(matches!(err.kind, TypeErrorKind::ArityMismatch));
     }
 
+    fn tprec(p: Prim) -> TensorPrec {
+        TensorPrec::Concrete(p)
+    }
+
     #[test]
     fn unify_tensor_same_dims() {
         let mut s = Subst::new();
         let t1 = Type::Tensor(
             vec![Dim::Name("batch".into()), Dim::Name("hidden".into())],
-            Prim::F32,
+            tprec(Prim::F32),
         );
         let t2 = Type::Tensor(
             vec![Dim::Name("batch".into()), Dim::Name("hidden".into())],
-            Prim::F32,
+            tprec(Prim::F32),
         );
         assert!(unify(&t1, &t2, &mut s).is_ok());
     }
@@ -494,8 +569,8 @@ mod tests {
     #[test]
     fn unify_tensor_dim_mismatch() {
         let mut s = Subst::new();
-        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
-        let t2 = Type::Tensor(vec![Dim::Name("seq".into())], Prim::F32);
+        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F32));
+        let t2 = Type::Tensor(vec![Dim::Name("seq".into())], tprec(Prim::F32));
         let err = unify(&t1, &t2, &mut s).unwrap_err();
         assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
     }
@@ -503,8 +578,8 @@ mod tests {
     #[test]
     fn unify_tensor_precision_mismatch() {
         let mut s = Subst::new();
-        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
-        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::Bf16);
+        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F32));
+        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::Bf16));
         let err = unify(&t1, &t2, &mut s).unwrap_err();
         assert!(matches!(err.kind, TypeErrorKind::PrecisionMismatch));
     }
@@ -514,8 +589,8 @@ mod tests {
         let mut g = var_gen();
         let dv = g.fresh_dvar();
         let mut s = Subst::new();
-        let t1 = Type::Tensor(vec![Dim::Var(dv)], Prim::F32);
-        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
+        let t1 = Type::Tensor(vec![Dim::Var(dv)], tprec(Prim::F32));
+        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F32));
         assert!(unify(&t1, &t2, &mut s).is_ok());
         assert_eq!(s.apply_dim(&Dim::Var(dv)), Dim::Name("batch".into()));
     }
@@ -534,21 +609,117 @@ mod tests {
     #[test]
     fn unify_wildcard_matches_anything() {
         let mut s = Subst::new();
-        let t1 = Type::Tensor(vec![Dim::Wildcard], Prim::F32);
-        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
+        let t1 = Type::Tensor(vec![Dim::Wildcard], tprec(Prim::F32));
+        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F32));
         assert!(unify(&t1, &t2, &mut s).is_ok());
     }
 
     #[test]
     fn unify_tensor_rank_mismatch() {
         let mut s = Subst::new();
-        let t1 = Type::Tensor(vec![Dim::Name("a".into())], Prim::F32);
+        let t1 = Type::Tensor(vec![Dim::Name("a".into())], tprec(Prim::F32));
         let t2 = Type::Tensor(
             vec![Dim::Name("a".into()), Dim::Name("b".into())],
-            Prim::F32,
+            tprec(Prim::F32),
         );
         let err = unify(&t1, &t2, &mut s).unwrap_err();
         assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
+    }
+
+    // === WS-A5 precision polymorphism unification ===
+
+    #[test]
+    fn unify_tensor_prec_var_binds_to_concrete() {
+        // tensor[batch, ?p] vs tensor[batch, f32]
+        // ?p must bind to f32 in the substitution.
+        let mut g = var_gen();
+        let pv = g.fresh_tvar();
+        let mut s = Subst::new();
+        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Var(pv));
+        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F32));
+        unify(&t1, &t2, &mut s).expect("var precision should bind");
+        assert_eq!(s.apply(&Type::Var(pv)), Type::Prim(Prim::F32));
+        // After substitution, the var-precision tensor reads as f32 too.
+        match s.apply(&t1) {
+            Type::Tensor(_, TensorPrec::Concrete(Prim::F32)) => {}
+            other => panic!("apply should resolve precision var to f32, got {other}"),
+        }
+    }
+
+    #[test]
+    fn unify_tensor_prec_concrete_binds_var_other_side() {
+        // Symmetric: concrete on left, var on right.
+        let mut g = var_gen();
+        let pv = g.fresh_tvar();
+        let mut s = Subst::new();
+        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::Bf16));
+        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Var(pv));
+        unify(&t1, &t2, &mut s).expect("var precision should bind");
+        assert_eq!(s.apply(&Type::Var(pv)), Type::Prim(Prim::Bf16));
+    }
+
+    #[test]
+    fn unify_two_tensor_prec_vars_link() {
+        // Two precision vars unify by linking; the link survives later
+        // binding through either var.
+        let mut g = var_gen();
+        let p1 = g.fresh_tvar();
+        let p2 = g.fresh_tvar();
+        let mut s = Subst::new();
+        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Var(p1));
+        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Var(p2));
+        unify(&t1, &t2, &mut s).expect("two prec vars should link");
+        // Now bind one of them to a concrete prim and confirm the other
+        // resolves to the same prim through the link.
+        let t3 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F64));
+        unify(&t1, &t3, &mut s).expect("link + bind should work");
+        assert_eq!(s.apply(&Type::Var(p1)), Type::Prim(Prim::F64));
+        assert_eq!(s.apply(&Type::Var(p2)), Type::Prim(Prim::F64));
+    }
+
+    #[test]
+    fn unify_tensor_prec_var_then_conflicting_concrete_errors() {
+        // Once ?p is bound to f32, unifying tensor[..., ?p] with
+        // tensor[..., bf16] must error with PrecisionMismatch.
+        let mut g = var_gen();
+        let pv = g.fresh_tvar();
+        let mut s = Subst::new();
+        let t_var = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Var(pv));
+        let t_f32 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F32));
+        let t_bf16 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::Bf16));
+        unify(&t_var, &t_f32, &mut s).expect("first call binds prec var to f32");
+        let err = unify(&t_var, &t_bf16, &mut s).unwrap_err();
+        assert!(matches!(err.kind, TypeErrorKind::PrecisionMismatch));
+    }
+
+    #[test]
+    fn unify_same_prec_var_with_itself_succeeds() {
+        let mut g = var_gen();
+        let pv = g.fresh_tvar();
+        let mut s = Subst::new();
+        let t1 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Var(pv));
+        let t2 = Type::Tensor(vec![Dim::Name("batch".into())], TensorPrec::Var(pv));
+        unify(&t1, &t2, &mut s).expect("self-unify must succeed");
+    }
+
+    #[test]
+    fn apply_tensor_prec_resolves_through_chain() {
+        // Build a substitution that puts ?p1 -> ?p2 -> Prim::F32.
+        let mut g = var_gen();
+        let p1 = g.fresh_tvar();
+        let p2 = g.fresh_tvar();
+        let mut s = Subst::new();
+        unify(&Type::Var(p1), &Type::Var(p2), &mut s).unwrap();
+        unify(&Type::Var(p2), &Type::Prim(Prim::F32), &mut s).unwrap();
+        // apply_tensor_prec on either var must collapse to Concrete(F32).
+        assert_eq!(
+            s.apply_tensor_prec(&TensorPrec::Var(p1)),
+            TensorPrec::Concrete(Prim::F32)
+        );
+        assert_eq!(
+            s.apply_tensor_prec(&TensorPrec::Var(p2)),
+            TensorPrec::Concrete(Prim::F32)
+        );
     }
 
     #[test]
@@ -580,6 +751,12 @@ mod tests {
 
     #[test]
     fn error_type_unifies_with_anything() {
+        // Per WS-A5 RT-3a F1 escalation: the permissive rule is retained
+        // here so a single upstream error does not fan out a cascade of
+        // secondary diagnostics from one root cause; the silent
+        // passthrough at the def-body vs declared-sig boundary is
+        // closed at the call site in `infer.rs`, not by tightening the
+        // unification rule.
         let mut s = Subst::new();
         assert!(unify(&Type::Error, &Type::Prim(Prim::F32), &mut s).is_ok());
         assert!(unify(&Type::Prim(Prim::F32), &Type::Error, &mut s).is_ok());
