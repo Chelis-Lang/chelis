@@ -142,7 +142,7 @@ Track) are post-v1 extensions and do not appear here.
 
 | Phase | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| K0 | `grep -F "spec/design/kerrent.md" spec/12-roadmap.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the roadmap) | `spec/design/kerrent.md` §v1 milestones (Milestone 0 is the spec lock itself) | default gate (doc grep) |
+| K0 | `grep -F "spec/design/kerrent.md" spec/12-roadmap.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the roadmap) | `spec/design/kerrent.md` (the spec lock is the doc's existence; the body enumerates Milestones 1–6 only, so K0 has no in-spec milestone anchor) | default gate (doc grep) |
 | K1 | Parser-correctness suite for the `kernel` annotation and the v1 tile-level primitives (`tile.load`, `tile.store`, `tile.dot`, `tile.reduce`, `tile.mask`, …); kernel-annotated functions get a distinct AST representation distinguishable from tensor-level functions — exact named test TBD when K1 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 1 | aspirational |
 | K2 | Kernel-IR-layer type-checking suite: tile-level operations are first-class IR nodes; dimension types compose through tile scope; mismatched-shape kernel bodies fail at type-check — exact named test TBD when K2 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 2 | aspirational |
 | K3 | Triton IR emission suite: each tile-level operation lowers to a defined Triton IR equivalent and the output validates against Triton's IR specification — exact named test TBD when K3 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 3 | aspirational |
