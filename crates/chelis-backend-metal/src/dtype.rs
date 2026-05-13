@@ -91,6 +91,41 @@ pub fn kernel_suffix(prec: Prim) -> &'static str {
     }
 }
 
+/// Host-safe `sizeof(...)` expression for emitted Objective-C++ host code.
+///
+/// MSL types `half` and `bfloat` are only defined inside MSL kernel
+/// translation units; they do not exist in plain C++ host code. Emitting
+/// `sizeof(half)` or `sizeof(bfloat)` host-side fails to compile with
+/// `clang++ -fobjc-arc` (the MPS f16 wrapper already correctly uses
+/// `sizeof(uint16_t)` for exactly this reason). Every host-side byte-width
+/// computation in the emitter must route through this helper instead of
+/// `sizeof({msl_ty})` so the emitted .mm links cleanly against any Apple
+/// toolchain.
+///
+/// `f64` deliberately panics here as defense in depth; the IR validation
+/// guard, the CLI gate, and the codegen entry all reject `f64` upstream.
+pub fn host_sizeof_expr(prec: Prim) -> &'static str {
+    match prec {
+        Prim::F32 => "sizeof(float)",
+        Prim::F16 => "sizeof(uint16_t)",
+        Prim::Bf16 => "sizeof(uint16_t)",
+        Prim::Int8 => "sizeof(int8_t)",
+        Prim::Int16 => "sizeof(int16_t)",
+        Prim::Int32 => "sizeof(int32_t)",
+        Prim::Int64 => "sizeof(int64_t)",
+        Prim::Bool => "sizeof(bool)",
+        Prim::F64 => panic!(
+            "Metal backend rejects f64 (Apple Silicon GPUs lack FP64 ALUs); \
+             reject_unsupported_metal_ops should have caught the rest"
+        ),
+        other => panic!(
+            "Metal backend dtype not in the active per-backend matrix: {} \
+             (see spec/04-type-system.md §1.1.3)",
+            other.name()
+        ),
+    }
+}
+
 /// Shared `chelis_runtime` dtype enum tag for an active Metal dtype.
 /// Used at the host writeback site to match the runtime's `chelis_alloc`
 /// dispatch. Tag spellings match `crates/chelis-runtime/include/chelis_runtime.h`
@@ -140,6 +175,24 @@ pub fn requires_msl_320_guard(prec: Prim) -> bool {
     matches!(prec, Prim::Bf16)
 }
 
+/// Matmul-accumulator promotion per spec/04-type-system.md §5.7.1.
+///
+/// Mirrors [`sum_accumulator`] but explicitly named for the matmul
+/// path so call sites read intent: `bf16/f16` operands accumulate in
+/// `f32`, narrow ints (`int8/int16`) accumulate in `int32`, and other
+/// dtypes accumulate in their own precision. The kernel template
+/// downcasts the f32 accumulator back to operand precision at write-out
+/// time and casts both tile operands to f32 at the multiply (the spec
+/// requires the partial product to compute in accumulator precision,
+/// not just the running sum).
+pub fn matmul_accumulator(operand_prec: Prim) -> Prim {
+    match operand_prec {
+        Prim::F16 | Prim::Bf16 => Prim::F32,
+        Prim::Int8 | Prim::Int16 => Prim::Int32,
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +213,28 @@ mod tests {
     #[should_panic(expected = "Metal backend rejects f64")]
     fn msl_type_panics_on_f64() {
         let _ = msl_type(Prim::F64);
+    }
+
+    /// F6: pin the panic message format on the three other dtype
+    /// helpers that defensively reject f64 (the spec §1.1.3 hardware
+    /// constraint diagnostic must mention "f64" so a regression that
+    /// changes the wording surfaces here, not at a downstream user).
+    #[test]
+    #[should_panic(expected = "Metal backend rejects f64")]
+    fn metal_elem_size_panics_on_f64() {
+        let _ = metal_elem_size(Prim::F64);
+    }
+
+    #[test]
+    #[should_panic(expected = "Metal backend rejects f64")]
+    fn runtime_dtype_tag_panics_on_f64() {
+        let _ = runtime_dtype_tag(Prim::F64);
+    }
+
+    #[test]
+    #[should_panic(expected = "Metal backend rejects f64")]
+    fn kernel_suffix_panics_on_f64() {
+        let _ = kernel_suffix(Prim::F64);
     }
 
     #[test]
@@ -183,6 +258,35 @@ mod tests {
         assert_eq!(sum_accumulator(Prim::Int32), Prim::Int32);
         assert_eq!(sum_accumulator(Prim::Int64), Prim::Int64);
         assert_eq!(sum_accumulator(Prim::F32), Prim::F32);
+    }
+
+    #[test]
+    fn matmul_accumulator_promotes_per_spec() {
+        assert_eq!(matmul_accumulator(Prim::F16), Prim::F32);
+        assert_eq!(matmul_accumulator(Prim::Bf16), Prim::F32);
+        assert_eq!(matmul_accumulator(Prim::F32), Prim::F32);
+        assert_eq!(matmul_accumulator(Prim::Int8), Prim::Int32);
+        assert_eq!(matmul_accumulator(Prim::Int16), Prim::Int32);
+        assert_eq!(matmul_accumulator(Prim::Int32), Prim::Int32);
+        assert_eq!(matmul_accumulator(Prim::Int64), Prim::Int64);
+    }
+
+    #[test]
+    fn host_sizeof_returns_host_safe_types_for_active_matrix() {
+        assert_eq!(host_sizeof_expr(Prim::F32), "sizeof(float)");
+        assert_eq!(host_sizeof_expr(Prim::F16), "sizeof(uint16_t)");
+        assert_eq!(host_sizeof_expr(Prim::Bf16), "sizeof(uint16_t)");
+        assert_eq!(host_sizeof_expr(Prim::Int8), "sizeof(int8_t)");
+        assert_eq!(host_sizeof_expr(Prim::Int16), "sizeof(int16_t)");
+        assert_eq!(host_sizeof_expr(Prim::Int32), "sizeof(int32_t)");
+        assert_eq!(host_sizeof_expr(Prim::Int64), "sizeof(int64_t)");
+        assert_eq!(host_sizeof_expr(Prim::Bool), "sizeof(bool)");
+    }
+
+    #[test]
+    #[should_panic(expected = "Metal backend rejects f64")]
+    fn host_sizeof_panics_on_f64() {
+        let _ = host_sizeof_expr(Prim::F64);
     }
 
     #[test]
