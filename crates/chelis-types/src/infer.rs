@@ -163,6 +163,12 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // precision promotion" rule. f64 is supported as of v0.2.3.
     validate_tensor_precisions_in_program(exprs, &mut errors);
 
+    // WS-A8 cross-row enforcement: reject `matmul`/transcendental ops that
+    // are reached through a polymorphic-precision sig instantiated at a
+    // dtype the spec rules forbid (§5.7.2 / §5.4).
+    let local_ir_env = build_ir_type_env(exprs);
+    validate_polymorphic_op_constraints(exprs, &local_ir_env, &mut errors);
+
     InferResult {
         errors,
         typed_nodes,
@@ -220,6 +226,8 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
+    validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
+    log_sub("validate_polymorphic_op_constraints", &mut sub_t);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
     log_sub("suppress_unbound_for_cycle", &mut sub_t);
     if !result.errors.is_empty() {
@@ -328,6 +336,7 @@ pub fn build_compiled_library_context(
     );
     validate_ir_program(library_exprs, &library_ir, &mut result.errors);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
     if !result.errors.is_empty() {
         return Err(result);
@@ -460,6 +469,8 @@ pub fn check_ir_with_signature_context(
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(new_exprs, &mut result.errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
+    validate_polymorphic_op_constraints(new_exprs, &combined_ir, &mut result.errors);
+    log_sub("validate_polymorphic_op_constraints", &mut sub_t);
     suppress_unbound_for_cycle_members_against_context(
         new_exprs,
         &context.inner().library_def_names,
@@ -511,6 +522,7 @@ pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
     let mut result = infer_ir_program_with_env(exprs, &type_env);
     validate_ir_program(exprs, &type_env, &mut result.errors);
     validate_tensor_precisions_in_program(exprs, &mut result.errors);
+    validate_polymorphic_op_constraints(exprs, &type_env, &mut result.errors);
     suppress_unbound_for_cycle_members(exprs, &mut result.errors);
     result
 }
@@ -2403,6 +2415,656 @@ fn walk_for_tensor_precision(
         }
         deep::Expr::Atom(_, _) => {}
     }
+}
+
+/// WS-A8 cross-row enforcement: spec/04-type-system.md §5.4 (transcendentals
+/// on float-only) and §5.7.2 (matmul not admitted on integer operands)
+/// fire correctly at direct primitive call sites
+/// (see `check_matmul_signature` and the `TENSOR_OPS` post-check in
+/// `infer_app`), but were silent when the same restricted op was reached
+/// through a polymorphic-precision sig instantiation.
+///
+/// Example: a stdlib `linear.forward` body uses `matmul(x, w)`. Its sig
+/// is `&tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]`. Inside
+/// the body, `matmul`'s operand precisions are both `Var(p)`; the §5.7.2
+/// check (`lhs_prec.is_integer()`) returns `false` for a `Var`. At a
+/// concrete call site `linear.forward(x: int32, w: int32)`, the call
+/// site instantiates `p` to `int32` via unification — but the body's
+/// already-checked `matmul(x, w)` doesn't get re-checked. The integer
+/// rejection silently slipped through.
+///
+/// This pass closes the gap. It walks every `(app (var name) ...)` call
+/// site post-inference and, when the callee is a top-level user-def
+/// with a polymorphic-precision sig, builds a precision-tvar
+/// substitution from the call site's arg types vs the callee's sig
+/// parameter types, then re-checks the callee's body for restricted
+/// ops with the substituted operand precisions.
+fn validate_polymorphic_op_constraints(
+    exprs: &[deep::Expr],
+    type_env: &IrTypeEnv,
+    errors: &mut Vec<CheckError>,
+) {
+    let defs_with_bodies = collect_def_bodies(exprs);
+    let defsigs = collect_defsig_exprs(exprs);
+    // Merge defsig sigs into the type-env view so polymorphic
+    // signatures (which haven't been annotated onto def bodies yet) are
+    // visible to the call-site lookup.
+    let mut combined_env: IrTypeEnv = type_env.clone();
+    for (name, sig_expr) in &defsigs {
+        combined_env.entry(name.clone()).or_insert(sig_expr.clone());
+    }
+    // For each top-level def we walk into, build a local scope mapping
+    // body-param names to their declared types (extracted from the
+    // def's sig in `combined_env`). This lets us resolve `(var x)`
+    // references inside the body without requiring the bodies to have
+    // been annotated. Bodies of polymorphic defs intentionally have
+    // their inner exprs untouched by the annotator at this stage.
+    for expr in top_level_decl_items(exprs) {
+        let scope = build_def_param_scope(expr, &combined_env);
+        walk_for_poly_op_constraint_violations(
+            expr,
+            &defs_with_bodies,
+            &combined_env,
+            &scope,
+            errors,
+        );
+    }
+}
+
+/// Build a name → declared-type-expr map for a def's body params, by
+/// pairing each param's name with the corresponding sig parameter slot.
+fn build_def_param_scope(expr: &deep::Expr, sigs: &IrTypeEnv) -> HashMap<String, deep::Expr> {
+    let mut scope = HashMap::new();
+    let deep::Expr::List(list, _) = expr else {
+        return scope;
+    };
+    if get_tag(list) != Some("def") {
+        return scope;
+    }
+    let kids = children(list);
+    let Some(name) = kids.first().and_then(symbol_name) else {
+        return scope;
+    };
+    let Some(body_expr) = kids.get(1) else {
+        return scope;
+    };
+    let Some((param_names, _)) = extract_fn_params_and_body(body_expr) else {
+        return scope;
+    };
+    // Prefer the def's surrounding sig if any; fall back to inline
+    // param-type annotations on the params themselves (def shape:
+    // `def f(x: tensor[3, f32]) = ...`).
+    if let Some(sig) = sigs.get(name)
+        && let Some((sig_params, _)) = parse_t_fn_parts(sig)
+    {
+        for (pname, sig_param) in param_names.iter().zip(sig_params.iter()) {
+            scope.insert(pname.clone(), sig_param.clone());
+        }
+        return scope;
+    }
+    // Fall back: inline param-type annotations.
+    let deep::Expr::List(fn_list, _) = body_expr else {
+        return scope;
+    };
+    let Some(deep::Expr::List(params_list, _)) = children(fn_list).first() else {
+        return scope;
+    };
+    if get_tag(params_list) != Some("params") {
+        return scope;
+    }
+    for param in children(params_list) {
+        if let Some((pname, Some(ty_expr))) = param_name_and_inline_type(param) {
+            scope.insert(pname, ty_expr);
+        }
+    }
+    scope
+}
+
+/// Extract `(name {type: T} ...)` shape's name+type from a single param
+/// expression. Returns `None` for plain `(name {})` shape (no inline
+/// type) — the surrounding sig fills those in.
+fn param_name_and_inline_type(param: &deep::Expr) -> Option<(String, Option<deep::Expr>)> {
+    match param {
+        deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some((name.clone(), None)),
+        deep::Expr::List(list, _) => {
+            let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) = list.elements.first() else {
+                return None;
+            };
+            let ty = match list.elements.get(1) {
+                Some(deep::Expr::Map(meta, _)) => meta
+                    .entries
+                    .iter()
+                    .find(|(k, _)| k == "type")
+                    .map(|(_, v)| v.clone()),
+                _ => None,
+            };
+            Some((name.clone(), ty))
+        }
+        deep::Expr::MetaExpr(meta, _) => {
+            let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref() else {
+                return None;
+            };
+            let ty = meta
+                .entries
+                .iter()
+                .find(|(k, _)| k == "type")
+                .map(|(_, v)| v.clone());
+            Some((name.clone(), ty))
+        }
+        _ => None,
+    }
+}
+
+/// Collect every `(defsig {} name sig_expr)` at the top level into a
+/// name → sig-expr map. WS-A8 needs this so polymorphic-sig info reaches
+/// the cross-row enforcement pass even when the def's body annotation
+/// has not yet been populated by the annotator.
+fn collect_defsig_exprs(exprs: &[deep::Expr]) -> HashMap<String, deep::Expr> {
+    let mut out = HashMap::new();
+    for expr in top_level_decl_items(exprs) {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("defsig") {
+            continue;
+        }
+        let kids = children(list);
+        if let Some(name) = kids.first().and_then(symbol_name)
+            && let Some(sig) = kids.get(1)
+        {
+            out.insert(name.to_string(), sig.clone());
+        }
+    }
+    out
+}
+
+/// Map from def name to (params: Vec<param-name>, body-expr).
+type DefBodyMap = HashMap<String, (Vec<String>, deep::Expr)>;
+
+fn collect_def_bodies(exprs: &[deep::Expr]) -> DefBodyMap {
+    let mut out = HashMap::new();
+    for expr in top_level_decl_items(exprs) {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(body) = kids.get(1) else {
+            continue;
+        };
+        let Some((params, body_expr)) = extract_fn_params_and_body(body) else {
+            continue;
+        };
+        out.insert(name.to_string(), (params, body_expr));
+    }
+    out
+}
+
+fn extract_fn_params_and_body(expr: &deep::Expr) -> Option<(Vec<String>, deep::Expr)> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("fn") {
+        return None;
+    }
+    let kids = children(list);
+    let params_expr = kids.first()?;
+    let body_expr = kids.get(1)?;
+    let deep::Expr::List(params_list, _) = params_expr else {
+        return None;
+    };
+    if get_tag(params_list) != Some("params") {
+        return None;
+    }
+    let mut names = Vec::new();
+    for param in children(params_list) {
+        if let Some(name) = param_name_for_refs(param) {
+            names.push(name);
+        }
+    }
+    Some((names, body_expr.clone()))
+}
+
+fn walk_for_poly_op_constraint_violations(
+    expr: &deep::Expr,
+    defs: &DefBodyMap,
+    type_env: &IrTypeEnv,
+    scope: &HashMap<String, deep::Expr>,
+    errors: &mut Vec<CheckError>,
+) {
+    match expr {
+        deep::Expr::List(list, _span) => {
+            // Check if this is `(app (var name) arg1 arg2 ...)` calling
+            // a top-level user-def with a polymorphic precision sig.
+            if get_tag(list) == Some("app") {
+                check_app_for_poly_op_constraint(list, defs, type_env, scope, errors);
+            }
+            for child in &list.elements {
+                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
+            }
+        }
+        deep::Expr::Map(map, _) => {
+            for (_, v) in &map.entries {
+                walk_for_poly_op_constraint_violations(v, defs, type_env, scope, errors);
+            }
+        }
+        deep::Expr::MetaExpr(meta, _) => {
+            walk_for_poly_op_constraint_violations(&meta.expr, defs, type_env, scope, errors);
+            for (_, v) in &meta.entries {
+                walk_for_poly_op_constraint_violations(v, defs, type_env, scope, errors);
+            }
+        }
+        deep::Expr::Atom(_, _) => {}
+    }
+}
+
+/// At an `(app (var callee_name) arg1 arg2 ...)` call site, if `callee_name`
+/// is a top-level user-def with a polymorphic-precision sig, compute the
+/// call-site precision substitution and re-check the body for restricted
+/// ops with substituted precisions.
+fn check_app_for_poly_op_constraint(
+    list: &deep::List,
+    defs: &DefBodyMap,
+    type_env: &IrTypeEnv,
+    scope: &HashMap<String, deep::Expr>,
+    errors: &mut Vec<CheckError>,
+) {
+    let kids = children(list);
+    let Some(callee_expr) = kids.first() else {
+        return;
+    };
+    let deep::Expr::List(callee_list, _) = callee_expr else {
+        return;
+    };
+    if get_tag(callee_list) != Some("var") {
+        return;
+    }
+    let Some(callee_name) = children(callee_list).first().and_then(symbol_name) else {
+        return;
+    };
+    // Look up the callee's declared signature; only proceed if it carries
+    // a precision tvar (otherwise there's nothing to monomorphize).
+    let Some(sig_expr) = lookup_sig_in_type_env(type_env, callee_name) else {
+        return;
+    };
+    let Some((sig_params, _sig_ret)) = parse_t_fn_parts(sig_expr) else {
+        return;
+    };
+    if !sig_params.iter().any(type_expr_has_tensor_prec_var) {
+        return;
+    }
+    // Look up the callee's body so we can scan it.
+    let Some((body_params, body)) = defs.get(callee_name) else {
+        return;
+    };
+    // Build the call-site precision substitution: for each sig parameter
+    // whose precision slot is `(t-var {} q)`, resolve the corresponding
+    // call-site argument's concrete precision. Try the arg's `type:`
+    // annotation first; fall back to the enclosing-def `scope` when the
+    // arg is `(var x)` for an unannotated body-level reference.
+    let mut subst: HashMap<String, String> = HashMap::new();
+    for (sig_param, arg_expr) in sig_params.iter().zip(kids.iter().skip(1)) {
+        let Some(prec_var_name) = precision_var_name_in_type_expr(sig_param) else {
+            continue;
+        };
+        let arg_ty =
+            annotated_type_of_expr(arg_expr).or_else(|| resolve_var_type_in_scope(arg_expr, scope));
+        let Some(arg_ty) = arg_ty else {
+            continue;
+        };
+        let Some(prim_name) = precision_prim_name_in_type_expr(&arg_ty) else {
+            continue;
+        };
+        // Last-write-wins is fine: if the same `q` appears in multiple
+        // params, the call site's unification already enforced consistency
+        // (otherwise `chelis check` would have surfaced a precision
+        // mismatch earlier in the pipeline).
+        subst.insert(prec_var_name, prim_name);
+    }
+    if subst.is_empty() {
+        return;
+    }
+    // Map the body's parameter names to the sig's parameter precision-var
+    // names, so we can resolve `(var x)` inside the body to a precision
+    // variable. The body's params and the sig's params line up by
+    // position.
+    let mut param_to_prec: HashMap<String, String> = HashMap::new();
+    for (body_param_name, sig_param) in body_params.iter().zip(sig_params.iter()) {
+        if let Some(prec_var_name) = precision_var_name_in_type_expr(sig_param) {
+            param_to_prec.insert(body_param_name.clone(), prec_var_name);
+        }
+    }
+    // Walk the body looking for restricted ops applied to body parameters
+    // whose precision tvar (after substitution) violates §5.4 / §5.7.2.
+    walk_body_for_restricted_ops(body, &param_to_prec, &subst, callee_name, list, errors);
+}
+
+/// Top-level def signature lookup: scan `type_env` for the callee's
+/// declared `(t-fn ...)` signature.
+fn lookup_sig_in_type_env<'a>(type_env: &'a IrTypeEnv, name: &str) -> Option<&'a deep::Expr> {
+    type_env.get(name).or_else(|| {
+        // Fall back to terminal-name match (mirrors `lookup_declared_type_expr`).
+        let mut matches = type_env.iter().filter_map(|(key, value)| {
+            let key_terminal = key
+                .rsplit_once("__")
+                .map(|(_, t)| t)
+                .unwrap_or(key.as_str());
+            let key_terminal = key_terminal
+                .rsplit_once('.')
+                .map(|(_, t)| t)
+                .unwrap_or(key_terminal);
+            (key_terminal == name).then_some(value)
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    })
+}
+
+fn parse_t_fn_parts(expr: &deep::Expr) -> Option<(Vec<deep::Expr>, deep::Expr)> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("t-fn") {
+        return None;
+    }
+    let kids = children(list);
+    let (ret, args) = kids.split_last()?;
+    Some((args.iter().map(|e| (*e).clone()).collect(), (*ret).clone()))
+}
+
+/// Strip a leading `(t-ref {} ...)` wrapper for precision-var probing;
+/// the borrow doesn't affect the precision slot.
+fn strip_t_ref(expr: &deep::Expr) -> &deep::Expr {
+    if let deep::Expr::List(list, _) = expr
+        && get_tag(list) == Some("t-ref")
+        && let Some(inner) = list.elements.get(2)
+    {
+        return inner;
+    }
+    expr
+}
+
+fn type_expr_has_tensor_prec_var(expr: &deep::Expr) -> bool {
+    let stripped = strip_t_ref(expr);
+    let deep::Expr::List(list, _) = stripped else {
+        return false;
+    };
+    match get_tag(list) {
+        Some("t-tensor") => precision_var_name_in_type_expr(stripped).is_some(),
+        Some("t-fn") | Some("t-tuple") | Some("t-adt") => {
+            children(list).iter().any(type_expr_has_tensor_prec_var)
+        }
+        _ => false,
+    }
+}
+
+/// Pull the precision-var name out of a tensor-type expression's
+/// last child (the precision slot). Returns `Some(name)` when the
+/// slot is `(t-var {} name)`; `None` when concrete or non-tensor.
+fn precision_var_name_in_type_expr(expr: &deep::Expr) -> Option<String> {
+    let stripped = strip_t_ref(expr);
+    let deep::Expr::List(list, _) = stripped else {
+        return None;
+    };
+    if get_tag(list) != Some("t-tensor") {
+        return None;
+    }
+    let last = list.elements.last()?;
+    let deep::Expr::List(prec_list, _) = last else {
+        return None;
+    };
+    if get_tag(prec_list) != Some("t-var") {
+        return None;
+    }
+    children(prec_list)
+        .first()
+        .and_then(symbol_name)
+        .map(String::from)
+}
+
+/// Pull the concrete `(t-prim {} name)` from a tensor-type expression's
+/// precision slot. Returns `None` when the slot is a tvar.
+fn precision_prim_name_in_type_expr(expr: &deep::Expr) -> Option<String> {
+    let stripped = strip_t_ref(expr);
+    let deep::Expr::List(list, _) = stripped else {
+        return None;
+    };
+    if get_tag(list) != Some("t-tensor") {
+        return None;
+    }
+    let last = list.elements.last()?;
+    let deep::Expr::List(prec_list, _) = last else {
+        return None;
+    };
+    if get_tag(prec_list) != Some("t-prim") {
+        return None;
+    }
+    children(prec_list)
+        .first()
+        .and_then(symbol_name)
+        .map(String::from)
+}
+
+/// Look up the type of `(var name)` in the enclosing-def `scope` map
+/// (built from the def's sig + inline param annotations). Returns
+/// `None` when the expression is not a var or the name is not in
+/// scope.
+fn resolve_var_type_in_scope(
+    expr: &deep::Expr,
+    scope: &HashMap<String, deep::Expr>,
+) -> Option<deep::Expr> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    let name = children(list).first().and_then(symbol_name)?;
+    scope.get(name).cloned()
+}
+
+/// Pull the `type:` meta entry off a Deep expression. Returns the inner
+/// type expression when present.
+fn annotated_type_of_expr(expr: &deep::Expr) -> Option<deep::Expr> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    let meta = match list.elements.get(1) {
+        Some(deep::Expr::Map(meta, _)) => meta,
+        _ => return None,
+    };
+    meta.entries
+        .iter()
+        .find(|(k, _)| k == "type")
+        .map(|(_, v)| v.clone())
+}
+
+/// Walk a polymorphic def's body looking for `(app (var op) arg1 arg2 ...)`
+/// where `op` is one of the §5.4 (transcendental, float-only) or §5.7.2
+/// (matmul, integer-rejected) restricted ops, and `arg1`/`arg2` are
+/// `(var name)` references to body parameters. Validate the substituted
+/// precision against the spec rule.
+fn walk_body_for_restricted_ops(
+    expr: &deep::Expr,
+    param_to_prec: &HashMap<String, String>,
+    subst: &HashMap<String, String>,
+    callee_name: &str,
+    call_site_list: &deep::List,
+    errors: &mut Vec<CheckError>,
+) {
+    if let deep::Expr::List(list, _) = expr
+        && get_tag(list) == Some("app")
+    {
+        let kids = children(list);
+        if let Some(deep::Expr::List(callee, _)) = kids.first()
+            && get_tag(callee) == Some("var")
+            && let Some(op_name) = children(callee).first().and_then(symbol_name)
+        {
+            check_restricted_op_in_body(
+                op_name,
+                &kids[1..],
+                param_to_prec,
+                subst,
+                callee_name,
+                call_site_list,
+                errors,
+            );
+        }
+        for child in &list.elements {
+            walk_body_for_restricted_ops(
+                child,
+                param_to_prec,
+                subst,
+                callee_name,
+                call_site_list,
+                errors,
+            );
+        }
+    } else if let deep::Expr::List(list, _) = expr {
+        for child in &list.elements {
+            walk_body_for_restricted_ops(
+                child,
+                param_to_prec,
+                subst,
+                callee_name,
+                call_site_list,
+                errors,
+            );
+        }
+    } else if let deep::Expr::MetaExpr(meta, _) = expr {
+        walk_body_for_restricted_ops(
+            &meta.expr,
+            param_to_prec,
+            subst,
+            callee_name,
+            call_site_list,
+            errors,
+        );
+    }
+}
+
+/// `op_name`: the name of the inner operation (e.g. `matmul`, `exp`).
+/// `op_args`: the arg expressions of the `(app (var op_name) ...)` form.
+const TRANSCENDENTAL_FLOAT_ONLY_OPS: &[&str] = &[
+    "exp",
+    "log",
+    "sin",
+    "cos",
+    "sqrt",
+    "tan",
+    "atan",
+    "softmax",
+    "sigmoid",
+    "tanh",
+    "silu",
+    "gelu",
+    "layer_norm",
+    "normalize",
+];
+
+const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];
+
+fn check_restricted_op_in_body(
+    op_name: &str,
+    op_args: &[deep::Expr],
+    param_to_prec: &HashMap<String, String>,
+    subst: &HashMap<String, String>,
+    callee_name: &str,
+    call_site_list: &deep::List,
+    errors: &mut Vec<CheckError>,
+) {
+    if !INTEGER_REJECTED_OPS.contains(&op_name) && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
+    {
+        return;
+    }
+    // Resolve each arg's precision through the param-to-prec mapping and
+    // the call-site substitution. The arg may be either a direct
+    // `(var x)` reference to a body param OR a deeper expression — for
+    // the latter we look at its annotated type's precision slot.
+    for arg in op_args {
+        let resolved_prim = resolve_arg_precision_through_subst(arg, param_to_prec, subst);
+        let Some(prim_name) = resolved_prim else {
+            continue;
+        };
+        let Some(prim) = Prim::parse_name(&prim_name) else {
+            continue;
+        };
+        let _ = call_site_list; // span hint reserved for future plumbing
+        if INTEGER_REJECTED_OPS.contains(&op_name) && prim.is_integer() {
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "{op_name} on integer operand precision `{prim_name}` is not \
+                     admitted in this cycle per spec/04-type-system.md \u{00a7}5.7.2: \
+                     integer matmul not admitted (the spec deliberately defers the \
+                     integer-matmul accumulator rule). Reached through the polymorphic \
+                     sig for `{callee_name}` instantiated at integer precision; the \
+                     restriction fires on every integer instantiation, including via \
+                     stdlib wrappers."
+                ),
+                vec![format!(
+                    "spec/04-type-system.md \u{00a7}5.7.2: there is no current backend \
+                     that supports integer BLAS. Use reduce_sum over an explicit \
+                     expand+mul lowering for integer inner products, or float \
+                     instantiations of `{callee_name}`."
+                )],
+            ));
+            return;
+        }
+        if TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name) && !prim.is_float() {
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "{op_name} on operand precision `{prim_name}` is not admitted per \
+                     spec/04-type-system.md \u{00a7}5.4: transcendental operations are \
+                     restricted to f32, f64, bf16, f16 (not integer). Reached through \
+                     the polymorphic sig for `{callee_name}` instantiated at \
+                     `{prim_name}`; the restriction fires on every non-float \
+                     instantiation, including via stdlib wrappers."
+                ),
+                vec![format!(
+                    "spec/04-type-system.md \u{00a7}5.4: cast to a float precision \
+                     before applying `{op_name}`, or pick a float instantiation of \
+                     `{callee_name}`."
+                )],
+            ));
+            return;
+        }
+    }
+}
+
+/// Resolve a single arg's precision-tvar binding for restricted-op
+/// checking. If the arg is `(var name)` and `name` is in the body's
+/// param-to-prec map, look up the call-site substitution.  If the arg
+/// is itself an `app` with an annotated tensor type whose precision
+/// slot is concrete, use that. Returns `Some(prim_name)` if resolvable.
+fn resolve_arg_precision_through_subst(
+    arg: &deep::Expr,
+    param_to_prec: &HashMap<String, String>,
+    subst: &HashMap<String, String>,
+) -> Option<String> {
+    if let deep::Expr::List(list, _) = arg
+        && get_tag(list) == Some("var")
+        && let Some(name) = children(list).first().and_then(symbol_name)
+        && let Some(prec_var) = param_to_prec.get(name)
+        && let Some(prim) = subst.get(prec_var)
+    {
+        return Some(prim.clone());
+    }
+    // Fall back to the arg's annotated type's concrete precision (when
+    // the body did its own arithmetic, e.g. `wx = matmul(x, w);
+    // softmax(wx)`).
+    if let Some(ty) = annotated_type_of_expr(arg)
+        && let Some(prim) = precision_prim_name_in_type_expr(&ty)
+    {
+        return Some(prim);
+    }
+    None
 }
 
 fn validate_ir_expr(
@@ -5135,7 +5797,23 @@ fn infer_app(
                         }
                         "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
                         | "gelu" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            // WS-A8 / RT-3 F3: spec/04-type-system.md §5.4
+                            // restricts transcendental ops to float
+                            // precisions (f32, f64, bf16, f16). The
+                            // tensor form was previously admitted with
+                            // any precision, slipping integer instantiations
+                            // past the type checker; the scalar form
+                            // already enforced this. Tensors carrying
+                            // an unresolved `TensorPrec::Var(_)` are
+                            // accepted here so a polymorphic body
+                            // type-checks; the cross-row enforcement
+                            // pass `validate_polymorphic_op_constraints`
+                            // catches integer instantiations at the
+                            // call site.
+                            matches!(
+                                resolved,
+                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error
+                            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
                                 || matches!(resolved, Type::Prim(prec) if prec.is_float())
                         }
                         "cmplt" | "lt" | "gt" | "lte" | "gte" => {
@@ -5157,16 +5835,55 @@ fn infer_app(
                         _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error),
                     };
                     if !ok {
+                        // WS-A8: surface a §5.4 citation when a
+                        // transcendental rejects an integer tensor.
+                        let is_transcendental = matches!(
+                            fname.as_str(),
+                            "exp"
+                                | "log"
+                                | "sin"
+                                | "sqrt"
+                                | "relu"
+                                | "sigmoid"
+                                | "tanh"
+                                | "silu"
+                                | "gelu"
+                        );
+                        let (kind, message, hints) = if is_transcendental
+                            && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
+                            && !p.is_float()
+                        {
+                            (
+                                CheckErrorKind::PrecisionMismatch,
+                                format!(
+                                    "{fname} on operand precision `{}` is not admitted per \
+                                     spec/04-type-system.md \u{00a7}5.4: transcendental \
+                                     operations are restricted to f32, f64, bf16, f16 (not \
+                                     integer)",
+                                    p.name()
+                                ),
+                                vec![format!(
+                                    "spec/04-type-system.md \u{00a7}5.4: cast to a float \
+                                     precision before applying `{fname}`."
+                                )],
+                            )
+                        } else {
+                            (
+                                CheckErrorKind::TypeMismatch,
+                                format!(
+                                    "{fname} does not accept argument type {resolved} in this \
+                                     context"
+                                ),
+                                vec![],
+                            )
+                        };
                         errors.push(CheckError::new(
-                            CheckErrorKind::TypeMismatch,
+                            kind,
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "{} does not accept argument type {} in this context",
-                                    fname, resolved
-                                ),
+                                message,
                             ),
-                            vec![],
+                            hints,
                         ));
                         return Type::Error;
                     }
@@ -5201,6 +5918,35 @@ fn infer_app(
                             ));
                             return Type::Error;
                         }
+                    }
+                    // WS-A8 / RT-3 F3: softmax is a transcendental row
+                    // op per spec/04-type-system.md \u{00a7}5.4 and must
+                    // reject integer operand precisions. Polymorphic
+                    // (`Var`) precisions are accepted here so a poly
+                    // body type-checks; the cross-row enforcement pass
+                    // catches integer call-site instantiations.
+                    if fname == "softmax"
+                        && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
+                        && !p.is_float()
+                    {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::PrecisionMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "softmax on operand precision `{}` is not admitted per \
+                                     spec/04-type-system.md \u{00a7}5.4: transcendental \
+                                     operations are restricted to f32, f64, bf16, f16 \
+                                     (not integer)",
+                                    p.name()
+                                ),
+                            ),
+                            vec![format!(
+                                "spec/04-type-system.md \u{00a7}5.4: cast to a float \
+                                 precision before applying softmax."
+                            )],
+                        ));
+                        return Type::Error;
                     }
                 }
 

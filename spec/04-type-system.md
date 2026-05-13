@@ -720,6 +720,21 @@ must carry `TensorPrec::Concrete(_)`. Backends assert this invariant
 at the lowering match arm; a `TensorPrec::Var(_)` reaching a backend
 is a monomorphization bug, not user error.
 
+Monomorphization is implemented (WS-A8) by threading a precision
+substitution map (`prec_substitutions`) through `LowerCtx`, populated
+at every call site of a polymorphic-precision sig from the formal vs
+actual parameter types. Inlining at a concrete call site supplies the
+concrete precision before the backend boundary; standalone emission
+of a polymorphic-precision sig is intentionally elided (no caller can
+use the symbol without a concrete instantiation). Cross-row spec
+rules (§5.4 transcendental float-only, §5.7.2 integer matmul not
+admitted) are enforced both at direct primitive call sites and at
+polymorphic-call-site instantiation by the
+`validate_polymorphic_op_constraints` pass; an integer instantiation
+of a polymorphic body that uses `matmul` (or float-only operand of a
+transcendental row op) surfaces with the spec's existing
+`PrecisionMismatch` diagnostic kind and a §5.7.2 / §5.4 citation.
+
 ---
 
 ## 6. Fitness Scoring

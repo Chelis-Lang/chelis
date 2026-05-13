@@ -13,6 +13,17 @@
 //! `expected_to_fail_*` tests have been renamed to drop the prefix
 //! and inverted to assert the fixed behavior.
 //!
+//! WS-A8 supersedes the F2 backend-rejection contract. Section D's
+//! original tests asserted that backends MUST refuse to emit a
+//! polymorphic sig with no call site. After WS-A8 implemented true
+//! monomorphization, the contract is: a polymorphic sig with no
+//! concrete call site is silently elided from emission (no caller
+//! needs the symbol; no concrete type to instantiate). The backend
+//! tripwire panic remains as a safety net but is unreachable from
+//! properly-typed source. The Section D tests now pin the
+//! silent-elision contract and add positive cases that exercise
+//! monomorphization with a concrete call site.
+//!
 //! Findings legend:
 //!   * Test names tagged "baseline_*" pin behavior that was correct
 //!     before the fixups and must stay correct.
@@ -411,14 +422,21 @@ fn baseline_unsigned_alias_in_precision_rejected_with_diagnostic() {
 // invariant at the lowering match arm; a `TensorPrec::Var(_)`
 // reaching a backend is a monomorphization bug, not user error."
 //
-// The F2 fix adds the assertion in `try_extract_tensor_type` (and
-// surfaces it as a `LowerDiagnostic` via the new
-// `try_lower_compiled_program` entry point in `chelis_ir::host`). All
-// three backends (C, HIP, Metal) now refuse to emit code for a
-// polymorphic sig that has no concrete instantiation site.
+// WS-A8 supersedes the WS-A5 RT-3a F2 contract: monomorphization
+// itself was implemented (call-site precision substitution into the
+// def body, host emission of polymorphic-sig defs is skipped). The
+// backend tripwire panic in `try_extract_tensor_type` is retained as
+// a safety net, but properly-typed source never reaches it.
+//
+// Post-WS-A8 contract: a polymorphic sig with no concrete call site
+// is silently elided from emission (no caller is asking for it; no
+// concrete type to monomorphize against). The build succeeds with no
+// emitted symbols for that sig. The F2 backend tripwire only fires
+// for genuine internal monomorphization gaps and is unreachable from
+// well-typed source.
 // ---------------------------------------------------------------------------
 
-fn polymorphic_sig_no_call_must_fail_with_monomorphization_diag(target: &str, dir_name: &str) {
+fn polymorphic_sig_no_call_now_skips_emit_silently(target: &str, dir_name: &str) {
     let dir = tempdir().expect("tempdir");
     let src = dir.path().join("poly_no_call.ch");
     let out = dir.path().join(dir_name);
@@ -431,36 +449,69 @@ fn polymorphic_sig_no_call_must_fail_with_monomorphization_diag(target: &str, di
     let result = run_build(&src, target, &out);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        !result.status.success(),
-        "F2 fix: target `{target}` must refuse polymorphic sig with \
-         no concrete instantiation per spec/04-type-system.md \u{00a7}5.8.1. \
-         stderr={stderr}"
+        result.status.success(),
+        "WS-A8: target `{target}` must accept a polymorphic sig with \
+         no concrete instantiation by silently eliding the emit per \
+         spec/04-type-system.md \u{00a7}5.8.1. stderr={stderr}"
     );
     assert!(
-        stderr.contains("monomorphization") || stderr.contains("TensorPrec"),
-        "F2 fix: stderr must name the monomorphization invariant or \
-         the `TensorPrec` sentinel. stderr={stderr}"
+        !stderr.contains("monomorphization"),
+        "WS-A8: stderr must not surface the monomorphization tripwire \
+         for properly-typed source. stderr={stderr}"
     );
+}
+
+#[test]
+fn polymorphic_sig_no_call_skips_emit_silently_c_backend() {
+    polymorphic_sig_no_call_now_skips_emit_silently("c", "c_out");
+}
+
+#[test]
+fn polymorphic_sig_no_call_skips_emit_silently_hip_backend() {
+    polymorphic_sig_no_call_now_skips_emit_silently("hip", "hip_out");
+}
+
+#[test]
+fn polymorphic_sig_no_call_skips_emit_silently_metal_backend() {
+    polymorphic_sig_no_call_now_skips_emit_silently("metal", "metal_out");
+}
+
+// WS-A8 positive cases: a polymorphic sig with a concrete call site
+// must build successfully, with the call-site instantiation supplying
+// the concrete precision through monomorphization.
+fn polymorphic_sig_with_concrete_call_now_builds(target: &str, dir_name: &str) {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("poly_with_call.ch");
+    let out = dir.path().join(dir_name);
+    fs::create_dir_all(&out).unwrap();
+    write_file(
+        &src,
+        "sig poly_id: tensor[n, p] -> tensor[n, p]\n\
+         def poly_id(x) = x\n\
+         def call(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)\n",
+    );
+    let result = run_build(&src, target, &out);
+    let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        stderr.contains("5.8.1"),
-        "F2 fix: stderr must cite spec section 5.8.1 so the user can \
-         locate the rule. stderr={stderr}"
+        result.status.success(),
+        "WS-A8: target `{target}` must build a polymorphic sig + concrete \
+         call site successfully. stderr={stderr}"
     );
 }
 
 #[test]
-fn polymorphic_sig_no_call_now_rejected_by_c_backend() {
-    polymorphic_sig_no_call_must_fail_with_monomorphization_diag("c", "c_out");
+fn polymorphic_sig_with_concrete_call_builds_c_backend() {
+    polymorphic_sig_with_concrete_call_now_builds("c", "c_out");
 }
 
 #[test]
-fn polymorphic_sig_no_call_now_rejected_by_hip_backend() {
-    polymorphic_sig_no_call_must_fail_with_monomorphization_diag("hip", "hip_out");
+fn polymorphic_sig_with_concrete_call_builds_hip_backend() {
+    polymorphic_sig_with_concrete_call_now_builds("hip", "hip_out");
 }
 
 #[test]
-fn polymorphic_sig_no_call_now_rejected_by_metal_backend() {
-    polymorphic_sig_no_call_must_fail_with_monomorphization_diag("metal", "metal_out");
+fn polymorphic_sig_with_concrete_call_builds_metal_backend() {
+    polymorphic_sig_with_concrete_call_now_builds("metal", "metal_out");
 }
 
 // ---------------------------------------------------------------------------
