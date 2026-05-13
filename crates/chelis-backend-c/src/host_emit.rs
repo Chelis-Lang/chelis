@@ -261,8 +261,15 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push(
         "    chelis_tensor* out_tensor = chelis_alloc(ndim, shape, input->dtype);".to_string(),
     );
+    // RT-4 F2: size the memcpy by the actual dtype element width via
+    // chelis_dtype_size, not by hardcoded sizeof(float). Otherwise
+    // f64/i64 reshape truncates to half its data and i8/i16 reshape
+    // would overrun on contiguous input.
     out.push(
-        "    memcpy(out_tensor->data, input->data, (size_t)input->size * sizeof(float));"
+        "    size_t elem_bytes = (size_t)chelis_dtype_size(input->dtype);".to_string(),
+    );
+    out.push(
+        "    memcpy(out_tensor->data, input->data, (size_t)input->size * elem_bytes);"
             .to_string(),
     );
     out.push("    return out_tensor;".to_string());

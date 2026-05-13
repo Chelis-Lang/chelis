@@ -461,6 +461,27 @@ pub unsafe extern "C" fn chelis_alloc(
     Box::into_raw(tensor)
 }
 
+/// Element size in bytes for the given dtype tag.
+///
+/// Mirrors the per-dtype dispatch inside [`chelis_alloc`] and the GPU-side
+/// `chelis_gpu_dtype_size`. Generated C code calls this when sizing
+/// memcpys / per-element casts so the byte stride matches the storage
+/// layout of `chelis_tensor::data`. RT-4 F2/F3 fix: replaces hardcoded
+/// `sizeof(float)` in the C backend's reshape and cast emitters.
+#[no_mangle]
+pub extern "C" fn chelis_dtype_size(dtype: c_int) -> c_int {
+    if dtype == CHELIS_I64 || dtype == CHELIS_F64 {
+        std::mem::size_of::<i64>() as c_int
+    } else if dtype == CHELIS_BF16 || dtype == CHELIS_F16 || dtype == CHELIS_I16 {
+        2
+    } else if dtype == CHELIS_I8 {
+        std::mem::size_of::<i8>() as c_int
+    } else {
+        // CHELIS_F32, CHELIS_I32, CHELIS_BOOL all use 4 bytes.
+        std::mem::size_of::<f32>() as c_int
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_alloc_view(
     ndim: c_int,

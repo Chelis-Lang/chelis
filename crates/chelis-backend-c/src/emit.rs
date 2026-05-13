@@ -426,7 +426,7 @@ impl CEmitter {
                 self.emit_stride(id, strides, &node.inputs, &node.output_type);
             }
             RiscOp::Realize => self.emit_realize(id, &node.inputs, &node.output_type),
-            RiscOp::Cast { .. } => self.emit_cast(id, &node.inputs, &node.output_type),
+            RiscOp::Cast { .. } => self.emit_cast(id, &node.inputs, &node.output_type, dag),
             RiscOp::Store { name } => self.emit_store(id, name.as_str(), &node.inputs),
             RiscOp::FusedElem { ops } => {
                 let in_place =
@@ -3059,13 +3059,46 @@ impl CEmitter {
     }
 
     // ---- Cast ----
-    fn emit_cast(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
-        // Phase 0f only supports casts to f32, validated before emission.
+    fn emit_cast(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType, dag: &Dag) {
+        // RT-4 F3: a value-converting cast, not a bitwise reinterpret.
+        // Spec §5.2 says "cast changes precision"; the previous bitwise
+        // memcpy through `sizeof(float)` produced garbage when source
+        // and target dtypes differed in size or numeric encoding (e.g.
+        // `cast(3.5f32, int32)` returned the int32 reinterpretation of
+        // the float bit pattern instead of `3`).
         let a = inputs[0].0;
+        let src_ty = dag.get(inputs[0]).map(|n| n.output_type.clone());
+        let src_et = src_ty
+            .as_ref()
+            .map(Self::elem_type)
+            .unwrap_or("float");
+        let dst_et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "memcpy(t{id}->data, t{a}->data, t{id}->size * sizeof(float));"
-        ));
+        if src_ty
+            .as_ref()
+            .is_some_and(|s| s.precision == ty.precision)
+        {
+            // Same-dtype cast: copy directly using the per-dtype size.
+            // Sizing by `sizeof({elem})` rather than the cast cost
+            // models a same-dtype cast as a structural identity copy
+            // and matches the runtime's per-dtype storage layout.
+            self.line(&format!(
+                "memcpy(t{id}->data, t{a}->data, t{id}->size * sizeof({dst_et}));"
+            ));
+        } else {
+            // Cross-dtype value-converting cast. C's implicit conversion
+            // rules give us truncation-toward-zero for float→int and
+            // standard rounding for int→float; bf16/f16 sources are
+            // out of scope per the F3 brief and would have been
+            // rejected upstream by validate_supported_precisions.
+            self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "(({dst_et}*)t{id}->data)[i] = ({dst_et})((({src_et}*)t{a}->data)[i]);"
+            ));
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     // ---- Store ----

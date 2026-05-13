@@ -102,6 +102,13 @@ extern "C" {
 
 chelis_tensor *chelis_alloc(int ndim, const int *shape, int dtype);
 chelis_tensor *chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);
+/* Element size in bytes for the given CHELIS_* dtype tag. Mirrors the
+ * per-dtype dispatch inside `chelis_alloc` and the GPU-side
+ * `chelis_gpu_dtype_size`. Generated C code calls this when sizing
+ * memcpys / per-element strides so the byte stride matches the storage
+ * layout. RT-4 F2/F3 fix: replaces hardcoded `sizeof(float)` in the C
+ * backend's reshape and cast emitters. */
+int chelis_dtype_size(int dtype);
 void chelis_free(chelis_tensor *t);
 void chelis_fill_f32(chelis_tensor *t, float val);
 void chelis_fill_i64(chelis_tensor *t, int64_t val);
