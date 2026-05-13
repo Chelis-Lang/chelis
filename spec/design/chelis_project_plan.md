@@ -1256,6 +1256,53 @@ FFI boundaries. See `spec/design/differentiable_language.md` §What's not in sco
 
 ---
 
+## Hydronnx Shell Track (Phases H0–H5)
+
+Parallel committed-scope track for Hydronnx, the Chelis shell that consumes ONNX
+model files and exposes them as typed, callable Chelis functions. Detailed
+design in `spec/design/hydronnx.md`; roadmap row in `spec/12-roadmap.md`
+§Hydronnx.
+
+`Hydronnx` (PascalCase) is the module path; `hydronnx` is the crate, package,
+file, and prose form. The upstream `ONNX` interchange format is not owned by
+Chelis — Hydronnx is the consumer, not the format. The two names are kept
+distinct everywhere they appear.
+
+Scope is committed; the strategic decision on when to begin Phase H1 is
+separate. Phasing is sequenced by dependency: H1 → H2 → H3 → H4, with H5 free
+to develop in parallel with H4.
+
+| Phase | Deliverable | Notes |
+|---|---|---|
+| **H0** | Spec lock at `spec/design/hydronnx.md` | ✅ Complete |
+| **H1** | ONNX protobuf parser, internal IR (`OnnxModel`/`OnnxGraph`/`OnnxNode`/`OnnxTensor`), `chelis-hydronnx-inspect` CLI utility. Inventory matches `onnx.checker.check_model` baseline. | Single-agent dispatch; standalone milestone. |
+| **H2** | Operator translator over the v0.1 core subset: tensor manipulation, elementwise arithmetic, comparisons, logical, reductions, matrix, activations, normalization, convolution, decomposed Attention/MultiHeadAttention/RotaryEmbedding, Cast, Constant/ConstantOfShape. | Decomposition recipes for high-level operators are pinned in the spec so future IR-specializer recognizers know the canonical tag tree to match. Per-operator and per-category numerical agreement vs ONNX Runtime. |
+| **H3** | Weight loading (ONNX TensorProto → Chelis tensor), layout conversion, dtype conversion, Chelis function emission with provenance metadata. `load_model` / `inspect_model` / `load_model_with_opts` API surface. | Single-agent dispatch; closes the end-to-end loading capability. |
+| **H4** | Type-discipline integration: dimension types on loaded signatures, call-site type checking, property attachment, AD composition where operators support it, composition with other Chelis code. | Composes with `spec/design/chelis_property_spec.md` and the existing hull infrastructure. |
+| **H5** | Documentation, examples per strong-fit model category, property examples, honest performance framing, ONNX-Runtime → hydronnx migration guide. | Discovery and onboarding milestone. |
+
+Initial dtype scope (`f32`, `f64`, `i32`, `i64`) matches the host-side dtype
+build-out. Operator coverage extensions (`bf16`, `f16`, `i8`, `i16`,
+quantized formats) ship as the dtype build-out delivers host-side precision.
+
+Dependencies on other Chelis workstreams are deliberately non-blocking where
+possible:
+
+- The `IR-FirstClassFn-F1` / `IR-SelectOp-F1` / `IR-MatchLowering-F1` §5 entries
+  in `docs/gap_synthesis.md` extend Hydronnx's operator coverage (If, Loop,
+  Scan) when they close; v0.1 explicitly excludes those operators.
+- The differentiable-language Phase D1 control-flow AD work unlocks AD through
+  dynamic-graph operators once those operators load.
+- Fusion, kernel authoring, and MLIR-backend work are performance enhancers
+  that loaded models pick up automatically — no Hydronnx changes required.
+
+What is explicitly *not* in v1 scope: custom ONNX operators, ONNX Training
+graphs, dynamic-graph operators (If, Loop, Scan), quantized formats
+(QDQ / Q8 / Q4), multi-device or distributed inference, Chelis → ONNX
+round-trip export. See `spec/design/hydronnx.md` §What's not in v1 scope.
+
+---
+
 ## Ecosystem Library Decisions
 
 Evaluated via multi-agent review.

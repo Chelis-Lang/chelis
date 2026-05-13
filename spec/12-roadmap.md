@@ -102,6 +102,36 @@ develop in parallel with D5 once D4 lands. Committing to D1 reclassifies
 IR-SelectOp-F1, IR-MatchLowering-F1, and IR-FirstClassFn-F1 from
 "surface-when-forced" to required prerequisites.
 
+## Hydronnx — ONNX shell (committed scope)
+
+Five-phase plan for `Hydronnx`, the Chelis shell that consumes ONNX
+model files and exposes them as typed, callable Chelis functions with
+dimension types, property attachment, AD composition, and trust-stack
+integration. The scope is committed (canonical document below); the
+strategic decision on when to begin Phase H1 is separate. Detailed
+design in `spec/design/hydronnx.md`. Throughout: `Hydronnx` /
+`hydronnx` is the shell; `ONNX` is the upstream interchange format the
+shell consumes, owned by the ONNX project, not by Chelis.
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| **H0** | Spec lock — `spec/design/hydronnx.md` | ✅ Complete |
+| **H1** | ONNX protobuf parser + internal IR + `chelis-hydronnx-inspect` CLI utility. | Planned |
+| **H2** | Operator translator over the v0.1 core subset (tensor manipulation, elementwise, comparisons, reductions, matrix, activations, normalization, convolution, decomposed Attention/MultiHeadAttention/RotaryEmbedding, Cast, Constant). Per-operator numerical agreement vs ONNX Runtime. | Planned |
+| **H3** | Weight loading (TensorProto → Chelis tensor), layout conversion, dtype conversion, Chelis function emission with attached provenance metadata. End-to-end loading via `load_model` / `inspect_model`. | Planned |
+| **H4** | Type-discipline integration: dimension types on loaded signatures, call-site type checking, property attachment, AD composition where operators support it, composition with other Chelis code. | Planned |
+| **H5** | Documentation, examples per strong-fit category (image classification, object detection, tabular forecasting), property examples, performance framing, ONNX-Runtime → hydronnx migration guide. | Planned |
+
+Dependencies on the IR §5 entries (`IR-FirstClassFn-F1`,
+`IR-SelectOp-F1`, `IR-MatchLowering-F1` in `docs/gap_synthesis.md`)
+are non-blocking for v0.1: dynamic-graph ONNX operators (If, Loop,
+Scan) extend Hydronnx's operator coverage when those entries close
+(and when the differentiable-language Phase D1 control-flow AD work
+lands), but they are explicitly out of the v0.1 operator subset.
+Fusion, kernel authoring, and MLIR-backend work are performance
+enhancers that loaded models benefit from automatically without
+Hydronnx changes.
+
 ## Exploratory: Agent Editing Surface
 
 **Status:** Exploratory. One bounded proof-of-concept tool, then evaluate.

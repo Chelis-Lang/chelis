@@ -112,6 +112,23 @@ agent dispatch picks the executable test fixture for each phase.
 | D5 | Differentiability-typing suite: positive/negative annotation checks, `chelis check --show-inferred` regression, `Lipschitz(K)` property verifier — exact named test TBD when D5 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 5 | aspirational |
 | D6 | Corpus oracle: every program in `examples/differentiable/` survives `chelis fmt`/`check`/`eval`/`build` and the on-ramp primer's worked snippets match their checked-in outputs — exact named test TBD when D6 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 6 | aspirational |
 
+## Phase H (Hydronnx — ONNX shell)
+
+Committed scope per `spec/design/hydronnx.md` and the
+`spec/12-roadmap.md` §Hydronnx track. `Hydronnx` is the Chelis shell;
+`ONNX` is the upstream interchange format. H0 is the spec lock;
+oracles for H1–H5 are named here as aspirational until the owning
+agent dispatch picks the executable test fixture for each phase.
+
+| Phase | Oracle command | Owning spec doc | Status |
+|---|---|---|---|
+| H0 | `grep -F "spec/design/hydronnx.md" spec/12-roadmap.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the roadmap) | `spec/design/hydronnx.md` §Phase 0 | default gate (doc grep) |
+| H1 | Parser-inventory agreement suite: a small ONNX model (MobileNet-class or linear regression) loaded through hydronnx produces the same inventory as `onnx.checker.check_model` in Python, and malformed inputs surface the documented diagnostics — exact named test TBD when H1 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 1 | aspirational |
+| H2 | Per-operator numerical-agreement suite against ONNX Runtime across the v0.1 core operator subset, plus one end-to-end model per strong-fit category — exact named test TBD when H2 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 2 | aspirational |
+| H3 | End-to-end loading suite: weights load, `load_model` produces a callable Chelis function with correct outputs, `inspect_model` matches actual model structure, `load_model_with_opts` overrides take effect, documented failure cases (custom op, unsupported opset, corrupted weights) surface the documented errors — exact named test TBD when H3 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 3 | aspirational |
+| H4 | Type-discipline integration suite: dimension types on loaded signatures, wrong-shape call-site rejection, property attachment + verification, AD composition (positive and negative — non-differentiable operator surfaces a pinned diagnostic), composition with hand-written Chelis preprocessing/post-processing — exact named test TBD when H4 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 4 | aspirational |
+| H5 | Corpus oracle: every program in the hydronnx examples directory survives `chelis fmt`/`check`/`eval`/`build`, the migration-guide snippets compile, and the worked image-classification / object-detection / tabular examples produce the documented outputs — exact named test TBD when H5 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 5 | aspirational |
+
 ## Phase M (Metal Backend)
 
 | Phase | Oracle command | Owning spec doc | Status |
