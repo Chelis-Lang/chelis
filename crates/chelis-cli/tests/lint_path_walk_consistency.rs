@@ -139,7 +139,6 @@ fn write_exception_fixture(root: &std::path::Path) {
 /// Both invocations must produce identical stdout and exit code, with
 /// zero `surf-def-arrow-form` violations because the exception applies.
 #[test]
-#[ignore = "pins Lint-ExceptionPathRoot-F1; unignored when fix lands"]
 fn lint_cli_exception_pattern_matches_under_subtree_and_cwd_walks() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
@@ -179,7 +178,6 @@ fn lint_cli_exception_pattern_matches_under_subtree_and_cwd_walks() {
 /// examples packages` against a workspace that contains the excepted
 /// fixture under `crates/`.
 #[test]
-#[ignore = "pins Lint-ExceptionPathRoot-F1; unignored when fix lands"]
 fn lint_cli_exception_pattern_matches_under_multi_subtree_walk() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();

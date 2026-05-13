@@ -8,7 +8,20 @@
 //! original `SKILL.md` carve-out.
 //!
 //! Matching: an exception applies to a violation when (a) the path-relative-
-//! to-root matches the exception's glob pattern and (b) the rule id matches.
+//! to-`workspace_root` matches the exception's glob pattern and (b) the rule
+//! id matches.
+//!
+//! Path anchoring: exception patterns in
+//! `crates/chelis-cli/src/style_gate.rs::exceptions` are written relative to
+//! the workspace root (e.g., `crates/chelis-surf/tests/fixtures/*.ch`,
+//! `docs/book/src/*.md`). They must therefore be matched against
+//! workspace-relative paths, not against paths relative to the per-target
+//! lint walk root. When the CLI walks a sub-directory (e.g., `chelis lint
+//! --check crates`), the walk root is a sub-directory of the workspace
+//! root; using it for prefix-stripping drops the leading workspace-relative
+//! segments and the exception silently fails to match. Callers therefore
+//! pass an explicit `workspace_root` argument distinct from the walk root.
+//! Closes `Lint-ExceptionPathRoot-F1`.
 
 use crate::{Exception, Violation};
 use regex::Regex;
@@ -75,22 +88,33 @@ fn section_parents(id: &str) -> Vec<String> {
 
 /// Filter `violations` against the exception list. A violation is dropped
 /// if any exception's `rule_id` and `pattern` (glob) both match.
+///
+/// `workspace_root` is the path against which exception globs are anchored
+/// (typically the canonical path of the workspace root). It is distinct
+/// from the per-target lint walk root because exception patterns are
+/// written workspace-relative; using the walk root for prefix-stripping
+/// silently breaks workspace-rooted patterns under sub-directory walks
+/// (see `Lint-ExceptionPathRoot-F1`).
 pub fn apply_exceptions<'a>(
     violations: impl IntoIterator<Item = &'a Violation>,
     exceptions: &[Exception],
-    root: &std::path::Path,
+    workspace_root: &std::path::Path,
 ) -> Vec<Violation> {
     violations
         .into_iter()
-        .filter(|v| !is_excepted(v, exceptions, root))
+        .filter(|v| !is_excepted(v, exceptions, workspace_root))
         .cloned()
         .collect()
 }
 
-fn is_excepted(violation: &Violation, exceptions: &[Exception], root: &std::path::Path) -> bool {
+fn is_excepted(
+    violation: &Violation,
+    exceptions: &[Exception],
+    workspace_root: &std::path::Path,
+) -> bool {
     let rel = violation
         .path
-        .strip_prefix(root)
+        .strip_prefix(workspace_root)
         .unwrap_or(&violation.path)
         .to_string_lossy()
         .to_string();
@@ -271,6 +295,37 @@ mod tests {
         };
         let kept = apply_exceptions([&v], &[exc], std::path::Path::new("/repo"));
         assert_eq!(kept.len(), 1);
+    }
+
+    /// Anchor invariant: exception matching must be relative to the
+    /// workspace root, not the per-target walk root. A workspace-rooted
+    /// exception pattern like `crates/x/fixtures/*.ch` must match a
+    /// violation at `<workspace_root>/crates/x/fixtures/foo.ch`
+    /// regardless of which sub-tree the CLI is walking. Pins
+    /// `Lint-ExceptionPathRoot-F1`.
+    #[test]
+    fn apply_exceptions_anchors_on_workspace_root_not_walk_target() {
+        let v = Violation {
+            rule_id: "surf-def-arrow-form".into(),
+            spec_ref: "§3.5".into(),
+            path: PathBuf::from("/repo/crates/chelis-surf/tests/fixtures/foo.ch"),
+            line: None,
+            col: None,
+            message: "colon-form".into(),
+        };
+        let exc = Exception {
+            pattern: "crates/chelis-surf/tests/fixtures/*.ch".into(),
+            rule_id: "surf-def-arrow-form".into(),
+            cross_ref: "§3.5".into(),
+        };
+        // The CLI walks `<repo>/crates` as the target. The exception
+        // must still match because `workspace_root` is `/repo`, not
+        // `/repo/crates`.
+        let kept = apply_exceptions([&v], &[exc], std::path::Path::new("/repo"));
+        assert!(
+            kept.is_empty(),
+            "workspace-rooted exception must match under subtree walks; kept={kept:?}"
+        );
     }
 
     #[test]

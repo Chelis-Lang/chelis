@@ -1330,7 +1330,14 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
         })
         .collect::<Vec<_>>();
     let exceptions_list = style_gate::exceptions();
-    for violation in chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, parent) {
+    // Anchor exception matching against the canonical CWD (the
+    // workspace root by convention). Single-file builds rarely
+    // intersect workspace-rooted exception patterns, but propagate
+    // the same anchor used by `cmd_lint` for consistency.
+    let workspace_root = detect_lint_workspace_root();
+    for violation in
+        chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, &workspace_root)
+    {
         eprintln!("warning: {violation}");
     }
 }
@@ -5380,6 +5387,26 @@ fn cmd_lint(
             }
         })
         .collect();
+    // Exception patterns in `style_gate::exceptions()` are written
+    // workspace-relative (e.g.,
+    // `crates/chelis-surf/tests/fixtures/*.ch`,
+    // `docs/book/src/*.md`). They must therefore be matched against
+    // workspace-relative paths, not against paths relative to a
+    // per-target walk root. When the CLI walks a sub-directory
+    // (e.g., `chelis lint --check crates`), the walk root is a
+    // sub-directory of the workspace root; using it for
+    // prefix-stripping in `apply_exceptions` drops the leading
+    // workspace-relative segments (here, `crates/`) and the exception
+    // silently fails to match. Reuse PR #93's
+    // canonicalize-at-CLI-boundary pattern by treating the canonical
+    // current working directory as the workspace root: both the CI
+    // invocation `chelis lint --check .` and the developer-facing
+    // `chelis lint --check crates docs` are issued from the workspace
+    // root by convention, so the CWD identifies it without a walk-up
+    // filesystem search (which would be brittle under symlinks,
+    // mounts, and permission edges per the standing rule). Closes
+    // `Lint-ExceptionPathRoot-F1`.
+    let workspace_root = detect_lint_workspace_root();
     // The exception list is sourced from `style_gate::exceptions()` so
     // the standalone `chelis lint` subcommand and the build-time style
     // gate filter against one shared registry. Rule-internal allowlists
@@ -5390,7 +5417,7 @@ fn cmd_lint(
     let mut blocking_total = 0usize;
     for target in &targets {
         if fix {
-            let applied = apply_lint_fixes(target, &rules, &exceptions)?;
+            let applied = apply_lint_fixes(target, &workspace_root, &rules, &exceptions)?;
             if applied > 0 {
                 println!(
                     "fixed {} replacement(s) under {}",
@@ -5400,7 +5427,11 @@ fn cmd_lint(
             }
         }
         let raw_violations = chelis_lint::lint(target, &rules)?;
-        let kept = chelis_lint::exceptions::apply_exceptions(&raw_violations, &exceptions, target);
+        let kept = chelis_lint::exceptions::apply_exceptions(
+            &raw_violations,
+            &exceptions,
+            &workspace_root,
+        );
         for v in &kept {
             // V2-F3 (PR #58): suppress warnings for rules that opt in
             // to `check_mirrors_fix` when the autofix would silently
@@ -5444,15 +5475,47 @@ fn rule_severity(rules: &[Box<dyn chelis_lint::Rule>], id: &str) -> chelis_lint:
         .unwrap_or(chelis_lint::Severity::Error)
 }
 
+/// Detect the lint workspace root: the canonical current working
+/// directory. Exception patterns in `style_gate::exceptions()` are
+/// authored relative to this root (e.g.,
+/// `crates/chelis-surf/tests/fixtures/*.ch`), and both the CI gate
+/// (`chelis lint --check .`) and developer invocations (`chelis lint
+/// --check crates docs`) are issued from the workspace root by
+/// convention. Reusing PR #93's canonicalize-at-CLI-boundary pattern,
+/// the canonical CWD identifies the workspace root without a walk-up
+/// filesystem search (which would be brittle under symlinks, mounts,
+/// and permission edges per
+/// `feedback_no_walkup_filesystem_detection.md`).
+///
+/// If canonicalization fails (e.g., the CLI is invoked from a deleted
+/// or unreadable directory), emit a stderr warning and fall back to
+/// the un-canonicalized CWD. This is not a walk-up; it preserves
+/// today's behavior on edge-case paths while keeping a single
+/// detection mechanism.
+fn detect_lint_workspace_root() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|err| {
+        eprintln!("warning: failed to read current directory: {err}; using `.`");
+        PathBuf::from(".")
+    });
+    std::fs::canonicalize(&cwd).unwrap_or_else(|err| {
+        eprintln!(
+            "warning: failed to canonicalize current directory {}: {err}; using as-is",
+            cwd.display()
+        );
+        cwd
+    })
+}
+
 fn apply_lint_fixes(
     target: &Path,
+    workspace_root: &Path,
     rules: &[Box<dyn chelis_lint::Rule>],
     exceptions: &[chelis_lint::Exception],
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let mut total = 0usize;
     for _ in 0..5 {
         let raw = chelis_lint::lint(target, rules)?;
-        let kept = chelis_lint::exceptions::apply_exceptions(&raw, exceptions, target);
+        let kept = chelis_lint::exceptions::apply_exceptions(&raw, exceptions, workspace_root);
         let mut by_path: BTreeMap<PathBuf, Vec<chelis_lint::Violation>> = BTreeMap::new();
         for violation in kept {
             by_path

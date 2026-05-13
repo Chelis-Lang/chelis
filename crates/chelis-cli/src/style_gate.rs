@@ -16,7 +16,7 @@
 //! why the case is exempt — free-form prose is not part of the schema.
 
 use chelis_lint::{Exception, Violation};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Path globs (relative to the lint root) that are exempt from specific
 /// lint rules, with a mandatory cross-reference to the spec section
@@ -173,13 +173,26 @@ fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {
     let rules = chelis_lint::registry::all_rules();
     // Lint the file directly. `WalkDir` accepts file roots, and this avoids
     // path-shape mismatches between `message.ch` and `./message.ch`.
-    let parent = file.parent().unwrap_or_else(|| Path::new("."));
     let raw = match chelis_lint::lint(file, &rules) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
     let exceptions_list = exceptions();
-    chelis_lint::exceptions::apply_exceptions(&raw, &exceptions_list, parent)
+    // Anchor exception matching against the canonical current
+    // working directory (the workspace root by convention), mirroring
+    // the standalone `chelis lint` subcommand. Closes
+    // `Lint-ExceptionPathRoot-F1` for the build-time style gate as
+    // well: single-file builds (`chelis check foo.ch`,
+    // `chelis build foo.ch`) invoked from the workspace root now see
+    // the same exception application as `chelis lint --check .`.
+    let workspace_root = std::env::current_dir()
+        .and_then(|cwd| std::fs::canonicalize(&cwd))
+        .unwrap_or_else(|_| {
+            file.parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
+    chelis_lint::exceptions::apply_exceptions(&raw, &exceptions_list, &workspace_root)
 }
 
 fn format_outcome(file: &Path, outcome: &GateOutcome) -> String {
