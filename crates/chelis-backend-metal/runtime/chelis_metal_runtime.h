@@ -175,7 +175,7 @@ static inline void chelis_metal_launch(
     if (tg_x == 0 || grid_x == 0) {
 #ifndef NDEBUG
         fprintf(stderr, "chelis Metal: chelis_metal_launch received zero "
-                        "grid_x=%lu / tg_x=%lu — emitter planner bug\n",
+                        "grid_x=%lu / tg_x=%lu; emitter planner bug\n",
                 (unsigned long)grid_x, (unsigned long)tg_x);
         abort();
 #else
@@ -233,7 +233,7 @@ static inline void chelis_metal_launch2d(
     if (tg_x == 0 || tg_y == 0 || grid_x == 0 || grid_y == 0) {
 #ifndef NDEBUG
         fprintf(stderr, "chelis Metal: chelis_metal_launch2d received "
-                        "zero grid (%lu,%lu) / tg (%lu,%lu) — planner bug\n",
+                        "zero grid (%lu,%lu) / tg (%lu,%lu); planner bug\n",
                 (unsigned long)grid_x, (unsigned long)grid_y,
                 (unsigned long)tg_x, (unsigned long)tg_y);
         abort();
