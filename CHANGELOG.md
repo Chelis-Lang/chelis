@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.8] — 2026-05-13
 
 ### Fixed - host-eval scalar zero-arg fn-call silent miscompilation (#80)
 
@@ -174,6 +174,25 @@ unlock comes entirely from the upstream typecheck and linearity
 fixes. See
 `docs/investigations/redundant_linearity_autofix_recoverage_diagnosis.md`
 for the diagnosis.
+
+### Fixed - `numel(to_tensor([]))` returns 0 for empty input (#100)
+
+Three clamp sites inflated a zero-element shape product back to one:
+`eval_builtin "numel"` did `shape.iter().product::<usize>().max(1)`,
+and both `chelis_alloc_tensor` and `chelis_alloc_view` had
+`if size == 0 { size = 1 }`. Shape inference was correct
+(`to_tensor([])` produces rank-1 shape `[0]`); the bug was in
+`numel` reporting only. Dropping the three clamps lets the
+empty-product identity (`[].iter().product() == 1`) handle the
+scalar case naturally while rank-1 zero-element tensors correctly
+report `numel = 0`. Allocator safety preserved by the existing
+`bytes.max(1)` on `posix_memalign`. Closes
+`Runtime-EmptyTensorNumel-F1`, the upstream root cause of the
+Coral-reported `filter`/`head`/`tail`/`slice` crashes on empty
+results. Regression tests at
+`crates/chelis-cli/tests/eval_empty_tensor_numel.rs` and
+`crates/chelis-cli/tests/cbackend_empty_tensor_numel.rs` (eval-vs-C
+agreement).
 
 ## [0.7.7] — 2026-05-12
 
