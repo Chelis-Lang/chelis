@@ -512,6 +512,53 @@ under `MODEL_NAMESPACE_PREFIXES`. Adding a new model/algorithm
 prefix requires both updating that table and updating this section's
 recognized-list.
 
+#### Math/ML well-known prefixes (domain-agnostic)
+
+A parallel curated list of math/ML well-known prefixes accepts canonical
+elementary-math, statistics, loss-function, activation-function, and
+ML-lifecycle operation names regardless of the hosting module's domain
+shorthand. These names are shared across the wider math/ML ecosystem
+(numpy, scipy, torch, tensorflow) and identify the operation, not a
+module-scoped variant family.
+
+Recognized math/ML well-known prefixes:
+
+| Prefix      | Family                                      |
+|-------------|---------------------------------------------|
+| `exp_`      | Elementary math: exponential                |
+| `sin_`      | Elementary math: sine                       |
+| `cos_`      | Elementary math: cosine                     |
+| `tan_`      | Elementary math: tangent                    |
+| `std_`      | Statistics: standard deviation              |
+| `var_`      | Statistics: variance                        |
+| `lin_`      | Linear interpolation / linear methods       |
+| `mse_`      | Loss: mean squared error                    |
+| `ce_`       | Loss: cross entropy                         |
+| `kl_`       | Loss: Kullback-Leibler divergence           |
+| `bce_`      | Loss: binary cross entropy                  |
+| `relu_`     | Activation: rectified linear unit           |
+| `gelu_`     | Activation: gaussian error linear unit      |
+| `silu_`     | Activation: sigmoid linear unit             |
+| `tanh_`     | Activation: hyperbolic tangent              |
+| `fit_`      | ML lifecycle: fit a model                   |
+| `pred_`     | ML lifecycle: predict from a model          |
+| `eval_`     | ML lifecycle: evaluate a model              |
+
+The lint tracks these in `crates/chelis-lint/src/rules/prefix_namespace.rs`
+under `MATH_ML_WELL_KNOWN_PREFIXES`. The distinction from
+`MODEL_NAMESPACE_PREFIXES` is scope: model-namespaces are tied to a
+specific module domain (`bs_` in `Shoals.Pricing`); math/ML well-known
+prefixes are domain-agnostic — a function named `mse_loss` is the same
+operation whether it lives in `Hello.Loss`, `Nautilus.Stats`, or any
+other module. Adding to this list requires updating both the const and
+this section.
+
+Longer well-known prefixes (`softmax_`, `sigmoid_`, `train_`) are 5+
+characters and fall outside the short-prefix extractor's 2–4 character
+window. They are recognized implicitly because the rule never extracts
+them as a prefix in the first place. They are documented here for
+clarity but require no entry in `MATH_ML_WELL_KNOWN_PREFIXES`.
+
 ### 7.2 Type-suffix policy
 
 **Rule:** Type and shape suffixes describe the **element type or
@@ -668,6 +715,27 @@ Single-word status-report filenames (`SKILL.md`, `STATUS.md`) follow
 the same SCREAMING_SNAKE rule and collapse visually to looking like
 PascalCase.
 
+#### Cargo-package-name exception
+
+A narrative-docs filename may use kebab-case when its filename stem
+matches the `name` of a Cargo package in the workspace. This carve-out
+exists because Cargo package names are kebab-case by convention
+(`c-earchin`, `chelis-runtime`, `chelis-cli`), and a documentation file
+named for a specific Cargo crate (`docs/shells/c-earchin.md`) reads
+more naturally with the package's own name shape than with a forced
+snake-case rewrite.
+
+The exception applies only to filenames that:
+
+- match a Cargo `[package].name` in the workspace exactly (no fuzzy
+  matching), and
+- pass the kebab-case regex `^[a-z][a-z0-9-]*\.md$`.
+
+Filenames that don't match a Cargo package fall under the base §8.3
+rule. The lint enforces this in
+`crates/chelis-lint/src/rules/doc_filename_convention.rs` by walking
+the workspace for `Cargo.toml` files and reading their `[package].name`.
+
 ### 8.4 Versioned reports
 
 **Rule:** snake_case with version markers in underscored form.
@@ -706,6 +774,16 @@ The detection is `book.toml`-based, not path-string-based, so any
 repo's mdBook layout works (chelis uses `docs/book/src/`; nautilus
 uses `docs/src/`; other shells can choose their own layout).
 
+The lint implements this in
+`crates/chelis-lint/src/rules/doc_filename_convention.rs` with two
+detection paths: a path-string fast path covering the canonical
+chelis-ecosystem `docs/src/` and `docs/book/src/` layouts, and a
+filesystem-anchored fallback that walks ancestor directories of the
+file looking for a sibling `book.toml`. When a `book.toml` is found,
+the entire ancestor tree (rooted at the `book.toml`'s directory) is
+mdBook mode and accepts kebab-case across the full tree — including
+sibling and shallower files such as `docs/getting-started.md`.
+
 #### Tool-required exceptions inside any mdBook source tree
 
 Two filenames inside an mdBook source tree are determined by mdBook
@@ -732,7 +810,7 @@ when cleaning existing text:
 
 The blocking `no-em-dash-in-public-strings` rule enforces this for
 Surf, Deep, Rust, and Python string literals that are likely to reach
-users as diagnostics, docstrings, or public output. The v1 fixer is
+users as diagnostics, log messages, or public output. The v1 fixer is
 deliberately narrow: `a — b` becomes `a. B`; paired parenthetical
 dashes become commas; whitespace-asymmetric cases require manual
 review. Markdown prose enforcement is queued until the active doc
@@ -740,6 +818,22 @@ corpus is cleaned. Do not add lint exceptions merely to preserve an em
 dash in current-state docs. This rule does not prohibit syntax or
 notation that is semantically meaningful in a spec, such as `->`, `|>`,
 section references, or mathematical symbols.
+
+#### Docstring exclusion (Python)
+
+Python module, function, class, and method docstrings are narrative
+prose, not user-facing strings. The rule excludes them.
+
+The lint detects docstrings by shape: a Python triple-quoted string
+(`"""..."""` or `'''...'''`) whose **opening triple-quote is the first
+non-whitespace token on its line**. This catches all three canonical
+docstring positions (module-top, after `def`, after `class`) and
+excludes mid-line triple-quoted strings like
+`print("""...""")` or `raise ValueError("""...""")`, which are
+user-facing and still bound by the rule.
+
+Rust `///` and `//!` doc comments are not string literals and are
+already outside the rule's scope; no additional carve-out is needed.
 
 ---
 

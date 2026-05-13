@@ -171,6 +171,32 @@ const KNOWN_SINGLE_WORDS: &[&str] = &[
     // SafeTensors) would diverge from the upstream's PyPI/HuggingFace
     // identity.
     "Safetensors",
+    // Hello-chelis (2026-05) corpus survey: single English words used
+    // as module components that today trip the 7-char long-lowercase-run
+    // heuristic even though each is canonically a single PascalCase word
+    // per §6.3. Asserting these here closes the surface gap pending the
+    // Vocabulary-F2 structural follow-up that replaces hand-maintenance
+    // with derivation from a canonical vocabulary list.
+    "Linearity",
+    "Hypothesis",
+    "Integration",
+    "Optimize",
+    // Math/ML single-word domains used as module components across the
+    // ecosystem. Each is canonically one English word per §6.3.
+    "Matrix",
+    "Vector",
+    "Random",
+    "Statistics",
+    "Probability",
+    "Geometry",
+    "Calculus",
+    "Algebra",
+    "Topology",
+    "Spectrum",
+    "Inference",
+    "Classification",
+    "Regression",
+    "Clustering",
 ];
 
 /// Known PascalCase compound module/type names in the Chelis ecosystem.
@@ -436,6 +462,60 @@ mod tests {
         // hits the >=7 long-run threshold even though it's a single English
         // word being used as an ecosystem module-prefix name.
         assert_eq!(component_violation("Capstone"), None);
+    }
+
+    // Extended-scope §6.3 allowlist gaps surfaced by the hello-chelis
+    // corpus survey (2026-05). Each is a single English PascalCase word
+    // used as a module-component name; today they trip the 7-char
+    // long-lowercase-run heuristic at L275 even though they're correctly
+    // formed per §6.3. The allowlist must include them.
+    #[test]
+    fn accepts_linearity_hypothesis_integration_optimize() {
+        assert_eq!(component_violation("Linearity"), None);
+        assert_eq!(component_violation("Hypothesis"), None);
+        assert_eq!(component_violation("Integration"), None);
+        assert_eq!(component_violation("Optimize"), None);
+    }
+
+    // §6.3 sibling sweep — additional single English words used as
+    // module-components across mathematical, statistical, and ML domains.
+    // Each is a canonical single-word PascalCase identifier under §6.3.
+    #[test]
+    fn accepts_extended_single_word_math_domains() {
+        for name in [
+            "Tensor",
+            "Matrix",
+            "Vector",
+            "Random",
+            "Statistics",
+            "Probability",
+            "Geometry",
+            "Calculus",
+            "Algebra",
+            "Topology",
+            "Spectrum",
+            "Inference",
+            "Classification",
+            "Regression",
+            "Clustering",
+        ] {
+            assert_eq!(
+                component_violation(name),
+                None,
+                "extended single-word `{name}` should pass §6.3",
+            );
+        }
+    }
+
+    #[test]
+    fn negative_long_lowercase_word_without_allowlist_still_fires() {
+        // Sanity: a long-lowercase-run identifier not in the allowlist
+        // still fires. Use a fictional run that won't be confused with
+        // a real ecosystem name.
+        assert!(
+            component_violation("Bogusnonsense").is_some(),
+            "uncurated long-lowercase-run name should still flag",
+        );
     }
 
     #[test]

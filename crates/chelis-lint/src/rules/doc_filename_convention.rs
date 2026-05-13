@@ -5,7 +5,10 @@
 //! - `chelis/spec/design/`: `snake_case.md` (§8.2)
 //! - `chelis/docs/`, shell `docs/`: `snake_case.md` for narrative docs;
 //!   `SCREAMING_SNAKE_CASE.md` allowed for status reports (§8.3)
-//! - `chelis/docs/book/src/`: kebab-case (§8.5, deliberate mdBook exception)
+//! - any tree rooted at a `book.toml`: kebab-case (§8.5, deliberate mdBook
+//!   exception, detected by walking ancestors for `book.toml`).
+//! - filename matching a Cargo package name in the workspace also accepts
+//!   kebab-case in narrative `docs/` (the `c-earchin` case).
 //! - Other paths: no rule (out of scope here; caught by sibling rules
 //!   if applicable).
 
@@ -76,14 +79,127 @@ fn classify_doc(path: &Path) -> Slot {
     Slot::Other
 }
 
-/// Detect whether `path` sits inside an mdBook source tree. The mdBook
-/// source tree is conventionally `<repo>/docs/src/` (chelis-ecosystem
-/// default) or `<repo>/docs/book/src/` (legacy layout). Sibling files
-/// of `book.toml` (such as `nautilus/docs/RELEASES.md`) are NOT in the
-/// source tree — those are top-level docs/ files governed by §8.3.
+/// Detect whether `path` sits inside an mdBook source tree.
+///
+/// Two detection modes:
+///
+/// 1. Path-string fast path. The chelis-ecosystem-canonical mdBook
+///    source trees live under `<repo>/docs/src/` (current layout) or
+///    `<repo>/docs/book/src/` (legacy chelis layout). Files whose path
+///    contains either substring are mdBook chapters.
+/// 2. `book.toml`-anchored detection. When the fast path doesn't fire,
+///    walk ancestors of `path` looking for a sibling `book.toml`. If
+///    found, the entire ancestor tree (from `book.toml`'s directory
+///    downward) is mdBook mode. This generalizes detection to repos
+///    whose mdBook layout doesn't put sources under `docs/src/` — for
+///    example a `docs/` directory with `book.toml` at the top and
+///    chapters at `docs/getting-started.md`.
 fn is_inside_mdbook_tree(path: &Path) -> bool {
     let s = path.to_string_lossy();
-    s.contains("/docs/src/") || s.contains("/docs/book/src/")
+    if s.contains("/docs/src/") || s.contains("/docs/book/src/") {
+        return true;
+    }
+    // book.toml-anchored detection. We walk every ancestor directory and
+    // probe for `book.toml`. The probe is cheap (one stat() per ancestor)
+    // and bounded by path depth; no recursive walk.
+    has_ancestor_marker(path, "book.toml")
+}
+
+/// True if any strict ancestor directory of `path` contains a file
+/// named `marker_filename`. The ancestor chain stops at the filesystem
+/// root.
+fn has_ancestor_marker(path: &Path, marker_filename: &str) -> bool {
+    let mut cursor = path.parent();
+    while let Some(dir) = cursor {
+        if dir.join(marker_filename).is_file() {
+            return true;
+        }
+        cursor = dir.parent();
+    }
+    false
+}
+
+/// True if the filename stem of `path` (without the `.md` extension)
+/// matches the `name` of a Cargo package somewhere in the workspace
+/// rooted at `root`. This is the "Cargo-package-name exception" carve-out
+/// to §8.3: when a narrative doc is named for a Cargo crate (e.g.,
+/// `docs/shells/c-earchin.md` for the `c-earchin` crate), the kebab-case
+/// filename is intentional and accepted.
+///
+/// Detection walks ancestor dirs of `path` looking for `Cargo.toml`, plus
+/// — when no ancestor `Cargo.toml` matches — scans the `root` for
+/// `Cargo.toml` files under `crates/`. The scan is bounded so it's safe
+/// to call from a lint check.
+fn filename_matches_cargo_package(root: &Path, path: &Path) -> bool {
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    // Cargo package names are constrained to a small charset; the stem
+    // must look like one to even consider checking. This prevents
+    // spurious filesystem walks for stems like `SUMMARY` or
+    // `RELEASES`.
+    if !looks_like_cargo_package_name(stem) {
+        return false;
+    }
+    // Scan workspace crates first — this is the common case. The
+    // `root/crates/` layout is what the chelis ecosystem uses.
+    let crates_dir = root.join("crates");
+    if let Ok(entries) = std::fs::read_dir(&crates_dir) {
+        for entry in entries.flatten() {
+            let manifest = entry.path().join("Cargo.toml");
+            if let Some(name) = read_cargo_package_name(&manifest)
+                && name == stem
+            {
+                return true;
+            }
+        }
+    }
+    // Fallback: walk ancestors looking for any Cargo.toml whose
+    // package name matches. Useful for layouts where the doc file is
+    // colocated with a crate.
+    let mut cursor = path.parent();
+    while let Some(dir) = cursor {
+        let manifest = dir.join("Cargo.toml");
+        if let Some(name) = read_cargo_package_name(&manifest)
+            && name == stem
+        {
+            return true;
+        }
+        cursor = dir.parent();
+    }
+    false
+}
+
+/// Return `Some(name)` if `manifest` is a readable `Cargo.toml` whose
+/// `[package].name` is parseable. Errors return `None`.
+fn read_cargo_package_name(manifest: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(manifest).ok()?;
+    extract_package_name(&contents)
+}
+
+/// Lightweight `[package].name = "..."` extractor. Avoids pulling in a
+/// full TOML parser for this single helper. Matches the conventional
+/// shape `[package]\nname = "..."` allowing whitespace and Windows
+/// line endings. Returns the first match.
+fn extract_package_name(toml_src: &str) -> Option<String> {
+    static PACKAGE_NAME_RE: OnceLock<Regex> = OnceLock::new();
+    let re = PACKAGE_NAME_RE.get_or_init(|| {
+        Regex::new(r#"(?s)\[package\][^\[]*?\bname\s*=\s*"([A-Za-z0-9._\-]+)""#).unwrap()
+    });
+    re.captures(toml_src)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// True if `s` looks like a valid Cargo package name (kebab/lowercase,
+/// digits, underscore, hyphen — no spaces or capital letters). This is
+/// a cheap pre-filter that prevents irrelevant filesystem probes.
+fn looks_like_cargo_package_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_' || b == b'.'
+        })
+        && s.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
 }
 
 /// True if the filename starts with `NN-` (two digits + hyphen), suggesting
@@ -126,11 +242,21 @@ impl Rule for DocFilenameConvention {
                 "snake_case (e.g., `phase1a_kernel_codegen.md`)",
                 "§8.2",
             ),
-            Slot::Docs => (
-                snake_re().is_match(name) || screaming_snake_re().is_match(name),
-                "snake_case for narrative documents; SCREAMING_SNAKE_CASE for status reports (e.g., `STATUS.md`, `RELEASES.md`)",
-                "§8.3",
-            ),
+            Slot::Docs => {
+                // §8.3 narrative-docs base shape: snake_case (narrative)
+                // or SCREAMING_SNAKE (status reports). Plus the
+                // Cargo-package-name carve-out: a kebab-case filename
+                // whose stem matches a Cargo package in the workspace
+                // is accepted as documentation for that package.
+                let base = snake_re().is_match(name) || screaming_snake_re().is_match(name);
+                let cargo_exception =
+                    kebab_re().is_match(name) && filename_matches_cargo_package(ctx.root, ctx.path);
+                (
+                    base || cargo_exception,
+                    "snake_case for narrative documents; SCREAMING_SNAKE_CASE for status reports (e.g., `STATUS.md`, `RELEASES.md`); kebab-case is accepted only when the filename stem matches a Cargo package name in the workspace",
+                    "§8.3",
+                )
+            }
             Slot::BookSrc => (
                 // Tool-required mdBook special files (per §8.5
                 // "Tool-required exceptions") are exempt from the
@@ -313,5 +439,91 @@ mod tests {
         let v = run("/repo/spec/99-bad_format.md");
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].spec_ref, "§8.1");
+    }
+
+    // §8.5 mdBook detection by `book.toml` marker (not just hardcoded
+    // path strings). When `book.toml` exists in any ancestor of the doc
+    // file, the entire ancestor tree is mdBook mode and kebab-case is
+    // accepted across the full tree (not only `src/` underneath).
+    #[test]
+    fn accepts_kebab_when_book_toml_is_ancestor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let docs = repo.join("docs");
+        std::fs::create_dir_all(&docs).expect("mkdir");
+        std::fs::write(docs.join("book.toml"), "[book]\ntitle = \"x\"\n").expect("write");
+        let target = docs.join("getting-started.md");
+        std::fs::write(&target, "").expect("write target");
+
+        let ctx = Context {
+            root: repo,
+            path: &target,
+            source: None,
+            surface: Surface::DocFile,
+        };
+        let v = DocFilenameConvention.check(&ctx);
+        assert!(
+            v.is_empty(),
+            "kebab in book.toml-rooted tree should pass; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_kebab_for_filename_matching_cargo_package_name() {
+        // `c-earchin.md` matches the `c-earchin` cargo crate name in
+        // hello-chelis. The narrative-docs rule should accept this
+        // hyphenated filename when a matching Cargo package exists in
+        // the workspace.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let crate_dir = repo.join("crates").join("c-earchin");
+        std::fs::create_dir_all(&crate_dir).expect("mkdir");
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"c-earchin\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write");
+        let docs_shells = repo.join("docs").join("shells");
+        std::fs::create_dir_all(&docs_shells).expect("mkdir");
+        let target = docs_shells.join("c-earchin.md");
+        std::fs::write(&target, "").expect("write target");
+
+        let ctx = Context {
+            root: repo,
+            path: &target,
+            source: None,
+            surface: Surface::DocFile,
+        };
+        let v = DocFilenameConvention.check(&ctx);
+        assert!(
+            v.is_empty(),
+            "kebab filename matching Cargo package name should pass; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn negative_kebab_in_docs_without_book_toml_or_package_match_still_flags() {
+        // Sanity: a kebab-case file in narrative docs without book.toml
+        // marker and without a matching Cargo package name still fires.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let docs = repo.join("docs");
+        std::fs::create_dir_all(&docs).expect("mkdir");
+        let target = docs.join("some-random-doc.md");
+        std::fs::write(&target, "").expect("write target");
+
+        let ctx = Context {
+            root: repo,
+            path: &target,
+            source: None,
+            surface: Surface::DocFile,
+        };
+        let v = DocFilenameConvention.check(&ctx);
+        assert_eq!(
+            v.len(),
+            1,
+            "kebab outside book.toml and not Cargo-package-matching should still flag"
+        );
+        assert_eq!(v[0].spec_ref, "§8.3");
     }
 }
