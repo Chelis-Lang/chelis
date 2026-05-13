@@ -293,6 +293,19 @@ mod tests {
     }
 
     #[test]
+    fn check_mirrors_fix_opts_in_for_redundant_linearity_call() {
+        // 0.7.9 cleanup (Lint-RedundantLinearityCopyOnBorrowWarn-F1,
+        // Lint-PreferPipeRedundantLinearityPair-F1): the rule opts in
+        // to the `check_mirrors_fix` filter so the CLI suppresses
+        // warnings whose autofix would be silently dropped by the
+        // typed-pipeline gate (e.g., copy(borrow), or pipe-form 2-arg
+        // list primitives like `xs |> drop(n)`). This pins the
+        // opt-in.
+        let rule = RedundantLinearityCall;
+        assert!(rule.check_mirrors_fix());
+    }
+
+    #[test]
     fn flags_copy_and_drop_calls() {
         let violations = run("def f(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
              result = drop(f(to_tensor([1.0, 2.0])))\n");
