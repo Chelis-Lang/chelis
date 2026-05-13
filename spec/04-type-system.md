@@ -79,6 +79,147 @@ boundary where unsigned data enters the program. If a future cycle adds
 unsigned types, this section must be revised at the same time as the active
 list above.
 
+#### 1.1.3 Per-Backend Dtype Support Matrix
+
+The active primitive set in §1.1 is the **language-level** dtype contract: a
+program that mentions one of the nine active primitives is well-typed in
+every Chelis pass that does not select a backend (parser, type checker, IR
+evaluator). Backend code generation is a separate surface; not every backend
+admits every active dtype. This sub-section is the authoritative per-backend
+matrix. Any "Metal supports X" or "C backend supports Y" claim elsewhere in
+the spec or in user-facing docs must resolve to a cell in this table.
+
+| dtype  | C backend                               | HIP backend                | Metal backend                                | Evaluator |
+|--------|-----------------------------------------|----------------------------|----------------------------------------------|-----------|
+| f32    | admitted                                | admitted                   | admitted                                     | admitted  |
+| f64    | admitted                                | admitted                   | **rejected (hardware)**                      | admitted  |
+| bf16   | rejected (deferred)                     | admitted (matmul + load/store via `hipblasGemmEx`) | admitted on Apple7+ (M3 or later) | admitted |
+| f16    | rejected (deferred)                     | admitted (matmul + load/store via `hipblasGemmEx`) | admitted                          | admitted |
+| int8   | admitted                                | admitted                   | admitted                                     | admitted  |
+| int16  | admitted                                | admitted                   | admitted                                     | admitted  |
+| int32  | admitted                                | admitted                   | admitted                                     | admitted  |
+| int64  | admitted                                | admitted                   | admitted                                     | admitted  |
+| bool   | admitted                                | admitted                   | admitted                                     | admitted  |
+
+Cell semantics:
+
+- **admitted** — the backend codegen accepts the dtype on every shipped op
+  surface that admits any dtype, and emits correct code. Per-op restrictions
+  (e.g. matmul accumulator dispatch per §5.7.1, transcendental ops are
+  float-only per §5.4) apply uniformly across backends and are not encoded
+  in this matrix.
+- **rejected (deferred)** — the backend rejects the dtype at codegen with a
+  diagnostic naming the deferral. The dtype is admitted at the language
+  level and on at least one other backend; the gap is implementation-side
+  and the spec will lift the rejection in a future cycle.
+- **rejected (hardware)** — the backend rejects the dtype at codegen with a
+  diagnostic naming the hardware constraint. There is no planned lift,
+  because no lift is achievable on the target hardware without software
+  emulation, which is explicitly out of scope (see the f64-on-Metal entry
+  below).
+
+##### f64 on Metal: hard-rejected (hardware rationale)
+
+f64 on the Metal backend is **hard-rejected**, not deferred. Apple Silicon
+GPUs (M1, M2, M3, M4, and every announced successor in the Apple GPU family)
+have no double-precision floating-point ALUs in their GPU compute units;
+this is a hardware constraint, not a Chelis design choice. Software
+emulation (e.g., double-double arithmetic over two f32s) is **explicitly
+out of scope** for this cycle and any foreseeable cycle: the precision,
+performance, and AD-adjoint stories for emulated f64 do not match the
+language-level f64 contract, and silently substituting an emulated value
+would violate the no-implicit-precision-promotion rule in §5.
+
+The required diagnostic when a program uses f64 with `--target metal` is:
+
+> "Apple Silicon GPUs lack FP64 ALUs; use `--target c` or `--target hip` for
+> f64 workloads."
+
+This rejection is enforced at the CLI gate, at the IR validation pass, and
+defensively at the codegen entry point. All three surfaces must surface the
+same diagnostic. f64 must never reach the kernel emission path on Metal.
+
+##### bf16 on Metal: requires Apple7+ GPU family
+
+bf16 on the Metal backend is admitted only on the Apple7 GPU family (M3) or
+later. There are two enforcement surfaces, and the spec pins both because
+they fail in different places at different times:
+
+- **Compile-time (kernel template).** MSL exposes the `bfloat` scalar type
+  only when the target language version is 3.2 or higher (which corresponds
+  to Apple7+ GPU family targeting). The Metal kernel template emits any
+  `bfloat`-typed kernel inside `#if __METAL_VERSION__ >= 320 ... #endif`. A
+  CLI build that emits bf16 kernels still produces a syntactically valid
+  Metal source artifact: the artifact contains the `#if`-guarded kernel
+  text and is acceptable to `metal` / `clang++ -framework Metal` on every
+  toolchain version, regardless of the target GPU family.
+- **Runtime (pipeline creation).** Even with the kernel artifact present,
+  pipeline state creation on a pre-Apple7 device (M1, M2) will fail because
+  the device's GPU does not support `bfloat` operations. The Metal runtime
+  surfaces this as a clean diagnostic at pipeline creation time, not as a
+  silent kernel-load failure.
+
+The required diagnostic when bf16 pipeline creation fails on a pre-Apple7
+device is:
+
+> "bf16 requires Apple7+ GPU family (M3 or later); detected device family is
+> Apple{N}."
+
+Programs that target bf16 on Metal must be tested on Apple7+ hardware.
+Test runners on M1/M2 hardware should mark bf16 Metal correctness tests as
+ignored with the manual gate documented in the owning phase plan.
+
+##### Metal runtime header: ARC vs MRC and MPS wrapper ownership model
+
+The Metal backend's Objective-C++ runtime header
+(`crates/chelis-backend-metal/runtime/chelis_metal_runtime.h`) is **compiled
+under ARC** (Automatic Reference Counting). The user-facing build
+invocation is documented as `clang++ -fobjc-arc -framework Metal -framework
+Foundation` against the emitted `.mm`; the `-fobjc-arc` flag is part of
+the user-facing contract for the Metal backend. The runtime header itself
+documents and relies on this model: `chelis_metal_alloc` returns an
+ARC-owned `id<MTLBuffer>` whose strong reference is released automatically
+when the local goes out of scope, and there is intentionally no
+`chelis_metal_free`.
+
+Future helpers that the runtime header exposes — including the planned
+`MetalPerformanceShaders.MPSMatrixMultiplication` wrapper helpers
+(`chelis_metal_mps_gemm_f32`, `chelis_metal_mps_gemm_f16`, and any
+sibling) — must follow the **same ARC model**. The four invariants below
+are pinned for every present and future Metal runtime helper:
+
+1. **ARC vs MRC.** The runtime header is compiled under ARC. Every helper
+   added to `chelis_metal_runtime.h` MUST follow the same model.
+   **Mixing ARC and MRC in the same translation unit is forbidden**; an
+   MRC helper that needs to coexist with the ARC runtime must live in a
+   separate translation unit with explicit boundary documentation.
+2. **Lifetime boundary.** MPS wrapper objects (`MPSMatrixDescriptor`,
+   `MPSMatrix`, and any analogous `MPS*` helper object) MUST NOT outlive
+   the `MTLBuffer`s they wrap. The existing `chelis_metal_alloc` plus
+   `chelis_tensor` ownership manages `MTLBuffer` lifetimes; the wrapper
+   helpers must construct their `MPS*` objects inside the
+   `chelis_metal_mps_gemm_*` call, use them for one dispatch, and let
+   them be released before the call returns. There is **no caller-side
+   ownership of the MPS objects**: callers see only the `MTLBuffer`
+   inputs and outputs they already owned. The `MTLBuffer` references the
+   wrappers hold MUST be live for the duration of the call (the caller
+   keeps strong references through the dispatch).
+3. **Autorelease pattern.** Because the runtime is ARC, each MPS wrapper
+   helper function MUST wrap its dispatch in `@autoreleasepool { ... }`
+   so that any MPS-internal autoreleased objects (descriptors created by
+   convenience constructors, transient `NSError` chains, etc.) do not
+   leak across host calls. The autorelease pool is per-helper-call, not
+   per-program.
+4. **No-mixed-model invariant.** Future additions to
+   `chelis_metal_runtime.h` MUST follow the same ARC model. Any new
+   helper that would mix models must be in a separate translation unit
+   with explicit boundary documentation; it must not be added to
+   `chelis_metal_runtime.h`.
+
+These four invariants exist so that the implementation phase that adds the
+MPS wrappers does not re-decide the ownership model, and so that future
+Metal runtime work cannot drift the contract.
+
 ### 1.2 Function Types
 
 ```scheme

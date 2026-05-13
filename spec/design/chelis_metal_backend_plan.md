@@ -613,12 +613,12 @@ crates/chelis-runtime/build.rs      -- no Metal/Foundation framework links
 
 ### Integration tests (in `crates/chelis-cli/tests/`)
 
-- **Elementwise correctness:** `chelis build --target metal` on `def f(a: tensor[n, f32], b: tensor[n, f32]) -> tensor[n, f32] = add(a, b)`, compile, run, verify output matches evaluator.
-- **Reduction correctness:** Same for `sum(a, 0)`, verify against evaluator.
-- **Matmul correctness:** Same for `matmul(a, b)`, verify against Accelerate reference.
+- **Elementwise correctness:** `chelis build --target metal` on `def f(a: tensor[n, f32], b: tensor[n, f32]) -> tensor[n, f32] = add(a, b)`, compile, run, verify output matches evaluator. Per-dtype matrix coverage (f32 plus the WS-M1 admit set: f16, bf16, int8, int16, int32, int64, bool — see `spec/04-type-system.md` §1.1.3) extends the elementwise test family with the same shape per dtype.
+- **Reduction correctness:** Same for `sum(a, 0)`, verify against evaluator. Per-dtype coverage applies the §5.7.1 accumulator rule (f16/bf16 reduce_sum → f32 accumulator → operand-precision result; integer reduce_sum widens per spec) for the dtypes the Metal backend admits.
+- **Matmul correctness:** Same for `matmul(a, b)`. The f32 and f16 paths route through the MPS wrapper helpers (`chelis_metal_mps_gemm_f32` / `chelis_metal_mps_gemm_f16`) per the ARC ownership model in `spec/04-type-system.md` §1.1.3; bf16 routes through the parameterized 16x16 tiled MSL kernel; integer matmul is rejected at type-check per §5.7.2 and never reaches the backend. Verify f32/f16 against an MPS-reference baseline; verify bf16 against an f32 reference within bf16 tolerance.
 - **Fused correctness:** Same for `exp(add(mul(a, b), c))`, verify the output is from a single fused kernel (grep generated C for kernel count) and numerically correct.
 - **Fallback correctness:** Same for a program using `cumsum` (CPU fallback), verify it still produces correct results via the fallback path.
-- **Evaluator agreement:** For every test, the Metal-compiled binary must produce results matching `chelis eval` within f32 tolerance.
+- **Evaluator agreement:** For every test, the Metal-compiled binary must produce results matching `chelis eval` within the dtype's documented tolerance (f32 ~1e-6 relative; f16 ~1e-3; bf16 ~1e-2; integer dtypes byte-identical). This is the silent-corruption gate: byte-identical agreement on integer dtypes catches the silent-downgrade class the C-backend WS-A0 footgun fix surfaced.
 
 ### CI considerations
 
@@ -643,7 +643,14 @@ M1: Scaffolding + CLI dispatch (default-gate)
 ├── crates/chelis-backend-metal/ skeleton (lib.rs stub, empty src/, runtime header)
 ├── --target metal arm in chelis-cli/src/main.rs (stub codegen + cmd_build_metal)
 ├── reject_unsupported_metal_ops (deny pad/shrink today; sort/argsort/cumsum/cumprod are not yet IR variants)
-├── reject_unsupported_metal_precisions (f32 + bool only)
+├── reject_unsupported_metal_precisions per the Metal column of
+│   `spec/04-type-system.md` §1.1.3: admit f32, f16, bf16, int8, int16,
+│   int32, int64, bool; hard-reject f64 with the FP64-ALU diagnostic
+│   ("Apple Silicon GPUs lack FP64 ALUs; use `--target c` or
+│   `--target hip` for f64 workloads"). bf16 admits at codegen but the
+│   runtime surfaces the Apple7+ requirement on M1/M2 devices per
+│   §1.1.3. Pre-WS-M1 the gate was f32+bool only; WS-M1 lifts the
+│   matrix to the §1.1.3 admit set.
 ├── chelis-effects validate_build_target arm
 └── Oracle: cargo build --workspace + cli target_metal tests +
     no Apple-SDK Rust deps via `cargo tree | grep` guard
@@ -706,9 +713,20 @@ Deferred (not in M0–M7, tracked as follow-ups):
 
 ## 10. What's NOT in This Plan
 
-- **MPS integration for matmul:** Deferred. Custom tiled kernel first. MPS later if profiling shows it matters.
+- **MPS integration for matmul:** WS-M1 lands MPS for f32 and f16 matmul via
+  the wrapper helpers (`chelis_metal_mps_gemm_f32` / `chelis_metal_mps_gemm_f16`)
+  exposed from `chelis_metal_runtime.h` under the ARC ownership model pinned in
+  `spec/04-type-system.md` §1.1.3. bf16 matmul stays on the parameterized 16x16
+  tiled MSL kernel; integer matmul is rejected at type-check per §5.7.2 and
+  never reaches the backend.
 - **GPU sort / argsort / cumsum:** Deferred. CPU fallback for now.
-- **f64 (double precision) kernels:** Apple Silicon GPU has limited f64 support. Start with f32 only. Document f64 limitation.
+- **f64 (double precision) kernels:** Hard-rejected on Metal per
+  `spec/04-type-system.md` §1.1.3. Apple Silicon GPUs (M1, M2, M3, M4, all
+  announced successors) have **no FP64 ALUs** in their GPU compute units;
+  software emulation (e.g., double-double over two f32s) is explicitly out of
+  scope for this cycle and any foreseeable cycle. f64 workloads must use
+  `--target c` or `--target hip`. The diagnostic surfaces at the CLI gate, the
+  IR validation pass, and the codegen entry point with the same wording.
 - **Multi-GPU:** Apple Silicon has one GPU. No multi-device dispatch.
 - **Async dispatch:** All dispatches use `waitUntilCompleted()` (synchronous). Async command buffer pipelining is an optimization for later.
 - **Integration with the Resource effect:** The type system tracks `Resource` for device placement. Wiring this to Metal buffer allocation (so `Resource(GPU)` maps to Metal buffers and `Resource(CPU)` maps to CPU memory) is a type-system integration, not a backend task. Defer to when the effect system is fully wired for device management.
