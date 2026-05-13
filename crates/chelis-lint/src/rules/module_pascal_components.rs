@@ -438,6 +438,60 @@ mod tests {
         assert_eq!(component_violation("Capstone"), None);
     }
 
+    // Extended-scope §6.3 allowlist gaps surfaced by the hello-chelis
+    // corpus survey (2026-05). Each is a single English PascalCase word
+    // used as a module-component name; today they trip the 7-char
+    // long-lowercase-run heuristic at L275 even though they're correctly
+    // formed per §6.3. The allowlist must include them.
+    #[test]
+    fn accepts_linearity_hypothesis_integration_optimize() {
+        assert_eq!(component_violation("Linearity"), None);
+        assert_eq!(component_violation("Hypothesis"), None);
+        assert_eq!(component_violation("Integration"), None);
+        assert_eq!(component_violation("Optimize"), None);
+    }
+
+    // §6.3 sibling sweep — additional single English words used as
+    // module-components across mathematical, statistical, and ML domains.
+    // Each is a canonical single-word PascalCase identifier under §6.3.
+    #[test]
+    fn accepts_extended_single_word_math_domains() {
+        for name in [
+            "Tensor",
+            "Matrix",
+            "Vector",
+            "Random",
+            "Statistics",
+            "Probability",
+            "Geometry",
+            "Calculus",
+            "Algebra",
+            "Topology",
+            "Spectrum",
+            "Inference",
+            "Classification",
+            "Regression",
+            "Clustering",
+        ] {
+            assert_eq!(
+                component_violation(name),
+                None,
+                "extended single-word `{name}` should pass §6.3",
+            );
+        }
+    }
+
+    #[test]
+    fn negative_long_lowercase_word_without_allowlist_still_fires() {
+        // Sanity: a long-lowercase-run identifier not in the allowlist
+        // still fires. Use a fictional run that won't be confused with
+        // a real ecosystem name.
+        assert!(
+            component_violation("Bogusnonsense").is_some(),
+            "uncurated long-lowercase-run name should still flag",
+        );
+    }
+
     #[test]
     fn sibling_sweep_canonical_ecosystem_names_pass() {
         // Sibling sweep: every chelis-ecosystem PascalCase top-level name

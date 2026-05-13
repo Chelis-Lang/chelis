@@ -420,4 +420,101 @@ mod tests {
         // No module declaration → rule skips.
         assert!(v.is_empty());
     }
+
+    // §7.1.1 sibling-sweep: math/ML well-known prefixes used as
+    // model-or-algorithm sub-namespace identifiers. These names are
+    // canonical mathematical or ML primitives and are uniformly applied
+    // across helpers within their modules. The hello-chelis corpus has
+    // 17 occurrences of these prefixes flagged today even though the
+    // names are clearly canonical math/ML. Each one is pinned here to
+    // lock the §7.1.1 curated list once the rule lands.
+    #[test]
+    fn accepts_curated_math_ml_prefix_exp() {
+        // `exp_decay_model`, `exp_growth_helper` in a module like
+        // `Hello.CurveFit` (whose initials are `cf`, not `exp`).
+        let src = "module Hello.CurveFit\ndef exp_decay_model(x: f32) = todo\ndef exp_growth_helper(x: f32) = todo\n";
+        let v = run(src);
+        assert!(v.is_empty(), "exp_ is a curated math/ML prefix; got: {v:?}");
+    }
+
+    #[test]
+    fn accepts_curated_math_ml_prefix_lin() {
+        let src =
+            "module Hello.Module\ndef lin_step(x: f32) = todo\ndef lin_interp(x: f32) = todo\n";
+        let v = run(src);
+        assert!(v.is_empty(), "lin_ is a curated math/ML prefix; got: {v:?}");
+    }
+
+    #[test]
+    fn accepts_curated_math_ml_prefix_gelu_silu_relu() {
+        let src = "module Hello.Activations\ndef gelu_forward(x: f32) = todo\ndef gelu_backward(x: f32) = todo\ndef relu_forward(x: f32) = todo\ndef relu_backward(x: f32) = todo\ndef silu_forward(x: f32) = todo\ndef silu_backward(x: f32) = todo\n";
+        let v = run(src);
+        assert!(
+            v.is_empty(),
+            "gelu_, silu_, relu_ are curated math/ML prefixes; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_curated_math_ml_prefix_ce_mse_bce_kl() {
+        let src = "module Hello.Loss\ndef ce_loss(x: f32) = todo\ndef ce_grad(x: f32) = todo\ndef mse_loss(x: f32) = todo\ndef mse_grad(x: f32) = todo\ndef bce_loss(x: f32) = todo\ndef bce_grad(x: f32) = todo\ndef kl_loss(x: f32) = todo\ndef kl_grad(x: f32) = todo\n";
+        let v = run(src);
+        assert!(
+            v.is_empty(),
+            "ce_, mse_, bce_, kl_ are curated loss-function prefixes; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_curated_math_ml_prefix_fit_pred_train_eval() {
+        let src = "module Hello.Module\ndef fit_step(x: f32) = todo\ndef fit_run(x: f32) = todo\ndef pred_step(x: f32) = todo\ndef pred_run(x: f32) = todo\ndef train_step(x: f32) = todo\ndef train_loop(x: f32) = todo\ndef eval_step(x: f32) = todo\ndef eval_loop(x: f32) = todo\n";
+        let v = run(src);
+        assert!(
+            v.is_empty(),
+            "fit_, pred_, train_, eval_ are curated ML lifecycle prefixes; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_curated_math_ml_prefix_sin_cos_tan_sqrt_log() {
+        let src = "module Hello.MathOps\ndef sin_step(x: f32) = todo\ndef sin_apply(x: f32) = todo\ndef cos_step(x: f32) = todo\ndef cos_apply(x: f32) = todo\ndef tan_step(x: f32) = todo\ndef tan_apply(x: f32) = todo\ndef sqrt_step(x: f32) = todo\ndef sqrt_apply(x: f32) = todo\ndef log_step(x: f32) = todo\ndef log_apply(x: f32) = todo\n";
+        let v = run(src);
+        assert!(
+            v.is_empty(),
+            "sin_, cos_, tan_, sqrt_, log_ are curated math prefixes; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_curated_math_ml_prefix_softmax_sigmoid_tanh() {
+        let src = "module Hello.Activations\ndef softmax_apply(x: f32) = todo\ndef softmax_grad(x: f32) = todo\ndef sigmoid_apply(x: f32) = todo\ndef sigmoid_grad(x: f32) = todo\ndef tanh_apply(x: f32) = todo\ndef tanh_grad(x: f32) = todo\n";
+        let v = run(src);
+        assert!(
+            v.is_empty(),
+            "softmax_, sigmoid_, tanh_ are curated activation prefixes; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_curated_math_ml_prefix_std_var() {
+        let src = "module Hello.Stats\ndef std_compute(x: f32) = todo\ndef std_batch(x: f32) = todo\ndef var_compute(x: f32) = todo\ndef var_batch(x: f32) = todo\n";
+        let v = run(src);
+        assert!(
+            v.is_empty(),
+            "std_, var_ are curated stat prefixes; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn negative_unrecognized_prefix_still_fires() {
+        // Sanity: a prefix not in the curated list, not in the module
+        // shorthand set, and used by 2+ functions still fires.
+        let src = "module Hello.Module\ndef zzz_one(x: f32) = todo\ndef zzz_two(x: f32) = todo\n";
+        let v = run(src);
+        assert_eq!(
+            v.len(),
+            2,
+            "uncurated unknown prefix should still fire; got: {v:?}"
+        );
+    }
 }

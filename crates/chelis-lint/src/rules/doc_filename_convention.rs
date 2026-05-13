@@ -314,4 +314,90 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].spec_ref, "§8.1");
     }
+
+    // §8.5 mdBook detection by `book.toml` marker (not just hardcoded
+    // path strings). When `book.toml` exists in any ancestor of the doc
+    // file, the entire ancestor tree is mdBook mode and kebab-case is
+    // accepted across the full tree (not only `src/` underneath).
+    #[test]
+    fn accepts_kebab_when_book_toml_is_ancestor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let docs = repo.join("docs");
+        std::fs::create_dir_all(&docs).expect("mkdir");
+        std::fs::write(docs.join("book.toml"), "[book]\ntitle = \"x\"\n").expect("write");
+        let target = docs.join("getting-started.md");
+        std::fs::write(&target, "").expect("write target");
+
+        let ctx = Context {
+            root: repo,
+            path: &target,
+            source: None,
+            surface: Surface::DocFile,
+        };
+        let v = DocFilenameConvention.check(&ctx);
+        assert!(
+            v.is_empty(),
+            "kebab in book.toml-rooted tree should pass; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_kebab_for_filename_matching_cargo_package_name() {
+        // `c-earchin.md` matches the `c-earchin` cargo crate name in
+        // hello-chelis. The narrative-docs rule should accept this
+        // hyphenated filename when a matching Cargo package exists in
+        // the workspace.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let crate_dir = repo.join("crates").join("c-earchin");
+        std::fs::create_dir_all(&crate_dir).expect("mkdir");
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"c-earchin\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write");
+        let docs_shells = repo.join("docs").join("shells");
+        std::fs::create_dir_all(&docs_shells).expect("mkdir");
+        let target = docs_shells.join("c-earchin.md");
+        std::fs::write(&target, "").expect("write target");
+
+        let ctx = Context {
+            root: repo,
+            path: &target,
+            source: None,
+            surface: Surface::DocFile,
+        };
+        let v = DocFilenameConvention.check(&ctx);
+        assert!(
+            v.is_empty(),
+            "kebab filename matching Cargo package name should pass; got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn negative_kebab_in_docs_without_book_toml_or_package_match_still_flags() {
+        // Sanity: a kebab-case file in narrative docs without book.toml
+        // marker and without a matching Cargo package name still fires.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let docs = repo.join("docs");
+        std::fs::create_dir_all(&docs).expect("mkdir");
+        let target = docs.join("some-random-doc.md");
+        std::fs::write(&target, "").expect("write target");
+
+        let ctx = Context {
+            root: repo,
+            path: &target,
+            source: None,
+            surface: Surface::DocFile,
+        };
+        let v = DocFilenameConvention.check(&ctx);
+        assert_eq!(
+            v.len(),
+            1,
+            "kebab outside book.toml and not Cargo-package-matching should still flag"
+        );
+        assert_eq!(v[0].spec_ref, "§8.3");
+    }
 }

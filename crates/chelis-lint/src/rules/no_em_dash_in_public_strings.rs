@@ -393,4 +393,95 @@ mod tests {
                 .is_none()
         );
     }
+
+    // §8.6 scope: the rule targets user-facing strings (diagnostics,
+    // log messages, raised-error text). Module/function/class
+    // docstrings in Python are narrative prose, not user-facing
+    // strings — they must not trip the rule.
+    fn py_ctx(src: &str) -> Context<'_> {
+        Context {
+            root: Path::new("/"),
+            path: Path::new("test.py"),
+            source: Some(src),
+            surface: Surface::PythonSource,
+        }
+    }
+
+    #[test]
+    fn ignores_python_module_docstring() {
+        let dash = '\u{2014}';
+        let src = format!(
+            "\"\"\"Top-level module docstring {dash} narrative prose.\"\"\"\n\nimport sys\n"
+        );
+        assert!(
+            NoEmDashInPublicStrings.check(&py_ctx(&src)).is_empty(),
+            "module docstring should be excluded from §8.6",
+        );
+    }
+
+    #[test]
+    fn ignores_python_function_docstring() {
+        let dash = '\u{2014}';
+        let src = format!(
+            "def f(x):\n    \"\"\"Compute the thing {dash} returns float.\"\"\"\n    return x\n"
+        );
+        assert!(
+            NoEmDashInPublicStrings.check(&py_ctx(&src)).is_empty(),
+            "function docstring should be excluded from §8.6",
+        );
+    }
+
+    #[test]
+    fn ignores_python_class_docstring() {
+        let dash = '\u{2014}';
+        let src =
+            format!("class Foo:\n    \"\"\"Class docstring {dash} narrative.\"\"\"\n    pass\n");
+        assert!(
+            NoEmDashInPublicStrings.check(&py_ctx(&src)).is_empty(),
+            "class docstring should be excluded from §8.6",
+        );
+    }
+
+    #[test]
+    fn ignores_python_triple_single_quoted_docstring() {
+        let dash = '\u{2014}';
+        let src =
+            format!("def f(x):\n    '''Compute the thing {dash} returns float.'''\n    return x\n");
+        assert!(
+            NoEmDashInPublicStrings.check(&py_ctx(&src)).is_empty(),
+            "triple-single-quoted docstring should be excluded too",
+        );
+    }
+
+    #[test]
+    fn flags_python_print_with_em_dash() {
+        // Negative control: a user-facing print() call still fires.
+        let dash = '\u{2014}';
+        let src = format!("print(\"hello {dash} world\")\n");
+        let v = NoEmDashInPublicStrings.check(&py_ctx(&src));
+        assert_eq!(v.len(), 1, "print() with em-dash must still fire");
+    }
+
+    #[test]
+    fn flags_python_raise_with_em_dash() {
+        let dash = '\u{2014}';
+        let src = format!("raise ValueError(\"bad {dash} bad\")\n");
+        let v = NoEmDashInPublicStrings.check(&py_ctx(&src));
+        assert_eq!(v.len(), 1, "raise with em-dash must still fire");
+    }
+
+    #[test]
+    fn flags_python_inline_triple_quoted_call_argument() {
+        // A triple-quoted string passed as a call argument is NOT a
+        // docstring (it isn't a bare-statement expression). It must
+        // still fire because it's reaching a user-facing call site.
+        let dash = '\u{2014}';
+        let src = format!("print(\"\"\"hello {dash} world\"\"\")\n");
+        let v = NoEmDashInPublicStrings.check(&py_ctx(&src));
+        assert_eq!(
+            v.len(),
+            1,
+            "triple-quoted in print() is user-facing, not docstring"
+        );
+    }
 }
