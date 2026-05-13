@@ -425,6 +425,129 @@ result = step(ws)
     assert_autofix_strips_and_preserves("f9_shape_b_vmap_observational", source);
 }
 
+/// F10 (Lint-RedundantLinearityCopyOnBorrowWarn-F1, 0.7.9 cleanup):
+/// the rule must not emit its advisory warning when stripping `copy()`
+/// would leave the program with a borrow-to-owned type mismatch the
+/// implicit-copy inserter cannot bridge. Nautilus reports 137+ such
+/// false positives in `src/linalg.ch` against 0.7.8.
+///
+/// Shape: `consume_owned(copy(y))` where `y: &tensor[n, f32]` and
+/// `consume_owned` takes an owned tensor. Today (pre-fix): the warning
+/// fires without a `[fix]` marker because the CLI driver's
+/// typed-pipeline gate correctly drops the rewrite, but the warning is
+/// emitted before that gate runs. After fix: opting the rule into
+/// `check_mirrors_fix=true` makes the CLI driver mirror the gate at
+/// the warning-emit path, so the warning is suppressed when no safe
+/// rewrite is available.
+#[test]
+fn f10_warning_suppressed_when_typed_pipeline_rejects_strip_on_borrow() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("copy_on_borrow.ch");
+    let source = "\
+def consume_owned[n](x: tensor[n, f32]) -> tensor[n, f32] = realize(x)
+
+def caller[n](y: &tensor[n, f32]) -> tensor[n, f32] = consume_owned(copy(y))
+
+input = to_tensor([1.0, 2.0])
+result = caller(&input)
+";
+    write_and_format(&path, source);
+
+    // The pre-fix source type-checks and evaluates: the explicit copy
+    // is structurally necessary because `consume_owned` takes an owned
+    // tensor and `y` is a borrow.
+    chelis_check_ok(&path);
+    chelis_eval_ok(&path);
+
+    // The warning must NOT fire: stripping `copy(y)` would leave the
+    // call as `consume_owned(y)` which fails because `y: &tensor[n,
+    // f32]` is not assignable to a parameter expecting an owned
+    // tensor. The copy is structurally necessary, not migration-compat
+    // noise.
+    let lint_stdout = chelis_lint_check_stdout(&path);
+    assert!(
+        !lint_stdout.contains("redundant-linearity-call"),
+        "f10: warning fired on structurally-necessary copy(borrow); stripping would fail the typed pipeline; got:\n{lint_stdout}",
+    );
+}
+
+/// F11 (Item 1 negative control): the warning MUST still fire when
+/// the strip is safe (typed pipeline accepts the post-strip source).
+/// Pin both halves of the suppression gate so the fix does not
+/// over-suppress.
+#[test]
+fn f11_warning_still_fires_when_strip_is_safe() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("strip_safe.ch");
+    let source = "\
+def f(w: tensor[2, f32]) -> tensor[2, f32] = realize(copy(w))
+
+result = f(to_tensor([1.0, 2.0]))
+";
+    write_and_format(&path, source);
+
+    let lint_stdout = chelis_lint_check_stdout(&path);
+    assert!(
+        lint_stdout.contains("redundant-linearity-call"),
+        "f11: warning should still fire when the strip is safe; got:\n{lint_stdout}",
+    );
+    assert!(
+        lint_stdout.contains("[fix]"),
+        "f11: `[fix]` marker should be present when the strip is safe; got:\n{lint_stdout}",
+    );
+}
+
+/// F12 (Lint-PreferPipeRedundantLinearityPair-F1, 0.7.9 cleanup):
+/// Coral's report. The pipe form `xs |> drop(n)` puts a literal
+/// single-arg `drop(n)` in the source text, but semantically it is the
+/// 2-arg list-drop with the first argument piped in. Stripping
+/// `drop(n)` to `n` would replace the call with an integer and fail
+/// the typed pipeline. Today (pre-fix): the rule's regex matches
+/// `drop(n)` as single-arg and fires; the CLI gate correctly drops
+/// the `[fix]` marker, but the warning is misleading. After fix:
+/// `check_mirrors_fix` suppresses the warning because no safe rewrite
+/// is on offer. Coral observed this against 0.7.7 in
+/// `src/internal/hamt.ch` and `src/internal/window.ch` and worked
+/// around it by writing `drop(xs, one_i64())` directly.
+#[test]
+fn f12_warning_suppressed_on_2arg_list_drop_in_pipe_form() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_list_drop.ch");
+    let source = "\
+def f(xs: List[int64], n: int64) -> List[int64] = xs |> drop(n)
+";
+    write_and_format(&path, source);
+
+    let lint_stdout = chelis_lint_check_stdout(&path);
+    assert!(
+        !lint_stdout.contains("redundant-linearity-call"),
+        "f12: warning fired on 2-arg list-drop in pipe form; stripping `drop(n)` to `n` would fail the typed pipeline; got:\n{lint_stdout}",
+    );
+}
+
+/// F13 (Item 3 negative control): the legitimate single-arg
+/// `drop(x)` redundancy warning must still fire (and offer a `[fix]`)
+/// on a tensor argument where the strip is safe under implicit
+/// linearity. Pins that the Item 3 fix does not over-suppress
+/// legitimate linearity-primitive `drop()` flagging.
+#[test]
+fn f13_warning_still_fires_on_legitimate_redundant_drop() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("redundant_drop.ch");
+    let source = "\
+def f(w: tensor[2, f32]) -> tensor[2, f32] = drop(realize(w))
+
+result = f(to_tensor([1.0, 2.0]))
+";
+    write_and_format(&path, source);
+
+    let lint_stdout = chelis_lint_check_stdout(&path);
+    assert!(
+        lint_stdout.contains("redundant-linearity-call"),
+        "f13: warning should still fire on legitimate single-arg drop(tensor); got:\n{lint_stdout}",
+    );
+}
+
 /// Relaxed contract for F4: the autofix output must still parse,
 /// type-check, and evaluate identically to the pre-fix source. The
 /// autofix may leave some flagged `copy()` calls in place when stripping

@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed - redundant-linearity-call false-positive on copy(borrow)
+
+The `redundant-linearity-call` advisory warning previously fired on
+`copy()` calls where stripping the call would leave the program with
+a borrow-to-owned type mismatch the implicit-copy inserter cannot
+bridge. The CLI driver's typed-pipeline gate correctly suppressed the
+`[fix]` marker, but the warning itself still fired, leaving 137+
+false positives in Nautilus `src/linalg.ch` against 0.7.8. Fixed by
+opting the rule into `check_mirrors_fix=true` so the CLI driver's
+`should_suppress_unfixable_violation` helper suppresses the warning
+when the typed-pipeline gate rejects the proposed strip. Closes
+`Lint-RedundantLinearityCopyOnBorrowWarn-F1`. Regression tests at
+`crates/chelis-lint/tests/redundant_linearity_call_autofix.rs` (F10,
+F11 negative control).
+
+### Fixed - redundant-linearity-call false-positive on 2-arg list primitives in pipe form
+
+The pipe form `xs |> drop(n)` puts a literal single-arg `drop(n)` in
+the source text, but semantically it is the 2-arg list-drop with the
+first argument piped in. The rule's syntactic
+`has_single_top_level_argument()` accepted the pipe-form shape and
+fired a redundant-linearity-call warning, which the user could not
+satisfy without breaking the program (Coral reported the pattern
+against 0.7.7 in `src/internal/hamt.ch` and `src/internal/window.ch`
+and worked around it by writing the 2-arg form directly). Closed
+transparently by the same `check_mirrors_fix` opt-in above: the
+typed-pipeline gate rejects the strip `drop(n) -> n` and the warning
+is suppressed. Closes `Lint-PreferPipeRedundantLinearityPair-F1`.
+Regression tests at
+`crates/chelis-lint/tests/redundant_linearity_call_autofix.rs` (F12,
+F13 negative control).
+
 ## [0.7.8] — 2026-05-13
 
 ### Fixed - host-eval scalar zero-arg fn-call silent miscompilation (#80)
