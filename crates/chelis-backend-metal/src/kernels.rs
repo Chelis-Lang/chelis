@@ -27,22 +27,58 @@
 //! | header | `#include <hip/hip_runtime.h>` | `#include <metal_stdlib>\nusing namespace metal;` |
 //!
 //! Bool tensors are emitted as `device const bool*` directly. Verified in
-//! the M2 prelude on Apple Silicon (M3, GPU family 7+) — no uchar
+//! the M2 prelude on Apple Silicon (M3, GPU family 7+); no uchar
 //! workaround needed.
+//!
+//! ## WS-M1: per-dtype parameterization
+//!
+//! All templates here that previously hardcoded `float` are now
+//! parameterized through [`crate::dtype::msl_type`] / [`crate::dtype::kernel_suffix`].
+//! See spec/04-type-system.md §1.1.3 for the per-backend matrix and
+//! §5.7.1 for reduction-accumulator promotion. `bf16` kernels gate
+//! their MSL `bfloat` use behind `#if __METAL_VERSION__ >= 320`
+//! (Apple7+ requirement).
+
+use chelis_types::types::Prim;
+
+use crate::dtype;
+
+/// Returns the MSL header block: `#include <metal_stdlib>` + namespace
+/// import. Wraps the body in a `bfloat`-version `#if` guard when any
+/// participating dtype requires MSL 3.2 / Apple7+ (bf16 today, per
+/// spec/04-type-system.md §1.1.3). The caller composes the guarded
+/// region; this helper only emits the unconditional header.
+fn msl_header() -> &'static str {
+    "#include <metal_stdlib>\nusing namespace metal;\n\n"
+}
+
+/// Wrap a kernel body in `#if __METAL_VERSION__ >= 320 ... #endif` when
+/// any participating precision requires it (today: bf16 only). Returns
+/// the body unchanged otherwise. The wrap puts the guard outside the
+/// kernel function so a pre-Apple7 build still emits a syntactically
+/// valid translation unit; the guarded region simply produces no
+/// `kernel void` declaration on those builds, and the runtime's
+/// pipeline-creation step surfaces a clean diagnostic when the user
+/// dispatches a missing kernel.
+fn maybe_wrap_msl_320(body: String, precs: &[Prim]) -> String {
+    if precs.iter().any(|p| dtype::requires_msl_320_guard(*p)) {
+        format!("#if __METAL_VERSION__ >= 320\n{body}#endif\n")
+    } else {
+        body
+    }
+}
 
 /// Emit a complete elementwise kernel source string.
 ///
 /// `kernel_name`: the MSL function name, also used as the cache key
-/// `params`: list of `(qualifier, type, name)` triples for the parameter
-///           block, in order. The emitter is expected to follow the buffer
-///           conventions documented above.
+/// `params`: list of parameter declarations (one per buffer) in order.
 /// `body`: the per-element body, with `tid` already bounds-checked. The
 ///         body may reference parameter names directly.
 ///
 /// Returns a self-contained MSL source string suitable for embedding in a
 /// `static NSString *const ... = @R"MSL(...)MSL";` literal.
 pub fn elementwise_kernel(kernel_name: &str, params: &[String], body: &str) -> String {
-    let header = "#include <metal_stdlib>\nusing namespace metal;\n\n";
+    let header = msl_header();
     let params_block = params.join(",\n    ");
     format!(
         "{header}kernel void {kernel_name}(
@@ -58,6 +94,19 @@ pub fn elementwise_kernel(kernel_name: &str, params: &[String], body: &str) -> S
     )
 }
 
+/// WS-M1: same as [`elementwise_kernel`] but wraps the body in the
+/// `#if __METAL_VERSION__ >= 320` guard when any of `precs` requires
+/// it (bf16 today). Preferred call shape for new emit sites.
+pub fn elementwise_kernel_for(
+    kernel_name: &str,
+    params: &[String],
+    body: &str,
+    precs: &[Prim],
+) -> String {
+    let raw = elementwise_kernel(kernel_name, params, body);
+    maybe_wrap_msl_320(raw, precs)
+}
+
 /// Build a parameter declaration for a `device const T*` input buffer at
 /// `[[buffer(idx)]]`.
 pub fn input_param(idx: usize, ty: &str, name: &str) -> String {
@@ -70,18 +119,11 @@ pub fn output_param(idx: usize, ty: &str, name: &str) -> String {
     format!("device {ty}* {name} [[buffer({idx})]]")
 }
 
-/// Map a Chelis precision to the MSL type spelling used in kernel params
-/// and the body. M2 supports f32 and bool; everything else is rejected
-/// upstream at the CLI by `reject_unsupported_metal_precisions`.
-pub fn msl_type(prec: chelis_types::types::Prim) -> &'static str {
-    match prec {
-        chelis_types::types::Prim::F32 => "float",
-        chelis_types::types::Prim::Bool => "bool",
-        _ => panic!(
-            "Metal backend M2 supports only f32 and bool element types; \
-             reject_unsupported_metal_precisions should have caught the rest"
-        ),
-    }
+/// Map a Chelis precision to the MSL type spelling. Thin re-export of
+/// [`crate::dtype::msl_type`] kept here so existing call sites compile
+/// without churn.
+pub fn msl_type(prec: Prim) -> &'static str {
+    dtype::msl_type(prec)
 }
 
 /// MSL spelling for a unary math intrinsic.
@@ -127,15 +169,6 @@ pub enum ReduceKind {
 }
 
 impl ReduceKind {
-    /// MSL identity element string for the reduction.
-    pub fn identity(self) -> &'static str {
-        match self {
-            Self::Sum => "0.0f",
-            Self::Max => "-INFINITY",
-            Self::Min => "INFINITY",
-        }
-    }
-
     /// Short label used in kernel names (`reduce_sum`, `reduce_max`, …).
     pub fn label(self) -> &'static str {
         match self {
@@ -145,9 +178,48 @@ impl ReduceKind {
         }
     }
 
-    /// Combine expression: given two MSL float expressions `lhs` and `rhs`,
-    /// produce the merged scalar.
-    pub fn combine(self, lhs: &str, rhs: &str) -> String {
+    /// MSL identity element string for the reduction at the given
+    /// accumulator precision. Sums use the dtype's `0`, max uses the
+    /// dtype's minimum-representable value, min uses the maximum.
+    /// Integer types use literal zero/INT*_MIN/INT*_MAX rather than
+    /// `INFINITY` so the resulting kernel actually compiles.
+    pub fn identity(self, prec: Prim) -> &'static str {
+        match (self, prec) {
+            (Self::Sum, Prim::F32) => "0.0f",
+            (Self::Sum, Prim::F16) => "(half)0.0h",
+            (Self::Sum, Prim::Bf16) => "(bfloat)0.0",
+            (Self::Sum, Prim::Int8) => "(char)0",
+            (Self::Sum, Prim::Int16) => "(short)0",
+            (Self::Sum, Prim::Int32) => "0",
+            (Self::Sum, Prim::Int64) => "0L",
+            (Self::Sum, Prim::Bool) => "false",
+            (Self::Max, Prim::F32) => "-INFINITY",
+            (Self::Max, Prim::F16) => "(half)(-65504.0)",
+            (Self::Max, Prim::Bf16) => "(bfloat)(-INFINITY)",
+            (Self::Max, Prim::Int8) => "(char)(-128)",
+            (Self::Max, Prim::Int16) => "(short)(-32768)",
+            (Self::Max, Prim::Int32) => "(int)(-2147483647 - 1)",
+            (Self::Max, Prim::Int64) => "(long)(-9223372036854775807L - 1L)",
+            (Self::Max, Prim::Bool) => "false",
+            (Self::Min, Prim::F32) => "INFINITY",
+            (Self::Min, Prim::F16) => "(half)65504.0",
+            (Self::Min, Prim::Bf16) => "(bfloat)INFINITY",
+            (Self::Min, Prim::Int8) => "(char)127",
+            (Self::Min, Prim::Int16) => "(short)32767",
+            (Self::Min, Prim::Int32) => "2147483647",
+            (Self::Min, Prim::Int64) => "9223372036854775807L",
+            (Self::Min, Prim::Bool) => "true",
+            (kind, prec) => panic!(
+                "Metal reduction identity not defined for ({kind:?}, {}); see spec/04-type-system.md §5.7.1",
+                prec.name()
+            ),
+        }
+    }
+
+    /// Combine expression at the accumulator dtype: given two MSL
+    /// expressions `lhs` and `rhs`, produce the merged scalar.
+    pub fn combine_at(self, prec: Prim, lhs: &str, rhs: &str) -> String {
+        let _ = prec; // currently MSL handles the operator overloads itself.
         match self {
             Self::Sum => format!("({lhs}) + ({rhs})"),
             Self::Max => format!("max({lhs}, {rhs})"),
@@ -161,21 +233,31 @@ impl ReduceKind {
 /// the upstream Metal-backend plan committed to.
 pub const MATMUL_TILE: usize = 16;
 
-/// Emit the tiled MSL matmul kernel.
+/// Emit the tiled MSL matmul kernel parameterized over operand precision.
 ///
-/// Computes `C[M, N] = A[M, K] @ B[K, N]` for row-major contiguous f32
+/// Computes `C[M, N] = A[M, K] @ B[K, N]` for row-major contiguous
 /// matrices via a 16x16 tile. Threadgroup memory caches one tile of A
 /// and one tile of B per outer iteration; each thread accumulates one
 /// output element. The kernel is dispatched with an `MxN` grid in
 /// 16x16 threadgroups; the host picks tg = (16, 16, 1).
-pub fn matmul_tiled_kernel(kernel_name: &str) -> String {
+///
+/// `prec` parameterizes both the buffer element type AND the
+/// per-thread accumulator type. `bf16` operand precision wraps the
+/// kernel in the `#if __METAL_VERSION__ >= 320` guard required by the
+/// MSL `bfloat` type. Integer matmul is rejected at type-check per
+/// spec/04-type-system.md §5.7.2 and at the F1 codegen guard in
+/// `emit::Emitter::emit_matmul`; this template still admits integer
+/// dtypes defensively for future generalization.
+pub fn matmul_tiled_kernel_for(kernel_name: &str, prec: Prim) -> String {
     let tile = MATMUL_TILE;
+    let ty = msl_type(prec);
+    let identity = ReduceKind::Sum.identity(prec);
     // M, N, K are packed into a single uniform struct bound at buffer(3).
     // Binding them as three separate `constant uint&` parameters at
     // distinct buffer indices would require three `setBytes:atIndex:` calls
     // from the host, but `chelis_metal_launch2d` only binds one uniforms
-    // blob — so a single struct keeps the kernel and host in lockstep.
-    format!(
+    // blob, so a single struct keeps the kernel and host in lockstep.
+    let body = format!(
         "#include <metal_stdlib>
 using namespace metal;
 
@@ -186,9 +268,9 @@ struct ChelisMatmulDims {{
 }};
 
 kernel void {kernel_name}(
-    device const float* A [[buffer(0)]],
-    device const float* B [[buffer(1)]],
-    device float* C [[buffer(2)]],
+    device const {ty}* A [[buffer(0)]],
+    device const {ty}* B [[buffer(1)]],
+    device {ty}* C [[buffer(2)]],
     constant ChelisMatmulDims& dims [[buffer(3)]],
     uint2 gid [[thread_position_in_grid]],
     uint2 lid [[thread_position_in_threadgroup]]
@@ -197,18 +279,18 @@ kernel void {kernel_name}(
     const uint M = dims.M;
     const uint N = dims.N;
     const uint K = dims.K;
-    threadgroup float tileA[{tile}][{tile}];
-    threadgroup float tileB[{tile}][{tile}];
+    threadgroup {ty} tileA[{tile}][{tile}];
+    threadgroup {ty} tileB[{tile}][{tile}];
 
-    float acc = 0.0f;
+    {ty} acc = {identity};
     uint num_tiles = (K + TILE - 1) / TILE;
     for (uint t = 0; t < num_tiles; t++) {{
         uint aRow = gid.y;
         uint aCol = t * TILE + lid.x;
         uint bRow = t * TILE + lid.y;
         uint bCol = gid.x;
-        tileA[lid.y][lid.x] = (aRow < M && aCol < K) ? A[aRow * K + aCol] : 0.0f;
-        tileB[lid.y][lid.x] = (bRow < K && bCol < N) ? B[bRow * N + bCol] : 0.0f;
+        tileA[lid.y][lid.x] = (aRow < M && aCol < K) ? A[aRow * K + aCol] : ({ty}){identity};
+        tileB[lid.y][lid.x] = (bRow < K && bCol < N) ? B[bRow * N + bCol] : ({ty}){identity};
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (uint i = 0; i < TILE; i++) {{
@@ -221,7 +303,15 @@ kernel void {kernel_name}(
     }}
 }}
 "
-    )
+    );
+    maybe_wrap_msl_320(body, &[prec])
+}
+
+/// f32-only legacy entry point retained for any callers that haven't
+/// migrated to [`matmul_tiled_kernel_for`]. New code should call the
+/// `_for` variant.
+pub fn matmul_tiled_kernel(kernel_name: &str) -> String {
+    matmul_tiled_kernel_for(kernel_name, Prim::F32)
 }
 
 /// Threadgroup size for the single-threadgroup reduction kernel.
@@ -236,35 +326,49 @@ kernel void {kernel_name}(
 /// the `lid + stride < tg_size` check.
 pub const REDUCE_TG_SIZE: usize = 256;
 
-/// Emit a 1D reduction kernel that reduces a contiguous `n`-element f32
-/// buffer to a single scalar via threadgroup memory + tree reduction.
+/// Emit a 1D reduction kernel parameterized on operand and accumulator
+/// dtype per spec §5.7.1.
+///
+/// Reduces a contiguous `n`-element buffer of `operand_prec` to a single
+/// scalar of `accumulator_prec` via threadgroup memory + tree reduction.
+/// For `reduce_sum`, `accumulator_prec` is the spec-required widened
+/// dtype (f32 for f16/bf16; i32 for i8/i16; otherwise same as operand).
+/// For `max`/`min`, `accumulator_prec == operand_prec` per the spec.
 ///
 /// Dispatched with a fixed power-of-two threadgroup size
 /// ([`REDUCE_TG_SIZE`] = 256). The wrap loop strides `n` at `tg_size`
 /// per iteration so any `n <= REDUCE_TG_SIZE * REDUCE_TG_SIZE` (with
-/// the same single-threadgroup constraint) reduces in one pass. For
-/// `n` smaller than `tg_size`, threads with `lid >= n` skip the wrap
-/// loop entirely and seed `shared[lid]` with the identity, so the
-/// tree-reduction is still well-defined.
+/// the same single-threadgroup constraint) reduces in one pass.
 ///
-/// Two-pass reduction for `n > REDUCE_TG_SIZE` is M4.next; the emitter
-/// rejects oversized inputs at the host site.
-pub fn reduce_full_kernel(kernel_name: &str, kind: ReduceKind) -> String {
-    let identity = kind.identity();
+/// Two-pass reduction for `n > REDUCE_TG_SIZE * REDUCE_TG_SIZE` is
+/// M4.next; the emitter rejects oversized inputs at the host site.
+pub fn reduce_full_kernel_for(
+    kernel_name: &str,
+    kind: ReduceKind,
+    operand_prec: Prim,
+    accumulator_prec: Prim,
+) -> String {
+    let in_ty = msl_type(operand_prec);
+    let acc_ty = msl_type(accumulator_prec);
+    let identity = kind.identity(accumulator_prec);
     let tg = REDUCE_TG_SIZE;
-    // The single-threadgroup reduction uses `lid` as both the per-thread
-    // index into the input stride loop AND the threadgroup-local index for
-    // tree reduction. Attribute bindings must not duplicate, so bind once
-    // as `lid` and use it everywhere.
-    let combine_acc_input = kind.combine("acc", "input[lid + i]");
-    let combine_pair = kind.combine("shared[lid]", "shared[lid + stride]");
-    format!(
+    // Promote each input element to the accumulator dtype before
+    // combining so narrow-float / narrow-int sums don't silently
+    // saturate (per spec/04-type-system.md §5.7.1).
+    let elem_promoted = if operand_prec == accumulator_prec {
+        "input[lid + i]".to_string()
+    } else {
+        format!("({acc_ty})input[lid + i]")
+    };
+    let combine_acc_input = kind.combine_at(accumulator_prec, "acc", &elem_promoted);
+    let combine_pair = kind.combine_at(accumulator_prec, "shared[lid]", "shared[lid + stride]");
+    let body = format!(
         "#include <metal_stdlib>
 using namespace metal;
 
 kernel void {kernel_name}(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
+    device const {in_ty}* input [[buffer(0)]],
+    device {acc_ty}* output [[buffer(1)]],
     constant uint& n [[buffer(2)]],
     uint lid [[thread_position_in_threadgroup]]
 ) {{
@@ -273,9 +377,9 @@ kernel void {kernel_name}(
     // of TG_SIZE threads regardless of n; the wrap loop below handles any
     // n by striding TG_SIZE elements per iteration.
     const uint TG_SIZE = {tg};
-    threadgroup float shared[{tg}];
+    threadgroup {acc_ty} shared[{tg}];
 
-    float acc = {identity};
+    {acc_ty} acc = {identity};
     // Threads with lid >= n skip the wrap loop and seed `acc` with the
     // identity, keeping the tree reduction well-defined for any n.
     for (uint i = 0; i + lid < n; i += TG_SIZE) {{
@@ -298,5 +402,102 @@ kernel void {kernel_name}(
     }}
 }}
 "
-    )
+    );
+    maybe_wrap_msl_320(body, &[operand_prec, accumulator_prec])
+}
+
+/// f32-only legacy entry point retained for callers that haven't
+/// migrated to [`reduce_full_kernel_for`]. New code should call the
+/// `_for` variant.
+pub fn reduce_full_kernel(kernel_name: &str, kind: ReduceKind) -> String {
+    reduce_full_kernel_for(kernel_name, kind, Prim::F32, Prim::F32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matmul_template_uses_dtype_for_buffers() {
+        let src = matmul_tiled_kernel_for("k_matmul_test", Prim::F16);
+        assert!(src.contains("device const half* A"));
+        assert!(src.contains("device half* C"));
+        assert!(src.contains("threadgroup half tileA"));
+    }
+
+    #[test]
+    fn matmul_bf16_wraps_in_msl_320_guard() {
+        let src = matmul_tiled_kernel_for("k_matmul_bf16_test", Prim::Bf16);
+        assert!(src.contains("#if __METAL_VERSION__ >= 320"));
+        assert!(src.contains("device const bfloat* A"));
+        assert!(src.trim_end().ends_with("#endif"));
+    }
+
+    #[test]
+    fn matmul_f32_no_msl_320_guard() {
+        let src = matmul_tiled_kernel_for("k_matmul_f32_test", Prim::F32);
+        assert!(!src.contains("#if __METAL_VERSION__"));
+    }
+
+    #[test]
+    fn reduce_sum_widens_narrow_floats_to_f32() {
+        let src = reduce_full_kernel_for(
+            "k_reduce_sum_f16_test",
+            ReduceKind::Sum,
+            Prim::F16,
+            Prim::F32,
+        );
+        assert!(src.contains("device const half* input"));
+        assert!(src.contains("device float* output"));
+        assert!(src.contains("threadgroup float shared"));
+        assert!(src.contains("(float)input[lid + i]"));
+    }
+
+    #[test]
+    fn reduce_sum_widens_narrow_ints_to_i32() {
+        let src = reduce_full_kernel_for(
+            "k_reduce_sum_i8_test",
+            ReduceKind::Sum,
+            Prim::Int8,
+            Prim::Int32,
+        );
+        assert!(src.contains("device const char* input"));
+        assert!(src.contains("device int* output"));
+        assert!(src.contains("(int)input[lid + i]"));
+    }
+
+    #[test]
+    fn reduce_max_keeps_operand_precision() {
+        let src = reduce_full_kernel_for(
+            "k_reduce_max_f16_test",
+            ReduceKind::Max,
+            Prim::F16,
+            Prim::F16,
+        );
+        assert!(src.contains("device const half* input"));
+        assert!(src.contains("device half* output"));
+        assert!(src.contains("max(acc, input[lid + i])"));
+        assert!(!src.contains("(half)input[lid + i]"));
+    }
+
+    #[test]
+    fn elementwise_kernel_for_bf16_wraps_guard() {
+        let params = vec![
+            input_param(0, "bfloat", "a"),
+            output_param(1, "bfloat", "out"),
+        ];
+        let src = elementwise_kernel_for(
+            "k_unary_bf16_test",
+            &params,
+            "    out[tid] = -a[tid];",
+            &[Prim::Bf16],
+        );
+        assert!(src.contains("#if __METAL_VERSION__ >= 320"));
+    }
+
+    #[test]
+    fn legacy_matmul_kernel_still_emits_f32() {
+        let src = matmul_tiled_kernel("k_matmul_legacy");
+        assert!(src.contains("device const float* A"));
+    }
 }

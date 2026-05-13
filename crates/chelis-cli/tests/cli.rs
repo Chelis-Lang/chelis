@@ -5013,6 +5013,10 @@ fn target_metal_rejects_shrink() {
 
 #[test]
 fn target_metal_rejects_f64_precision() {
+    // WS-M1 widens the active Metal dtype set to all spec dtypes
+    // except f64 (spec/04-type-system.md §1.1.3). The f64 rejection
+    // diagnostic is now the spec-pinned FP64-ALU message; tests must
+    // assert exact-string-match so the contract doesn't drift.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("f64_one.ch");
     write_file(&path, "def f64_one() -> f64 = cast(1.0, f64)\n");
@@ -5024,8 +5028,171 @@ fn target_metal_rejects_f64_precision() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "`chelis build --target metal` DAG path only supports f32/bool tensors",
+            "Apple Silicon GPUs lack FP64 ALUs; use `--target c` or `--target hip` for f64 workloads",
         ));
+}
+
+#[test]
+fn target_metal_admits_f16_add() {
+    // WS-M1: f16 is in the active Metal dtype set
+    // (spec/04-type-system.md §1.1.3). A simple f16 add must build
+    // through `chelis build --target metal` without the CLI gate
+    // rejecting on precision grounds.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("f16_add.ch");
+    let out_dir = dir.path().join("out");
+    write_file(
+        &path,
+        "def f16_add(x: tensor[3, f16], y: tensor[3, f16]) -> tensor[3, f16] = add(x, y)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "metal",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let mm_src = fs::read_to_string(out_dir.join("f16_add_metal.mm")).expect("metal source");
+    assert!(
+        mm_src.contains("device const half*"),
+        "f16 add must emit `device const half*` operands: {mm_src}"
+    );
+}
+
+#[test]
+fn target_metal_admits_bf16_add() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bf16_add.ch");
+    let out_dir = dir.path().join("out");
+    write_file(
+        &path,
+        "def bf16_add(x: tensor[3, bf16], y: tensor[3, bf16]) -> tensor[3, bf16] = add(x, y)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "metal",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let mm_src = fs::read_to_string(out_dir.join("bf16_add_metal.mm")).expect("metal source");
+    assert!(
+        mm_src.contains("#if __METAL_VERSION__ >= 320"),
+        "bf16 add must wrap the kernel in the MSL 3.2+ guard: {mm_src}"
+    );
+    assert!(
+        mm_src.contains("device const bfloat*"),
+        "bf16 add must emit `device const bfloat*` operands: {mm_src}"
+    );
+}
+
+#[test]
+fn target_metal_admits_i32_add() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("i32_add.ch");
+    let out_dir = dir.path().join("out");
+    write_file(
+        &path,
+        "def i32_add(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = add(x, y)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "metal",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let mm_src = fs::read_to_string(out_dir.join("i32_add_metal.mm")).expect("metal source");
+    assert!(
+        mm_src.contains("device const int*"),
+        "i32 add must emit `device const int*` operands: {mm_src}"
+    );
+}
+
+#[test]
+fn target_metal_admits_i64_add() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("i64_add.ch");
+    let out_dir = dir.path().join("out");
+    write_file(
+        &path,
+        "def i64_add(x: tensor[3, int64], y: tensor[3, int64]) -> tensor[3, int64] = add(x, y)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "metal",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let mm_src = fs::read_to_string(out_dir.join("i64_add_metal.mm")).expect("metal source");
+    assert!(
+        mm_src.contains("device const long*"),
+        "i64 add must emit `device const long*` operands: {mm_src}"
+    );
+}
+
+#[test]
+fn target_metal_link_line_includes_metal_performance_shaders() {
+    // WS-M1 added MPSMatrixMultiplication for f32/f16 matmul; the
+    // emitted build recipe must include `MetalPerformanceShaders`.
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("mm.ch");
+    let out_dir = dir.path().join("out");
+    write_file(
+        &src,
+        "def mm(a: tensor[4, 4, f32], b: tensor[4, 4, f32]) -> tensor[4, 4, f32] = matmul(a, b)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "metal",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "-framework MetalPerformanceShaders",
+        ));
+    let mm_src = fs::read_to_string(out_dir.join("mm_metal.mm")).expect("metal source");
+    assert!(
+        mm_src.contains("chelis_metal_mps_gemm_f32("),
+        "f32 matmul must dispatch to MPS via `chelis_metal_mps_gemm_f32`: {mm_src}"
+    );
 }
 
 #[test]

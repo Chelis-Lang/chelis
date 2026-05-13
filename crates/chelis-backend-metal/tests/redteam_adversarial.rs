@@ -126,7 +126,7 @@ fn m7_chain_of_elementwise_does_not_collapse_to_one_kernel() {
 }
 
 #[test]
-fn m7_matmul_at_tile_boundary_routes_to_tiled_kernel() {
+fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
     // M=K=N exactly equals TILE — tests boundary handling of the tiled kernel.
     use chelis_ir::dag::DimExpr;
 
@@ -183,9 +183,14 @@ fn m7_matmul_at_tile_boundary_routes_to_tiled_kernel() {
     let result = codegen_metal(&dag, "mm_tile");
     let src = &result.mm_source;
     assert_emits_real_kernel(src, "tile-boundary matmul");
+    // WS-M1: f32 matmul routes to MPSMatrixMultiplication; the tiled MSL
+    // kernel is no longer emitted for f32 dispatch. The boundary case
+    // (M=N=K exactly equals TILE) is still meaningful: the MPS path
+    // exercises the same shapes, and the emitter must not regress to
+    // the stub.
     assert!(
-        src.contains("k_matmul_"),
-        "tile-boundary matmul must specialize to the tiled kernel: {src}"
+        src.contains("chelis_metal_mps_gemm_f32(buf_0, buf_1, buf_5, 16u, 16u, 16u)"),
+        "tile-boundary f32 matmul must dispatch through MPS: {src}"
     );
 }
 
@@ -331,13 +336,12 @@ fn m7_bool_load_through_where_falls_through_to_stub() {
 }
 
 #[test]
-fn m7_no_silent_miscompile_for_unsupported_unary_with_int_precision() {
-    // The emitter's msl_type panics on non-{f32, bool} precisions — but
-    // the CLI's reject_unsupported_metal_precisions is the gate that
-    // *should* catch this before the emitter is ever called. Confirm
-    // the emitter at least bails (panic or fall-through) rather than
-    // silently emitting code that interprets int data as f32.
-    use std::panic::AssertUnwindSafe;
+fn wsm1_int32_unary_neg_emits_typed_kernel() {
+    // WS-M1: int32 is now in the active Metal dtype set
+    // (spec/04-type-system.md §1.1.3). Unary Neg on int32 should
+    // emit a properly typed kernel (`device const int*`), not the
+    // stub and not the f32 kernel that would silently misinterpret
+    // the buffer's bytes.
     let int_ty = TensorType {
         dims: vec![DimInfo::Lit(4)],
         precision: Prim::Int32,
@@ -352,18 +356,72 @@ fn m7_no_silent_miscompile_for_unsupported_unary_with_int_precision() {
     let n = dag.add_node(RiscOp::Neg, vec![a], int_ty, None);
     dag.add_root(n);
 
-    // Either the emitter falls through to stub, OR it panics. Both are
-    // acceptable outcomes — what's NOT acceptable is silently emitting a
-    // kernel that miscompiles. We catch the panic so the test reports
-    // either outcome cleanly.
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| codegen_metal(&dag, "int_neg")));
-    match result {
-        Ok(r) => {
-            assert_falls_through_to_stub(&r.mm_source, "int32 unary neg");
-        }
-        Err(_) => {
-            // Panic-on-unsupported-precision is the alternative honest
-            // outcome and is consistent with the kernels::msl_type panic.
-        }
-    }
+    let result = codegen_metal(&dag, "int_neg");
+    let src = &result.mm_source;
+    assert!(
+        src.contains("device const int* a"),
+        "int32 unary neg must emit an int-typed input parameter: {src}"
+    );
+    assert!(
+        src.contains("device int* out"),
+        "int32 unary neg must emit an int-typed output parameter: {src}"
+    );
+    assert!(
+        src.contains("CHELIS_I32"),
+        "int32 root output should declare CHELIS_I32 dtype: {src}"
+    );
+}
+
+#[test]
+fn wsm1_unary_transcendental_on_int_rejected_at_codegen() {
+    // Defense in depth: the type checker rejects transcendentals on
+    // integer precisions per spec §5.4. If a regression admitted such
+    // a DAG, the Metal emitter must bail with a structured error, not
+    // emit a kernel that calls `exp(int)` and silently miscompiles.
+    let int_ty = TensorType {
+        dims: vec![DimInfo::Lit(4)],
+        precision: Prim::Int32,
+    };
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        int_ty.clone(),
+        None,
+    );
+    let n = dag.add_node(RiscOp::Exp, vec![a], int_ty, None);
+    dag.add_root(n);
+
+    let result = codegen_metal(&dag, "bad_transcend");
+    let src = &result.mm_source;
+    assert!(
+        src.contains("M1 fallback stub"),
+        "int32 transcendental must fall through to stub via codegen rejection: {src}"
+    );
+}
+
+#[test]
+fn wsm1_f64_matmul_falls_through_to_stub() {
+    // f64 on Metal is hard-rejected per spec §1.1.3. A DAG that
+    // reaches the codegen entry must bail; emit_dag's
+    // `require_metal_admissible` returns the FP64-ALU diagnostic and
+    // the result falls through to the stub artifact.
+    let mat_f64 = |r: usize, c: usize| TensorType {
+        dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
+        precision: Prim::F64,
+    };
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_f64(2, 3),
+        None,
+    );
+    dag.add_root(a);
+    let result = codegen_metal(&dag, "f64_load");
+    assert!(
+        result.mm_source.contains("M1 fallback stub"),
+        "f64 input must surface via the stub fallback (CLI gate is the user-facing reject): {}",
+        result.mm_source
+    );
 }

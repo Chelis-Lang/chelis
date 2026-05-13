@@ -23,6 +23,16 @@
 
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
+/* WS-M1: MPSMatrixMultiplication powers the f32/f16 matmul dispatch
+ * path. The wrapper helpers `chelis_metal_mps_gemm_f32` and
+ * `chelis_metal_mps_gemm_f16` are defined further down. Per the
+ * WS-M0 ARC ownership pin (spec/04-type-system.md §1.1.3), every
+ * `MPSMatrixDescriptor` and `MPSMatrix` is constructed inside the
+ * helper, used for one dispatch, and released before the helper
+ * returns; the helper wraps its body in `@autoreleasepool { ... }`
+ * so MPS-internal autoreleased objects don't leak across host calls.
+ * The helper compiles under ARC just like the rest of this header. */
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 
 #include "chelis_runtime.h"
 #include <stdio.h>
@@ -251,5 +261,117 @@ static inline void chelis_metal_launch2d(
     [cb commit];
     [cb waitUntilCompleted];
 }
+
+/* ---- MPSMatrixMultiplication wrappers (WS-M1) ----
+ *
+ * Production-quality GEMM via Apple Metal Performance Shaders. Operands
+ * and output are owned by the caller as `id<MTLBuffer>` (typically
+ * allocated by `chelis_metal_alloc`); the helper constructs all
+ * MPS objects internally and releases them before returning, per the
+ * ownership pin in spec/04-type-system.md §1.1.3.
+ *
+ * Row-major contiguous layout: A is M×K, B is K×N, C is M×N.
+ *
+ * The autorelease pool wraps the entire dispatch so any
+ * MPS-internal autoreleased objects (e.g. transient `NSError` chains
+ * from convenience constructors) drain at the helper boundary rather
+ * than leaking into the caller's pool.
+ */
+
+static inline void chelis_metal_mps_gemm_f32(
+    __unsafe_unretained id<MTLBuffer> A,
+    __unsafe_unretained id<MTLBuffer> B,
+    __unsafe_unretained id<MTLBuffer> C,
+    NSUInteger M, NSUInteger N, NSUInteger K
+) {
+    @autoreleasepool {
+        MPSMatrixDescriptor *descA = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:M
+                            columns:K
+                           rowBytes:K * sizeof(float)
+                           dataType:MPSDataTypeFloat32];
+        MPSMatrixDescriptor *descB = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:K
+                            columns:N
+                           rowBytes:N * sizeof(float)
+                           dataType:MPSDataTypeFloat32];
+        MPSMatrixDescriptor *descC = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:M
+                            columns:N
+                           rowBytes:N * sizeof(float)
+                           dataType:MPSDataTypeFloat32];
+        MPSMatrix *matA = [[MPSMatrix alloc] initWithBuffer:A descriptor:descA];
+        MPSMatrix *matB = [[MPSMatrix alloc] initWithBuffer:B descriptor:descB];
+        MPSMatrix *matC = [[MPSMatrix alloc] initWithBuffer:C descriptor:descC];
+        MPSMatrixMultiplication *gemm = [[MPSMatrixMultiplication alloc]
+            initWithDevice:chelis_metal_device()
+             transposeLeft:NO
+            transposeRight:NO
+                resultRows:M
+             resultColumns:N
+           interiorColumns:K
+                     alpha:1.0
+                      beta:0.0];
+        id<MTLCommandBuffer> cb = [chelis_metal_queue() commandBuffer];
+        [gemm encodeToCommandBuffer:cb
+                          leftMatrix:matA
+                         rightMatrix:matB
+                        resultMatrix:matC];
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+}
+
+#if __METAL_VERSION__ >= 320 || !defined(__METAL_VERSION__)
+/* f16 GEMM. The MPS f16 path is host-side and does not require Apple7+ /
+ * MSL 3.2; the macro guard above is purely a defensive belt-and-braces
+ * since pre-Apple7 GPUs may still create the pipeline successfully but
+ * the user-facing contract for sub-f32 precision is documented at the
+ * Apple7+ level (spec/04-type-system.md §1.1.3). The host helper itself
+ * does not depend on `bfloat`. */
+static inline void chelis_metal_mps_gemm_f16(
+    __unsafe_unretained id<MTLBuffer> A,
+    __unsafe_unretained id<MTLBuffer> B,
+    __unsafe_unretained id<MTLBuffer> C,
+    NSUInteger M, NSUInteger N, NSUInteger K
+) {
+    @autoreleasepool {
+        MPSMatrixDescriptor *descA = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:M
+                            columns:K
+                           rowBytes:K * sizeof(uint16_t)
+                           dataType:MPSDataTypeFloat16];
+        MPSMatrixDescriptor *descB = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:K
+                            columns:N
+                           rowBytes:N * sizeof(uint16_t)
+                           dataType:MPSDataTypeFloat16];
+        MPSMatrixDescriptor *descC = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:M
+                            columns:N
+                           rowBytes:N * sizeof(uint16_t)
+                           dataType:MPSDataTypeFloat16];
+        MPSMatrix *matA = [[MPSMatrix alloc] initWithBuffer:A descriptor:descA];
+        MPSMatrix *matB = [[MPSMatrix alloc] initWithBuffer:B descriptor:descB];
+        MPSMatrix *matC = [[MPSMatrix alloc] initWithBuffer:C descriptor:descC];
+        MPSMatrixMultiplication *gemm = [[MPSMatrixMultiplication alloc]
+            initWithDevice:chelis_metal_device()
+             transposeLeft:NO
+            transposeRight:NO
+                resultRows:M
+             resultColumns:N
+           interiorColumns:K
+                     alpha:1.0
+                      beta:0.0];
+        id<MTLCommandBuffer> cb = [chelis_metal_queue() commandBuffer];
+        [gemm encodeToCommandBuffer:cb
+                          leftMatrix:matA
+                         rightMatrix:matB
+                        resultMatrix:matC];
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+}
+#endif
 
 #endif /* CHELIS_METAL_RUNTIME_H */
