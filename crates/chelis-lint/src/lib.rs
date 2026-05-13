@@ -165,12 +165,14 @@ pub trait Rule: Send + Sync {
     ///
     /// Default `false`: warnings fire even when no fix is offered, so
     /// the user can see the diagnostic and rewrite manually. This is
-    /// the right behavior for advisory rules like
-    /// `redundant-linearity-call`, where the warning is informational
-    /// and the lack of a fix carries its own signal.
+    /// the right behavior for purely informational advisories whose
+    /// lack-of-fix carries its own signal (no such rule is currently
+    /// registered; the closest historical example was the pre-0.7.9
+    /// `redundant-linearity-call`).
     ///
     /// Rules whose warning is only meaningful when paired with a safe
-    /// rewrite — currently `prefer-pipe-operator` — opt in to `true`.
+    /// rewrite (currently `prefer-pipe-operator` and
+    /// `redundant-linearity-call`) opt in to `true`.
     /// `chelis lint --fix` then converges for those rules: either the
     /// rewrite is applied (and the warning disappears with the
     /// rewrite), or the warning is suppressed (because the rule

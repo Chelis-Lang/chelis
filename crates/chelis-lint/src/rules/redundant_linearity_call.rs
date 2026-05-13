@@ -82,10 +82,40 @@ impl Rule for RedundantLinearityCall {
         // type/effect/linearity-checks. After Item 1 of the 0.7.6 toolchain
         // hygiene workstream (PR #29) extended implicit linearity to handle
         // var-RHS let-bindings, the broad class of programs the lint targets
-        // is safe to rewrite — but the CLI fix driver still verifies each
+        // is safe to rewrite, but the CLI fix driver still verifies each
         // candidate against the typed pipeline before writing. See
         // `docs/investigations/redundant_linearity_autofix_architecture.md`
         // for the architectural decision (Path 1B).
+        true
+    }
+
+    fn check_mirrors_fix(&self) -> bool {
+        // 0.7.9 cleanup (Lint-RedundantLinearityCopyOnBorrowWarn-F1,
+        // Lint-PreferPipeRedundantLinearityPair-F1): the advisory
+        // warning is only actionable when the rule can offer a safe
+        // strip. When the autofix declines because the typed-pipeline
+        // gate rejects the post-strip source, surfacing the warning
+        // is misleading: the `copy()` is structurally necessary, not
+        // migration-compat noise. Two concrete shapes:
+        //
+        //   `consume_owned(copy(y))` with `y: &tensor[n, f32]`: the
+        //   strip would produce `consume_owned(y)` which fails because
+        //   the implicit-copy inserter does not bridge `&T` to `T` in
+        //   non-return, non-fan-out argument positions.
+        //
+        //   `xs |> drop(n)`: the pipe-form 2-arg list-drop appears
+        //   single-arg in the source text; the strip `drop(n) -> n`
+        //   would replace the call with an integer and fail
+        //   type-checking.
+        //
+        // Opting in to `check_mirrors_fix` makes the CLI driver mirror
+        // the typed-pipeline gate at the warning-emit path
+        // (`should_suppress_unfixable_violation` in
+        // `crates/chelis-cli/src/main.rs`). The warning is suppressed
+        // when no safe rewrite is on offer; legitimate diagnostics
+        // (where the strip would type-check) continue to fire with a
+        // `[fix]` marker. See
+        // `docs/investigations/redundant_linearity_call_precision_0_7_9.md`.
         true
     }
 

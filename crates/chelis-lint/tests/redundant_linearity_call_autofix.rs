@@ -439,11 +439,7 @@ result = step(ws)
 /// `check_mirrors_fix=true` makes the CLI driver mirror the gate at
 /// the warning-emit path, so the warning is suppressed when no safe
 /// rewrite is available.
-///
-/// Gated `#[ignore]` until the fix lands in commit 3 of this PR (the
-/// `redundant-linearity-call` `check_mirrors_fix` opt-in).
 #[test]
-#[ignore]
 fn f10_warning_suppressed_when_typed_pipeline_rejects_strip_on_borrow() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("copy_on_borrow.ch");
