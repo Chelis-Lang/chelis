@@ -852,6 +852,93 @@ fn tensor_dim_substitutions(
         .collect()
 }
 
+/// WS-A8: build a precision substitution map from formal vs actual
+/// tensor types at a polymorphic-def call site. The formal types come
+/// from the def's annotated parameter signatures and may carry
+/// `(t-var {} p)` precision slots (precision polymorphism per
+/// spec/04-type-system.md §5.8). The actual types come from the call
+/// site's lowered argument nodes and always carry concrete primitives
+/// (the call site is the monomorphization boundary).
+///
+/// The returned map is keyed by the precision-var name as it appears in
+/// `(t-var {} p)` slots. The map flows into [`LowerCtx::prec_substitutions`]
+/// so any `try_extract_tensor_type` call reached during inlining of
+/// the def body resolves the precision-tvar to a concrete `Prim` and
+/// the F2 backend tripwire never fires for a properly-monomorphized
+/// program.
+///
+/// Formals are walked via the raw type-expr tree (not the
+/// already-extracted `TensorType` value), because the latter has the
+/// `(t-var)` slot already collapsed to a default precision. The raw
+/// tree preserves the `(t-var {} p)` shape so we can recover the
+/// var-name. The actual types come from the lowered DAG so their
+/// precision is a concrete `Prim`.
+fn tensor_prec_substitutions(
+    formal_param_exprs: &[Option<Expr>],
+    actual_args: &[TensorType],
+) -> HashMap<String, Prim> {
+    let mut subst = HashMap::new();
+    for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
+        let Some(formal_expr) = formal_expr else {
+            continue;
+        };
+        if let Some(var_name) = extract_precision_var_name(formal_expr) {
+            subst.entry(var_name).or_insert(actual.precision);
+        }
+    }
+    subst
+}
+
+/// Pull the precision-var name out of a tensor type expression's
+/// precision slot. Returns `Some(name)` when the slot is shaped
+/// `(t-var {} name)`; returns `None` when the slot is concrete
+/// (`(t-prim {} f32)`) or the expression is not a tensor type.
+///
+/// Strips a leading `(t-ref {} ...)` wrapper so a `&tensor[..., p]`
+/// parameter is treated the same as `tensor[..., p]` for substitution
+/// purposes — the borrow is irrelevant to precision monomorphization.
+fn extract_precision_var_name(expr: &Expr) -> Option<String> {
+    let stripped = if let Expr::List(list, _) = expr
+        && list.elements.len() >= 3
+        && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
+        && tag == "t-ref"
+    {
+        list.elements.get(2)?
+    } else {
+        expr
+    };
+    let Expr::List(list, _) = stripped else {
+        return None;
+    };
+    if list.elements.len() < 3 {
+        return None;
+    }
+    let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0] else {
+        return None;
+    };
+    if tag != "t-tensor" {
+        return None;
+    }
+    let last = list.elements.last()?;
+    let Expr::List(prec_list, _) = last else {
+        return None;
+    };
+    if prec_list.elements.len() < 3 {
+        return None;
+    }
+    let Expr::Atom(Atom::Symbol(prec_tag), _) = &prec_list.elements[0] else {
+        return None;
+    };
+    if prec_tag != "t-var" {
+        return None;
+    }
+    if let Expr::Atom(Atom::Symbol(name), _) = &prec_list.elements[2] {
+        Some(name.clone())
+    } else {
+        None
+    }
+}
+
 pub fn top_level_expr_is_lowered(
     expr: &Expr,
     program_exprs: &[Expr],
@@ -1038,10 +1125,40 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
         return true;
     };
     match get_tag(list) {
-        Some("t-fn") => list.elements.last().is_some_and(type_is_never_lowerable),
+        // WS-A8: a t-fn whose return type or any parameter type carries
+        // a `(t-var {} _)` precision slot is precision-polymorphic and
+        // has no concrete monomorphization on its own. Standalone
+        // lowering of such a sig would emit a HostFunction whose
+        // tensor precision slots cannot be filled in, tripping the F2
+        // backend tripwire. The function is still reachable via
+        // call-site inlining (the call site supplies the concrete
+        // precision per spec/04-type-system.md §5.8.1); we just must
+        // skip the standalone top-level emission.
+        Some("t-fn") => {
+            type_expr_has_precision_var(expr)
+                || list.elements.last().is_some_and(type_is_never_lowerable)
+        }
         Some("t-tuple") => children(list).iter().any(type_is_never_lowerable),
         Some("t-adt") | Some("t-unit") => true,
         Some("t-prim") => false,
+        _ => false,
+    }
+}
+
+/// WS-A8: walk a Deep type expression and report whether any
+/// `(t-tensor {} dims... (t-var {} _))` precision slot appears. Used
+/// to detect precision-polymorphic signatures that have no standalone
+/// monomorphization and must be reached through call-site inlining
+/// only (per spec/04-type-system.md §5.8.1).
+pub fn type_expr_has_precision_var(expr: &Expr) -> bool {
+    let Expr::List(list, _) = expr else {
+        return false;
+    };
+    match get_tag(list) {
+        Some("t-tensor") => extract_precision_var_name(expr).is_some(),
+        Some("t-ref") | Some("t-fn") | Some("t-tuple") | Some("t-adt") => {
+            children(list).iter().any(type_expr_has_precision_var)
+        }
         _ => false,
     }
 }
@@ -1672,7 +1789,7 @@ fn if_expr_is_dag_lowerable(list: &List) -> bool {
     }
 
     let result_ty = match list.elements.get(1) {
-        Some(Expr::Map(meta, _)) => LowerCtx::type_from_meta(&meta.entries),
+        Some(Expr::Map(meta, _)) => LowerCtx::type_from_meta_static(&meta.entries),
         _ => LowerCtx::default_type(),
     };
     if !result_ty.precision.is_float() {
@@ -2008,6 +2125,16 @@ struct LowerCtx {
     /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: HashSet<String>,
     dim_substitutions: HashMap<String, DimInfo>,
+    /// WS-A8: precision-tvar substitutions, keyed by the precision-var
+    /// name (e.g. `p`) as it appears in `(t-var {} p)` precision slots
+    /// of the polymorphic def's signature. Populated at call sites of
+    /// polymorphic top-level defs (see `lower_plain_callable_app`)
+    /// alongside `dim_substitutions`. Consulted by
+    /// [`Self::try_extract_tensor_type`] to resolve a precision-tvar
+    /// slot into a concrete `Prim` before backends see the type. After
+    /// monomorphization every reachable tensor type carries
+    /// `TensorPrec::Concrete(_)` per spec/04-type-system.md §5.8.1.
+    prec_substitutions: HashMap<String, Prim>,
     /// The span_id of the Deep `Expr` currently being lowered. Threaded
     /// through `lower_expr` (set on entry, restored on exit) so every
     /// helper that calls `self.dag.add_node(...)` can pass the
@@ -2034,6 +2161,7 @@ impl LowerCtx {
             inlining_names: HashSet::new(),
             fn_typed_params: HashSet::new(),
             dim_substitutions: HashMap::new(),
+            prec_substitutions: HashMap::new(),
             current_span_id: None,
         }
     }
@@ -2112,7 +2240,25 @@ impl LowerCtx {
     }
 
     /// Extract a type from a metadata map if one is present, otherwise return a default.
-    fn type_from_meta(meta: &[(String, Expr)]) -> TensorType {
+    /// WS-A8: instance entry that consults `self.prec_substitutions`
+    /// when extracting a tensor type out of a Deep meta map. Ensures
+    /// inlined polymorphic-def bodies see substituted precisions on
+    /// their `type:` annotations.
+    fn type_from_meta(&self, meta: &[(String, Expr)]) -> TensorType {
+        for (key, val) in meta {
+            if key == "type" {
+                return Self::type_from_type_expr_with_subst(val, &self.prec_substitutions);
+            }
+        }
+        Self::default_type()
+    }
+
+    /// Static (no-substitution) variant of [`Self::type_from_meta`].
+    /// Reserved for callers that operate before lowering begins (e.g.
+    /// the if-lowerable shape pre-check at top-level analysis time).
+    /// A `(t-var)` precision slot reaching this entry will trip the
+    /// F2 backend tripwire panic per spec/04-type-system.md §5.8.1.
+    fn type_from_meta_static(meta: &[(String, Expr)]) -> TensorType {
         for (key, val) in meta {
             if key == "type" {
                 return Self::type_from_type_expr(val);
@@ -2172,6 +2318,22 @@ impl LowerCtx {
     }
 
     fn type_from_type_expr(expr: &Expr) -> TensorType {
+        Self::type_from_type_expr_with_subst(expr, &HashMap::new())
+    }
+
+    /// WS-A8: precision-aware variant of [`Self::type_from_type_expr`].
+    /// Resolves `(t-var {} p)` precision slots through `prec_subst` so a
+    /// polymorphic def's body, when inlined at a concrete call site,
+    /// sees the substituted concrete primitive instead of tripping the
+    /// F2 backend tripwire. The static
+    /// [`Self::type_from_type_expr`] entry point still panics on a
+    /// `t-var` slot — that path is the diagnostic surface for genuine
+    /// monomorphization bugs (a polymorphic sig reached the backend
+    /// boundary without a concrete instantiation site).
+    fn type_from_type_expr_with_subst(
+        expr: &Expr,
+        prec_subst: &HashMap<String, Prim>,
+    ) -> TensorType {
         if let Some(prim) = Self::try_extract_prim(expr) {
             return TensorType {
                 dims: vec![],
@@ -2179,9 +2341,9 @@ impl LowerCtx {
             };
         }
         if let Some(inner) = Self::try_extract_ref_type(expr) {
-            return Self::type_from_type_expr(inner);
+            return Self::type_from_type_expr_with_subst(inner, prec_subst);
         }
-        if let Some(tt) = Self::try_extract_tensor_type(expr) {
+        if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, prec_subst) {
             return tt;
         }
         Self::default_type()
@@ -2211,7 +2373,20 @@ impl LowerCtx {
         None
     }
 
-    fn try_extract_tensor_type(expr: &Expr) -> Option<TensorType> {
+    /// WS-A8: precision-aware variant of `try_extract_tensor_type`.
+    /// When the precision slot is `(t-var {} p)`, consult `prec_subst`
+    /// to resolve `p` to a concrete `Prim`. If the substitution has the
+    /// binding, return a `TensorType` carrying the concrete primitive
+    /// (this is the monomorphization-success path). If no binding is
+    /// found AND the substitution is non-empty (i.e. the caller IS in
+    /// a substitution-aware context), still panic — the body referenced
+    /// a precision tvar the call site failed to bind, which is a real
+    /// monomorphization gap. With an empty substitution the panic still
+    /// fires per the F2 backend tripwire contract.
+    fn try_extract_tensor_type_with_subst(
+        expr: &Expr,
+        prec_subst: &HashMap<String, Prim>,
+    ) -> Option<TensorType> {
         // Flat format: (t-tensor {} dim1 dim2 ... (t-prim {} p))
         // Children after tag+meta: dimension nodes followed by a t-prim node as the last child.
         if let Expr::List(list, _) = expr
@@ -2224,17 +2399,20 @@ impl LowerCtx {
             if children.is_empty() {
                 return None;
             }
-            // WS-A5 RT-3a F2: backends require a concrete tensor
+            // WS-A5 RT-3a F2 / WS-A8: backends require a concrete tensor
             // precision per spec/04-type-system.md §5.8.1. If the
             // precision slot is a `(t-var {} ...)` here we are looking
-            // at an unresolved precision tvar that escaped
-            // monomorphization. Surface this as a hard lowering panic
-            // rather than silently degrading to the default scalar f32
-            // type and emitting nonsense backend code; the build CLI
-            // catches the panic via `try_lower_subexpr_program` and
-            // turns it into a user-facing diagnostic naming the §5.8.1
-            // monomorphization invariant.
-            if let Some(last_child) = children.last()
+            // at an unresolved precision tvar. WS-A8 lets the caller
+            // pass `prec_subst` (the call-site precision-tvar bindings
+            // computed in `lower_plain_callable_app`) so an inlined
+            // polymorphic-def body can resolve the slot to a concrete
+            // primitive without ever tripping the panic. The panic
+            // remains as a safety net: properly-monomorphized programs
+            // never reach it; reaching it indicates either (a) a
+            // standalone polymorphic-def lowering attempt with no
+            // concrete call site, or (b) an internal monomorphization
+            // bug missed a precision tvar.
+            let prim = if let Some(last_child) = children.last()
                 && let Expr::List(prec_list, _) = last_child
                 && prec_list.elements.len() >= 3
                 && let Expr::Atom(Atom::Symbol(prec_tag), _) = &prec_list.elements[0]
@@ -2244,18 +2422,23 @@ impl LowerCtx {
                     Expr::Atom(Atom::Symbol(name), _) => name.clone(),
                     _ => "?".to_string(),
                 };
-                panic!(
-                    "internal: backend lowering reached an unresolved tensor \
-                     precision variable `{var_name}`; spec/04-type-system.md \
-                     \u{00a7}5.8.1 requires every reachable tensor type to carry \
-                     `TensorPrec::Concrete(_)` after monomorphization. Reaching \
-                     this point with `TensorPrec::Var(_)` is a monomorphization \
-                     bug, not user error. Likely cause: the polymorphic sig has \
-                     no concrete call site to instantiate the precision tvar."
-                );
-            }
-            // Last child is the precision (t-prim {} name).
-            let prim = Self::try_extract_prim(children.last()?)?;
+                if let Some(prim) = prec_subst.get(&var_name).copied() {
+                    prim
+                } else {
+                    panic!(
+                        "BUG: monomorphization missed precision var `{var_name}`; \
+                         this should not be reachable from properly-typed source \
+                         code. spec/04-type-system.md \u{00a7}5.8.1 requires every \
+                         reachable tensor type to carry `TensorPrec::Concrete(_)` \
+                         after monomorphization. Reaching this point with \
+                         `TensorPrec::Var(_)` indicates a polymorphic sig with no \
+                         concrete call site, or an internal monomorphization gap."
+                    );
+                }
+            } else {
+                // Last child is the precision (t-prim {} name).
+                Self::try_extract_prim(children.last()?)?
+            };
             // All children before the last are dimension nodes.
             let mut dims = Vec::new();
             for child in &children[..children.len() - 1] {
@@ -2673,7 +2856,7 @@ impl LowerCtx {
     /// `(lit {type: T} value)`
     fn lower_lit(&mut self, elems: &[Expr]) -> LoweredValue {
         let ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
-            Self::type_from_meta(&meta.entries)
+            self.type_from_meta(&meta.entries)
         } else {
             Self::default_type()
         };
@@ -2702,7 +2885,7 @@ impl LowerCtx {
     fn lower_var(&mut self, elems: &[Expr]) -> LoweredValue {
         // C6: Extract type from metadata if available, otherwise use checked top-level type info.
         let explicit_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
-            Self::type_from_meta(&meta.entries)
+            self.type_from_meta(&meta.entries)
         } else {
             Self::default_type()
         };
@@ -2783,7 +2966,7 @@ impl LowerCtx {
         }
 
         let ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
-            Self::type_from_meta(&meta.entries)
+            self.type_from_meta(&meta.entries)
         } else {
             Self::default_type()
         };
@@ -3021,12 +3204,13 @@ impl LowerCtx {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("grad", std::slice::from_ref(fn_expr));
         };
+        let prec_subst_for_params = self.prec_substitutions.clone();
         let param_types: Vec<TensorType> = param_names
             .iter()
             .enumerate()
             .map(|(index, _)| {
                 extract_param_type(fn_expr, index)
-                    .map(Self::type_from_type_expr)
+                    .map(|expr| Self::type_from_type_expr_with_subst(expr, &prec_subst_for_params))
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
@@ -3127,19 +3311,34 @@ impl LowerCtx {
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
-        let param_types: Vec<TensorType> = param_names
+        let saved_prec_substitutions = self.prec_substitutions.clone();
+        // WS-A8: capture the raw param-type Deep exprs so we can pull
+        // out `(t-var {} p)` precision-var names for monomorphization.
+        // The parsed `TensorType` already collapses `t-var` slots to a
+        // default precision, which loses the var-name we need.
+        let param_type_exprs: Vec<Option<Expr>> = param_names
             .iter()
             .enumerate()
-            .map(|(index, _)| {
-                extract_param_type(fn_expr, index)
-                    .map(Self::type_from_type_expr)
-                    .unwrap_or_else(Self::default_type)
+            .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
+            .collect();
+        let prec_subst_for_params = self.prec_substitutions.clone();
+        let param_types: Vec<TensorType> = param_type_exprs
+            .iter()
+            .map(|opt_expr| match opt_expr {
+                Some(expr) => Self::type_from_type_expr_with_subst(expr, &prec_subst_for_params),
+                None => Self::default_type(),
             })
             .collect();
         let mut formal_types = Vec::new();
+        let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
-        for ((name, arg_expr), param_ty) in param_names.iter().zip(args.iter()).zip(param_types) {
-            // Item 2-extended: shadowing — the inlined fn's param name
+        for (((name, arg_expr), param_ty), formal_expr) in param_names
+            .iter()
+            .zip(args.iter())
+            .zip(param_types)
+            .zip(param_type_exprs.iter())
+        {
+            // Item 2-extended: shadowing; the inlined fn's param name
             // is bound to a fresh value (either a `local_callable` or a
             // `bindings` entry). Drop any outer-scope
             // `fn_typed_params[name]` so the resolver doesn't
@@ -3159,6 +3358,7 @@ impl LowerCtx {
                         self.dag.get(*node_id).map(|node| node.output_type.clone())
                 {
                     formal_types.push(param_ty);
+                    formal_type_exprs.push(formal_expr.clone());
                     actual_types.push(actual_ty);
                 }
                 self.bindings.insert(name.clone(), arg_id);
@@ -3166,6 +3366,13 @@ impl LowerCtx {
         }
         self.dim_substitutions
             .extend(tensor_dim_substitutions(&formal_types, &actual_types));
+        // WS-A8: extend the precision-tvar substitution with bindings
+        // from this call site's formal-vs-actual precision slots. Walks
+        // the raw type-exprs (which preserve `(t-var)` shape) against
+        // the actual `TensorType`s (which always carry concrete
+        // primitives at lowering time).
+        self.prec_substitutions
+            .extend(tensor_prec_substitutions(&formal_type_exprs, &actual_types));
         // Inlining-F1: install the recursion guard *here*, after argument
         // evaluation, so legitimate nested calls passed as arguments to
         // the same fn-typed-parameter alias (e.g. `outer(doubler, seed)`
@@ -3185,6 +3392,7 @@ impl LowerCtx {
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
+        self.prec_substitutions = saved_prec_substitutions;
         result
     }
 
@@ -3207,7 +3415,8 @@ impl LowerCtx {
         }
         let result = self.lower_expr(body);
         if let Some(ret_ty_expr) = extract_fn_return_type(fn_expr) {
-            let ret_ty = Self::type_from_type_expr(ret_ty_expr);
+            let ret_ty =
+                Self::type_from_type_expr_with_subst(ret_ty_expr, &self.prec_substitutions);
             self.repair_output_type_if_default(&result, &ret_ty);
         }
         self.bindings = saved;
@@ -3241,12 +3450,13 @@ impl LowerCtx {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("vmap", std::slice::from_ref(fn_expr));
         };
+        let prec_subst_for_params = self.prec_substitutions.clone();
         let param_types: Vec<TensorType> = param_names
             .iter()
             .enumerate()
             .map(|(index, _)| {
                 extract_param_type(fn_expr, index)
-                    .map(Self::type_from_type_expr)
+                    .map(|expr| Self::type_from_type_expr_with_subst(expr, &prec_subst_for_params))
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
@@ -3405,12 +3615,13 @@ impl LowerCtx {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("vmap(grad)", std::slice::from_ref(fn_expr));
         };
+        let prec_subst_for_params = self.prec_substitutions.clone();
         let param_types: Vec<TensorType> = param_names
             .iter()
             .enumerate()
             .map(|(index, _)| {
                 extract_param_type(fn_expr, index)
-                    .map(Self::type_from_type_expr)
+                    .map(|expr| Self::type_from_type_expr_with_subst(expr, &prec_subst_for_params))
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
@@ -4726,7 +4937,7 @@ impl LowerCtx {
         }
 
         let ty = ty_expr
-            .map(Self::type_from_type_expr)
+            .map(|expr| Self::type_from_type_expr_with_subst(expr, &self.prec_substitutions))
             .unwrap_or_else(Self::default_type);
         LoweredValue::Node(self.dag.add_node(
             RiscOp::Load { name: name.into() },
@@ -5071,7 +5282,7 @@ impl LowerCtx {
         let then_node = self.lower_expr_node(then_expr, "if then branch");
         let else_node = self.lower_expr_node(else_expr, "if else branch");
         let out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
-            Self::type_from_meta(&meta.entries)
+            self.type_from_meta(&meta.entries)
         } else {
             self.dag
                 .get(then_node)

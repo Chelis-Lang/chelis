@@ -1097,6 +1097,19 @@ fn lower_host_program(
             continue;
         };
         let ty_expr = lookup_declared_type_expr(program, name);
+        // WS-A8: skip polymorphic-precision sigs at host emission time.
+        // A `t-fn` whose tensor types carry `(t-var {} _)` precision
+        // slots has no concrete monomorphization on its own; reaching
+        // `parse_host_type` for its parameters trips the F2 backend
+        // tripwire panic per spec/04-type-system.md §5.8.1. Such a def
+        // is reachable from concrete client code via call-site inlining
+        // (the inliner threads the call site's concrete precision into
+        // the body); the standalone host symbol is intentionally
+        // omitted because no caller can use it without supplying the
+        // monomorphization binding the inliner provides.
+        if ty_expr.is_some_and(crate::lower::type_expr_has_precision_var) {
+            continue;
+        }
         // Pure-tensor top-level function defs are normally lowered to the
         // DAG. But when the program also has host-lane bindings (i.e. some
         // def is NOT DAG-lowerable), downstream host-lane callers still
@@ -4959,6 +4972,25 @@ fn lower_app_host_expr(
         .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostType::Fn(..))));
     let tensor_result = matches!(explicit_ty, HostType::Tensor(_))
         || matches!(inferred_ret_ty, HostType::Tensor(_));
+    // WS-A8: if the callee is a polymorphic-precision sig, the host
+    // emitter elided its standalone definition (per the
+    // `type_expr_has_precision_var` skip in `lower_host_program`).
+    // Calling such a name in C produces an undefined-symbol link
+    // error; the only legal lowering is to inline the body at the
+    // call site so the precision is supplied from the call's
+    // concrete arg types. Force inlining for this case.
+    let callee_is_polymorphic_precision = lookup_declared_type_expr(program, &name)
+        .is_some_and(crate::lower::type_expr_has_precision_var);
+    if callee_is_polymorphic_precision
+        && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
+    {
+        let pushed = push_inlining(&name);
+        let lowered = lower_host_expr(&specialized, program, scope, tensor_helpers);
+        if pushed {
+            pop_inlining(&name);
+        }
+        return lowered;
+    }
     if has_callable_params
         && tensor_result
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
@@ -6308,15 +6340,23 @@ fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) ->
             _ => HostType::Unknown,
         },
         Some("t-tensor") => {
-            // WS-A5 RT-3a F2: defer to `tensor_type_from_deep`, which
-            // panics with a monomorphization-bug diagnostic if it
-            // encounters a `(t-var {} ...)` precision slot per
-            // spec/04-type-system.md \u{00a7}5.8.1. Reaching this
-            // conversion with an unresolved precision tvar means the
-            // monomorphization stage missed a polymorphic sig that has
-            // no concrete instantiation site; backends must not silently
-            // emit code for such a sig.
-            HostType::Tensor(crate::lower::tensor_type_from_deep(expr))
+            // WS-A5 RT-3a F2 / WS-A8: a `t-tensor` whose precision slot
+            // is `(t-var {} _)` is precision-polymorphic and has no
+            // concrete `HostType::Tensor` representation by itself per
+            // spec/04-type-system.md \u{00a7}5.8.1. Surface that as
+            // `HostType::Unknown` here so the host emitter falls back
+            // to call-site inlining (which carries the concrete
+            // precision) rather than panicking on the bare sig parse.
+            // The standalone-emit gate in `lower_host_program` already
+            // skips the def itself; this guard handles every secondary
+            // sig-parse path (e.g. `lookup_declared_fn_type` reached
+            // from a call-site lookup of a polymorphic callee's
+            // signature).
+            if crate::lower::type_expr_has_precision_var(expr) {
+                HostType::Unknown
+            } else {
+                HostType::Tensor(crate::lower::tensor_type_from_deep(expr))
+            }
         }
         Some("t-ref") => list
             .elements
