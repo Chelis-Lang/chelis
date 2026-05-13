@@ -6,6 +6,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added - `redundant-linearity-call` autofix covers implicit-copy v3 shapes
+
+The implicit-copy fan-out v3 fix (Shape A borrow-to-owned at return
+position and Shape B grad/vmap fan-out across observational
+higher-order calls) closes a coverage gap for the
+`redundant-linearity-call` autofix. The Path 1B safety gate
+(typed-pipeline-accepts) now accepts strip candidates for these
+shapes, so `chelis lint --check` emits the `[fix]` marker and
+`chelis lint --fix` rewrites them. No rule logic changed; the
+unlock comes entirely from the upstream typecheck and linearity
+fixes. See
+`docs/investigations/redundant_linearity_autofix_recoverage_diagnosis.md`
+for the diagnosis.
+
 ## [0.7.7] — 2026-05-12
 
 ### Added - pipe-stage callable surface
