@@ -202,12 +202,37 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
     out.push("    printf(\"], data=[\");".to_string());
     // Limit raised from 10 to 32 (a 4x4 tensor previously rendered only 10
     // of 16 elements with no marker, indistinguishable from a true 10-element
-    // tensor — red-team v0.2.6 MEDIUM). Also append "..." when truncated so
+    // tensor; red-team v0.2.6 MEDIUM). Also append "..." when truncated so
     // the trailing-data case is visually unambiguous; downstream parsers
     // must tolerate the `...` token.
     out.push("    int64_t limit = t->size < 32 ? t->size : 32;".to_string());
     out.push("    for (int64_t i = 0; i < limit; ++i) {".to_string());
-    out.push("        double value = t->data[i];".to_string());
+    // RT-4 F1: read each slot at the correct dtype. The previous code
+    // assumed `t->data` was always `float*` and silently read f64/i64
+    // tensors as 4-byte slots, producing garbage when the runtime
+    // (correctly) sized the buffer at 8 bytes/elem. The display
+    // format stays float-style for parity with the evaluator's tensor
+    // renderer (every tensor prints as `1.0, 2.0, ...`); int dtypes
+    // are widened to double for the format step but stored at the
+    // correct width.
+    out.push("        double value;".to_string());
+    out.push("        switch (t->dtype) {".to_string());
+    out.push("            case CHELIS_F64: value = ((double*)t->data)[i]; break;".to_string());
+    out.push(
+        "            case CHELIS_I64: value = (double)((int64_t*)t->data)[i]; break;".to_string(),
+    );
+    out.push(
+        "            case CHELIS_I32: value = (double)((int32_t*)t->data)[i]; break;".to_string(),
+    );
+    out.push(
+        "            case CHELIS_I16: value = (double)((int16_t*)t->data)[i]; break;".to_string(),
+    );
+    out.push(
+        "            case CHELIS_I8:  value = (double)((int8_t*)t->data)[i]; break;".to_string(),
+    );
+    out.push("            case CHELIS_BOOL: value = (double)t->data[i]; break;".to_string());
+    out.push("            default: value = (double)t->data[i]; break;".to_string());
+    out.push("        }".to_string());
     out.push("        if (i > 0) { printf(\", \"); }".to_string());
     out.push("        if (fabs(value - round(value)) < 1e-9) {".to_string());
     out.push("            printf(\"%.1f\", value);".to_string());
@@ -265,12 +290,9 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     // chelis_dtype_size, not by hardcoded sizeof(float). Otherwise
     // f64/i64 reshape truncates to half its data and i8/i16 reshape
     // would overrun on contiguous input.
+    out.push("    size_t elem_bytes = (size_t)chelis_dtype_size(input->dtype);".to_string());
     out.push(
-        "    size_t elem_bytes = (size_t)chelis_dtype_size(input->dtype);".to_string(),
-    );
-    out.push(
-        "    memcpy(out_tensor->data, input->data, (size_t)input->size * elem_bytes);"
-            .to_string(),
+        "    memcpy(out_tensor->data, input->data, (size_t)input->size * elem_bytes);".to_string(),
     );
     out.push("    return out_tensor;".to_string());
     out.push("}".to_string());
@@ -1299,6 +1321,38 @@ impl<'a> HostEmitter<'a> {
                 return;
             }
             "to_tensor" => {
+                // RT-4 F1: when the destination tensor's precision is
+                // known at compile time, dispatch through the typed
+                // runtime entry point so the storage width matches
+                // the declared dtype. Without this hint the runtime
+                // would deduce dtype from the value-tag of the first
+                // leaf — but `chelis_value_from_f64` has the same tag
+                // (CHELIS_VALUE_FLOAT64) for both f32 and f64 sources,
+                // so a declared `tensor[3, f64] = [1.0, 2.0, 3.0]`
+                // silently truncated to f32 storage.
+                if let HostType::Tensor(t) = ty {
+                    let dtype_macro = match t.precision {
+                        chelis_types::types::Prim::F32 => "CHELIS_F32",
+                        chelis_types::types::Prim::F64 => "CHELIS_F64",
+                        chelis_types::types::Prim::Bool => "CHELIS_BOOL",
+                        chelis_types::types::Prim::Int8 => "CHELIS_I8",
+                        chelis_types::types::Prim::Int16 => "CHELIS_I16",
+                        chelis_types::types::Prim::Int32 => "CHELIS_I32",
+                        chelis_types::types::Prim::Int64 => "CHELIS_I64",
+                        // bf16/f16/f8e4m3 host literals are rejected
+                        // by the C backend's precision gate; if we
+                        // reach here, fall through to the legacy
+                        // entry so the diagnostic surfaces consistently.
+                        _ => "",
+                    };
+                    if !dtype_macro.is_empty() {
+                        self.lines.push(format!(
+                            "{}{target} = chelis_tensor_from_value_list_typed({}, {dtype_macro});",
+                            self.indent, arg_vars[0].0
+                        ));
+                        return;
+                    }
+                }
                 self.lines.push(format!(
                     "{}{target} = chelis_tensor_from_value_list({});",
                     self.indent, arg_vars[0].0

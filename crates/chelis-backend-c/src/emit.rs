@@ -3068,16 +3068,10 @@ impl CEmitter {
         // the float bit pattern instead of `3`).
         let a = inputs[0].0;
         let src_ty = dag.get(inputs[0]).map(|n| n.output_type.clone());
-        let src_et = src_ty
-            .as_ref()
-            .map(Self::elem_type)
-            .unwrap_or("float");
+        let src_et = src_ty.as_ref().map(Self::elem_type).unwrap_or("float");
         let dst_et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
-        if src_ty
-            .as_ref()
-            .is_some_and(|s| s.precision == ty.precision)
-        {
+        if src_ty.as_ref().is_some_and(|s| s.precision == ty.precision) {
             // Same-dtype cast: copy directly using the per-dtype size.
             // Sizing by `sizeof({elem})` rather than the cast cost
             // models a same-dtype cast as a structural identity copy

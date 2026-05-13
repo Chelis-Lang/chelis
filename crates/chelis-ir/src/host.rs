@@ -695,14 +695,37 @@ fn lower_host_program(
             // to the value node's `merged_spans` so the def's source region
             // doesn't drop out of the audit chain.
             value.append_merged_span(expr.span_id());
-            let ty = host_expr_type(&value);
+            let inferred_ty = host_expr_type(&value);
+            // RT-4 F1: respect the surface-level type annotation on a
+            // global binding. Without this the type-checker-validated
+            // declaration `x: tensor[3, f64] = [1.0, 2.0, 3.0]` was
+            // silently lowered with the inferred f32 type because the
+            // `to_tensor` builtin's return type defaults to f32 for any
+            // float-tagged list. The downstream host emitter uses this
+            // type to dispatch the typed runtime call so the storage
+            // matches the declared dtype.
+            let declared_ty = ty_expr
+                .map(parse_host_type)
+                .filter(|ty| !matches!(ty, HostType::Unknown));
+            let ty = declared_ty.clone().unwrap_or_else(|| inferred_ty.clone());
+            // When the declared type sharpens the inferred type (e.g.
+            // declared f64, inferred f32), retag the outermost value
+            // type so downstream host emit sees the right precision
+            // for the typed to_tensor runtime call. This is a
+            // structural retag; the type checker has already validated
+            // that the literal assignment is sound.
+            if let Some(declared) = declared_ty.as_ref()
+                && declared != &inferred_ty
+            {
+                value = force_host_expr_type(value, declared.clone());
+            }
             host.globals.push(HostBinding {
                 name: name.to_string(),
                 display_name: None,
-                ty,
+                ty: ty.clone(),
                 value: value.clone(),
             });
-            global_scope.insert(name.to_string(), host_expr_type(&value));
+            global_scope.insert(name.to_string(), ty);
         }
     }
     loop {
@@ -2267,7 +2290,14 @@ fn refine_host_expr_types(
             for arg in args.iter_mut() {
                 changed |= refine_host_expr_types(arg, scope, signatures);
             }
-            if let Some(inferred) = infer_builtin_host_type(name, args)
+            // RT-4 F1: only override `ty` when the current value has
+            // unresolved type variables. Previously this clobbered any
+            // declared-type retag (e.g. a global binding annotated as
+            // `tensor[3, f64]` would be overwritten back to the
+            // builtin's default `tensor[list, f32]` inferred return
+            // type, defeating the F1 fix's typed runtime dispatch).
+            if host_type_has_unknown(ty)
+                && let Some(inferred) = infer_builtin_host_type(name, args)
                 && !host_type_has_unknown(&inferred)
                 && *ty != inferred
             {

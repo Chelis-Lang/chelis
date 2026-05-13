@@ -202,6 +202,11 @@ chelis_list *chelis_dict_keys(const chelis_dict *dict);
 chelis_list *chelis_dict_values(const chelis_dict *dict);
 chelis_list *chelis_dict_entries(const chelis_dict *dict);
 chelis_tensor *chelis_tensor_from_value_list(const chelis_list *list);
+/* RT-4 F1: dtype-aware variant. Honors the declared destination dtype
+ * for both allocation and per-element writes. The C backend calls this
+ * when the surface-level annotation disambiguates storage width
+ * (e.g. `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`). */
+chelis_tensor *chelis_tensor_from_value_list_typed(const chelis_list *list, int dst_dtype);
 chelis_list *chelis_list_from_tensor(const chelis_tensor *tensor);
 chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_value pad_value);
 chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_value pad_value);
