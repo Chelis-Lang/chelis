@@ -1700,6 +1700,15 @@ fn cmd_build(
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
                 reject_unsupported_effect_ops(&metal_dag, "metal")?;
                 reject_unsupported_metal_ops(&metal_dag)?;
+                // F4: IR validation pass for the Metal admissible-precision
+                // matrix per spec/04-type-system.md §1.1.3. The spec names
+                // three rejection surfaces; this is the second (the CLI
+                // gate `reject_unsupported_metal_ops` above is the first;
+                // `Emitter::require_metal_admissible` in the backend is
+                // the third). All three share the same diagnostic text
+                // so the user sees one voice regardless of which surface
+                // catches the f64 first.
+                chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
                 let fused = chelis_ir::fuse::fuse(&metal_dag);
                 cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
             }
@@ -1913,6 +1922,11 @@ fn cmd_build_deep(
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
                 reject_unsupported_effect_ops(&metal_dag, "metal")?;
                 reject_unsupported_metal_ops(&metal_dag)?;
+                // F4: IR validation pass; see cmd_build for the full
+                // rationale. This is the same surface from the Deep
+                // ingestion path so symbolic-dim and span-attributed
+                // Deep get the same f64 rejection behavior.
+                chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
                 let fused = chelis_ir::fuse::fuse(&metal_dag);
                 cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
             }
