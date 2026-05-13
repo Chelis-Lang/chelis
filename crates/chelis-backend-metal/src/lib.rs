@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use chelis_ir::dag::DimExpr;
 
 pub mod blas;
+pub mod dtype;
 pub mod emit;
 pub mod kernels;
 
@@ -36,7 +37,9 @@ pub struct MetalCodegenResult {
     pub h_header: String,
     /// Compiler flags required (passed to `clang++`).
     pub compile_flags: Vec<String>,
-    /// Linker flags required: `-framework Metal -framework Foundation`.
+    /// Linker flags required: `-framework Metal -framework Foundation
+    /// -framework MetalPerformanceShaders` (the third was added in WS-M1
+    /// for the f32/f16 MPS matmul dispatch path).
     pub link_flags: Vec<String>,
     /// Input slot labels in positional order.
     pub input_labels: Vec<String>,
@@ -130,6 +133,12 @@ pub fn codegen_metal(dag: &chelis_ir::dag::Dag, func_name: &str) -> MetalCodegen
             "Metal".to_string(),
             "-framework".to_string(),
             "Foundation".to_string(),
+            // WS-M1: MPSMatrixMultiplication is the f32/f16 matmul
+            // dispatch path; integer matmul is rejected at type-check
+            // (spec/04-type-system.md §5.7.2) and bf16 falls back to
+            // the tiled MSL kernel via `kernels::matmul_tiled_kernel`.
+            "-framework".to_string(),
+            "MetalPerformanceShaders".to_string(),
         ],
         input_labels,
         output_labels,

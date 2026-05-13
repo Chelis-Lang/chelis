@@ -4040,6 +4040,16 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
 fn reject_unsupported_metal_ops(
     dag: &chelis_ir::dag::Dag,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // WS-M1: per spec/04-type-system.md §1.1.3, the Metal backend admits
+    // every active dtype except f64 (Apple Silicon GPUs lack FP64 ALUs;
+    // software emulation explicitly out of scope). bf16 additionally
+    // requires Apple7+ (M3 or later) at runtime; the kernel template
+    // gates `bfloat` behind `#if __METAL_VERSION__ >= 320` so the
+    // emitted source artifact is valid on every toolchain.
+    //
+    // Mirrors `reject_unsupported_hip_ops` precision discipline: admit
+    // a precise allow-list per spec, reject the rest with a structured
+    // CLI diagnostic instead of a panic from the kernel templates.
     for node in dag.nodes() {
         match &node.op {
             chelis_ir::dag::RiscOp::Pad { .. } => {
@@ -4059,15 +4069,35 @@ fn reject_unsupported_metal_ops(
             _ => {}
         }
         match node.output_type.precision {
-            chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
+            chelis_types::types::Prim::F32
+            | chelis_types::types::Prim::F16
+            | chelis_types::types::Prim::Bf16
+            | chelis_types::types::Prim::Int8
+            | chelis_types::types::Prim::Int16
+            | chelis_types::types::Prim::Int32
+            | chelis_types::types::Prim::Int64
+            | chelis_types::types::Prim::Bool => {}
+            chelis_types::types::Prim::F64 => {
+                // Hardware-rejected per spec/04-type-system.md §1.1.3.
+                // Diagnostic text is the spec-pinned string; tests
+                // assert exact-string match so this must not drift.
+                return Err(format!(
+                    "`chelis build --target metal` rejects f64 (node {}): \
+                     Apple Silicon GPUs lack FP64 ALUs; use `--target c` or \
+                     `--target hip` for f64 workloads. \
+                     See spec/04-type-system.md §1.1.3.",
+                    node.id.0
+                )
+                .into());
+            }
             other => {
                 return Err(format!(
-                    "`chelis build --target metal` DAG path only supports f32/bool tensors; \
-                     node {} carries precision `{}`. \
-                     Apple Silicon GPU has limited f64 support; rewrite the program \
-                     to use f32 tensors or build it with `--target c` instead.",
-                    node.id.0,
-                    other.name()
+                    "`chelis build --target metal` DAG path does not support tensor \
+                     precision `{}` (node {}). The Metal backend admits the \
+                     active dtype set per spec/04-type-system.md §1.1.3 except \
+                     f64; supported: f32/f16/bf16/int8/int16/int32/int64/bool.",
+                    other.name(),
+                    node.id.0
                 )
                 .into());
             }

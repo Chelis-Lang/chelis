@@ -6,8 +6,10 @@
 //! layouts will be added incrementally.
 
 use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_types::types::Prim;
 
 use crate::blas;
+use crate::dtype;
 use crate::kernels;
 use std::collections::{HashMap, HashSet};
 
@@ -137,12 +139,25 @@ pub fn emit_dag(dag: &Dag, func_name: &str) -> Result<EmitResult, String> {
 struct TensorPlan {
     /// Buffer variable name in the emitted .mm (e.g. `buf_2`).
     buf: String,
-    /// MSL element type ("float" / "bool").
-    msl_ty: &'static str,
+    /// Tensor element precision; the source of truth for MSL spelling
+    /// (`dtype::msl_type`), per-element width (`dtype::metal_elem_size`),
+    /// runtime tag (`dtype::runtime_dtype_tag`), and reduction
+    /// accumulator (`dtype::sum_accumulator`).
+    prec: Prim,
     /// Element count (must be statically known for M2).
     n: usize,
     /// Row-major shape (dimensions listed in declaration order).
     shape: Vec<usize>,
+}
+
+impl TensorPlan {
+    fn msl_ty(&self) -> &'static str {
+        dtype::msl_type(self.prec)
+    }
+
+    fn elem_size(&self) -> usize {
+        dtype::metal_elem_size(self.prec)
+    }
 }
 
 struct Emitter {
@@ -299,17 +314,9 @@ impl Emitter {
                 )
             })?
             .clone();
-        let dtype = match plan.msl_ty {
-            "float" => "CHELIS_F32",
-            "bool" => "CHELIS_BOOL",
-            other => {
-                return Err(format!(
-                    "Metal emit root writeback `{}`: unexpected msl_ty `{}`",
-                    spec.label, other
-                ));
-            }
-        };
-        let bytes = format!("{}u * sizeof({})", plan.n, plan.msl_ty);
+        let dtype = dtype::runtime_dtype_tag(plan.prec);
+        let msl_ty = plan.msl_ty();
+        let bytes = format!("{}u * sizeof({})", plan.n, msl_ty);
         // `spec.label` is producer-supplied (Store name from LoadStoreName,
         // or `root{N}` synthesized internally). Comment-context sanitize
         // for the LoadStoreName case (synthesized labels are clean ASCII).
@@ -408,18 +415,30 @@ impl Emitter {
             // Binary elementwise (M2 first cut: add, mul).
             RiscOp::Add | RiscOp::Mul => self.emit_binary(dag, node),
 
-            // Full-axis rank-1 reductions to scalar (M4 first cut).
+            // Full-axis rank-1 reductions to scalar. WS-M1 widens the
+            // accumulator admission per spec/04-type-system.md §5.7.1
+            // (f16/bf16 → f32; i8/i16 → i32; i32/i64 → same; f32 → f32).
+            // Reading the accumulator field (not destructure-`..`) is the
+            // memory-rule-pinned discipline so silent precision downgrades
+            // surface as kernel-template panics rather than wrong answers.
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
-            } => self.emit_reduce(dag, node, kernels::ReduceKind::Sum),
-            RiscOp::MaxReduce { axis: 0 } => self.emit_reduce(dag, node, kernels::ReduceKind::Max),
-            RiscOp::MinReduce { axis: 0 } => self.emit_reduce(dag, node, kernels::ReduceKind::Min),
+                accumulator,
+            } => self.emit_reduce(dag, node, kernels::ReduceKind::Sum, Some(*accumulator)),
+            RiscOp::MaxReduce { axis: 0 } => {
+                self.emit_reduce(dag, node, kernels::ReduceKind::Max, None)
+            }
+            RiscOp::MinReduce { axis: 0 } => {
+                self.emit_reduce(dag, node, kernels::ReduceKind::Min, None)
+            }
 
             // Matmul (Sum{axis:1} head of expand+mul+sum subgraph; M5).
+            // Read the accumulator field rather than destructure-`..` so
+            // silent precision drift can be caught here in defense in
+            // depth alongside the F1 guard in `emit_matmul`.
             RiscOp::Sum {
                 axis: 1,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: _,
             } if self.matmuls.contains_key(&node.id.0) => {
                 let info = self.matmuls[&node.id.0].clone();
                 self.emit_matmul(node, &info)
@@ -433,11 +452,36 @@ impl Emitter {
         }
     }
 
-    fn require_static_rank1(
-        &self,
-        ty: &TensorType,
-        ctx: &str,
-    ) -> Result<(usize, &'static str), String> {
+    /// Reject f64 with the FP64-ALU diagnostic per spec/04-type-system.md
+    /// §1.1.3. Defense in depth: the CLI gate
+    /// (`reject_unsupported_metal_ops`) and the IR validation pass also
+    /// reject this case, so reaching here represents a contract drift.
+    /// All three surfaces share the same diagnostic text.
+    fn require_metal_admissible(prec: Prim, ctx: &str) -> Result<(), String> {
+        match prec {
+            Prim::F32
+            | Prim::F16
+            | Prim::Bf16
+            | Prim::Int8
+            | Prim::Int16
+            | Prim::Int32
+            | Prim::Int64
+            | Prim::Bool => Ok(()),
+            Prim::F64 => Err(format!(
+                "Metal emit ({ctx}): Apple Silicon GPUs lack FP64 ALUs; \
+                 use `--target c` or `--target hip` for f64 workloads. \
+                 See spec/04-type-system.md §1.1.3."
+            )),
+            other => Err(format!(
+                "Metal emit ({ctx}): precision `{}` is not in the active \
+                 per-backend dtype matrix (spec/04-type-system.md §1.1.3)",
+                other.name()
+            )),
+        }
+    }
+
+    fn require_static_rank1(&self, ty: &TensorType, ctx: &str) -> Result<(usize, Prim), String> {
+        Self::require_metal_admissible(ty.precision, ctx)?;
         if ty.dims.len() != 1 {
             return Err(format!(
                 "Metal M2 emit ({ctx}): rank {} not yet supported; M2 first cut handles rank-1 only",
@@ -452,17 +496,19 @@ impl Emitter {
                 ));
             }
         };
-        Ok((n, kernels::msl_type(ty.precision)))
+        Ok((n, ty.precision))
     }
 
-    /// Accept rank-1 OR rank-2 with literal extents and f32/bool precision.
-    /// Used for ops that work on both ranks (Load, Store, matmul operands,
-    /// matmul output). Returns `(total_n, shape, msl_ty)`.
+    /// Accept rank-1 OR rank-2 with literal extents and any active Metal
+    /// precision (per spec/04-type-system.md §1.1.3). Used for ops that
+    /// work on both ranks (Load, Store, matmul operands, matmul output).
+    /// Returns `(total_n, shape, prec)`.
     fn require_static_shape(
         &self,
         ty: &TensorType,
         ctx: &str,
-    ) -> Result<(usize, Vec<usize>, &'static str), String> {
+    ) -> Result<(usize, Vec<usize>, Prim), String> {
+        Self::require_metal_admissible(ty.precision, ctx)?;
         if ty.dims.is_empty() {
             return Err(format!(
                 "Metal emit ({ctx}): rank-0 not supported via this path; use scalar Const/reduce instead"
@@ -486,7 +532,7 @@ impl Emitter {
             }
         }
         let n: usize = shape.iter().product();
-        Ok((n, shape, kernels::msl_type(ty.precision)))
+        Ok((n, shape, ty.precision))
     }
 
     fn emit_load(&mut self, node: &DagNode, name: &str, inputs: &[String]) -> Result<(), String> {
@@ -494,7 +540,8 @@ impl Emitter {
         // helper so a rank-2 input materializes its plan correctly; downstream
         // ops that don't yet handle rank-2 (unary/binary elementwise without
         // matching shape) will reject via require_static_rank1.
-        let (n, shape, msl_ty) = self.require_static_shape(&node.output_type, "Load")?;
+        let (n, shape, prec) = self.require_static_shape(&node.output_type, "Load")?;
+        let msl_ty = dtype::msl_type(prec);
         let idx = inputs
             .iter()
             .position(|l| l == name)
@@ -521,7 +568,7 @@ impl Emitter {
         ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf,
-            msl_ty,
+            prec,
             n,
             shape,
         });
@@ -529,7 +576,8 @@ impl Emitter {
     }
 
     fn emit_const(&mut self, node: &DagNode, value: f64) -> Result<(), String> {
-        let (n, msl_ty) = self.require_static_rank1(&node.output_type, "Const")?;
+        let (n, prec) = self.require_static_rank1(&node.output_type, "Const")?;
+        let msl_ty = dtype::msl_type(prec);
         let buf = format!("buf_{}", node.id.0);
         let bytes = format!("{n}u * sizeof({msl_ty})");
         self.push_span_comments(node);
@@ -546,7 +594,7 @@ impl Emitter {
         ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf,
-            msl_ty,
+            prec,
             n,
             shape: vec![n],
         });
@@ -567,15 +615,43 @@ impl Emitter {
                 )
             })?
             .clone();
-        let (n, msl_ty) = self.require_static_rank1(&node.output_type, "unary")?;
-        if in_plan.n != n || in_plan.msl_ty != msl_ty {
+        let (n, prec) = self.require_static_rank1(&node.output_type, "unary")?;
+        let msl_ty = dtype::msl_type(prec);
+        if in_plan.n != n || in_plan.prec != prec {
             return Err(format!(
                 "Metal M2 emit unary node {}: input shape {:?}/{} != output shape [{}]/{} \
                  (no implicit broadcast/cast in M2 first cut)",
-                node.id.0, in_plan.shape, in_plan.msl_ty, n, msl_ty,
+                node.id.0,
+                in_plan.shape,
+                in_plan.msl_ty(),
+                n,
+                msl_ty,
             ));
         }
-        let kernel_name = format!("k_unary_{}", node.id.0);
+        // Transcendental ops on integer dtypes are spec-rejected at the
+        // type checker (§5.4 — Transcendental requires float). Defense in
+        // depth: surface a clear codegen error if one ever leaks through.
+        let needs_float = matches!(
+            &node.op,
+            RiscOp::Exp
+                | RiscOp::Log
+                | RiscOp::Sin
+                | RiscOp::Cos
+                | RiscOp::Tan
+                | RiscOp::Atan
+                | RiscOp::Sqrt
+        );
+        if needs_float && !matches!(prec, Prim::F32 | Prim::F16 | Prim::Bf16) {
+            return Err(format!(
+                "Metal emit unary node {}: transcendental op {:?} requires float precision; \
+                 got `{}`. See spec/04-type-system.md §5.4.",
+                node.id.0,
+                node.op,
+                prec.name()
+            ));
+        }
+        let suffix = dtype::kernel_suffix(prec);
+        let kernel_name = format!("k_unary{suffix}_{}", node.id.0);
         let pso_var = format!("pso_{}", node.id.0);
         let body = match &node.op {
             RiscOp::Neg => "    out[tid] = -a[tid];".to_string(),
@@ -593,7 +669,7 @@ impl Emitter {
             kernels::input_param(0, msl_ty, "a"),
             kernels::output_param(1, msl_ty, "out"),
         ];
-        let src = kernels::elementwise_kernel(&kernel_name, &params, &body);
+        let src = kernels::elementwise_kernel_for(&kernel_name, &params, &body, &[prec]);
         let src = Self::prepend_span_comments_to_kernel_source(node, src);
         self.kernels
             .push((pso_var.clone(), kernel_name.clone(), src));
@@ -617,7 +693,7 @@ impl Emitter {
         ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf: out_buf,
-            msl_ty,
+            prec,
             n,
             shape: vec![n],
         });
@@ -643,8 +719,9 @@ impl Emitter {
             .plan_of(b_id)
             .ok_or_else(|| format!("binary node {} rhs {} not materialized", node.id.0, b_id.0))?
             .clone();
-        let (n, msl_ty) = self.require_static_rank1(&node.output_type, "binary")?;
-        if a_plan.n != n || b_plan.n != n || a_plan.msl_ty != msl_ty || b_plan.msl_ty != msl_ty {
+        let (n, prec) = self.require_static_rank1(&node.output_type, "binary")?;
+        let msl_ty = dtype::msl_type(prec);
+        if a_plan.n != n || b_plan.n != n || a_plan.prec != prec || b_plan.prec != prec {
             return Err(format!(
                 "Metal M2 emit binary node {}: shape/type mismatch (M2 first cut: same-shape contiguous only)",
                 node.id.0
@@ -656,7 +733,8 @@ impl Emitter {
                 node.id.0, node.op
             )
         })?;
-        let kernel_name = format!("k_binary_{}", node.id.0);
+        let suffix = dtype::kernel_suffix(prec);
+        let kernel_name = format!("k_binary{suffix}_{}", node.id.0);
         let pso_var = format!("pso_{}", node.id.0);
         let params = vec![
             kernels::input_param(0, msl_ty, "a"),
@@ -664,7 +742,7 @@ impl Emitter {
             kernels::output_param(2, msl_ty, "out"),
         ];
         let body = format!("    out[tid] = a[tid] {op} b[tid];");
-        let src = kernels::elementwise_kernel(&kernel_name, &params, &body);
+        let src = kernels::elementwise_kernel_for(&kernel_name, &params, &body, &[prec]);
         let src = Self::prepend_span_comments_to_kernel_source(node, src);
         self.kernels
             .push((pso_var.clone(), kernel_name.clone(), src));
@@ -689,7 +767,7 @@ impl Emitter {
         ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf: out_buf,
-            msl_ty,
+            prec,
             n,
             shape: vec![n],
         });
@@ -697,11 +775,19 @@ impl Emitter {
         Ok(())
     }
 
+    /// Emit a full-axis reduction kernel for a rank-1 input to a rank-0
+    /// scalar output.
+    ///
+    /// `accumulator_override` carries the IR's pinned accumulator for
+    /// `reduce_sum` (per spec §5.7.1). For `max`/`min` reductions the
+    /// accumulator equals the operand precision (no upgrade) and
+    /// `accumulator_override` is `None`.
     fn emit_reduce(
         &mut self,
         _dag: &Dag,
         node: &DagNode,
         kind: kernels::ReduceKind,
+        accumulator_override: Option<Prim>,
     ) -> Result<(), String> {
         let in_id = *node
             .inputs
@@ -716,7 +802,7 @@ impl Emitter {
                 )
             })?
             .clone();
-        // M4 first cut: full-axis reduce to scalar, rank-1 contiguous f32 input.
+        // Full-axis reduce to scalar, rank-1 contiguous input.
         if in_plan.shape.len() != 1 {
             return Err(format!(
                 "Metal M4 emit reduce node {}: rank {} input not yet supported \
@@ -725,19 +811,21 @@ impl Emitter {
                 in_plan.shape.len()
             ));
         }
-        if in_plan.msl_ty != "float" {
+        Self::require_metal_admissible(in_plan.prec, "reduce input")?;
+        // Output should be rank-0 with the spec-required accumulator
+        // precision (per §5.7.1 for sums; same as operand for max/min).
+        let expected_acc = match (kind, accumulator_override) {
+            (kernels::ReduceKind::Sum, Some(acc)) => acc,
+            (kernels::ReduceKind::Sum, None) => dtype::sum_accumulator(in_plan.prec),
+            (kernels::ReduceKind::Max | kernels::ReduceKind::Min, _) => in_plan.prec,
+        };
+        Self::require_metal_admissible(expected_acc, "reduce accumulator")?;
+        if !node.output_type.dims.is_empty() || node.output_type.precision != expected_acc {
             return Err(format!(
-                "Metal M4 emit reduce node {}: only f32 reductions supported in M4 first cut",
-                node.id.0
-            ));
-        }
-        // Output should be rank-0 f32 scalar.
-        if !node.output_type.dims.is_empty()
-            || node.output_type.precision != chelis_types::types::Prim::F32
-        {
-            return Err(format!(
-                "Metal M4 emit reduce node {}: output must be rank-0 f32 in M4 first cut, got {:?}",
-                node.id.0, node.output_type
+                "Metal M4 emit reduce node {}: output must be rank-0 `{}`, got {:?}",
+                node.id.0,
+                expected_acc.name(),
+                node.output_type
             ));
         }
         let n = in_plan.n;
@@ -756,16 +844,23 @@ impl Emitter {
                 node.id.0, n, SINGLE_TG_LIMIT
             ));
         }
-        let kernel_name = format!("k_reduce_{}_{}", kind.label(), node.id.0);
+        let in_suffix = dtype::kernel_suffix(in_plan.prec);
+        let acc_suffix = dtype::kernel_suffix(expected_acc);
+        let kernel_name = format!(
+            "k_reduce_{}{in_suffix}{acc_suffix}_{}",
+            kind.label(),
+            node.id.0
+        );
         let pso_var = format!("pso_{}", node.id.0);
-        let src = kernels::reduce_full_kernel(&kernel_name, kind);
+        let src = kernels::reduce_full_kernel_for(&kernel_name, kind, in_plan.prec, expected_acc);
         let src = Self::prepend_span_comments_to_kernel_source(node, src);
         self.kernels
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_buf = format!("buf_{}", node.id.0);
-        // Output is one float scalar.
-        let bytes = "1u * sizeof(float)".to_string();
+        let acc_msl = dtype::msl_type(expected_acc);
+        // Output is one accumulator-typed scalar.
+        let bytes = format!("1u * sizeof({acc_msl})");
         self.push_span_comments(node);
         self.body
             .push(format!("// node {} = reduce_{}", node.id.0, kind.label()));
@@ -779,22 +874,21 @@ impl Emitter {
         // Always dispatch a single TG_SIZE-thread threadgroup. The kernel
         // strides over n internally; mismatching tg with n was the source
         // of a critical non-power-of-2 miscompile that the previous fix
-        // (clamping tg = n.min(256)) shipped — fixed here by decoupling.
+        // (clamping tg = n.min(256)) shipped; fixed here by decoupling.
         let tg = kernels::REDUCE_TG_SIZE;
         self.body.push(format!(
             "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}, {tg}u, {tg}u, bufs, 2, &n_{}, sizeof(uint32_t)); }}",
             in_plan.buf,
             node.id.0
         ));
-        // Reduction returns a rank-0 scalar in IR semantics
-        // (TensorType::scalar_f32() has dims: vec![]). Reflect that in
-        // the plan so emit_root_writeback emits chelis_alloc(0, NULL,
-        // CHELIS_F32) and the resulting tensor has ndim=0 — matching
-        // the IR's contract and what host code asserting on rank would
-        // see. The buffer itself still holds 1 float on the device.
+        // Reduction returns a rank-0 scalar in IR semantics. Reflect
+        // that in the plan so emit_root_writeback emits chelis_alloc(0,
+        // NULL, <accumulator>) and the resulting tensor has ndim=0,
+        // matching the IR's contract. The buffer itself still holds 1
+        // accumulator-typed element on the device.
         self.plans[node.id.0] = Some(TensorPlan {
             buf: out_buf,
-            msl_ty: "float",
+            prec: expected_acc,
             n: 1,
             shape: vec![],
         });
@@ -829,54 +923,112 @@ impl Emitter {
                 node.id.0, a_plan.shape, b_plan.shape
             ));
         }
-        if a_plan.msl_ty != "float" || b_plan.msl_ty != "float" {
+        if a_plan.prec != b_plan.prec || a_plan.prec != info.precision {
             return Err(format!(
-                "Metal M5 matmul node {}: only f32 supported in M5 first cut",
-                node.id.0
+                "Metal matmul node {}: operand precision mismatch (lhs `{}`, rhs `{}`, info `{}`); \
+                 spec/04-type-system.md §5.4 forbids implicit precision promotion",
+                node.id.0,
+                a_plan.prec.name(),
+                b_plan.prec.name(),
+                info.precision.name()
+            ));
+        }
+        // F1 tactical guard: integer matmul is rejected at type-check
+        // (Wave-2-Fixups B6, spec/04-type-system.md §5.7.2). Defense in
+        // depth here so a future regression that admits integer matmul
+        // surfaces a structured codegen error instead of a kernel
+        // template that silently truncates.
+        if !matches!(info.precision, Prim::F32 | Prim::F16 | Prim::Bf16) {
+            return Err(format!(
+                "F1: Metal-backend BlasMatmul currently supports only float \
+                 precisions (f32/f16/bf16); node {} has operand precision `{}`. \
+                 Integer matmul is rejected at type-check per \
+                 spec/04-type-system.md §5.7.2 and should never reach codegen.",
+                node.id.0,
+                info.precision.name()
             ));
         }
 
-        let kernel_name = format!("k_matmul_{}", node.id.0);
-        let pso_var = format!("pso_{}", node.id.0);
-        let src = kernels::matmul_tiled_kernel(&kernel_name);
-        let src = Self::prepend_span_comments_to_kernel_source(node, src);
-        self.kernels
-            .push((pso_var.clone(), kernel_name.clone(), src));
-
+        let prec = info.precision;
+        let elem_bytes = dtype::metal_elem_size(prec);
         let out_n = info.m * info.n;
         let out_buf = format!("buf_{}", node.id.0);
         self.push_span_comments(node);
         self.body.push(format!(
-            "// node {} = matmul {}x{}*{}x{}",
-            node.id.0, info.m, info.k, info.k, info.n
+            "// node {} = matmul {}x{}*{}x{} ({})",
+            node.id.0,
+            info.m,
+            info.k,
+            info.k,
+            info.n,
+            prec.name()
         ));
         self.body.push(format!(
-            "id<MTLBuffer> {out_buf} = chelis_metal_alloc({out_n}u * sizeof(float));"
+            "id<MTLBuffer> {out_buf} = chelis_metal_alloc({out_n}u * {elem_bytes}u);"
         ));
-        self.body.push(format!(
-            "id<MTLComputePipelineState> {pso_var} = chelis_metal_get_pipeline({pso_var}_src, @\"{kernel_name}\");"
-        ));
-        self.body.push(format!(
-            "{{ struct {{ uint32_t M, N, K; }} mm_uniforms_{} = {{ {}u, {}u, {}u }};",
-            node.id.0, info.m, info.n, info.k
-        ));
-        self.body.push(format!(
-            "  __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {}, {out_buf} }};",
-            a_plan.buf, b_plan.buf
-        ));
-        // 2D grid sized exactly to the output (rounded up to TILE);
-        // tg=(TILE,TILE,1). The kernel handles the boundary cases via the
-        // `(aRow < M && aCol < K) ? ...` guards in matmul_tiled_kernel.
-        let tile = kernels::MATMUL_TILE;
-        let grid_y = info.m.div_ceil(tile) * tile;
-        let grid_x = info.n.div_ceil(tile) * tile;
-        self.body.push(format!(
-            "  chelis_metal_launch2d({pso_var}, {grid_x}u, {grid_y}u, {tile}u, {tile}u, bufs, 3, &mm_uniforms_{}, sizeof(mm_uniforms_{})); }}",
-            node.id.0, node.id.0
-        ));
+
+        match prec {
+            Prim::F32 => {
+                // MPSMatrixMultiplication for f32. Per the WS-M0 ARC
+                // ownership pin, the helper constructs and releases all
+                // MPS objects internally and wraps the dispatch in
+                // `@autoreleasepool { ... }`.
+                self.body.push(format!(
+                    "chelis_metal_mps_gemm_f32({}, {}, {out_buf}, {}u, {}u, {}u);",
+                    a_plan.buf, b_plan.buf, info.m, info.n, info.k
+                ));
+            }
+            Prim::F16 => {
+                self.body.push(format!(
+                    "chelis_metal_mps_gemm_f16({}, {}, {out_buf}, {}u, {}u, {}u);",
+                    a_plan.buf, b_plan.buf, info.m, info.n, info.k
+                ));
+            }
+            Prim::Bf16 => {
+                // bf16 falls back to the tiled MSL kernel because MPS
+                // does not expose an Apple7+-only bfloat GEMM in the
+                // public API on every shipping toolchain. The kernel
+                // template gates on `__METAL_VERSION__ >= 320` so the
+                // emitted source remains valid on every toolchain.
+                let suffix = dtype::kernel_suffix(prec);
+                let kernel_name = format!("k_matmul{suffix}_{}", node.id.0);
+                let pso_var = format!("pso_{}", node.id.0);
+                let src = kernels::matmul_tiled_kernel_for(&kernel_name, prec);
+                let src = Self::prepend_span_comments_to_kernel_source(node, src);
+                self.kernels
+                    .push((pso_var.clone(), kernel_name.clone(), src));
+                self.body.push(format!(
+                    "id<MTLComputePipelineState> {pso_var} = chelis_metal_get_pipeline({pso_var}_src, @\"{kernel_name}\");"
+                ));
+                self.body.push(format!(
+                    "{{ struct {{ uint32_t M, N, K; }} mm_uniforms_{} = {{ {}u, {}u, {}u }};",
+                    node.id.0, info.m, info.n, info.k
+                ));
+                self.body.push(format!(
+                    "  __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {}, {out_buf} }};",
+                    a_plan.buf, b_plan.buf
+                ));
+                let tile = kernels::MATMUL_TILE;
+                let grid_y = info.m.div_ceil(tile) * tile;
+                let grid_x = info.n.div_ceil(tile) * tile;
+                self.body.push(format!(
+                    "  chelis_metal_launch2d({pso_var}, {grid_x}u, {grid_y}u, {tile}u, {tile}u, bufs, 3, &mm_uniforms_{}, sizeof(mm_uniforms_{})); }}",
+                    node.id.0, node.id.0
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "Metal matmul node {}: unsupported precision `{}` reached the \
+                     dispatch arm; the F1 guard upstream should have caught this",
+                    node.id.0,
+                    other.name()
+                ));
+            }
+        }
+
         self.plans[node.id.0] = Some(TensorPlan {
             buf: out_buf,
-            msl_ty: "float",
+            prec,
             n: out_n,
             shape: vec![info.m, info.n],
         });
@@ -902,16 +1054,9 @@ impl Emitter {
             .iter()
             .position(|l| l == name)
             .ok_or_else(|| format!("Store `{name}` not registered in output_labels"))?;
-        let bytes = format!("{}u * sizeof({})", in_plan.n, in_plan.msl_ty);
-        let dtype = match in_plan.msl_ty {
-            "float" => "CHELIS_F32",
-            "bool" => "CHELIS_BOOL",
-            other => {
-                return Err(format!(
-                    "Metal M2 emit store `{name}`: unexpected msl_ty `{other}`"
-                ));
-            }
-        };
+        let in_msl_ty = in_plan.msl_ty();
+        let bytes = format!("{}u * sizeof({})", in_plan.n, in_msl_ty);
+        let dtype = dtype::runtime_dtype_tag(in_plan.prec);
         self.push_span_comments(node);
         // Comment-context sanitization for producer-supplied Store name.
         // See `emit_load` for the architectural-pattern rationale.
@@ -957,15 +1102,13 @@ impl Emitter {
             .iter()
             .filter_map(|p| p.as_ref())
             .map(|p| {
-                let bytes_per = match p.msl_ty {
-                    "float" => 4,
-                    "bool" => 1,
-                    _ => 4,
-                };
-                // Every alloc bumps zero-length to >= 1 byte in the
-                // runtime, but we report the requested size — n=0 reports
-                // 0 bytes, consistent with the formula contract.
-                p.n * bytes_per
+                // Honor the per-dtype element width via the central
+                // helper so no caller hardcodes `sizeof(float)`
+                // (RT-4-Fixups F2 lesson). Every alloc bumps
+                // zero-length to >= 1 byte in the runtime, but we
+                // report the requested size; n=0 reports 0 bytes,
+                // consistent with the formula contract.
+                p.n * p.elem_size()
             })
             .sum()
     }

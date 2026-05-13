@@ -452,9 +452,19 @@ fn m4_reduce_root_emits_rank_zero_scalar_alloc() {
 }
 
 // ===========================================================================
-// M5: tiled matmul. 16x16 tile, no MPS dep. Specialization rule mirrors
-// HIP's hipBLAS detector: rank-2 contiguous f32 (expand+mul+sum(axis=1))
-// routes to the tiled kernel.
+// M5/WS-M1: matmul dispatch. The expand+mul+sum(axis=1) subgraph is
+// detected and folded; per spec/04-type-system.md §1.1.3 the dispatch
+// path now depends on operand precision:
+//
+//   * f32, f16    -> MPSMatrixMultiplication (`chelis_metal_mps_gemm_*`)
+//   * bf16        -> the 16x16 tiled MSL kernel (parameterized over
+//                    bfloat under `#if __METAL_VERSION__ >= 320`)
+//   * integer     -> rejected at the F1 codegen guard, mirroring the
+//                    type-checker's §5.7.2 rejection
+//
+// HIP's hipBLAS detector is the structural peer; the Metal dispatch
+// table differs only in routing f32/f16 through MPS instead of
+// hipBLAS.
 // ===========================================================================
 
 fn mat_f32(r: usize, c: usize) -> TensorType {
@@ -519,40 +529,73 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
 }
 
 #[test]
-fn m5_matmul_subgraph_routes_to_tiled_kernel() {
+fn wsm1_f32_matmul_routes_to_mps() {
+    // WS-M1: f32 matmul dispatches to MPSMatrixMultiplication via
+    // `chelis_metal_mps_gemm_f32`, not the tiled MSL kernel.
     let dag = build_matmul_dag(32, 16, 16);
     let result = codegen_metal(&dag, "mm");
     let src = &result.mm_source;
     assert!(
         !src.contains("M1 fallback stub"),
-        "M5 should specialize matmul, not fall through to stub: {src}"
-    );
-    // The tiled kernel function name follows `k_matmul_<sumNodeId>`.
-    assert!(
-        src.contains("kernel void k_matmul_"),
-        "expected tiled matmul kernel declaration: {src}"
+        "f32 matmul should specialize, not fall through to stub: {src}"
     );
     assert!(
-        src.contains("threadgroup float tileA[16][16]"),
-        "expected 16x16 threadgroup tile A: {src}"
+        src.contains("chelis_metal_mps_gemm_f32(buf_0, buf_1, buf_5, 32u, 16u, 16u)"),
+        "f32 matmul should call the MPS helper with the right shapes: {src}"
     );
+    // No tiled kernel is emitted for the f32 path.
     assert!(
-        src.contains("threadgroup float tileB[16][16]"),
-        "expected 16x16 threadgroup tile B: {src}"
-    );
-    assert!(
-        src.contains("acc += tileA["),
-        "expected tile accumulation: {src}"
-    );
-    // Dispatch via the 2D launch helper.
-    assert!(
-        src.contains("chelis_metal_launch2d("),
-        "expected 2D dispatch: {src}"
+        !src.contains("kernel void k_matmul"),
+        "f32 matmul must not emit the tiled MSL kernel; goes through MPS instead: {src}"
     );
 }
 
 #[test]
-fn m5_matmul_skips_expand_and_mul_intermediates() {
+fn wsm1_f16_matmul_routes_to_mps() {
+    // WS-M1: f16 matmul also dispatches to MPS (`chelis_metal_mps_gemm_f16`).
+    let dag = build_matmul_dag_prec(8, 8, 8, Prim::F16);
+    let result = codegen_metal(&dag, "mm_f16");
+    let src = &result.mm_source;
+    assert!(
+        src.contains("chelis_metal_mps_gemm_f16("),
+        "f16 matmul should call the f16 MPS helper: {src}"
+    );
+    assert!(
+        !src.contains("kernel void k_matmul"),
+        "f16 matmul must not emit a tiled MSL kernel: {src}"
+    );
+}
+
+#[test]
+fn wsm1_bf16_matmul_routes_to_tiled_msl() {
+    // WS-M1: bf16 matmul falls back to the parameterized tiled MSL
+    // kernel (MPS doesn't expose a public bfloat GEMM on every
+    // toolchain). The kernel template gates on
+    // `#if __METAL_VERSION__ >= 320`.
+    let dag = build_matmul_dag_prec(8, 8, 8, Prim::Bf16);
+    let result = codegen_metal(&dag, "mm_bf16");
+    let src = &result.mm_source;
+    assert!(
+        src.contains("kernel void k_matmul_bf16_"),
+        "bf16 matmul should emit a parameterized tiled MSL kernel: {src}"
+    );
+    assert!(
+        src.contains("threadgroup bfloat tileA"),
+        "bf16 matmul tile should be bfloat-typed: {src}"
+    );
+    assert!(
+        src.contains("#if __METAL_VERSION__ >= 320"),
+        "bf16 matmul must wrap the kernel in the MSL 3.2+ guard: {src}"
+    );
+    // bf16 must NOT route through MPS (no public bfloat MPS GEMM).
+    assert!(
+        !src.contains("chelis_metal_mps_gemm_"),
+        "bf16 matmul must not call any MPS helper: {src}"
+    );
+}
+
+#[test]
+fn wsm1_matmul_skips_expand_and_mul_intermediates() {
     let dag = build_matmul_dag(32, 16, 16);
     let result = codegen_metal(&dag, "mm");
     let src = &result.mm_source;
@@ -562,33 +605,96 @@ fn m5_matmul_skips_expand_and_mul_intermediates() {
         !src.contains("k_binary_") || !src.contains("k_unary_"),
         "matmul subgraph should not emit standalone unary/binary kernels: {src}"
     );
-    // Exactly one matmul kernel.
-    let matmul_count = src.matches("kernel void k_matmul_").count();
+    // Exactly one MPS dispatch (no tiled kernel for f32 anymore).
+    let mps_count = src.matches("chelis_metal_mps_gemm_f32(").count();
     assert_eq!(
-        matmul_count, 1,
-        "expected exactly 1 matmul kernel, got {matmul_count}: {src}"
+        mps_count, 1,
+        "expected exactly 1 MPS f32 dispatch, got {mps_count}: {src}"
     );
 }
 
 #[test]
-fn m5_matmul_passes_m_n_k_uniforms() {
-    let dag = build_matmul_dag(32, 16, 16);
-    let result = codegen_metal(&dag, "mm");
+fn wsm1_bf16_matmul_passes_m_n_k_uniforms() {
+    // The bf16 path keeps the packed M/N/K uniforms because it emits
+    // the parameterized tiled kernel. The f32/f16 paths bypass uniforms
+    // entirely (MPS takes M/N/K as helper args).
+    let dag = build_matmul_dag_prec(8, 8, 8, Prim::Bf16);
+    let result = codegen_metal(&dag, "mm_bf16");
     let src = &result.mm_source;
-    // Uniforms struct carries M, N, K as packed uint32 trio.
     assert!(
         src.contains("struct { uint32_t M, N, K; }"),
-        "expected packed M/N/K uniforms: {src}"
+        "bf16 matmul should carry packed M/N/K uniforms: {src}"
     );
     assert!(
-        src.contains("32u, 16u, 16u"),
-        "expected M=32, N=16, K=16 uniform values: {src}"
+        src.contains("8u, 8u, 8u"),
+        "bf16 matmul should pass M=8, N=8, K=8: {src}"
     );
-    // Output is rank-2 [M, N].
-    assert!(
-        src.contains("(int)32") && src.contains("(int)16"),
-        "expected rank-2 output shape encoded as M, N: {src}"
+}
+
+fn mat_prec(r: usize, c: usize, p: Prim) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
+        precision: p,
+    }
+}
+
+fn tensor3_prec(a: usize, b: usize, c: usize, p: Prim) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(a), DimInfo::Lit(b), DimInfo::Lit(c)],
+        precision: p,
+    }
+}
+
+fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
+    use chelis_ir::dag::DimExpr;
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_prec(m, k, prec),
+        None,
     );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_prec(k, n, prec),
+        None,
+    );
+    let ea = dag.add_node(
+        RiscOp::Expand {
+            axis: 2,
+            size: DimExpr::Concrete(n),
+        },
+        vec![a],
+        tensor3_prec(m, k, n, prec),
+        None,
+    );
+    let eb = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: DimExpr::Concrete(m),
+        },
+        vec![b],
+        tensor3_prec(m, k, n, prec),
+        None,
+    );
+    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_prec(m, k, n, prec), None);
+    // Per spec §5.7.1 the bf16/f16 sum accumulator is f32.
+    let acc = match prec {
+        Prim::F16 | Prim::Bf16 => Prim::F32,
+        other => other,
+    };
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: acc,
+        },
+        vec![mul],
+        mat_prec(m, n, prec),
+        None,
+    );
+    dag.add_root(sum);
+    dag
 }
 
 #[test]
