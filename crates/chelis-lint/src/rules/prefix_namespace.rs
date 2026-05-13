@@ -194,6 +194,35 @@ const MODEL_NAMESPACE_PREFIXES: &[&str] = &[
     "lamb",
 ];
 
+/// Curated math/ML well-known prefixes per §7.1.1. These prefixes are
+/// canonical mathematical or machine-learning operation names whose
+/// identity as standalone primitives is shared across the wider math/ML
+/// ecosystem (numpy, scipy, torch, tensorflow): they're not module-domain
+/// shorthands and not single-module model namespaces. Functions in any
+/// module may legitimately group helpers under one of these prefixes
+/// (e.g., `exp_decay_model`, `gelu_forward`, `mse_loss`, `kl_grad`).
+///
+/// Distinct from [`MODEL_NAMESPACE_PREFIXES`] in scope: model-namespaces
+/// are tied to a specific module domain (`bs_` in `Shoals.Pricing`).
+/// Math/ML well-known prefixes are domain-agnostic — they name an
+/// operation, not a domain variant.
+///
+/// Adding to this list is a documented assertion that the prefix names
+/// a canonical math/ML primitive. New entries also need a §7.1.1 cross-ref
+/// in `chelis/spec/01-nomenclature.md`.
+const MATH_ML_WELL_KNOWN_PREFIXES: &[&str] = &[
+    // Elementary math (exp, log, sin, cos, tan, sqrt are universal
+    // primitives; `log` and `sqrt` are also in COMMON_VERB_PREFIXES so
+    // they're already accepted, but listed here for completeness).
+    "exp", "sin", "cos", "tan", // Statistics / numerical methods.
+    "std", "var", "lin", // Loss-function families (mse, ce, bce, kl).
+    "mse", "ce", "kl", "bce", // Activation-function families.
+    "relu", "gelu", "silu", "tanh",
+    // ML lifecycle verbs (fit, pred, eval; train is 5 chars and isn't
+    // detected by the short-prefix extractor — listed for documentation).
+    "fit", "pred", "eval",
+];
+
 /// Extract a 2–4 lowercase-letter prefix followed by `_` from a function
 /// name. Returns the prefix without the underscore. Filters out both the
 /// common-verb prefixes in [`COMMON_VERB_PREFIXES`] and the recognized
@@ -210,6 +239,9 @@ fn extract_short_prefix(name: &str) -> Option<String> {
                 return None;
             }
             if MODEL_NAMESPACE_PREFIXES.contains(&prefix) {
+                return None;
+            }
+            if MATH_ML_WELL_KNOWN_PREFIXES.contains(&prefix) {
                 return None;
             }
             return Some(prefix.to_string());
