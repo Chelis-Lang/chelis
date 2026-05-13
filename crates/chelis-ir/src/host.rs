@@ -1257,14 +1257,37 @@ fn lower_host_program(
             // to the value node's `merged_spans` so the def's source region
             // doesn't drop out of the audit chain.
             value.append_merged_span(expr.span_id());
-            let ty = host_expr_type(&value);
+            let inferred_ty = host_expr_type(&value);
+            // RT-4 F1: respect the surface-level type annotation on a
+            // global binding. Without this the type-checker-validated
+            // declaration `x: tensor[3, f64] = [1.0, 2.0, 3.0]` was
+            // silently lowered with the inferred f32 type because the
+            // `to_tensor` builtin's return type defaults to f32 for any
+            // float-tagged list. The downstream host emitter uses this
+            // type to dispatch the typed runtime call so the storage
+            // matches the declared dtype.
+            let declared_ty = ty_expr
+                .map(parse_host_type)
+                .filter(|ty| !matches!(ty, HostType::Unknown));
+            let ty = declared_ty.clone().unwrap_or_else(|| inferred_ty.clone());
+            // When the declared type sharpens the inferred type (e.g.
+            // declared f64, inferred f32), retag the outermost value
+            // type so downstream host emit sees the right precision
+            // for the typed to_tensor runtime call. This is a
+            // structural retag; the type checker has already validated
+            // that the literal assignment is sound.
+            if let Some(declared) = declared_ty.as_ref()
+                && declared != &inferred_ty
+            {
+                value = force_host_expr_type(value, declared.clone());
+            }
             host.globals.push(HostBinding {
                 name: name.to_string(),
                 display_name: None,
-                ty,
+                ty: ty.clone(),
                 value: value.clone(),
             });
-            global_scope.insert(name.to_string(), host_expr_type(&value));
+            global_scope.insert(name.to_string(), ty);
         }
     }
     loop {
@@ -2308,7 +2331,13 @@ fn try_summarize_blas_helper(
     }
     // From here we are committed: the specialized DAG is BLAS-near
     // and has exactly one root. Output-precision is the next gate.
-    if output.precision != Prim::F32 {
+    // WS-A1/A2/A3 lift: f32 (sgemm), f64 (dgemm), bf16/f16 (hipblasGemmEx
+    // with f32 accumulator) are all admitted; integer matmul is rejected
+    // upstream at the type checker per spec §5.7.2.
+    if !matches!(
+        output.precision,
+        Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
+    ) {
         return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
             rejection_class: SummaryRejectionClass::BlasOutputPrecisionMismatch,
             helper_body_span: body_span,
@@ -2331,6 +2360,7 @@ fn try_summarize_blas_helper(
             m,
             n,
             k,
+            ..
         } => (batch_dims.clone(), m.clone(), n.clone(), k.clone()),
         other => {
             return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
@@ -2342,10 +2372,14 @@ fn try_summarize_blas_helper(
             }));
         }
     };
-    if root_node.output_type.precision != Prim::F32 || root_node.inputs.len() != 2 {
+    let root_precision_admitted = matches!(
+        root_node.output_type.precision,
+        Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
+    );
+    if !root_precision_admitted || root_node.inputs.len() != 2 {
         // Root IS BlasMatmul but its rank/precision doesn't match
         // the recognized shape. Still a BlasNotMatmulPattern
-        // rejection — the variant name covers both "wrong op" and
+        // rejection; the variant name covers both "wrong op" and
         // "right op, wrong shape".
         return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
             rejection_class: SummaryRejectionClass::BlasNotMatmulPattern,
@@ -2379,10 +2413,13 @@ fn try_summarize_blas_helper(
         .iter()
         .map(|input| input.ty.clone())
         .collect::<Vec<_>>();
+    // WS-A1/A2/A3: admit f32 (sgemm), f64 (dgemm), bf16/f16 (hipblasGemmEx
+    // with f32 accumulator). Integer matmul is rejected upstream at the
+    // type checker per spec §5.7.2 so it never reaches here.
     if let Some((input_index, ty)) = input_tys
         .iter()
         .enumerate()
-        .find(|(_, ty)| ty.precision != Prim::F32)
+        .find(|(_, ty)| !matches!(ty.precision, Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16))
     {
         return Err(BlasSummaryAttempt::Rejected(HelperSummaryRejection {
             rejection_class: SummaryRejectionClass::BlasInputPrecisionMismatch,
@@ -3930,7 +3967,14 @@ fn refine_host_expr_types(
             for arg in args.iter_mut() {
                 changed |= refine_host_expr_types(arg, scope, signatures);
             }
-            if let Some(inferred) = infer_builtin_host_type(name, args)
+            // RT-4 F1: only override `ty` when the current value has
+            // unresolved type variables. Previously this clobbered any
+            // declared-type retag (e.g. a global binding annotated as
+            // `tensor[3, f64]` would be overwritten back to the
+            // builtin's default `tensor[list, f32]` inferred return
+            // type, defeating the F1 fix's typed runtime dispatch).
+            if host_type_has_unknown(ty)
+                && let Some(inferred) = infer_builtin_host_type(name, args)
                 && !host_type_has_unknown(&inferred)
                 && *ty != inferred
             {

@@ -119,7 +119,15 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
         None,
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(prim, 8, 16, 4), None);
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat(prim, 8, 4), None);
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
+        vec![mul],
+        mat(prim, 8, 4),
+        None,
+    );
     dag.add_root(sum);
 
     let inputs = vec![input("a", mat(prim, 8, 16)), input("b", mat(prim, 16, 4))];
@@ -158,6 +166,7 @@ fn f32_matmul_helper_returns_ok_with_summary() {
 // =========================================================================
 
 #[test]
+#[ignore = "WS-A2: F64 BLAS matmul is admitted (cblas_dgemm); BlasOutputPrecisionMismatch no longer fires for F64."]
 fn blas_output_precision_mismatch_f64_emits_structured_rejection() {
     // F64 matmul subgraph: the recognizer's matmul-near pre-check
     // fires (Sum(Mul(Expand, Expand)) shape) AND the output is F64,
@@ -243,7 +252,10 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
     );
     let mul1 = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
     let sum1 = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul1],
         mat(Prim::F32, 8, 4),
         None,
@@ -270,7 +282,10 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
     );
     let mul2 = dag.add_node(RiscOp::Mul, vec![ea2, eb2], t3(Prim::F32, 8, 16, 4), None);
     let sum2 = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul2],
         mat(Prim::F32, 8, 4),
         None,
@@ -329,6 +344,7 @@ fn blas_not_matmul_pattern_subcase_b_malformed_blas_root_emits_structured_reject
             m: DimExpr::Concrete(8),
             n: DimExpr::Concrete(4),
             k: DimExpr::Concrete(16),
+            accumulator: Prim::F32,
         },
         vec![a], // Only one input — malformed.
         mat(Prim::F32, 8, 4),
@@ -396,7 +412,10 @@ fn blas_non_load_operand_const_lhs_emits_structured_rejection() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 8, 4),
         None,
@@ -459,7 +478,10 @@ fn blas_non_load_operand_const_rhs_emits_structured_rejection() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 8, 4),
         None,
@@ -532,6 +554,7 @@ fn build_handcrafted_blas_with_load_prims(
             m: DimExpr::Concrete(8),
             n: DimExpr::Concrete(4),
             k: DimExpr::Concrete(16),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         out_ty.clone(),
@@ -544,6 +567,7 @@ fn build_handcrafted_blas_with_load_prims(
 }
 
 #[test]
+#[ignore = "WS-A2: F64 BLAS matmul is admitted (cblas_dgemm); F64 inputs no longer trigger BlasInputPrecisionMismatch."]
 fn blas_input_precision_mismatch_helper_has_f64_declared_input_emits_structured_rejection() {
     // Hand-built BlasMatmul with F32 output but input[0] Load is F64
     // (declared input matches). The recognizer's BlasMatmul-root
@@ -641,6 +665,7 @@ fn blas_dimension_binding_failure_unbound_m_emits_structured_rejection() {
             m: DimExpr::Sym("unbound_m".into()),
             n: DimExpr::Concrete(4),
             k: DimExpr::Concrete(16),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         mat(Prim::F32, 8, 4),
@@ -699,6 +724,7 @@ fn blas_dimension_binding_failure_unbound_k_emits_structured_rejection() {
             m: DimExpr::Concrete(8),
             n: DimExpr::Concrete(4),
             k: DimExpr::Sym("unbound_k".into()),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         mat(Prim::F32, 8, 4),
@@ -819,7 +845,15 @@ fn sum_without_matmul_shape_returns_not_eligible() {
         None,
     );
     // Sum directly over a Load, no Mul(Expand, Expand) underneath.
-    let root = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], out_ty.clone(), None);
+    let root = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![a],
+        out_ty.clone(),
+        None,
+    );
     dag.add_root(root);
 
     let inputs = vec![input("a", in_ty)];
@@ -856,6 +890,7 @@ fn blas_rejection_helper_body_span_is_threaded_through_when_present() {
             m: DimExpr::Concrete(8),
             n: DimExpr::Concrete(4),
             k: DimExpr::Concrete(16),
+            accumulator: Prim::F32,
         },
         vec![a],
         mat(Prim::F32, 8, 4),

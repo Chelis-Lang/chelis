@@ -1607,6 +1607,7 @@ fn cmd_build(
                     )
                     .into());
                 }
+                reject_unsupported_c_precisions_host(host_program)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
@@ -1831,6 +1832,7 @@ fn cmd_build_deep(
                     )
                     .into());
                 }
+                reject_unsupported_c_precisions_host(host_program)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
@@ -3905,27 +3907,133 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
             _ => {}
         }
     }
+    // RT-4 F5: HIP backend dtype coverage today (verified end-to-end
+    // before admitting):
+    //   * f32, bool — full elementwise + matmul + reductions.
+    //   * f64       — full elementwise + dgemm matmul (WS-A2).
+    //   * bf16, f16 — MATMUL ONLY via `hipblasGemmEx` (WS-A3). The
+    //                 elementwise kernel suffix path
+    //                 (`dtype_kernel_suffix`) panics on bf16/f16.
+    //                 Admit only when every bf16/f16 node is an input
+    //                 load, output store, or BLAS matmul / its operand
+    //                 path; reject earlier otherwise so the user sees
+    //                 a structured CLI diagnostic instead of a panic.
+    //   * int8/int16/int32/int64 — typed elementwise kernels (WS-A4),
+    //                 plus loaded sparse indices.
+    //
+    // The widened admit-list (was f32/bool only) closes the divergence
+    // the RT-4 red team flagged: the HIP backend's bf16/f16 GEMM
+    // machinery was unreachable from the CLI surface.
+    // First pass: collect the directly-admitted bf16/f16 nodes (Load,
+    // Store, BlasMatmul). Then reachability-extend through the operand
+    // path of any BlasMatmul: a bf16/f16 helper that lowers to BlasMatmul
+    // typically introduces intermediate Expand / Realize / Copy nodes
+    // (the matmul lowering shape per spec/04-type-system.md §5.7) whose
+    // bf16/f16 buffers are never actually read by an elementwise kernel
+    // because the BlasMatmul subsumes them; admitting these intermediates
+    // keeps the WS-A3 hipblasGemmEx path reachable from the Surf CLI.
+    let mut bf16_or_f16_admissible_ops: HashSet<chelis_ir::dag::NodeId> = dag
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.output_type.precision,
+                chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
+            )
+        })
+        .filter_map(|node| match &node.op {
+            // Loads / stores carrying bf16/f16 are admitted; the storage
+            // is 2 bytes (per `chelis_gpu_dtype_size`) and the buffers
+            // round-trip without per-element arithmetic.
+            chelis_ir::dag::RiscOp::Load { .. } | chelis_ir::dag::RiscOp::Store { .. } => {
+                Some(node.id)
+            }
+            // BLAS matmul on bf16/f16 dispatches to `hipblasGemmEx` with
+            // an f32 accumulator (WS-A3). Its operands stay bf16/f16.
+            chelis_ir::dag::RiscOp::BlasMatmul { .. } => Some(node.id),
+            _ => None,
+        })
+        .collect();
+    // Reachability pass: walk upward from each BlasMatmul through its
+    // direct/transitive operand bf16/f16 nodes. Admit Expand / Realize /
+    // Copy / Mul / Sum that are subsumed by the BLAS substitution at
+    // emit time.
+    let mut frontier: Vec<chelis_ir::dag::NodeId> = bf16_or_f16_admissible_ops
+        .iter()
+        .copied()
+        .filter(|id| {
+            matches!(
+                dag.get(*id).map(|n| &n.op),
+                Some(chelis_ir::dag::RiscOp::BlasMatmul { .. })
+            )
+        })
+        .collect();
+    while let Some(id) = frontier.pop() {
+        if let Some(node) = dag.get(id) {
+            for &input in &node.inputs {
+                if let Some(inp_node) = dag.get(input)
+                    && matches!(
+                        inp_node.output_type.precision,
+                        chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
+                    )
+                    && bf16_or_f16_admissible_ops.insert(input)
+                {
+                    frontier.push(input);
+                }
+            }
+        }
+    }
+
     for node in dag.nodes() {
         match node.output_type.precision {
-            chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
-            chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
-                if sparse_index_nodes.contains(&node.id)
-                    && matches!(node.op, chelis_ir::dag::RiscOp::Load { .. }) => {}
+            chelis_types::types::Prim::F32
+            | chelis_types::types::Prim::F64
+            | chelis_types::types::Prim::Bool
+            | chelis_types::types::Prim::Int8
+            | chelis_types::types::Prim::Int16 => {}
+            chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64 => {
+                // Loaded int32/int64 sparse indices are still admitted
+                // unconditionally; non-load int producers are admitted
+                // via the WS-A4 typed kernel templates.
+                let _ = sparse_index_nodes.contains(&node.id);
+            }
+            chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
+                // Admit only nodes that the HIP backend can actually
+                // emit today: load/store buffers and BLAS matmul.
+                // Other bf16/f16 producers (elementwise, reductions,
+                // casts) would panic in the kernel-suffix path; reject
+                // here with a citation so the user gets a useful
+                // error and not a Rust stack trace.
+                if !bf16_or_f16_admissible_ops.contains(&node.id) {
+                    return Err(format!(
+                        "`chelis build --target hip` admits `{}` only on tensor \
+                         load/store nodes and on `BlasMatmul` operands today \
+                         (`hipblasGemmEx` with an f32 accumulator, WS-A3). \
+                         Node {} carries op {:?} which has no bf16/f16 kernel \
+                         template yet (chelis-backend-hip emit::dtype_kernel_suffix). \
+                         See spec/04-type-system.md §5.7.1.",
+                        node.output_type.precision.name(),
+                        node.id.0,
+                        node.op
+                    )
+                    .into());
+                }
+            }
             other => {
                 return Err(format!(
-                    "`chelis build --target hip` DAG path only supports f32/bool tensors, \
-                     plus loaded int32/int64 tensors when they are consumed as sparse indices; \
-                     node {} carries precision `{}`. \
-                     The HIP backend is single-entry and doesn't route through a \
-                     host-lane wrapper. Rewrite the program to use f32 tensors or \
-                     build it with `--target c` instead.",
+                    "`chelis build --target hip` DAG path does not support tensor \
+                     precision `{}` (node {}). \
+                     Supported: f32/f64/bool plus the integer family \
+                     (int8/int16/int32/int64), with bf16/f16 admitted on matmul \
+                     and load/store nodes. See spec/04-type-system.md §5.7.1.",
+                    other.name(),
                     node.id.0,
-                    other.name()
                 )
                 .into());
             }
         }
     }
+    let _ = sparse_index_nodes;
     Ok(())
 }
 
@@ -3963,6 +4071,141 @@ fn reject_unsupported_metal_ops(
                 )
                 .into());
             }
+        }
+    }
+    Ok(())
+}
+
+/// Decide whether a tensor precision is supported by the C backend.
+///
+/// Mirrors the admit-list in `validate_supported_precisions` inside
+/// `chelis-backend-c::emit`. The C backend admits f32/f64/bool plus the
+/// integer family (int8/int16/int32/int64). bf16/f16 are rejected here so
+/// users get a structured CLI diagnostic instead of a `panic!` from the
+/// emitter (RT-4 F4).
+fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
+    use chelis_types::types::Prim;
+    matches!(
+        precision,
+        Prim::F32 | Prim::F64 | Prim::Bool | Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
+    )
+}
+
+/// Mirror of `reject_unsupported_c_precisions` for the host-program lane.
+///
+/// The C backend's `codegen_host_program` recursively invokes
+/// `CEmitter::emit_dag_with_options` on every `tensor_helper`'s DAG, which
+/// internally panics on unsupported precisions (`validate_supported_precisions`
+/// at chelis-backend-c::emit). For the DAG-only path the CLI guards the
+/// panic with `reject_unsupported_c_precisions`; this function does the
+/// same for the host-program lane (RT-4 F4: `def f(x: tensor[3, bf16]) ...`
+/// previously panicked with a Rust stack trace).
+fn reject_unsupported_c_precisions_host(
+    program: &chelis_ir::host::HostProgram,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_host_type(
+        ty: &chelis_ir::host::HostType,
+        context: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use chelis_ir::host::HostType;
+        match ty {
+            HostType::Tensor(t) if !c_backend_supports_precision(t.precision) => {
+                return Err(format!(
+                    "`chelis build --target c` host-program lane does not yet support \
+                     tensor precision `{}` ({}). The C backend admits \
+                     f32/f64/bool/int8/int16/int32/int64 today; bf16/f16 are admitted \
+                     only on `--target hip`. \
+                     See spec/04-type-system.md §5.7.1.",
+                    t.precision.name(),
+                    context
+                )
+                .into());
+            }
+            HostType::Tensor(_) => {}
+            HostType::List(inner) | HostType::Option(inner) => check_host_type(inner, context)?,
+            HostType::Dict(k, v) => {
+                check_host_type(k, context)?;
+                check_host_type(v, context)?;
+            }
+            HostType::Tuple(items) => {
+                for item in items {
+                    check_host_type(item, context)?;
+                }
+            }
+            HostType::Fn(params, ret) => {
+                for p in params {
+                    check_host_type(p, context)?;
+                }
+                check_host_type(ret, context)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn check_helper(
+        helper: &chelis_ir::host::HostTensorHelper,
+        context: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for input in &helper.inputs {
+            if !c_backend_supports_precision(input.ty.precision) {
+                return Err(format!(
+                    "`chelis build --target c` host-program lane does not yet support \
+                     tensor precision `{}` (helper `{}` input `{}` in {}). \
+                     bf16/f16 are admitted only on `--target hip`. \
+                     See spec/04-type-system.md §5.7.1.",
+                    input.ty.precision.name(),
+                    helper.name,
+                    input.name,
+                    context
+                )
+                .into());
+            }
+        }
+        if !c_backend_supports_precision(helper.output.precision) {
+            return Err(format!(
+                "`chelis build --target c` host-program lane does not yet support \
+                 tensor precision `{}` (helper `{}` output in {}). \
+                 bf16/f16 are admitted only on `--target hip`. \
+                 See spec/04-type-system.md §5.7.1.",
+                helper.output.precision.name(),
+                helper.name,
+                context
+            )
+            .into());
+        }
+        for node in helper.dag.nodes() {
+            if !c_backend_supports_precision(node.output_type.precision) {
+                return Err(format!(
+                    "`chelis build --target c` host-program lane does not yet support \
+                     tensor precision `{}` (helper `{}` node {} in {}). \
+                     bf16/f16 are admitted only on `--target hip`. \
+                     See spec/04-type-system.md §5.7.1.",
+                    node.output_type.precision.name(),
+                    helper.name,
+                    node.id.0,
+                    context
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    for binding in &program.globals {
+        check_host_type(&binding.ty, &format!("global `{}`", binding.name))?;
+    }
+    for helper in &program.global_tensor_helpers {
+        check_helper(helper, "global tensor helpers")?;
+    }
+    for function in &program.functions {
+        let context = format!("function `{}`", function.name);
+        for param in &function.params {
+            check_host_type(&param.ty, &format!("{} param `{}`", context, param.name))?;
+        }
+        check_host_type(&function.ret_ty, &format!("{} return", context))?;
+        for helper in &function.tensor_helpers {
+            check_helper(helper, &context)?;
         }
     }
     Ok(())

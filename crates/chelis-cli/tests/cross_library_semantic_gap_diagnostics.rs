@@ -682,6 +682,7 @@ fn well_typed_surface_does_not_emit_reserved_classes() {
 // =========================================================================
 
 #[test]
+#[ignore = "WS-A2: F64 BLAS matmul is now admitted (cblas_dgemm via the cycle's F64-completeness lift); the W5 P0 BlasOutputPrecisionMismatch path no longer fires for F64 helpers. Bf16/F16 (WS-A3) and the integer family (rejected upstream at the type checker, spec §5.7.2) cover the remaining rejection paths."]
 fn surface_f64_matmul_helper_emits_blas_output_precision_mismatch_rejection() {
     // F64 user-`def` matmul helper. The W5 P0 fix kept this off the
     // `RiscOp::BlasMatmul` path silently; W6 Task A upgrades that
@@ -717,6 +718,7 @@ fn surface_f64_matmul_helper_emits_blas_output_precision_mismatch_rejection() {
 }
 
 #[test]
+#[ignore = "WS-A2: F64 BLAS matmul is admitted; the rejection this test asserts no longer fires."]
 fn surface_f64_matmul_rejection_carries_surf_span_when_available() {
     // The surface-driven F64 helper's rejection must carry a
     // surf-prefixed span on at least one of callsite_span /
@@ -749,6 +751,7 @@ fn surface_f64_matmul_rejection_carries_surf_span_when_available() {
 }
 
 #[test]
+#[ignore = "WS-A2: F64 BLAS matmul is admitted; the rejection this test asserts no longer fires."]
 fn surface_f64_matmul_rejection_carries_helper_def_name() {
     // Same source as above; locks that the helper_path.def_name
     // names the F64 def (`my_mm`), mirroring the sparse-side
@@ -834,6 +837,7 @@ fn surface_elementwise_helper_emits_no_blas_rejection() {
 }
 
 #[test]
+#[ignore = "WS-A2: F64 BLAS matmul is admitted; the rejection this test asserts no longer fires."]
 fn surface_f64_matmul_rejection_display_mentions_blas_precision() {
     // Supplemental Display surface check — not the matchable
     // contract. Mirrors `rejection_display_mentions_helper_and_class`

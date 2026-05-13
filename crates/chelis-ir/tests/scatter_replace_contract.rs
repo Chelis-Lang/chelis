@@ -253,9 +253,20 @@ fn scatter_replace_ad_returns_structured_not_supported_error() {
         None,
     );
     // Collapse to scalar so grad_dag_checked has a scalar-float output.
-    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![scatter], t(vec![2]), None);
+    let s1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![scatter],
+        t(vec![2]),
+        None,
+    );
     let out = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
         vec![s1],
         TensorType::scalar_f32(),
         None,
@@ -330,9 +341,20 @@ fn scatter_replace_unchecked_grad_dag_returns_none_not_silent_zero() {
         t(vec![3, 2]),
         None,
     );
-    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![scatter], t(vec![2]), None);
+    let s1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![scatter],
+        t(vec![2]),
+        None,
+    );
     let out = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
         vec![s1],
         TensorType::scalar_f32(),
         None,
@@ -374,9 +396,20 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
         t(vec![3, 2]),
         None,
     );
-    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![gathered], t(vec![2]), None);
+    let s1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![gathered],
+        t(vec![2]),
+        None,
+    );
     let out = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
         vec![s1],
         TensorType::scalar_f32(),
         None,

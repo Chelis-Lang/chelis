@@ -102,6 +102,13 @@ extern "C" {
 
 chelis_tensor *chelis_alloc(int ndim, const int *shape, int dtype);
 chelis_tensor *chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);
+/* Element size in bytes for the given CHELIS_* dtype tag. Mirrors the
+ * per-dtype dispatch inside `chelis_alloc` and the GPU-side
+ * `chelis_gpu_dtype_size`. Generated C code calls this when sizing
+ * memcpys / per-element strides so the byte stride matches the storage
+ * layout. RT-4 F2/F3 fix: replaces hardcoded `sizeof(float)` in the C
+ * backend's reshape and cast emitters. */
+int chelis_dtype_size(int dtype);
 void chelis_free(chelis_tensor *t);
 void chelis_fill_f32(chelis_tensor *t, float val);
 void chelis_fill_i64(chelis_tensor *t, int64_t val);
@@ -195,6 +202,11 @@ chelis_list *chelis_dict_keys(const chelis_dict *dict);
 chelis_list *chelis_dict_values(const chelis_dict *dict);
 chelis_list *chelis_dict_entries(const chelis_dict *dict);
 chelis_tensor *chelis_tensor_from_value_list(const chelis_list *list);
+/* RT-4 F1: dtype-aware variant. Honors the declared destination dtype
+ * for both allocation and per-element writes. The C backend calls this
+ * when the surface-level annotation disambiguates storage width
+ * (e.g. `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`). */
+chelis_tensor *chelis_tensor_from_value_list_typed(const chelis_list *list, int dst_dtype);
 chelis_list *chelis_list_from_tensor(const chelis_tensor *tensor);
 chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_value pad_value);
 chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_value pad_value);

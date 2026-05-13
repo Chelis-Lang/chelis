@@ -5080,8 +5080,7 @@ fn infer_top_level(
             // against the declared return relaxed into `Ref(T)`.
             let initial_failed = unify_result.is_err();
             let recovered_by_relaxed_retry = if initial_failed {
-                let relaxed_decl =
-                    shape_a_relaxed_return(&kids[1], &resolved_body, &resolved_decl);
+                let relaxed_decl = shape_a_relaxed_return(&kids[1], &resolved_body, &resolved_decl);
                 relaxed_decl
                     .as_ref()
                     .is_some_and(|relaxed| unify(&body_ty, relaxed, subst).is_ok())

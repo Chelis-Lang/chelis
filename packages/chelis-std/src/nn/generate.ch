@@ -12,11 +12,13 @@ sig generate_loop_step: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (ten
 sig ids_to_batch_tensor: List[int64] -> tensor[rows, cols, int64]
 def generate[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), context: tensor[batch, seq, int64], max_tokens: int64) = generate_greedy_loop(model, context, None, max_tokens)
 def generate_with[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), context: tensor[batch, seq, int64], config: GenerateConfig) = generate_loop(model, context, None, config.max_tokens, config)
-def generate_greedy_loop[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), current: tensor[batch, seq, int64], cache: Option[KVCache[kv]], remaining: int64) = { if lte(remaining, cast(0, int64)) then current else {
-  step = model(copy(current), cache)
-  next_ids = greedy_next_tokens(step.0)
-  generate_greedy_loop(model, concat([current, ids_to_batch_tensor(next_ids)], cast(1, int32)), Some(step.1), sub(remaining, cast(1, int64)))
-} }
+def generate_greedy_loop[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), current: tensor[batch, seq, int64], cache: Option[KVCache[kv]], remaining: int64) = {
+  if lte(remaining, cast(0, int64)) then current else {
+    step = model(copy(current), cache)
+    next_ids = greedy_next_tokens(step.0)
+    generate_greedy_loop(model, concat([current, ids_to_batch_tensor(next_ids)], cast(1, int32)), Some(step.1), sub(remaining, cast(1, int64)))
+  }
+}
 def greedy_next_tokens[batch, vocab](logits: &tensor[batch, vocab, f32]) -> List[int64] = {
   batch_size = cast(shape(logits, cast(0, int32)), int64)
   rows = split(logits, cast(0, int32), one_sizes(batch_size))

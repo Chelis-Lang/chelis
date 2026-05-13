@@ -95,7 +95,15 @@ fn build_gather_scalar(
         } else {
             t(next_shape.clone())
         };
-        let next = dag.add_node(RiscOp::Sum { axis: 0 }, vec![current], ty, None);
+        let next = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![current],
+            ty,
+            None,
+        );
         current = next;
         current_shape = next_shape;
     }
@@ -225,9 +233,20 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
         t(vec![2, 4]),
         None,
     );
-    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![gathered], t(vec![4]), None);
+    let s1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![gathered],
+        t(vec![4]),
+        None,
+    );
     let s2 = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
         vec![s1],
         TensorType::scalar_f32(),
         None,
@@ -510,9 +529,20 @@ fn scatter_ad_rejects_regardless_of_wrt_subset() {
         t(vec![3, 2]),
         None,
     );
-    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![scatter], t(vec![2]), None);
+    let s1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![scatter],
+        t(vec![2]),
+        None,
+    );
     let out = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
         vec![s1],
         TensorType::scalar_f32(),
         None,
@@ -602,9 +632,20 @@ fn scatter_add_backward_op_returns_no_individual_adjoint() {
         t(vec![3, 2]),
         None,
     );
-    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![sa], t(vec![2]), None);
+    let s1 = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![sa],
+        t(vec![2]),
+        None,
+    );
     let out = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
         vec![s1],
         TensorType::scalar_f32(),
         None,

@@ -116,7 +116,10 @@ fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 2, 4),
         None,
@@ -191,7 +194,10 @@ fn int_float_int_cast_round_trip_misses_specialization() {
         None,
     );
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::Int32, 2, 4),
         None,
@@ -261,7 +267,10 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 2, 4),
         None,
@@ -325,7 +334,10 @@ fn permute_round_trip_pair_between_expand_and_mul_misses_blas() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![p2, eb], t3(Prim::F32, 2, 3, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 2, 4),
         None,
@@ -377,7 +389,10 @@ fn single_identity_permute_does_collapse_to_blas() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![p_id, eb], t3(Prim::F32, 2, 3, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 2, 4),
         None,
@@ -448,7 +463,10 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 2, 3, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 2, 4),
         None,

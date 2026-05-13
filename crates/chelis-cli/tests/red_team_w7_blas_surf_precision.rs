@@ -88,6 +88,7 @@ fn assert_blas_output_precision_mismatch(rejections: &[SummaryRejection], expect
 // =========================================================================
 
 #[test]
+#[ignore = "WS-A2: F64 BLAS matmul is admitted (cblas_dgemm); BlasOutputPrecisionMismatch no longer fires for F64 helpers."]
 fn w7_surf_f64_matmul_helper_emits_blas_output_precision_mismatch() {
     let source = "def my_mm(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
                   -> tensor[8, 4, f64] = matmul(a, b)\n\
@@ -102,6 +103,7 @@ fn w7_surf_f64_matmul_helper_emits_blas_output_precision_mismatch() {
 // =========================================================================
 
 #[test]
+#[ignore = "WS-A0 spec lock: integer matmul is now a type error per spec §5.7.2 (PrecisionMismatch at the type checker), so the helper never reaches the BLAS summary-rejection path this test exercises. The IR-level cross-product in red_team_w7_blas_cross_product.rs still covers integer matmul rejection at the recognizer level."]
 fn w7_surf_int32_matmul_helper_emits_blas_output_precision_mismatch() {
     let source = "def my_mm(a: tensor[8, 16, int32], b: tensor[16, 4, int32]) \
                   -> tensor[8, 4, int32] = matmul(a, b)\n\
@@ -116,6 +118,7 @@ fn w7_surf_int32_matmul_helper_emits_blas_output_precision_mismatch() {
 // =========================================================================
 
 #[test]
+#[ignore = "WS-A0 spec lock: integer matmul is now a type error per spec §5.7.2 (PrecisionMismatch at the type checker), so the helper never reaches the BLAS summary-rejection path this test exercises."]
 fn w7_surf_int64_matmul_helper_emits_blas_output_precision_mismatch() {
     let source = "def my_mm(a: tensor[8, 16, int64], b: tensor[16, 4, int64]) \
                   -> tensor[8, 4, int64] = matmul(a, b)\n\
@@ -134,6 +137,7 @@ fn w7_surf_int64_matmul_helper_emits_blas_output_precision_mismatch() {
 // =========================================================================
 
 #[test]
+#[ignore = "WS-A2: F64 BLAS matmul is admitted; helpers no longer accumulate summary rejections for F64."]
 fn nonempty_summary_rejections_for_surf_f64_matmul_helper() {
     let source = "def my_mm(a: tensor[8, 16, f64], b: tensor[16, 4, f64]) \
                   -> tensor[8, 4, f64] = matmul(a, b)\n\
@@ -166,6 +170,7 @@ fn nonempty_summary_rejections_for_surf_f64_matmul_helper() {
 // =========================================================================
 
 #[test]
+#[ignore = "WS-A0 spec lock: integer matmul is a type error per spec §5.7.2; the helper never reaches host lowering, so summary rejections never accrue."]
 fn nonempty_summary_rejections_for_surf_int32_matmul_helper() {
     let source = "def my_mm(a: tensor[8, 16, int32], b: tensor[16, 4, int32]) \
                   -> tensor[8, 4, int32] = matmul(a, b)\n\

@@ -1909,19 +1909,12 @@ impl CEmitter {
 
     // ---- BLAS matmul ----
     fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
-        // Defense in depth: cblas_sgemm is F32-only. If a non-F32 BlasMatmul
-        // reaches here it indicates a missing precision filter upstream (the
-        // canonical filter is at chelis_ir::specialize::detect_matmul_pattern).
-        // Refuse to emit rather than silently miscompile.
-        assert_eq!(
-            ty.precision,
-            Prim::F32,
-            "emit_blas_matmul received non-F32 output (precision={:?}) at node {id}; \
-             cblas_sgemm is single-precision only. The upstream specializer in \
-             chelis_ir::specialize must keep non-F32 matmul subgraphs on the \
-             generic expand+mul+sum path.",
-            ty.precision,
-        );
+        // WS-A1: dispatch f32 -> cblas_sgemm and f64 -> cblas_dgemm by the
+        // IR-pinned accumulator precision (see the match below). The
+        // historical F32-only assert that lived here was lifted with WS-A1;
+        // upstream guards in verify.rs and validate_supported_precisions
+        // reject unsupported accumulator dtypes before they reach this
+        // function.
         let a = spec.a.0;
         let b = spec.b.0;
         let m_expr = Self::emit_dim_expr(&spec.m);
@@ -3292,31 +3285,41 @@ impl CEmitter {
         let src_et = Self::elem_type(src_ty);
         let dst_et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
-        // Strided element-wise loop. The output is freshly allocated and
-        // contiguous, so the destination index is the flat loop index. The
-        // source may be non-contiguous; resolve its element via the
-        // standard `chelis_flat_to_indices` + `chelis_indices_to_flat`
-        // dance used by `emit_realize` and friends. A C-level primitive
-        // cast `(dst_et)src` performs the precision conversion -- this is
-        // the canonical C semantics for f32<->f64 rounding,
-        // float->int truncate-toward-zero, and int->float widening, and
-        // matches the runtime evaluator's `convert_scalar_data` semantics
-        // on the validated precision set.
-        self.line("#pragma omp parallel for");
-        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
-        self.indent += 1;
-        self.line("int indices[CHELIS_MAX_DIM];");
-        self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
-        ));
-        self.line(&format!(
-            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
-        ));
-        self.line(&format!(
-            "(({dst_et}*)t{id}->data)[i] = ({dst_et})(({src_et}*)t{a}->data)[idx];"
-        ));
-        self.indent -= 1;
-        self.line("}");
+        if src_ty.precision == ty.precision {
+            // Same-dtype cast: copy directly using the per-dtype size.
+            // Models a same-dtype cast as a structural identity copy
+            // matching the runtime's per-dtype storage layout.
+            self.line(&format!(
+                "memcpy(t{id}->data, t{a}->data, t{id}->size * sizeof({dst_et}));"
+            ));
+        } else {
+            // Cross-dtype value-converting cast. Strided element-wise
+            // loop: the output is freshly allocated and contiguous, so
+            // the destination index is the flat loop index. The source
+            // may be non-contiguous; resolve its element via the
+            // standard `chelis_flat_to_indices` + `chelis_indices_to_flat`
+            // dance used by `emit_realize` and friends. A C-level
+            // primitive cast `(dst_et)src` performs the precision
+            // conversion; canonical C semantics for f32<->f64 rounding,
+            // float->int truncate-toward-zero, and int->float widening,
+            // matching the runtime evaluator's `convert_scalar_data`
+            // semantics on the validated precision set.
+            self.line("#pragma omp parallel for");
+            self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+            self.indent += 1;
+            self.line("int indices[CHELIS_MAX_DIM];");
+            self.line(&format!(
+                "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            ));
+            self.line(&format!(
+                "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            ));
+            self.line(&format!(
+                "(({dst_et}*)t{id}->data)[i] = ({dst_et})(({src_et}*)t{a}->data)[idx];"
+            ));
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     // ---- Store ----

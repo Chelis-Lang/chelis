@@ -521,12 +521,16 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     if sum_node.inputs.len() != 1 || sum_node.output_type.dims.len() < 2 {
         return None;
     }
-    // BlasMatmul dispatches to cblas_sgemm / hipblas_sgemm — single-precision
-    // BLAS — at codegen. Replacing a non-F32 matmul subgraph with BlasMatmul
-    // would silently miscompile the user's program (F64 bytes read as F32,
-    // integer bytes read as F32, etc.). Keep non-F32 matmul on the generic
-    // expand+mul+sum path.
-    if sum_node.output_type.precision != Prim::F32 {
+    // WS-A1 / WS-A2 / WS-A3: BlasMatmul dispatches to cblas_sgemm /
+    // cblas_dgemm / hipblas_sgemm / hipblasGemmEx by precision. F32, F64,
+    // Bf16, F16 all have backend support. Integer matmul is rejected
+    // upstream at the type checker per spec §5.7.2 so it never reaches
+    // here. Other precisions (F8e4m3) fall through to the generic
+    // expand+mul+sum path until a backend lift covers them.
+    if !matches!(
+        sum_node.output_type.precision,
+        Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
+    ) {
         return None;
     }
     let lead_len = sum_node.output_type.dims.len() - 2;
@@ -564,7 +568,13 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     }
     let a_ty = &dag.get(a)?.output_type;
     let b_ty = &dag.get(b)?.output_type;
-    if a_ty.precision != Prim::F32 || b_ty.precision != Prim::F32 {
+    // Operand precisions must match the sum (BLAS dispatch is by
+    // accumulator dtype) and must be in the BLAS-admitted set
+    // (sum_node.output_type.precision is already filtered to that set
+    // above).
+    if a_ty.precision != sum_node.output_type.precision
+        || b_ty.precision != sum_node.output_type.precision
+    {
         return None;
     }
     let batch_dims = sum_node.output_type.dims[..lead_len]

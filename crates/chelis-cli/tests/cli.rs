@@ -1678,8 +1678,12 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         source.contains("chelis_tensor* __binding_0_value;"),
         "expected tensor-valued local grad result to stay tensor-typed:\n{source}"
     );
+    // RT-4 F1: the runtime call may be either the legacy untyped
+    // entry point or the new dtype-aware variant (CHELIS_F32 here);
+    // both carry the same shape semantics.
     assert!(
-        source.contains("chelis_tensor_from_value_list(")
+        (source.contains("chelis_tensor_from_value_list(")
+            || source.contains("chelis_tensor_from_value_list_typed("))
             && source.contains("__host_tensor_arg_1")
             && source.contains("tensor_grad_local_wrapper__global__tensor_0"),
         "expected local-wrapper grad to specialize into a tensor helper with a hoisted tensor arg:\n{source}"
@@ -2630,8 +2634,13 @@ int main(void) {
     chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_F32);
     chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_I32);
     chelis_tensor *updates = chelis_alloc(2, updates_shape, CHELIS_F32);
-    idx->data[0] = 1.0f;
-    idx->data[1] = 1.0f;
+    /* RT-4 F1 sibling: write through `(int32_t*)` so the slot stores
+     * int32 bytes; the runtime now reads indices at the dtype-correct
+     * width and a float-bit-pattern write would surface as the bit
+     * pattern as an int (e.g. 1065353216 for 1.0f), defeating the
+     * duplicate-index fixture. */
+    ((int32_t*)idx->data)[0] = 1;
+    ((int32_t*)idx->data)[1] = 1;
     updates->data[0] = 5.0f;
     updates->data[1] = 5.0f;
     updates->data[2] = 6.0f;

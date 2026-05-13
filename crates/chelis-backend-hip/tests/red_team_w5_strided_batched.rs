@@ -92,6 +92,7 @@ fn rank4_uniform_batched_matmul_dispatches_strided_batched_with_product_batch_co
             m: DimExpr::Concrete(4),
             n: DimExpr::Concrete(6),
             k: DimExpr::Concrete(5),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         t(Prim::F32, vec![2, 3, 4, 6]),
@@ -112,13 +113,13 @@ fn rank4_uniform_batched_matmul_dispatches_strided_batched_with_product_batch_co
 }
 
 /// ADV-HIP-2: Rank-3 F64 uniform layout. The HIP backend fail-closes at
-/// codegen time with a Phase-1a "only f32/bool/int32/int64" panic — the
-/// F64 case is intentionally not supported, so it shouldn't silently
-/// dispatch to anything. Lock the fail-closed behavior so a future
-/// commit that quietly enables F64 emit must update this test and
-/// audit whether the strided-batched plan is correct for double precision.
+/// codegen time when the operand and accumulator precision pair has no
+/// hipBLAS dispatch entry. WS-A2 lifted f64 support for the (f64, f64)
+/// pair (cblas_dgemm equivalent); the (f64, f32) combination this test
+/// constructs is still rejected because the IR-pinned accumulator and
+/// operand are inconsistent (spec §5.7.1).
 #[test]
-#[should_panic(expected = "only supports f32/bool/int32/int64")]
+#[should_panic(expected = "is not yet supported by the HIP backend")]
 fn rank3_f64_uniform_batched_does_not_dispatch_strided_batched() {
     let mut dag = Dag::new();
     let a = dag.add_node(
@@ -139,6 +140,7 @@ fn rank3_f64_uniform_batched_does_not_dispatch_strided_batched() {
             m: DimExpr::Concrete(4),
             n: DimExpr::Concrete(6),
             k: DimExpr::Concrete(5),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         t(Prim::F64, vec![3, 4, 6]),
@@ -194,6 +196,7 @@ fn symbolic_batch_concrete_mnk_dispatches_strided_batched_with_symbolic_batch_co
             m: DimExpr::Concrete(4),
             n: DimExpr::Concrete(6),
             k: DimExpr::Concrete(5),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         t_named(Prim::F32, dims_out),
@@ -253,6 +256,7 @@ fn symbolic_mnk_falls_back_to_helper_loop_not_strided_batched() {
             m: DimExpr::Sym("m".into()),
             n: DimExpr::Sym("n".into()),
             k: DimExpr::Sym("k".into()),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         t_named(Prim::F32, dims_out),
@@ -298,6 +302,7 @@ fn rank2_matmul_takes_plain_sgemm_not_batched_nor_strided() {
             m: DimExpr::Concrete(8),
             n: DimExpr::Concrete(4),
             k: DimExpr::Concrete(16),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         t(Prim::F32, vec![8, 4]),
@@ -354,6 +359,7 @@ fn broadcasted_rhs_leading_axis_falls_back_to_helper_loop() {
             m: DimExpr::Concrete(4),
             n: DimExpr::Concrete(6),
             k: DimExpr::Concrete(5),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         t(Prim::F32, vec![3, 4, 6]),
@@ -420,6 +426,7 @@ fn both_sides_broadcasted_leading_axis_falls_back_to_helper_loop() {
             m: DimExpr::Concrete(4),
             n: DimExpr::Concrete(6),
             k: DimExpr::Concrete(5),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         t(Prim::F32, vec![3, 4, 6]),

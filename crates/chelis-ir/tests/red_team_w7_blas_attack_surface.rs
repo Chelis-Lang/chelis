@@ -126,7 +126,10 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 8, 4),
         None,
@@ -265,7 +268,10 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 8, 4),
         None,
@@ -346,6 +352,7 @@ fn blas_non_load_operand_cast_wrapping_load_emits_structured_rejection() {
             m: DimExpr::Concrete(8),
             n: DimExpr::Concrete(4),
             k: DimExpr::Concrete(16),
+            accumulator: Prim::F32,
         },
         vec![a_cast, b],
         mat(Prim::F32, 8, 4),
@@ -414,6 +421,7 @@ fn blas_dimension_binding_failure_unbound_batch_emits_structured_rejection() {
             m: DimExpr::Concrete(8),
             n: DimExpr::Concrete(4),
             k: DimExpr::Concrete(16),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         TensorType {
@@ -472,6 +480,7 @@ fn blas_dimension_binding_failure_unbound_n_emits_structured_rejection() {
             m: DimExpr::Concrete(8),
             n: DimExpr::Sym("unbound_n".into()),
             k: DimExpr::Concrete(16),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         mat(Prim::F32, 8, 4),
@@ -555,7 +564,10 @@ fn blas_not_matmul_pattern_wrong_sum_axis_emits_structured_rejection_tail_op_sum
     // Wrong axis: sum over axis 0 instead of 1. Output type matches
     // the wrong axis.
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 0 },
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         t3(Prim::F32, 1, 16, 4),
         None,
@@ -615,7 +627,10 @@ fn near_miss_sum_of_mul_of_two_loads_no_expand_returns_not_eligible() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![a, b], in_ty.clone(), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         TensorType {
             dims: vec![DimInfo::Lit(4)],
@@ -666,7 +681,10 @@ fn near_miss_sum_of_mul_of_expand_and_load_returns_not_eligible() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, b], t3(Prim::F32, 8, 16, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![mul],
         mat(Prim::F32, 8, 4),
         None,
@@ -718,7 +736,10 @@ fn near_miss_sum_of_add_of_expands_returns_not_eligible() {
     );
     let add = dag.add_node(RiscOp::Add, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
         vec![add],
         mat(Prim::F32, 8, 4),
         None,
@@ -752,6 +773,7 @@ fn near_miss_sum_of_add_of_expands_returns_not_eligible() {
 // =========================================================================
 
 #[test]
+#[ignore = "WS-A2: F64 matmul subgraphs are now successfully specialized to BlasMatmul (cblas_dgemm); the W5 P0 fail-closed rejection no longer fires."]
 fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
     // F64 matmul subgraph — specialize_for_blas declines (W5 P0).
     // The post-specialize root is the Sum(Mul(Expand,Expand)) shape
@@ -789,7 +811,10 @@ fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F64, 8, 16, 4), None);
     let sum = dag.add_node(
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F64,
+        },
         vec![mul],
         mat(Prim::F64, 8, 4),
         None,
@@ -840,6 +865,7 @@ fn hand_built_blas_matmul_root_f32_accepts() {
             m: DimExpr::Concrete(8),
             n: DimExpr::Concrete(4),
             k: DimExpr::Concrete(16),
+            accumulator: Prim::F32,
         },
         vec![a, b],
         mat(Prim::F32, 8, 4),

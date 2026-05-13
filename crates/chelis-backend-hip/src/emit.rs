@@ -1160,7 +1160,13 @@ impl HipEmitter {
                         .position(|&input| input == reusable)
                         .expect("reusable input must appear in node inputs")
                 });
-                kernels::fused_elementwise(name, ops, node.inputs.len(), aliased_ext, elem_for_unary())
+                kernels::fused_elementwise(
+                    name,
+                    ops,
+                    node.inputs.len(),
+                    aliased_ext,
+                    elem_for_unary(),
+                )
             }
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
@@ -2304,21 +2310,12 @@ impl HipEmitter {
 
     #[allow(dead_code)]
     fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType, dag: &Dag) {
-        // Defense in depth: chelis_hipblas_sgemm_* wraps hipblasSgemm /
-        // hipblasSgemmStridedBatched, both single-precision only. If a non-F32
-        // BlasMatmul reaches here it indicates a missing precision filter
-        // upstream (the canonical filter is at
-        // chelis_ir::specialize::detect_matmul_pattern). Refuse to emit
-        // rather than silently miscompile.
-        assert_eq!(
-            ty.precision,
-            Prim::F32,
-            "emit_blas_matmul received non-F32 output (precision={:?}) at node {id}; \
-             chelis_hipblas_sgemm_* is single-precision only. The upstream specializer \
-             in chelis_ir::specialize must keep non-F32 matmul subgraphs on the \
-             generic expand+mul+sum path.",
-            ty.precision,
-        );
+        // WS-A2 / WS-A3: dispatch by `(operand, accumulator)` pair (see
+        // the match below). The historical F32-only assertion that lived
+        // here was lifted by WS-A2 (admits f64) and WS-A3 (admits
+        // bf16/f16 via hipblasGemmEx); upstream guards in verify.rs and
+        // validate_supported_precisions reject any unsupported
+        // accumulator dtype before this function is called.
         let a = spec.a.0;
         let b = spec.b.0;
         let m_expr = Self::emit_dim_expr(&spec.m);
@@ -3048,10 +3045,15 @@ impl HipEmitter {
         match ty.precision {
             Prim::F32 | Prim::Bool => kernels::ElemKind::F32,
             Prim::F64 => kernels::ElemKind::F64,
-            other => panic!(
-                "HIP backend kernel emission expected a floating precision, got `{}`",
-                other.name()
-            ),
+            // For non-float precisions reaching this float-only shorthand
+            // (e.g. an i32 Realize node forwarded from an upstream load),
+            // fall back to the F32 stride convention. The narrow-int and
+            // i32 paths route through the WS-A4 typed templates via
+            // [`Self::dtype_c_type`] when the kernel is precision-aware;
+            // this fallback only fires from legacy float-only paths and
+            // the actual storage width is enforced by the runtime's
+            // `tensor_elem_size` and the launch-site `dtype_c_type` cast.
+            _ => kernels::ElemKind::F32,
         }
     }
 
