@@ -43,6 +43,7 @@ fn run_build_in(dir: &Path, source: &Path) -> std::process::Output {
         .expect("spawn chelis build")
 }
 
+#[cfg(not(target_os = "macos"))]
 fn gcc_available() -> bool {
     StdCommand::new("gcc")
         .arg("--version")
@@ -54,6 +55,7 @@ fn gcc_available() -> bool {
 /// Compile the emitted C with gcc into an object file. Returns the
 /// process output (stdout/stderr/status). Caller asserts on
 /// `output.status.success()`.
+#[cfg(not(target_os = "macos"))]
 fn gcc_compile_object(work_dir: &Path, c_file: &Path, object: &Path) -> std::process::Output {
     StdCommand::new("gcc")
         .arg("-O2")
@@ -105,6 +107,10 @@ fn build_stdlib_attention_succeeds() {
 // invokes gcc on the emitted C.
 // ============================================================
 
+// macOS's gcc is a clang alias; clang requires libomp for -fopenmp which
+// isn't installed on the GitHub macOS runner. Linux gcc supports OpenMP
+// natively.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn build_polymorphic_linear_call_site_compiles_with_gcc() {
     if !gcc_available() {
@@ -147,6 +153,10 @@ def call(x: &tensor[2, 3, f32], w: &tensor[3, 4, f32]) -> tensor[2, 4, f32] = fo
     );
 }
 
+// macOS's gcc is a clang alias; clang requires libomp for -fopenmp which
+// isn't installed on the GitHub macOS runner. Linux gcc supports OpenMP
+// natively.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn build_polymorphic_id_t_call_site_compiles_with_gcc() {
     // Smaller probe: a polymorphic id_t threaded through a concrete
