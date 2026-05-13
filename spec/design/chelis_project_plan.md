@@ -1223,6 +1223,166 @@ reference type checker — the ultimate conformance oracle.
 
 ---
 
+## Differentiable Programming Track (Phases D0–D6)
+
+Parallel committed-scope track for end-to-end differentiable programming. Detailed
+design in `spec/design/differentiable_language.md`; roadmap row in
+`spec/12-roadmap.md` §Differentiable programming.
+
+Scope is committed; the strategic decision on when to begin Phase D1 is separate.
+The phases are sequenced by dependency: D1 → D2 → D3 → D4 → D5, with D6 free to
+develop in parallel with D5 once D4 lands.
+
+| Phase | Deliverable | Notes |
+|---|---|---|
+| **D0** | Spec lock at `spec/design/differentiable_language.md` | ✅ Complete |
+| **D1** | AD through `if`, `match`, `while`, `for`, recursion. C/HIP backends gain `RiscOp::Select` and ADT-tagged match lowering; reverse-mode loops emit trajectory storage. | Depends on `IR-SelectOp-F1` and `IR-MatchLowering-F1` (`docs/gap_synthesis.md` §5). Committing reclassifies them from surface-when-forced to required. |
+| **D2** | Field-wise gradient ADTs/records and higher-order function AD. | Depends on `IR-FirstClassFn-F1`. |
+| **D3** | Effect-aware AD: pure / `state` / `raises` / `capability` / `sample` (reparam, REINFORCE, pathwise). Unlocks Chelis-as-PPL substrate. | Composes with the Phase 2a effect work; does not add new effects, just gradient rules per effect. |
+| **D4** | Implicit differentiation via `fix`, `argmin`, `solve` markers (IFT-derived gradients, KKT for `argmin`). | Differentiable simulation / optimization-as-a-layer use cases. |
+| **D5** | Type-level differentiability: `Differentiable`, `PartiallyDifferentiable`, `NonDifferentiable` annotations + inference. Composes with the existing property-verification harness. | Connects to `spec/design/chelis_property_spec.md` for gradient-behavior properties (e.g. `Lipschitz(K)`). |
+| **D6** | Primer, `examples/differentiable/`, shell library `chelis-diff` (distributions, optimizers, IFT helpers, finite-difference checks). | On-ramp for PyTorch/JAX users. |
+
+Pre-locked decisions (forward + reverse mode parity, AD-as-transformation,
+type-level differentiability, effect-driven gradient discipline, marked implicit
+differentiation, field-wise ADT gradients, backward compatibility with today's
+`grad`) are listed in the canonical document and are not subject to per-dispatch
+re-litigation.
+
+What is explicitly *not* in this track: distributed AD, JIT-style per-input
+recompilation, mixed-precision AD (lives with the broader dtype build-out),
+higher-order AD beyond what falls out of forward∘reverse composition, AD across
+FFI boundaries. See `spec/design/differentiable_language.md` §What's not in scope.
+
+---
+
+## Hydronnx Shell Track (Phases H0–H5)
+
+Parallel committed-scope track for Hydronnx, the Chelis shell that consumes ONNX
+model files and exposes them as typed, callable Chelis functions. Detailed
+design in `spec/design/hydronnx.md`; roadmap row in `spec/12-roadmap.md`
+§Hydronnx.
+
+`Hydronnx` (PascalCase) is the module path; `hydronnx` is the crate, package,
+file, and prose form. The upstream `ONNX` interchange format is not owned by
+Chelis — Hydronnx is the consumer, not the format. The two names are kept
+distinct everywhere they appear.
+
+Scope is committed; the strategic decision on when to begin Phase H1 is
+separate. Phasing is sequenced by dependency: H1 → H2 → H3 → H4 → H5.
+
+| Phase | Deliverable | Notes |
+|---|---|---|
+| **H0** | Spec lock at `spec/design/hydronnx.md` | ✅ Complete |
+| **H1** | ONNX protobuf parser, internal IR (`hydronnx::ir::Model` / `Graph` / `Node` / `Tensor` — path-qualified, no `Onnx` prefix on the type names), `chelis-hydronnx-inspect` CLI utility. Inventory matches `onnx.checker.check_model` baseline. | Single-agent dispatch; standalone milestone. |
+| **H2** | Operator translator over the v0.1 core subset: tensor manipulation, elementwise arithmetic, comparisons, logical, reductions, matrix, activations, normalization, convolution, decomposed Attention/MultiHeadAttention/RotaryEmbedding, Cast, Constant/ConstantOfShape. | Decomposition recipes for high-level operators are pinned in the spec so future IR-specializer recognizers know the canonical tag tree to match. Per-operator and per-category numerical agreement vs ONNX Runtime. |
+| **H3** | Weight loading (ONNX TensorProto → Chelis tensor), layout conversion, dtype conversion, Chelis function emission with provenance metadata. `load_model` / `inspect_model` / `load_model_with_opts` API surface. | Single-agent dispatch; closes the end-to-end loading capability. |
+| **H4** | Type-discipline integration: dimension types on loaded signatures, call-site type checking, property attachment, AD composition where operators support it, composition with other Chelis code. | Composes with `spec/design/chelis_property_spec.md` and the existing hull infrastructure. |
+| **H5** | Documentation, examples per strong-fit model category, property examples, honest performance framing, ONNX-Runtime → hydronnx migration guide. | Discovery and onboarding milestone. |
+
+Initial dtype scope (`f32`, `f64`, `i32`, `i64`) matches the host-side dtype
+build-out. Operator coverage extensions (`bf16`, `f16`, `i8`, `i16`,
+quantized formats) ship as the dtype build-out delivers host-side precision.
+
+Dependencies on other Chelis workstreams are deliberately non-blocking where
+possible:
+
+- The `IR-FirstClassFn-F1` / `IR-SelectOp-F1` / `IR-MatchLowering-F1` §5 entries
+  in `docs/gap_synthesis.md` extend Hydronnx's operator coverage (If, Loop,
+  Scan) when they close; v0.1 explicitly excludes those operators.
+- The differentiable-language Phase D1 control-flow AD work unlocks AD through
+  dynamic-graph operators once those operators load.
+- Fusion, kernel authoring, and MLIR-backend work are performance enhancers
+  that loaded models pick up automatically — no Hydronnx changes required.
+
+What is explicitly *not* in v1 scope: custom ONNX operators, ONNX Training
+graphs, dynamic-graph operators (If, Loop, Scan), quantized formats
+(QDQ / Q8 / Q4), multi-device or distributed inference, Chelis → ONNX
+round-trip export. See `spec/design/hydronnx.md` §What's not in v1 scope.
+
+---
+
+## Kerrent Track (Phases K0–K6 + Addendums KA–KF)
+
+Parallel committed-scope track for Kerrent, the Chelis core language feature
+for authoring GPU kernels in Chelis source code. Detailed design in
+`spec/design/kerrent.md`; roadmap row in `spec/12-roadmap.md` §Kerrent.
+
+`Kerrent` (proper noun) is the Chelis feature name. It is a core language
+feature, not a shell: it introduces a new `kernel` keyword, tile-level
+primitives, and a new IR layer between the RISC DAG and Triton IR. The
+upstream `Triton` kernel compiler is owned by the Triton project, not by
+Chelis — Kerrent emits Triton IR, Triton compiles it. The two names are kept
+distinct everywhere they appear, analogous to the Hydronnx-vs-ONNX discipline.
+
+Scope is committed; the strategic decision on when to begin Phase K1 is
+separate. Phasing is sequenced by dependency: K1 → K2 → K3 → K4 → K5 → K6.
+
+| Phase | Deliverable | Notes |
+|---|---|---|
+| **K0** | Spec lock at `spec/design/kerrent.md` | ✅ Complete |
+| **K1** | Kernel syntax and parser. `kernel` annotation + tile-level primitives (`tile.load`, `tile.store`, `tile.dot`, `tile.reduce`, `tile.mask`, …) parse correctly. Kernel-annotated functions get a distinct AST representation the rest of the pipeline can distinguish from tensor-level functions. | Single-agent dispatch; standalone milestone. |
+| **K2** | Kernel IR layer between Chelis's RISC DAG and Triton IR. Tile-level operations become first-class IR nodes. Dimension types extend to tile scope. Type checking on kernel functions runs against this IR. | The new IR layer is the substrate K3, K4, and K5 all consume — its shape choices freeze on landing and force every downstream pass to fit. |
+| **K3** | Lowering pass from kernel IR to Triton's MLIR dialect. Each tile-level operation has a defined Triton IR equivalent; output validates against Triton's IR specification. | Orthogonal to Phase 5c (Triton backend for whole-program RISC-DAG emission) — see distinction note below. |
+| **K4** | Build integration. Triton compiler invocation from the Chelis build pipeline; kernel artifacts (compiled PTX or AMDGCN) get produced and linked. The Triton dependency is handled cleanly by the build system. | Touches `chelis build` and the manifest surface; needs coordination with the reef/build infrastructure. |
+| **K5** | Runtime integration. Kernel calls from tensor-level Chelis lower to launches against Triton artifacts via the existing HIP/CUDA backend machinery for argument marshaling and grid configuration. | Memory-layout matching at the kernel boundary is where this milestone fails silently rather than loudly — a mismatch corrupts kernel inputs/outputs without any compile-time signal, so the K5 oracle has to actually run the kernel and compare results. |
+| **K6** | First production kernel: FlashAttention-shaped fused attention kernel written in Kerrent, replacing the current attention decomposition. Transformer inference becomes competitive with PyTorch+CUDA for the attention block. | Customer-visible proof point; closes the dominant transformer performance gap identified in `docs/gap_synthesis.md` §Concrete cost picture. |
+
+**Phase 5c distinction.** Phase 5c (§5c: Triton Backend, above) describes a
+whole-program backend that emits Chelis's RISC DAG to Triton IR — i.e.,
+tensor-level Chelis is lowered through the existing IR pipeline, with Triton
+as the final code-generation target. Kerrent's K3 operates at a different
+layer: it lowers **user-authored kernel-level Chelis** (functions marked with
+the `kernel` keyword) through the new kernel IR to Triton IR. The two paths
+are independent; a Chelis program can use one, the other, both, or neither.
+Future agents must not conflate them.
+
+### Kerrent v1 guarantees (per `spec/design/kerrent.md` §Guarantees)
+
+- Dimension type checking at kernel boundaries (call-site shape mismatches
+  fail at type-check).
+- Dimension type checking inside kernel bodies (tile-level operations are
+  typed; `tile.dot` between mismatched tiles fails at type-check).
+- No undefined behavior from shape errors. The CUDA-class shape bugs become
+  compile-time errors.
+- Existing Chelis property verification extends to kernel-using code by
+  sampling at the function boundary. Kernel bodies themselves are opaque to
+  sampling in v1 (see Addendum KE for the body-level extension).
+- Cross-vendor portability: same source runs on NVIDIA via Triton's PTX
+  backend and on AMD via Triton's AMDGCN backend.
+
+What Kerrent v1 explicitly does **not** guarantee: algorithmic correctness of
+the kernel logic itself, performance bounds (Triton handles autotuning), or
+AD correctness through kernels (v1 kernels are forward-only).
+
+### Addendums KA–KF (post-v1 extensions)
+
+Six addendums extend Kerrent beyond v1. They are tracked here with priority
+tiers; none get roadmap phase rows or phase oracles because none are active
+phases. Each becomes a dispatch when its priority tier and the broader Chelis
+roadmap align.
+
+| ID | Addendum | Priority | Notes |
+|---|---|---|---|
+| **KA** | AD composition through kernels | **HIGH** (first post-v1) | Extends the AD transform to operate on kernel-level IR. A Kerrent kernel for forward computation gets a corresponding kernel for backward computation, generated by the AD transform at tile level. Composes with `spec/design/differentiable_language.md` (the D-track) — together they produce the AD-through-kernels capability no other framework offers. |
+| **KB** | Thread-level addressing | MEDIUM | Extends Kerrent with thread-level primitives — thread index types, shared memory with explicit synchronization, warp-level operations (shuffles, ballots). Lowering still goes through Triton where possible; falls back to direct MLIR for patterns Triton can't express. |
+| **KC** | Custom shared memory patterns | MEDIUM | Exposes shared memory as a region type with explicit allocation, access patterns, and synchronization. Routes around Triton's automatic allocation when the user is managing it manually. |
+| **KD** | MLIR-direct lowering | LOWER | Builds a Chelis GPU dialect parallel to (or replacing) Triton emission for patterns Triton's IR doesn't express well. Cuda-oxide-shaped path. The platonic ideal of Chelis-native kernel compilation but substantial work. |
+| **KE** | Verified kernel bodies | LOWER | Extends `chelis prove` and property verification to sample tile-level inputs and verify kernel-level properties. Dimension-typed-plus-property-verified GPU code doesn't exist anywhere. |
+| **KF** | Direct kernel platforms beyond NVIDIA and AMD | LOWER | Lowers Chelis's kernel IR through MLIR to target dialects for additional platforms (Apple Silicon via MLIR's Metal compute, embedded GPUs, novel accelerators). |
+
+The "v1 plus Addendum KA" combination is the strategically distinctive scope:
+v1 produces the kernel authorship capability; KA produces the AD-through-
+kernels capability no other framework offers. Everything else is opportunistic
+extension scheduled by customer pull.
+
+What is explicitly *not* in v1 scope: thread-level addressing, custom shared
+memory patterns, warp-level primitives, AD through kernels (forward-only in
+v1), property verification on kernel bodies beyond standard dimension typing.
+See `spec/design/kerrent.md` §What v1 doesn't include and §Addendums.
+
+---
+
 ## Ecosystem Library Decisions
 
 Evaluated via multi-agent review.
