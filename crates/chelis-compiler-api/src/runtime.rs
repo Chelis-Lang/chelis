@@ -1804,7 +1804,14 @@ impl<'a> EvalContext<'a> {
             }
             "numel" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                let numel = tensor.value.shape.iter().product::<usize>().max(1);
+                // Empty-product identity handles the scalar (shape `[]`) case
+                // correctly: `[].iter().product::<usize>() == 1`. For rank-1+
+                // tensors with any zero dimension the product is 0, which is
+                // the genuine element count and must not be clamped. The
+                // historical `.max(1)` clamp here was the root cause of
+                // Runtime-EmptyTensorNumel-F1: `numel(to_tensor([]))`
+                // returning 1 instead of 0.
+                let numel = tensor.value.shape.iter().product::<usize>();
                 Ok(RuntimeValue::Int(numel as i64))
             }
             "tensor_to_scalar" => {
