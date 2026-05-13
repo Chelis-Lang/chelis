@@ -112,6 +112,60 @@ chelis_metal_get_pipeline(NSString *src, NSString *fn) {
     return pso;
 }
 
+/* ---- bf16 capability check (spec/04-type-system.md §1.1.3) ----
+ *
+ * bf16 on Metal requires Apple7+ GPU family (M3 or later). The MSL
+ * `bfloat` type itself is gated at compile time by
+ * `#if __METAL_VERSION__ >= 320`, but a kernel string that references
+ * `bfloat` will still surface as a generic "MSL compile failed" abort
+ * if dispatched on a pre-Apple7 device, losing the spec-pinned
+ * diagnostic. This helper performs the runtime family check at
+ * dispatch time so the user sees the structured message.
+ *
+ * Per spec §1.1.3 the required diagnostic when bf16 fails on a
+ * pre-Apple7 device is exactly:
+ *   "bf16 requires Apple7+ GPU family (M3 or later); detected device
+ *    family is Apple{N}."
+ *
+ * The result is cached so subsequent dispatches are O(1); the first
+ * dispatch on a given device pays the family-probe cost once.
+ */
+
+static inline void chelis_metal_require_bf16_capability(id<MTLDevice> device) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if ([device supportsFamily:MTLGPUFamilyApple7]) {
+            return;
+        }
+        /* Probe descending so the highest matching family is reported
+         * (the user-facing diagnostic names the *detected* family,
+         * which is the highest the GPU advertises). */
+        int detected = 0;
+        MTLGPUFamily families[] = {
+            MTLGPUFamilyApple9,
+            MTLGPUFamilyApple8,
+            MTLGPUFamilyApple7,
+            MTLGPUFamilyApple6,
+            MTLGPUFamilyApple5,
+            MTLGPUFamilyApple4,
+            MTLGPUFamilyApple3,
+            MTLGPUFamilyApple2,
+            MTLGPUFamilyApple1,
+        };
+        int family_numbers[] = { 9, 8, 7, 6, 5, 4, 3, 2, 1 };
+        for (size_t i = 0; i < sizeof(families) / sizeof(families[0]); ++i) {
+            if ([device supportsFamily:families[i]]) {
+                detected = family_numbers[i];
+                break;
+            }
+        }
+        fprintf(stderr,
+                "bf16 requires Apple7+ GPU family (M3 or later); "
+                "detected device family is Apple%d.\n", detected);
+        abort();
+    });
+}
+
 /* ---- Buffer alloc over StorageModeShared (unified memory) ----
  *
  * Buffers are owned by ARC at the call site of chelis_metal_alloc. When
@@ -322,13 +376,15 @@ static inline void chelis_metal_mps_gemm_f32(
     }
 }
 
-#if __METAL_VERSION__ >= 320 || !defined(__METAL_VERSION__)
-/* f16 GEMM. The MPS f16 path is host-side and does not require Apple7+ /
- * MSL 3.2; the macro guard above is purely a defensive belt-and-braces
- * since pre-Apple7 GPUs may still create the pipeline successfully but
- * the user-facing contract for sub-f32 precision is documented at the
- * Apple7+ level (spec/04-type-system.md §1.1.3). The host helper itself
- * does not depend on `bfloat`. */
+/* f16 GEMM. Host-side helper; does not depend on `bfloat` or any
+ * MSL-only type. `__METAL_VERSION__` is defined only inside MSL
+ * translation units, so any host-side guard on it is a no-op. The
+ * user-facing contract for sub-f32 precision is documented at the
+ * Apple7+ level in spec/04-type-system.md §1.1.3, but the *host*
+ * helper compiles unconditionally on every Apple SDK; the runtime
+ * Apple-family check for bf16 lives in
+ * `chelis_metal_require_bf16_capability` and is invoked from each
+ * bf16 dispatch site by the emitter. */
 static inline void chelis_metal_mps_gemm_f16(
     __unsafe_unretained id<MTLBuffer> A,
     __unsafe_unretained id<MTLBuffer> B,
@@ -372,6 +428,5 @@ static inline void chelis_metal_mps_gemm_f16(
         [cb waitUntilCompleted];
     }
 }
-#endif
 
 #endif /* CHELIS_METAL_RUNTIME_H */
