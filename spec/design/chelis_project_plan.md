@@ -1269,13 +1269,12 @@ Chelis — Hydronnx is the consumer, not the format. The two names are kept
 distinct everywhere they appear.
 
 Scope is committed; the strategic decision on when to begin Phase H1 is
-separate. Phasing is sequenced by dependency: H1 → H2 → H3 → H4, with H5 free
-to develop in parallel with H4.
+separate. Phasing is sequenced by dependency: H1 → H2 → H3 → H4 → H5.
 
 | Phase | Deliverable | Notes |
 |---|---|---|
 | **H0** | Spec lock at `spec/design/hydronnx.md` | ✅ Complete |
-| **H1** | ONNX protobuf parser, internal IR (`OnnxModel`/`OnnxGraph`/`OnnxNode`/`OnnxTensor`), `chelis-hydronnx-inspect` CLI utility. Inventory matches `onnx.checker.check_model` baseline. | Single-agent dispatch; standalone milestone. |
+| **H1** | ONNX protobuf parser, internal IR (`hydronnx::ir::Model` / `Graph` / `Node` / `Tensor` — path-qualified, no `Onnx` prefix on the type names), `chelis-hydronnx-inspect` CLI utility. Inventory matches `onnx.checker.check_model` baseline. | Single-agent dispatch; standalone milestone. |
 | **H2** | Operator translator over the v0.1 core subset: tensor manipulation, elementwise arithmetic, comparisons, logical, reductions, matrix, activations, normalization, convolution, decomposed Attention/MultiHeadAttention/RotaryEmbedding, Cast, Constant/ConstantOfShape. | Decomposition recipes for high-level operators are pinned in the spec so future IR-specializer recognizers know the canonical tag tree to match. Per-operator and per-category numerical agreement vs ONNX Runtime. |
 | **H3** | Weight loading (ONNX TensorProto → Chelis tensor), layout conversion, dtype conversion, Chelis function emission with provenance metadata. `load_model` / `inspect_model` / `load_model_with_opts` API surface. | Single-agent dispatch; closes the end-to-end loading capability. |
 | **H4** | Type-discipline integration: dimension types on loaded signatures, call-site type checking, property attachment, AD composition where operators support it, composition with other Chelis code. | Composes with `spec/design/chelis_property_spec.md` and the existing hull infrastructure. |

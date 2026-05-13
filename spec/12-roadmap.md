@@ -104,7 +104,7 @@ IR-SelectOp-F1, IR-MatchLowering-F1, and IR-FirstClassFn-F1 from
 
 ## Hydronnx — ONNX shell (committed scope)
 
-Five-phase plan for `Hydronnx`, the Chelis shell that consumes ONNX
+Six-phase plan for `Hydronnx`, the Chelis shell that consumes ONNX
 model files and exposes them as typed, callable Chelis functions with
 dimension types, property attachment, AD composition, and trust-stack
 integration. The scope is committed (canonical document below); the
@@ -117,8 +117,8 @@ shell consumes, owned by the ONNX project, not by Chelis.
 |---|---|---|
 | **H0** | Spec lock — `spec/design/hydronnx.md` | ✅ Complete |
 | **H1** | ONNX protobuf parser + internal IR + `chelis-hydronnx-inspect` CLI utility. | Planned |
-| **H2** | Operator translator over the v0.1 core subset (tensor manipulation, elementwise, comparisons, reductions, matrix, activations, normalization, convolution, decomposed Attention/MultiHeadAttention/RotaryEmbedding, Cast, Constant). Per-operator numerical agreement vs ONNX Runtime. | Planned |
-| **H3** | Weight loading (TensorProto → Chelis tensor), layout conversion, dtype conversion, Chelis function emission with attached provenance metadata. End-to-end loading via `load_model` / `inspect_model`. | Planned |
+| **H2** | Operator translator over the v0.1 core subset (tensor manipulation, elementwise, comparisons, logical, reductions, matrix, activations, normalization, convolution, decomposed Attention/MultiHeadAttention/RotaryEmbedding, Cast, Constant, ConstantOfShape). Per-operator numerical agreement vs ONNX Runtime. | Planned |
+| **H3** | Weight loading (TensorProto → Chelis tensor), layout conversion, dtype conversion, Chelis function emission with attached provenance metadata. End-to-end loading via `load_model` / `inspect_model` / `load_model_with_opts`. | Planned |
 | **H4** | Type-discipline integration: dimension types on loaded signatures, call-site type checking, property attachment, AD composition where operators support it, composition with other Chelis code. | Planned |
 | **H5** | Documentation, examples per strong-fit category (image classification, object detection, tabular forecasting), property examples, performance framing, ONNX-Runtime → hydronnx migration guide. | Planned |
 

@@ -59,7 +59,7 @@ Hydronnx has four components:
 
 ## Phases
 
-The work decomposes into five phases.
+The work decomposes into six phases (Phase 0 spec lock plus Phases 1–5 of implementation and ecosystem).
 
 ### Phase 0: Spec lock and ONNX subset definition
 
@@ -86,7 +86,7 @@ Single agent. Builds the ONNX file parser and the internal representation.
 **Scope.**
 
 - Add ONNX protobuf dependency to the hydronnx crate. Use the standard prost-based parser (or equivalent in the Chelis-toolchain Rust ecosystem).
-- Define the internal representation (`OnnxModel`, `OnnxGraph`, `OnnxNode`, `OnnxTensor`, etc.) that the parser populates and the downstream translator consumes.
+- Define the internal representation (`hydronnx::ir::Model`, `hydronnx::ir::Graph`, `hydronnx::ir::Node`, `hydronnx::ir::Tensor`, etc.) that the parser populates and the downstream translator consumes. The types are path-qualified under the `hydronnx::ir` module rather than carrying an `Onnx` prefix.
 - Implement the parser: read the protobuf, validate the structure, populate the internal representation, surface errors for malformed inputs.
 - Implement a `chelis-hydronnx-inspect` CLI utility (or library function) that prints the model's inventory: input/output names and shapes, operator list, weight tensor list, opset version, file size. Useful for debugging and for verifying the parser before the rest of the pipeline ships.
 
@@ -292,19 +292,22 @@ Each error includes the specific issue, the location in the ONNX file (operator 
 
 ## The release shape
 
-v0.1: Phases 0-4 implemented. Documentation and examples for one model category (recommend image classification as the simplest). hydronnx version 0.1.0.
+Version numbers follow the standard Chelis shell `vX.Y.Z` SemVer convention; the
+milestone labels and the package version increment in lockstep.
 
-v0.2: Phase 5 documentation and examples expand to cover all strong-fit categories. hydronnx version 0.1.1.
+v0.1.0: Phases 0-4 implemented. Documentation and examples for one model category (recommend image classification as the simplest).
 
-v0.3: Recognizers added to the IR specialization substrate so that decomposed operators (Softmax, LayerNormalization, Attention) get collapsed to fused emissions when fusion infrastructure ships. Hydronnx itself doesn't change; the loaded models get faster automatically.
+v0.2.0: Phase 5 documentation and examples expand to cover all strong-fit categories.
 
-v0.4 and beyond: Operator coverage expansion (Loop, Scan, If when IR control flow lands), quantization support when Chelis has a quantization story, custom operator support, multi-device deployment.
+v0.3.0: Recognizers added to the IR specialization substrate so that decomposed operators (Softmax, LayerNormalization, Attention) get collapsed to fused emissions when fusion infrastructure ships. Hydronnx itself doesn't change; the loaded models get faster automatically.
+
+v0.4.0 and beyond: Operator coverage expansion (Loop, Scan, If when IR control flow lands), quantization support when Chelis has a quantization story, custom operator support, multi-device deployment.
 
 ## Net
 
 Hydronnx is a bounded, well-scoped workstream that delivers concrete user value: any ONNX model becomes a Chelis function with the type discipline and verification machinery applied. v0.1 covers the operators and model categories that match Chelis's strong-fit profile (everything except large generative models, which wait for kernel authorship).
 
-The five-phase structure decomposes the work into independent, testable milestones. Phases 0-3 build the core capability. Phase 4 integrates with Chelis's broader type system. Phase 5 produces documentation and examples.
+The six-phase structure decomposes the work into independent, testable milestones. Phases 0-3 build the core capability. Phase 4 integrates with Chelis's broader type system. Phase 5 produces documentation and examples.
 
 Dependencies on other Chelis workstreams are limited and clearly specified. Hydronnx composes with those workstreams as they ship rather than blocking on them.
 
