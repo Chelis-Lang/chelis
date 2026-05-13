@@ -105,3 +105,98 @@ fn lint_cli_dot_prefix_explicit_path_already_fires_rule() {
     );
     assert_eq!(code, 1, "expected blocking exit code 1");
 }
+
+/// Build a fixture that exercises exception-list matching. The shared
+/// `style_gate::exceptions()` registry contains an entry for
+/// `crates/chelis-surf/tests/fixtures/*.ch` with rule
+/// `surf-def-arrow-form` (the Surf parser test corpus deliberately
+/// exercises legacy colon-form return syntax). The fixture mirrors that
+/// path layout so the exception applies, and writes a single file using
+/// the colon form to trigger the rule.
+fn write_exception_fixture(root: &std::path::Path) {
+    let dir = root.join("crates/chelis-surf/tests/fixtures");
+    fs::create_dir_all(&dir).expect("mkdir fixture dir");
+    fs::write(
+        dir.join("block_binding_expr.ch"),
+        "def f(x: f32): f32 = {\n  y = mul(x, x)\n  add(y, x)\n}\n",
+    )
+    .expect("write fixture");
+}
+
+/// Pin the exception-matching invariant: workspace-rooted exception
+/// patterns must match identically whether the CLI is invoked as
+/// `chelis lint --check .` or as `chelis lint --check crates`.
+///
+/// Bug shape: `apply_exceptions` strip-prefixes the violation path
+/// against the walk-target root, not the workspace root. When the
+/// walk-target is a sub-directory (e.g., `crates`), the relative path
+/// loses its `crates/` segment, so a workspace-rooted exception pattern
+/// like `crates/chelis-surf/tests/fixtures/*.ch` never matches and the
+/// violation fires as a false positive. CI invokes `chelis lint
+/// --check .` so the gate isn't broken, but developers linting
+/// sub-trees see spurious errors.
+///
+/// Both invocations must produce identical stdout and exit code, with
+/// zero `surf-def-arrow-form` violations because the exception applies.
+#[test]
+#[ignore = "pins Lint-ExceptionPathRoot-F1; unignored when fix lands"]
+fn lint_cli_exception_pattern_matches_under_subtree_and_cwd_walks() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_exception_fixture(root);
+
+    let (code_cwd, out_cwd) = run_lint(root, &["."]);
+    let (code_explicit, out_explicit) = run_lint(root, &["crates"]);
+
+    // Neither invocation should report `surf-def-arrow-form` on the
+    // fixture: the workspace-rooted exception is in effect for both.
+    let needle = "surf-def-arrow-form";
+    assert!(
+        !out_cwd.contains(needle),
+        "CWD walk must apply workspace-rooted exception; stdout was:\n{out_cwd}"
+    );
+    assert!(
+        !out_explicit.contains(needle),
+        "subtree walk must apply workspace-rooted exception (same shape as CWD walk); stdout was:\n{out_explicit}"
+    );
+
+    // Both invocations must exit with the same code (no blocking
+    // violation, since the only rule that would fire is excepted).
+    assert_eq!(
+        code_cwd, code_explicit,
+        "exit codes must match between invocations; CWD={code_cwd} explicit={code_explicit}"
+    );
+    assert_eq!(
+        code_cwd, 0,
+        "expected exit 0 from CWD walk (exception suppresses the only would-be violation); stdout was:\n{out_cwd}"
+    );
+}
+
+/// Sibling pin: even when the user passes multiple sub-tree arguments
+/// covering the entire workspace (the concrete reproducer from the
+/// gap-synthesis entry), the exception must still apply. This is the
+/// real-world failing invocation: `chelis lint --check crates docs
+/// examples packages` against a workspace that contains the excepted
+/// fixture under `crates/`.
+#[test]
+#[ignore = "pins Lint-ExceptionPathRoot-F1; unignored when fix lands"]
+fn lint_cli_exception_pattern_matches_under_multi_subtree_walk() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_exception_fixture(root);
+    // Add the sibling directories the real reproducer cites so the
+    // invocation shape mirrors the gap-synthesis entry verbatim.
+    fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+    fs::create_dir_all(root.join("examples")).expect("mkdir examples");
+    fs::create_dir_all(root.join("packages")).expect("mkdir packages");
+
+    let (code, out) = run_lint(root, &["crates", "docs", "examples", "packages"]);
+    assert!(
+        !out.contains("surf-def-arrow-form"),
+        "multi-subtree walk must apply workspace-rooted exception; stdout was:\n{out}"
+    );
+    assert_eq!(
+        code, 0,
+        "expected exit 0 (no blocking violations); stdout was:\n{out}"
+    );
+}
