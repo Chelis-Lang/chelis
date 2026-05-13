@@ -109,8 +109,14 @@ pub fn codegen_metal(dag: &chelis_ir::dag::Dag, func_name: &str) -> MetalCodegen
         // dispatch, file emission, link recipe) stays consistent. Calling
         // the stub aborts at runtime, surfacing the unsupported case
         // rather than silently miscompiling. Peak bytes is 0 in this
-        // case — the stub allocates nothing.
-        Err(_) => (emit::stub_mm_source(func_name), 0),
+        // case; the stub allocates nothing. The error reason is threaded
+        // into the stub so the user sees a meaningful diagnostic
+        // (e.g., the integer-matmul §5.7.2 hint) instead of a bare
+        // "not yet implemented" string.
+        Err(reason) => {
+            let hint = emit::stub_reason_hint(dag, &reason);
+            (emit::stub_mm_source_with_reason(func_name, &hint), 0)
+        }
     };
     let h_header = format!(
         "extern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
