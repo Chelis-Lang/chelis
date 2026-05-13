@@ -1,15 +1,15 @@
 # Lines of Code Report
 
-Generated: 2026-05-13 14:44 UTC
+Generated: 2026-05-13 17:54 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 268 | 111,415 | 10,521 | 41,510 | 163,446 | Compiler, CLI, runtime, backends, type checker |
-| C | 13 | 33,164 | 196 | 701 | 34,061 | Generated runtime, headers |
+| Rust | 293 | 120,476 | 12,757 | 45,040 | 178,273 | Compiler, CLI, runtime, backends, type checker |
+| C | 13 | 33,418 | 255 | 736 | 34,409 | Generated runtime, headers |
 | JSON | 21 | 3,984 | 0 | 2,732 | 6,716 | Package metadata, test fixtures |
-| **Chelis Surf** (.ch) | **101** | **3,014** | **24** | **15** | **3,053** | **Examples, std library, test fixtures** |
+| **Chelis Surf** (.ch) | **102** | **3,036** | **24** | **15** | **3,075** | **Examples, std library, test fixtures** |
 | Python | 25 | 2,696 | 440 | 898 | 4,034 | PyO3 bindings, tools, benchmarks |
-| TOML | 32 | 511 | 10 | 67 | 588 | Cargo/reef manifests |
+| TOML | 32 | 515 | 14 | 67 | 596 | Cargo/reef manifests |
 | YAML | 2 | 320 | 20 | 73 | 413 | CI workflows |
 | PEG Grammars (.pest) | 2 | 262 | 0 | 28 | 290 | Validator grammars (Surf + Deep) |
 | XML | 1 | 212 | 57 | 38 | 307 |  |
@@ -17,6 +17,6 @@ Generated: 2026-05-13 14:44 UTC
 | JavaScript | 2 | 202 | 0 | 29 | 231 | Tree-sitter grammar definitions |
 | Objective-C | 1 | 143 | 63 | 46 | 252 |  |
 | Tree-sitter Queries (.scm) | 2 | 102 | 0 | 6 | 108 | Syntax highlighting for Surf and Deep |
-| Markdown | 171 | 0 | 16,155 | 8,105 | 24,260 | Specs, design docs, plans |
+| Markdown | 171 | 0 | 16,418 | 8,206 | 24,624 | Specs, design docs, plans |
 | __generated__ | 1 | 0 | 0 | 0 | 0 |  |
-| **Total** | **649** | **156,228** | **27,486** | **54,251** | **237,965** | |
+| **Total** | **675** | **165,569** | **30,048** | **57,917** | **253,534** | |
