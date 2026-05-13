@@ -38,6 +38,38 @@ Regression tests at
 `crates/chelis-lint/tests/redundant_linearity_call_autofix.rs` (F12,
 F13 negative control).
 
+### Fixed - lint exception path matching anchored at workspace root
+
+`chelis lint --check crates docs examples packages` produced 6
+false-positive `surf-def-arrow-form` errors against
+`crates/chelis-surf/tests/fixtures/*.ch` that `chelis lint --check .`
+correctly excepted. CI invokes the `.` form so the gate was not
+broken, but developers linting sub-trees saw spurious errors. Root
+cause: `apply_exceptions` at
+`crates/chelis-lint/src/exceptions.rs::is_excepted`
+strip-prefixed the violation path against the walk-target root rather
+than a shared workspace root, so workspace-rooted exception patterns
+silently failed to match under sub-directory walks.
+
+Fixed by adding a `workspace_root` parameter to `apply_exceptions`
+and `is_excepted`, distinct from the walk root, and anchoring
+prefix-stripping against it. The CLI detects the workspace root by
+canonicalizing the current working directory at the boundary,
+reusing the canonicalize-at-CLI-boundary pattern PR #93 established
+for walk targets. No walk-up filesystem search is introduced (per
+`feedback_no_walkup_filesystem_detection.md`).
+
+Updates four call sites:
+`cmd_lint`, `apply_lint_fixes`,
+`emit_advisory_lint_warnings_for_file`, and
+`style_gate::run_lint_for_single_file`. Closes
+`Lint-ExceptionPathRoot-F1`. Regression tests at
+`crates/chelis-cli/tests/lint_path_walk_consistency.rs`
+(`lint_cli_exception_pattern_matches_under_subtree_and_cwd_walks`
+and `lint_cli_exception_pattern_matches_under_multi_subtree_walk`)
+plus a unit test in
+`crates/chelis-lint/src/exceptions.rs::tests::apply_exceptions_anchors_on_workspace_root_not_walk_target`.
+
 ## [0.7.8] — 2026-05-13
 
 ### Fixed - host-eval scalar zero-arg fn-call silent miscompilation (#80)
