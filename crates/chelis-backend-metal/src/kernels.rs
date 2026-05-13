@@ -241,17 +241,60 @@ pub const MATMUL_TILE: usize = 16;
 /// output element. The kernel is dispatched with an `MxN` grid in
 /// 16x16 threadgroups; the host picks tg = (16, 16, 1).
 ///
-/// `prec` parameterizes both the buffer element type AND the
-/// per-thread accumulator type. `bf16` operand precision wraps the
-/// kernel in the `#if __METAL_VERSION__ >= 320` guard required by the
-/// MSL `bfloat` type. Integer matmul is rejected at type-check per
+/// `prec` parameterizes the buffer element type AND the threadgroup
+/// tile element type (operand precision is preserved in shared memory
+/// to keep the threadgroup footprint matched to the device buffer
+/// footprint). The accumulator type is selected by
+/// [`dtype::matmul_accumulator`] per spec/04-type-system.md §5.7.1:
+/// bf16 and f16 promote to f32 for the per-thread accumulator and the
+/// inner-product partial product is computed in f32 (operands are
+/// explicitly cast at the multiply, not just at `acc +=`). f32 keeps
+/// f32 accumulator with no cast.
+///
+/// `bf16` operand precision wraps the kernel in the
+/// `#if __METAL_VERSION__ >= 320` guard required by the MSL `bfloat`
+/// type. Integer matmul is rejected at type-check per
 /// spec/04-type-system.md §5.7.2 and at the F1 codegen guard in
 /// `emit::Emitter::emit_matmul`; this template still admits integer
-/// dtypes defensively for future generalization.
+/// dtypes defensively for future generalization (using same-type
+/// accumulator for ints).
 pub fn matmul_tiled_kernel_for(kernel_name: &str, prec: Prim) -> String {
+    let acc_prec = dtype::matmul_accumulator(prec);
+    matmul_tiled_kernel_with_acc(kernel_name, prec, acc_prec)
+}
+
+/// Variant of [`matmul_tiled_kernel_for`] that takes the accumulator
+/// precision explicitly. Callers that already know the IR-pinned
+/// accumulator (e.g., from a `BlasMatmul` node) should use this entry
+/// point so the kernel template never has to re-derive the spec
+/// promotion rules.
+pub fn matmul_tiled_kernel_with_acc(
+    kernel_name: &str,
+    operand_prec: Prim,
+    accumulator_prec: Prim,
+) -> String {
     let tile = MATMUL_TILE;
-    let ty = msl_type(prec);
-    let identity = ReduceKind::Sum.identity(prec);
+    let ty = msl_type(operand_prec);
+    let acc_ty = msl_type(accumulator_prec);
+    let identity = ReduceKind::Sum.identity(operand_prec);
+    let acc_identity = ReduceKind::Sum.identity(accumulator_prec);
+    // When the accumulator differs from the operand, the partial product
+    // tileA*tileB must compute in accumulator precision (spec §5.7.1) —
+    // otherwise the multiplication happens at operand precision and
+    // truncates before the accumulator widens it. Cast both operands at
+    // the multiply, not just the result.
+    let mul_expr = if accumulator_prec == operand_prec {
+        "tileA[lid.y][i] * tileB[i][lid.x]".to_string()
+    } else {
+        format!("({acc_ty})tileA[lid.y][i] * ({acc_ty})tileB[i][lid.x]")
+    };
+    // Output is at operand precision; downcast `acc` at write-out time
+    // when the accumulator widened.
+    let writeback_expr = if accumulator_prec == operand_prec {
+        "acc".to_string()
+    } else {
+        format!("({ty})acc")
+    };
     // M, N, K are packed into a single uniform struct bound at buffer(3).
     // Binding them as three separate `constant uint&` parameters at
     // distinct buffer indices would require three `setBytes:atIndex:` calls
@@ -279,10 +322,13 @@ kernel void {kernel_name}(
     const uint M = dims.M;
     const uint N = dims.N;
     const uint K = dims.K;
+    // Tiles cache operand bytes so the threadgroup memory footprint matches
+    // the device buffer footprint. The accumulator promotion happens at
+    // the multiply, not in the tile cache (spec/04-type-system.md §5.7.1).
     threadgroup {ty} tileA[{tile}][{tile}];
     threadgroup {ty} tileB[{tile}][{tile}];
 
-    {ty} acc = {identity};
+    {acc_ty} acc = {acc_identity};
     uint num_tiles = (K + TILE - 1) / TILE;
     for (uint t = 0; t < num_tiles; t++) {{
         uint aRow = gid.y;
@@ -294,17 +340,17 @@ kernel void {kernel_name}(
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (uint i = 0; i < TILE; i++) {{
-            acc += tileA[lid.y][i] * tileB[i][lid.x];
+            acc += {mul_expr};
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }}
     if (gid.y < M && gid.x < N) {{
-        C[gid.y * N + gid.x] = acc;
+        C[gid.y * N + gid.x] = {writeback_expr};
     }}
 }}
 "
     );
-    maybe_wrap_msl_320(body, &[prec])
+    maybe_wrap_msl_320(body, &[operand_prec, accumulator_prec])
 }
 
 /// f32-only legacy entry point retained for any callers that haven't
@@ -422,6 +468,8 @@ mod tests {
         let src = matmul_tiled_kernel_for("k_matmul_test", Prim::F16);
         assert!(src.contains("device const half* A"));
         assert!(src.contains("device half* C"));
+        // Tiles cache operand bytes (operand precision), even though
+        // the accumulator widens (spec §5.7.1).
         assert!(src.contains("threadgroup half tileA"));
     }
 
@@ -431,6 +479,76 @@ mod tests {
         assert!(src.contains("#if __METAL_VERSION__ >= 320"));
         assert!(src.contains("device const bfloat* A"));
         assert!(src.trim_end().ends_with("#endif"));
+    }
+
+    /// F1 + F5 (spec/04-type-system.md §5.7.1): bf16 matmul accumulates
+    /// in f32 and the partial product casts both operands to f32 at the
+    /// multiply (operand-precision multiplication truncates before the
+    /// accumulator widens).
+    #[test]
+    fn bf16_matmul_uses_f32_accumulator_per_spec_5_7_1() {
+        let src = matmul_tiled_kernel_for("k_matmul_bf16_acc", Prim::Bf16);
+        // Accumulator is f32 (spec §5.7.1).
+        assert!(
+            src.contains("float acc"),
+            "bf16 matmul must declare `float acc` per spec §5.7.1: {src}"
+        );
+        assert!(
+            !src.contains("bfloat acc"),
+            "bf16 matmul must NOT declare `bfloat acc` (silently truncates): {src}"
+        );
+        // Tiles still hold operand precision (memory-bandwidth match).
+        assert!(
+            src.contains("threadgroup bfloat tileA") && src.contains("threadgroup bfloat tileB"),
+            "bf16 matmul tile storage stays at operand precision: {src}"
+        );
+        // Partial product casts operands to f32 at the multiply.
+        assert!(
+            src.contains("(float)tileA[lid.y][i] * (float)tileB[i][lid.x]"),
+            "bf16 matmul partial product must cast to f32 at multiply: {src}"
+        );
+        // Writeback downcasts back to bf16.
+        assert!(
+            src.contains("(bfloat)acc"),
+            "bf16 matmul must downcast f32 acc to bfloat at write-out: {src}"
+        );
+    }
+
+    /// f32 matmul keeps the f32 accumulator and emits no operand cast
+    /// (cast would be a no-op).
+    #[test]
+    fn f32_matmul_no_operand_cast_at_multiply() {
+        let src = matmul_tiled_kernel_for("k_matmul_f32_acc", Prim::F32);
+        assert!(src.contains("float acc"));
+        assert!(
+            src.contains("tileA[lid.y][i] * tileB[i][lid.x]"),
+            "f32 matmul should not insert a redundant cast: {src}"
+        );
+        assert!(
+            !src.contains("(float)tileA"),
+            "f32 matmul must not double-cast operands: {src}"
+        );
+    }
+
+    /// f16 matmul: spec §5.7.1 promotes f16 operand to f32 accumulator
+    /// just like bf16.
+    #[test]
+    fn f16_matmul_promotes_to_f32_accumulator() {
+        let src = matmul_tiled_kernel_for("k_matmul_f16_acc", Prim::F16);
+        assert!(src.contains("float acc"));
+        assert!(src.contains("(float)tileA[lid.y][i] * (float)tileB[i][lid.x]"));
+        assert!(src.contains("(half)acc"));
+    }
+
+    /// `matmul_tiled_kernel_with_acc` lets the caller pin the
+    /// accumulator explicitly; verify the cast routing follows the
+    /// same shape regardless of the helper used.
+    #[test]
+    fn matmul_with_explicit_accumulator() {
+        let src = matmul_tiled_kernel_with_acc("k_mm_explicit", Prim::Bf16, Prim::F32);
+        assert!(src.contains("float acc"));
+        assert!(src.contains("(float)tileA"));
+        assert!(src.contains("(bfloat)acc"));
     }
 
     #[test]

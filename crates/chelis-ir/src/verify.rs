@@ -1014,6 +1014,59 @@ fn dim_known_size(dim: &DimInfo) -> Option<usize> {
     }
 }
 
+/// IR validation pass for the Metal target's admissible dtype matrix.
+///
+/// Per spec/04-type-system.md §1.1.3 the Metal backend rejects f64
+/// because Apple Silicon GPUs lack FP64 ALUs (software emulation is
+/// explicitly out of scope). The spec names three rejection surfaces:
+/// the CLI gate, the IR validation pass, and the codegen entry. This
+/// function is the IR validation pass; the CLI gate is
+/// `chelis-cli::reject_unsupported_metal_ops` and the codegen entry is
+/// `chelis-backend-metal::emit::Emitter::require_metal_admissible`.
+/// All three surfaces emit the same diagnostic text so a regression
+/// in one is caught by the same string-match tests used by the
+/// others.
+///
+/// Returns `Ok(())` if every node's tensor precision is admissible on
+/// Metal, or `Err(message)` with the spec-pinned diagnostic for the
+/// first f64 / unsupported-precision node encountered. The message
+/// uses the same wording as the CLI gate and codegen entry so the
+/// three surfaces speak with one voice.
+pub fn validate_metal_admissible_precisions(dag: &Dag) -> Result<(), String> {
+    for node in dag.nodes() {
+        match node.output_type.precision {
+            Prim::F32
+            | Prim::F16
+            | Prim::Bf16
+            | Prim::Int8
+            | Prim::Int16
+            | Prim::Int32
+            | Prim::Int64
+            | Prim::Bool => {}
+            Prim::F64 => {
+                return Err(format!(
+                    "IR validation rejects FP64 for `--target metal` (node {}): \
+                     Apple Silicon GPUs lack FP64 ALUs; use `--target c` or \
+                     `--target hip` for f64 workloads. \
+                     See spec/04-type-system.md §1.1.3.",
+                    node.id.0
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "IR validation rejects precision `{}` for `--target metal` \
+                     (node {}). The Metal backend admits the active dtype set \
+                     per spec/04-type-system.md §1.1.3 except f64; supported: \
+                     f32/f16/bf16/int8/int16/int32/int64/bool.",
+                    other.name(),
+                    node.id.0
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Check if two dimension descriptors are compatible.
 fn dims_compatible(a: &DimInfo, b: &DimInfo) -> bool {
     match (a, b) {
@@ -1065,6 +1118,59 @@ mod tests {
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
+    }
+
+    /// F4: the IR validation pass for Metal must accept admissible
+    /// dtypes and reject f64 with the spec-pinned diagnostic.
+    #[test]
+    fn metal_validation_accepts_admissible_dtypes() {
+        for prec in [
+            Prim::F32,
+            Prim::F16,
+            Prim::Bf16,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ] {
+            let mut dag = Dag::new();
+            dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                tensor_ty(&[4], prec),
+                None,
+            );
+            assert!(
+                validate_metal_admissible_precisions(&dag).is_ok(),
+                "{prec:?} should be admissible on Metal"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_validation_rejects_f64_with_spec_diagnostic() {
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_ty(&[4], Prim::F64),
+            None,
+        );
+        let err =
+            validate_metal_admissible_precisions(&dag).expect_err("f64 must be rejected on Metal");
+        assert!(
+            err.contains("FP64") && err.contains("Apple Silicon"),
+            "diagnostic must cite the spec hardware constraint: {err}"
+        );
+        assert!(
+            err.contains("§1.1.3"),
+            "diagnostic must cite spec section: {err}"
+        );
+        assert!(
+            err.contains("--target c") || err.contains("--target hip"),
+            "diagnostic must point at the alternate targets: {err}"
+        );
     }
 
     #[test]

@@ -110,6 +110,27 @@ pub fn check_effects_with_context(
     }
 }
 
+/// Validate that the program's target-relevant constructs are admissible
+/// for the requested build target.
+///
+/// Today this validates:
+///   * resource-region pinning (`with device("gpu:N")` requires
+///     `--target hip` or `--target metal`; CPU pinning requires
+///     `--target c`).
+///
+/// Per spec/04-type-system.md §1.1.3 the Metal target additionally
+/// rejects FP64 because Apple Silicon GPUs lack FP64 ALUs (software
+/// emulation explicitly out of scope). The spec names three rejection
+/// surfaces: the CLI gate (`reject_unsupported_metal_ops` in
+/// `chelis-cli`), the IR validation pass
+/// (`chelis_ir::verify::validate_metal_admissible_precisions`), and
+/// the codegen entry (`Emitter::require_metal_admissible` in
+/// `chelis-backend-metal`). The IR pass walks the lowered DAG (which
+/// is post-typecheck and out of scope here) and the CLI invokes it
+/// between type-check and codegen so the f64-on-metal rejection
+/// surfaces with the spec-pinned diagnostic at every entry point.
+/// This function does not duplicate that DAG walk; it complements it
+/// by validating handler-region pinning at the AST surface.
 pub fn validate_build_target(
     program: &CheckedProgram,
     target: &str,
