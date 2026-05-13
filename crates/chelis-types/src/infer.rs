@@ -5059,25 +5059,28 @@ fn infer_top_level(
         // declared concrete shape (#39).
         //
         // Implicit-copy fan-out v3 Shape A: if the initial unify fails
-        // and the body is a bare `(fn (params) (var x))` whose declared
-        // return is owned `T` while the body's inferred type returns
-        // `Ref(T)`, retry the unify against the declared return relaxed
-        // into `Ref(T)`.  This mirrors `auto_borrow_call_arg_types`'s
-        // owned-to-borrow coercion at argument positions: there is a
-        // single bare reference at the return position and the caller
-        // already arranged the borrow lifetime via the param itself.
-        // The relaxed retry is gated on the bare-`var`-body shape so
-        // wider body shapes (`let`, `if`, app sub-expressions) still
-        // fail with the existing TypeMismatch for now.
+        // and the body's tail position resolves to a `(var x)`
+        // reference (after walking `let`/`if`/`match` wrappers via
+        // `descend_to_tail_var`) whose declared return is owned `T`
+        // while the body's inferred type returns `Ref(T)`, retry the
+        // unify against the declared return relaxed into `Ref(T)`.
+        // This mirrors `auto_borrow_call_arg_types`'s owned-to-borrow
+        // coercion at argument positions: the caller already arranged
+        // the borrow lifetime via the param itself, and the tail-var
+        // descent confirms every reachable return path returns the
+        // same parameter.  Heterogeneous returns and bodies whose tail
+        // is an `app` or other non-var expression still fail with the
+        // existing TypeMismatch.
         let scheme_body = if let Some(decl_ty) = declared_ty {
             let unify_result = unify(&body_ty, &decl_ty, subst);
             let resolved_body = subst.apply(&body_ty);
             let resolved_decl = subst.apply(&decl_ty);
             // Implicit-copy fan-out v3 Shape A relaxed retry: if the
-            // initial unify fails and the body is a bare `(fn (params)
-            // (var x))` whose declared return is owned `T` while the
-            // body's inferred type returns `Ref(T)`, retry the unify
-            // against the declared return relaxed into `Ref(T)`.
+            // initial unify fails and the body's tail position resolves
+            // to a `(var x)` reference whose declared return is owned
+            // `T` while the body's inferred type returns `Ref(T)`,
+            // retry the unify against the declared return relaxed
+            // into `Ref(T)`.
             let initial_failed = unify_result.is_err();
             let recovered_by_relaxed_retry = if initial_failed {
                 let relaxed_decl = shape_a_relaxed_return(&kids[1], &resolved_body, &resolved_decl);
@@ -8456,16 +8459,24 @@ fn auto_borrow_call_arg_types(func_ty: &Type, arg_tys: Vec<Type>, subst: &Subst)
         .collect()
 }
 
-/// Implicit-copy fan-out v3 Shape A relaxation: when a def's body is a
-/// bare `(fn (params...) (var x))` and the body's inferred return type
-/// is `Ref(R)` while the declared return is owned `R`, return a
-/// relaxed declared type `Fn(params, Ref(R))` so the def-body unify can
-/// succeed.  Returns `None` for any other body shape; the caller
-/// surfaces the existing TypeMismatch in that case.
+/// Implicit-copy fan-out v3 Shape A relaxation: when a def's body's
+/// tail-position expression is a bare `(var x)` reference (possibly
+/// wrapped in `let`, `if`, or `match` structures whose sibling branches
+/// all return the same name) and the body's inferred return type is
+/// `Ref(R)` while the declared return is owned `R`, return a relaxed
+/// declared type `Fn(params, Ref(R))` so the def-body unify can succeed.
+/// Returns `None` for any other body shape; the caller surfaces the
+/// existing TypeMismatch in that case.
+///
+/// The PR #91 (W4-A) version of this helper accepted only a bare
+/// `(fn (params...) (var x))` body.  0.7.9 broadens the gate to walk
+/// `let`/`if`/`match` tail-position structures via
+/// `descend_to_tail_var`, closing `Linearity-ShapeABroadReturn-F1`.
 fn shape_a_relaxed_return(body_expr: &deep::Expr, body_ty: &Type, decl_ty: &Type) -> Option<Type> {
     // body is the def's body, which the desugarer wraps as
-    // `(fn (params ...) body_inner)` whenever the def has params.  We
-    // only relax when body_inner is a bare `(var name)` reference.
+    // `(fn (params ...) body_inner)` whenever the def has params.  Walk
+    // the inner expression's tail position to confirm it resolves to a
+    // bare `(var name)` reference across every reachable sibling.
     let body_list = match body_expr {
         deep::Expr::List(list, _) => list,
         _ => return None,
@@ -8474,13 +8485,7 @@ fn shape_a_relaxed_return(body_expr: &deep::Expr, body_ty: &Type, decl_ty: &Type
         return None;
     }
     let inner = children(body_list).get(1)?;
-    let inner_list = match inner {
-        deep::Expr::List(list, _) => list,
-        _ => return None,
-    };
-    if get_tag(inner_list) != Some("var") {
-        return None;
-    }
+    descend_to_tail_var(inner)?;
 
     // The body's inferred type and the declared type both must be
     // `Fn(params, ret)` with matching params and a return-position
@@ -8505,6 +8510,85 @@ fn shape_a_relaxed_return(body_expr: &deep::Expr, body_ty: &Type, decl_ty: &Type
         decl_params.clone(),
         Box::new(Type::Ref(Box::new(decl_ret.as_ref().clone()))),
     ))
+}
+
+/// Descend through `let`, `if`, and `match` to a tail-position
+/// `(var name)` reference.  Returns `Some(name)` when every sibling
+/// branch resolves to the same bare-var name, `None` otherwise.
+///
+/// This is the broader-Shape-A coverage closure for
+/// `Linearity-ShapeABroadReturn-F1`.  The rules:
+///
+/// - `(var x)` returns `Some("x")` (the leaf case from PR #91).
+/// - `(let bind body)` recurses into `body` (the second child).
+/// - `(if cond then_e else_e)` recurses into both branches; both must
+///   resolve to the same name.
+/// - `(match scrutinee arm ...)` recurses into every arm body (the
+///   third child of each `(arm pattern guard body)` triple); all arms
+///   must resolve to the same name.
+/// - Otherwise returns `None`.
+///
+/// The descent is type-agnostic; the surrounding logic in
+/// `shape_a_relaxed_return` already verifies that the body's inferred
+/// return type is `Ref(R)` and the declared return is `R` structurally.
+///
+/// The "same name across siblings" requirement is intentional: the
+/// existing relaxation is justified by the caller's borrow lifetime
+/// already covering the parameter being returned.  Heterogeneous
+/// bare-var returns would extend the relaxation beyond v3 scope and
+/// need a richer coercion story.
+fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
+    let list = match expr {
+        deep::Expr::List(list, _) => list,
+        _ => return None,
+    };
+    match get_tag(list) {
+        Some("var") => var_name_list(list),
+        Some("let") => {
+            let body = children(list).get(1)?;
+            descend_to_tail_var(body)
+        }
+        Some("if") => {
+            let kids = children(list);
+            let then_e = kids.get(1)?;
+            let else_e = kids.get(2)?;
+            let then_name = descend_to_tail_var(then_e)?;
+            let else_name = descend_to_tail_var(else_e)?;
+            if then_name == else_name {
+                Some(then_name)
+            } else {
+                None
+            }
+        }
+        Some("match") => {
+            let kids = children(list);
+            // Skip the scrutinee (first child); every remaining child is
+            // expected to be an `(arm pattern guard body)` triple.
+            let arms = kids.get(1..)?;
+            if arms.is_empty() {
+                return None;
+            }
+            let mut name: Option<&str> = None;
+            for arm in arms {
+                let arm_list = match arm {
+                    deep::Expr::List(list, _) => list,
+                    _ => return None,
+                };
+                if get_tag(arm_list) != Some("arm") {
+                    return None;
+                }
+                let arm_body = children(arm_list).get(2)?;
+                let arm_name = descend_to_tail_var(arm_body)?;
+                match name {
+                    None => name = Some(arm_name),
+                    Some(prev) if prev == arm_name => {}
+                    Some(_) => return None,
+                }
+            }
+            name
+        }
+        _ => None,
+    }
 }
 
 /// Structural type equality ignoring dim-variable identity (treats

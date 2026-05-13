@@ -70,6 +70,31 @@ and `lint_cli_exception_pattern_matches_under_multi_subtree_walk`)
 plus a unit test in
 `crates/chelis-lint/src/exceptions.rs::tests::apply_exceptions_anchors_on_workspace_root_not_walk_target`.
 
+### Fixed - implicit-copy Shape A covers let/if/match tail-position returns
+
+PR #91's W4-A relaxed-retry in `shape_a_relaxed_return`
+(`crates/chelis-types/src/infer.rs`) only accepted a bare
+`(fn (params...) (var x))` body, so
+
+```surf
+def f[n](x: &tensor[n, f32]) -> tensor[n, f32] = { y = x; y }
+def g[n](c: bool, x: &tensor[n, f32]) -> tensor[n, f32] = if c then x else x
+def h[n](c: Choice, x: &tensor[n, f32]) -> tensor[n, f32] =
+  match c with { | Left => x | Right => x }
+```
+
+all surfaced `def 'f' body doesn't match declared signature` even
+though the tail expression of every desugared body is the same
+bare-var ref the v3 fix already accepts. Added
+`descend_to_tail_var` next to `shape_a_relaxed_return`; the walker
+descends through `(let bind body)`, `(if cond then_e else_e)`, and
+`(match scrutinee arm ...)` and returns `Some(name)` only when every
+sibling branch resolves to the same bare-var name. The structural
+type-equality check and relaxed-type construction are unchanged, so
+the broader gate stays as conservative as PR #91's. Closes
+`Linearity-ShapeABroadReturn-F1`. Regression fixtures at
+`crates/chelis-ir/tests/implicit_copy_shape_a_broader_return.rs`.
+
 ## [0.7.8] — 2026-05-13
 
 ### Fixed - host-eval scalar zero-arg fn-call silent miscompilation (#80)
