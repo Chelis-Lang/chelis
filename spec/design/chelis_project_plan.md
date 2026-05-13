@@ -1223,6 +1223,39 @@ reference type checker — the ultimate conformance oracle.
 
 ---
 
+## Differentiable Programming Track (Phases D0–D6)
+
+Parallel committed-scope track for end-to-end differentiable programming. Detailed
+design in `spec/design/differentiable_language.md`; roadmap row in
+`spec/12-roadmap.md` §Differentiable programming.
+
+Scope is committed; the strategic decision on when to begin Phase D1 is separate.
+The phases are sequenced by dependency: D1 → D2 → D3 → D4 → D5, with D6 free to
+develop in parallel with D5 once D4 lands.
+
+| Phase | Deliverable | Notes |
+|---|---|---|
+| **D0** | Spec lock at `spec/design/differentiable_language.md` | ✅ Complete |
+| **D1** | AD through `if`, `match`, `while`, `for`, recursion. C/HIP backends gain `RiscOp::Select` and ADT-tagged match lowering; reverse-mode loops emit trajectory storage. | Depends on `IR-SelectOp-F1` and `IR-MatchLowering-F1` (`docs/gap_synthesis.md` §5). Committing reclassifies them from surface-when-forced to required. |
+| **D2** | Field-wise gradient ADTs/records and higher-order function AD. | Depends on `IR-FirstClassFn-F1`. |
+| **D3** | Effect-aware AD: pure / `state` / `raises` / `capability` / `sample` (reparam, REINFORCE, pathwise). Unlocks Chelis-as-PPL substrate. | Composes with the Phase 2a effect work; does not add new effects, just gradient rules per effect. |
+| **D4** | Implicit differentiation via `fix`, `argmin`, `solve` markers (IFT-derived gradients, KKT for `argmin`). | Differentiable simulation / optimization-as-a-layer use cases. |
+| **D5** | Type-level differentiability: `Differentiable`, `PartiallyDifferentiable`, `NonDifferentiable` annotations + inference. Composes with the existing property-verification harness. | Connects to `spec/design/chelis_property_spec.md` for gradient-behavior properties (e.g. `Lipschitz(K)`). |
+| **D6** | Primer, `examples/differentiable/`, shell library `chelis-diff` (distributions, optimizers, IFT helpers, finite-difference checks). | On-ramp for PyTorch/JAX users. |
+
+Pre-locked decisions (forward + reverse mode parity, AD-as-transformation,
+type-level differentiability, effect-driven gradient discipline, marked implicit
+differentiation, field-wise ADT gradients, backward compatibility with today's
+`grad`) are listed in the canonical document and are not subject to per-dispatch
+re-litigation.
+
+What is explicitly *not* in this track: distributed AD, JIT-style per-input
+recompilation, mixed-precision AD (lives with the broader dtype build-out),
+higher-order AD beyond what falls out of forward∘reverse composition, AD across
+FFI boundaries. See `spec/design/differentiable_language.md` §What's not in scope.
+
+---
+
 ## Ecosystem Library Decisions
 
 Evaluated via multi-agent review.

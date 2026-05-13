@@ -95,6 +95,23 @@ Status legend:
 | A · Real-network end-to-end (Item 8) | `GITHUB_TOKEN=$(gh auth token) cargo test -p chelis-cli --test phase_a_item8_autofetch_build phaseA_item8_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 8 | manual gate (real GitHub + `GITHUB_TOKEN`) |
 | A · Real-network end-to-end (Item 9) | `GITHUB_TOKEN=$(gh auth token) cargo test -p chelis-cli --test phase_a_item9_lockfile_origin phaseA_item9_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 9 | manual gate (real GitHub + `GITHUB_TOKEN`) |
 
+## Phase D (Differentiable Programming)
+
+Committed scope per `spec/design/differentiable_language.md` and the
+`spec/12-roadmap.md` §Differentiable programming track. D0 is the spec
+lock; oracles for D1–D6 are named here as aspirational until the owning
+agent dispatch picks the executable test fixture for each phase.
+
+| Phase | Oracle command | Owning spec doc | Status |
+|---|---|---|---|
+| D0 | `grep -F "spec/design/differentiable_language.md" spec/12-roadmap.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the roadmap) | `spec/design/differentiable_language.md` §Phase 0 | default gate (doc grep) |
+| D1 | Numerical-agreement suite covering AD through `if`, `match`, `while`, `for`, and a recursive function — exact named test TBD when D1 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 1 | aspirational |
+| D2 | Field-wise gradient suite covering struct/record gradients, ADT-tagged match gradients, and higher-order-function gradients — exact named test TBD when D2 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 2 | aspirational |
+| D3 | Effect-aware AD suite: pathwise (Normal/Uniform/Beta), REINFORCE (Categorical/Bernoulli), `raises`/`state` composition, plus the small-Bayesian VI convergence test — exact named test TBD when D3 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 3 | aspirational |
+| D4 | Implicit-differentiation suite: `fix` agreement vs unrolled baseline, analytical-`argmin` quadratic, KKT-derived constrained-optimum gradient — exact named test TBD when D4 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 4 | aspirational |
+| D5 | Differentiability-typing suite: positive/negative annotation checks, `chelis check --show-inferred` regression, `Lipschitz(K)` property verifier — exact named test TBD when D5 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 5 | aspirational |
+| D6 | Corpus oracle: every program in `examples/differentiable/` survives `chelis fmt`/`check`/`eval`/`build` and the on-ramp primer's worked snippets match their checked-in outputs — exact named test TBD when D6 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 6 | aspirational |
+
 ## Phase M (Metal Backend)
 
 | Phase | Oracle command | Owning spec doc | Status |

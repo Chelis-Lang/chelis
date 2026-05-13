@@ -78,6 +78,30 @@ Cross-references: `spec/design/effect_taxonomy_expansion.md` for the
 detailed design of Phases B and C; `spec/design/reef_distribution.md` for
 Phase A and the post-launch Phase D registry-server endgame.
 
+## Differentiable programming (committed scope)
+
+Seven-phase plan for end-to-end differentiable programming: AD that
+composes through arbitrary control flow, user-defined data, effects,
+fixed points, and implicit constructs, with differentiability expressed
+at the type level. The scope is committed (canonical document below);
+the strategic decision on when to begin Phase 1 is separate. Detailed
+design in `spec/design/differentiable_language.md`.
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| **D0** | Spec lock — `spec/design/differentiable_language.md` | ✅ Complete |
+| **D1** | Control-flow AD (`if`, `match`, `while`, `for`, recursion). Depends on the IR-SelectOp-F1 and IR-MatchLowering-F1 §5 entries in `docs/gap_synthesis.md`. | Planned |
+| **D2** | ADT and record gradients (field-wise extension + higher-order). Depends on IR-FirstClassFn-F1. | Planned |
+| **D3** | Effect-aware AD (state, raises, capability, stochastic sample-effect dispatch for reparam / REINFORCE / pathwise). | Planned |
+| **D4** | Implicit differentiation (`fix`, `argmin`, `solve` markers + IFT-derived gradients). | Planned |
+| **D5** | Differentiability typing (`Differentiable` / `PartiallyDifferentiable` / `NonDifferentiable` type-level marker, inference, property attachment). | Planned |
+| **D6** | Documentation, examples, `chelis-diff` shell library, on-ramp for PyTorch/JAX users. | Planned |
+
+Phases D1–D5 are sequential because each builds on the prior; D6 can
+develop in parallel with D5 once D4 lands. Committing to D1 reclassifies
+IR-SelectOp-F1, IR-MatchLowering-F1, and IR-FirstClassFn-F1 from
+"surface-when-forced" to required prerequisites.
+
 ## Exploratory: Agent Editing Surface
 
 **Status:** Exploratory. One bounded proof-of-concept tool, then evaluate.
