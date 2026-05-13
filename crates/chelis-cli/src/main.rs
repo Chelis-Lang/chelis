@@ -4040,20 +4040,19 @@ fn reject_unsupported_c_precisions_host(
     ) -> Result<(), Box<dyn std::error::Error>> {
         use chelis_ir::host::HostType;
         match ty {
-            HostType::Tensor(t) => {
-                if !c_backend_supports_precision(t.precision) {
-                    return Err(format!(
-                        "`chelis build --target c` host-program lane does not yet support \
-                         tensor precision `{}` ({}). The C backend admits \
-                         f32/f64/bool/int8/int16/int32/int64 today; bf16/f16 are admitted \
-                         only on `--target hip`. \
-                         See spec/04-type-system.md §5.7.1.",
-                        t.precision.name(),
-                        context
-                    )
-                    .into());
-                }
+            HostType::Tensor(t) if !c_backend_supports_precision(t.precision) => {
+                return Err(format!(
+                    "`chelis build --target c` host-program lane does not yet support \
+                     tensor precision `{}` ({}). The C backend admits \
+                     f32/f64/bool/int8/int16/int32/int64 today; bf16/f16 are admitted \
+                     only on `--target hip`. \
+                     See spec/04-type-system.md §5.7.1.",
+                    t.precision.name(),
+                    context
+                )
+                .into());
             }
+            HostType::Tensor(_) => {}
             HostType::List(inner) | HostType::Option(inner) => check_host_type(inner, context)?,
             HostType::Dict(k, v) => {
                 check_host_type(k, context)?;
