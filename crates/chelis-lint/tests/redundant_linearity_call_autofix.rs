@@ -8,19 +8,31 @@
 //!
 //! These fixtures pin the re-enablement scope:
 //!
-//! - F1 trivial strip: `realize(copy(w))` → `realize(w)`
-//! - F2 within-call fan-out: `mul(copy(w), copy(w))` → `mul(w, w)`
+//! - F1 trivial strip: `realize(copy(w))` -> `realize(w)`
+//! - F2 within-call fan-out: `mul(copy(w), copy(w))` -> `mul(w, w)`
 //! - F3 cross-statement var-RHS aliasing:
-//!   `let alias = copy(x); mul(x, alias)` → `let alias = x; mul(x, alias)`
+//!   `let alias = copy(x); mul(x, alias)` -> `let alias = x; mul(x, alias)`
 //! - F4 architectural invariant: every flagged program survives the typed
 //!   pipeline after autofix.
+//!
+//! After implicit-copy fan-out v3 landed (PR #91), the typed-pipeline gate
+//! also accepts two additional shapes that previously left the warning
+//! without a `[fix]` marker:
+//!
+//! - F5 Shape A borrow-to-owned at return position: `def f[a](x: &T) -> T = copy(x)`
+//! - F6 Shape A with use-site driver
+//! - F7 Shape B grad fan-out: `grad(f, wrt=p)(copy(args)...)` followed by
+//!   a trailing borrow-read
+//! - F8 Shape B four-arg mse fan-out with copies on every arg
+//! - F9 Shape B vmap fan-out: `vmap(f)(copy(arg))`
 //!
 //! Each fixture asserts:
 //!   (a) `chelis lint --check` flags the `copy()` as redundant
 //!   (b) `chelis lint --fix` strips it
 //!   (c) the stripped output parses, type-checks, and evaluates identically
 //!
-//! Fixtures are `#[ignore]` until the autofix is re-enabled (Item 5).
+//! See `docs/investigations/redundant_linearity_autofix_recoverage_diagnosis.md`
+//! for the Wave 5 / Item 6 follow-on diagnosis.
 
 use assert_cmd::Command;
 use std::fs;
@@ -299,6 +311,118 @@ result = f(to_tensor([1.0, 2.0]))
         covered >= 4,
         "f4 corpus should exercise at least 4 distinct shapes; only {covered} covered",
     );
+}
+
+/// F5: Shape A borrow-to-owned at return position. Pre-W4-A, the
+/// typecheck phase rejected the bare-`x` candidate so the typed-pipeline
+/// gate dropped the strip. PR #91 (commit 80f6cf1) added a return-position
+/// implicit-copy coercion that makes the stripped form type-check, which
+/// allows the autofix to accept the candidate.
+#[test]
+fn f5_shape_a_borrow_return_position() {
+    let source = "\
+def identity_dim[a](x: &tensor[a, f32]) -> tensor[a, f32] = copy(x)
+
+input = to_tensor([1.0, 2.0])
+result = identity_dim(&input)
+";
+    assert_autofix_strips_and_preserves("f5_shape_a_borrow_return_position", source);
+}
+
+/// F6: Shape A with a downstream consumer that exercises the inserted
+/// return-position copy at a call site.
+#[test]
+fn f6_shape_a_with_use_site_driver() {
+    let source = "\
+def identity_dim[a](x: &tensor[a, f32]) -> tensor[a, f32] = copy(x)
+
+def driver(x: tensor[3, f32]) -> tensor[3, f32] = {
+  y = identity_dim(&x)
+  add(y, y)
+}
+
+input = to_tensor([1.0, 2.0, 3.0])
+result = driver(input)
+";
+    assert_autofix_strips_and_preserves("f6_shape_a_with_use_site_driver", source);
+}
+
+/// F7: Shape B grad fan-out. Two grad calls of the same loss with a
+/// trailing borrow-read of the arg. Pre-W4-A, the linearity checker
+/// rejected the stripped candidate because grad-app was treated as a
+/// Structural consume. PR #91 promoted grad-app args to borrows, so
+/// the stripped candidate now passes linearity.
+#[test]
+fn f7_shape_b_grad_fanout() {
+    let source = "\
+def my_loss(w: tensor[3, f32], b: tensor[3, f32]) -> tensor[f32] = {
+  d = sub(w, b)
+  sq = mul(d, d)
+  sum(sq, 0)
+}
+
+def step(w: tensor[3, f32], b: tensor[3, f32]) -> tensor[3, f32] = {
+  dw = grad(my_loss, wrt=w)(copy(w), copy(b))
+  trailing = sub(w, dw)
+  add(trailing, b)
+}
+
+w = to_tensor([1.0, 2.0, 3.0])
+b = to_tensor([0.5, 0.5, 0.5])
+result = step(w, b)
+";
+    assert_autofix_strips_and_preserves("f7_shape_b_grad_fanout", source);
+}
+
+/// F8: Shape B four-arg mse-shape with copies on every arg. Mirrors the
+/// hello-chelis linreg.ch sgd_step pattern at vector arity 3.
+#[test]
+fn f8_shape_b_grad_fanout_four_arg_mse() {
+    let source = "\
+def mse_loss(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[3, f32]) -> tensor[f32] = {
+  prod = mul(w, b)
+  d = sub(prod, x)
+  e = sub(d, y)
+  sq = mul(e, e)
+  sum(sq, 0)
+}
+
+def sgd_step(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[3, f32]) -> tensor[3, f32] = {
+  dw = grad(mse_loss, wrt=w)(copy(x), copy(y), copy(w), copy(b))
+  db = grad(mse_loss, wrt=b)(copy(x), copy(y), copy(w), copy(b))
+  new_w = sub(w, dw)
+  new_b = sub(b, db)
+  add(new_w, new_b)
+}
+
+x = to_tensor([1.0, 2.0, 3.0])
+y = to_tensor([0.1, 0.2, 0.3])
+w = to_tensor([0.5, 0.5, 0.5])
+b = to_tensor([0.25, 0.25, 0.25])
+result = sgd_step(x, y, w, b)
+";
+    assert_autofix_strips_and_preserves("f8_shape_b_grad_fanout_four_arg_mse", source);
+}
+
+/// F9: Shape B vmap fan-out. PR #91 extended the observational
+/// higher-order callee classification to vmap, so vmap-app args are also
+/// promoted to borrows. The redundant `copy()` around the vmap input is
+/// now safely strippable.
+#[test]
+fn f9_shape_b_vmap_observational() {
+    let source = "\
+def my_op(w: tensor[3, f32]) -> tensor[f32] = sum(w, 0)
+
+def step(ws: tensor[5, 3, f32]) -> tensor[5, f32] = {
+  out = vmap(my_op)(copy(ws))
+  trailing = sub(out, out)
+  trailing
+}
+
+ws = to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]])
+result = step(ws)
+";
+    assert_autofix_strips_and_preserves("f9_shape_b_vmap_observational", source);
 }
 
 /// Relaxed contract for F4: the autofix output must still parse,

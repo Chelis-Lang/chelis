@@ -1133,15 +1133,13 @@ fn bind_name_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Exp
 }
 
 /// Synthesized destructure bind (Linearity-F2).  Marks the `bind`
-/// node with `destructure: true` in its meta-map so:
-/// (i) `chelis_types::annotate_let_children` knows to inject the
-/// inferred type of the bind value into the value's meta-map (the
-/// `(tuple-get ...)` and `(var __chelis_tmp_N)` shapes do not carry
-/// `:type` by default per the `should_attach_type_metadata` deny
-/// list), and
-/// (ii) the linearity checker routes surfaced violations on the
-/// destructured tmp scope through `LinearityInfo::warnings` during
-/// the W1 PR 1 deprecation window.
+/// node with `destructure: true` in its meta-map so the linearity
+/// checker can distinguish synthesized-tmp scopes from regular
+/// `let` scopes.  Linearity-F2 W2 cascade (this PR) treats
+/// use-after-consume inside a destructure-marked scope as an
+/// error: implicit Copy insertion does not apply to destructured
+/// components because tuple-get produces a fresh owned value, not
+/// an aliased borrow.
 fn bind_destructure_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Expr {
     let bind_node = node_meta(
         "bind",
@@ -1161,11 +1159,6 @@ fn destructure_pattern(
     next_tmp: &mut usize,
 ) -> deep::Expr {
     match pattern {
-        // The user-visible component binding (`a` in `let (a, b)
-        // = pair`) is also tagged `destructure: true` so its type
-        // gets injected by `annotate_let_children`; downstream
-        // linearity inherits the type via `scope.declare` from
-        // `check_let`.
         LetPattern::Var(name, _) => bind_destructure_value(name, dvar(source_name), body),
         LetPattern::Wildcard(_) => body,
         LetPattern::Tuple(parts, _) => {
@@ -1205,12 +1198,6 @@ impl DesugarCtx {
                     next_tmp += 1;
                     let value = self.desugar_expr(&binding.value);
                     out = destructure_pattern(pattern, &temp_name, out, &mut next_tmp);
-                    // The top-level destructure source bind is also
-                    // tagged so the linearity walk routes surfaced
-                    // violations on the synthesized scope through
-                    // the warning channel.  Type metadata for the
-                    // source is attached by
-                    // `annotate_let_children`.
                     out = bind_destructure_value(&temp_name, value, out);
                 }
             }

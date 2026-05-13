@@ -6,6 +6,175 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed - host-eval scalar zero-arg fn-call silent miscompilation (#80)
+
+`def go -> f32 = 7.5; result = go()` previously evaluated `result`
+as `0.0` via `chelis eval --file` instead of `7.5`. Root cause was
+an off-by-one arity guard in IR lowering: `LowerCtx::lower_app` at
+`crates/chelis-ir/src/lower.rs:2712` rejected zero-arg
+`(app {meta} (var fn-name))` forms (3 elements: tag + meta + fn)
+via `if elems.len() < 4`, emitting `RiscOp::Const { value: 0.0 }`
+before any callable resolution. Fixed by relaxing the guard to
+`if elems.len() < 3`; the downstream arms already handle empty
+arg slices correctly. Closes `HostEval-ScalarFn-F1`. Regression
+tests at `crates/chelis-cli/tests/host_eval_scalar_fn_call.rs`
+cover f32/f64/i64/bool zero-arg return types plus a one-arg
+negative control.
+
+### Changed - linearity checker uses typed `ConsumeKind` discrimination (#83)
+
+`ConsumeSite` now carries an `enum ConsumeKind { Aliasing,
+Structural }` field. The previous string-prefix check
+(`descriptor.starts_with("binding ")`) at
+`crates/chelis-types/src/linearity.rs::read_or_error` is replaced
+by `matches!(site.kind, ConsumeKind::Aliasing)`. All eight
+consume-site producers set `kind` explicitly. Closes
+`Linearity-F1`.
+
+### Fixed - alias-consume linearity bypass (#83)
+
+`let y = x; let z = realize(y); add(x, z)` previously passed
+`chelis check` silently because `y`'s linearity state was tracked
+per-bound-name, not per-underlying-value. Fixed by adding a
+`LinearScope.aliases: HashMap<String, Vec<Option<String>>>`
+parallel to `bindings` and `types`. `Structural` consumes
+forward through `resolve_alias_chain` to the underlying source
+name's scope entry; multi-level chains (`let z = y; let y = x;
+consume(z)`) walk to `x`. Closes `Linearity-AliasedConsume-F1`.
+Regression tests at
+`crates/chelis-types/tests/linearity_aliased_consume.rs`.
+
+### Fixed - tuple-destructure linearity false-negative now errors (#83 + #90)
+
+`let (a, b) = pair; realize(a); realize(a)` previously passed
+silently because `chelis-surf` desugar synthesized `__chelis_tmp_N`
+intermediaries without type metadata, making
+`expr_is_owned_linear` return false and skipping the entire
+destructure chain. Fixed in PR #83 via a local
+`tuple_get_element_type` helper that indexes into the underlying
+tuple var's `t-tuple` scope-type at linearity-check time. PR #90
+swept the production corpus (zero warnings surfaced), then
+removed the temporary `LinearityInfo::warnings` cascade channel
+and routed destructured-component use-after-consume directly
+through `errors`. Closes `Linearity-F2`. Regression tests at
+`crates/chelis-types/tests/linearity_typed_consumekind.rs` and
+`linearity_aliased_consume.rs`.
+
+### Changed - C runtime tensor data is dtype-aware (#84 + #86 + #87 + #88)
+
+`chelis_tensor.data` is now `*mut u8`, accessed through a new
+`TensorElement` trait with checked `data_ptr`, unchecked
+`data_ptr_unchecked` (debug_assert), and a default `fill` lifting
+the cast-then-loop pattern from `chelis_fill_i64`. Trait impls
+for `f32, f64, i32, i64` (`bool` and `i32` route through `f32`
+internally because the runtime stores them f32-encoded today —
+tracked separately as `CRuntime-BoolStorage-F1` and
+`CRuntime-I32Storage-F1`). `CHELIS_*` constants promoted to
+`pub const`.
+
+Migration shipped in four PRs: PR #84 introduced the trait +
+struct change + first anchor migrations; PR #86 migrated 31
+runtime call sites across 14 ops; PR #87 migrated 6 host_emit
+code-generation sites; PR #88 added 22 multi-op composition
+fixtures and the workstream-wide sibling sweep audit.
+**110 dtype-coupling fixtures lock the migration**:
+`crates/chelis-e2e/tests/dtype_op_matrix.rs` (77),
+`crates/chelis-backend-c/tests/host_emit_dtype_dispatch.rs` (11),
+`crates/chelis-cli/tests/cbackend_cast_arithmetic_composition.rs`
+(5), plus the four 0.7.6 surface-fix regression locks.
+Sibling-sweep audit: 11 intentional `*mut f32` references remain
+in `crates/chelis-runtime/` (each enumerated with justification);
+0 in `crates/chelis-backend-c/`, HIP, Metal, IR. Closes
+`CRuntime-F32Coupling`. Audit note:
+`docs/investigations/c_runtime_dtype_coupling_workstream_audit.md`.
+
+### Fixed - implicit-copy inserter handles return-position borrow-to-owned and grad/vmap fan-out (#91)
+
+Two fan-out shapes that previously failed:
+
+- **Shape A** (return-position borrow-to-owned): `def identity_dim[a](x: &tensor[a, f32]) -> tensor[a, f32] = x`
+  previously failed with a type mismatch. Fixed at
+  `crates/chelis-types/src/infer.rs::check_top_level` via a
+  relaxed-retry path in the def-body unify that recognizes
+  body-as-bare-var with `Ref(T)` inferred and `T` declared.
+  Limited to the bare `(var x)` body shape; broader return-position
+  coercions (`let`/`if`/`match` tails) are tracked as a follow-on.
+- **Shape B** (grad/vmap-callee fan-out): `dw = grad(f, wrt=w)(args); db = grad(f, wrt=b)(args)`
+  previously failed with `UseAfterConsume` on the fanned-out args.
+  Fixed at
+  `crates/chelis-types/src/linearity.rs::arg_is_borrowed` via a
+  new `callee_is_observational_higher_order` helper that treats
+  every arg of a `(grad ...)` or `(vmap ...)` callee as borrowed
+  rather than consumed. Covers piped grad/vmap stages too
+  (pipe-stage path routes through the same `arg_is_borrowed`).
+
+Closes Item 1 v3 of the implicit-copy inserter rollout (after
+PR #29 v1 and the v2 fix-up). Six fixtures at
+`crates/chelis-ir/tests/implicit_copy_fanout_v3.rs`.
+
+### Changed - lint precision: math/ML prefixes, ecosystem allowlist, kebab-case docs, docstring em-dash (#92)
+
+Four lint-rule precision fixes:
+
+- **§7.1.1** `prefix-namespace` accepts a curated math/ML
+  well-known prefix list (`exp_`, `log_`, `sin_`, `cos_`, `tan_`,
+  `sqrt_`, `lin_`, `std_`, `var_`, `min_`, `max_`, `sum_`,
+  `mean_`, `relu_`, `gelu_`, `silu_`, `tanh_`, `sigmoid_`) in
+  addition to module-domain-derived prefixes. Module-level
+  allowlist annotations are also supported.
+- **§6.3** `module-pascal-components` `KNOWN_SINGLE_WORDS`
+  extended by 18 entries (4 from the hello-chelis report —
+  `Linearity`, `Hypothesis`, `Integration`, `Optimize` — plus a
+  math/ML sweep adding 14 more). `Vocabulary-F2` structural
+  closure (auto-generation from spec §2.6) remains pending.
+- **§8.3** `doc-filename-convention` accepts kebab-case in
+  mdBook-rooted narrative-doc trees (detected by walking
+  ancestors for `book.toml`) and accepts hyphens when the
+  filename stem matches a workspace Cargo `[package].name`
+  (e.g., `c-earchin.md` matches package `c-earchin`).
+- **§8.6** `no-em-dash-in-public-strings` excludes Python
+  docstrings (first non-whitespace triple-quoted string on its
+  line). Mid-line triple-quoted strings (`print("""…""")`)
+  remain in scope.
+
+Spec text updated at `spec/01-nomenclature.md` §7.1.1, §8.3, §8.5,
+§8.6.
+
+### Fixed - lint CLI produces identical output for CWD walk and explicit-path walk (#93)
+
+`chelis lint --check src/ tests/ verify/ scripts/ docs/`
+previously returned a different error count than
+`chelis lint --check .` because
+`doc-filename-convention::classify_doc` did substring matching on
+the walker's path output. `walkdir::WalkDir::new(root)` yields
+paths prefixed with the root passed in, so `.` produced
+`./docs/file.md` (substring `/docs/` matched) while `docs/`
+produced `docs/file.md` (no leading slash, no match). Fixed by
+canonicalizing user-supplied target paths to absolute paths at
+the CLI boundary in `cmd_lint`. Companion fix to
+`crates/chelis-lint/src/walker.rs::is_skip_dir` ensures the
+worktree-scoped skip filter never matches the walk-root entry
+itself.
+
+Sibling-sweep finding: `chelis-lint/src/exceptions.rs::is_excepted`
+has parallel path-spelling sensitivity in the opposite direction
+(`crates/chelis-surf/tests/fixtures/*.ch` patterns fail when the
+CLI walks a sub-directory). Filed as `Lint-ExceptionPathRoot-F1`.
+
+### Added - `redundant-linearity-call` autofix covers implicit-copy v3 shapes (#95)
+
+The implicit-copy fan-out v3 fix (Shape A borrow-to-owned at return
+position and Shape B grad/vmap fan-out across observational
+higher-order calls) closes a coverage gap for the
+`redundant-linearity-call` autofix. The Path 1B safety gate
+(typed-pipeline-accepts) now accepts strip candidates for these
+shapes, so `chelis lint --check` emits the `[fix]` marker and
+`chelis lint --fix` rewrites them. No rule logic changed; the
+unlock comes entirely from the upstream typecheck and linearity
+fixes. See
+`docs/investigations/redundant_linearity_autofix_recoverage_diagnosis.md`
+for the diagnosis.
+
 ## [0.7.7] — 2026-05-12
 
 ### Added - pipe-stage callable surface
