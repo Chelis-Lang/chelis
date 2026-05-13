@@ -171,6 +171,32 @@ const KNOWN_SINGLE_WORDS: &[&str] = &[
     // SafeTensors) would diverge from the upstream's PyPI/HuggingFace
     // identity.
     "Safetensors",
+    // Hello-chelis (2026-05) corpus survey: single English words used
+    // as module components that today trip the 7-char long-lowercase-run
+    // heuristic even though each is canonically a single PascalCase word
+    // per §6.3. Asserting these here closes the surface gap pending the
+    // Vocabulary-F2 structural follow-up that replaces hand-maintenance
+    // with derivation from a canonical vocabulary list.
+    "Linearity",
+    "Hypothesis",
+    "Integration",
+    "Optimize",
+    // Math/ML single-word domains used as module components across the
+    // ecosystem. Each is canonically one English word per §6.3.
+    "Matrix",
+    "Vector",
+    "Random",
+    "Statistics",
+    "Probability",
+    "Geometry",
+    "Calculus",
+    "Algebra",
+    "Topology",
+    "Spectrum",
+    "Inference",
+    "Classification",
+    "Regression",
+    "Clustering",
 ];
 
 /// Known PascalCase compound module/type names in the Chelis ecosystem.
