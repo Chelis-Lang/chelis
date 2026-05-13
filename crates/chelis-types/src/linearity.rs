@@ -1050,6 +1050,20 @@ impl Checker {
         if builtin_arg_is_borrowed(builtin, arg_index) {
             return true;
         }
+        if func.is_some_and(callee_is_observational_higher_order) {
+            // Implicit-copy fan-out v3 Shape B: `grad(f, ...)(args)` and
+            // `vmap(f, ...)(args)` call sites are observational at the
+            // linearity level.  Lowering at
+            // `chelis-ir::lower::lower_grad_callable_with_nodes` synthesizes
+            // a fresh closure body around Load nodes for every arg and
+            // splices the caller's NodeId in without destroying it; the
+            // forward and backward (or batched) DAGs both read from the
+            // same Load.  Classifying every arg position as a borrow lets
+            // the linearity checker permit fan-out across multiple grad or
+            // vmap calls of the same arg followed by later borrow-reads,
+            // matching the semantics already implemented in the IR.
+            return true;
+        }
         let Some(func_ty) = func.and_then(|expr| self.expr_type(expr, scope)) else {
             return false;
         };
@@ -1148,6 +1162,16 @@ fn borrow_inner(expr: &Expr) -> Option<&Expr> {
         return None;
     }
     children(list).first()
+}
+
+/// True when `expr` is a `(grad ...)`, `(vmap ...)`, or nested
+/// composition thereof.  Used by `arg_is_borrowed` to mark grad-app and
+/// vmap-app call sites as observational at the linearity level.
+fn callee_is_observational_higher_order(expr: &Expr) -> bool {
+    let Expr::List(list, _) = expr else {
+        return false;
+    };
+    matches!(get_tag(list), Some("grad") | Some("vmap"))
 }
 
 fn param_names(expr: &Expr) -> Vec<String> {

@@ -4283,13 +4283,36 @@ fn infer_top_level(
         // concrete dim. Narrow the body's Wildcards against the declared
         // template so the scheme registered for callers reflects the
         // declared concrete shape (#39).
+        //
+        // Implicit-copy fan-out v3 Shape A: if the initial unify fails
+        // and the body is a bare `(fn (params) (var x))` whose declared
+        // return is owned `T` while the body's inferred type returns
+        // `Ref(T)`, retry the unify against the declared return relaxed
+        // into `Ref(T)`.  This mirrors `auto_borrow_call_arg_types`'s
+        // owned-to-borrow coercion at argument positions: there is a
+        // single bare reference at the return position and the caller
+        // already arranged the borrow lifetime via the param itself.
+        // The relaxed retry is gated on the bare-`var`-body shape so
+        // wider body shapes (`let`, `if`, app sub-expressions) still
+        // fail with the existing TypeMismatch for now.
         let scheme_body = if let Some(decl_ty) = declared_ty {
-            if let Err(_te) = unify(&body_ty, &decl_ty, subst) {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!("def '{}' body doesn't match declared signature", name),
-                    vec![],
-                ));
+            let initial = unify(&body_ty, &decl_ty, subst);
+            if let Err(_te) = initial {
+                let relaxed_decl = shape_a_relaxed_return(
+                    &kids[1],
+                    &subst.apply(&body_ty),
+                    &subst.apply(&decl_ty),
+                );
+                let recovered = relaxed_decl
+                    .as_ref()
+                    .is_some_and(|relaxed| unify(&body_ty, relaxed, subst).is_ok());
+                if !recovered {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!("def '{}' body doesn't match declared signature", name),
+                        vec![],
+                    ));
+                }
             }
             let resolved_body = subst.apply(&body_ty);
             let resolved_decl = subst.apply(&decl_ty);
@@ -7350,6 +7373,97 @@ fn auto_borrow_call_arg_types(func_ty: &Type, arg_tys: Vec<Type>, subst: &Subst)
             },
         )
         .collect()
+}
+
+/// Implicit-copy fan-out v3 Shape A relaxation: when a def's body is a
+/// bare `(fn (params...) (var x))` and the body's inferred return type
+/// is `Ref(R)` while the declared return is owned `R`, return a
+/// relaxed declared type `Fn(params, Ref(R))` so the def-body unify can
+/// succeed.  Returns `None` for any other body shape; the caller
+/// surfaces the existing TypeMismatch in that case.
+fn shape_a_relaxed_return(body_expr: &deep::Expr, body_ty: &Type, decl_ty: &Type) -> Option<Type> {
+    // body is the def's body, which the desugarer wraps as
+    // `(fn (params ...) body_inner)` whenever the def has params.  We
+    // only relax when body_inner is a bare `(var name)` reference.
+    let body_list = match body_expr {
+        deep::Expr::List(list, _) => list,
+        _ => return None,
+    };
+    if get_tag(body_list) != Some("fn") {
+        return None;
+    }
+    let inner = children(body_list).get(1)?;
+    let inner_list = match inner {
+        deep::Expr::List(list, _) => list,
+        _ => return None,
+    };
+    if get_tag(inner_list) != Some("var") {
+        return None;
+    }
+
+    // The body's inferred type and the declared type both must be
+    // `Fn(params, ret)` with matching params and a return-position
+    // mismatch of exactly `Ref(R)` (body) vs `R` (decl).
+    let (Type::Fn(body_params, body_ret), Type::Fn(decl_params, decl_ret)) = (body_ty, decl_ty)
+    else {
+        return None;
+    };
+    if body_params.len() != decl_params.len() {
+        return None;
+    }
+    let Type::Ref(body_inner_ret) = body_ret.as_ref() else {
+        return None;
+    };
+    // The body's unwrapped return must match the declared return
+    // structurally before we allow the relaxation; otherwise the
+    // relaxed unify would still fail and only the loop would change.
+    if !types_structurally_equal(body_inner_ret.as_ref(), decl_ret.as_ref()) {
+        return None;
+    }
+    Some(Type::Fn(
+        decl_params.clone(),
+        Box::new(Type::Ref(Box::new(decl_ret.as_ref().clone()))),
+    ))
+}
+
+/// Structural type equality ignoring dim-variable identity (treats
+/// fresh dvars as compatible if both sides have one at the same
+/// position).  Used by `shape_a_relaxed_return` to guard the relaxed
+/// retry: the relaxation is only safe when the body and declared
+/// return differ exactly by a top-level `Ref` wrapper.
+fn types_structurally_equal(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::Unit, Type::Unit) => true,
+        (Type::Prim(p1), Type::Prim(p2)) => p1 == p2,
+        (Type::Ref(i1), Type::Ref(i2)) => types_structurally_equal(i1, i2),
+        (Type::Tensor(d1, p1), Type::Tensor(d2, p2)) => p1 == p2 && d1.len() == d2.len(),
+        (Type::Tuple(es1), Type::Tuple(es2)) => {
+            es1.len() == es2.len()
+                && es1
+                    .iter()
+                    .zip(es2.iter())
+                    .all(|(e1, e2)| types_structurally_equal(e1, e2))
+        }
+        (Type::Adt(n1, a1), Type::Adt(n2, a2)) => {
+            n1 == n2
+                && a1.len() == a2.len()
+                && a1
+                    .iter()
+                    .zip(a2.iter())
+                    .all(|(e1, e2)| types_structurally_equal(e1, e2))
+        }
+        (Type::Fn(p1, r1), Type::Fn(p2, r2)) => {
+            p1.len() == p2.len()
+                && p1
+                    .iter()
+                    .zip(p2.iter())
+                    .all(|(e1, e2)| types_structurally_equal(e1, e2))
+                && types_structurally_equal(r1, r2)
+        }
+        (Type::Var(_), Type::Var(_)) => true,
+        (Type::Error, _) | (_, Type::Error) => true,
+        _ => false,
+    }
 }
 
 fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
