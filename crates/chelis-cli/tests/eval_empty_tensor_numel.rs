@@ -63,7 +63,6 @@ fn write_program(dir: &Path, name: &str, body: &str) -> PathBuf {
 }
 
 #[test]
-#[ignore = "numel(to_tensor([])) returns 1 instead of 0; Runtime-EmptyTensorNumel-F1"]
 fn eval_numel_empty_tensor() {
     let dir = tempdir().expect("tempdir");
     let path = write_program(

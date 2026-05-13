@@ -572,9 +572,13 @@ pub unsafe extern "C" fn chelis_alloc(
             };
         }
     }
-    if tensor.size == 0 {
-        tensor.size = 1;
-    }
+    // No size clamp: an empty rank-1 tensor has 0 elements, and
+    // chelis_tensor_numel must report that genuine count
+    // (Runtime-EmptyTensorNumel-F1). Allocator safety is preserved by the
+    // bytes.max(1) call below; subsequent for-loops and memset paths handle
+    // a zero size correctly (0..0 is a no-op, memset of 0 bytes is a no-op).
+    // Scalars (ndim == 0) keep the initializer's size = 1 via the skipped
+    // multiplication loop, which matches the empty-product identity.
     let elem_size = tensor_elem_size(dtype);
     let bytes = tensor.size as usize * elem_size;
     let mut ptr: *mut libc::c_void = std::ptr::null_mut();
@@ -621,9 +625,10 @@ pub unsafe extern "C" fn chelis_alloc_view(
             };
         }
     }
-    if tensor.size == 0 {
-        tensor.size = 1;
-    }
+    // No size clamp: views report the genuine element count of the
+    // underlying shape. See chelis_alloc_tensor above for the same rationale
+    // (Runtime-EmptyTensorNumel-F1). Views do not own their data, so the
+    // allocator-safety justification never applied here in the first place.
     Box::into_raw(tensor)
 }
 
