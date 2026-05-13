@@ -132,6 +132,44 @@ Fusion, kernel authoring, and MLIR-backend work are performance
 enhancers that loaded models benefit from automatically without
 Hydronnx changes.
 
+## Kerrent — GPU kernel authorship (committed scope)
+
+Six-milestone plan for `Kerrent`, the Chelis core language feature for
+authoring GPU kernels in Chelis source code. Kerrent introduces a new
+`kernel` keyword, tile-level primitives, and a new IR layer between
+the RISC DAG and Triton IR. v1 targets Triton as the kernel compiler;
+FlashAttention is the customer-visible proof point. The scope is
+committed (canonical document below); the strategic decision on when
+to begin Phase K1 is separate. Detailed design in
+`spec/design/kerrent.md`. Throughout: `Kerrent` is the Chelis language
+feature; `Triton` is the upstream kernel compiler owned by the Triton
+project, not by Chelis — analogous to the Hydronnx-vs-ONNX naming
+discipline.
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| **K0** | Spec lock — `spec/design/kerrent.md` | ✅ Complete |
+| **K1** | Kernel syntax and parser: `kernel` annotation and tile-level primitives parse correctly; kernel-annotated functions get a distinct AST representation. | Planned |
+| **K2** | Kernel IR layer between the RISC DAG and Triton IR; tile-level operations as first-class IR nodes; type checking against the kernel IR. | Planned |
+| **K3** | Triton IR emission: lowering pass from the kernel IR to Triton's MLIR dialect with output validated against Triton's IR specification. | Planned |
+| **K4** | Build integration: Triton compiler invocation from the Chelis build pipeline; PTX/AMDGCN kernel artifacts produced and linked. | Planned |
+| **K5** | Runtime integration: kernel calls from tensor-level Chelis lower to launches against Triton artifacts via the existing HIP/CUDA backend machinery. | Planned |
+| **K6** | First production kernel: FlashAttention-shaped fused attention kernel written in Kerrent, replacing the current attention decomposition. Transformer inference becomes competitive with PyTorch+CUDA for the attention block. | Planned |
+
+Addendums KA–KF (AD through kernels, thread-level addressing, custom
+shared memory patterns, MLIR-direct lowering, verified kernel bodies,
+and kernel platforms beyond NVIDIA/AMD) are post-v1 extensions with
+priority tiers tracked in `spec/design/chelis_project_plan.md`
+§Kerrent Track. They are not active phases and do not get roadmap rows
+or phase oracles. Addendum KA (AD through kernels) is the highest-
+leverage extension and composes with the differentiable-language
+D-track.
+
+Kerrent's K3 (Triton IR emission for user-authored kernels) is
+orthogonal to Phase 5c (RISC DAG → Triton IR backend, which emits
+whole-program tensor IR to Triton). The two operate at different layers
+and do not conflate.
+
 ## Exploratory: Agent Editing Surface
 
 **Status:** Exploratory. One bounded proof-of-concept tool, then evaluate.

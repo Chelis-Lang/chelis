@@ -102,10 +102,15 @@ product allocations such as `[seq, 256, 1024]` or `[seq, seq, 64]`.
 The remaining dominant term is real vanilla-attention state:
 score/probability tensors of shape `[seq, seq]` across the four heads.
 
-If FlashAttention-style attention fusion ships (not on the roadmap
-today), the quadratic score/probability materialization can collapse
-further. Slot planning alone cannot make those tensors smaller because
-they are real intermediate values, not allocator artifacts.
+If FlashAttention-style attention fusion ships, the quadratic
+score/probability materialization can collapse further. Slot planning
+alone cannot make those tensors smaller because they are real
+intermediate values, not allocator artifacts. **Planned closure:**
+Kerrent Phase K6 (`spec/design/kerrent.md` §Milestone 6) is the
+committed-scope path — a FlashAttention-shaped fused attention kernel
+authored in Kerrent and called from tensor-level Chelis, replacing the
+current attention decomposition. See `spec/12-roadmap.md` §Kerrent for
+the phase ledger.
 
 ### Cross-function specialization (Gap 5)
 
@@ -177,9 +182,14 @@ with a scatter-recognition pattern in Phase α's new specialize pass
 already set up.
 
 **Phase ε (continuing, opportunistic):** Add specialised recognizers
-for softmax, layer_norm, and attention (FlashAttention-style fusion
-is the largest of these). Each one is bounded; they accumulate in the
-specialize pass as Tier-2-shape-recognition rules.
+for softmax, layer_norm, and attention. Each one is bounded; they
+accumulate in the specialize pass as Tier-2-shape-recognition rules.
+**FlashAttention-style fusion is the largest of these and has graduated
+to a separate committed-scope path:** Kerrent Phase K6
+(`spec/design/kerrent.md` §Milestone 6) authors the kernel in Chelis
+source rather than recognizing-and-fusing the decomposed pattern after
+the fact. The remaining recognizers (softmax, layer_norm, and any
+non-attention fusion targets) still belong in the specialize pass.
 
 **Gap 5 — M5 workstream doc landed.** The active specs now frame
 user-`def` specialization loss as a known limitation intended to close
@@ -280,7 +290,7 @@ each their own named workstream:
 
 | Tracks | Required closure | Current executable anchor |
 |---|---|---|
-| Recognizer coverage tail (Pattern B in §1) | Spec definition per op shape; IR recognition (likely extending `chelis_ir::specialize`); backend dispatch in C (fused kernel) and HIP (cuDNN-shape equivalent); AD policy and adjoint table extension; corpus per op. Each op is a wave-sized effort. | None today. `crates/chelis-cli/tests/specialization_dispatch.rs` lines 134-141 document the generic-path cost (3-5× slower for softmax/layer_norm). |
+| Recognizer coverage tail (Pattern B in §1) | Spec definition per op shape; IR recognition (likely extending `chelis_ir::specialize`); backend dispatch in C (fused kernel) and HIP (cuDNN-shape equivalent); AD policy and adjoint table extension; corpus per op. Each op is a wave-sized effort. **Attention specifically** has graduated to Kerrent Phase K6 (`spec/design/kerrent.md` §Milestone 6) as a committed-scope path: the FlashAttention-shaped fused kernel is authored in Kerrent rather than recognized-and-fused after decomposition. Softmax and layer_norm remain on the recognizer track. | None today. `crates/chelis-cli/tests/specialization_dispatch.rs` lines 134-141 document the generic-path cost (3-5× slower for softmax/layer_norm). |
 
 ### §5 R2 — Path-B HIP host-program fallback codegen
 

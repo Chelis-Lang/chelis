@@ -1302,6 +1302,87 @@ round-trip export. See `spec/design/hydronnx.md` §What's not in v1 scope.
 
 ---
 
+## Kerrent Track (Phases K0–K6 + Addendums KA–KF)
+
+Parallel committed-scope track for Kerrent, the Chelis core language feature
+for authoring GPU kernels in Chelis source code. Detailed design in
+`spec/design/kerrent.md`; roadmap row in `spec/12-roadmap.md` §Kerrent.
+
+`Kerrent` (proper noun) is the Chelis feature name. It is a core language
+feature, not a shell: it introduces a new `kernel` keyword, tile-level
+primitives, and a new IR layer between the RISC DAG and Triton IR. The
+upstream `Triton` kernel compiler is owned by the Triton project, not by
+Chelis — Kerrent emits Triton IR, Triton compiles it. The two names are kept
+distinct everywhere they appear, analogous to the Hydronnx-vs-ONNX discipline.
+
+Scope is committed; the strategic decision on when to begin Phase K1 is
+separate. Phasing is sequenced by dependency: K1 → K2 → K3 → K4 → K5 → K6.
+
+| Phase | Deliverable | Notes |
+|---|---|---|
+| **K0** | Spec lock at `spec/design/kerrent.md` | ✅ Complete |
+| **K1** | Kernel syntax and parser. `kernel` annotation + tile-level primitives (`tile.load`, `tile.store`, `tile.dot`, `tile.reduce`, `tile.mask`, …) parse correctly. Kernel-annotated functions get a distinct AST representation the rest of the pipeline can distinguish from tensor-level functions. | Single-agent dispatch; standalone milestone. |
+| **K2** | Kernel IR layer between Chelis's RISC DAG and Triton IR. Tile-level operations become first-class IR nodes. Dimension types extend to tile scope. Type checking on kernel functions runs against this IR. | The new IR layer is the load-bearing piece for everything downstream. |
+| **K3** | Lowering pass from kernel IR to Triton's MLIR dialect. Each tile-level operation has a defined Triton IR equivalent; output validates against Triton's IR specification. | Orthogonal to Phase 5c (Triton backend for whole-program RISC-DAG emission) — see distinction note below. |
+| **K4** | Build integration. Triton compiler invocation from the Chelis build pipeline; kernel artifacts (compiled PTX or AMDGCN) get produced and linked. The Triton dependency is handled cleanly by the build system. | Touches `chelis build` and the manifest surface; needs coordination with the reef/build infrastructure. |
+| **K5** | Runtime integration. Kernel calls from tensor-level Chelis lower to launches against Triton artifacts via the existing HIP/CUDA backend machinery for argument marshaling and grid configuration. | Memory layout matching at the kernel boundary is the load-bearing correctness piece. |
+| **K6** | First production kernel: FlashAttention-shaped fused attention kernel written in Kerrent, replacing the current attention decomposition. Transformer inference becomes competitive with PyTorch+CUDA for the attention block. | Customer-visible proof point; closes the dominant transformer performance gap identified in `docs/gap_synthesis.md` §Concrete cost picture. |
+
+**Phase 5c distinction.** Phase 5c (§5c: Triton Backend, above) describes a
+whole-program backend that emits Chelis's RISC DAG to Triton IR — i.e.,
+tensor-level Chelis is lowered through the existing IR pipeline, with Triton
+as the final code-generation target. Kerrent's K3 operates at a different
+layer: it lowers **user-authored kernel-level Chelis** (functions marked with
+the `kernel` keyword) through the new kernel IR to Triton IR. The two paths
+are independent; a Chelis program can use one, the other, both, or neither.
+Future agents must not conflate them.
+
+### Kerrent v1 guarantees (per `spec/design/kerrent.md` §Guarantees)
+
+- Dimension type checking at kernel boundaries (call-site shape mismatches
+  fail at type-check).
+- Dimension type checking inside kernel bodies (tile-level operations are
+  typed; `tile.dot` between mismatched tiles fails at type-check).
+- No undefined behavior from shape errors. The CUDA-class shape bugs become
+  compile-time errors.
+- Existing Chelis property verification extends to kernel-using code by
+  sampling at the function boundary. Kernel bodies themselves are opaque to
+  sampling in v1 (see Addendum KE for the body-level extension).
+- Cross-vendor portability: same source runs on NVIDIA via Triton's PTX
+  backend and on AMD via Triton's AMDGCN backend.
+
+What Kerrent v1 explicitly does **not** guarantee: algorithmic correctness of
+the kernel logic itself, performance bounds (Triton handles autotuning), or
+AD correctness through kernels (v1 kernels are forward-only).
+
+### Addendums KA–KF (post-v1 extensions)
+
+Six addendums extend Kerrent beyond v1. They are tracked here with priority
+tiers; none get roadmap phase rows or phase oracles because none are active
+phases. Each becomes a dispatch when its priority tier and the broader Chelis
+roadmap align.
+
+| ID | Addendum | Priority | Notes |
+|---|---|---|---|
+| **KA** | AD composition through kernels | **HIGH** (first post-v1) | Extends the AD transform to operate on kernel-level IR. A Kerrent kernel for forward computation gets a corresponding kernel for backward computation, generated by the AD transform at tile level. Composes with `spec/design/differentiable_language.md` (the D-track) — together they produce the AD-through-kernels capability no other framework offers. |
+| **KB** | Thread-level addressing | MEDIUM | Extends Kerrent with thread-level primitives — thread index types, shared memory with explicit synchronization, warp-level operations (shuffles, ballots). Lowering still goes through Triton where possible; falls back to direct MLIR for patterns Triton can't express. |
+| **KC** | Custom shared memory patterns | MEDIUM | Exposes shared memory as a region type with explicit allocation, access patterns, and synchronization. Routes around Triton's automatic allocation when the user is managing it manually. |
+| **KD** | MLIR-direct lowering | LOWER | Builds a Chelis GPU dialect parallel to (or replacing) Triton emission for patterns Triton's IR doesn't express well. Cuda-oxide-shaped path. The platonic ideal of Chelis-native kernel compilation but substantial work. |
+| **KE** | Verified kernel bodies | LOWER | Extends `chelis prove` and property verification to sample tile-level inputs and verify kernel-level properties. Dimension-typed-plus-property-verified GPU code doesn't exist anywhere. |
+| **KF** | Direct kernel platforms beyond NVIDIA and AMD | LOWER | Lowers Chelis's kernel IR through MLIR to target dialects for additional platforms (Apple Silicon via MLIR's Metal compute, embedded GPUs, novel accelerators). |
+
+The "v1 plus Addendum KA" combination is the strategically distinctive scope:
+v1 produces the kernel authorship capability; KA produces the AD-through-
+kernels capability no other framework offers. Everything else is opportunistic
+extension scheduled by customer pull.
+
+What is explicitly *not* in v1 scope: thread-level addressing, custom shared
+memory patterns, warp-level primitives, AD through kernels (forward-only in
+v1), property verification on kernel bodies beyond standard dimension typing.
+See `spec/design/kerrent.md` §What v1 doesn't include and §Addendums.
+
+---
+
 ## Ecosystem Library Decisions
 
 Evaluated via multi-agent review.

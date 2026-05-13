@@ -129,6 +129,27 @@ agent dispatch picks the executable test fixture for each phase.
 | H4 | Type-discipline integration suite: dimension types on loaded signatures, wrong-shape call-site rejection, property attachment + verification, AD composition (positive and negative — non-differentiable operator surfaces a pinned diagnostic), composition with hand-written Chelis preprocessing/post-processing — exact named test TBD when H4 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 4 | aspirational |
 | H5 | Corpus oracle: every program in the hydronnx examples directory survives `chelis fmt`/`check`/`eval`/`build`, the migration-guide snippets compile, and the worked image-classification / object-detection / tabular examples produce the documented outputs — exact named test TBD when H5 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 5 | aspirational |
 
+## Phase K (Kerrent — GPU kernel authorship)
+
+Committed scope per `spec/design/kerrent.md` and the
+`spec/12-roadmap.md` §Kerrent track. `Kerrent` is the Chelis language
+feature for authoring GPU kernels in Chelis source; `Triton` is the
+upstream kernel compiler Kerrent emits to. K0 is the spec lock;
+oracles for K1–K6 are named here as aspirational until the owning
+agent dispatch picks the executable test fixture for each milestone.
+Addendums KA–KF (per `spec/design/chelis_project_plan.md` §Kerrent
+Track) are post-v1 extensions and do not appear here.
+
+| Phase | Oracle command | Owning spec doc | Status |
+|---|---|---|---|
+| K0 | `grep -F "spec/design/kerrent.md" spec/12-roadmap.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the roadmap) | `spec/design/kerrent.md` §v1 milestones (Milestone 0 is the spec lock itself) | default gate (doc grep) |
+| K1 | Parser-correctness suite for the `kernel` annotation and the v1 tile-level primitives (`tile.load`, `tile.store`, `tile.dot`, `tile.reduce`, `tile.mask`, …); kernel-annotated functions get a distinct AST representation distinguishable from tensor-level functions — exact named test TBD when K1 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 1 | aspirational |
+| K2 | Kernel-IR-layer type-checking suite: tile-level operations are first-class IR nodes; dimension types compose through tile scope; mismatched-shape kernel bodies fail at type-check — exact named test TBD when K2 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 2 | aspirational |
+| K3 | Triton IR emission suite: each tile-level operation lowers to a defined Triton IR equivalent and the output validates against Triton's IR specification — exact named test TBD when K3 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 3 | aspirational |
+| K4 | Build-integration suite: kernel-annotated Chelis programs compile through `chelis build`; PTX/AMDGCN artifacts are produced and link cleanly; the Triton dependency is handled by the build system — exact named test TBD when K4 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 4 | aspirational |
+| K5 | Runtime-integration suite: kernel calls from tensor-level Chelis launch correctly against Triton artifacts; memory layout matching at the kernel boundary is correct; cross-vendor execution (NVIDIA via PTX, AMD via AMDGCN) produces matching results — exact named test TBD when K5 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 5 | aspirational |
+| K6 | FlashAttention proof point: a FlashAttention-shaped fused attention kernel written in Kerrent replaces the current attention decomposition; transformer inference achieves competitive performance vs PyTorch+CUDA for the attention block, with numerical agreement vs the existing decomposed path — exact named test TBD when K6 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 6 | aspirational |
+
 ## Phase M (Metal Backend)
 
 | Phase | Oracle command | Owning spec doc | Status |
