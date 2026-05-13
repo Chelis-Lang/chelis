@@ -1,13 +1,13 @@
 //! Wave 3 terminal red team for the 0.7.8 compiler-cleanup workstream.
 //!
 //! Adversarial fixtures for the implicit-copy fan-out v3 closures (PR #91)
-//! and the broader Shape A scope explicitly DEFERRED in the v3 diagnosis.
+//! and the broader Shape A scope that v3 explicitly deferred.
 //!
-//! Each fixture has a pinned expected outcome; the deferred-shape fixtures
-//! are pinned as `expect_err` to lock the current behavior. If the fix
-//! later extends Shape A to cover let/if tail-return shapes, the
-//! corresponding `expect_err` fixtures will need to flip to
-//! `expect_ok` — the test catches regressions in either direction.
+//! The broader Shape A fixtures originally pinned the deferred-shape
+//! TypeMismatch as `expect_err`; the 0.7.9 cleanup closed
+//! `Linearity-ShapeABroadReturn-F1` and they now expect `Ok` clean
+//! lowering.  Each fixture has a single pinned expected outcome that
+//! catches regressions in either direction.
 
 use chelis_ir::dag::Dag;
 use chelis_ir::lower::try_lower_program;
@@ -37,12 +37,13 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
 /// This fixture covers the let-tail-return shape called out in the
 /// diagnosis's sibling sweep as a §5-candidate follow-on.
 ///
-/// Per the diagnosis: `def f(x: &T) -> T = let y = x in y` is OUT of v3
-/// scope. We pin the current (failing) behavior so a future broader-Shape-A
-/// fix has a regression target. If the fix lands later and the body
-/// starts lowering cleanly, this assertion flips.
+/// PR #91's diagnosis flagged `def f(x: &T) -> T = { y = x; y }` as OUT
+/// of v3 scope.  The 0.7.9 cleanup closed `Linearity-ShapeABroadReturn-F1`
+/// by extending `shape_a_relaxed_return` with the `descend_to_tail_var`
+/// helper, so the let-tail shape now lowers cleanly. Companion fixtures
+/// in `implicit_copy_shape_a_broader_return.rs` pin the broader coverage.
 #[test]
-fn shape_a_let_tail_return_currently_rejects() {
+fn shape_a_let_tail_return_lowers_cleanly() {
     let source = r#"
 module Repro.ShapeABroader
 
@@ -53,33 +54,27 @@ def identity_via_let[a](x: &tensor[a, f32]) -> tensor[a, f32] = {
 "#;
     let result = surf_to_dag(source);
     assert!(
-        result.is_err(),
-        "PR #91's diagnosis explicitly defers let/if/match tail-return Shape A; \
-         if this case now lowers cleanly, broader Shape A may have shipped quietly. \
-         Result: {:?}",
+        result.is_ok(),
+        "Shape A broader-return fix should lower let-tail returns cleanly; got {:?}",
         result
     );
 }
 
-/// Shape A with `if` tail-return — also explicitly out of v3 scope per
-/// the diagnosis.
+/// Shape A with `if` tail-return.  The 0.7.9 broader-Shape-A fix's
+/// descent walks both branches of the desugared `(if cond then_e else_e)`
+/// triple and accepts when both resolve to the same bare-var name.
 #[test]
-fn shape_a_if_tail_return_currently_rejects() {
-    // Surf doesn't have a bare-if-return; use match (also called out) as
-    // the closest reachable equivalent that does the same thing.
+fn shape_a_if_tail_return_lowers_cleanly() {
     let source = r#"
 module Repro.ShapeAIf
 
-def identity_via_match[a](x: &tensor[a, f32], flag: bool) -> tensor[a, f32] =
-  match flag with
-  | true -> x
-  | false -> x
+def identity_via_if[a](x: &tensor[a, f32], flag: bool) -> tensor[a, f32] =
+  if flag then x else x
 "#;
     let result = surf_to_dag(source);
     assert!(
-        result.is_err(),
-        "PR #91's diagnosis defers match-tail-return Shape A; if this case now lowers \
-         cleanly, broader Shape A may have shipped without §5 closure. Result: {:?}",
+        result.is_ok(),
+        "Shape A broader-return fix should lower if-tail returns cleanly; got {:?}",
         result
     );
 }
