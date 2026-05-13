@@ -249,7 +249,28 @@ These are surfaced for orchestrator consideration; agents do not file
    broader case needs a body-tree walk to identify return-position
    sub-expressions. Out of v3 scope.
 
-2. **`vmap(...)`-app linearity classification**: if Shape B's fix is
-   applied symmetrically (grad and vmap), this is closed. If the fix
-   is applied only to grad initially, the vmap mirror should be
-   filed.
+## Final fix surface
+
+Shape A and Shape B together close in two coordinated diffs (one PR).
+Per the discovery contract, both fixes live upstream of the brief's
+nominated `lower.rs::insert_copy_nodes_for_consuming_fanout` site; the
+inserter is unchanged.
+
+- Shape A: `crates/chelis-types/src/infer.rs`'s `check_top_level`
+  def-body unify (initially around L4286). On failure, a relaxed retry
+  via `shape_a_relaxed_return` handles `body = (fn (params) (var x))`
+  whose inferred return is `Ref(R)` and declared return is `R`. The
+  helper structurally validates that the body and declared types
+  differ only by a top-level `Ref` at the return position. Broader
+  body shapes still surface the existing TypeMismatch.
+- Shape B: `crates/chelis-types/src/linearity.rs`'s `arg_is_borrowed`
+  helper adds an observational-higher-order-callee clause that returns
+  true for every arg index when the callee is `(grad ...)` or
+  `(vmap ...)`. The pipe-stage path (`check_pipe`) already routes
+  through `arg_is_borrowed`, so piped grad/vmap stages are covered
+  by the same change. Nested compositions like `(vmap (grad ...))`
+  match the outer tag.
+
+The vmap fixture
+`shape_b_vmap_call_with_trailing_borrow_lowers_cleanly` exercises the
+sibling sweep target directly.

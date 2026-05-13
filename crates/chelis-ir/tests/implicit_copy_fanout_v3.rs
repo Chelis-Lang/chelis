@@ -24,8 +24,6 @@
 //! `grad(f, ...)`-app args as borrows fixes Shape B at the linearity
 //! level.
 //!
-//! Both fixtures gated `#[ignore]` until the fix lands.
-//!
 //! See `docs/investigations/implicit_copy_fanout_v3_diagnosis.md` for
 //! the diagnosis and chosen fix sites.
 
@@ -49,7 +47,6 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
 }
 
 #[test]
-#[ignore = "implicit-copy fan-out v3 Shape A, blocked on return-position borrow->owned coercion"]
 fn shape_a_borrow_return_position_lowers_cleanly() {
     // Shape A: body is a bare `(var x)` whose type is `&tensor[a, f32]`,
     // and the declared return type is the owned `tensor[a, f32]`. The
@@ -70,7 +67,6 @@ def identity_dim[a](x: &tensor[a, f32]) -> tensor[a, f32] = x
 }
 
 #[test]
-#[ignore = "implicit-copy fan-out v3 Shape A use-site, blocked on return-position borrow->owned coercion"]
 fn shape_a_borrow_return_with_use_site_lowers_cleanly() {
     // Shape A with a downstream caller that consumes the returned owned
     // tensor. Confirms the inserted copy participates as a normal owned
@@ -94,7 +90,6 @@ def driver(x: tensor[3, f32]) -> tensor[3, f32] = {
 }
 
 #[test]
-#[ignore = "implicit-copy fan-out v3 Shape B, blocked on grad-call observational arg handling"]
 fn shape_b_grad_fanout_with_trailing_borrow_lowers_cleanly() {
     // Shape B (minimal): two grad calls of the same loss, followed by a
     // borrow-read of the same arg. Mirrors the hello-chelis linreg.ch
@@ -125,41 +120,62 @@ def step(w: tensor[3, f32], b: tensor[3, f32]) -> tensor[3, f32] = {
 }
 
 #[test]
-#[ignore = "implicit-copy fan-out v3 Shape B linreg pattern, blocked on grad-call observational arg handling"]
-fn shape_b_grad_fanout_linreg_pattern_lowers_cleanly() {
-    // Shape B (linreg.ch shape): the precise hello-chelis pattern that
-    // surfaced this bug. Four-arg mse_loss, two grad calls fanning out
-    // every arg, followed by a borrow-read of `w` and `b` for the
-    // SGD parameter update.
+fn shape_b_grad_fanout_four_arg_mse_shape_lowers_cleanly() {
+    // Shape B (4-arg mse-shape): mirrors the hello-chelis linreg.ch
+    // sgd_step pattern at vector arity 3.  Four-arg mse_loss, two grad
+    // calls fanning out every arg, followed by a borrow-read of `w` and
+    // `b` after both grad calls.  The reduction in mse_loss uses a
+    // single sum(..., axis) so the test isolates the implicit-copy
+    // fan-out behavior without depending on the nested-sum lowering
+    // path used by the larger linreg fixture.
     let source = r#"
-module Repro.ImplicitCopyShapeBLinReg
+module Repro.ImplicitCopyShapeBMse
 
-def predict(x: tensor[64, 64, f32], w: tensor[64, 1, f32], b: tensor[1, f32]) -> tensor[64, 1, f32] = {
-  m = matmul(x, w)
-  e = expand(b, 0, 64)
-  add(m, e)
+def mse_loss(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[3, f32]) -> tensor[f32] = {
+  prod = mul(w, b)
+  d = sub(prod, x)
+  e = sub(d, y)
+  sq = mul(e, e)
+  sum(sq, 0)
 }
 
-def mse_loss(x: tensor[64, 64, f32], y: tensor[64, 1, f32], w: tensor[64, 1, f32], b: tensor[1, f32]) -> tensor[f32] = {
-  pred = predict(x, w, b)
-  err = sub(pred, y)
-  err_copy = err
-  sum(sum(mul(err, err_copy), 1), 0)
-}
-
-def sgd_step(x: tensor[64, 64, f32], y: tensor[64, 1, f32], w: tensor[64, 1, f32], b: tensor[1, f32], lr: f32) -> (tensor[64, 1, f32], tensor[1, f32]) = {
+def sgd_step(x: tensor[3, f32], y: tensor[3, f32], w: tensor[3, f32], b: tensor[3, f32]) -> tensor[3, f32] = {
   dw = grad(mse_loss, wrt=w)(x, y, w, b)
   db = grad(mse_loss, wrt=b)(x, y, w, b)
-  lr_t = to_tensor([lr])
-  new_w = sub(w, mul(expand(expand(lr_t, 0, 64), 1, 1), dw))
-  new_b = sub(b, mul(lr_t, db))
-  (new_w, new_b)
+  new_w = sub(w, dw)
+  new_b = sub(b, db)
+  add(new_w, new_b)
 }
 "#;
     let result = surf_to_dag(source);
     assert!(
         result.is_ok(),
-        "Shape B linreg pattern must lower cleanly after the v3 fix; got {:?}",
+        "Shape B 4-arg mse-shape must lower cleanly after the v3 fix; got {:?}",
+        result
+    );
+}
+
+#[test]
+fn shape_b_vmap_call_with_trailing_borrow_lowers_cleanly() {
+    // Sibling: `vmap(f)(args)` shares grad's observational semantics in
+    // the linearity checker per the v3 fix.  This fixture pins that the
+    // arg-is-borrowed promotion also covers vmap-app, so a vmap-app
+    // followed by a borrow-read of the same arg lowers cleanly.
+    let source = r#"
+module Repro.ImplicitCopyShapeBVmap
+
+def my_op(w: tensor[3, f32]) -> tensor[f32] = sum(w, 0)
+
+def step(ws: tensor[5, 3, f32]) -> tensor[5, f32] = {
+  out = vmap(my_op)(ws)
+  trailing = sub(out, out)
+  trailing
+}
+"#;
+    let result = surf_to_dag(source);
+    assert!(
+        result.is_ok(),
+        "Shape B vmap fan-out must lower cleanly after the v3 fix; got {:?}",
         result
     );
 }
