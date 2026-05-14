@@ -166,18 +166,47 @@ pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
 }
 
 fn structure_score(exprs: &[chelis_deep::Expr]) -> f64 {
-    let warnings = chelis_deep::validate::validate(exprs);
+    let stats = structural_stats(exprs);
     if exprs.is_empty() {
         1.0
     } else {
-        let node_count = count_nodes(exprs).max(1);
-        let invalid_nodes = warnings
-            .iter()
-            .map(|warning| warning.offset)
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        let valid = node_count.saturating_sub(invalid_nodes);
+        let node_count = stats.total_nodes.max(1);
+        let valid = node_count.saturating_sub(stats.invalid_nodes);
         valid as f64 / node_count as f64
+    }
+}
+
+/// Structural statistics for a Deep expr list: the total AST node count
+/// and the number of nodes the Deep tag validator flagged.
+///
+/// Both fields are computed by pure structural walks
+/// (`chelis_deep::validate::validate` is per-expr; `count_nodes` is a
+/// recursive sum) with no cross-expr-list interaction. They are the
+/// inputs the cross-process chelis-std typecheck cache stores so the
+/// in-context fitness report can reconstitute a whole-program
+/// `total_nodes` and `structure` component byte-identically to the
+/// monolithic path, without re-walking the chelis-std library decls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StructuralStats {
+    /// Total AST nodes visited (the monolithic `total_nodes` for a
+    /// clean program).
+    pub total_nodes: usize,
+    /// Count of distinct node offsets the Deep tag validator flagged.
+    pub invalid_nodes: usize,
+}
+
+/// Compute [`StructuralStats`] for `exprs`. See the type docs for why
+/// the result is suitable for partition-and-recombine.
+pub fn structural_stats(exprs: &[chelis_deep::Expr]) -> StructuralStats {
+    let warnings = chelis_deep::validate::validate(exprs);
+    let invalid_nodes = warnings
+        .iter()
+        .map(|warning| warning.offset)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    StructuralStats {
+        total_nodes: count_nodes(exprs),
+        invalid_nodes,
     }
 }
 

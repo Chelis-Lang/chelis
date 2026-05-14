@@ -47,6 +47,36 @@ gate. They are high-level end-to-end signal, not inner-loop coverage.
 - `docs/investigations/integration_test_suite_trim.md`: recorded the
   heavy e2e split, the per-test keep/move categorization, and the
   dedupe candidates flagged for follow-up review.
+### Added - cross-process chelis-std typecheck cache
+
+`chelis check` and `chelis build` no longer re-typecheck the entire
+chelis-std import graph from scratch on every invocation. The
+typechecked + lowered chelis-std library sub-context is now content-
+addressed and cached on disk, shared across every process and every
+stdlib-importing fixture.
+
+- New `StdLibContext` sub-context cache in `chelis-compiler-api`,
+  keyed on the struct-format version, the bundled-stdlib version +
+  archive + shell hashes, and a hash of the actual linked chelis-std
+  decls. The decl hash keeps the key honest when a `chelis-std`
+  checkout is itself the root package being checked.
+- Three-layer build: cached chelis-std `StdLibContext` (Layer 1), the
+  non-chelis-std library decls checked `_with_context` against it
+  (Layer 2), and the entry checked against Layer 2 (Layer 3). The
+  monolithic typecheck path stays byte-identical and is reachable via
+  `CHELIS_STDLIB_CACHE_DISABLE=1`.
+- Mandatory XDG cache-dir fallback (`$XDG_CACHE_HOME/chelis/` then
+  `~/.cache/chelis/`) when `CHELIS_REEF_HOME` is unset, applied to both
+  the new typecheck cache and the existing `CompiledContext` cache, so
+  test workers that do not set `CHELIS_REEF_HOME` get cache reuse.
+- Atomic temp-file + `fs::rename` writes with a magic header, version
+  envelope, and payload SHA-256; corrupt or torn cache files fall
+  through to a full recompute rather than aborting.
+
+Acceptance oracle: `crates/chelis-cli/tests/stdlib_typecheck_cache_oracle.rs`
+and `stdlib_typecheck_cache_concurrency.rs` pin cold-vs-warm and
+monolithic-vs-layered byte-identical output, the stale-key negative,
+and concurrency / corruption resilience.
 
 ### Changed - backend integration test suite parsimony pass
 

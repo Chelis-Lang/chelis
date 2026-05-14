@@ -286,6 +286,15 @@ pub struct PreparedProgram {
     pub decls: Vec<Decl>,
     pub entry_decls: Vec<Decl>,
     pub package_root: PathBuf,
+    /// The chelis-std-only slice of `decls`, in the same relative order.
+    /// The cross-process chelis-std typecheck cache content-addresses
+    /// this. Empty when the graph has no chelis-std package.
+    pub stdlib_decls: Vec<Decl>,
+    /// `decls` minus `stdlib_decls`, in the same relative order: the
+    /// user package's own modules plus any non-stdlib path-deps. Checked
+    /// `_with_context` against the cached chelis-std sub-context. The
+    /// concatenation `stdlib_decls ++ non_stdlib_decls` equals `decls`.
+    pub non_stdlib_decls: Vec<Decl>,
 }
 
 /// A reef package graph that has been resolved, linked, and cached for reuse
@@ -310,6 +319,19 @@ pub struct PreparedReefGraph {
     /// reads this directly to feed the type checker / lowerer once and cache
     /// the result.
     pub linked_library_decls: Vec<Decl>,
+    /// The chelis-std-only slice of `linked_library_decls`, in the same
+    /// relative order. The cross-process chelis-std typecheck cache checks
+    /// and caches this sub-context under a content-addressed key derived
+    /// from the linked chelis-std decls. Empty when the graph has no
+    /// chelis-std package, such as a package that depends on nothing.
+    pub linked_stdlib_decls: Vec<Decl>,
+    /// `linked_library_decls` minus `linked_stdlib_decls`, in the same
+    /// relative order: the user package's own modules plus any non-stdlib
+    /// path-deps. The chelis-std typecheck cache checks this `_with_context`
+    /// against the cached chelis-std sub-context (Layer 2). The
+    /// concatenation `linked_stdlib_decls ++ linked_non_stdlib_library_decls`
+    /// equals `linked_library_decls`.
+    pub linked_non_stdlib_library_decls: Vec<Decl>,
     pub(crate) internal_maps: HashMap<(String, String), HashMap<String, String>>,
     pub(crate) dep_shells: BTreeMap<String, ShellPackage>,
     pub(crate) eval_module_prefix: String,
@@ -631,12 +653,19 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
     let graph = resolve_package_graph(&root, LoadOptions::default_for_load())?;
     write_lockfile(&root.join("reef.lock"), &build_lockfile(&graph))?;
     let entry_module = module_name_for_input(&root, file, &graph.root_package)?;
-    let linked = link_graph(&graph, std::slice::from_ref(&entry_module))?;
+    let linked = link_graph_with_package_tags(&graph, std::slice::from_ref(&entry_module))?;
     let mut decls = Vec::new();
     let mut entry_decls = Vec::new();
-    for module in linked {
+    let mut stdlib_decls = Vec::new();
+    let mut non_stdlib_decls = Vec::new();
+    for (package_name, module) in linked {
         if module.entry {
-            entry_decls.extend(module.decls.clone());
+            entry_decls.extend(module.decls.iter().cloned());
+        }
+        if package_name == CHELIS_STD_PACKAGE_NAME {
+            stdlib_decls.extend(module.decls.iter().cloned());
+        } else {
+            non_stdlib_decls.extend(module.decls.iter().cloned());
         }
         decls.extend(module.decls);
     }
@@ -644,6 +673,8 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         decls,
         entry_decls,
         package_root: root,
+        stdlib_decls,
+        non_stdlib_decls,
     }))
 }
 
@@ -688,7 +719,7 @@ pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, Strin
         ));
     };
     let graph = load_package_graph_for_eval(&root)?;
-    let linked = link_graph(&graph, &[])?;
+    let linked = link_graph_with_package_tags(&graph, &[])?;
     let internal_maps = build_internal_maps(&graph);
     let dep_shells = dependency_shells(&graph);
     let eval_module_prefix = graph
@@ -697,8 +728,19 @@ pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, Strin
         .map(|package| package.manifest.package.module_prefix.clone())
         .unwrap_or_default();
 
+    // Partition the linked library decls into the chelis-std slice and
+    // everything else, preserving relative order so the concatenation
+    // `stdlib ++ non_stdlib` equals `linked_library_decls`. The
+    // chelis-std typecheck cache content-addresses the stdlib slice.
     let mut linked_library_decls = Vec::new();
-    for module in linked {
+    let mut linked_stdlib_decls = Vec::new();
+    let mut linked_non_stdlib_library_decls = Vec::new();
+    for (package_name, module) in linked {
+        if package_name == CHELIS_STD_PACKAGE_NAME {
+            linked_stdlib_decls.extend(module.decls.iter().cloned());
+        } else {
+            linked_non_stdlib_library_decls.extend(module.decls.iter().cloned());
+        }
         linked_library_decls.extend(module.decls);
     }
 
@@ -706,6 +748,8 @@ pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, Strin
         package_root: root,
         graph,
         linked_library_decls,
+        linked_stdlib_decls,
+        linked_non_stdlib_library_decls,
         internal_maps,
         dep_shells,
         eval_module_prefix,
@@ -757,12 +801,20 @@ pub fn compile_with_reef_graph(
     let rewritten_entry_decls = rewrite_entry_decls_with_reef_graph(graph, entry_decls)?;
 
     let mut decls = graph.linked_library_decls.clone();
-    decls.extend(rewritten_entry_decls);
+    decls.extend(rewritten_entry_decls.iter().cloned());
+
+    // The eval entry decls are not chelis-std; they join the non-stdlib
+    // partition. `stdlib_decls` is the graph's already-partitioned
+    // chelis-std slice.
+    let mut non_stdlib_decls = graph.linked_non_stdlib_library_decls.clone();
+    non_stdlib_decls.extend(rewritten_entry_decls);
 
     Ok(PreparedProgram {
         decls,
         entry_decls: entry_decls.to_vec(),
         package_root: graph.package_root.clone(),
+        stdlib_decls: graph.linked_stdlib_decls.clone(),
+        non_stdlib_decls,
     })
 }
 
@@ -4436,6 +4488,23 @@ fn effect_name(effect: &EffectExpr) -> String {
 }
 
 fn link_graph(graph: &PackageGraph, entry_modules: &[String]) -> Result<Vec<LinkedModule>, String> {
+    Ok(link_graph_with_package_tags(graph, entry_modules)?
+        .into_iter()
+        .map(|(_package_name, module)| module)
+        .collect())
+}
+
+/// Like [`link_graph`], but each linked module is paired with the name of
+/// the package it came from. The cross-process chelis-std typecheck cache
+/// uses this to partition the linked library decls into the chelis-std
+/// portion (cached under a content-addressed sub-key) and everything
+/// else. Iteration order matches `link_graph` exactly (a `BTreeMap` walk
+/// over `graph.packages`, then `package.modules`), so callers that flatten
+/// either result get identical decl ordering.
+fn link_graph_with_package_tags(
+    graph: &PackageGraph,
+    entry_modules: &[String],
+) -> Result<Vec<(String, LinkedModule)>, String> {
     let internal_maps = build_internal_maps(graph);
     let dep_shells = dependency_shells(graph);
 
@@ -4447,7 +4516,7 @@ fn link_graph(graph: &PackageGraph, entry_modules: &[String]) -> Result<Vec<Link
                     .iter()
                     .any(|entry_module| entry_module == &module.module_name);
             let decls = rewrite_module_decls(module, graph, &internal_maps, &dep_shells)?;
-            linked.push(LinkedModule { decls, entry });
+            linked.push((package_name.clone(), LinkedModule { decls, entry }));
         }
     }
     Ok(linked)

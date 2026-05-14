@@ -425,6 +425,7 @@ dependencies = [
  "chelis-ir",
  "chelis-macros",
  "chelis-reef",
+ "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
  "chelis-validate",

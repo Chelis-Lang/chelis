@@ -371,16 +371,25 @@ impl CompiledContext {
         package_id: (&str, &str),
         source_hash: ContextHash,
     ) -> PathBuf {
+        reef_home
+            .join(".cache")
+            .join("compiled")
+            .join(Self::cache_file_name(package_id, source_hash))
+    }
+
+    /// The bare `<name>-<version>-<prefix>.ctx` cache file name for a
+    /// package. Split out from [`cache_path_for`] so callers that resolve
+    /// the cache directory via the XDG-fallback helper
+    /// (`stdlib_cache::cache_dir_for`) can join the same file name onto
+    /// it.
+    pub fn cache_file_name(package_id: (&str, &str), source_hash: ContextHash) -> String {
         let (name, version) = package_id;
         let prefix_hex = hex_prefix(&source_hash.0, 8);
         // Sanitize to keep the filename POSIX-friendly across odd package
         // names (reef enforces a stricter rule, but we don't trust it here).
         let safe_name = sanitize_path_component(name);
         let safe_version = sanitize_path_component(version);
-        reef_home
-            .join(".cache")
-            .join("compiled")
-            .join(format!("{safe_name}-{safe_version}-{prefix_hex}.ctx"))
+        format!("{safe_name}-{safe_version}-{prefix_hex}.ctx")
     }
 
     /// Read-only borrow of the underlying [`PreparedReefGraph`]. Phase H
@@ -428,15 +437,24 @@ pub fn load_or_compile_for_package(
     package_dir: &Path,
     verbose_corruption_to_stderr: bool,
 ) -> Result<CompiledContext, CompilerError> {
-    // Phase K guardrail: if `reef_home` is empty (caller unset
-    // `CHELIS_REEF_HOME`), the disk cache would land at a relative
-    // `.cache/compiled/...` path in CWD — leaking artifacts into the
-    // user's working tree. Bypass the cache entirely in that case and
-    // delegate to a pure `compile_reef_context` build. The user opts
-    // in to the disk cache by setting `CHELIS_REEF_HOME`.
-    if reef_home.as_os_str().is_empty() {
-        return compile_reef_context(reef_home, package_dir);
-    }
+    // Resolve the compiled-context cache directory. When `CHELIS_REEF_HOME`
+    // is set, `reef_home` is non-empty and the cache lives at
+    // `<reef_home>/.cache/compiled/`. When it is unset, `reef_home` is
+    // empty and a bare `<reef_home>/.cache/compiled/...` join would land
+    // at a relative path in CWD, leaking artifacts into the working tree
+    // — so resolve the XDG fallback (`$XDG_CACHE_HOME/chelis/compiled/`
+    // -> `~/.cache/chelis/compiled/`) instead. This is the same fallback
+    // the chelis-std typecheck cache uses; it un-gates the disk cache for
+    // the no-`CHELIS_REEF_HOME` test-worker workload. Only when none of
+    // the three roots resolves do we fall through to an uncached compile.
+    let cache_dir = if reef_home.as_os_str().is_empty() {
+        match crate::stdlib_cache::cache_dir_for("compiled") {
+            Some(dir) => dir,
+            None => return compile_reef_context(reef_home, package_dir),
+        }
+    } else {
+        reef_home.join(".cache").join("compiled")
+    };
     // Step 1: walk the reef graph + hash every source file. This is the
     // mandatory pre-work for both the cache probe AND a full compile, so
     // we always pay it. On Coral-shape packages this is ~5s; the savings
@@ -457,8 +475,10 @@ pub fn load_or_compile_for_package(
     };
     let source_hash = ContextHash::from_digests(&live_digests);
     let (root_name, root_version) = live_graph.root_package_id();
-    let cache_path =
-        CompiledContext::cache_path_for(reef_home, (root_name, root_version), source_hash);
+    let cache_path = cache_dir.join(CompiledContext::cache_file_name(
+        (root_name, root_version),
+        source_hash,
+    ));
 
     // Step 2: probe the disk cache. A clean miss (Ok(None)) is fine.
     // Corrupt / version-skewed / hash-mismatched files fall through to a
