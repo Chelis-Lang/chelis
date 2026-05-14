@@ -292,6 +292,77 @@ precision filter from the W5 P0 fix remains locked (no `RiscOp::BlasMatmul`
 replacement for any non-F32 case). Test: `blas_rejection_cross_product_adversarial.rs::
 nonsilent_rejection_invariant_for_every_w5_rejected_precision`.
 
+## Post-0.7.9 test-infrastructure workstream (shipped in v0.7.10)
+
+A post-0.7.9 workstream that targeted CI wall-clock, test-suite quality, and
+two pre-existing compiler bugs surfaced by the downstream cascade. Recorded
+here as a completion anchor. Shipped in the `v0.7.10` release.
+
+**Headline CI win:** the per-PR `Integration Tests` job dropped from a
+~11.7min baseline to ~5.5min — the lever was splitting the heavyweight
+end-to-end suite (real `chelis build` + gcc + run, real `reef build` /
+`reef install`) off the per-PR gate onto a nightly + manual `heavy-e2e.yml`
+workflow, so per-PR CI is no longer gated by tests that cannot parallelize
+within a single invocation.
+
+Closures:
+
+- **Cross-process chelis-std typecheck cache** (PR #127). `chelis check` /
+  `chelis build` no longer re-typecheck the entire chelis-std import graph
+  per invocation; the typechecked + lowered chelis-std library sub-context
+  is content-addressed and cached on disk (`StdLibContext`), reused across
+  every process and every stdlib-importing fixture. Local `chelis check` of
+  a stdlib-importing file is ~13x faster warm.
+- **Heavyweight e2e split** (PR #126). New `.github/workflows/heavy-e2e.yml`
+  runs the explicitly-named heavy suite nightly + on `workflow_dispatch`
+  only; `.config/nextest.toml` `default`/`ci` profiles exclude it, the
+  `nightly` profile includes exactly it. Partition invariant locked by
+  `scripts/test_nextest_profile_partition.py`.
+- **e2e test parsimony pass** (PRs #121-124, #136). Deduped and consolidated
+  the chelis-cli / backend / ir / types test clusters; `production_stdlib_typechecks`
+  returned to the per-PR gate once the typecheck cache made it cheap.
+- **Toolchain footgun guards** (PRs #125, #133). A test-timing budget
+  (`scripts/test_timing_check.py` + committed baseline), em-dash lint
+  visibility (severity-bucketed `chelis lint` output — the recurring §8.6
+  footgun was visibility, not a parser gap), and a `gate.py` CI-parity lock
+  (`scripts/gate.py` is the single source of truth; the parity test catches
+  both `cargo` and `chelis` invocations hand-inlined into CI gate steps).
+- **CompiledContext cache package-identity + compiler-version keys**
+  (PR #130). HIGH-severity: the Phase K compiled-context disk cache keyed
+  only on `(package_name, package_version, source_hash)` — two packages at
+  distinct on-disk roots with identical name+version+source collided on one
+  cache file. Latent until the typecheck-cache work added an XDG cache-dir
+  fallback that un-gated the cache for the no-`CHELIS_REEF_HOME` case. Fix
+  folds a canonicalized `package_root` + `COMPILER_VERSION` `CacheIdentity`
+  into the cache file name, the on-disk envelope, and the `load_if_fresh`
+  freshness check; cache format version bumped 3 -> 4.
+- **Negative-axis + rank-0 standalone-parameter IR lowering** (PR #132).
+  Two pre-existing panics (present on the v0.7.9 tag) that shared one
+  symptom — `chelis eval` / `chelis test` panicking with `softmax axis
+  requires a statically known axis in IR lowering` for any package linking
+  bundled chelis-std. (a) `extract_axis` cast a negative axis literal
+  straight to `usize`; negative axes are now a uniform supported convention
+  across spec, checker, and lowering. (b) A def whose parameter types come
+  from a separate `sig` declaration lost those types under standalone
+  library lowering, binding params to a rank-0 default; the checker now
+  stamps declared sig param types onto the `(params ...)` node. This was
+  the downstream-cascade blocker — it unblocks `chelis test` for every
+  package that links chelis-std.
+- **Atomic reef package-cache writes** (PR #137). Pre-existing concurrent-
+  build race: `load_registry_package` extracted a package archive into the
+  shared `$CHELIS_REEF_HOME/cache/<hash>/` directory in place, so a
+  concurrent `chelis reef build` could read a half-written `reef.toml`. Fix
+  unpacks into a unique sibling staging dir and `fs::rename`s it into place
+  (same-directory rename is atomic).
+- **Adversarial coverage + test naming cleanup** (PRs #129, #134, #138-140).
+  A terminal red-team added adversarial coverage for the typecheck cache,
+  the e2e split partition invariant, and the toolchain guards (it is what
+  surfaced PR #130). 84 scaffolding-named test files (`phase3*`, `wsa*`,
+  `wsc*`, `rt*`, `s*`, `red_team_*` stamps) were renamed to describe what
+  each suite verifies; pure renames, every test count unchanged.
+
+No tracked follow-ups remain open from this workstream.
+
 ## Standalone follow-up entries (filed post-W7)
 
 These were previously narrative tail-references inside the M5-follow-up
