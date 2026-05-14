@@ -53,6 +53,10 @@ jobs:
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -73,9 +77,17 @@ jobs:
       # the heavyweight binaries (each test compiles/checks/builds
       # chelis-std). `cargo nextest` schedules tests from all binaries in
       # a single global thread pool, overlapping the heavyweight work.
+      #
+      # GitHub `ubuntu-latest` runners are 4 vCPU, so a single nextest
+      # job's wall clock is floored by the core count: ~543s of test
+      # execution does not compress below ~135s/core. To get under the
+      # CI time target this job is a 4-way matrix using nextest's
+      # deterministic `--partition count:N/4` sharding. Each shard runs a
+      # disjoint, exhaustive quarter of the workspace tests in parallel;
+      # the union across shards is exactly the full suite.
       # See docs/investigations/ci_integration_test_runtime_diagnosis.md.
-      - name: Integration tests
-        run: cargo nextest run --workspace
+      - name: Integration tests (shard ${{ matrix.shard }}/4)
+        run: cargo nextest run --workspace --partition count:${{ matrix.shard }}/4
 
   loc-report:
     name: LOC Report
