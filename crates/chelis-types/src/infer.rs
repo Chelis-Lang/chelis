@@ -5075,6 +5075,30 @@ fn infer_top_level(
             let unify_result = unify(&body_ty, &decl_ty, subst);
             let resolved_body = subst.apply(&body_ty);
             let resolved_decl = subst.apply(&decl_ty);
+            // Declared-dim rigidity check (TypeCheck-FreeDimVarUnification-F1
+            // Path B). The declared signature's param positions introduce
+            // the universally-quantified dim parameters; after the
+            // post-body sig-unify above, two distinct declared dims must
+            // not have collapsed into one another (and none may have been
+            // pinned to a concrete literal). This runs here, not inside
+            // `infer_def_body_with_sig`, because the collapse for an
+            // annotated-param body happens in the sig-unify itself, not
+            // during body inference. The body's tail returns the wrong
+            // declared dim (`def g[n, m](x: tensor[n, f32],
+            // y: tensor[m, f32]) -> tensor[n, f32] = y`), and the
+            // structural relaxed-retry guard does not see it because the
+            // initial unify already succeeded by collapsing `n` and `m`.
+            let mut declared_dvars: Vec<DimVar> = Vec::new();
+            if let Type::Fn(decl_params, _) = &decl_ty {
+                for t in decl_params {
+                    for dv in crate::env::free_dvars(t) {
+                        if !declared_dvars.contains(&dv) {
+                            declared_dvars.push(dv);
+                        }
+                    }
+                }
+            }
+            check_declared_dvars_rigid(&declared_dvars, subst, errors);
             // Implicit-copy fan-out v3 Shape A relaxed retry: if the
             // initial unify fails and the body's tail position resolves
             // to a `(var x)` reference whose declared return is owned
@@ -9763,6 +9787,84 @@ fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
     children(list).first().and_then(symbol_name)
 }
 
+/// Post-body rigidity check for a def's declared dimension parameters.
+///
+/// `declared_dvars` are the dim variables introduced by the declared
+/// parameter signatures, snapshotted before body inference. After the
+/// body is inferred, each declared dim parameter is universally
+/// quantified and must stay distinct: the body must type-check for
+/// *all* instantiations of those dims.
+///
+/// Two failure modes are flagged here, both `DimensionMismatch`:
+///
+/// - `Dim::Var -> Dim::Lit`: the body forced a polymorphic dim
+///   parameter to a concrete literal (Nautilus Bug 2). The signature's
+///   polymorphism claim is self-contradictory.
+/// - `Dim::Var -> Dim::Var` (or any shared resolution) collapse: two
+///   *distinct* declared dim parameters resolved to the *same*
+///   dimension after body inference. The body unified two
+///   universally-quantified dim parameters that must stay distinct.
+///   This is Path B of `TypeCheck-FreeDimVarUnification-F1` (SR-LEAK-A):
+///   `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
+///   tensor[n, f32] = y` collapses `n` and `m` via free `unify_dim`
+///   and never routes through the Shape A relaxed-retry guard.
+///
+/// A single declared dim parameter appearing in multiple param
+/// positions (`def h[n](x: tensor[n], y: tensor[n])`) is one dvar and
+/// never trips the collapse check.
+fn check_declared_dvars_rigid(
+    declared_dvars: &[DimVar],
+    subst: &Subst,
+    errors: &mut Vec<CheckError>,
+) {
+    // First resolved dim seen -> the declared dvar that produced it.
+    // A second declared dvar resolving to the same dim is a collapse.
+    let mut seen: HashMap<Dim, DimVar> = HashMap::new();
+    for dv in declared_dvars {
+        let resolved = subst.apply_dim(&Dim::Var(*dv));
+        if let Dim::Lit(n) = resolved {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "polymorphic dim variable forced to concrete Lit({n}) by function body: \
+                     declared dim parameters must remain polymorphic"
+                ),
+                vec![
+                    "Replace the polymorphic dim with the concrete literal in the signature, or \
+                     ensure the body does not pin the dim to a specific size"
+                        .to_string(),
+                ],
+            ));
+            continue;
+        }
+        // A declared dim parameter that resolves to itself (still
+        // unbound) is the legitimate polymorphic case; it cannot
+        // collide with another declared dvar's distinct identity.
+        if let Some(&prev) = seen.get(&resolved) {
+            if prev != *dv {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "distinct declared dim parameters d{} and d{} were unified by the \
+                         function body: declared dim parameters are rigid and must remain \
+                         distinct",
+                        prev.0, dv.0
+                    ),
+                    vec![
+                        "The body returns or constrains a value whose dimension differs from \
+                         the declared one. Use the same dim parameter on both sides if they \
+                         are meant to be equal, or fix the body so each declared dim stays \
+                         independent"
+                            .to_string(),
+                    ],
+                ));
+            }
+        } else {
+            seen.insert(resolved, *dv);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn infer_fn(
     list: &deep::List,
@@ -9792,11 +9894,12 @@ fn infer_fn(
     }
 
     // Snapshot the dimension variables introduced by the declared parameter
-    // signatures. If the body later forces any of them to a concrete literal,
-    // the signature's polymorphism claim is self-contradictory (Nautilus Bug 2):
-    // the user wrote `def f[m, n](x: tensor[m, n, f32])` but the body body
-    // demands `tensor[2, 2, f32]`. We flag this post-body so legitimate
-    // polymorphic uses (where the dvar stays unbound) still type-check.
+    // signatures. The post-body `check_declared_dvars_rigid` call flags both
+    // (a) a declared dim forced to a concrete literal (Nautilus Bug 2) and
+    // (b) two distinct declared dims collapsed into one another by the body
+    // (Path B of TypeCheck-FreeDimVarUnification-F1). We flag this post-body
+    // so legitimate polymorphic uses (where each dvar stays unbound and
+    // distinct) still type-check.
     let mut declared_dvars: Vec<DimVar> = Vec::new();
     for t in &param_types {
         for dv in crate::env::free_dvars(t) {
@@ -9822,23 +9925,7 @@ fn infer_fn(
         total_nodes,
     );
 
-    for dv in &declared_dvars {
-        let resolved = subst.apply_dim(&Dim::Var(*dv));
-        if let Dim::Lit(n) = resolved {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "polymorphic dim variable forced to concrete Lit({n}) by function body: \
-                     declared dim parameters must remain polymorphic"
-                ),
-                vec![
-                    "Replace the polymorphic dim with the concrete literal in the signature, or \
-                     ensure the body does not pin the dim to a specific size"
-                        .to_string(),
-                ],
-            ));
-        }
-    }
+    check_declared_dvars_rigid(&declared_dvars, subst, errors);
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
@@ -9931,17 +10018,14 @@ fn infer_def_body_with_sig(
         param_types.push(ty);
     }
 
-    // Mirror infer_fn's polymorphic-dim self-pin check: if the body forces
-    // any declared dim variable to a concrete literal, surface it.
-    let mut declared_dvars: Vec<DimVar> = Vec::new();
-    for t in &param_types {
-        for dv in crate::env::free_dvars(t) {
-            if !declared_dvars.contains(&dv) {
-                declared_dvars.push(dv);
-            }
-        }
-    }
-
+    // Note: the declared-dim rigidity check (both the Var->Lit pin and
+    // the Var->Var collapse of TypeCheck-FreeDimVarUnification-F1) runs
+    // at the caller's defsig site, *after* the post-body sig-unify. The
+    // sig-unify is where two distinct declared dims actually collapse
+    // for an annotated-param body like
+    // `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
+    // tensor[n, f32] = y`, so checking here (pre-sig-unify) would miss
+    // it. Running it only at the caller also avoids double-reporting.
     let body_expr = &kids[1];
     let body_ty = infer_expr(
         body_expr,
@@ -9953,24 +10037,6 @@ fn infer_def_body_with_sig(
         typed_nodes,
         total_nodes,
     );
-
-    for dv in &declared_dvars {
-        let resolved = subst.apply_dim(&Dim::Var(*dv));
-        if let Dim::Lit(n) = resolved {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "polymorphic dim variable forced to concrete Lit({n}) by function body: \
-                     declared dim parameters must remain polymorphic"
-                ),
-                vec![
-                    "Replace the polymorphic dim with the concrete literal in the signature, or \
-                     ensure the body does not pin the dim to a specific size"
-                        .to_string(),
-                ],
-            ));
-        }
-    }
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
