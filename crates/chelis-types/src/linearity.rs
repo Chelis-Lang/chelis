@@ -22,6 +22,24 @@ impl LinearityInfo {
             .entry(span.offset)
             .or_insert(input_index);
     }
+
+    /// Merge two linearity infos into one. Used by
+    /// [`crate::CheckedProgram::compose`] to reconstitute a whole-program
+    /// linearity map from a cached library half plus a freshly-checked
+    /// new-code half. `self` (the library half) wins on an offset clash;
+    /// in practice the two halves carry disjoint span offsets because
+    /// they come from separately-parsed source regions.
+    pub fn merged_with(&self, other: &LinearityInfo) -> LinearityInfo {
+        let mut reusable_inputs_by_offset = self.reusable_inputs_by_offset.clone();
+        for (offset, input_index) in &other.reusable_inputs_by_offset {
+            reusable_inputs_by_offset
+                .entry(*offset)
+                .or_insert(*input_index);
+        }
+        LinearityInfo {
+            reusable_inputs_by_offset,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

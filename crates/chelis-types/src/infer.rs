@@ -85,6 +85,63 @@ impl CheckedProgram {
         self.linearity = linearity;
         self
     }
+
+    /// Compose a `library` checked program with a `new_code` checked
+    /// program into a single whole-program `CheckedProgram`, equivalent
+    /// to what `check_ir_program(library_exprs ++ new_code_exprs)` plus
+    /// effects + linearity would produce — provided `new_code` was
+    /// produced by the `_with_context` variants stacked on `library`.
+    ///
+    /// This is the seam the cross-process chelis-std typecheck cache's
+    /// `chelis build` path uses: `library` is the cached chelis-std
+    /// sub-context's `library_checked` and `new_code` is the
+    /// `_with_context`-checked non-chelis-std decls + entry. The result
+    /// is the one monolithic `CheckedProgram` the `build` lowering
+    /// pipeline consumes, without re-inferring chelis-std.
+    ///
+    /// Composition rule (mirrors the monolithic `library ++ new` shape):
+    /// - `annotated_exprs`: `library` exprs followed by `new_code` exprs,
+    ///   in that order. Monolithic `check_ir_program` annotates in
+    ///   source order, and the linked program places library decls
+    ///   before the entry, so this ordering matches.
+    /// - `type_env`: union, `new_code` winning on shadow. `new_code`'s
+    ///   `type_env` is already unioned with the library's by the
+    ///   `_with_context` builder, so this just back-fills any
+    ///   library-only entries.
+    /// - `linearity`: the two `reusable_inputs_by_offset` maps merged.
+    /// - `signature_inference`: the two `functions` maps merged,
+    ///   `new_code` winning on a name clash.
+    ///
+    /// The monolithic-vs-layered acceptance oracle is what proves this
+    /// composition is byte-identical to the monolithic path; a
+    /// divergence is a compiler-correctness bug, not a tuning knob.
+    pub fn compose(library: &CheckedProgram, new_code: &CheckedProgram) -> Self {
+        let mut annotated_exprs =
+            Vec::with_capacity(library.annotated_exprs.len() + new_code.annotated_exprs.len());
+        annotated_exprs.extend(library.annotated_exprs.iter().cloned());
+        annotated_exprs.extend(new_code.annotated_exprs.iter().cloned());
+
+        let mut type_env = new_code.type_env.clone();
+        for (name, ty) in &library.type_env {
+            type_env.entry(name.clone()).or_insert_with(|| ty.clone());
+        }
+
+        let linearity = library.linearity.merged_with(&new_code.linearity);
+
+        let mut signature_inference = library.signature_inference.clone();
+        for (name, sig) in &new_code.signature_inference.functions {
+            signature_inference
+                .functions
+                .insert(name.clone(), sig.clone());
+        }
+
+        Self {
+            annotated_exprs,
+            type_env,
+            linearity,
+            signature_inference,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -386,6 +443,134 @@ pub fn build_compiled_library_context(
     // union step is a no-op and `annotated_type_env ==
     // library_ir_annotated`.
     let checked = CheckedProgram::from_parts(library_annotated, library_ir_annotated);
+
+    Ok((type_env, checked))
+}
+
+/// Layered sibling of [`build_compiled_library_context`]: build a library
+/// context for `library_exprs` *stacked on top of* an existing `base`
+/// context instead of on the empty (builtins + prelude) state.
+///
+/// This is the seam the cross-process chelis-std typecheck cache uses for
+/// its Layer 2 build: `base` is the cached chelis-std sub-context's
+/// `TypeEnv`, and `library_exprs` is the non-chelis-std library decls
+/// (the user package's own modules + path-deps). The chelis-std library
+/// is checked once, cached, and never re-walked here; only the
+/// `library_exprs` passed in are inferred + annotated.
+///
+/// Behavior contract:
+/// - `library_exprs` are checked against `base` exactly as
+///   [`check_ir_with_context`] would check new code against `base` — base
+///   bindings are visible, base ADT constructor sets remain visible to
+///   `match` exhaustivity, and `library_exprs` bindings shadow but do not
+///   consume base bindings.
+/// - The returned `TypeEnv` carries the **union** of base + `library_exprs`
+///   declared types and def-name sets, so a subsequent
+///   `check_ir_with_context` against it resolves `(var ...)` references
+///   into both the base (chelis-std) and the `library_exprs` (package)
+///   layers. `library_exprs` types win on shadow.
+/// - The returned `CheckedProgram` carries the `library_exprs` annotated
+///   bodies (NOT the base bodies — base bodies live in the base context's
+///   own `CheckedProgram`). Downstream effects / linearity / lowering must
+///   compose this against the base context's `CheckedProgram` /
+///   `LoweredLibrary` via the `_with_context` variants, exactly as the
+///   monolithic-vs-layered split requires.
+/// - On any error the same `Err(InferResult)` is returned that
+///   `check_ir_with_context(base, library_exprs)` would return.
+pub fn build_compiled_library_context_with_base(
+    base: &TypeEnv,
+    library_exprs: &[deep::Expr],
+) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    // Seed from the base context's snapshot rather than the empty state.
+    let mut state = base.inner().clone();
+
+    // `library_exprs` declared types (IR), layered on top of the base's.
+    let new_ir = build_ir_type_env(library_exprs);
+    let combined_ir: HashMap<String, deep::Expr> = state
+        .ir_types
+        .iter()
+        .chain(new_ir.iter())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    // Base is already validated; run inference + validators on
+    // `library_exprs` only. The IR env passed to inference is the
+    // `library_exprs`' own declared types (base schemes are already in
+    // `state.env`); the combined IR env is supplied to the validators so
+    // `(var basefoo)` references resolve to the base's declared type.
+    let mut result = infer_ir_program_with_state(
+        library_exprs,
+        &new_ir,
+        &mut state,
+        &combined_ir,
+        /* run_validate_passes_on = */ None,
+    );
+    validate_ir_program(library_exprs, &combined_ir, &mut result.errors);
+    validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    validate_polymorphic_op_constraints(library_exprs, &combined_ir, &mut result.errors);
+    suppress_unbound_for_cycle_members_against_context(
+        library_exprs,
+        &base.inner().library_def_names,
+        &mut result.errors,
+    );
+    if !result.errors.is_empty() {
+        return Err(result);
+    }
+
+    // Capture `library_exprs` def names, unioned with the base's, so a
+    // subsequent `_with_context` check against the returned TypeEnv
+    // distinguishes library refs (base + this layer) from new-code refs.
+    let mut library_def_names = base.inner().library_def_names.clone();
+    for expr in top_level_decl_items(library_exprs) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            library_def_names.insert(name.to_string());
+        }
+    }
+
+    let _ = result.errors.drain(..);
+
+    // Annotate ONLY the `library_exprs`, starting from the populated
+    // `state` so base names resolve during annotation.
+    let library_annotated: Vec<deep::Expr> = library_exprs
+        .iter()
+        .map(|e| {
+            annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
+        })
+        .collect();
+    let new_ir_annotated = build_ir_type_env(&library_annotated);
+
+    // The returned TypeEnv's `ir_types` is the union: base declared types
+    // plus this layer's, this layer winning on shadow.
+    let mut combined_ir_annotated = new_ir_annotated.clone();
+    for (name, ty) in &base.inner().ir_types {
+        combined_ir_annotated
+            .entry(name.clone())
+            .or_insert_with(|| ty.clone());
+    }
+
+    let type_env = TypeEnv::from_inner(TypeEnvInner {
+        env: state.env,
+        var_gen: state.var_gen,
+        subst: state.subst,
+        adt_reg: state.adt_reg,
+        ir_types: combined_ir_annotated,
+        library_def_names,
+    });
+
+    // The CheckedProgram carries this layer's annotated bodies plus a
+    // unioned `type_env` so downstream `_with_context` passes resolve
+    // both base and this-layer `(var ...)` references. This mirrors the
+    // `check_ir_with_context` returned-CheckedProgram contract.
+    let mut checked_type_env = new_ir_annotated;
+    for (name, ty) in &base.inner().ir_types {
+        checked_type_env
+            .entry(name.clone())
+            .or_insert_with(|| ty.clone());
+    }
+    let checked = CheckedProgram::from_parts(library_annotated, checked_type_env);
 
     Ok((type_env, checked))
 }

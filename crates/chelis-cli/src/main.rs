@@ -1197,35 +1197,82 @@ fn cmd_check_one(
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
         emit_advisory_lint_warnings_for_file(file);
     }
-    let (decls, _) = load_check_build_decls(file)?;
-    let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-    let mut report = chelis_types::check_ir_fitness(&deep_exprs);
-    let typed_program = chelis_types::check_typed_program(&deep_exprs);
-    let inferred_signatures_json = if show_inferred {
-        typed_program
-            .as_ref()
-            .ok()
-            .map(format_inferred_signatures_json)
-            .unwrap_or_else(|| "[]".to_string())
+    let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
+
+    // Layered fast path: when the input resolves inside a reef package
+    // (so the chelis-std / non-chelis-std partition is available) and the
+    // chelis-std typecheck cache is not disabled, check the non-chelis-std
+    // decls `_with_context` against the cached chelis-std sub-context. A
+    // type/macro error in the non-chelis-std decls returns `Ok(None)` and
+    // we fall through to the monolithic checker so the error-path report
+    // stays byte-identical.
+    let layered = if let Some(prepared) = &prepared {
+        if chelis_compiler_api::cache_disabled() {
+            None
+        } else {
+            chelis_compiler_api::check_layered(&prepared.stdlib_decls, &prepared.non_stdlib_decls)
+                .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
+        }
     } else {
-        String::new()
+        None
     };
-    // Linearity-F3 PR 2: `check_linearity` now returns module-wrapped
-    // violations as errors (the PR 1 warning channel was removed once
-    // the in-repo corpus was confirmed clean), so this is a flat
-    // Ok/Err dispatch with no separate warnings vector.
-    let (effect_errors, linearity_errors) = match &typed_program {
-        Ok(checked) => match chelis_effects::check_program(checked) {
-            Ok(checked) => (
-                Vec::new(),
-                chelis_types::check_linearity(&checked)
-                    .err()
-                    .unwrap_or_default(),
-            ),
-            Err(errors) => (errors, Vec::new()),
-        },
-        Err(_) => (Vec::new(), Vec::new()),
-    };
+
+    let (mut report, effect_errors, linearity_errors, inferred_signatures_json) =
+        if let Some(layered) = layered {
+            let inferred = if show_inferred {
+                format_inferred_signatures_json(&layered.typed_program)
+            } else {
+                String::new()
+            };
+            (
+                layered.fitness,
+                layered.effect_errors,
+                layered.linearity_errors,
+                inferred,
+            )
+        } else {
+            // Monolithic path: full inference over the whole merged
+            // program. Used when the input is not inside a reef package,
+            // when the cache is disabled, or when the non-chelis-std
+            // decls do not type-check clean.
+            let decls = match &prepared {
+                Some(prepared) => prepared.decls.clone(),
+                None => {
+                    let source = fs::read_to_string(file)?;
+                    chelis_surf::parser::parse_str(&source)?
+                }
+            };
+            let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+            let report = chelis_types::check_ir_fitness(&deep_exprs);
+            let typed_program = chelis_types::check_typed_program(&deep_exprs);
+            let inferred = if show_inferred {
+                typed_program
+                    .as_ref()
+                    .ok()
+                    .map(format_inferred_signatures_json)
+                    .unwrap_or_else(|| "[]".to_string())
+            } else {
+                String::new()
+            };
+            // Linearity-F3 PR 2: `check_linearity` now returns
+            // module-wrapped violations as errors (the PR 1 warning
+            // channel was removed once the in-repo corpus was confirmed
+            // clean), so this is a flat Ok/Err dispatch with no separate
+            // warnings vector.
+            let (effect_errors, linearity_errors) = match &typed_program {
+                Ok(checked) => match chelis_effects::check_program(checked) {
+                    Ok(checked) => (
+                        Vec::new(),
+                        chelis_types::check_linearity(&checked)
+                            .err()
+                            .unwrap_or_default(),
+                    ),
+                    Err(errors) => (errors, Vec::new()),
+                },
+                Err(_) => (Vec::new(), Vec::new()),
+            };
+            (report, effect_errors, linearity_errors, inferred)
+        };
     if !effect_errors.is_empty() {
         report.score = (report.score - 0.2 * effect_errors.len() as f64).max(0.0);
     }
@@ -1512,12 +1559,45 @@ fn cmd_build(
     if let Ok(source) = fs::read_to_string(file) {
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     }
-    let (decls, entry_decls) = load_check_build_decls(file)?;
+    let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
+    let (decls, entry_decls) = match &prepared {
+        Some(prepared) => (prepared.decls.clone(), prepared.entry_decls.clone()),
+        None => {
+            let source = fs::read_to_string(file)?;
+            let decls = chelis_surf::parser::parse_str(&source)?;
+            (decls.clone(), decls)
+        }
+    };
     reject_with_seed_for_build_target(&decls, target)?;
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
     let pruned_deep_exprs =
         prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_deep_exprs);
+
+    // Layered build fast path: when the input resolves inside a reef
+    // package, the chelis-std typecheck cache is enabled, AND build-time
+    // pruning did not drop any decls (so the full program is the
+    // lowering target), reuse the cached chelis-std sub-context for the
+    // type-check stage instead of re-inferring chelis-std. When pruning
+    // fires the layered whole-program `CheckedProgram` would not match
+    // the pruned lowering target, so the monolithic path is used.
+    // `check_layered_for_build` returns `Ok(None)` on any non-chelis-std
+    // type/effect/linearity error, falling back to monolithic so the
+    // error-path output stays byte-identical.
+    let layered_full_checked: Option<chelis_types::CheckedProgram> = match &prepared {
+        Some(prepared)
+            if !chelis_compiler_api::cache_disabled()
+                && pruned_deep_exprs.len() == full_deep_exprs.len() =>
+        {
+            chelis_compiler_api::check_layered_for_build(
+                &prepared.stdlib_decls,
+                &prepared.non_stdlib_decls,
+            )
+            .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
+        }
+        _ => None,
+    };
+
     let preserve_host_library_surface =
         if target == "c" && pruned_deep_exprs.len() != full_deep_exprs.len() {
             let full_checked = checked_program_with_effects(&full_deep_exprs)
@@ -1537,8 +1617,13 @@ fn cmd_build(
         pruned_deep_exprs
     };
     let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
-    let checked =
-        checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
+    // Use the layered whole-program `CheckedProgram` when it is available
+    // (no-pruning case) and the deep-exprs being lowered are the full
+    // program; otherwise check monolithically.
+    let checked = match layered_full_checked {
+        Some(checked) if deep_exprs.len() == checked.exprs().len() => checked,
+        _ => checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?,
+    };
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
     let mut compiled_program = chelis_ir::host::try_lower_compiled_program(&checked)

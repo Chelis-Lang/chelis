@@ -1,7 +1,10 @@
+pub(crate) mod cache_envelope;
 pub mod compiler;
 pub mod context;
+pub mod layered;
 pub(crate) mod runtime;
 pub mod schema;
+pub mod stdlib_cache;
 
 pub use compiler::{
     PreparedEvalInContext, check_in_context, eval_in_context, eval_many_in_context,
@@ -9,6 +12,13 @@ pub use compiler::{
 };
 pub use context::{
     CacheError, CompiledContext, ContextHash, compile_reef_context, load_or_compile_for_package,
+};
+pub use layered::{
+    LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats,
+};
+pub use stdlib_cache::{
+    StdLibContext, build_stdlib_context, cache_disabled, load_or_build_stdlib_context,
+    stdlib_cache_key, typecheck_cache_dir,
 };
 
 /// Pinned compiler version for fixture `reef.toml` files in tests and for
