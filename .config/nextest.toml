@@ -1,15 +1,85 @@
 # cargo-nextest configuration.
 #
-# The `ci` profile is used by `scripts/gate.py integration` (and the CI
-# integration job, which calls it). It emits machine-readable per-test
-# timing as JUnit XML so `scripts/test_timing_check.py` can flag tests
-# that regress past their committed budget. See
-# docs/investigations/test_toolchain_guards_design.md.
+# Profiles:
+#   default  - local `cargo nextest run`. Fast suite only; heavy e2e is excluded.
+#   ci       - per-PR `Integration Tests` job, via `scripts/gate.py integration`.
+#              Fast suite only (same default-filter as `default`), plus JUnit
+#              timing XML for `scripts/test_timing_check.py`.
+#   nightly  - the `Heavy E2E` workflow (.github/workflows/heavy-e2e.yml), which
+#              runs on a nightly `schedule:` and on `workflow_dispatch:` ONLY.
+#              Runs exactly the heavy e2e suite the other two profiles exclude.
+#
+# Heavy e2e == tests that run a real `chelis build` + gcc + run, a real
+# `reef build` / `reef install`, or a full-stdlib `chelis check`. Each one
+# re-typechecks or rebuilds the whole chelis-std transitive graph and costs
+# 9-28s wall, and nextest cannot parallelize within a single test, so leaving
+# them on the per-PR gate sets a hard multi-minute wall-clock floor. They are
+# high-level end-to-end signal, not inner-loop coverage, so they move to a
+# nightly job. The contention-independent unit/integration coverage they sit on
+# top of stays on the per-PR gate.
+#
+# The heavy set is named explicitly (not by a heuristic) so adding or removing
+# a heavy test is a reviewable diff. The selection is shared between the
+# fast-suite exclusion and the nightly inclusion via the `heavy-e2e` filterset
+# below being negated in `default`/`ci` and used positively in `nightly`.
+#
+# Grep targets if this needs revisiting:
+#   - real chelis build + gcc + run / reef build / reef install
+#   - full-stdlib `chelis check` (crates/chelis-cli/tests/production_stdlib_typechecks.rs)
+
+[profile.default]
+default-filter = '''
+    not (
+        binary_id(/^chelis-cli::production_stdlib_typechecks$/)
+        + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
+        + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
+        + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
+        + (binary_id(/^chelis-cli::cli$/) & test(/^phase3a_reef_std_acceptance_oracle$/))
+        + (binary_id(/^chelis-cli::cli$/) & test(/^reef_check_accepts_sig_only_shell_imports$/))
+        + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
+        + (binary_id(/^chelis-cli::phase_a_bundled_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
+        + (binary_id(/^chelis-cli::phase3t_reef_install$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+    )
+'''
 
 [profile.ci]
-# Inherit the default run behavior; the only addition is JUnit output.
+# Same fast-suite scope as `default`; the only additions are the JUnit
+# timing report and the shared exclusion of the heavy e2e suite.
+default-filter = '''
+    not (
+        binary_id(/^chelis-cli::production_stdlib_typechecks$/)
+        + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
+        + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
+        + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
+        + (binary_id(/^chelis-cli::cli$/) & test(/^phase3a_reef_std_acceptance_oracle$/))
+        + (binary_id(/^chelis-cli::cli$/) & test(/^reef_check_accepts_sig_only_shell_imports$/))
+        + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
+        + (binary_id(/^chelis-cli::phase_a_bundled_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
+        + (binary_id(/^chelis-cli::phase3t_reef_install$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+    )
+'''
 
 [profile.ci.junit]
 # Written to `target/nextest/ci/junit.xml`. nextest places JUnit
 # reports under `target/nextest/<profile>/<path>`.
 path = "junit.xml"
+
+[profile.nightly]
+# The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This
+# default-filter is exactly the set the `default`/`ci` profiles exclude, so
+# the two stay in lockstep: a test is on the per-PR gate XOR the nightly gate.
+default-filter = '''
+    binary_id(/^chelis-cli::production_stdlib_typechecks$/)
+    + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
+    + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
+    + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
+    + (binary_id(/^chelis-cli::cli$/) & test(/^phase3a_reef_std_acceptance_oracle$/))
+    + (binary_id(/^chelis-cli::cli$/) & test(/^reef_check_accepts_sig_only_shell_imports$/))
+    + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
+    + (binary_id(/^chelis-cli::phase_a_bundled_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
+    + (binary_id(/^chelis-cli::phase3t_reef_install$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+'''
+# A transient gcc/CPU-contention hiccup should not fail a nightly job; retry
+# the heavy tests rather than capping their concurrency (which would slow the
+# per-PR gate, the exact regression this change reverses).
+retries = 2

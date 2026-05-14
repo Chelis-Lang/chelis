@@ -6098,7 +6098,23 @@ path = "./mylib"
     /// What we CAN assert robustly: the split path is no slower than the
     /// single-shot path when amortized across two files, which is a
     /// sufficient signal that the shared graph isn't redoing work.
+    ///
+    /// Ignored by default: the assertion compares wall-clock elapsed time
+    /// against a 3x multiplier of a sub-millisecond single-shot baseline.
+    /// Under the nextest global thread pool the whole workspace runs in one
+    /// pool, so CPU contention from concurrent gcc-compile-and-run tests can
+    /// inflate the split path past the multiplier even though no extra work
+    /// is being done. The correctness guarantee lives in
+    /// `prepare_reef_graph_split_matches_single_shot_semantics`, which has no
+    /// timing dependency. This test stays as a documented manual perf gate:
+    ///
+    ///   cargo test -p chelis-reef -- --ignored \
+    ///     prepare_reef_graph_amortizes_work_across_multiple_files
+    ///
+    /// Expected success condition: the assertion passes on an unloaded
+    /// machine (run it serially, not under a full workspace test pass).
     #[test]
+    #[ignore = "diagnostic wall-clock perf gate; contention-sensitive, run manually unloaded"]
     fn prepare_reef_graph_amortizes_work_across_multiple_files() {
         let (_dir, root) = shared_graph_fixture();
 

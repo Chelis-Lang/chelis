@@ -1,0 +1,57 @@
+name: Heavy E2E
+
+# The heavyweight end-to-end suite: tests that run a real `chelis build`
+# + gcc + run, a real `reef build` / `reef install`, or a full-stdlib
+# `chelis check`. Each re-typechecks or rebuilds the whole chelis-std
+# transitive graph and costs 9-28s wall, and nextest cannot parallelize
+# within a single test, so they set a hard multi-minute wall-clock floor.
+# They are high-level end-to-end signal, not inner-loop coverage, so they
+# are OFF the per-PR `Integration Tests` gate and run here instead.
+#
+# This workflow runs on a nightly schedule and on manual dispatch ONLY.
+# It does NOT run per-PR and does NOT run on push-to-main. The exact set
+# of tests is the `nightly` nextest profile's default-filter in
+# `.config/nextest.toml`; the per-PR `ci` profile excludes exactly that
+# set, so a test is on the per-PR gate XOR this nightly gate.
+
+on:
+  schedule:
+    # 07:00 UTC daily. Off-peak; no per-PR latency impact.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  heavy-e2e:
+    name: Heavy E2E (Linux)
+    runs-on: ubuntu-latest
+    # The suite is ~27s of test wall on a fast box; allow generous head
+    # room for a slow runner plus compilation cache miss.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install C dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # The `nightly` nextest profile (.config/nextest.toml) selects
+      # exactly the heavy e2e suite via its default-filter and sets
+      # `retries = 2` so a transient gcc/CPU-contention hiccup does not
+      # fail the run. This is the only place the `nightly` profile is
+      # used.
+      - name: Heavy e2e suite
+        run: cargo nextest run --workspace --profile nightly
