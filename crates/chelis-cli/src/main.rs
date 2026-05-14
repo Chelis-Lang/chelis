@@ -1338,6 +1338,19 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
     for violation in
         chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, &workspace_root)
     {
+        // Parity with `cmd_lint`'s emit path (LP-LEAK-A / LP-LEAK-B):
+        // suppress warnings for rules that opt in to `check_mirrors_fix`
+        // when the autofix would silently decline or be rejected by the
+        // typed-pipeline gate. Without this filter `chelis check` floods
+        // with the same non-actionable false positives that
+        // `chelis lint --check` already suppresses, because the advisory
+        // emit path applied only the path-glob exception filter. Both
+        // code paths now run `should_suppress_unfixable_violation`, so
+        // the two cannot drift again. `parent` is the lint walk root,
+        // passed as `target` exactly as `cmd_lint` does.
+        if should_suppress_unfixable_violation(parent, &rules, &violation) {
+            continue;
+        }
         eprintln!("warning: {violation}");
     }
 }

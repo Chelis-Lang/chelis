@@ -164,7 +164,6 @@ fn lp_genuine_redundant_copy_still_flagged_with_fix_marker() {
 ///
 /// This test pins the leak.
 #[test]
-#[ignore = "documents the chelis-check advisory-emit leak; flip when emit_advisory_lint_warnings_for_file applies should_suppress_unfixable_violation"]
 fn lp_leak_a_chelis_check_advisory_emit_does_not_suppress_unfixable_copy_borrow() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("copy_borrow.ch");
@@ -199,7 +198,6 @@ fn lp_leak_a_chelis_check_advisory_emit_does_not_suppress_unfixable_copy_borrow(
 /// `emit_advisory_lint_warnings_for_file`. Pins that the fix to
 /// LP-LEAK-A must apply uniformly across rules with that opt-in.
 #[test]
-#[ignore = "documents the same advisory-emit leak for prefer-pipe-operator; flip when emit_advisory_lint_warnings_for_file applies should_suppress_unfixable_violation"]
 fn lp_leak_b_chelis_check_advisory_emit_does_not_suppress_unfixable_prefer_pipe() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pipe_drop.ch");
