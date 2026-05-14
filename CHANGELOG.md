@@ -6,6 +6,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed - `production_stdlib_typechecks` back on the per-PR gate
+
+Moved the `chelis-cli::production_stdlib_typechecks` suite (19 tests, one
+`chelis check` per unique stdlib file) off the nightly heavy-e2e profile
+and back onto the per-PR `ci`/`default` nextest profiles. It was placed
+in the heavy set before the cross-process typecheck cache landed; with
+the cache the checks are warm-cache fast, so they belong on the per-PR
+gate for the coverage.
+
 ### Added - adversarial coverage for the post-#130 compiled-context cache
 
 Replaced the reverted pre-#130 red-team file (`#128`, reverted in `#131`
