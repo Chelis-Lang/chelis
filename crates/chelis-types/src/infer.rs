@@ -8652,10 +8652,7 @@ fn types_structurally_equal(a: &Type, b: &Type) -> bool {
         (Type::Tensor(d1, p1), Type::Tensor(d2, p2)) => {
             p1 == p2
                 && d1.len() == d2.len()
-                && d1
-                    .iter()
-                    .zip(d2.iter())
-                    .all(|(x, y)| dims_identical(x, y))
+                && d1.iter().zip(d2.iter()).all(|(x, y)| dims_identical(x, y))
         }
         (Type::Tuple(es1), Type::Tuple(es2)) => {
             es1.len() == es2.len()
