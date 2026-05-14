@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.10] — 2026-05-14
+
 ### Fixed - negative axes and rank-0 standalone parameters in IR lowering
 
 `chelis eval` / `chelis test` panicked during IR lowering of any

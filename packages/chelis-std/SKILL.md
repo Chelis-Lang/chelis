@@ -345,7 +345,7 @@ flows.
 [package]
 name = "demo"
 version = "0.1.0"
-compiler = "=0.7.9"
+compiler = "=0.7.10"
 module_prefix = "Demo"
 
 [dependencies]
