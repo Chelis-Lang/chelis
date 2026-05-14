@@ -38,7 +38,7 @@ use chelis_types::types::Prim;
 
 /// Surf source -> desugar -> macro-expand -> typecheck -> effects ->
 /// linearity -> lower. Returns the lowered DAG, or a stage-tagged error
-/// string. Mirrors the `lower_surf` helper in `rt2_lowering_adversarial`.
+/// string. Mirrors the `lower_surf` helper in `reduce_sum_lowering_adversarial`.
 fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
     let decls = chelis_surf::parser::parse_str(src).map_err(|e| format!("parse: {e:?}"))?;
     let exprs = chelis_macros::expand_program(

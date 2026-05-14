@@ -9,7 +9,7 @@
 //! lowered IR will have `accumulator: int8` and IR-verify will reject
 //! it with the §5.7.1 narrowness diagnostic. That's the symptom of the
 //! type-checker spec divergence pinned in
-//! crates/chelis-types/tests/rt2_adversarial.rs.
+//! crates/chelis-types/tests/numeric_dtype_buildout_adversarial.rs.
 
 use chelis_ir::lower::lower_program;
 use chelis_ir::verify;

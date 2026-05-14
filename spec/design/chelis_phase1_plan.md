@@ -20,7 +20,7 @@ contiguous rank ≥ 2 `f32` matmul patterns to hipBLAS-backed helpers. Phase 1e 
 benchmark oracle plus checked-in local PyTorch comparison artifacts. Phase 1f now ships
 the standalone `chelis-validate` crate plus `chelis validate --surf/--deep/--desugar`
 CLI modes and a dedicated conformance oracle at
-`cargo test -p chelis-e2e --test phase1f_validate`.
+`cargo test -p chelis-e2e --test example_corpus_validate`.
 
 **Status after red-team review:** the shipped fixed-workload Phase 1 deliverable is met.
 The Phase 1e benchmark models (`mnist`, `linreg`, `transformer_block`) compile and run

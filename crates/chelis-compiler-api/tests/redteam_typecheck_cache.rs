@@ -30,7 +30,7 @@
 //!
 //! ## Relationship to the in-crate tests
 //!
-//! `phase_i_disk_cache.rs` and the `context.rs` / `stdlib_cache.rs` unit
+//! `disk_cache.rs` and the `context.rs` / `stdlib_cache.rs` unit
 //! tests already pin the happy paths and the two named #130 regression
 //! cases. This file attacks the GAPS those leave: identity
 //! canonicalization equivalence (a wrong-canonicalization regression

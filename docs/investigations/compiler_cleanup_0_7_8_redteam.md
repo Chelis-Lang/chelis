@@ -9,10 +9,10 @@ Run on branch `redteam/0_7_8_terminal` off `main` at commit `9996be5`
 Per CLAUDE.md "Red Team Protocol", every finding here was validated by
 running tests and commands. Adversarial fixtures were added under:
 
-- `crates/chelis-types/tests/red_team_0_7_8.rs` (9 linearity fixtures)
+- `crates/chelis-types/tests/linearity_alias_destructure_adversarial.rs` (9 linearity fixtures)
 - `crates/chelis-cli/tests/red_team_0_7_8.rs` (7 CLI fixtures)
-- `crates/chelis-ir/tests/red_team_0_7_8.rs` (6 implicit-copy v3 fixtures)
-- `crates/chelis-e2e/tests/red_team_0_7_8.rs` (9 CRuntime fixtures)
+- `crates/chelis-ir/tests/implicit_copy_fanout_shape_a_adversarial.rs` (6 implicit-copy v3 fixtures)
+- `crates/chelis-e2e/tests/runtime_dtype_coupling_adversarial.rs` (9 CRuntime fixtures)
 
 Total: 31 adversarial fixtures. All pass on the starting commit.
 

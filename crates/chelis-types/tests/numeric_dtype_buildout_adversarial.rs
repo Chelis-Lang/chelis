@@ -363,7 +363,7 @@ fn ws_a0_f8e4m3_in_contextual_tensor_position_rejected() {
 
 // ----------------------------------------------------------------
 // NEGATIVE PARITY: spec §1.1.2 — unsigned suffixes must lex error.
-// Existing ws_a0_rt1_unsigned_rejection.rs covers `cast(x, u8)` but
+// Existing unsigned_dtype_rejection.rs covers `cast(x, u8)` but
 // not the suffix path.
 // ----------------------------------------------------------------
 
