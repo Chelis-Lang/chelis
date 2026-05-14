@@ -64,12 +64,28 @@ which poisoned the linked chelis-std context for every downstream
   `crates/chelis-cli/tests/downstream_chelis_std_axis_oracle.rs` (a
   minimal downstream package importing chelis-std runs `chelis test`
   clean). Both on the per-PR `ci` profile.
-- `crates/chelis-compiler-api/tests/redteam_typecheck_cache.rs`:
-  repaired - it did not compile against the post-#130
-  `cache_file_name` signature and its `rt1_*` tests asserted the
-  pre-#130 collision behavior that #130 fixed. Re-pinned as negative
-  parity for the #130 fix (distinct roots do not collide;
-  `load_if_fresh` rejects an identity mismatch).
+### Fixed - gate.py CI-parity parser catches chelis invocations
+
+The `scripts/test_gate.py` CI-parity lock greps
+`.github/workflows/ci.yml` and fails if a gate job hand-inlines a
+command that `scripts/gate.py` does not produce. RT-2 found the
+parser's command filter only matched `cargo `-prefixed invocations, so
+a bare `chelis ...` command inlined into the `lint-and-unit` or
+`integration` job slipped past the lock undetected, contradicting the
+"every `cargo`/`chelis` invocation" claim in the `test_gate.py`
+docstring and `docs/investigations/test_toolchain_guards_design.md`.
+
+- `scripts/test_gate.py`: added `_is_gate_relevant_command`, which
+  matches both `cargo ` and `chelis ` prefixes; `_parse_ci_gate_invocations`
+  now uses it. The `cargo run -p chelis-cli --bin chelis -- ...` form
+  was already caught by the `cargo ` prefix; the bare `chelis ...` form
+  is the case that was missed.
+- `scripts/test_gate_parity_adversarial.py`: converted the
+  `test_known_gap_bare_chelis_command_is_not_caught` known-gap test
+  into `test_bare_chelis_command_is_caught`, a positive assertion that
+  the lock now fails on a hand-inlined bare `chelis` command, and added
+  `test_cargo_run_chelis_cli_command_is_caught` to pin the other
+  `chelis` invocation shape.
 
 ### Fixed - package-identity and compiler-version in compiled-context cache keys
 

@@ -11,17 +11,15 @@ adversarial complement: it MUTATES a copy of `ci.yml`, points the
 parity test at the mutation, and asserts the lock actually fails. A
 parity lock that never fails on a real drift is theater.
 
-It also pins one KNOWN GAP discovered by red-team: the parity parser
-only inspects commands that start with `cargo ` (see
-`_parse_ci_gate_invocations` in `scripts/test_gate.py`, the
-`command.startswith("cargo ")` filter). The module docstring and the
-design note both describe the lock as covering "every `cargo`/`chelis`
-invocation", but a gate job that hand-inlines a bare `chelis ...`
-command (rather than `cargo run -p chelis-cli ... -- ...`) slips past
-the lock. `test_known_gap_bare_chelis_command_is_not_caught` documents
-that gap as an executable expectation: if a future fix closes it, this
-test flips to a failure and forces the docstring/design note to be
-reconciled with the parser.
+It also covers bare `chelis ...` invocations. RT-2 found that the
+parity parser originally only inspected commands starting with
+`cargo `, so a gate job that hand-inlined a bare `chelis ...` command
+(rather than the `cargo run -p chelis-cli ... -- ...` form) slipped
+past the lock, contradicting the "every `cargo`/`chelis` invocation"
+claim in the `test_gate.py` docstring and the design note.
+`_is_gate_relevant_command` in `scripts/test_gate.py` now matches both
+prefixes; `test_bare_chelis_command_is_caught` is the adversarial proof
+that the gap is closed.
 """
 
 import importlib.util
@@ -123,18 +121,14 @@ class GateParityAdversarialTests(unittest.TestCase):
             "a `run: |` multiline block in a gate job",
         )
 
-    def test_known_gap_bare_chelis_command_is_not_caught(self):
-        # KNOWN GAP (red-team finding): the parser only inspects
-        # commands starting with `cargo `. A gate job that hand-inlines
-        # a bare `chelis ...` command slips past the lock, even though
-        # the design note and `test_gate.py`'s docstring both say the
-        # lock covers "every `cargo`/`chelis` invocation".
-        #
-        # This test pins the gap as an executable expectation: it
-        # asserts the lock currently does NOT catch the bare-`chelis`
-        # mutation. If a future change extends the parser to also match
-        # `chelis ` (closing the gap), this test FAILS -- which is the
-        # signal to delete it and reconcile the docs.
+    def test_bare_chelis_command_is_caught(self):
+        # RT-2 finding, now closed: the parser originally only inspected
+        # commands starting with `cargo `, so a gate job that
+        # hand-inlined a bare `chelis ...` command (rather than the
+        # `cargo run -p chelis-cli ... -- ...` form) slipped past the
+        # lock. `_is_gate_relevant_command` now matches `chelis ` too.
+        # Plant a hand-inlined bare `chelis` step into the `integration`
+        # gate job. The parity lock MUST fail.
         mutated = self.ci_text.replace(
             ANCHOR,
             "      - name: Sneaky bare chelis call\n"
@@ -143,13 +137,34 @@ class GateParityAdversarialTests(unittest.TestCase):
         )
         self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
         result = _run_parity_against(mutated)
-        self.assertEqual(
-            (len(result.failures), len(result.errors)),
-            (0, 0),
-            "the parity lock now CATCHES a bare `chelis` command -- the "
-            "known gap is closed. Delete this test and update the "
-            "`test_gate.py` docstring + design note, which already "
-            "claim `cargo`/`chelis` coverage",
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock did NOT catch a hand-inlined bare `chelis` "
+            "command in the `integration` gate job -- the RT-2 gap is "
+            "still open",
+        )
+
+    def test_cargo_run_chelis_cli_command_is_caught(self):
+        # The other `chelis` invocation shape: `cargo run -p chelis-cli
+        # --bin chelis -- ...`. This already starts with `cargo `, so
+        # the `cargo ` prefix catches it, but pin it explicitly so the
+        # coverage of both `chelis` invocation forms is visible.
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky cargo-run chelis call\n"
+            "        run: cargo run -p chelis-cli --bin chelis -- "
+            "lint --check .\n\n" + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock did NOT catch a hand-inlined `cargo run -p "
+            "chelis-cli --bin chelis -- ...` command in the "
+            "`integration` gate job",
         )
 
 
