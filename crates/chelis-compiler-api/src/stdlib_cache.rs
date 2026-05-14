@@ -8,12 +8,12 @@
 //! that cost independently.
 //!
 //! This module caches the typechecked + lowered chelis-std library
-//! sub-context — a [`StdLibContext`] — content-addressed on the bundled
-//! chelis-std bytes, so the work happens once per `(binary, machine)`
-//! and is reused across every process and every stdlib-importing
-//! fixture.
+//! sub-context — a [`StdLibContext`] — content-addressed on the linked
+//! chelis-std decls plus the bundled-stdlib constants, so the work
+//! happens once per `(binary, machine, stdlib-content)` and is reused
+//! across every process and every stdlib-importing fixture.
 //!
-//! ## Why content-addressing on the bundle works
+//! ## Why the content-addressed key works
 //!
 //! chelis-std ships inside the chelis binary via `include_bytes!`
 //! (`chelis-std-bundle`). Its archive + shell bytes and version are
@@ -21,10 +21,20 @@
 //! internal-name rewriting depends only on chelis-std's own
 //! package/module/symbol names, never on the importing package — so the
 //! linked chelis-std decls (and everything derived from them) are
-//! bit-identical for every fixture. The key
-//! `chelis_std_typecheck_v{N} || version || archive_sha256 ||
-//! shell_sha256` therefore self-invalidates on any stdlib regeneration
-//! and never needs a manual bust.
+//! bit-identical for every fixture that consumes the bundled stdlib.
+//!
+//! The key folds the struct-format version, the bundled-stdlib version +
+//! archive + shell hashes, AND a hash of the actual linked chelis-std
+//! `Decl` slice (see [`stdlib_cache_key`]). The decl hash is what keeps
+//! the key honest: `chelis-std` is the language runtime, so checking a
+//! file *inside* a `chelis-std` checkout resolves that checkout's own
+//! source as the root package rather than the bundle. Keying on the
+//! bundle constants alone would let an edited checkout stale-hit a
+//! bundled-std artifact. Because every bundled-std consumer's linked
+//! stdlib decls are bit-identical, the decl hash still collapses to one
+//! shared cross-fixture key on the common path; it only diverges when
+//! the stdlib content actually differs. The key self-invalidates on any
+//! stdlib regeneration and never needs a manual bust.
 //!
 //! ## Layering
 //!
@@ -93,13 +103,27 @@ pub struct StdLibContext {
     pub structural_stats: StructuralStats,
 }
 
-/// The 32-byte content-addressed cache key for the bundled chelis-std.
+/// The 32-byte content-addressed cache key for a chelis-std sub-context.
 ///
 /// Inputs: the struct-format version, the bundled chelis-std version
-/// string, and the SHA-256 hex of the bundled archive + shell bytes
-/// (`chelis-std-bundle`). Any change to the shipped stdlib flips at
-/// least one input, so the key self-invalidates.
-pub fn stdlib_cache_key() -> [u8; 32] {
+/// string, the SHA-256 hex of the bundled archive + shell bytes
+/// (`chelis-std-bundle`), AND a hash of the actual linked, internal-name-
+/// rewritten chelis-std `Decl` slice that will be type-checked into this
+/// sub-context.
+///
+/// Hashing the actual decls is what makes the key honest. The bundled
+/// archive/shell hashes alone are insufficient: `chelis-std` is the
+/// language runtime, so checking a file *inside* a `chelis-std` checkout
+/// resolves that checkout's own (possibly edited) source as the root
+/// package rather than the bundle (the bundled-version short-circuit in
+/// `chelis-reef` only fires when `chelis-std` is resolved as a
+/// dependency). Keying solely on the bundle constants would then let an
+/// edited `chelis-std` checkout stale-hit a bundled-std artifact sharing
+/// a `CHELIS_REEF_HOME`. Folding the decl bytes in flips the key on any
+/// such divergence while keeping it byte-identical across every fixture
+/// that consumes the unmodified bundled stdlib (their linked stdlib
+/// decls are bit-identical, see the module docs).
+pub fn stdlib_cache_key(stdlib_decls: &[chelis_surf::ast::Decl]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"chelis_std_typecheck_v");
     hasher.update(STDLIB_CACHE_FORMAT_VERSION.to_le_bytes());
@@ -112,6 +136,19 @@ pub fn stdlib_cache_key() -> [u8; 32] {
     let shell = chelis_std_bundle::shell_sha256();
     hasher.update((shell.len() as u64).to_le_bytes());
     hasher.update(shell.as_bytes());
+    // The decls actually being checked. `bincode` is a deterministic
+    // encoding, so this is a stable content hash; a `serialize` failure
+    // here is impossible for a well-formed `Decl` slice, but fall back to
+    // a fixed tag rather than panic so a cache-key computation never
+    // aborts a compile.
+    match bincode::serialize(stdlib_decls) {
+        Ok(decl_bytes) => {
+            hasher.update(b"decls");
+            hasher.update((decl_bytes.len() as u64).to_le_bytes());
+            hasher.update(&decl_bytes);
+        }
+        Err(_) => hasher.update(b"decls-unserializable"),
+    }
     hasher.finalize().into()
 }
 
@@ -127,35 +164,40 @@ fn hex_prefix(data: &[u8], n: usize) -> String {
     out
 }
 
-/// Resolve the directory the typecheck cache lives in.
+/// Resolve the directory a named on-disk compiler cache lives in.
 ///
-/// - `$CHELIS_REEF_HOME/.cache/typecheck/` when `CHELIS_REEF_HOME` is set
+/// - `$CHELIS_REEF_HOME/.cache/<name>/` when `CHELIS_REEF_HOME` is set
 ///   and non-empty;
-/// - else `$XDG_CACHE_HOME/chelis/typecheck/` when `XDG_CACHE_HOME` is
-///   set and non-empty;
-/// - else `$HOME/.cache/chelis/typecheck/`.
+/// - else `$XDG_CACHE_HOME/chelis/<name>/` when `XDG_CACHE_HOME` is set
+///   and non-empty;
+/// - else `$HOME/.cache/chelis/<name>/`.
 ///
 /// The XDG fallback is mandatory: `cargo nextest` test workers do not set
-/// `CHELIS_REEF_HOME`, and they are exactly the workload this cache
-/// optimizes. Returns `None` only when none of the three roots can be
+/// `CHELIS_REEF_HOME`, and they are exactly the workload these caches
+/// optimize. Returns `None` only when none of the three roots can be
 /// resolved (no `CHELIS_REEF_HOME`, no `XDG_CACHE_HOME`, no `HOME`), in
 /// which case the caller falls through to an uncached build.
-pub fn typecheck_cache_dir() -> Option<PathBuf> {
+///
+/// Both the chelis-std typecheck cache ([`typecheck_cache_dir`]) and the
+/// whole-package `CompiledContext` cache (`context.rs`) resolve through
+/// this one helper so the XDG fallback applies uniformly.
+pub fn cache_dir_for(name: &str) -> Option<PathBuf> {
     if let Some(reef_home) = non_empty_env("CHELIS_REEF_HOME") {
-        return Some(PathBuf::from(reef_home).join(".cache").join("typecheck"));
+        return Some(PathBuf::from(reef_home).join(".cache").join(name));
     }
     if let Some(xdg) = non_empty_env("XDG_CACHE_HOME") {
-        return Some(PathBuf::from(xdg).join("chelis").join("typecheck"));
+        return Some(PathBuf::from(xdg).join("chelis").join(name));
     }
     if let Some(home) = non_empty_env("HOME") {
-        return Some(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("chelis")
-                .join("typecheck"),
-        );
+        return Some(PathBuf::from(home).join(".cache").join("chelis").join(name));
     }
     None
+}
+
+/// Resolve the directory the chelis-std typecheck cache lives in. See
+/// [`cache_dir_for`] for the resolution order.
+pub fn typecheck_cache_dir() -> Option<PathBuf> {
+    cache_dir_for("typecheck")
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -204,7 +246,7 @@ pub fn load_or_build_stdlib_context(
         return build_stdlib_context(build_decls);
     }
 
-    let key = stdlib_cache_key();
+    let key = stdlib_cache_key(build_decls);
     let Some(cache_dir) = typecheck_cache_dir() else {
         // No resolvable cache root at all — build uncached. Rare:
         // requires CHELIS_REEF_HOME, XDG_CACHE_HOME and HOME all unset.
@@ -291,15 +333,14 @@ pub fn build_stdlib_context(
             .collect(),
     })?;
 
-    let library_checked = chelis_types::check_linearity(&checked).map_err(|errors| {
-        CompilerError {
+    let library_checked =
+        chelis_types::check_linearity(&checked).map_err(|errors| CompilerError {
             stage: "linearity".to_string(),
             errors: errors
                 .iter()
                 .map(crate::compiler::check_error_diagnostic)
                 .collect(),
-        }
-    })?;
+        })?;
 
     // Lower chelis-std as a standalone library, best-effort. A lowering
     // diagnostic here is NOT fatal: `check` does not use `library_dag`,
@@ -321,20 +362,43 @@ pub fn build_stdlib_context(
 mod tests {
     use super::*;
 
-    #[test]
-    fn cache_key_is_stable_within_a_binary() {
-        // The bundled stdlib is immutable per binary, so the key is a
-        // pure function of compile-time constants — every call agrees.
-        assert_eq!(stdlib_cache_key(), stdlib_cache_key());
+    /// A minimal well-formed `Decl` slice for key-stability tests. The
+    /// exact shape is irrelevant; what matters is that the same slice
+    /// hashes identically and a different slice hashes differently.
+    fn sample_decls(marker: &str) -> Vec<chelis_surf::ast::Decl> {
+        chelis_surf::parser::parse_str(&format!("module Sample\ndef {marker}_value -> int32 = 1\n"))
+            .expect("sample decls must parse")
     }
 
     #[test]
-    fn cache_key_depends_on_all_three_content_inputs() {
-        // Recompute the key with each content input perturbed and
-        // confirm the real key differs from every perturbation. This
+    fn cache_key_is_stable_for_identical_decls() {
+        // The key is a pure function of the compile-time bundle
+        // constants plus the decl bytes, so the same decl slice always
+        // hashes to the same key within a binary.
+        let decls = sample_decls("a");
+        assert_eq!(stdlib_cache_key(&decls), stdlib_cache_key(&decls));
+    }
+
+    #[test]
+    fn cache_key_depends_on_the_decls() {
+        // Two different chelis-std decl slices must produce different
+        // keys: this is the property that stops an edited chelis-std
+        // checkout from stale-hitting a bundled-std artifact.
+        let a = sample_decls("a");
+        let b = sample_decls("b");
+        assert_ne!(a, b, "test setup: the two decl slices must differ");
+        assert_ne!(stdlib_cache_key(&a), stdlib_cache_key(&b));
+    }
+
+    #[test]
+    fn cache_key_depends_on_the_bundle_constants() {
+        // Recompute the key with each bundle-constant input perturbed
+        // and confirm the real key differs from every perturbation. This
         // pins that version / archive_sha256 / shell_sha256 all feed the
-        // key, so a change to any one self-invalidates the cache.
-        let real = stdlib_cache_key();
+        // key, so a stdlib regeneration self-invalidates the cache even
+        // for an unchanged decl slice.
+        let decls = sample_decls("a");
+        let real = stdlib_cache_key(&decls);
 
         let perturb = |tag: &[u8]| -> [u8; 32] {
             let mut hasher = Sha256::new();
@@ -370,7 +434,7 @@ mod tests {
     #[test]
     fn cache_path_carries_version_and_key_prefix() {
         let dir = PathBuf::from("/tmp/tc");
-        let key = stdlib_cache_key();
+        let key = stdlib_cache_key(&sample_decls("a"));
         let path = stdlib_cache_path(&dir, key);
         let name = path.file_name().unwrap().to_str().unwrap();
         assert!(name.starts_with("chelis-std-"));

@@ -121,11 +121,8 @@ pub fn check_layered(
             // falling back. The fitness report itself is still clean
             // (type inference succeeded); the CLI folds effect errors
             // into the score exactly as the monolithic path does.
-            let fitness = reconstitute_clean_fitness(
-                &stdlib_ctx,
-                &non_stdlib_deep,
-                &non_stdlib_checked,
-            );
+            let fitness =
+                reconstitute_clean_fitness(&stdlib_ctx, &non_stdlib_deep, &non_stdlib_checked);
             return Ok(Some(LayeredCheck {
                 fitness,
                 effect_errors,
@@ -135,17 +132,15 @@ pub fn check_layered(
         }
     };
 
-    let linearity_errors =
-        match chelis_types::check_linearity_with_context(
-            &stdlib_ctx.library_checked,
-            &non_stdlib_effects_checked,
-        ) {
-            Ok(_) => Vec::new(),
-            Err(errors) => errors,
-        };
+    let linearity_errors = match chelis_types::check_linearity_with_context(
+        &stdlib_ctx.library_checked,
+        &non_stdlib_effects_checked,
+    ) {
+        Ok(_) => Vec::new(),
+        Err(errors) => errors,
+    };
 
-    let fitness =
-        reconstitute_clean_fitness(&stdlib_ctx, &non_stdlib_deep, &non_stdlib_checked);
+    let fitness = reconstitute_clean_fitness(&stdlib_ctx, &non_stdlib_deep, &non_stdlib_checked);
     Ok(Some(LayeredCheck {
         fitness,
         effect_errors: Vec::new(),
@@ -227,9 +222,7 @@ fn reconstitute_clean_fitness(
     }
 }
 
-fn expand(
-    decls: &[chelis_surf::ast::Decl],
-) -> Result<Vec<chelis_deep::Expr>, String> {
+fn expand(decls: &[chelis_surf::ast::Decl]) -> Result<Vec<chelis_deep::Expr>, String> {
     let desugared = chelis_surf::desugar::desugar_program(decls);
     chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
         .map(|expanded| expanded.into_exprs())

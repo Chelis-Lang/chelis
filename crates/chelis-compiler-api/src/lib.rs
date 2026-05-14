@@ -13,9 +13,7 @@ pub use compiler::{
 pub use context::{
     CacheError, CompiledContext, ContextHash, compile_reef_context, load_or_compile_for_package,
 };
-pub use layered::{
-    LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats,
-};
+pub use layered::{LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats};
 pub use stdlib_cache::{
     StdLibContext, build_stdlib_context, cache_disabled, load_or_build_stdlib_context,
     stdlib_cache_key, typecheck_cache_dir,

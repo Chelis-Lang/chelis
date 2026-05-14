@@ -321,9 +321,9 @@ pub struct PreparedReefGraph {
     pub linked_library_decls: Vec<Decl>,
     /// The chelis-std-only slice of `linked_library_decls`, in the same
     /// relative order. The cross-process chelis-std typecheck cache checks
-    /// + caches this sub-context under a content-addressed key derived
-    /// from the bundled stdlib bytes. Empty when the graph has no
-    /// chelis-std package (e.g. a package that depends on nothing).
+    /// and caches this sub-context under a content-addressed key derived
+    /// from the linked chelis-std decls. Empty when the graph has no
+    /// chelis-std package, such as a package that depends on nothing.
     pub linked_stdlib_decls: Vec<Decl>,
     /// `linked_library_decls` minus `linked_stdlib_decls`, in the same
     /// relative order: the user package's own modules plus any non-stdlib

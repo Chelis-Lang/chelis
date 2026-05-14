@@ -3242,7 +3242,7 @@ fn cmd_internal_test_file(
         _ => {
             let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
             let graph = chelis_reef::prepare_reef_graph(&cwd)?;
-            TestExecutionContext::ReefGraph(graph)
+            TestExecutionContext::ReefGraph(Box::new(graph))
         }
     };
 
@@ -3396,11 +3396,13 @@ fn json_string(s: &str) -> String {
 /// unchanged behavior + the parent-serializes + worker-deserializes
 /// bridge being load-bearing across every spawned worker.
 enum TestExecutionContext {
-    // `CompiledContext` is ~640 bytes (TypeEnv + reef state + DAG carrier);
-    // `PreparedReefGraph` is ~192 bytes. Box the larger variant so the
-    // enum's stack footprint stays compact regardless of which arm runs.
+    // Both `CompiledContext` and `PreparedReefGraph` are large structs
+    // (TypeEnv + reef state + DAG carrier; the reef graph carries the
+    // linked decl lists plus the chelis-std / non-chelis-std partition).
+    // Box both arms so the enum's stack footprint stays compact
+    // regardless of which one is active.
     Context(Box<chelis_compiler_api::CompiledContext>),
-    ReefGraph(chelis_reef::PreparedReefGraph),
+    ReefGraph(Box<chelis_reef::PreparedReefGraph>),
 }
 
 impl TestExecutionContext {

@@ -126,7 +126,6 @@ fn fresh_cache_home() -> (TempDir, PathBuf) {
 // Property 1: cold-cache vs warm-cache byte-identical.
 // ---------------------------------------------------------------------
 
-#[ignore = "stdlib-typecheck-cache: unignored by the feat: commit that adds the cache"]
 #[test]
 fn cold_vs_warm_check_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
@@ -145,15 +144,18 @@ fn cold_vs_warm_check_byte_identical() {
     }
 }
 
-#[ignore = "stdlib-typecheck-cache: unignored by the feat: commit that adds the cache"]
 #[test]
 fn cold_vs_warm_build_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
     for file in stdlib_corpus() {
-        let cold_dir = tempdir().expect("cold out dir");
-        let cold = run_capture("build", &file, &cache_home, &[], Some(cold_dir.path()));
-        let warm_dir = tempdir().expect("warm out dir");
-        let warm = run_capture("build", &file, &cache_home, &[], Some(warm_dir.path()));
+        // One shared out dir: `chelis build` echoes the resolved `-o`
+        // path in its stdout, so cold and warm must build into the SAME
+        // directory for the comparison to isolate the cache effect from
+        // out-dir-path nondeterminism. The warm run overwrites the cold
+        // run's artifacts; the byte-identical property is over stdout.
+        let out_dir = tempdir().expect("out dir");
+        let cold = run_capture("build", &file, &cache_home, &[], Some(out_dir.path()));
+        let warm = run_capture("build", &file, &cache_home, &[], Some(out_dir.path()));
         assert_eq!(
             cold,
             warm,
@@ -171,7 +173,6 @@ fn cold_vs_warm_build_byte_identical() {
 // correctness-preserving.
 // ---------------------------------------------------------------------
 
-#[ignore = "stdlib-typecheck-cache: unignored by the feat: commit that adds the cache"]
 #[test]
 fn monolithic_vs_incontext_check_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
@@ -200,21 +201,24 @@ fn monolithic_vs_incontext_check_byte_identical() {
     }
 }
 
-#[ignore = "stdlib-typecheck-cache: unignored by the feat: commit that adds the cache"]
 #[test]
 fn monolithic_vs_incontext_build_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
     for file in stdlib_corpus() {
-        let mono_dir = tempdir().expect("mono out dir");
+        // One shared out dir for the same reason as
+        // `cold_vs_warm_build_byte_identical`: `chelis build` echoes the
+        // resolved `-o` path, so the monolithic and in-context runs must
+        // target the same directory to isolate the layering effect from
+        // out-dir-path nondeterminism.
+        let out_dir = tempdir().expect("out dir");
         let monolithic = run_capture(
             "build",
             &file,
             &cache_home,
             &[("CHELIS_STDLIB_CACHE_DISABLE", "1")],
-            Some(mono_dir.path()),
+            Some(out_dir.path()),
         );
-        let ctx_dir = tempdir().expect("ctx out dir");
-        let in_context = run_capture("build", &file, &cache_home, &[], Some(ctx_dir.path()));
+        let in_context = run_capture("build", &file, &cache_home, &[], Some(out_dir.path()));
         assert_eq!(
             monolithic,
             in_context,
@@ -232,7 +236,6 @@ fn monolithic_vs_incontext_build_byte_identical() {
 // (recompute), never a stale hit.
 // ---------------------------------------------------------------------
 
-#[ignore = "stdlib-typecheck-cache: unignored by the feat: commit that adds the cache"]
 #[test]
 fn stale_stdlib_byte_mutation_misses_not_stale_hit() {
     // The chelis-std typecheck cache key is content-addressed on

@@ -66,7 +66,6 @@ fn cache_dir(cache_home: &Path) -> PathBuf {
 // 1. Parallel cold-cache stress.
 // ---------------------------------------------------------------------
 
-#[ignore = "stdlib-typecheck-cache: unignored by the feat: commit that adds the cache"]
 #[test]
 fn parallel_cold_cache_invocations_all_succeed_identically() {
     let (_guard, cache_home) = fresh_cache_home();
@@ -115,7 +114,6 @@ fn parallel_cold_cache_invocations_all_succeed_identically() {
 // 2 & 3. Corrupt / truncated cache file fall-through.
 // ---------------------------------------------------------------------
 
-#[ignore = "stdlib-typecheck-cache: unignored by the feat: commit that adds the cache"]
 #[test]
 fn corrupt_cache_file_falls_through_to_recompute() {
     let (_guard, cache_home) = fresh_cache_home();
@@ -164,7 +162,6 @@ fn corrupt_cache_file_falls_through_to_recompute() {
     );
 }
 
-#[ignore = "stdlib-typecheck-cache: unignored by the feat: commit that adds the cache"]
 #[test]
 fn truncated_cache_file_falls_through_to_recompute() {
     let (_guard, cache_home) = fresh_cache_home();
