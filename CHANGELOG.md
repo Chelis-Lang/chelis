@@ -33,6 +33,23 @@ integration test cluster without losing coverage.
   which additionally asserts the emitted bf16 GemmEx wrapper and link
   flag.
 
+### Changed - phase3 integration test parsimony pass
+
+Trimmed redundant tests from the `chelis-cli` `phase3*` integration
+test cluster. Deleted
+`phase3j_pre_oracle_build_path_repros_uniform_like_seed_succeeds` from
+`crates/chelis-cli/tests/phase3j_pre_std.rs`: it asserted the seed=7
+`uniform_like` vector, a strict subset of
+`phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ`,
+which builds seed 7 and seed 42 in one program and asserts the
+identical seed=7 vector. Deleted
+`reef_std_parquet_module_resolves_and_type_checks` and
+`reef_std_parquet_write_resolves_and_type_checks` from
+`crates/chelis-cli/tests/phase3g_io.rs`: both were strict subsets of
+`reef_std_parquet_module_builds_cleanly`, which imports both
+`read_parquet` and `write_parquet`, type-checks a `def` for each, and
+also runs `chelis build`. No invariant coverage was lost.
+
 ## [0.7.9] — 2026-05-14
 
 ### Fixed - chelis check advisory warnings now match chelis lint --check
