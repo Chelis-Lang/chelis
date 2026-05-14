@@ -65,8 +65,17 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # The workspace has ~200 integration test binaries. `cargo test
+      # --workspace --tests` runs them one binary at a time, serializing
+      # the heavyweight binaries (each test compiles/checks/builds
+      # chelis-std). `cargo nextest` schedules tests from all binaries in
+      # a single global thread pool, overlapping the heavyweight work.
+      # See docs/investigations/ci_integration_test_runtime_diagnosis.md.
       - name: Integration tests
-        run: cargo test --workspace --tests
+        run: cargo nextest run --workspace
 
   loc-report:
     name: LOC Report
@@ -107,6 +116,9 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Assert Apple Silicon runner
         run: |
           set -euo pipefail
@@ -117,12 +129,15 @@ jobs:
       # generated C, or Metal codegen-structure regressions) actually turn
       # this job red. Before this step existed, macOS-only breakage was
       # silently invisible to CI because the job only built and ran a
-      # narrow Accelerate smoke shell script. `cargo test --workspace
-      # --tests` builds everything it needs as part of test compilation,
-      # so a separate `cargo build --workspace` step beforehand is
-      # redundant under Swatinem's rust-cache.
+      # narrow Accelerate smoke shell script. `cargo nextest run
+      # --workspace` builds everything it needs as part of test
+      # compilation, so a separate `cargo build --workspace` step
+      # beforehand is redundant under Swatinem's rust-cache. nextest's
+      # cross-binary parallelism keeps this job off the same ~200-binary
+      # serialization bloat as the Linux integration job; see
+      # docs/investigations/ci_integration_test_runtime_diagnosis.md.
       - name: Workspace tests
-        run: cargo test --workspace --tests
+        run: cargo nextest run --workspace
 
       - name: Verify packaged binary architecture
         run: |
