@@ -8,10 +8,12 @@ Three things are locked here:
   (a) the per-stage subsets union exactly to the full canonical list;
   (b) a parity assertion: every `cargo`/`chelis` invocation in a gate
       step of `.github/workflows/ci.yml` is produced by `gate.py`. This
-      is the lock that turns future CI-vs-gate drift into a test
-      failure. The non-gate jobs (sanitizer, macOS-smoke, docs,
-      LOC-report, no-AI-authorship) are excluded by name so the
-      exclusion is explicit and reviewable;
+      covers both `cargo ...` and bare `chelis ...` commands (the
+      `cargo run -p chelis-cli --bin chelis -- ...` form is caught by
+      the `cargo ` prefix). This is the lock that turns future
+      CI-vs-gate drift into a test failure. The non-gate jobs
+      (sanitizer, macOS-smoke, docs, LOC-report, no-AI-authorship) are
+      excluded by name so the exclusion is explicit and reviewable;
   (c) `--list` prints the canonical full list.
 """
 
@@ -111,18 +113,36 @@ class ListOutputTests(unittest.TestCase):
         self.assertNotIn("cargo test --workspace", rendered)
 
 
+# A gate `run:` step is "gate-relevant" if it invokes the Rust
+# toolchain (`cargo ...`) or the Chelis CLI directly (`chelis ...`).
+# The `cargo run -p chelis-cli --bin chelis -- ...` form is already
+# covered by the `cargo ` prefix; the bare `chelis ...` form is the
+# case the original `cargo `-only filter missed (RT-2 finding). Both
+# the module docstring and
+# docs/investigations/test_toolchain_guards_design.md describe the lock
+# as covering "every `cargo`/`chelis` invocation", so the parser must
+# catch both.
+_GATE_COMMAND_PREFIXES = ("cargo ", "chelis ")
+
+
+def _is_gate_relevant_command(command: str) -> bool:
+    """True if `command` is a `cargo` or `chelis` invocation that a gate
+    job must route through `gate.py` rather than hand-inline."""
+    return any(command.startswith(prefix) for prefix in _GATE_COMMAND_PREFIXES)
+
+
 def _parse_ci_gate_invocations() -> dict[str, list[str]]:
     """Parse `.github/workflows/ci.yml` and return, per gate job, the
-    list of `run:` command lines that invoke `cargo` or
-    `cargo run ... chelis ... lint`.
+    list of `run:` command lines that invoke `cargo` or `chelis`
+    (including the `cargo run ... chelis ... lint` form).
 
     The parser is intentionally simple line-based YAML-shape matching:
     it tracks the current `<job>:` header (two-space indent under
     `jobs:`) and collects single-line `run:` values whose command
-    starts with `cargo`. Multi-line `run: |` blocks in the gate jobs
-    are not used today; if one is introduced the parity test will not
-    see it, which the `test_no_multiline_run_in_gate_jobs` guard
-    catches.
+    starts with `cargo ` or `chelis ` (see `_is_gate_relevant_command`).
+    Multi-line `run: |` blocks in the gate jobs are not used today; if
+    one is introduced the parity test will not see it, which the
+    `test_no_multiline_run_in_gate_jobs` guard catches.
     """
     text = CI_YML.read_text()
     lines = text.splitlines()
@@ -147,7 +167,7 @@ def _parse_ci_gate_invocations() -> dict[str, list[str]]:
             # guard test can detect it.
             invocations[current_job].append("<multiline-run-block>")
             continue
-        if command.startswith("cargo "):
+        if _is_gate_relevant_command(command):
             invocations[current_job].append(command)
     return invocations
 
@@ -164,7 +184,7 @@ class CiParityTests(unittest.TestCase):
     def test_gate_jobs_call_gate_py(self):
         # The `lint-and-unit` and `integration` jobs must invoke
         # `python3 scripts/gate.py <stage>` and must NOT hand-inline
-        # any `cargo` command.
+        # any `cargo` or `chelis` command.
         invocations = _parse_ci_gate_invocations()
         for job in ("lint-and-unit", "integration"):
             self.assertIn(job, invocations, f"CI job '{job}' not found")
@@ -172,7 +192,7 @@ class CiParityTests(unittest.TestCase):
                 invocations[job],
                 [],
                 (
-                    f"CI job '{job}' hand-inlines cargo command(s) "
+                    f"CI job '{job}' hand-inlines cargo/chelis command(s) "
                     f"{invocations[job]}; route them through "
                     f"scripts/gate.py instead"
                 ),
@@ -184,7 +204,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("scripts/gate.py integration", text)
 
     def test_non_gate_jobs_are_excluded_by_name(self):
-        # The non-gate jobs are allowed to keep their own cargo
+        # The non-gate jobs are allowed to keep their own cargo/chelis
         # invocations. This test pins the exclusion list so it stays
         # visible: if a new non-gate job is added, the author must
         # decide explicitly whether it is in scope.
