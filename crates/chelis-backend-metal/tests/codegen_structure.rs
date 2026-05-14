@@ -528,71 +528,12 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
     dag
 }
 
-#[test]
-fn wsm1_f32_matmul_routes_to_mps() {
-    // WS-M1: f32 matmul dispatches to MPSMatrixMultiplication via
-    // `chelis_metal_mps_gemm_f32`, not the tiled MSL kernel.
-    let dag = build_matmul_dag(32, 16, 16);
-    let result = codegen_metal(&dag, "mm");
-    let src = &result.mm_source;
-    assert!(
-        !src.contains("M1 fallback stub"),
-        "f32 matmul should specialize, not fall through to stub: {src}"
-    );
-    assert!(
-        src.contains("chelis_metal_mps_gemm_f32(buf_0, buf_1, buf_5, 32u, 16u, 16u)"),
-        "f32 matmul should call the MPS helper with the right shapes: {src}"
-    );
-    // No tiled kernel is emitted for the f32 path.
-    assert!(
-        !src.contains("kernel void k_matmul"),
-        "f32 matmul must not emit the tiled MSL kernel; goes through MPS instead: {src}"
-    );
-}
-
-#[test]
-fn wsm1_f16_matmul_routes_to_mps() {
-    // WS-M1: f16 matmul also dispatches to MPS (`chelis_metal_mps_gemm_f16`).
-    let dag = build_matmul_dag_prec(8, 8, 8, Prim::F16);
-    let result = codegen_metal(&dag, "mm_f16");
-    let src = &result.mm_source;
-    assert!(
-        src.contains("chelis_metal_mps_gemm_f16("),
-        "f16 matmul should call the f16 MPS helper: {src}"
-    );
-    assert!(
-        !src.contains("kernel void k_matmul"),
-        "f16 matmul must not emit a tiled MSL kernel: {src}"
-    );
-}
-
-#[test]
-fn wsm1_bf16_matmul_routes_to_tiled_msl() {
-    // WS-M1: bf16 matmul falls back to the parameterized tiled MSL
-    // kernel (MPS doesn't expose a public bfloat GEMM on every
-    // toolchain). The kernel template gates on
-    // `#if __METAL_VERSION__ >= 320`.
-    let dag = build_matmul_dag_prec(8, 8, 8, Prim::Bf16);
-    let result = codegen_metal(&dag, "mm_bf16");
-    let src = &result.mm_source;
-    assert!(
-        src.contains("kernel void k_matmul_bf16_"),
-        "bf16 matmul should emit a parameterized tiled MSL kernel: {src}"
-    );
-    assert!(
-        src.contains("threadgroup bfloat tileA"),
-        "bf16 matmul tile should be bfloat-typed: {src}"
-    );
-    assert!(
-        src.contains("#if __METAL_VERSION__ >= 320"),
-        "bf16 matmul must wrap the kernel in the MSL 3.2+ guard: {src}"
-    );
-    // bf16 must NOT route through MPS (no public bfloat MPS GEMM).
-    assert!(
-        !src.contains("chelis_metal_mps_gemm_"),
-        "bf16 matmul must not call any MPS helper: {src}"
-    );
-}
+// Per-dtype matmul routing (f32/f16 -> MPS, bf16 -> tiled MSL) is the
+// canonical responsibility of `dtype_matrix.rs::matmul_{f32,f16,bf16}_*`.
+// The former `wsm1_{f32,f16,bf16}_matmul_routes_to_*` tests here asserted
+// the same routing targets and were removed as duplicates. The two tests
+// below stay because they cover non-routing facets (subgraph folding and
+// the M/N/K uniform packing) that dtype_matrix does not.
 
 #[test]
 fn wsm1_matmul_skips_expand_and_mul_intermediates() {
