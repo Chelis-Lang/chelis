@@ -92,7 +92,7 @@
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tempfile::tempdir;
 
 const INTEGER_DTYPES: &[&str] = &["int8", "int16", "int32", "int64"];
@@ -146,14 +146,6 @@ fn error_messages(json: &Value) -> Vec<String> {
         .iter()
         .map(|e| e["message"].as_str().unwrap_or("").to_string())
         .collect()
-}
-
-fn stdlib_path(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/chelis-std")
-        .join(rel)
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("failed to canonicalize {rel}: {e}"))
 }
 
 // =================================================================
@@ -571,48 +563,14 @@ fn finding_6_concrete_only_program_builds_clean() {
     );
 }
 
-// =================================================================
-// FINDING 7: building the production stdlib `linear.ch` panics.
-// This is the canonical case finding 6 protects against regressing.
-// =================================================================
-
-#[test]
-fn production_stdlib_linear_now_builds_clean() {
-    // WS-A8: production `packages/chelis-std/src/nn/linear.ch` is
-    // the canonical case the BLOCKER-class panic blocked. With
-    // monomorphization implemented the standalone polymorphic def is
-    // silently skipped from emission and the host wrapper for the
-    // sigless reachable code is emitted cleanly.
-    let path = stdlib_path("src/nn/linear.ch");
-    let output = run_build(&path);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "WS-A8: production linear.ch must build successfully. stderr={stderr}"
-    );
-    assert!(
-        !stderr.contains("monomorphization"),
-        "WS-A8: stderr must not surface the monomorphization tripwire \
-         for production linear.ch. stderr={stderr}"
-    );
-}
-
-// =================================================================
-// Bounded sanity / cross-cutting: production stdlib check pass.
-// =================================================================
-
-#[test]
-fn production_stdlib_attention_typechecks_clean() {
-    // Cross-check: production attention.ch type-checks even though
-    // its body would silently accept integer instantiations.
-    let path = stdlib_path("src/nn/attention.ch");
-    let json = run_check(&path);
-    let errs = errors(&json);
-    assert!(
-        errs.is_empty(),
-        "production attention.ch should type-check; got {errs:?}"
-    );
-}
+// FINDING 7 (building the production stdlib `linear.ch` panics) is the
+// canonical case finding 6 protects against regressing. The production
+// `linear.ch` / `attention.ch` build coverage now lives in
+// `wsa8_monomorphization_build.rs` (which also asserts the
+// monomorphization tripwire never surfaces); the production-file
+// `chelis check` coverage lives in `production_stdlib_typechecks.rs`.
+// Both were deduplicated out of this file so the production stdlib is
+// checked/built exactly once across the suite.
 
 // =================================================================
 // Negative-parity gap: cross-precision integer rejection through

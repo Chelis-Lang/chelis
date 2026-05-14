@@ -24,8 +24,10 @@
 //!    site because the sig pins f32. This file pins the f32
 //!    constraint by exercising it.
 //!
-//! 4. Each newly-generalized production stdlib file in
-//!    packages/chelis-std/src/ continues to type-check standalone.
+//! The standalone type-check of each newly-generalized production
+//! stdlib file under packages/chelis-std/src/ lives in the
+//! consolidated `production_stdlib_typechecks.rs` (one check per file,
+//! deduplicated across the WS-* suites).
 //!
 //! Coverage matrix (printed by run_coverage_matrix at the end):
 //!
@@ -561,130 +563,4 @@ def bad(p: tensor[3, {dtype}], g: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = a
         let json = run_check(&path);
         expect_any_error(&json, &format!("optim.adamw_step rejects {dtype}"));
     }
-}
-
-// =================================================================
-// 5. Production stdlib files (each newly-generalized one) type-check
-//    standalone. Pins that the actual files in
-//    packages/chelis-std/src/ remain well-formed.
-// =================================================================
-
-fn stdlib_path(rel: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/chelis-std")
-        .join(rel)
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("failed to canonicalize {rel}: {e}"))
-}
-
-#[test]
-fn production_stdlib_linear_typechecks() {
-    let path = stdlib_path("src/nn/linear.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production nn/linear.ch");
-}
-
-#[test]
-fn production_stdlib_embedding_typechecks() {
-    let path = stdlib_path("src/nn/embedding.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production nn/embedding.ch");
-}
-
-#[test]
-fn production_stdlib_rmsnorm_typechecks() {
-    let path = stdlib_path("src/nn/rmsnorm.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production nn/rmsnorm.ch");
-}
-
-#[test]
-fn production_stdlib_silu_typechecks() {
-    let path = stdlib_path("src/nn/silu.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production nn/silu.ch");
-}
-
-#[test]
-fn production_stdlib_gelu_typechecks() {
-    let path = stdlib_path("src/nn/gelu.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production nn/gelu.ch");
-}
-
-#[test]
-fn production_stdlib_attention_typechecks() {
-    let path = stdlib_path("src/nn/attention.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production nn/attention.ch");
-}
-
-#[test]
-fn production_stdlib_generate_typechecks() {
-    let path = stdlib_path("src/nn/generate.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production nn/generate.ch");
-}
-
-#[test]
-fn production_stdlib_init_random_typechecks() {
-    let path = stdlib_path("src/init/random.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production init/random.ch");
-}
-
-#[test]
-fn production_stdlib_init_kaiming_typechecks() {
-    let path = stdlib_path("src/init/kaiming.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production init/kaiming.ch");
-}
-
-#[test]
-fn production_stdlib_init_xavierext_typechecks() {
-    let path = stdlib_path("src/init/xavierext.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production init/xavierext.ch");
-}
-
-#[test]
-fn production_stdlib_loss_bce_typechecks() {
-    let path = stdlib_path("src/loss/bce.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production loss/bce.ch");
-}
-
-#[test]
-fn production_stdlib_loss_crossentropy_typechecks() {
-    let path = stdlib_path("src/loss/crossentropy.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production loss/crossentropy.ch");
-}
-
-#[test]
-fn production_stdlib_loss_kldiv_typechecks() {
-    let path = stdlib_path("src/loss/kldiv.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production loss/kldiv.ch");
-}
-
-#[test]
-fn production_stdlib_loss_metrics_typechecks() {
-    let path = stdlib_path("src/loss/metrics.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production loss/metrics.ch");
-}
-
-#[test]
-fn production_stdlib_optim_typechecks() {
-    let path = stdlib_path("src/optim.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production optim.ch");
-}
-
-#[test]
-fn production_stdlib_test_typechecks() {
-    let path = stdlib_path("src/test.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production test.ch");
 }
