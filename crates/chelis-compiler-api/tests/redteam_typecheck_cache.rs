@@ -1,7 +1,7 @@
 //! Red-team adversarial coverage for the cross-process typecheck cache
 //! (`docs/investigations/stdlib_typecheck_cache.md`, merged in #127).
 //!
-//! A stale or wrong cache hit is a silent miscompilation — the worst bug
+//! A stale or wrong cache hit is a silent miscompilation - the worst bug
 //! class in a compiler. The merged acceptance oracle
 //! (`chelis-cli/tests/stdlib_typecheck_cache_oracle.rs`) only exercises
 //! the cache with `CHELIS_REEF_HOME` set, so it never touches the
@@ -15,11 +15,11 @@
 //!   `CompiledContext` disk cache for the `CHELIS_REEF_HOME`-unset case
 //!   by resolving the shared `~/.cache/chelis/compiled/` XDG fallback.
 //!   The cache file name is `(package_name, package_version,
-//!   source_hash)` and `load_if_fresh` only re-verifies `source_hash` —
+//!   source_hash)` and `load_if_fresh` only re-verifies `source_hash` -
 //!   a *content* check, never an *identity* check. Two genuinely
 //!   different packages that share a name+version and have
 //!   byte-identical sources therefore collide on one cache file, and the
-//!   loser silently loads the winner's `CompiledContext` — including the
+//!   loser silently loads the winner's `CompiledContext` - including the
 //!   winner's `package_root`, which points at a different (possibly
 //!   deleted) directory. `chelis test`'s worker has a `package_root`
 //!   guard that turns this into a hard error instead of a silent wrong
@@ -29,13 +29,13 @@
 //!
 //! - **RT-2 (MEDIUM, stale-hit gap):** `stdlib_cache_key` folds the
 //!   struct-format version, the bundled-stdlib version, the
-//!   archive/shell SHAs, and a hash of the linked chelis-std decls — but
+//!   archive/shell SHAs, and a hash of the linked chelis-std decls - but
 //!   NOT the chelis *compiler* build identity. Two `chelis` binaries
 //!   built from different compiler source (different typechecker /
 //!   effects / linearity / lowering logic) but the same bundled
 //!   chelis-std produce the *same* key. A binary that shares a cache
 //!   directory with another binary version reads the other's
-//!   `StdLibContext` — a stale typecheck/lower result for *this*
+//!   `StdLibContext` - a stale typecheck/lower result for *this*
 //!   binary's semantics. The struct-format-version prefix only guards
 //!   the `StdLibContext` *shape*, never the compiler *semantics* that
 //!   produced its contents.
@@ -56,7 +56,7 @@ use tempfile::TempDir;
 /// version, and `src/main.ch` body into a fresh tempdir. Returns
 /// `(tempdir_guard, package_root)`. The package has no dependencies, so
 /// its `source_hash` is a pure function of `name`, `version`, and the
-/// `main.ch` bytes — nothing path-dependent.
+/// `main.ch` bytes - nothing path-dependent.
 fn make_pkg(name: &str, version: &str, main_ch: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("tempdir");
     let root = dir.path().join(name);
@@ -76,14 +76,14 @@ fn make_pkg(name: &str, version: &str, main_ch: &str) -> (TempDir, PathBuf) {
 const TRIVIAL_MAIN: &str = "module Rt.Main\n\ndef rt_value -> int32 = cast(0, int32)\n";
 
 // ---------------------------------------------------------------------
-// RT-1: Phase K CompiledContext cache — two distinct packages with
+// RT-1: Phase K CompiledContext cache - two distinct packages with
 // identical (name, version, source bytes) collide on one cache file.
 // ---------------------------------------------------------------------
 
 #[test]
 fn rt1_identical_packages_in_different_dirs_collide_on_one_cache_file() {
     // Two packages, same name+version+source bytes, in DIFFERENT
-    // tempdirs — exactly the `phase3t_*` fixture shape, which builds a
+    // tempdirs - exactly the `phase3t_*` fixture shape, which builds a
     // `make_reef_package("phase3t-iso-...")` fixture with deterministic
     // content in a fresh tempdir on every run.
     let (_dir_a, root_a) = make_pkg("rt-collide", "0.1.0", TRIVIAL_MAIN);
@@ -101,7 +101,7 @@ fn rt1_identical_packages_in_different_dirs_collide_on_one_cache_file() {
     // packages write to the SAME path.
     assert_eq!(
         ctx_a.source_hash, ctx_b.source_hash,
-        "two byte-identical packages must hash identically — this is the \
+        "two byte-identical packages must hash identically - this is the \
          collision precondition"
     );
     let name_a = CompiledContext::cache_file_name(("rt-collide", "0.1.0"), ctx_a.source_hash);
@@ -121,14 +121,14 @@ fn rt1_identical_packages_in_different_dirs_collide_on_one_cache_file() {
         .save(&shared_path)
         .expect("A writes the shared cache file");
 
-    // Package B looks up ITS cache entry — same path — against B's own
+    // Package B looks up ITS cache entry - same path - against B's own
     // package_dir. `load_if_fresh` only re-verifies source_hash, which
     // matches (identical content), so it returns A's context as a hit.
     let loaded_for_b =
         CompiledContext::load_if_fresh(&shared_path, Path::new("/tmp/unused"), &root_b)
             .expect("load_if_fresh must not error on a content-matching entry")
             .expect(
-                "load_if_fresh returns A's context as a fresh hit for B — the \
+                "load_if_fresh returns A's context as a fresh hit for B - the \
              content hashes match so the cache cannot tell the packages apart",
             );
 
@@ -142,7 +142,7 @@ fn rt1_identical_packages_in_different_dirs_collide_on_one_cache_file() {
         loaded_root,
         root_a,
         "REGRESSION (RT-1): package B's cache lookup silently returned \
-         package A's CompiledContext — its package_root points at A's \
+         package A's CompiledContext - its package_root points at A's \
          directory `{}`, not B's `{}`. The Phase K cache file name and \
          load_if_fresh hash check are both content-only; nothing ties a \
          cache entry to the on-disk identity of the package that wrote \
@@ -154,7 +154,7 @@ fn rt1_identical_packages_in_different_dirs_collide_on_one_cache_file() {
     );
     assert_ne!(
         loaded_root, root_b,
-        "the loaded context's package_root is NOT package B's own root — \
+        "the loaded context's package_root is NOT package B's own root - \
          confirming the cross-package contamination"
     );
 }
@@ -162,8 +162,8 @@ fn rt1_identical_packages_in_different_dirs_collide_on_one_cache_file() {
 #[test]
 fn rt1_distinct_source_packages_do_not_collide() {
     // Negative parity for RT-1: when the two packages' sources actually
-    // differ, their source_hashes — and therefore their cache file
-    // names — differ, so there is no collision. This pins that the
+    // differ, their source_hashes - and therefore their cache file
+    // names - differ, so there is no collision. This pins that the
     // collision in `rt1_identical_packages_...` is specifically about
     // byte-identical content, not a blanket cache-key defect.
     let (_dir_a, root_a) = make_pkg("rt-distinct", "0.1.0", TRIVIAL_MAIN);
@@ -194,7 +194,7 @@ fn rt1_load_if_fresh_does_not_validate_package_identity() {
     // the "two compiles" framing: build ONE context, save it, then load
     // it back against a DIFFERENT package directory whose source bytes
     // happen to match. `load_if_fresh` takes `package_dir` precisely so
-    // it can re-verify freshness — but it only re-derives a content
+    // it can re-verify freshness - but it only re-derives a content
     // hash, never checks that `package_dir` is the directory the cached
     // context was built from. A content match against an unrelated
     // directory is accepted as a hit.
@@ -213,7 +213,7 @@ fn rt1_load_if_fresh_does_not_validate_package_identity() {
     assert!(
         outcome.is_some(),
         "documents RT-1: load_if_fresh accepts a content-matching cache \
-         entry against an unrelated package_dir — it validates source \
+         entry against an unrelated package_dir - it validates source \
          CONTENT, never package IDENTITY"
     );
     assert_eq!(
@@ -238,8 +238,8 @@ fn rt2_stdlib_cache_key_omits_compiler_build_identity() {
     // build-identity signal.
     //
     // This test pins the gap structurally. It recomputes the key for a
-    // fixed decl slice and asserts it is byte-stable — which IS the
-    // intended cross-fixture-reuse property — and then documents, with
+    // fixed decl slice and asserts it is byte-stable - which IS the
+    // intended cross-fixture-reuse property - and then documents, with
     // the COMPILER_VERSION value in scope, that nothing in that
     // derivation is sensitive to it. If a future change folds the
     // compiler build identity into the key (closing the stale-hit hole),
@@ -251,7 +251,7 @@ fn rt2_stdlib_cache_key_omits_compiler_build_identity() {
     let key_second = stdlib_cache_key(&decls);
     assert_eq!(
         key_first, key_second,
-        "the key is deterministic for a fixed decl slice — the intended \
+        "the key is deterministic for a fixed decl slice - the intended \
          cross-fixture-reuse property"
     );
 
@@ -275,6 +275,6 @@ fn rt2_stdlib_cache_key_omits_compiler_build_identity() {
     assert!(
         compiler_version_is_a_real_signal,
         "COMPILER_VERSION is a real, non-empty build-identity string that \
-         the cache key could fold in but does not — RT-2"
+         the cache key could fold in but does not - RT-2"
     );
 }
