@@ -80,6 +80,22 @@ without dropping any pinned invariant.
   `rt_g_compose.rs::g5_cold_path_overhead_at_most_2x_monolithic`,
   separating it from the correctness pass per the CLAUDE.md
   perf-vs-correctness rule, and documented it in `docs/manual_gates.md`.
+### Changed - e2e parsimony pass over the wsa/wsc/rt3a integration test cluster
+
+Trimmed redundant coverage in the `chelis-cli` `wsa*` / `wsc*` /
+`rt3a*` integration test cluster without losing any pinned invariant.
+Three cross-cluster triplicate tests (the WS-C-blocker reproducer and
+two integer-matmul-rejection copies) were removed because the
+invariant is already pinned by keep-by-default regression locks in
+`rt3a_adversarial.rs`, `rt4_adversarial.rs`, and
+`wsa5_precision_polymorphism.rs`. The WS-A6 and WS-A7 dtype-matrix
+re-tests were consolidated into their owning files
+(`wsa6_def_annotation_desugar.rs`, `wsa7_bareref_return_inference.rs`),
+which now carry the full arithmetic-dtype matrix. Near-identical tests
+in `wsc_v3_stdlib_finish.rs` and `wsc_stdlib_generalization.rs` were
+collapsed into table-driven tests with identical coverage, and two
+literal-duplicate fixtures in `rt3a_adversarial.rs` were merged into
+one test that keeps the union of both assertions.
 
 ## [0.7.9] — 2026-05-14
 
