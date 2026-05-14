@@ -493,45 +493,6 @@ view = print(ok)
 
 #[test]
 #[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
-fn reef_std_parquet_module_resolves_and_type_checks() {
-    let dir = tempdir().expect("tempdir");
-    let reef_home = dir.path().join("reef-home");
-    let std_pkg = dir.path().join("chelis-std");
-    let app_pkg = dir.path().join("parquet-app");
-    copy_dir_recursive(&package_std(), &std_pkg);
-    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .args(["reef", "publish", std_pkg.to_str().unwrap()])
-        .assert()
-        .success();
-
-    write_file(&app_pkg.join("reef.toml"), &app_reef_toml("parquet-app"));
-    write_file(
-        &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
-
-import Std.Io.Parquet (read_parquet)
-
-def load_rows(path: string) -> List[Dict[string, string]] = read_parquet(path)
-"#,
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"score\": 1"));
-}
-
-#[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_parquet_module_rejects_missing_export() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -570,48 +531,12 @@ x = nonexistent_parquet_fn("foo")
         .stderr(predicate::str::contains("does not export"));
 }
 
-#[test]
-#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
-fn reef_std_parquet_write_resolves_and_type_checks() {
-    let dir = tempdir().expect("tempdir");
-    let reef_home = dir.path().join("reef-home");
-    let std_pkg = dir.path().join("chelis-std");
-    let app_pkg = dir.path().join("parquet-write-app");
-    copy_dir_recursive(&package_std(), &std_pkg);
-    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .args(["reef", "publish", std_pkg.to_str().unwrap()])
-        .assert()
-        .success();
-
-    write_file(
-        &app_pkg.join("reef.toml"),
-        &app_reef_toml("parquet-write-app"),
-    );
-    write_file(
-        &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
-
-import Std.Io.Parquet (write_parquet)
-
-def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_parquet(path, rows)
-"#,
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"score\": 1"));
-}
-
+/// End-to-end Parquet IO package acceptance: imports both
+/// `read_parquet` and `write_parquet`, type-checks a `def` for each
+/// (so `chelis check` clean-with-score-1 pins the type-check path for
+/// both symbols), then builds through `chelis build --target c`. This
+/// subsumes the narrower read-only and write-only resolves/type-checks
+/// cases, which were strict subsets of this test's check assertion.
 #[test]
 #[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_parquet_module_builds_cleanly() {
