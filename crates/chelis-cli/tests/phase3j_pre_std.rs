@@ -398,7 +398,8 @@ gelu_out = forward(ys)
 /// Bucket-5 closure (was Batch 7b's `_rejected` negative): a program
 /// that uses `with seed(...)` now builds cleanly through `chelis build
 /// --target c`, gcc-links, runs, and produces deterministic output
-/// that is byte-exact across runs for the same seed.
+/// that is byte-exact across runs for the same seed, and a different
+/// seed must produce a different output.
 ///
 /// Direct DAG-lowered random ops can carry the seed as
 /// `RiscOp::UniformLike { seed }`; generated host-function paths use
@@ -411,31 +412,22 @@ gelu_out = forward(ys)
 /// f32-vs-f64 reduction difference is intrinsic to the runtime
 /// precision, not a seed-plumbing bug.
 ///
-/// The same-seed determinism contract (seed=7 -> exact byte sequence)
-/// is pinned by the seed=7 branch of
-/// `phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ`
-/// below, which asserts the identical seed=7 vector alongside seed=42.
-/// A dedicated seed=7-only test would be a strict subset of that, so it
-/// is folded in here.
+/// This test builds seed 7 and seed 42 in one program. The seed=7
+/// branch pins the same-seed determinism contract (seed=7 -> exact
+/// byte sequence); the seed=42 branch pins seed sensitivity. Had we
+/// silently dropped the seed (the pre-Bucket-5 wrong-answer that
+/// surfaced as `chelis_uniform_sample_f32(0ULL, ...)` in the emitted
+/// C), runs with seed=7 and seed=42 would have produced identical
+/// bytes, and this assertion would catch that regression.
 ///
-/// The seed-sensitivity test exercises the direct `uniform_like`
-/// builtin under `with seed(...)` rather than
-/// `Std.Init.Kaiming.kaiming_uniform`. The kaiming wrapper's body uses
-/// `to_tensor(map(scalar_fn, to_list(raw)))`, which the host-lane
-/// lowerer turns into a host function, making the binding
-/// function-typed instead of a printed tensor value. The narrow
-/// seed-plumbing oracle uses `uniform_like` directly so the binding
-/// stays a tensor and the compiled stdout assertion is meaningful.
-
-/// Bucket-5 negative-parity sibling for `with seed`: a different seed
-/// must produce a different output, and re-running with the same seed
-/// must reproduce the same output.
-///
-/// This pins the determinism contract: had we silently dropped the
-/// seed (the pre-Bucket-5 wrong-answer that surfaced as
-/// `chelis_uniform_sample_f32(0ULL, ...)` in the emitted C), runs with
-/// seed=7 and seed=42 would have produced identical bytes. The
-/// assertion here would catch that regression.
+/// The test exercises the direct `uniform_like` builtin under
+/// `with seed(...)` rather than `Std.Init.Kaiming.kaiming_uniform`.
+/// The kaiming wrapper's body uses `to_tensor(map(scalar_fn,
+/// to_list(raw)))`, which the host-lane lowerer turns into a host
+/// function, making the binding function-typed instead of a printed
+/// tensor value. The narrow seed-plumbing oracle uses `uniform_like`
+/// directly so the binding stays a tensor and the compiled stdout
+/// assertion is meaningful.
 #[test]
 fn phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-seed-differs");
