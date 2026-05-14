@@ -12,6 +12,7 @@ use std::env;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 use tar::{Archive, Builder};
@@ -3619,8 +3620,7 @@ fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, 
     }
     let cache_root = registry_root.join("cache").join(&archive_sha256);
     if !cache_root.exists() {
-        fs::create_dir_all(&cache_root).map_err(|e| LoadRegistryError::Other(e.to_string()))?;
-        extract_archive(&archive_path, &cache_root).map_err(LoadRegistryError::Other)?;
+        extract_archive_atomic(&archive_path, &cache_root).map_err(LoadRegistryError::Other)?;
     }
     Ok(InstalledPackage {
         root: cache_root,
@@ -4353,6 +4353,76 @@ fn extract_archive(archive_path: &Path, out_dir: &Path) -> Result<(), String> {
     let decoded = zstd::stream::decode_all(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut archive = Archive::new(Cursor::new(decoded));
     archive.unpack(out_dir).map_err(|e| e.to_string())
+}
+
+/// Extract `archive_path` into `final_dir` atomically.
+///
+/// The package cache directory `<registry>/cache/<archive_sha256>/` is
+/// shared across every concurrent `chelis reef build` that touches the
+/// same `$CHELIS_REEF_HOME`. Extracting in place leaves a window where
+/// the directory exists but its files (`reef.toml`, `src/main.ch`, ...)
+/// are only partially written, so a concurrent reader can observe a
+/// torn or empty `reef.toml` and fail with a `TOML parse error at line
+/// 1, column 1`.
+///
+/// This helper extracts into a unique sibling temp directory and then
+/// `fs::rename`s it into place. Same-directory rename is atomic on
+/// every supported FS, so a concurrent reader sees either no
+/// `cache/<hash>/` directory at all or the fully-populated one, never
+/// an intermediate state.
+///
+/// If the rename loses a race (another process populated `final_dir`
+/// first), that is success: both extractions produce byte-identical
+/// trees because the cache key is the archive's own content hash. The
+/// loser discards its temp directory and returns `Ok`.
+fn extract_archive_atomic(archive_path: &Path, final_dir: &Path) -> Result<(), String> {
+    let parent = final_dir.parent().ok_or_else(|| {
+        format!(
+            "extract_archive_atomic: {} has no parent directory",
+            final_dir.display()
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|e| format!("failed to create cache directory {}: {e}", parent.display()))?;
+    // Unique temp dir name: PID + a process-local counter so two
+    // extractions racing inside the same process also get distinct
+    // staging directories.
+    static EXTRACT_SEQ: AtomicUsize = AtomicUsize::new(0);
+    let unique = format!(
+        ".extract-{}-{}.tmp",
+        std::process::id(),
+        EXTRACT_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let tmp_dir = parent.join(unique);
+    // Best-effort cleanup of a stale staging dir from a crashed write.
+    let _ = fs::remove_dir_all(&tmp_dir);
+    fs::create_dir_all(&tmp_dir).map_err(|e| {
+        format!(
+            "failed to create staging directory {}: {e}",
+            tmp_dir.display()
+        )
+    })?;
+    if let Err(e) = extract_archive(archive_path, &tmp_dir) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+    match fs::rename(&tmp_dir, final_dir) {
+        Ok(()) => Ok(()),
+        Err(_) if final_dir.exists() => {
+            // Lost the race: another extraction populated `final_dir`
+            // first. The trees are content-identical, so discard ours.
+            let _ = fs::remove_dir_all(&tmp_dir);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            Err(format!(
+                "failed to publish extracted cache {} -> {}: {e}",
+                tmp_dir.display(),
+                final_dir.display()
+            ))
+        }
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -6803,5 +6873,111 @@ chelis-std = {{ version = "0.3.0" }}
         unsafe {
             std::env::remove_var("CHELIS_REEF_HOME");
         }
+    }
+
+    /// Build a tiny `.tar.zst` archive containing `reef.toml` and
+    /// `src/main.ch`, returning its on-disk path. Shared by the
+    /// `extract_archive_atomic` tests.
+    fn stage_test_archive(dir: &Path) -> PathBuf {
+        let root = dir.join("pkg-src");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "atomicpkg"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Atomic"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Atomic.Main\n\nexport (one)\ndef one -> int32 = 1\n",
+        );
+        let archive_path = dir.join("atomicpkg.tar.zst");
+        build_archive(&root, &archive_path).expect("build_archive");
+        archive_path
+    }
+
+    /// `extract_archive_atomic` publishes the fully-populated tree and
+    /// leaves no `.extract-*.tmp` staging directory behind.
+    #[test]
+    fn extract_archive_atomic_publishes_and_leaves_no_staging_dir() {
+        let dir = tempdir().expect("tempdir");
+        let archive_path = stage_test_archive(dir.path());
+
+        let cache_root = dir.path().join("cache").join("deadbeef");
+        extract_archive_atomic(&archive_path, &cache_root).expect("atomic extract");
+
+        // The final tree is complete.
+        assert!(cache_root.join("reef.toml").exists());
+        assert!(cache_root.join("src/main.ch").exists());
+        let manifest = fs::read_to_string(cache_root.join("reef.toml")).expect("read manifest");
+        assert!(
+            manifest.contains("name = \"atomicpkg\""),
+            "extracted reef.toml must be the full, parseable manifest; got: {manifest}"
+        );
+
+        // No orphan staging directory remains in the cache parent.
+        let leftover: Vec<_> = fs::read_dir(dir.path().join("cache"))
+            .expect("read cache dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".extract-"))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "no .extract-*.tmp staging dir must remain; found: {leftover:?}"
+        );
+    }
+
+    /// Concurrent-write contract: many threads extracting the same
+    /// archive into the same cache directory all succeed, and every
+    /// observed `reef.toml` is the complete manifest, never a torn or
+    /// empty file. This is the unit-level guard for the
+    /// `phaseA_item8_two_concurrent_builds_serialize` CLI flake.
+    #[test]
+    fn extract_archive_atomic_concurrent_writers_never_tear_reef_toml() {
+        let dir = tempdir().expect("tempdir");
+        let archive_path = stage_test_archive(dir.path());
+        let cache_root = dir.path().join("cache").join("sha-shared");
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let archive_path = archive_path.clone();
+            let cache_root = cache_root.clone();
+            handles.push(std::thread::spawn(move || {
+                // Extract (mirrors load_registry_package's guarded call).
+                if !cache_root.exists() {
+                    extract_archive_atomic(&archive_path, &cache_root)
+                        .expect("concurrent atomic extract");
+                }
+                // Immediately read back, racing the other writers.
+                let manifest = fs::read_to_string(cache_root.join("reef.toml"))
+                    .expect("reef.toml must be readable, never mid-write");
+                assert!(
+                    manifest.contains("name = \"atomicpkg\""),
+                    "reader observed a torn reef.toml: {manifest:?}"
+                );
+            }));
+        }
+        for h in handles {
+            h.join().expect("extractor thread panicked");
+        }
+
+        // Exactly the published tree, no staging leftovers.
+        assert!(cache_root.join("src/main.ch").exists());
+        let leftover: Vec<_> = fs::read_dir(dir.path().join("cache"))
+            .expect("read cache dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".extract-"))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "no .extract-*.tmp staging dir must remain after concurrent extracts; found: {leftover:?}"
+        );
     }
 }

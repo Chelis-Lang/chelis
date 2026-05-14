@@ -24,6 +24,27 @@ RNG-seed tests (each pins a distinct assertion that cannot be folded
 without loss), and the two `wsa8_monomorphization_build` stdlib build
 tests (`linear.ch` standalone-polymorphic vs `attention.ch`
 cross-function-polymorphic are distinct monomorphization shapes).
+### Fixed - atomic reef package-cache writes (concurrent-build race)
+
+`load_registry_package` extracted a package archive into the shared
+`$CHELIS_REEF_HOME/cache/<archive_sha256>/` directory in place: it
+created the directory, then unpacked `reef.toml` and its siblings file
+by file. The `if !cache_root.exists()` guard went false the instant the
+directory was created, so a concurrent `chelis reef build` against the
+same reef-home could observe a half-written `reef.toml` and fail with
+`TOML parse error at line 1, column 1`. This surfaced as an intermittent
+failure of the `phaseA_item8_two_concurrent_builds_serialize` CLI test.
+
+- `crates/chelis-reef/src/lib.rs`: new `extract_archive_atomic` helper
+  unpacks into a unique sibling `.extract-*.tmp` staging directory and
+  `fs::rename`s it into place. Same-directory rename is atomic, so a
+  concurrent reader sees either no cache directory or the fully
+  populated one, never a torn file. A lost rename race (another process
+  published first) is treated as success because the cache key is the
+  archive's own content hash, so the trees are byte-identical.
+- Unit coverage: `extract_archive_atomic_publishes_and_leaves_no_staging_dir`
+  and `extract_archive_atomic_concurrent_writers_never_tear_reef_toml`
+  (16 threads extracting and reading back the same cache directory).
 
 ### Added - adversarial coverage for the post-#130 compiled-context cache
 
