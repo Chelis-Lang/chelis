@@ -131,11 +131,28 @@ When a public surface has an implicit invariant, make it explicit and test it.
 Minimum repo gate:
 
 ```sh
-cargo build --workspace --all-targets
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
+python3 scripts/gate.py
 ```
+
+`scripts/gate.py` is the single source of truth for the per-PR
+developer-runnable gate. CI calls `python3 scripts/gate.py <stage>` for
+each split job, and `scripts/test_gate.py` asserts the CI workflow
+hand-inlines no gate command the script does not produce. To see the
+canonical list:
+
+```sh
+python3 scripts/gate.py --list
+# cargo build --workspace --all-targets
+# cargo clippy --workspace --all-targets -- -D warnings
+# cargo fmt --all -- --check
+# cargo run -p chelis-cli --bin chelis --quiet -- lint --check .
+# cargo nextest run --workspace --profile ci
+```
+
+The gate runs `cargo nextest run` (CI's actual runner), not `cargo test
+--workspace`, and includes `chelis lint --check .` (the §8.6 / §12
+naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
+and docs CI jobs are out of scope for this script by design.
 
 Default-gate discipline:
 

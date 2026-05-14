@@ -33,22 +33,14 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Naming lint (chelis lint --check)
-        # Per spec/01-nomenclature.md §12, `chelis lint` enforces
-        # ecosystem naming conventions. Gating mode (--check exits
-        # nonzero on any violation): the post-Wave-A/B/C/red-team
-        # state of chelis main reports zero violations across all 9
-        # rules. New violations introduced by a PR fail this step.
-        run: cargo run -p chelis-cli --bin chelis --quiet -- lint --check .
-
-      - name: Unit tests
-        run: cargo test --workspace --lib
+      # The lint-and-unit gate subset (build, clippy, fmt, chelis lint
+      # --check) is defined once in scripts/gate.py and run here via
+      # `gate.py lint-and-unit`. Do not hand-inline cargo/chelis
+      # commands into this job: scripts/test_gate.py greps this file
+      # and fails if any gate step is not produced by gate.py. See
+      # docs/investigations/test_toolchain_guards_design.md.
+      - name: Gate (lint-and-unit subset)
+        run: python3 scripts/gate.py lint-and-unit
 
   integration:
     name: Integration Tests (Linux)
@@ -74,8 +66,27 @@ jobs:
       # chelis-std). `cargo nextest` schedules tests from all binaries in
       # a single global thread pool, overlapping the heavyweight work.
       # See docs/investigations/ci_integration_test_runtime_diagnosis.md.
-      - name: Integration tests
-        run: cargo nextest run --workspace
+      #
+      # The integration gate subset (`cargo nextest run --workspace`)
+      # is defined once in scripts/gate.py and run here via `gate.py
+      # integration`. The `ci` nextest profile writes per-test JUnit
+      # timing XML to target/nextest/ci/junit.xml; the test-timing
+      # budget step below consumes it. Do not hand-inline cargo
+      # commands into this job (see scripts/test_gate.py parity lock).
+      - name: Gate (integration subset)
+        run: python3 scripts/gate.py integration
+
+      # Informational, non-failing: flags integration tests that have
+      # regressed past their committed timing baseline or that are new
+      # and over the absolute ceiling. The baseline
+      # (scripts/test_timing_baseline.json) is hand-curated and
+      # explicitly regenerated, never auto-updated on merge. Promotable
+      # to a blocking step later. See
+      # docs/investigations/test_toolchain_guards_design.md.
+      - name: Test-timing budget (informational)
+        if: always()
+        continue-on-error: true
+        run: python3 scripts/test_timing_check.py --junit target/nextest/ci/junit.xml
 
   loc-report:
     name: LOC Report
