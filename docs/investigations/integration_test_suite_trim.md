@@ -164,21 +164,49 @@ intact; none were deleted in this change.** Reasoning, per the
 
 ### Dedupe candidates flagged for orchestrator review
 
-Not acted on here; each needs a load-bearing-invariant judgment call:
+Each needed a judgment call on whether the duplication was safe to collapse
+without dropping a distinct invariant. **Reviewed; all three kept.** Verdict
+per candidate below.
 
 - `production_stdlib_typechecks::*`: 19 tests, identical operation
   (`chelis check <stdlib file>`), each re-typechecks the whole transitive
   stdlib graph. Candidate: keep one representative deepest-import-graph file
   and drop the rest, accepting the loss of per-file attribution. Counter-
   argument: the trim audit preserved per-file coverage on purpose.
+  **Verdict: kept all 19.** The dedupe motivation was wall-clock cost on a
+  heavy gate. The cross-process typecheck cache makes each check warm-cache
+  fast, and the suite is back on the per-PR `ci`/`default` profiles (see the
+  profile change below). Collapsing to one representative would drop coverage
+  and per-file failure attribution to save almost nothing now that the cache
+  removed the per-invocation cost the dedupe was meant to address.
 - `phase3j_pre_std` three RNG-seed tests: candidate to collapse to one
   end-to-end RNG-seed-determinism test if the distinct assertions
   (byte-exact output, handler-seed-in-C, per-op advance) can be folded into a
   single fixture without losing any of them.
+  **Verdict: kept all three.** They cannot be folded without losing an
+  assertion. `phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ`
+  deliberately uses `uniform_like` *directly* (no stdlib import) so the
+  binding stays a printed tensor and the byte-exact stdout assertion is
+  meaningful; the in-file doc comment explains this. The other two are
+  specifically *about* stdlib wrappers through distinct import paths
+  (`Std.Init.Kaiming` vs `Std.Init.Random`): `kaiming_uniform` pins that the
+  generated C threads the handler seed (not a literal `seed=0`), and
+  `normal_like` pins that the RNG state advances through the wrapper's inner
+  `uniform_like` calls. Folding loses either the byte-exact direct-primitive
+  assertion or the per-wrapper coverage.
 - `wsa8_monomorphization_build` `build_stdlib_linear_succeeds` vs
   `build_stdlib_attention_succeeds`: candidate to keep one representative
   stdlib build if monomorphization coverage does not actually differ between
   `linear.ch` and `attention.ch`.
+  **Verdict: kept both.** The monomorphization shapes differ. `linear.ch` is
+  a single standalone polymorphic def over symbolic dims (`a, b, c`) -- the
+  canonical RT-3 FINDING 7 case the BLOCKER-class panic blocked.
+  `attention.ch` ships four polymorphic defs including cross-function
+  polymorphic call chains (`multi_head_attention` and
+  `grouped_query_attention` both call `scaled_dot_product_attention`) plus a
+  `gather`/`int64` shape. Cross-function polymorphic monomorphization is a
+  distinct path from a single standalone def, so the two builds are not
+  duplicates.
 
 The dedupe examples named in the split brief that target *manual-gate*
 (`#[ignore]`'d) tests rather than per-PR tests -- the gelu/rmsnorm numeric
@@ -188,3 +216,21 @@ per-item `_build_path_repros_*` tests, and the `phase3j_pre_std_batch2/3/3b/4`
 files -- are out of scope for this change: those tests are already 100%
 `#[ignore]`'d, so they are already off the per-PR gate. Deduping the manual-gate
 set is a separate workstream.
+
+## `production_stdlib_typechecks` returned to the per-PR gate
+
+Follow-up to the heavy e2e split. `production_stdlib_typechecks` (19 tests,
+one `chelis check` per unique stdlib file) was placed in the heavy set
+because each invocation re-typechecked the whole chelis-std transitive graph
+from scratch. The cross-process typecheck cache landed since then: warm-cache
+checks are fast, so the suite no longer sets a multi-minute wall-clock floor
+and belongs back on the per-PR gate for the coverage.
+
+The `binary_id(/^chelis-cli::production_stdlib_typechecks$/)` entry was
+removed from all three `default-filter` blocks in `.config/nextest.toml` --
+the `default` and `ci` negated exclusions and the `nightly` positive
+inclusion -- which puts the suite back on the `ci`/`default` profiles.
+`scripts/test_nextest_profile_partition.py` still passes: the partition
+invariant (every non-ignored test on the per-PR gate XOR nightly) holds. The
+`nextest.toml` header comment was updated so the heavy-set definition no
+longer lists "full-stdlib `chelis check`".
