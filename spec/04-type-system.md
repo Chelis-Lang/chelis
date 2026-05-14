@@ -531,6 +531,22 @@ At call sites, dimension variables are instantiated by unification — no explic
 ;; Result : tensor[seq, batch, f32]
 ```
 
+Declared dimension parameters are **rigid within the def body**. When a
+definition is checked against its declared signature, each declared dim
+parameter is universally quantified: the body must type-check for *all*
+instantiations of that dim. Consequently two **distinct** declared dim
+parameters do not unify with each other during body validation — a body
+that requires `n` and `m` to be the same dimension does not satisfy a
+signature that declares them separately. This is a body-validation rule,
+distinct from call-site instantiation: it is only at the call site that a
+dim variable is genuinely bound to a concrete dimension.
+
+```scheme
+;; def f[n, m](x: tensor[n, f32], y: tensor[m, f32]): tensor[n, f32] = y
+;; TYPE ERROR: the body returns tensor[m, f32] but the declared return is
+;; tensor[n, f32]; n and m are distinct rigid dim parameters.
+```
+
 ### 4.5 The Wildcard Dimension
 
 `(d-name {} *)` represents an unknown/dynamic dimension. Produced by operations where the compiler cannot statically determine the dimension:
