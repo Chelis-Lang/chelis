@@ -5,7 +5,7 @@
 //! `phase3l_shoals_oracle` is the spec contract — invoke with:
 //!
 //! ```text
-//! cargo test -p chelis-cli --test phase3l_shoals_oracle phase3l_shoals_oracle -- --ignored --exact --nocapture
+//! cargo test -p chelis-cli --test shoals_oracle phase3l_shoals_oracle -- --ignored --exact --nocapture
 //! ```
 //!
 //! The oracle is environment-conditional: it skips with a clear message

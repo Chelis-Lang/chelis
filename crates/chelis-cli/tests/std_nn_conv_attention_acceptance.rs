@@ -1,6 +1,6 @@
 //! Phase 3j-pre Batch 3b: Std.Nn.Conv and Std.Nn.Attention acceptance.
 //!
-//! Batch 3 shipped the activations + RmsNorm (see `phase3j_pre_std_batch3.rs`).
+//! Batch 3 shipped the activations + RmsNorm (see `std_nn_activation_norm_acceptance.rs`).
 //! Batch 3b adds the remaining Batch 3 scope:
 //!
 //!   - `Std.Nn.Conv`: `conv1d`, `conv2d_small`
@@ -33,7 +33,7 @@
 //!   - the host runtime lowering does not implement `matmul`, `softmax`,
 //!     `permute`, or `expand`, so consumer-level `chelis eval` of the
 //!     attention wrappers is not reachable (only `build`+gcc is; that
-//!     path is already validated by the `phase3i_std` oracle pattern and
+//!     path is already validated by the `std_package_acceptance` oracle pattern and
 //!     does not need per-batch duplication here);
 //!   - rank-changing `reshape` is rejected by the package-mode
 //!     enforce-defsig pass whenever a `def` is present in the same

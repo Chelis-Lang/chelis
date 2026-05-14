@@ -139,7 +139,7 @@ this shoreline as documentation rather than rename.
 **Rule:** snake_case (Rust standard).
 
 Examples: `parser.rs`, `lexer.rs`, `span_merge.rs`, `optimize.rs`,
-`pipeline.rs`, `phase_a_item6_from_github.rs`.
+`pipeline.rs`, `reef_install_from_github.rs`.
 
 ### 2.4 `.ch` (Surf) source files
 
@@ -848,7 +848,7 @@ Phase A artifacts use the same form: `phase_a` in filenames,
 `phase-a` in branch names.
 
 ```
-phase_a_item6_from_github.rs    // Rust file (snake)
+reef_install_from_github.rs    // Rust file (snake)
 feat/phase-a-item6-from-github  // git branch (kebab)
 phase-a-item6                   // commit scope (kebab)
 ```

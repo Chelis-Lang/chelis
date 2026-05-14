@@ -55,6 +55,23 @@ have distinct names reflecting their distinct layers
 `docs/phase_oracles.md`, the Phase 1f oracle command in the active
 specs, and `scripts/test_timing_baseline.json` keys.
 
+### Changed - descriptive test names in `chelis-cli` (dropped phase/ws/rt scaffolding)
+
+Renamed 41 `chelis-cli` integration-test files whose names encoded the
+development phase or workstream that created them (`phase3*`,
+`phase_a_*`, `phase_h_*`, `phase_k_*`, `wsa5/6/7/8_*`, `wsc_*`,
+`rt3/rt3a/rt4_adversarial`, `red_team_0_7_*`, `red_team_w*`) to names
+that describe what each suite verifies (for example `phase3j_pre_std`
+to `std_nn_build_acceptance`, `wsa8_monomorphization_build` to
+`monomorphization_build`, `rt4_adversarial` to
+`numeric_dtype_adversarial`). Pure rename: every test still runs and
+every regression-lock invariant is preserved; `cargo nextest list`
+reports the same 735 `chelis-cli` tests across 75 binaries as before.
+Updated all references in `.config/nextest.toml` `binary_id` filters,
+`crates/chelis-cli/Cargo.toml`, source doc comments,
+`docs/manual_gates.md`, `docs/phase_oracles.md`, the active Phase 3
+specs, and `scripts/test_timing_baseline.json`.
+
 ### Changed - `production_stdlib_typechecks` back on the per-PR gate
 
 Moved the `chelis-cli::production_stdlib_typechecks` suite (19 tests, one

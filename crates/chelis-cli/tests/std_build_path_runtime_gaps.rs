@@ -41,7 +41,7 @@
 //! `packages/chelis-std/tests/runtime/attention_eval_cross.ch` that
 //! confirms eval-vs-build agreement on the uniform case.
 //!
-//! Pattern mirrors `phase3i_std::reef_std_generate_builds_and_runs_compiled_program`.
+//! Pattern mirrors `std_package_acceptance::reef_std_generate_builds_and_runs_compiled_program`.
 
 use assert_cmd::Command;
 use std::fs;

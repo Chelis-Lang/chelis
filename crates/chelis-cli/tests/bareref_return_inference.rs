@@ -104,7 +104,7 @@ fn bare_arg_add_with_borrow_sig_concrete_precision_type_checks() {
 /// Arithmetic-dtype matrix: the WS-A7 reproducer shape (sig with
 /// borrowed inputs + owned output, bare-arg def delegating to `add`)
 /// must type-check when instantiated at every active arithmetic dtype.
-/// This loop was consolidated here from `wsc_v3_stdlib_finish.rs`
+/// This loop was consolidated here from `stdlib_precision_generalization_followups.rs`
 /// (formerly `wsa7_bare_def_with_sig_having_borrows_typechecks`) in the
 /// e2e parsimony pass so the dtype-matrix coverage lives with the
 /// invariant's owning file.

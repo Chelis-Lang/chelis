@@ -5541,7 +5541,7 @@ fn infer_top_level(
         // (`&tensor[..]`) flows through the call site directly. Seeding
         // bare params with the declared type here makes the bare-arg path
         // behave the same as the annotated path. See
-        // `crates/chelis-cli/tests/wsa7_bareref_return_inference.rs`.
+        // `crates/chelis-cli/tests/bareref_return_inference.rs`.
         let body_ty = if let Some(decl_ty) = &declared_ty {
             infer_def_body_with_sig(
                 &kids[1],

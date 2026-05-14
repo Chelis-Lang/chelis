@@ -739,7 +739,7 @@ fn cmd_eval(
     // there is no library context to amortize against; keep the existing
     // monolithic path. Output (formatted result, exit code, error messages)
     // is byte-identical to pre-refactor on the same input — see
-    // `crates/chelis-cli/tests/phase_h_eval_in_context.rs` for the parity
+    // `crates/chelis-cli/tests/eval_in_reef_context.rs` for the parity
     // probes and the Phase G acceptance suite
     // (`crates/chelis-compiler-api/tests/compiled_context.rs`)
     // for the underlying API parity guarantee.
@@ -3183,7 +3183,7 @@ fn cmd_internal_test_file(
     timeout: Duration,
 ) -> Result<i32, String> {
     // Hidden testing knob — gates the regression test for per-file
-    // subprocess isolation in `crates/chelis-cli/tests/phase3t_subprocess_isolation.rs`.
+    // subprocess isolation in `crates/chelis-cli/tests/subprocess_isolation.rs`.
     // Both env vars must be set together so a production user cannot trip
     // this by accident with a single stray variable. The value of
     // CHELIS_TEST_FORCE_ABORT is treated as a substring filter on the

@@ -6787,7 +6787,7 @@ additional_sources = ["properties"]
             .canonicalize()
             .expect("monorepo root");
         // Skip if the monorepo's chelis-std dist is missing — the
-        // owning gate is `phase3t_reef_install` which carries the
+        // owning gate is `reef_install_from_monorepo` which carries the
         // same prerequisite. Mirror its behavior so this test does
         // not falsely red-flag a bare clone.
         let dist = monorepo.join("packages/chelis-std/dist");
