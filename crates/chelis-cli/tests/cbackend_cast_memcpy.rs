@@ -55,7 +55,7 @@ fn target_debug_dir() -> PathBuf {
         .expect("could not resolve target/debug dir from current_exe")
 }
 
-/// Mirror of `redteam_exec_compile.rs::ensure_runtime_static_lib`. When
+/// Mirror of `exec_compile.rs::ensure_runtime_static_lib`. When
 /// `chelis-runtime` is built as a dev-dependency, cargo only emits the
 /// hashed staticlib in `target/debug/deps/`; the test gcc invocation
 /// links against the conventional `target/debug/libchelis_runtime.a`.

@@ -422,7 +422,7 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
 
 // ── Span-charset defense in depth (post-S4 red-team finding) ──────────
 //
-// Mirror of the C backend tests in `chelis-backend-c/tests/s4_span_comments.rs`.
+// Mirror of the C backend tests in `chelis-backend-c/tests/span_comments.rs`.
 // Per `spec/03-deep-syntax.md` §1.1.1 the parser rejects forbidden span
 // chars; this test class exercises programmatic IR construction that
 // bypasses the parser, so the HIP backend's sanitizer
