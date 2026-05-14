@@ -136,7 +136,19 @@ fn host_eval_zero_arg_i64_large_value() {
 /// Re-verify after PR #93: walking the canonical sub-tree set should
 /// not produce false-positive `doc-filename-convention` errors that
 /// `chelis lint --check .` excepts.
+///
+/// `#[ignore]`'d manual gate: this test runs `chelis lint --check` over
+/// the entire repository twice and is the single slowest integration
+/// test (~100s). It is far over the default inner-loop budget. It stays
+/// a regression lock for the 0.7.8 PR #93 fix via the documented manual
+/// gate in `docs/manual_gates.md`.
+///
+/// Manual command:
+///   cargo test -p chelis-cli --test red_team_0_7_8 \
+///     lint_subtree_invocation_matches_dot_for_doc_filename_convention \
+///     -- --ignored --exact
 #[test]
+#[ignore = "full-repo double lint scan (~100s); see docs/manual_gates.md"]
 fn lint_subtree_invocation_matches_dot_for_doc_filename_convention() {
     // Find the repo root via the `chelis` binary's location.
     let exe = Command::cargo_bin("chelis").expect("binary");
