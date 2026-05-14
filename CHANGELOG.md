@@ -6,6 +6,46 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed - chelis check advisory warnings now match chelis lint --check
+
+`chelis check` (the workflow `chelis reef build` invokes on `.ch`
+files) flooded with `redundant-linearity-call` and
+`prefer-pipe-operator` advisory warnings that `chelis lint --check`
+already suppressed. The two emit paths had diverged: `cmd_lint`
+applied `should_suppress_unfixable_violation` before printing kept
+violations, but `emit_advisory_lint_warnings_for_file` (the path
+`chelis check` invokes) applied only the path-glob exception filter.
+For rules opted into `check_mirrors_fix=true`, a non-actionable
+warning whose autofix the typed-pipeline gate rejects therefore still
+fired through `chelis check`. Fixed by threading
+`should_suppress_unfixable_violation` into the advisory-emit path so
+both code paths apply the same gate. A genuinely-redundant `copy()`
+on an owned tensor still warns (the autofix is safe). Closes
+`Lint-CheckMirrorsFixAdvisoryEmitLeak-F1`. Regression tests at
+`crates/chelis-cli/tests/red_team_0_7_9.rs` (`lp_leak_a`, `lp_leak_b`,
+`lp_leak_fix_*` positive control).
+
+### Fixed - lint workspace-root detection uses a real Cargo workspace probe
+
+`detect_lint_workspace_root` was implemented as
+`canonicalize(current_working_directory)` with no workspace probe, so
+the workspace-rooted exception matching shipped in the previous fix
+held only when `chelis lint` was invoked from the workspace root.
+Running `chelis lint --check .` from a subdirectory, or `chelis lint
+--check /abs/workspace` from an unrelated directory, re-surfaced the
+false-positive `surf-def-arrow-form` errors. Fixed by detecting the
+workspace root with `cargo locate-project --workspace`, Cargo's own
+canonical workspace-locating probe, run with its working directory
+set to the lint target's directory rather than the process CWD. When
+the targets are not inside any Cargo workspace, no workspace-rooted
+exception glob can apply, so violations pass through unfiltered
+(linting a loose file outside a workspace remains supported). The
+same detection is now shared by `cmd_lint`, the advisory-emit path,
+and the build-time style gate. Closes
+`Lint-WorkspaceRootCwdAssumption-F1`. Regression tests at
+`crates/chelis-cli/tests/red_team_0_7_9.rs` (`le_leak_a`,
+`le_leak_fix_sibling_path_invocation_matches_workspace_root_invocation`).
+
 ### Fixed - redundant-linearity-call false-positive on copy(borrow)
 
 The `redundant-linearity-call` advisory warning previously fired on

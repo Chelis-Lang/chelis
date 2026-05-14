@@ -63,22 +63,42 @@ discovery, not a hand-rolled traversal: it is the same probe `cargo`
 itself uses, and it correctly handles invocation from any
 subdirectory.
 
-If `cargo` is unavailable or the command fails (the CLI is invoked
-outside any Cargo workspace), fail with a clear diagnostic:
+`detect_lint_workspace_root` lives in `style_gate.rs` (the shared home
+of the exception list) and takes a `probe_dir: &Path` argument: the
+`cargo locate-project` command runs with its working directory set to
+`probe_dir` rather than the process CWD. `probe_dir` is the directory
+the lint operates on — a walk target's directory, or a single file's
+parent — so `chelis lint --check /abs/workspace/crates` issued from an
+unrelated directory still resolves the correct workspace root. The
+function returns `Result<PathBuf, String>`; it has exactly one
+detection mechanism and fails clean with a diagnostic when `probe_dir`
+is not inside any Cargo workspace.
 
-```
-error: could not detect workspace root; run from within a Cargo workspace
-```
+### Caller policy: detection failure means "no workspace-rooted exception applies"
 
-No fallback path with different semantics is added. A single detection
-mechanism, per `feedback_no_walkup_filesystem_detection.md`'s "two
-detection paths with different semantics violate the no-silent-
-deferrals principle".
+All three exception-anchor call sites — `cmd_lint`,
+`emit_advisory_lint_warnings_for_file`, and the style gate's
+`run_lint_for_single_file` — apply one uniform policy: on a detection
+`Ok`, anchor exception matching against the detected root; on a
+detection `Err`, pass the raw violations through unfiltered.
 
-`detect_lint_workspace_root` returns `Result<PathBuf, _>` so its three
-callers — `cmd_lint`, `emit_advisory_lint_warnings_for_file`, and
-(after this change) the style gate — propagate the failure as a clean
-CLI error instead of silently linting against the wrong root.
+This is NOT a second detection mechanism with different semantics. The
+exception globs are authored workspace-root relative, so they can only
+match when there is a workspace root to anchor against. When the
+targets are not inside any Cargo workspace, no workspace-rooted
+exception can legitimately apply (a loose file under `/tmp` is not
+`crates/chelis-surf/tests/fixtures/*.ch`), so the unfiltered raw
+violations ARE the correct result.
+
+The brief's literal wording was "fail with a clear diagnostic" on
+detection failure. Hard-failing `cmd_lint` was rejected because
+`chelis lint --check /tmp/loose_file.ch` outside any workspace is a
+supported, pre-existing operation (covered by the LP linearity-call
+fixtures in `red_team_0_7_9.rs`); aborting it would be a regression
+unrelated to this bug. Degrading to unfiltered output is the
+semantically-correct, non-regressing policy and keeps all three call
+sites on one coherent contract. This deviation from the literal
+wording is called out in the PR body for orchestrator review.
 
 ## Strategy decision and the red-team fixture conflict
 

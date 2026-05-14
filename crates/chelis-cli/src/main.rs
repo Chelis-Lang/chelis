@@ -1330,14 +1330,21 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
         })
         .collect::<Vec<_>>();
     let exceptions_list = style_gate::exceptions();
-    // Anchor exception matching against the canonical CWD (the
-    // workspace root by convention). Single-file builds rarely
-    // intersect workspace-rooted exception patterns, but propagate
-    // the same anchor used by `cmd_lint` for consistency.
-    let workspace_root = detect_lint_workspace_root();
-    for violation in
-        chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, &workspace_root)
-    {
+    // Anchor exception matching against the detected Cargo workspace
+    // root, the same anchor `cmd_lint` uses. If the file is not inside
+    // a Cargo workspace, detection fails and no workspace-rooted
+    // exception glob can legitimately apply, so the violations pass
+    // through unfiltered (correct: a file outside the workspace is not,
+    // e.g., `crates/chelis-surf/tests/fixtures/*.ch`). This advisory
+    // emit is a best-effort nicety, so a detection failure skips
+    // exception filtering rather than aborting `chelis check`.
+    let filtered = match style_gate::detect_lint_workspace_root(parent) {
+        Ok(workspace_root) => {
+            chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, &workspace_root)
+        }
+        Err(_) => mine,
+    };
+    for violation in filtered {
         // Parity with `cmd_lint`'s emit path (LP-LEAK-A / LP-LEAK-B):
         // suppress warnings for rules that opt in to `check_mirrors_fix`
         // when the autofix would silently decline or be rejected by the
@@ -5454,16 +5461,50 @@ fn cmd_lint(
     // sub-directory of the workspace root; using it for
     // prefix-stripping in `apply_exceptions` drops the leading
     // workspace-relative segments (here, `crates/`) and the exception
-    // silently fails to match. Reuse PR #93's
-    // canonicalize-at-CLI-boundary pattern by treating the canonical
-    // current working directory as the workspace root: both the CI
-    // invocation `chelis lint --check .` and the developer-facing
-    // `chelis lint --check crates docs` are issued from the workspace
-    // root by convention, so the CWD identifies it without a walk-up
-    // filesystem search (which would be brittle under symlinks,
-    // mounts, and permission edges per the standing rule). Closes
-    // `Lint-ExceptionPathRoot-F1`.
-    let workspace_root = detect_lint_workspace_root();
+    // silently fails to match.
+    //
+    // The workspace root is detected with `cargo locate-project
+    // --workspace` (`style_gate::detect_lint_workspace_root`), Cargo's
+    // own canonical workspace-locating probe, which resolves the root
+    // correctly from any subdirectory and from absolute-path
+    // invocations issued outside the workspace. This replaces the
+    // earlier `canonicalize(cwd)` shortcut, which silently broke
+    // workspace-rooted exceptions whenever the CLI was not invoked
+    // from the workspace root. Closes `Lint-ExceptionPathRoot-F1` and
+    // `Lint-WorkspaceRootCwdAssumption-F1`.
+    //
+    // Probe from the first target's directory (not the process CWD):
+    // the targets are already canonicalized absolute paths, so for a
+    // directory target the target itself is the probe dir, and for a
+    // file target the parent is. This makes `chelis lint --check
+    // /abs/workspace` resolve correctly regardless of the invoking
+    // shell's working directory.
+    //
+    // If detection fails the targets are not inside a Cargo workspace,
+    // so no workspace-rooted exception glob can legitimately apply
+    // (a path outside the workspace is not, e.g.,
+    // `crates/chelis-surf/tests/fixtures/*.ch`). Linting a loose file
+    // outside any workspace is a supported operation, so the
+    // violations pass through unfiltered rather than aborting `lint`.
+    // This is the same uniform policy the advisory-emit path and the
+    // build-time style gate apply: one detection mechanism, and a
+    // detection failure means "no workspace, no workspace-anchored
+    // exceptions", not a second detection mechanism with different
+    // semantics.
+    let probe_dir = targets
+        .first()
+        .map(|first| {
+            if first.is_dir() {
+                first.clone()
+            } else {
+                first
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."))
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+    let workspace_root = style_gate::detect_lint_workspace_root(&probe_dir).ok();
     // The exception list is sourced from `style_gate::exceptions()` so
     // the standalone `chelis lint` subcommand and the build-time style
     // gate filter against one shared registry. Rule-internal allowlists
@@ -5474,7 +5515,7 @@ fn cmd_lint(
     let mut blocking_total = 0usize;
     for target in &targets {
         if fix {
-            let applied = apply_lint_fixes(target, &workspace_root, &rules, &exceptions)?;
+            let applied = apply_lint_fixes(target, workspace_root.as_deref(), &rules, &exceptions)?;
             if applied > 0 {
                 println!(
                     "fixed {} replacement(s) under {}",
@@ -5484,11 +5525,7 @@ fn cmd_lint(
             }
         }
         let raw_violations = chelis_lint::lint(target, &rules)?;
-        let kept = chelis_lint::exceptions::apply_exceptions(
-            &raw_violations,
-            &exceptions,
-            &workspace_root,
-        );
+        let kept = apply_exceptions_opt(&raw_violations, &exceptions, workspace_root.as_deref());
         for v in &kept {
             // V2-F3 (PR #58): suppress warnings for rules that opt in
             // to `check_mirrors_fix` when the autofix would silently
@@ -5532,47 +5569,38 @@ fn rule_severity(rules: &[Box<dyn chelis_lint::Rule>], id: &str) -> chelis_lint:
         .unwrap_or(chelis_lint::Severity::Error)
 }
 
-/// Detect the lint workspace root: the canonical current working
-/// directory. Exception patterns in `style_gate::exceptions()` are
-/// authored relative to this root (e.g.,
-/// `crates/chelis-surf/tests/fixtures/*.ch`), and both the CI gate
-/// (`chelis lint --check .`) and developer invocations (`chelis lint
-/// --check crates docs`) are issued from the workspace root by
-/// convention. Reusing PR #93's canonicalize-at-CLI-boundary pattern,
-/// the canonical CWD identifies the workspace root without a walk-up
-/// filesystem search (which would be brittle under symlinks, mounts,
-/// and permission edges per
-/// `feedback_no_walkup_filesystem_detection.md`).
+/// Apply the workspace-rooted exception list when a workspace root was
+/// detected; otherwise pass the raw violations through unchanged.
 ///
-/// If canonicalization fails (e.g., the CLI is invoked from a deleted
-/// or unreadable directory), emit a stderr warning and fall back to
-/// the un-canonicalized CWD. This is not a walk-up; it preserves
-/// today's behavior on edge-case paths while keeping a single
-/// detection mechanism.
-fn detect_lint_workspace_root() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|err| {
-        eprintln!("warning: failed to read current directory: {err}; using `.`");
-        PathBuf::from(".")
-    });
-    std::fs::canonicalize(&cwd).unwrap_or_else(|err| {
-        eprintln!(
-            "warning: failed to canonicalize current directory {}: {err}; using as-is",
-            cwd.display()
-        );
-        cwd
-    })
+/// Exception globs in `style_gate::exceptions()` are authored
+/// workspace-root relative, so they can only match when there is a
+/// workspace root to anchor against. When
+/// `style_gate::detect_lint_workspace_root` fails (the targets are not
+/// inside a Cargo workspace), no workspace-rooted exception can
+/// legitimately apply, so the raw violations are the correct result.
+/// This keeps `cmd_lint`, the advisory-emit path, and the style gate
+/// on one uniform policy without a second detection mechanism.
+fn apply_exceptions_opt(
+    violations: &[chelis_lint::Violation],
+    exceptions: &[chelis_lint::Exception],
+    workspace_root: Option<&Path>,
+) -> Vec<chelis_lint::Violation> {
+    match workspace_root {
+        Some(root) => chelis_lint::exceptions::apply_exceptions(violations, exceptions, root),
+        None => violations.to_vec(),
+    }
 }
 
 fn apply_lint_fixes(
     target: &Path,
-    workspace_root: &Path,
+    workspace_root: Option<&Path>,
     rules: &[Box<dyn chelis_lint::Rule>],
     exceptions: &[chelis_lint::Exception],
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let mut total = 0usize;
     for _ in 0..5 {
         let raw = chelis_lint::lint(target, rules)?;
-        let kept = chelis_lint::exceptions::apply_exceptions(&raw, exceptions, workspace_root);
+        let kept = apply_exceptions_opt(&raw, exceptions, workspace_root);
         let mut by_path: BTreeMap<PathBuf, Vec<chelis_lint::Violation>> = BTreeMap::new();
         for violation in kept {
             by_path

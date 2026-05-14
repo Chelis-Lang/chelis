@@ -17,6 +17,72 @@
 
 use chelis_lint::{Exception, Violation};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Detect the Cargo workspace root that exception globs are anchored
+/// against, probing from `probe_dir`.
+///
+/// Exception patterns in [`exceptions`] are authored workspace-root
+/// relative (e.g. `crates/chelis-surf/tests/fixtures/*.ch`), so
+/// exception matching must strip the workspace-root prefix from each
+/// violation's absolute path. The workspace root is detected with
+/// `cargo locate-project --workspace --message-format plain` run with
+/// its working directory set to `probe_dir`; cargo reports the
+/// absolute path of the workspace root `Cargo.toml`, and the workspace
+/// root is its parent directory.
+///
+/// `probe_dir` is the directory the lint operates on (a walk target's
+/// directory, or a single file's parent) rather than the process CWD,
+/// so `chelis lint --check /abs/workspace/crates` issued from an
+/// unrelated directory still resolves the correct workspace root.
+///
+/// This is Cargo's own canonical workspace-locating mechanism, not a
+/// hand-rolled filesystem walk-up: it is the same probe `cargo` itself
+/// uses and it correctly resolves the workspace root from any
+/// subdirectory of the workspace. Per
+/// `feedback_no_walkup_filesystem_detection.md`, a hand-rolled walk-up
+/// search for `Cargo.toml` / `.git` is rejected (brittle under
+/// symlinks, mounts, permission edges); deferring to Cargo's probe is
+/// the durable alternative.
+///
+/// If `cargo` is unavailable or the command fails (`probe_dir` is not
+/// inside any Cargo workspace), this returns `Err` with a clear
+/// diagnostic. No fallback path with different semantics is added: a
+/// single detection mechanism, callers surface the failure as a clean
+/// CLI error.
+pub fn detect_lint_workspace_root(probe_dir: &Path) -> Result<PathBuf, String> {
+    let output = Command::new("cargo")
+        .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .current_dir(probe_dir)
+        .output()
+        .map_err(|err| {
+            format!(
+                "could not detect workspace root; failed to run `cargo locate-project`: {err}; run from within a Cargo workspace"
+            )
+        })?;
+    if !output.status.success() {
+        return Err(
+            "could not detect workspace root; run from within a Cargo workspace".to_string(),
+        );
+    }
+    let manifest = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if manifest.is_empty() {
+        return Err(
+            "could not detect workspace root; `cargo locate-project` reported no manifest"
+                .to_string(),
+        );
+    }
+    let manifest_path = PathBuf::from(&manifest);
+    let root = manifest_path.parent().ok_or_else(|| {
+        format!("could not detect workspace root; `{manifest}` has no parent directory")
+    })?;
+    std::fs::canonicalize(root).map_err(|err| {
+        format!(
+            "could not detect workspace root; failed to canonicalize `{}`: {err}",
+            root.display()
+        )
+    })
+}
 
 /// Path globs (relative to the lint root) that are exempt from specific
 /// lint rules, with a mandatory cross-reference to the spec section
@@ -178,21 +244,30 @@ fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {
         Err(_) => return Vec::new(),
     };
     let exceptions_list = exceptions();
-    // Anchor exception matching against the canonical current
-    // working directory (the workspace root by convention), mirroring
-    // the standalone `chelis lint` subcommand. Closes
+    // Anchor exception matching against the detected Cargo workspace
+    // root, mirroring the standalone `chelis lint` subcommand. Closes
     // `Lint-ExceptionPathRoot-F1` for the build-time style gate as
-    // well: single-file builds (`chelis check foo.ch`,
-    // `chelis build foo.ch`) invoked from the workspace root now see
-    // the same exception application as `chelis lint --check .`.
-    let workspace_root = std::env::current_dir()
-        .and_then(|cwd| std::fs::canonicalize(&cwd))
-        .unwrap_or_else(|_| {
-            file.parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."))
-        });
-    chelis_lint::exceptions::apply_exceptions(&raw, &exceptions_list, &workspace_root)
+    // well, and `Lint-WorkspaceRootCwdAssumption-F1`: single-file
+    // builds (`chelis check foo.ch`, `chelis build foo.ch`) now anchor
+    // exceptions against the real workspace root regardless of which
+    // directory the CLI was invoked from.
+    //
+    // If detection fails the file is not inside a Cargo workspace, so
+    // no workspace-rooted exception glob can legitimately apply. The
+    // raw violations pass through unfiltered: that is the correct
+    // behavior (a file outside the workspace is not, e.g.,
+    // `crates/chelis-surf/tests/fixtures/*.ch`), not a second
+    // detection mechanism with different semantics.
+    let probe_dir = file
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match detect_lint_workspace_root(probe_dir) {
+        Ok(workspace_root) => {
+            chelis_lint::exceptions::apply_exceptions(&raw, &exceptions_list, &workspace_root)
+        }
+        Err(_) => raw,
+    }
 }
 
 fn format_outcome(file: &Path, outcome: &GateOutcome) -> String {

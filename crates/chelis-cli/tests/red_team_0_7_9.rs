@@ -372,7 +372,6 @@ fn le_mixed_file_and_dir_targets_apply_workspace_rooted_exception() {
 /// workspace root; without the fix the probe result is ignored and the
 /// CWD is used directly, breaking the workspace-rooted exception.
 #[test]
-#[ignore = "documents the cwd-as-workspace-root assumption; flip when detect_lint_workspace_root probes the real workspace root"]
 fn le_leak_a_cwd_not_workspace_root_breaks_workspace_rooted_exception() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
@@ -406,7 +405,6 @@ fn le_leak_a_cwd_not_workspace_root_breaks_workspace_rooted_exception() {
 /// exception matching against the sibling, not the workspace, and the
 /// `crates/chelis-surf/tests/fixtures/*.ch` exception failed to match.
 #[test]
-#[ignore = "pins the workspace-root detection fix; flip when detect_lint_workspace_root probes the real workspace root"]
 fn le_leak_fix_sibling_path_invocation_matches_workspace_root_invocation() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
