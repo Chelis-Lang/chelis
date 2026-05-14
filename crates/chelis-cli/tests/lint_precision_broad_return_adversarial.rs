@@ -319,7 +319,7 @@ fn le_deep_subtree_walk_applies_workspace_rooted_exception() {
 }
 
 /// LE-2: Mixed walk targets (file + directory). `chelis lint --check
-/// crates/chelis-cli/tests/red_team_0_7_9.rs crates/chelis-types`
+/// crates/chelis-cli/tests/lint_precision_broad_return_adversarial.rs crates/chelis-types`
 /// must continue to apply workspace-rooted exceptions on the fixture.
 #[test]
 fn le_mixed_file_and_dir_targets_apply_workspace_rooted_exception() {

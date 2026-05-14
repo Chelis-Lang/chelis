@@ -18,7 +18,7 @@
 //!   * exit code != 0
 //!   * stderr contains the branded fail message
 //!
-//! The pattern mirrors `phase3t_test_std.rs::assert_eval_fails_with`.
+//! The pattern mirrors `std_test_module.rs::assert_eval_fails_with`.
 
 use assert_cmd::Command;
 use predicates::prelude::*;

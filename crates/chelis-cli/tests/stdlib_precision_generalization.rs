@@ -103,8 +103,8 @@ const FLOAT_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16"];
 // The WS-C-blocker reproducer (polymorphic-precision sig must reject a
 // precision mismatch across a single call) is pinned by the
 // keep-by-default regression lock
-// `rt3a_adversarial.rs::baseline_wsc_blocker_reproducer_errors_without_unbound_wrapping`
-// and by `wsa5_precision_polymorphism.rs::ws_c_blocker_polymorphic_precision_does_not_silently_accept_mismatch`.
+// `precision_polymorphism_adversarial.rs::baseline_wsc_blocker_reproducer_errors_without_unbound_wrapping`
+// and by `precision_polymorphism.rs::ws_c_blocker_polymorphic_precision_does_not_silently_accept_mismatch`.
 // Both survivors write the identical fixture and assert the f32+int32
 // mismatch error, so the copy that previously lived here was removed in
 // the e2e parsimony pass.
@@ -315,7 +315,7 @@ def bad(t: tensor[32, 128, f32], gain: f64) -> tensor[32, 128, f32] ! { Random }
 //
 // The integer-matmul rejection invariant is pinned by the
 // keep-by-default regression lock
-// `rt4_adversarial.rs::rt4_invariant_int_matmul_rejected_for_every_int_dtype`,
+// `numeric_dtype_adversarial.rs::rt4_invariant_int_matmul_rejected_for_every_int_dtype`,
 // which loops every integer dtype and asserts the 5.7.2 citation. The
 // copy that previously lived here was removed in the e2e parsimony
 // pass. The positive parity case (float matmul accepted) stays here

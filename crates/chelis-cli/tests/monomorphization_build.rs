@@ -1,7 +1,7 @@
 //! WS-A8 build acceptance suite: monomorphization closes the
 //! BLOCKER-class gap that made every polymorphic-precision sig
 //! invisible to `chelis build`. The pre-WS-A8 WS-C v3 acceptance
-//! suite (`wsc_v3_stdlib_finish.rs`) only exercised `chelis check`;
+//! suite (`stdlib_precision_generalization_followups.rs`) only exercised `chelis check`;
 //! these tests pin `chelis build` and the reachable C-codegen
 //! pipeline against the production stdlib polymorphic sigs.
 //!

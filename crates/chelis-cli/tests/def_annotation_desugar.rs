@@ -175,7 +175,7 @@ fn def_mixed_dim_and_precision_quantifiers_accepted() {
 /// Arithmetic-dtype matrix: a def with an explicit precision tvar in
 /// its quantifier list must type-check when instantiated at every
 /// active arithmetic dtype, not only the float/int spot checks above.
-/// This loop was consolidated here from `wsc_v3_stdlib_finish.rs`
+/// This loop was consolidated here from `stdlib_precision_generalization_followups.rs`
 /// (formerly `wsa6_def_param_annotation_precision_quantifier_typechecks`)
 /// in the e2e parsimony pass so the dtype-matrix coverage lives with
 /// the invariant's owning file.

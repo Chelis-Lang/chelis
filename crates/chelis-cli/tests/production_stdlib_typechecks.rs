@@ -4,8 +4,8 @@
 //! that ships a generalized polymorphic-precision signature is checked
 //! here exactly once. Pre-trim, the same handful of files were
 //! independently `chelis check`'d (and a couple `chelis build`'d)
-//! across `wsc_v3_stdlib_finish.rs`, `wsc_stdlib_generalization.rs`,
-//! `rt3_adversarial.rs`, and `wsa8_monomorphization_build.rs`. A single
+//! across `stdlib_precision_generalization_followups.rs`, `stdlib_precision_generalization.rs`,
+//! `stdlib_generalization_adversarial.rs`, and `monomorphization_build.rs`. A single
 //! `chelis check` on a stdlib file re-typechecks the entire chelis-std
 //! transitive import graph (~4-9s), so running it N times across N
 //! files was the dominant integration-suite runtime cost.
@@ -16,7 +16,7 @@
 //! per-file checks across its global pool.
 //!
 //! Spec authority: spec/04-type-system.md sections 5.4, 5.7.2, 5.8.
-//! `wsa8_monomorphization_build.rs` retains the `chelis build` path
+//! `monomorphization_build.rs` retains the `chelis build` path
 //! coverage for `linear.ch` / `attention.ch`; this file is the `chelis
 //! check` surface.
 

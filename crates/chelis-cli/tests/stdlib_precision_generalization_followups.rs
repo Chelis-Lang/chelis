@@ -118,8 +118,8 @@ fn expect_any_error(json: &Value, label: &str) {
 // WS-A7 (bare-def + sig-with-borrows return inference) dtype-matrix
 // re-tests that previously lived here were consolidated into their
 // owning files in the e2e parsimony pass:
-//   * `wsa6_def_annotation_desugar.rs::def_quantifier_precision_tvar_typechecks_at_every_arithmetic_dtype`
-//   * `wsa7_bareref_return_inference.rs::bare_arg_add_with_borrow_sig_typechecks_at_every_arithmetic_dtype`
+//   * `def_annotation_desugar.rs::def_quantifier_precision_tvar_typechecks_at_every_arithmetic_dtype`
+//   * `bareref_return_inference.rs::bare_arg_add_with_borrow_sig_typechecks_at_every_arithmetic_dtype`
 // Both owning files now carry the full arithmetic-dtype matrix.
 // =================================================================
 
@@ -162,7 +162,7 @@ def call(x: &tensor[2, 3, {dtype}], w: &tensor[3, 4, {dtype}], bias_in: &tensor[
 
 // Spec sec 5.7.2 integer matmul rejection (direct-call path) is pinned
 // by the keep-by-default regression lock
-// `rt4_adversarial.rs::rt4_invariant_int_matmul_rejected_for_every_int_dtype`,
+// `numeric_dtype_adversarial.rs::rt4_invariant_int_matmul_rejected_for_every_int_dtype`,
 // which loops every integer dtype and asserts the 5.7.2 citation. The
 // copy that previously lived here was removed in the e2e parsimony
 // pass.

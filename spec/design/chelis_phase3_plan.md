@@ -618,7 +618,7 @@ def load_training_data(data_path: string, tok_path: string,
 Authoritative oracle:
 
 ```sh
-cargo test -p chelis-cli --test phase3g_io phase3g_text_pipeline_acceptance_oracle -- --ignored --exact --nocapture
+cargo test -p chelis-cli --test std_io_pipeline phase3g_text_pipeline_acceptance_oracle -- --ignored --exact --nocapture
 ```
 
 The checked-in illustrative Reef package at
@@ -795,7 +795,7 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli --test phase3i_std -- --ignored --nocapture`
+`cargo test -p chelis-cli --test std_package_acceptance -- --ignored --nocapture`
 
 This is the owning executable oracle for the currently shipped `Std.Time`,
 `Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate` surface. A later
@@ -846,7 +846,7 @@ Pure compiled additions to `chelis-std`. Nothing here requires a new shell.
       helper rather than the tensor primitive.
     - `Conv1d`/`Conv2d` wrappers and the attention modules
       (`scaled_dot_product_attention`, multi-head, grouped-query) are
-      shipped in **Batch 3b** (see `crates/chelis-cli/tests/phase3j_pre_std_batch3b.rs`)
+      shipped in **Batch 3b** (see `crates/chelis-cli/tests/std_nn_conv_attention_acceptance.rs`)
       as **literal concrete-shape** defs — not polymorphic wrappers —
       for the following reasons, each tracked as a non-silent deferral:
       - `conv2d` requires concrete d-lit dims at IR check lowering time
@@ -913,7 +913,7 @@ Pure compiled additions to `chelis-std`. Nothing here requires a new shell.
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli --test phase3j_pre_std` — exercises the integrated
+`cargo test -p chelis-cli --test std_nn_build_acceptance` — exercises the integrated
 3j-pre surface (RMSNorm + GELU + Kaiming init + SDPA import) through `chelis
 check`/`chelis eval` with hand-computed exact reference values.
 
@@ -938,7 +938,7 @@ tag push. Release history:
   - **Acknowledged limitations (3j-pre, current state after Batch 7b):**
     - **Fixed in Batches 5b and 7b** (now exercised end-to-end through
       `chelis build --target c` + gcc-link + run with byte-exact stdout
-      assertions in `crates/chelis-cli/tests/phase3j_pre_std.rs`, none
+      assertions in `crates/chelis-cli/tests/std_nn_build_acceptance.rs`, none
       of which are `#[ignore]`d):
       - `Std.Nn.RmsNorm.forward` (rank-1 wrapper) — Batch 5b restored
         the dim-variable emission and the host-lane wrapper pathway.
@@ -971,7 +971,7 @@ tag push. Release history:
       `crates/chelis-cli/src/main.rs::reject_with_seed_for_build_target`
       is removed; the function survives as a no-op forward-compat
       hook. The Bucket-5 oracle tests in
-      `crates/chelis-cli/tests/phase3j_pre_std.rs` and
+      `crates/chelis-cli/tests/std_nn_build_acceptance.rs` and
       `crates/chelis-cli/tests/cli.rs` pin: (1) `with seed` builds and
       runs end-to-end through `chelis build --target c` + gcc + run,
       (2) the same seed produces identical bytes across runs
@@ -1384,10 +1384,10 @@ write their own references only for proprietary models. Full design:
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli --test phase3l_shoals_oracle phase3l_shoals_oracle -- --ignored --exact --nocapture`
+`cargo test -p chelis-cli --test shoals_oracle phase3l_shoals_oracle -- --ignored --exact --nocapture`
 — prices a European call option via Black-Scholes and Monte Carlo, verifies
 convergence, and checks same-seed reproducibility. A separate focused manual smoke,
-`cargo test -p chelis-cli --test phase3l_shoals_oracle phase3l_shoals_oracle_grad_greeks_match_analytic -- --ignored --exact --nocapture`,
+`cargo test -p chelis-cli --test shoals_oracle phase3l_shoals_oracle_grad_greeks_match_analytic -- --ignored --exact --nocapture`,
 checks that Shoals's grad-derived Greek properties are lower/type-check clean
 without paying the Monte Carlo oracle runtime, then runtime-skips with a
 warning because the downstream pricing body still contains constructs the IR

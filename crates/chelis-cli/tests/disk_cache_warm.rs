@@ -36,7 +36,7 @@ fn write_file(path: &Path, contents: &str) {
 
 /// Build a reef package with a path-dep `mylib` exporting pure-int
 /// helpers. Mirrors the Phase H fixture so the cache test exercises the
-/// same dispatch as `phase_h_eval_in_context.rs`.
+/// same dispatch as `eval_in_reef_context.rs`.
 fn path_dep_package() -> (TempDir, PathBuf) {
     let dir = tempdir().expect("tempdir");
     let root = dir.path().join("myapp");

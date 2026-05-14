@@ -2,8 +2,8 @@
 //! pass, post-WS-A8 monomorphization fix.
 //!
 //! Originally this file pinned the gaps that the WS-C v3 acceptance
-//! suite (`wsc_v3_stdlib_finish.rs`) and the WS-C v2 acceptance suite
-//! (`wsc_stdlib_generalization.rs`) left open. The 5 BLOCKER findings
+//! suite (`stdlib_precision_generalization_followups.rs`) and the WS-C v2 acceptance suite
+//! (`stdlib_precision_generalization.rs`) left open. The 5 BLOCKER findings
 //! (1, 2, 3, 6, 7) have been closed by WS-A8: monomorphization is now
 //! implemented, and §5.4 / §5.7.2 enforcement runs at every
 //! polymorphic-call-site instantiation in addition to direct primitive
@@ -566,7 +566,7 @@ fn finding_6_concrete_only_program_builds_clean() {
 // FINDING 7 (building the production stdlib `linear.ch` panics) is the
 // canonical case finding 6 protects against regressing. The production
 // `linear.ch` / `attention.ch` build coverage now lives in
-// `wsa8_monomorphization_build.rs` (which also asserts the
+// `monomorphization_build.rs` (which also asserts the
 // monomorphization tripwire never surfaces); the production-file
 // `chelis check` coverage lives in `production_stdlib_typechecks.rs`.
 // Both were deduplicated out of this file so the production stdlib is

@@ -18,7 +18,7 @@
 //!
 //! The fixture is copied from the checked-in source tree into a tempdir so
 //! the reef graph resolver sees a self-contained package root, matching the
-//! pattern used by `phase3t_test_std.rs::make_app`.
+//! pattern used by `std_test_module.rs::make_app`.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -241,7 +241,7 @@ if not found:
 /// dev machine and the script can take several seconds when it shells out to
 /// `chelis eval` for every sample point. Run manually with:
 ///
-///   cargo test -p chelis-cli --test phase3t_pseudo_nautilus \
+///   cargo test -p chelis-cli --test pseudo_nautilus_fixture \
 ///     -- --ignored pseudo_nautilus_parity_script_runs_with_scipy
 ///
 /// Expected: exit 0, printed parity table with max |diff| below 1e-5.

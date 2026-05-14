@@ -21,8 +21,10 @@
 //! mismatched-library-context error on a perfectly valid package, just
 //! because a content-identical package was tested earlier.
 //!
-//! This is exactly why `crates/chelis-cli/tests/phase3t_*` tests fail
-//! non-deterministically once the user's `~/.cache/chelis/compiled/`
+//! This is exactly why the `chelis test` integration suites (the
+//! `test_command_smoke`, `subprocess_isolation`, and `std_test_module`
+//! files) fail non-deterministically once the user's
+//! `~/.cache/chelis/compiled/`
 //! has been warmed by an earlier run: the `make_minimal_reef_with_test`
 //! helpers write byte-identical sources every time.
 //!

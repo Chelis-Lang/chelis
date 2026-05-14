@@ -71,7 +71,7 @@ fn write_program(dir: &Path, name: &str, body: &str) -> PathBuf {
 }
 
 /// Parse `binding = tensor(shape=[..], data=[..])` lines into a Vec<f32>.
-/// Same shape as the helper in `phase3t_build_runtime_gaps.rs`. Used for
+/// Same shape as the helper in `std_build_path_runtime_gaps.rs`. Used for
 /// compiled-binary stdout where each binding is printed `name = value`.
 fn parse_named_tensor_data(stdout: &str, binding: &str) -> Option<Vec<f32>> {
     let prefix = format!("{binding} = tensor(");

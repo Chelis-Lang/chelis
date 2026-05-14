@@ -35,14 +35,14 @@ default-filter = '''
     not (
         binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
         + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
-        + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
-        + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
-        + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
+        + binary_id(/^chelis-cli::monomorphization_build$/)
+        + (binary_id(/^chelis-cli::std_nn_build_acceptance$/) & test(/^cross_function_seed_stdlib_/))
+        + (binary_id(/^chelis-cli::std_nn_build_acceptance$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
         + (binary_id(/^chelis-cli::cli$/) & test(/^phase3a_reef_std_acceptance_oracle$/))
         + (binary_id(/^chelis-cli::cli$/) & test(/^reef_check_accepts_sig_only_shell_imports$/))
         + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
-        + (binary_id(/^chelis-cli::phase_a_bundled_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
-        + (binary_id(/^chelis-cli::phase3t_reef_install$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+        + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
+        + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
     )
 '''
 
@@ -53,14 +53,14 @@ default-filter = '''
     not (
         binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
         + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
-        + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
-        + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
-        + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
+        + binary_id(/^chelis-cli::monomorphization_build$/)
+        + (binary_id(/^chelis-cli::std_nn_build_acceptance$/) & test(/^cross_function_seed_stdlib_/))
+        + (binary_id(/^chelis-cli::std_nn_build_acceptance$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
         + (binary_id(/^chelis-cli::cli$/) & test(/^phase3a_reef_std_acceptance_oracle$/))
         + (binary_id(/^chelis-cli::cli$/) & test(/^reef_check_accepts_sig_only_shell_imports$/))
         + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
-        + (binary_id(/^chelis-cli::phase_a_bundled_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
-        + (binary_id(/^chelis-cli::phase3t_reef_install$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+        + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
+        + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
     )
 '''
 
@@ -76,14 +76,14 @@ path = "junit.xml"
 default-filter = '''
     binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
     + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
-    + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
-    + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
-    + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
+    + binary_id(/^chelis-cli::monomorphization_build$/)
+    + (binary_id(/^chelis-cli::std_nn_build_acceptance$/) & test(/^cross_function_seed_stdlib_/))
+    + (binary_id(/^chelis-cli::std_nn_build_acceptance$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
     + (binary_id(/^chelis-cli::cli$/) & test(/^phase3a_reef_std_acceptance_oracle$/))
     + (binary_id(/^chelis-cli::cli$/) & test(/^reef_check_accepts_sig_only_shell_imports$/))
     + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
-    + (binary_id(/^chelis-cli::phase_a_bundled_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
-    + (binary_id(/^chelis-cli::phase3t_reef_install$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+    + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
+    + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
 '''
 # A transient gcc/CPU-contention hiccup should not fail a nightly job; retry
 # the heavy tests rather than capping their concurrency (which would slow the

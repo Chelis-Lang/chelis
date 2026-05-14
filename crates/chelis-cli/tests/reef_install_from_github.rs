@@ -13,7 +13,7 @@
 //! into the fetch path; without that seam the test would have to hit
 //! real GitHub.
 //!
-//! The oracle test lives next to the existing `phase3t_reef_install.rs`
+//! The oracle test lives next to the existing `reef_install_from_monorepo.rs`
 //! `--from-monorepo` regression test so the contract-invariant
 //! "source-equivalence" sub-case can re-use the same monorepo-built
 //! `chelis-std-0.3.0.{chb,tar.zst}` artifacts that the existing test

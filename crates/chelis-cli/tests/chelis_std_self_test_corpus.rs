@@ -18,7 +18,7 @@
 //! 9 host-runtime tests under tests/runtime/ for `expand` / `softmax` and
 //! the eval-vs-build attention cross-check).
 //!
-//! Pattern mirrors `phase3t_pseudo_nautilus.rs`.
+//! Pattern mirrors `pseudo_nautilus_fixture.rs`.
 
 use assert_cmd::Command;
 use std::fs;
@@ -52,7 +52,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 #[test]
-#[ignore = "manual gate: ~170s runtime; runs the full 205-test chelis-std self-test corpus under chelis test. Invoke via `cargo test -p chelis-cli --test phase3t_chelis_std_self -- --ignored --nocapture`. CI/manual gate; not on the inner-loop budget per CLAUDE.md."]
+#[ignore = "manual gate: ~170s runtime; runs the full 205-test chelis-std self-test corpus under chelis test. Invoke via `cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture`. CI/manual gate; not on the inner-loop budget per CLAUDE.md."]
 fn chelis_std_self_test_corpus_passes_under_chelis_test() {
     // Stage chelis-std into a tempdir so the test does not touch the
     // checked-in package on disk and is isolated from any developer-local
