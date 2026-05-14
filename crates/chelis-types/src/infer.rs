@@ -8591,17 +8591,48 @@ fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
     }
 }
 
-/// Structural type equality ignoring dim-variable identity (treats
-/// fresh dvars as compatible if both sides have one at the same
-/// position).  Used by `shape_a_relaxed_return` to guard the relaxed
-/// retry: the relaxation is only safe when the body and declared
-/// return differ exactly by a top-level `Ref` wrapper.
+/// Two tensor dimensions are *identical* for structural-equality
+/// purposes iff they denote the same dimension: same concrete
+/// `Dim::Name`, same `Dim::Lit`, or the same `Dim::Var`.  `Dim::Wildcard`
+/// matches anything on either side (it is the permissive "unknown"
+/// sentinel, consistent with `unify_dim`).
+///
+/// Two *distinct* symbolic dim variables (`n` vs `m`) are NOT identical
+/// even though both contribute rank 1.  This is the soundness fix for
+/// `TypeCheck-FreeDimVarUnification-F1` (SR-LEAK-A): the Shape A
+/// relaxed-retry must not accept a body whose return dim diverges from
+/// the declared return dim.
+fn dims_identical(d1: &Dim, d2: &Dim) -> bool {
+    match (d1, d2) {
+        (Dim::Wildcard, _) | (_, Dim::Wildcard) => true,
+        (Dim::Name(n1), Dim::Name(n2)) => n1 == n2,
+        (Dim::Lit(l1), Dim::Lit(l2)) => l1 == l2,
+        (Dim::Var(v1), Dim::Var(v2)) => v1 == v2,
+        _ => false,
+    }
+}
+
+/// Structural type equality used by `shape_a_relaxed_return` to guard
+/// the relaxed retry: the relaxation is only safe when the body and
+/// declared return differ exactly by a top-level `Ref` wrapper, so the
+/// dim structure underneath must match by *identity*, not just by rank.
+///
+/// Tensor dims are compared with `dims_identical`: same concrete name,
+/// same literal, or the same dim variable.  Distinct dim variables do
+/// not match (`TypeCheck-FreeDimVarUnification-F1`).
 fn types_structurally_equal(a: &Type, b: &Type) -> bool {
     match (a, b) {
         (Type::Unit, Type::Unit) => true,
         (Type::Prim(p1), Type::Prim(p2)) => p1 == p2,
         (Type::Ref(i1), Type::Ref(i2)) => types_structurally_equal(i1, i2),
-        (Type::Tensor(d1, p1), Type::Tensor(d2, p2)) => p1 == p2 && d1.len() == d2.len(),
+        (Type::Tensor(d1, p1), Type::Tensor(d2, p2)) => {
+            p1 == p2
+                && d1.len() == d2.len()
+                && d1
+                    .iter()
+                    .zip(d2.iter())
+                    .all(|(x, y)| dims_identical(x, y))
+        }
         (Type::Tuple(es1), Type::Tuple(es2)) => {
             es1.len() == es2.len()
                 && es1
