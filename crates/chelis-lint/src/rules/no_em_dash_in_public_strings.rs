@@ -584,4 +584,71 @@ mod tests {
             "triple-quoted in print() is user-facing, not docstring"
         );
     }
+
+    // Guard 2 (test toolchain footgun guards): the em-dash §8.6 rule
+    // has been bitten twice by em dashes inside Rust test-function
+    // string literals (WS-B2 acceptance panic messages; the RT-1
+    // adversarial panic message). The investigation found the rule
+    // already CATCHES every one of those constructs; the failure mode
+    // was visibility (the blocking errors were buried under hundreds
+    // of advisory warnings in `chelis lint --check .` output), fixed
+    // in `cmd_lint`. These cases mirror the historical misses and
+    // lock that `quoted_spans` keeps reaching each construct, plus
+    // the ASCII-hyphen negative parity. See
+    // docs/investigations/test_toolchain_guards_design.md.
+
+    #[test]
+    fn flags_em_dash_in_raw_string_inside_test_fn() {
+        let dash = '\u{2014}';
+        let src = format!(
+            "#[test]\nfn t() {{\n    let s = r#\"expected NO int64 {dash} silent widening\"#;\n    assert!(!s.is_empty());\n}}\n"
+        );
+        let violations = NoEmDashInPublicStrings.check(&ctx(&src));
+        assert_eq!(
+            violations.len(),
+            1,
+            "em dash in a raw string literal inside a #[test] fn must fire",
+        );
+    }
+
+    #[test]
+    fn flags_em_dash_in_format_macro_arg_inside_test_fn() {
+        let dash = '\u{2014}';
+        let src = format!(
+            "#[test]\nfn t() {{\n    let msg = format!(\"declared return type f64 {dash} must override\");\n    assert!(!msg.is_empty());\n}}\n"
+        );
+        let violations = NoEmDashInPublicStrings.check(&ctx(&src));
+        assert_eq!(
+            violations.len(),
+            1,
+            "em dash in a format! macro string arg inside a #[test] fn must fire",
+        );
+    }
+
+    #[test]
+    fn flags_em_dash_in_multi_line_string_inside_test_fn() {
+        // The two historical misses both used `\`-continued multi-line
+        // panic-message string literals; reproduce that exact shape.
+        let dash = '\u{2014}';
+        let src = format!(
+            "#[test]\nfn t() {{\n    panic!(\n        \"bare unannotated list must not silently default \\\n         to int64 {dash} got something\"\n    );\n}}\n"
+        );
+        let violations = NoEmDashInPublicStrings.check(&ctx(&src));
+        assert_eq!(
+            violations.len(),
+            1,
+            "em dash in a multi-line string literal inside a #[test] fn must fire",
+        );
+    }
+
+    #[test]
+    fn ignores_ascii_hyphen_in_test_fn_string() {
+        // Negative parity: a plain ASCII hyphen-minus must NOT fire,
+        // including inside raw strings and macro args.
+        let src = "#[test]\nfn t() {\n    let a = \"this-is-fine no em dash here\";\n    let b = r#\"raw-string with-hyphens only\"#;\n    let c = format!(\"format-arg with-a-hyphen\");\n    assert!(!a.is_empty() && !b.is_empty() && !c.is_empty());\n}\n";
+        assert!(
+            NoEmDashInPublicStrings.check(&ctx(src)).is_empty(),
+            "ASCII hyphen-minus must not be flagged as an em dash",
+        );
+    }
 }

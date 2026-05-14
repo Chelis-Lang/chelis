@@ -96,6 +96,33 @@ in `wsc_v3_stdlib_finish.rs` and `wsc_stdlib_generalization.rs` were
 collapsed into table-driven tests with identical coverage, and two
 literal-duplicate fixtures in `rt3a_adversarial.rs` were merged into
 one test that keeps the union of both assertions.
+### Added - test toolchain footgun guards
+
+Three standing guards that turn recurring CI footguns into
+enforcement. See `docs/investigations/test_toolchain_guards_design.md`.
+
+- Test-timing budget: a `ci` nextest profile (`.config/nextest.toml`)
+  writes per-test JUnit timing XML; `scripts/test_timing_check.py`
+  flags tests that regressed past their committed budget or that are
+  new and over the absolute ceiling. Thresholds are config
+  (`scripts/test_timing_config.json`,
+  `scripts/test_timing_baseline.json`); the baseline is hand-curated
+  and regenerated explicitly via
+  `python3 scripts/test_timing_check.py --update-baseline`. CI runs it
+  as an informational, non-failing step.
+- Em-dash visibility: `chelis lint --check` now buckets output by
+  severity so blocking errors print last under a delimited header plus
+  a summary line instead of being buried in advisory-warning noise.
+  Investigation confirmed the `no-em-dash-in-public-strings` (§8.6)
+  rule already catches em dashes in raw strings, `format!` arguments,
+  and multi-line strings; the recurring failure was visibility, not a
+  parser gap.
+- CI-gate parity: `scripts/gate.py` is the single source of truth for
+  the per-PR developer gate; `.github/workflows/ci.yml` calls it per
+  stage and `scripts/test_gate.py` asserts the workflow inlines no
+  gate command the script does not produce. `AGENTS.md` now points at
+  `python3 scripts/gate.py` and is corrected to run `cargo nextest`
+  and include `chelis lint --check .`.
 
 ## [0.7.9] — 2026-05-14
 

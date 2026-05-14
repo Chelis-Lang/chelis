@@ -1,0 +1,5 @@
+{
+  "_comment": "Test-timing budget thresholds for scripts/test_timing_check.py. tolerance: a test in the baseline is flagged when it runs slower than tolerance x its baseline time. absolute_ceiling: a NEW test (not in the baseline) is flagged only when it runs longer than this many seconds. Both are config so the budget moves without code changes.",
+  "tolerance": 2.0,
+  "absolute_ceiling": 30.0
+}

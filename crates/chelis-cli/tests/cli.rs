@@ -6042,6 +6042,69 @@ fn lint_no_em_dash_blocks_check_and_can_fix_clause_case() {
     assert!(rewritten.contains("\"one. Two\""));
 }
 
+// Guard 2 (test toolchain footgun guards): a blocking lint ERROR must
+// be surfaced distinctly, not buried in advisory-warning noise. The
+// em-dash §8.6 rule was bitten twice by CI failure debugging that
+// misread a buried blocking error. `cmd_lint` now buckets output by
+// severity: advisory/warning lines print first, then blocking errors
+// last under a delimited header plus a summary line. See
+// docs/investigations/test_toolchain_guards_design.md.
+#[test]
+fn lint_check_surfaces_blocking_error_below_advisory_noise() {
+    let dir = tempdir().expect("tempdir");
+    let dash = '\u{2014}';
+    // A Surf file that triggers an advisory warning
+    // (`redundant-linearity-call` is a warning, but path-glob and
+    // unfixable suppression aside it still prints). Pair it with a
+    // Rust file carrying a blocking em-dash error.
+    write_file(
+        &dir.path().join("redundant.ch"),
+        "def keep(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
+         result = drop(keep(to_tensor([1.0, 2.0])))\n",
+    );
+    write_file(
+        &dir.path().join("message.rs"),
+        &format!("fn main() {{ println!(\"one {dash} two\"); }}\n"),
+    );
+
+    let assert = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--check", dir.path().to_str().unwrap()])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+
+    // The blocking-error section header is present, and the em-dash
+    // error line appears inside it.
+    assert!(
+        stdout.contains("blocking lint error(s)"),
+        "expected a blocking-error section header, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("lint --check failed:"),
+        "expected a blocking-error summary line, got:\n{stdout}"
+    );
+    let header_pos = stdout
+        .find("blocking lint error(s)")
+        .expect("header present");
+    let error_pos = stdout
+        .find("no-em-dash-in-public-strings")
+        .expect("em-dash error present");
+    assert!(
+        error_pos > header_pos,
+        "the blocking em-dash error must print after the section header, got:\n{stdout}"
+    );
+    // The warning line, if printed, must come before the header (the
+    // buckets print advisory/warning first, errors last).
+    if let Some(warning_pos) = stdout.find("warning:") {
+        assert!(
+            warning_pos < header_pos,
+            "advisory/warning lines must print before the blocking-error \
+             section, got:\n{stdout}"
+        );
+    }
+}
+
 #[test]
 fn lint_no_em_dash_does_not_corrupt_unspaced_dash() {
     let dir = tempdir().expect("tempdir");
