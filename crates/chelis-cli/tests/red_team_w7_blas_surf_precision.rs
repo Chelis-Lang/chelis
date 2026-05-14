@@ -11,7 +11,7 @@
 //! because some of these precisions can fail at earlier IR passes
 //! (linearity / effect / etc.) for synthetic-shaped tests. The
 //! IR-level cross-product in
-//! `crates/chelis-ir/tests/red_team_w7_blas_cross_product.rs` covers
+//! `crates/chelis-ir/tests/blas_rejection_cross_product_adversarial.rs` covers
 //! all eight precisions at the recognizer level; this file is the
 //! Surf-driven complement for the precisions the front-end reliably
 //! accepts.
@@ -103,7 +103,7 @@ fn w7_surf_f64_matmul_helper_emits_blas_output_precision_mismatch() {
 // =========================================================================
 
 #[test]
-#[ignore = "WS-A0 spec lock: integer matmul is now a type error per spec §5.7.2 (PrecisionMismatch at the type checker), so the helper never reaches the BLAS summary-rejection path this test exercises. The IR-level cross-product in red_team_w7_blas_cross_product.rs still covers integer matmul rejection at the recognizer level."]
+#[ignore = "WS-A0 spec lock: integer matmul is now a type error per spec §5.7.2 (PrecisionMismatch at the type checker), so the helper never reaches the BLAS summary-rejection path this test exercises. The IR-level cross-product in blas_rejection_cross_product_adversarial.rs still covers integer matmul rejection at the recognizer level."]
 fn w7_surf_int32_matmul_helper_emits_blas_output_precision_mismatch() {
     let source = "def my_mm(a: tensor[8, 16, int32], b: tensor[16, 4, int32]) \
                   -> tensor[8, 4, int32] = matmul(a, b)\n\

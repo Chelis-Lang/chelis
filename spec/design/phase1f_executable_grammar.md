@@ -5,7 +5,7 @@
 **Authoritative oracle:**
 
 ```sh
-cargo test -p chelis-e2e --test phase1f_validate
+cargo test -p chelis-e2e --test example_corpus_validate
 ```
 
 ### What the Agent Builds

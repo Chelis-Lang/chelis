@@ -741,7 +741,7 @@ fn cmd_eval(
     // is byte-identical to pre-refactor on the same input — see
     // `crates/chelis-cli/tests/phase_h_eval_in_context.rs` for the parity
     // probes and the Phase G acceptance suite
-    // (`crates/chelis-compiler-api/tests/phase_g_compiled_context.rs`)
+    // (`crates/chelis-compiler-api/tests/compiled_context.rs`)
     // for the underlying API parity guarantee.
     match (file, expr) {
         (Some(path), _) => {

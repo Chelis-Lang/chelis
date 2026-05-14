@@ -81,8 +81,8 @@ itself is correct.
 
 ## Regression coverage
 
-- `phase_i_disk_cache.rs::two_packages_same_name_version_source_but_different_root_do_not_collide`
-- `phase_i_disk_cache.rs::cache_entry_from_a_different_compiler_build_is_a_clean_miss`
+- `disk_cache.rs::two_packages_same_name_version_source_but_different_root_do_not_collide`
+- `disk_cache.rs::cache_entry_from_a_different_compiler_build_is_a_clean_miss`
 - `stdlib_cache.rs::tests::cache_key_depends_on_the_compiler_version`
 
 All three are on the per-PR `ci` profile (cache key / identity logic

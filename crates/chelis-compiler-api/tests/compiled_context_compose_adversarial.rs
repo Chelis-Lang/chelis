@@ -583,7 +583,7 @@ fn g11_check_in_context_does_not_run_user_code() {
     // applied, so no runtime division-by-zero fires. (We don't assert on
     // safe's appearance in roots — `def safe -> int32` is a 0-arg fn,
     // documented as not necessarily lowerable to a tensor root in the
-    // existing phase_g_compiled_context fixture.)
+    // existing compiled_context fixture.)
     let _ = eval_in_context(&ctx, snippet).expect("eval ok");
 }
 

@@ -85,7 +85,7 @@ fn expect_rejected(
 
 /// Build a canonical Tier-2 matmul subgraph (Expand × Expand → Mul → Sum)
 /// of the given precision: `[8, 16] @ [16, 4] → [8, 4]`. Mirrors the
-/// shape `red_team_w5_blas_summary_silent.rs` builds.
+/// shape `blas_summary_silent_rejection_adversarial.rs` builds.
 fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let mut dag = Dag::new();
     let a = dag.add_node(

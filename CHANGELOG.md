@@ -37,6 +37,23 @@ References updated in `docs/phase_oracles.md`, `spec/08-backends.md`,
 `spec/design/phase1d_flattening.md`, the renamed files' own doc-comment
 cross-references, and the `scripts/test_timing_baseline.json` binary
 keys.
+### Changed - descriptive test-file names (ir/types/api/e2e/effects)
+
+Renamed scaffolding-named integration test files in `chelis-ir`,
+`chelis-types`, `chelis-compiler-api`, `chelis-e2e`, and `chelis-effects`
+so each file is named for what it verifies rather than the
+phase/wave/workstream that created it (dropped `phase_d/e/f/g/i_`,
+`rt1/rt2_`, `rt_g_`, `red_team_w5/w7_`, `red_team_0_7_8`, `ws_a0/a3/b2_`,
+`s3_`, `phase1f_` scaffolding stamps). Pure rename: every test still
+runs, every regression-lock invariant is preserved, only names and
+references changed. The three same-named `red_team_0_7_8.rs` files now
+have distinct names reflecting their distinct layers
+(`implicit_copy_fanout_shape_a_adversarial` in `chelis-ir`,
+`linearity_alias_destructure_adversarial` in `chelis-types`,
+`runtime_dtype_coupling_adversarial` in `chelis-e2e`). Updated all
+`mod`/doc-comment references, `docs/manual_gates.md`,
+`docs/phase_oracles.md`, the Phase 1f oracle command in the active
+specs, and `scripts/test_timing_baseline.json` keys.
 
 ### Changed - `production_stdlib_typechecks` back on the per-PR gate
 

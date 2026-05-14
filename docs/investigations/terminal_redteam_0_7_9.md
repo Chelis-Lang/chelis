@@ -40,7 +40,7 @@ cargo test -p chelis-ir --test implicit_copy_shape_a_broader_return
   -> 7 passed; 0 failed; 0 ignored
 cargo test -p chelis-cli --test red_team_0_7_8
   -> 7 passed; 0 failed; 0 ignored
-cargo test -p chelis-ir --test red_team_0_7_8
+cargo test -p chelis-ir --test implicit_copy_fanout_shape_a_adversarial
   -> 6 passed; 0 failed; 0 ignored
 ```
 
@@ -274,7 +274,7 @@ Pinned by `red_team_0_7_9::sr_leak_a_dim_var_mismatch_silently_passes`
 | `chelis lint --check crates docs examples packages` from worktree | exit 0; identical to `chelis lint --check .` |
 | `chelis lint --check crates/chelis-surf` from worktree | exit 0; 0 false-positive `surf-def-arrow-form` errors |
 | `chelis lint --check .` from `<worktree>/crates` | exit 0 in stdout but emits 6 false-positive `surf-def-arrow-form` errors (LE-LEAK-A repro) |
-| 0.7.8 red-team backward-compat (`red_team_0_7_8` in both `chelis-cli` and `chelis-ir`) | all pass |
+| 0.7.8 red-team backward-compat (`red_team_0_7_8` in `chelis-cli`, `implicit_copy_fanout_shape_a_adversarial` in `chelis-ir`) | all pass |
 
 ## Full gate
 

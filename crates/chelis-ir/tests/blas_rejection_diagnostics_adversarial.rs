@@ -4,7 +4,7 @@
 //! (W6 Task A) — non-precision paths":
 //!
 //!   * pattern-match every variant other than the precision ones
-//!     (covered separately in `red_team_w7_blas_cross_product.rs`)
+//!     (covered separately in `blas_rejection_cross_product_adversarial.rs`)
 //!   * verify no false positives on accepted F32 matmul callsites
 //!   * adversarial near-miss helpers:
 //!     - rank-3-output-with-rank-2-operands (handled by W6's

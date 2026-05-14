@@ -55,7 +55,7 @@ fn parse_name_rejects_fp32_misspelling() {
 }
 
 // `cast(1, u8)` rejection at check time is pinned with the exact §1.1.2
-// diagnostic by `ws_a0_rt1_unsigned_rejection.rs::
+// diagnostic by `unsigned_dtype_rejection.rs::
 // cast_scalar_to_u8_rejected_with_spec_1_1_2_diagnostic`, which asserts
 // a strict superset of the looser rejection-only check that previously
 // lived here.
@@ -113,7 +113,7 @@ fn bare_float_literal_does_not_satisfy_int64() {
 
 // The `def main -> int32 = 2147483648` out-of-i32-range default case is
 // pinned with the exact §5.3 range diagnostic by
-// `ws_a0_rt1_int_overflow.rs::
+// `int_literal_overflow.rs::
 // literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic`, which
 // asserts a strict superset of the rejection-only check that previously
 // lived here (same source, plus the exact out-of-range phrase, the i64
@@ -369,7 +369,7 @@ fn unknown_suffix_is_lex_error() {
 /// diagnostic now suggests both the `i64` literal suffix AND the
 /// `cast(_, i64)` workaround, since the suffix grammar is shipped.
 ///
-/// Distinct input from `ws_a0_rt1_int_overflow.rs`: this snippet
+/// Distinct input from `int_literal_overflow.rs`: this snippet
 /// declares an `int64` return position (`def main -> int64 = ...`),
 /// pinning that even an int64-typed context does not rescue a bare
 /// integer literal from the §5.3 int32 default and the D1 diagnostic
