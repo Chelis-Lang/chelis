@@ -6,6 +6,71 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed - negative axes and rank-0 standalone parameters in IR lowering
+
+`chelis eval` / `chelis test` panicked during IR lowering of any
+package that links bundled chelis-std: `softmax axis requires a
+statically known axis in IR lowering`. Two distinct pre-existing bugs
+(both present on the v0.7.9 release tag) shared that one
+downstream-blocker symptom.
+
+Bug B - negative axes. `extract_axis` in IR lowering did `*n as usize`,
+so a negative axis literal like `-1` became `usize::MAX`; `tier2`
+indexed past the operand rank and `require_dim` panicked. The type
+checker was inconsistent: `gather`/`scatter` normalized negative axes,
+the reductions rejected them outright (`requires non-negative axis`),
+and `softmax` never validated its axis at all. Negative axes are a
+supported, uniform convention - `-1` is the last axis - so the spec,
+the checker, and lowering now all agree on it.
+
+Bug A - rank-0 standalone parameters. A top-level def whose parameter
+types come from a separate `sig` declaration desugars to bare, untyped
+`fn` params. Standalone library lowering bound them to a rank-0
+`default_type()`, so any shape-sensitive op on such a param hit the
+same `require_dim` panic even with a non-negative axis. This is the
+exact shape of `Std.Loss.CrossEntropy.loss`'s `softmax(logits, 1)`,
+which poisoned the linked chelis-std context for every downstream
+`chelis test`.
+
+- `crates/chelis-ir/src/lower.rs`: `extract_axis` is now
+  `extract_axis_raw` (returns the raw `i64`); a new rank-aware
+  `normalize_axis` helper maps a negative axis to `rank + axis` and
+  turns a still-out-of-range axis into a clean `LowerDiagnostic`
+  instead of a `require_dim` panic. Wired into all 7 axis-taking
+  lowering sites (softmax, mean, sum, max_reduce, the
+  min/prod/argmax/argmin reduction family, gather, scatter_replace),
+  each fetching the operand rank from the operand node (falling back
+  to the ascribed `app` type when the operand node is rank-0).
+- `crates/chelis-types/src/infer.rs`: the type checker normalizes
+  negative axes the same way so the IR only ever sees non-negative
+  axes. `check_reduction_signature` no longer rejects negative axes;
+  `softmax` now validates and normalizes its axis; shared
+  `resolve_builtin_axis` / `resolve_axis_pair_member` helpers carry the
+  normalization for gather, scatter, scatter_replace, cumsum, sort,
+  split, trace, and diagonal. For Bug A, a new `annotate_params_node`
+  stamps each def's declared `sig` parameter type expressions - copied
+  verbatim, so `&` borrow wrappers survive - onto the `(params ...)`
+  node, plumbing the type the checker already inferred to where
+  `lower_fn` reads it. Defs with no `sig` keep bare params so
+  `infer_signature_metadata`'s read-only/borrow inference is
+  unaffected.
+- `spec/05-risc-primitives.md`: the **Axis** paragraph now states the
+  negative-axis-indexes-from-the-end convention explicitly, resolving
+  an internal contradiction with the formula examples that already use
+  `axis=-1`.
+- Coverage: `crates/chelis-ir/tests/negative_axis_normalization.rs`
+  (negative + positive axis parity per op, out-of-range as a clean
+  error not a panic, and the rank-0 standalone-param regression) and
+  `crates/chelis-cli/tests/downstream_chelis_std_axis_oracle.rs` (a
+  minimal downstream package importing chelis-std runs `chelis test`
+  clean). Both on the per-PR `ci` profile.
+- `crates/chelis-compiler-api/tests/redteam_typecheck_cache.rs`:
+  repaired - it did not compile against the post-#130
+  `cache_file_name` signature and its `rt1_*` tests asserted the
+  pre-#130 collision behavior that #130 fixed. Re-pinned as negative
+  parity for the #130 fix (distinct roots do not collide;
+  `load_if_fresh` rejects an identity mismatch).
+
 ### Fixed - package-identity and compiler-version in compiled-context cache keys
 
 The Phase K `CompiledContext` disk cache keyed its cache file name only

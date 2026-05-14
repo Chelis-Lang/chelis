@@ -82,7 +82,15 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | `sum` | `(&tensor[d1,...,dn,p], axis: int, accumulator: prec = default(p)) -> tensor[d1,...,d{k-1},d{k+1},...,dn,acc]` | Sum over axis k, removing that dimension. `accumulator` controls the precision of the running sum and the result element type. | `expand(g, original_shape, axis=k)` (gradient flows back at the operand precision `p`; the adjoint is computed in operand precision) |
 | `max_reduce` | `(&tensor[d1,...,dn,p], axis: int) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Max over axis k, removing that dimension | `g * one_hot(argmax(x, k))` — gradient flows to the max element only |
 
-**Axis:** Zero-indexed integer. Must be a valid axis for the input rank.
+**Axis:** Integer index into the input rank. Non-negative axes are
+zero-indexed from the front. A negative axis indexes from the end:
+`-1` is the last axis, `-2` the second-to-last, and so on (an axis `a`
+with `a < 0` denotes `rank + a`). After this normalization the axis
+must fall within `0..rank`; an out-of-range axis is a type error. This
+from-the-end convention applies uniformly to every axis-taking
+primitive — the reductions here, `softmax`, `mean`, `gather`,
+`scatter`, and the movement and ordering ops — and is the convention
+the formula examples below already use (`axis=-1` for the last axis).
 
 **Output dimensions:** The dimension at position `axis` is removed. All other dimensions are preserved.
 
