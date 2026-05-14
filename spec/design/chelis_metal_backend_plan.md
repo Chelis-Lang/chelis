@@ -566,7 +566,7 @@ crates/chelis-backend-metal/
         chelis_metal_runtime.h  -- Objective-C++ helpers, peer of chelis_hip_runtime.h
     tests/
         codegen_structure.rs    -- default-gate: structural assertions on emitted strings
-        redteam_adversarial.rs  -- default-gate: edge cases
+        codegen_adversarial.rs  -- default-gate: edge cases
         gpu_correctness.rs      -- #[ignore] manual gate: real device dispatch on M-series Mac
 
 .github/scripts/
@@ -695,11 +695,11 @@ M6: GPU correctness oracle (manual gate, real device dispatch)
     cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1
 
 M7: Adversarial / red-team test surface (default-gate)
-├── tests/redteam_adversarial.rs mirroring HIP's
+├── tests/codegen_adversarial.rs mirroring HIP's
 ├── Cases: zero-element tensors; rank-0 scalars; symbolic dims of 0/1;
 │   bool through where; cast f32→bool→f32; very large grids (>2^16 threadgroups);
 │   single-element reductions; matmul degenerate dim
-└── Oracle: cargo test -p chelis-backend-metal --test redteam_adversarial
+└── Oracle: cargo test -p chelis-backend-metal --test codegen_adversarial
 ```
 
 After each phase lands, invoke `/red-team` (which routes to `redteam-exec`) — fresh local subagent in fresh context. Main-thread validation does not satisfy the red-team requirement.

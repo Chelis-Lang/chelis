@@ -6,6 +6,38 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed - descriptive test names in backend crates
+
+Renamed scaffolding-named integration test files in `chelis-backend-c`,
+`chelis-backend-hip`, and `chelis-backend-metal` so each is named for
+what it verifies, not the wave/workstream that created it. Pure rename:
+zero behavior change, every test still runs, every regression-lock
+invariant preserved. The `rt1_`/`rt2_`/`rt_`/`s4_`/`s6_`/`ws_a3_`/
+`red_team_w5_`/`redteam_` prefixes were dev-process noise.
+
+- `chelis-backend-c`: `rt1_adversarial` -> `dtype_boundary_adversarial`,
+  `rt2_adversarial` -> `dtype_matrix_adversarial`, `redteam_adversarial`
+  -> `simd_math_codegen_adversarial`, `redteam_c_fused_compile` ->
+  `fused_compile`, `redteam_exec_compile` -> `exec_compile`,
+  `red_team_w5_f64_matmul_miscompile` -> `f64_matmul_miscompile`,
+  `s4_span_comments` -> `span_comments`, `s6_host_span_comments` ->
+  `host_span_comments`.
+- `chelis-backend-hip`: `redteam_adversarial` -> `codegen_adversarial`,
+  `red_team_w5_strided_batched` -> `strided_batched_dispatch`,
+  `s4_span_comments` -> `span_comments`, `ws_a3_bf16_f16_matmul` ->
+  `bf16_f16_matmul`.
+- `chelis-backend-metal`: `redteam_adversarial` -> `codegen_adversarial`,
+  `rt_metal_adversarial` -> `dtype_expansion_adversarial`,
+  `s4_span_comments` -> `span_comments`.
+
+References updated in `docs/phase_oracles.md`, `spec/08-backends.md`,
+`spec/design/chelis_phase1_plan.md`,
+`spec/design/chelis_metal_backend_plan.md`,
+`spec/design/phase1c_memory_planning.md`,
+`spec/design/phase1d_flattening.md`, the renamed files' own doc-comment
+cross-references, and the `scripts/test_timing_baseline.json` binary
+keys.
+
 ### Changed - `production_stdlib_typechecks` back on the per-PR gate
 
 Moved the `chelis-cli::production_stdlib_typechecks` suite (19 tests, one

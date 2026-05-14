@@ -77,7 +77,7 @@ cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-thre
 Supporting evidence:
 
 - `cargo test -p chelis-backend-hip --test codegen_structure`
-- `cargo test -p chelis-backend-hip --test redteam_adversarial`
+- `cargo test -p chelis-backend-hip --test codegen_adversarial`
 - `cargo test -p chelis-cli --test cli`
 
 ### Test Strategy

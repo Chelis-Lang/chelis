@@ -7,7 +7,7 @@
 //! reductions) must fall through to the stub-with-abort body cleanly,
 //! not silently miscompile.
 //!
-//! Mirrors `chelis-backend-hip/tests/redteam_adversarial.rs` in spirit;
+//! Mirrors `chelis-backend-hip/tests/codegen_adversarial.rs` in spirit;
 //! coverage breadth grows as later phases add real support for each case.
 //! When a case here flips from "falls through to stub" to "emits real
 //! kernels", that's a signal the corresponding phase has shipped — flip

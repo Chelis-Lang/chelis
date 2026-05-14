@@ -2193,7 +2193,7 @@ fn g21_matmul_f64_gpu_matches_cpu() {
 
 // WS-A3 bf16 codegen acceptance ("HIP codegen no longer panics on bf16
 // matmul") is pinned by
-// `crates/chelis-backend-hip/tests/ws_a3_bf16_f16_matmul.rs::
+// `crates/chelis-backend-hip/tests/bf16_f16_matmul.rs::
 // bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper`, which is a
 // strict superset: it asserts codegen succeeds AND emits the
 // `chelis_hipblas_bf16_gemm_f32_acc_row_major` wrapper with `-lhipblas`.
@@ -2377,7 +2377,7 @@ fn ws_a2_hip_argmax_f64_kernel_emitted() {
 // WS-A4: i8 / i16 end-to-end execution tests on GPU.
 //
 // These mirror the C-backend WS-A4 tests in
-// crates/chelis-backend-c/tests/redteam_exec_compile.rs. The
+// crates/chelis-backend-c/tests/exec_compile.rs. The
 // `gpu_*` tests are `#[ignore]` so they only run under the manual
 // HIP gate (see file header). The codegen-shape tests below run by
 // default in CI so a kernel-name regression is caught without

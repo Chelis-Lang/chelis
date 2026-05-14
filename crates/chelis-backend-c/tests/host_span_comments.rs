@@ -12,7 +12,7 @@
 //! values, so they cover the host-emit code path even when the upstream
 //! lowering pipeline elides spans.
 //!
-//! Mirrors the DAG-side coverage in `s4_span_comments.rs`.
+//! Mirrors the DAG-side coverage in `span_comments.rs`.
 
 use chelis_backend_c::host_emit::emit_host_program;
 use chelis_ir::host::{HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostType};

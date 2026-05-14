@@ -57,7 +57,7 @@ crates/
     tests/
       codegen_structure.rs     — structural/source-emission coverage for HIP codegen
       gpu_correctness.rs       — manual HIP oracle on real GPU hardware
-      redteam_adversarial.rs   — adversarial ownership, cleanup, and surface checks
+      codegen_adversarial.rs   — adversarial ownership, cleanup, and surface checks
 
   chelis-ir/                   ← MODIFIED: fusion pass, symbolic dimensions
     src/

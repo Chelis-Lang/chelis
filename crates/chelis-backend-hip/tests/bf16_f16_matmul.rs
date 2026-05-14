@@ -4,7 +4,7 @@
 //! exercises the manual HIP gate (requires a HIP-capable GPU plus
 //! `hipcc`/`hiprtc`/`libhipblas`):
 //!
-//!     cargo test -p chelis-backend-hip --test ws_a3_bf16_f16_matmul \
+//!     cargo test -p chelis-backend-hip --test bf16_f16_matmul \
 //!       -- --ignored --test-threads=1
 //!
 //! Test inventory:

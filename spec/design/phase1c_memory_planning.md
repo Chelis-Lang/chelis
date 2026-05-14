@@ -71,7 +71,7 @@ cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-thre
 Supporting evidence:
 
 - `cargo test -p chelis-backend-hip --test codegen_structure`
-- `cargo test -p chelis-backend-hip --test redteam_adversarial`
+- `cargo test -p chelis-backend-hip --test codegen_adversarial`
 - `cargo test -p chelis-cli --test cli`
 
 ### Test Strategy
@@ -80,7 +80,7 @@ Supporting evidence:
 - [x] Buffer reuse: overlapping lifetimes stay separate (`memory.rs` unit tests)
 - [x] Repeated `Load(name)` shares one device transfer (`codegen_structure.rs`)
 - [x] Outputs transfer host↔device only at the function boundary (`codegen_structure.rs`)
-- [x] Cleanup frees every wrapper and every backing slot exactly once (`memory.rs`, `codegen_structure.rs`, `redteam_adversarial.rs`)
+- [x] Cleanup frees every wrapper and every backing slot exactly once (`memory.rs`, `codegen_structure.rs`, `codegen_adversarial.rs`)
 - [x] Reused slots still iterate over logical tensor size, not slot capacity (`codegen_structure.rs`, `gpu_correctness.rs`)
 - [x] Manual GPU correctness covers repeated-load aliasing and reused-slot execution (`gpu_correctness.rs`)
 - [ ] Direct estimate-vs-`hipMemGetInfo` comparison remains future validation work if profiling shows the estimate needs tighter calibration

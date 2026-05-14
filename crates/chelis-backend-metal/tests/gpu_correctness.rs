@@ -632,7 +632,7 @@ fn m6_tiled_matmul_matches_evaluator() {
 // S4.3 — span-attributed program compile-success on Mac (manual gate).
 //
 // The S4.3 oracle has two halves: structural grep (covered in default-CI
-// `tests/s4_span_comments.rs`) and compile-success via `xcrun -sdk macosx
+// `tests/span_comments.rs`) and compile-success via `xcrun -sdk macosx
 // clang++` (covered here, as `#[ignore]` per the existing M6 manual-gate
 // pattern). This test complements the M3 macOS-smoke step, which today
 // only exercises a Surf input (metadata-lossy) — span coverage on Mac

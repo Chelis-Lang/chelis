@@ -256,7 +256,7 @@ model that mirrors HIP.
 
 `crates/chelis-backend-metal/` is structurally a peer of `crates/chelis-backend-hip/`:
 `src/{lib,emit,kernels,launch,memory,blas}.rs`, `runtime/chelis_metal_runtime.h`,
-`tests/{codegen_structure,redteam_adversarial,gpu_correctness}.rs`.
+`tests/{codegen_structure,codegen_adversarial,gpu_correctness}.rs`.
 
 `chelis build --target metal` is wired in `crates/chelis-cli/src/main.rs` alongside
 `--target c` and `--target hip`. Reject passes deny `pad`/`shrink` (the IR ops
@@ -361,7 +361,7 @@ specific kernels needing higher precision use `precise::*` qualifiers per-call.
 
 ### Phase M7: Adversarial test surface
 
-`tests/redteam_adversarial.rs` mirrors `crates/chelis-backend-hip/tests/redteam_adversarial.rs`.
+`tests/codegen_adversarial.rs` mirrors `crates/chelis-backend-hip/tests/codegen_adversarial.rs`.
 Cases: zero-element tensors, rank-0 scalars, symbolic dims of 0/1, bool through
 `where`, cast f32→bool→f32 round-trip, very large grids (>2^16 threadgroups),
 single-element reductions, matmul with degenerate dimensions.
@@ -369,7 +369,7 @@ single-element reductions, matmul with degenerate dimensions.
 Authoritative oracle:
 
 ```sh
-cargo test -p chelis-backend-metal --test redteam_adversarial
+cargo test -p chelis-backend-metal --test codegen_adversarial
 ```
 
 ### Carried-forward limitations
