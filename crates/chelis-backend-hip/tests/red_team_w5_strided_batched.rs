@@ -27,6 +27,17 @@
 //!
 //! Assertions match exact lines or assert exact substrings absent — not
 //! loose substrings present.
+//!
+//! This file also carries the two Perf-F1 structural acceptance cases
+//! (formerly `perf_f1_strided_batched_default.rs`):
+//!   * `perf_f1_uniform_rank3_batched_matmul_dispatches_strided_batched`
+//!   * `perf_f1_broadcasted_leading_axis_uses_helper_loop_fallback`
+//!
+//! These lock the rank-3 uniform-stride dispatch with literal batch count
+//! and stride literals, and the broadcasted-lhs-leading-axis helper-loop
+//! fallback. The W5 adversarial cases above (rank-4 uniform, rhs/both
+//! broadcasts) do not subsume the rank-3 literal-stride case, so the
+//! Perf-F1 cases live here as part of the keep-by-default lock.
 
 use chelis_backend_hip::codegen_hip;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
@@ -446,4 +457,167 @@ fn both_sides_broadcasted_leading_axis_falls_back_to_helper_loop() {
         out = out.0,
     );
     assert_line_present(&result.c_source, &expected);
+}
+
+// ---------------------------------------------------------------------------
+// Perf-F1 structural acceptance cases (formerly
+// `perf_f1_strided_batched_default.rs`). Locks two invariants of the HIP
+// batched-matmul dispatch:
+//
+// 1. On a uniform-stride rank-3 batched layout (statically contiguous matrix
+//    slices, concrete matrix dimensions, simple leading batch axes), the
+//    emitted host source dispatches to `hipblasSgemmStridedBatched` via the
+//    `chelis_hipblas_sgemm_strided_batched_row_major` runtime helper with a
+//    literal batch count. The per-batch helper loop must not appear.
+// 2. On a broadcasted leading-axis layout (the lhs leading batch dim is
+//    produced by a `RiscOp::Expand`), the emitted host source falls back to
+//    the per-batch helper loop. The strided-batched call must not appear.
+// ---------------------------------------------------------------------------
+
+/// Perf-F1 W1-A acceptance: uniform-stride rank-3 batched matmul takes the
+/// strided-batched path with the precise stride/batch-count literals.
+///
+/// Shape: `(3, 4, 5) @ (3, 5, 6) -> (3, 4, 6)` so
+/// `m=4, n=6, k=5, batch=3, a_stride=m*k=20, b_stride=k*n=30,
+/// out_stride=m*n=24`.
+#[test]
+fn perf_f1_uniform_rank3_batched_matmul_dispatches_strided_batched() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        t(Prim::F32, vec![3, 4, 5]),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        t(Prim::F32, vec![3, 5, 6]),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![DimExpr::Concrete(3)],
+            m: DimExpr::Concrete(4),
+            n: DimExpr::Concrete(6),
+            k: DimExpr::Concrete(5),
+            accumulator: Prim::F32,
+        },
+        vec![a, b],
+        t(Prim::F32, vec![3, 4, 6]),
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "perf_f1_uniform_strided_batched");
+
+    // The exact emitted line is deterministic from `emit_blas_matmul`:
+    //   chelis_hipblas_sgemm_strided_batched_row_major(d_t<a>, d_t<b>,
+    //       d_t<out>, <m>, <n>, <k>, <batch_count>, <a_stride>LL,
+    //       <b_stride>LL, <out_stride>LL);
+    let expected_line = format!(
+        "chelis_hipblas_sgemm_strided_batched_row_major(d_t{a}, d_t{b}, d_t{out}, 4, 6, 5, 3, 20LL, 30LL, 24LL);",
+        a = a.0,
+        b = b.0,
+        out = out.0,
+    );
+    assert_line_present(&result.c_source, &expected_line);
+
+    // The helper-loop fallback must not be reached on a uniform layout.
+    assert_no_substring(&result.c_source, "chelis_hipblas_sgemm_batched_row_major(");
+
+    // The strided-batched helper still requires the hipBLAS link flag.
+    assert!(
+        result.link_flags.iter().any(|flag| flag == "-lhipblas"),
+        "strided-batched dispatch must surface `-lhipblas`; got {:?}",
+        result.link_flags
+    );
+}
+
+/// Perf-F1 W1-A acceptance: a broadcasted leading-axis layout (the lhs
+/// leading batch dim is produced by `RiscOp::Expand`, so per-batch matrix
+/// slices share a stride-0 column on that axis) falls back to the per-batch
+/// helper loop. Strided-batched would be unsound here because it assumes
+/// uniform non-zero leading strides.
+///
+/// Shape:
+///   base_a : (4, 5)   (rank-2)
+///   a      : expand(base_a, axis=0, size=3) -> (3, 4, 5)
+///            (statically non-contiguous; stride[0] == 0 broadcast)
+///   b      : (3, 5, 6)
+///   out    : (3, 4, 6)
+#[test]
+fn perf_f1_broadcasted_leading_axis_uses_helper_loop_fallback() {
+    let mut dag = Dag::new();
+    let base_a = dag.add_node(
+        RiscOp::Load {
+            name: "base_a".into(),
+        },
+        vec![],
+        t(Prim::F32, vec![4, 5]),
+        None,
+    );
+    let a = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: DimExpr::Concrete(3),
+        },
+        vec![base_a],
+        t(Prim::F32, vec![3, 4, 5]),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        t(Prim::F32, vec![3, 5, 6]),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![DimExpr::Concrete(3)],
+            m: DimExpr::Concrete(4),
+            n: DimExpr::Concrete(6),
+            k: DimExpr::Concrete(5),
+            accumulator: Prim::F32,
+        },
+        vec![a, b],
+        t(Prim::F32, vec![3, 4, 6]),
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "perf_f1_broadcasted_helper_loop");
+
+    // The exact emitted fallback line is deterministic from
+    // `emit_blas_matmul`:
+    //   chelis_hipblas_sgemm_batched_row_major(d_t<a>, d_t<b>, d_t<out>,
+    //       <m>, <n>, <k>);
+    let expected_line = format!(
+        "chelis_hipblas_sgemm_batched_row_major(d_t{a}, d_t{b}, d_t{out}, 4, 6, 5);",
+        a = a.0,
+        b = b.0,
+        out = out.0,
+    );
+    assert_line_present(&result.c_source, &expected_line);
+
+    // Strided-batched must not appear when broadcasted leading strides
+    // would make per-batch offsets non-uniform.
+    assert_no_substring(
+        &result.c_source,
+        "chelis_hipblas_sgemm_strided_batched_row_major(",
+    );
+
+    // Helper-loop fallback still needs the hipBLAS link flag.
+    assert!(
+        result.link_flags.iter().any(|flag| flag == "-lhipblas"),
+        "helper-loop fallback must surface `-lhipblas`; got {:?}",
+        result.link_flags
+    );
+
+    // Static reference: `Expand` on the leading axis is exactly the
+    // broadcasted-leading-stride shape that disqualifies a uniform
+    // strided-batched plan. If this assertion is touched, the
+    // closed-list contiguity vocabulary in
+    // `crates/chelis-backend-hip/src/emit.rs::node_is_statically_contiguous`
+    // is what changed; surface the change to the spec.
 }
