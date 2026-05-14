@@ -101,6 +101,32 @@ fn bare_arg_add_with_borrow_sig_concrete_precision_type_checks() {
     assert_clean(&json, "concrete-precision sig + bare-arg def + add body");
 }
 
+/// Arithmetic-dtype matrix: the WS-A7 reproducer shape (sig with
+/// borrowed inputs + owned output, bare-arg def delegating to `add`)
+/// must type-check when instantiated at every active arithmetic dtype.
+/// This loop was consolidated here from `wsc_v3_stdlib_finish.rs`
+/// (formerly `wsa7_bare_def_with_sig_having_borrows_typechecks`) in the
+/// e2e parsimony pass so the dtype-matrix coverage lives with the
+/// invariant's owning file.
+#[test]
+fn bare_arg_add_with_borrow_sig_typechecks_at_every_arithmetic_dtype() {
+    const ARITHMETIC_DTYPES: &[&str] = &[
+        "f32", "f64", "bf16", "f16", "int8", "int16", "int32", "int64",
+    ];
+    for dtype in ARITHMETIC_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("wsa7_dtype_matrix.ch");
+        let src = format!(
+            "sig add_bare: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]\n\
+             def add_bare(lhs, rhs) = add(lhs, rhs)\n\
+             def use_at_dtype(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = add_bare(xs, xs)\n"
+        );
+        write_file(&path, &src);
+        let json = run_json_check(&path);
+        assert_clean(&json, &format!("wsa7 sig+bare-def at {dtype}"));
+    }
+}
+
 /// Baseline 1 (must remain green): `matmul` shape, where the callee
 /// scheme uses an independent return tvar (`(&t1, &t2) -> out`). The
 /// collapse that broke the `add` shape never fires here, so this case

@@ -254,6 +254,19 @@ fn unbound_function_in_polymorphic_body_no_longer_masks_return_mismatch() {
 // applies.
 // ---------------------------------------------------------------------------
 
+/// F3 fix: an unbound precision name in a let-binding precision slot
+/// must be rejected with an `UnsupportedTensorPrecision` diagnostic
+/// naming the offending identifier, and the score must drop below 1.0.
+///
+/// This fixture also exercises the cross-cutting WS-A5 + WS-B2
+/// (contextual tensor literal inference) path: the `[1.0, 2.0, 3.0]`
+/// literal in `xs: tensor[3, p] = [1.0, 2.0, 3.0]` outside a sig had
+/// its element type driven by the annotation's unbound `p`, which
+/// pre-F3 collapsed to `Type::Error` and slipped through silently. The
+/// F3 validator fall-through flags this case explicitly. A separate
+/// section-E test that wrote the identical fixture with a strict
+/// subset of these assertions was merged into this one in the e2e
+/// parsimony pass.
 #[test]
 fn unbound_precision_name_in_let_now_rejected() {
     let dir = tempdir().expect("tempdir");
@@ -276,7 +289,8 @@ fn unbound_precision_name_in_let_now_rejected() {
         has_unsupported_prec,
         "F3 fix: an unbound precision name in a let-binding must be \
          rejected with an UnsupportedTensorPrecision diagnostic naming \
-         the offending identifier. Got {errors:?}"
+         the offending identifier, even in the WS-B2 contextual literal \
+         inference path. Got {errors:?}"
     );
     let score = json["score"].as_f64().unwrap_or(-1.0);
     assert!(
@@ -515,38 +529,15 @@ fn polymorphic_sig_with_concrete_call_builds_metal_backend() {
 }
 
 // ---------------------------------------------------------------------------
-// E. Cross-cutting: WS-A5 + WS-B2 (contextual tensor literal inference).
-// `let xs: tensor[3, p] = [1.0, 2.0, 3.0]` outside a sig. The `p` is
-// unbound; pre-F3 the literals got tagged with `(t-prim {} p)` which
-// collapsed to `Type::Error` and slipped through silently. The F3
-// validator fall-through now flags this case explicitly.
+// E. Cross-cutting: WS-A5 + WS-B2 (contextual tensor literal
+// inference). The section-E test that pinned `let xs: tensor[3, p] =
+// [1.0, 2.0, 3.0]` outside a sig wrote the identical fixture and a
+// strict subset of the assertions of section C's
+// `unbound_precision_name_in_let_now_rejected`; the two were merged
+// into that single test in the e2e parsimony pass. See the doc comment
+// on `unbound_precision_name_in_let_now_rejected` above for the WS-B2
+// contextual-literal angle.
 // ---------------------------------------------------------------------------
-
-#[test]
-fn unbound_p_in_let_with_tensor_literal_now_rejected() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("let_lit_p.ch");
-    write_file(
-        &path,
-        "def main() -> tensor[3, f32] = {\n  \
-           xs: tensor[3, p] = [1.0, 2.0, 3.0]\n  \
-           xs\n\
-         }\n",
-    );
-    let json = run_json_check(&path);
-    let errors = json["errors"].as_array().cloned().unwrap_or_default();
-    let has_unsupported_prec = errors.iter().any(|e| {
-        let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-        let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        kind == "UnsupportedTensorPrecision" && msg.contains("`p`")
-    });
-    assert!(
-        has_unsupported_prec,
-        "F3 fix: an unbound `p` in a let-binding precision slot must be \
-         rejected even in the WS-B2 contextual literal inference path. \
-         Got {errors:?}"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // G. Whole-tensor type variable builtins still enforce precision

@@ -64,7 +64,6 @@ const ARITHMETIC_DTYPES: &[&str] = &[
     "f32", "f64", "bf16", "f16", "int8", "int16", "int32", "int64",
 ];
 const FLOAT_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16"];
-const INTEGER_DTYPES: &[&str] = &["int8", "int16", "int32", "int64"];
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
@@ -114,47 +113,15 @@ fn expect_any_error(json: &Value, label: &str) {
 
 // =================================================================
 // 1. WS-A6 + WS-A7 sanity reproducer.
+//
+// The WS-A6 (contextual desugar for def parameter annotations) and
+// WS-A7 (bare-def + sig-with-borrows return inference) dtype-matrix
+// re-tests that previously lived here were consolidated into their
+// owning files in the e2e parsimony pass:
+//   * `wsa6_def_annotation_desugar.rs::def_quantifier_precision_tvar_typechecks_at_every_arithmetic_dtype`
+//   * `wsa7_bareref_return_inference.rs::bare_arg_add_with_borrow_sig_typechecks_at_every_arithmetic_dtype`
+// Both owning files now carry the full arithmetic-dtype matrix.
 // =================================================================
-
-/// WS-A7 (bare-def + sig-with-borrows): a sig with borrowed inputs
-/// and an owned output should not infer the def's return type as
-/// borrowed when the body returns a fresh value.
-#[test]
-fn wsa7_bare_def_with_sig_having_borrows_typechecks() {
-    for dtype in ARITHMETIC_DTYPES {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("wsa7.ch");
-        let src = format!(
-            r#"sig add_bare: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
-def add_bare(lhs, rhs) = add(lhs, rhs)
-def use_at_dtype(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = add_bare(xs, xs)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_clean(&json, &format!("wsa7 sig+bare-def at {dtype}"));
-    }
-}
-
-/// WS-A6 (contextual desugar for def parameter annotations): a def
-/// with explicit `[..]` quantifiers may use those quantifier names in
-/// the precision slot of a tensor type without needing a separate
-/// sig.
-#[test]
-fn wsa6_def_param_annotation_precision_quantifier_typechecks() {
-    for dtype in ARITHMETIC_DTYPES {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("wsa6.ch");
-        let src = format!(
-            r#"def take[n, p](xs: &tensor[n, p]) -> &tensor[n, p] = xs
-def use_at_dtype(xs: &tensor[3, {dtype}]) -> &tensor[3, {dtype}] = take(xs)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_clean(&json, &format!("wsa6 def param annotation at {dtype}"));
-    }
-}
 
 // =================================================================
 // 2. Newly-generalized stdlib op shapes accept every admissible dtype.
@@ -193,31 +160,12 @@ def call(x: &tensor[2, 3, {dtype}], w: &tensor[3, 4, {dtype}], bias_in: &tensor[
     }
 }
 
-/// Spec sec 5.7.2 integer matmul rejection: at the type-check entry,
-/// a direct matmul call on integer operands surfaces a 5.7.2-citing
-/// diagnostic. This pins the call-site rejection that protects Linear
-/// (which uses matmul) from being instantiated at integer precisions
-/// at the body-vs-call boundary. Note: the rejection fires at the
-/// body's matmul site once the precision tvar is unified to a concrete
-/// integer type at the call site; if Linear is instantiated at an
-/// integer precision via a polymorphic call site, the integer
-/// rejection still fires at the IR-lowering / monomorphization layer
-/// because matmul's integer rejection is a primitive-level guard.
-/// This test pins the direct-call path.
-#[test]
-fn matmul_direct_call_rejects_integer_dtypes_per_spec_5_7_2() {
-    for dtype in INTEGER_DTYPES {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("matmul_int.ch");
-        let src = format!(
-            r#"def call(a: tensor[3, 4, {dtype}], b: tensor[4, 5, {dtype}]) -> tensor[3, 5, {dtype}] = matmul(a, b)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_any_error(&json, &format!("matmul direct integer rejection ({dtype})"));
-    }
-}
+// Spec sec 5.7.2 integer matmul rejection (direct-call path) is pinned
+// by the keep-by-default regression lock
+// `rt4_adversarial.rs::rt4_invariant_int_matmul_rejected_for_every_int_dtype`,
+// which loops every integer dtype and asserts the 5.7.2 citation. The
+// copy that previously lived here was removed in the e2e parsimony
+// pass.
 
 /// Std.Nn.Embedding.forward shape: gather. The table precision is a
 /// tvar; the ids dtype is fixed at int64. Accepts every active dtype
@@ -294,69 +242,25 @@ def call(xs: &tensor[1, 3, {dtype}]) -> int64 = row_argmax(xs)
 }
 
 /// Std.Optim.tensor_add / tensor_sub / tensor_mul / tensor_div shape:
-/// pure delegation to the underlying primitive. Accepts every active
-/// dtype.
+/// pure delegation to the underlying primitive. Each accepts every
+/// active arithmetic dtype. The four variants share an identical
+/// shape, so they are exercised by one table-driven test over the
+/// `[add, sub, mul, div]` primitives (consolidated in the e2e
+/// parsimony pass).
 #[test]
-fn optim_tensor_add_accepts_all_arithmetic_dtypes() {
-    for dtype in ARITHMETIC_DTYPES {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("optim_add.ch");
-        let src = format!(
-            r#"def tensor_add[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
-def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_add(xs, xs)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_clean(&json, &format!("optim.tensor_add[{dtype}]"));
-    }
-}
-
-#[test]
-fn optim_tensor_sub_accepts_all_arithmetic_dtypes() {
-    for dtype in ARITHMETIC_DTYPES {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("optim_sub.ch");
-        let src = format!(
-            r#"def tensor_sub[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = sub(lhs, rhs)
-def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_sub(xs, xs)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_clean(&json, &format!("optim.tensor_sub[{dtype}]"));
-    }
-}
-
-#[test]
-fn optim_tensor_mul_accepts_all_arithmetic_dtypes() {
-    for dtype in ARITHMETIC_DTYPES {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("optim_mul.ch");
-        let src = format!(
-            r#"def tensor_mul[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = mul(lhs, rhs)
-def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_mul(xs, xs)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_clean(&json, &format!("optim.tensor_mul[{dtype}]"));
-    }
-}
-
-#[test]
-fn optim_tensor_div_accepts_all_arithmetic_dtypes() {
-    for dtype in ARITHMETIC_DTYPES {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("optim_div.ch");
-        let src = format!(
-            r#"def tensor_div[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = div(lhs, rhs)
-def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_div(xs, xs)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_clean(&json, &format!("optim.tensor_div[{dtype}]"));
+fn optim_tensor_ops_accept_all_arithmetic_dtypes() {
+    for op in ["add", "sub", "mul", "div"] {
+        for dtype in ARITHMETIC_DTYPES {
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join("optim_op.ch");
+            let src = format!(
+                "def tensor_op[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = {op}(lhs, rhs)\n\
+                 def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_op(xs, xs)\n"
+            );
+            write_file(&path, &src);
+            let json = run_check(&path);
+            expect_clean(&json, &format!("optim.tensor_{op}[{dtype}]"));
+        }
     }
 }
 
@@ -508,59 +412,48 @@ def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> unit ! { Test } 
 // 4. f32-pinned ops reject non-f32 input at the sig.
 // =================================================================
 
-/// Std.Nn.Silu.forward is f32-pinned per spec sec 5.4 transcendental
-/// row (uses exp). Calling with bf16 / f64 / f16 / int* is rejected
-/// at the call site because the sig pins f32.
+/// f32-pinned stdlib ops reject non-f32 input at the sig.
+///
+/// * Std.Nn.Silu.forward is f32-pinned per spec sec 5.4 transcendental
+///   row (uses exp).
+/// * Std.Loss.CrossEntropy.loss is f32-pinned (uses softmax + log).
+/// * Std.Optim.AdamW step is f32-pinned (Config carries f32 fields).
+///
+/// All three share the identical "f32-pinned sig rejects non-f32 at
+/// the call site" shape, so they are exercised by one table-driven
+/// test over each op's f32-pinned fixture (consolidated in the e2e
+/// parsimony pass). The `{dtype}` placeholder is substituted into
+/// each fixture for every non-f32 arithmetic dtype.
 #[test]
-fn silu_forward_rejects_non_f32_at_sig_level() {
-    for dtype in ["f64", "bf16", "f16", "int8", "int16", "int32", "int64"] {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("silu_neg.ch");
-        let src = format!(
-            r#"sig forward: &tensor[n, f32] -> tensor[n, f32]
-def forward(x) = x
-def bad(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = forward(xs)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_any_error(&json, &format!("silu.forward rejects {dtype}"));
-    }
-}
-
-/// Std.Loss.CrossEntropy.loss is f32-pinned (uses softmax + log).
-/// Calling with bf16 / f64 / f16 / int* is rejected at the call site.
-#[test]
-fn crossentropy_loss_rejects_non_f32_at_sig_level() {
-    for dtype in ["f64", "bf16", "f16", "int8", "int16", "int32", "int64"] {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("ce_neg.ch");
-        let src = format!(
-            r#"sig loss: &tensor[batch, classes, f32] -> &tensor[batch, classes, f32] -> tensor[batch, f32]
-def loss(logits, labels) = sum(mul(logits, labels), 1)
-def bad(logits: &tensor[2, 3, {dtype}], labels: &tensor[2, 3, {dtype}]) -> tensor[2, {dtype}] = loss(logits, labels)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_any_error(&json, &format!("crossentropy.loss rejects {dtype}"));
-    }
-}
-
-/// Std.Optim.AdamW step is f32-pinned (Config carries f32 fields).
-/// Calling with non-f32 params is rejected at the call site.
-#[test]
-fn optim_adamw_rejects_non_f32_at_sig_level() {
-    for dtype in ["f64", "bf16", "f16", "int8", "int16", "int32", "int64"] {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("adamw_neg.ch");
-        let src = format!(
-            r#"def adamw_step[n](params: tensor[n, f32], grads: &tensor[n, f32]) -> tensor[n, f32] = sub(params, grads)
-def bad(p: tensor[3, {dtype}], g: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = adamw_step(p, g)
-"#
-        );
-        write_file(&path, &src);
-        let json = run_check(&path);
-        expect_any_error(&json, &format!("optim.adamw_step rejects {dtype}"));
+fn f32_pinned_ops_reject_non_f32_at_sig_level() {
+    let non_f32 = ["f64", "bf16", "f16", "int8", "int16", "int32", "int64"];
+    let fixtures: &[(&str, &str)] = &[
+        (
+            "silu.forward",
+            "sig forward: &tensor[n, f32] -> tensor[n, f32]\n\
+             def forward(x) = x\n\
+             def bad(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = forward(xs)\n",
+        ),
+        (
+            "crossentropy.loss",
+            "sig loss: &tensor[batch, classes, f32] -> &tensor[batch, classes, f32] -> tensor[batch, f32]\n\
+             def loss(logits, labels) = sum(mul(logits, labels), 1)\n\
+             def bad(logits: &tensor[2, 3, {dtype}], labels: &tensor[2, 3, {dtype}]) -> tensor[2, {dtype}] = loss(logits, labels)\n",
+        ),
+        (
+            "optim.adamw_step",
+            "def adamw_step[n](params: tensor[n, f32], grads: &tensor[n, f32]) -> tensor[n, f32] = sub(params, grads)\n\
+             def bad(p: tensor[3, {dtype}], g: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = adamw_step(p, g)\n",
+        ),
+    ];
+    for (label, template) in fixtures {
+        for dtype in non_f32 {
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join("f32_pinned_neg.ch");
+            let src = template.replace("{dtype}", dtype);
+            write_file(&path, &src);
+            let json = run_check(&path);
+            expect_any_error(&json, &format!("{label} rejects {dtype}"));
+        }
     }
 }
