@@ -46,6 +46,36 @@ and the build-time style gate. Closes
 `crates/chelis-cli/tests/red_team_0_7_9.rs` (`le_leak_a`,
 `le_leak_fix_sibling_path_invocation_matches_workspace_root_invocation`).
 
+### Fixed - type checker rejects divergent declared dimension parameters
+
+`chelis check` previously accepted a function whose declared return type
+and body type differed in dimension *identity* but matched in dimension
+*rank*. A definition like
+`def f[n, m](x: &tensor[n, f32], y: &tensor[m, f32]) -> tensor[n, f32] = y`
+type-checked with `score=1` and then evaluated with a runtime shape
+mismatch (HIGH severity silent miscompilation, red-team finding
+SR-LEAK-A). Two independent leak paths are closed:
+
+- `types_structurally_equal` (the Shape A relaxed-retry guard) compared
+  tensor dimensions by rank only. It now compares dimension *identity*:
+  two dims match iff same concrete name, same literal, or the same dim
+  variable. `Dim::Wildcard` still matches anything. Distinct dim
+  variables (`n` vs `m`) no longer satisfy the structural guard.
+- A plain owned-tensor body bypassed the relaxed-retry entirely: the
+  post-body signature unification collapsed two distinct declared dim
+  parameters via free dim-variable unification. A new post-body rigidity
+  check, `check_declared_dvars_rigid`, flags this `Var->Var` collapse
+  (and the previously-handled `Var->Lit` pin) as a `DimensionMismatch`.
+  Declared dimension parameters are rigid within the def body.
+
+Closes `TypeCheck-FreeDimVarUnification-F1` (red-team finding
+SR-LEAK-A, `docs/investigations/terminal_redteam_0_7_9.md`). Diagnosis:
+`docs/investigations/typecheck_dim_identity_diagnosis.md`. Regression
+tests at `crates/chelis-cli/tests/red_team_0_7_9.rs` (the SR-LEAK-A
+fixtures, divergent-dim negatives plus same-dim positive controls for
+both paths). Spec completion: `spec/04-type-system.md` §4.4 now states
+the dim-parameter rigidity rule the fix enforces.
+
 ### Fixed - redundant-linearity-call false-positive on copy(borrow)
 
 The `redundant-linearity-call` advisory warning previously fired on
