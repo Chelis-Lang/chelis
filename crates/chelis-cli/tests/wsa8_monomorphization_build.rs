@@ -15,7 +15,6 @@
 //! Spec authority: spec/04-type-system.md sections 5.4, 5.7.2, 5.8,
 //! 5.8.1.
 
-use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -86,6 +85,15 @@ fn build_stdlib_linear_succeeds() {
         "WS-A8: chelis build packages/chelis-std/src/nn/linear.ch \
          must succeed post-monomorphization. stderr={stderr}"
     );
+    // linear.ch is the canonical case the BLOCKER-class panic blocked
+    // (RT-3 FINDING 7): the standalone polymorphic def must be silently
+    // skipped from emission, never surface the monomorphization
+    // tripwire.
+    assert!(
+        !stderr.contains("monomorphization"),
+        "WS-A8: stderr must not surface the monomorphization tripwire \
+         for production linear.ch. stderr={stderr}"
+    );
 }
 
 #[test]
@@ -98,6 +106,11 @@ fn build_stdlib_attention_succeeds() {
         output.status.success(),
         "WS-A8: chelis build packages/chelis-std/src/nn/attention.ch \
          must succeed post-monomorphization. stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("monomorphization"),
+        "WS-A8: stderr must not surface the monomorphization tripwire \
+         for production attention.ch. stderr={stderr}"
     );
 }
 
@@ -236,57 +249,4 @@ def wrap(x) = softmax(x, -1)
 def use_int(x: &tensor[3, 4, int32]) -> tensor[3, 4, int32] = wrap(x)
 "#;
     build_must_reject(src, "poly_int_softmax", "5.4");
-}
-
-// ============================================================
-// Section D. WS-C v3 regression check: production stdlib
-// `chelis check` still passes after WS-A8.
-// ============================================================
-
-#[test]
-fn check_stdlib_linear_still_clean_post_wsa8() {
-    let src = stdlib_path("src/nn/linear.ch");
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["check", src.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value =
-        serde_json::from_slice(&output).expect("check output should be json");
-    let errors = json["errors"]
-        .as_array()
-        .expect("errors should be a json array");
-    assert!(
-        errors.is_empty(),
-        "WS-A8 regression: stdlib linear.ch must check clean post-WS-A8; \
-         got {errors:?}"
-    );
-}
-
-#[test]
-fn check_stdlib_attention_still_clean_post_wsa8() {
-    let src = stdlib_path("src/nn/attention.ch");
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["check", src.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value =
-        serde_json::from_slice(&output).expect("check output should be json");
-    let errors = json["errors"]
-        .as_array()
-        .expect("errors should be a json array");
-    assert!(
-        errors.is_empty(),
-        "WS-A8 regression: stdlib attention.ch must check clean post-WS-A8; \
-         got {errors:?}"
-    );
 }

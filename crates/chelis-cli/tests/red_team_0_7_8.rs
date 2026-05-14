@@ -1,12 +1,19 @@
 //! Wave 3 terminal red team for the 0.7.8 compiler-cleanup workstream.
 //!
-//! Adversarial fixtures for the CLI-level §5 closures:
-//! - HostEval-ScalarFn-F1 (nested zero-arg fn calls, zero-arg in subexpr)
-//! - Lint CLI path-walk (Item 7) plus the Lint-ExceptionPathRoot-F1
-//!   sibling-sweep §5 entry surfaced by PR #93.
+//! Adversarial fixtures for the CLI-level §5 closure HostEval-ScalarFn-F1
+//! (nested zero-arg fn calls, zero-arg in subexpr).
 //!
 //! Each fixture has a pinned expected outcome; either an exact stdout
 //! match or an exact exit-code / pattern.
+//!
+//! The Lint CLI path-walk / Lint-ExceptionPathRoot-F1 PR #93 closure
+//! invariant is covered by `lint_path_walk_consistency.rs`, which pins
+//! it with fast synthetic fixtures (a `lint .` vs `lint <subtree>` walk
+//! over a fixture containing a known violation, plus the workspace-
+//! rooted exception-matching cases). The earlier full-repo double-scan
+//! test here asserted only `count == count` and on the current repo
+//! that was `0 == 0` (no violations exist), so it cost ~90s to prove
+//! nothing the fixture-based lock does not prove precisely.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -123,82 +130,4 @@ fn host_eval_zero_arg_i64_large_value() {
     eval_file(&fixture)
         .success()
         .stdout(predicate::str::contains("data=[9999999999"));
-}
-
-// ============================================================
-// §3.6 Lint CLI consistency (Item 7) — full corpus sweep
-// ============================================================
-
-/// `chelis lint --check .` and `chelis lint --check <each subtree>`
-/// should produce identical results for paths covered by both
-/// invocations. PR #93 canonicalized the path resolution.
-///
-/// Re-verify after PR #93: walking the canonical sub-tree set should
-/// not produce false-positive `doc-filename-convention` errors that
-/// `chelis lint --check .` excepts.
-///
-/// `#[ignore]`'d manual gate: this test runs `chelis lint --check` over
-/// the entire repository twice and is the single slowest integration
-/// test (~100s). It is far over the default inner-loop budget. It stays
-/// a regression lock for the 0.7.8 PR #93 fix via the documented manual
-/// gate in `docs/manual_gates.md`.
-///
-/// Manual command:
-///   cargo test -p chelis-cli --test red_team_0_7_8 \
-///     lint_subtree_invocation_matches_dot_for_doc_filename_convention \
-///     -- --ignored --exact
-#[test]
-#[ignore = "full-repo double lint scan (~100s); see docs/manual_gates.md"]
-fn lint_subtree_invocation_matches_dot_for_doc_filename_convention() {
-    // Find the repo root via the `chelis` binary's location.
-    let exe = Command::cargo_bin("chelis").expect("binary");
-    let repo_root = std::env::var("CARGO_MANIFEST_DIR")
-        .map(|d| {
-            // We're under crates/chelis-cli/Cargo.toml; go up two levels.
-            std::path::PathBuf::from(d)
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .to_path_buf()
-        })
-        .expect("CARGO_MANIFEST_DIR");
-
-    drop(exe);
-
-    let dot_out = Command::cargo_bin("chelis")
-        .expect("binary")
-        .current_dir(&repo_root)
-        .args(["lint", "--check", "."])
-        .output()
-        .expect("dot lint");
-
-    let subtree_out = Command::cargo_bin("chelis")
-        .expect("binary")
-        .current_dir(&repo_root)
-        .args([
-            "lint", "--check", "crates", "docs", "examples", "packages", "scripts", "spec",
-        ])
-        .output()
-        .expect("subtree lint");
-
-    let dot_err_text = String::from_utf8_lossy(&dot_out.stderr).to_string();
-    let subtree_err_text = String::from_utf8_lossy(&subtree_out.stderr).to_string();
-
-    // Count `doc-filename-convention` *errors* (not warnings) on each.
-    let count_doc_filename_errors = |s: &str| -> usize {
-        s.lines()
-            .filter(|line| line.contains("error:") && line.contains("doc-filename-convention"))
-            .count()
-    };
-
-    let dot_err_count = count_doc_filename_errors(&dot_err_text);
-    let subtree_err_count = count_doc_filename_errors(&subtree_err_text);
-
-    assert_eq!(
-        dot_err_count, subtree_err_count,
-        "doc-filename-convention error counts must match between `lint .` ({dot_err_count}) and \
-         explicit subtree walk ({subtree_err_count}). PR #93 closure says they should be \
-         identical."
-    );
 }

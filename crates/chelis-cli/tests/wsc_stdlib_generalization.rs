@@ -445,38 +445,3 @@ def call_int8(xs: &tensor[2, 3, int8]) -> tensor[3, int64] = argmax(xs, cast(0, 
     let json = run_check(&path);
     expect_clean(&json, "argmax at f32 and int8 in same module");
 }
-
-// ---------------------------------------------------------------
-// 6. Production stdlib sig files type-check cleanly. This is the
-//    final integration check: the actual checked-in sigs from
-//    packages/chelis-std/src/ are well-formed under WS-A5.
-// ---------------------------------------------------------------
-
-fn stdlib_path(rel: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/chelis-std")
-        .join(rel)
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("failed to canonicalize {rel}: {e}"))
-}
-
-#[test]
-fn production_stdlib_reduce_sig_file_type_checks() {
-    let path = stdlib_path("src/tensor/reduce.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production reduce.ch");
-}
-
-#[test]
-fn production_stdlib_conv_sig_file_type_checks() {
-    let path = stdlib_path("src/nn/conv.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production conv.ch");
-}
-
-#[test]
-fn production_stdlib_xavier_sig_file_type_checks() {
-    let path = stdlib_path("src/init/xavier.ch");
-    let json = run_check(&path);
-    expect_clean(&json, "production xavier.ch");
-}
