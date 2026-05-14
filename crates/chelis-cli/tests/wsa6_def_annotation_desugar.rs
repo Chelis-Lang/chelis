@@ -172,6 +172,39 @@ fn def_mixed_dim_and_precision_quantifiers_accepted() {
     );
 }
 
+/// Arithmetic-dtype matrix: a def with an explicit precision tvar in
+/// its quantifier list must type-check when instantiated at every
+/// active arithmetic dtype, not only the float/int spot checks above.
+/// This loop was consolidated here from `wsc_v3_stdlib_finish.rs`
+/// (formerly `wsa6_def_param_annotation_precision_quantifier_typechecks`)
+/// in the e2e parsimony pass so the dtype-matrix coverage lives with
+/// the invariant's owning file.
+#[test]
+fn def_quantifier_precision_tvar_typechecks_at_every_arithmetic_dtype() {
+    const ARITHMETIC_DTYPES: &[&str] = &[
+        "f32", "f64", "bf16", "f16", "int8", "int16", "int32", "int64",
+    ];
+    for dtype in ARITHMETIC_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("wsa6_dtype_matrix.ch");
+        let src = format!(
+            "def take[n, p](xs: &tensor[n, p]) -> &tensor[n, p] = xs\n\
+             def use_at_dtype(xs: &tensor[3, {dtype}]) -> &tensor[3, {dtype}] = take(xs)\n"
+        );
+        write_file(&path, &src);
+        let json = run_json_check(&path);
+        let errors = json["errors"].as_array().cloned().unwrap_or_default();
+        assert!(
+            errors.is_empty(),
+            "WS-A6 def param annotation at {dtype}: expected clean check, got {errors:?}"
+        );
+        assert!(
+            (json["score"].as_f64().unwrap_or(0.0) - 1.0).abs() < f64::EPSILON,
+            "WS-A6 def param annotation at {dtype}: expected score 1.0, got {json}"
+        );
+    }
+}
+
 /// Regression guard: WS-A5 sig-only generalization is unchanged. A bare
 /// `sig poly_id: tensor[d, p] -> tensor[d, p]` still implicitly
 /// quantifies `d` and `p` and `poly_id` remains a polymorphic
