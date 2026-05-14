@@ -102,129 +102,124 @@ fn eval_named_roots(
 // Acceptance: evaluator parity (monolithic vs composed).
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[test]
-fn parity_pair_1_lib_const_referenced_by_new_code() {
-    let library_src = "
-        (def {} lib_const (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))
-    ";
-    let new_src = "
-        (def {} y
-          (app {type: (t-tensor {} (t-prim {} f32))}
-               (var {} mul)
-               (var {type: (t-tensor {} (t-prim {} f32))} lib_const)
-               (lit {type: (t-tensor {} (t-prim {} f32))} 3.0)))
-    ";
-    let combined_src = format!("{library_src}\n{new_src}");
-
-    // Monolithic baseline.
-    let mono_checked = check_monolithic(&combined_src);
-    let mono_dag = lower_program(&mono_checked);
-    let mono_roots = eval_dag_root_values(&mono_dag, &HashMap::new());
-
-    // Composed.
-    let (_lib_exprs, ctx, lib_checked) = check_lib(library_src);
-    let library: LoweredLibrary = lower_program_to_library(&lib_checked);
-    let new_checked = check_with_ctx(&ctx, new_src);
-    let composed_dag = lower_program_with_context(&library, &new_checked);
-    let composed_roots = eval_dag_root_values(&composed_dag, &HashMap::new());
-
-    // The new-code root (y = lib_const * 3.0 = 21.0) must be present in BOTH.
-    let mono_y = mono_roots
-        .last()
-        .expect("mono has at least one root")
-        .clone();
-    let composed_y = composed_roots
-        .last()
-        .expect("composed has at least one root")
-        .clone();
-    assert_eq!(mono_y.shape, composed_y.shape, "y-root shape must agree");
-    assert_eq!(
-        mono_y.data, composed_y.data,
-        "y-root value must agree byte-for-byte: mono={:?} composed={:?}",
-        mono_y.data, composed_y.data,
-    );
-    // Spot-check the actual numeric expectation so that an evaluator-side
-    // bug masking BOTH paths into wrongness doesn't slip past.
-    assert_eq!(composed_y.data, vec![21.0]);
+/// One library + snippet parity case: monolithic `lower_program` and
+/// composed `lower_program_with_context` must produce the same last-root
+/// shape and byte-identical data, and that data must equal `expected`
+/// (the spot-check that guards against an evaluator bug masking BOTH
+/// paths into agreement on a wrong value).
+struct ParityCase {
+    label: &'static str,
+    library_src: &'static str,
+    new_src: &'static str,
+    expected: Vec<f64>,
 }
 
 #[test]
-fn parity_pair_2_lib_function_inlined_into_new_code() {
-    let library_src = "
-        (defsig {} double
-          (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
-        (def {} double
-          (fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))}))
-            (app {type: (t-tensor {} (t-prim {} f32))}
-                 (var {} mul)
-                 (var {type: (t-tensor {} (t-prim {} f32))} x)
-                 (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))))
-    ";
-    let new_src = "
-        (def {} a
-          (app {type: (t-tensor {} (t-prim {} f32))}
-               (var {} double)
-               (lit {type: (t-tensor {} (t-prim {} f32))} 5.0)))
-    ";
-    let combined_src = format!("{library_src}\n{new_src}");
+fn parity_monolithic_vs_composed_for_library_snippet_pairs() {
+    let cases = [
+        ParityCase {
+            label: "lib_const referenced by new code (lib_const * 3.0)",
+            library_src: "
+                (def {} lib_const (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))
+            ",
+            new_src: "
+                (def {} y
+                  (app {type: (t-tensor {} (t-prim {} f32))}
+                       (var {} mul)
+                       (var {type: (t-tensor {} (t-prim {} f32))} lib_const)
+                       (lit {type: (t-tensor {} (t-prim {} f32))} 3.0)))
+            ",
+            expected: vec![21.0],
+        },
+        ParityCase {
+            label: "lib function inlined into new code (double(5.0))",
+            library_src: "
+                (defsig {} double
+                  (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
+                (def {} double
+                  (fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))}))
+                    (app {type: (t-tensor {} (t-prim {} f32))}
+                         (var {} mul)
+                         (var {type: (t-tensor {} (t-prim {} f32))} x)
+                         (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))))
+            ",
+            new_src: "
+                (def {} a
+                  (app {type: (t-tensor {} (t-prim {} f32))}
+                       (var {} double)
+                       (lit {type: (t-tensor {} (t-prim {} f32))} 5.0)))
+            ",
+            expected: vec![10.0],
+        },
+        ParityCase {
+            label: "lib value and lib function combined (affine(2.0) = 2.0 * 4.0 + 1.5)",
+            library_src: "
+                (def {} bias (lit {type: (t-tensor {} (t-prim {} f32))} 1.5))
+                (defsig {} affine
+                  (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
+                (def {} affine
+                  (fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))}))
+                    (app {type: (t-tensor {} (t-prim {} f32))}
+                         (var {} add)
+                         (app {type: (t-tensor {} (t-prim {} f32))}
+                              (var {} mul)
+                              (var {type: (t-tensor {} (t-prim {} f32))} x)
+                              (lit {type: (t-tensor {} (t-prim {} f32))} 4.0))
+                         (var {type: (t-tensor {} (t-prim {} f32))} bias))))
+            ",
+            new_src: "
+                (def {} z
+                  (app {type: (t-tensor {} (t-prim {} f32))}
+                       (var {} affine)
+                       (lit {type: (t-tensor {} (t-prim {} f32))} 2.0)))
+            ",
+            expected: vec![9.5],
+        },
+    ];
 
-    let mono_checked = check_monolithic(&combined_src);
-    let mono_dag = lower_program(&mono_checked);
-    let mono_roots = eval_dag_root_values(&mono_dag, &HashMap::new());
+    for case in &cases {
+        let combined_src = format!("{}\n{}", case.library_src, case.new_src);
 
-    let (_, ctx, lib_checked) = check_lib(library_src);
-    let library = lower_program_to_library(&lib_checked);
-    let new_checked = check_with_ctx(&ctx, new_src);
-    let composed_dag = lower_program_with_context(&library, &new_checked);
-    let composed_roots = eval_dag_root_values(&composed_dag, &HashMap::new());
+        // Monolithic baseline.
+        let mono_checked = check_monolithic(&combined_src);
+        let mono_dag = lower_program(&mono_checked);
+        let mono_roots = eval_dag_root_values(&mono_dag, &HashMap::new());
 
-    let mono_a = mono_roots.last().expect("mono root").clone();
-    let composed_a = composed_roots.last().expect("composed root").clone();
-    assert_eq!(mono_a.shape, composed_a.shape);
-    assert_eq!(mono_a.data, composed_a.data);
-    assert_eq!(composed_a.data, vec![10.0]);
-}
+        // Composed.
+        let (_lib_exprs, ctx, lib_checked) = check_lib(case.library_src);
+        let library: LoweredLibrary = lower_program_to_library(&lib_checked);
+        let new_checked = check_with_ctx(&ctx, case.new_src);
+        let composed_dag = lower_program_with_context(&library, &new_checked);
+        let composed_roots = eval_dag_root_values(&composed_dag, &HashMap::new());
 
-#[test]
-fn parity_pair_3_lib_value_and_lib_function_combined() {
-    let library_src = "
-        (def {} bias (lit {type: (t-tensor {} (t-prim {} f32))} 1.5))
-        (defsig {} affine
-          (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
-        (def {} affine
-          (fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))}))
-            (app {type: (t-tensor {} (t-prim {} f32))}
-                 (var {} add)
-                 (app {type: (t-tensor {} (t-prim {} f32))}
-                      (var {} mul)
-                      (var {type: (t-tensor {} (t-prim {} f32))} x)
-                      (lit {type: (t-tensor {} (t-prim {} f32))} 4.0))
-                 (var {type: (t-tensor {} (t-prim {} f32))} bias))))
-    ";
-    let new_src = "
-        (def {} z
-          (app {type: (t-tensor {} (t-prim {} f32))}
-               (var {} affine)
-               (lit {type: (t-tensor {} (t-prim {} f32))} 2.0)))
-    ";
-    let combined_src = format!("{library_src}\n{new_src}");
-
-    let mono_checked = check_monolithic(&combined_src);
-    let mono_dag = lower_program(&mono_checked);
-    let mono_roots = eval_dag_root_values(&mono_dag, &HashMap::new());
-
-    let (_, ctx, lib_checked) = check_lib(library_src);
-    let library = lower_program_to_library(&lib_checked);
-    let new_checked = check_with_ctx(&ctx, new_src);
-    let composed_dag = lower_program_with_context(&library, &new_checked);
-    let composed_roots = eval_dag_root_values(&composed_dag, &HashMap::new());
-
-    let mono_z = mono_roots.last().expect("mono root").clone();
-    let composed_z = composed_roots.last().expect("composed root").clone();
-    assert_eq!(mono_z.shape, composed_z.shape);
-    assert_eq!(mono_z.data, composed_z.data);
-    // 2.0 * 4.0 + 1.5 = 9.5
-    assert_eq!(composed_z.data, vec![9.5]);
+        // The new-code root must be present in BOTH and agree.
+        let mono_root = mono_roots
+            .last()
+            .unwrap_or_else(|| panic!("[{}] mono has at least one root", case.label))
+            .clone();
+        let composed_root = composed_roots
+            .last()
+            .unwrap_or_else(|| panic!("[{}] composed has at least one root", case.label))
+            .clone();
+        assert_eq!(
+            mono_root.shape, composed_root.shape,
+            "[{}] root shape must agree",
+            case.label,
+        );
+        assert_eq!(
+            mono_root.data, composed_root.data,
+            "[{}] root value must agree byte-for-byte: mono={:?} composed={:?}",
+            case.label, mono_root.data, composed_root.data,
+        );
+        // Spot-check the actual numeric expectation so that an
+        // evaluator-side bug masking BOTH paths into wrongness doesn't
+        // slip past.
+        assert_eq!(
+            composed_root.data, case.expected,
+            "[{}] composed root value must equal the spot-checked expectation",
+            case.label,
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

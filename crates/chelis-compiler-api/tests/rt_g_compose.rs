@@ -314,6 +314,7 @@ fn g4_bincode_tampering_truncates_library_then_eval_must_not_silently_succeed() 
 // ─── G5 — Cold-path overhead ─────────────────────────────────────────────
 
 #[test]
+#[ignore = "perf-ratio gate: wall-clock cold-path overhead measurement; separated from the correctness pass per CLAUDE.md. See docs/manual_gates.md."]
 fn g5_cold_path_overhead_at_most_2x_monolithic() {
     // Cold-path probe: 1× compile_reef_context + 1× eval_in_context vs
     // 1× prepare_eval(format(library + snippet)). Per RT-G prompt, target

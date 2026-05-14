@@ -125,74 +125,56 @@ fn collect_named_roots_json(roots: &[EvaluatedRoot], names: &[&str]) -> BTreeMap
 }
 
 #[test]
-fn eval_in_context_matches_prepare_eval_int_add() {
-    let (_dir, root) = library_fixture();
-    let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def main_value -> int32 = add(3, 4)\n";
+fn eval_in_context_matches_prepare_eval_for_int_snippets() {
+    // Each case: a snippet importing from the library fixture, plus the
+    // single named root whose eval value must match between the
+    // monolithic `prepare_eval(format(library + snippet))` baseline and
+    // the in-context `eval_in_context` flow.
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "int_add",
+            "module App.Eval\nimport Mylib.Math (add)\n\n\
+             def main_value -> int32 = add(3, 4)\n",
+            "main_value",
+        ),
+        (
+            "int_double",
+            "module App.Eval\nimport Mylib.Math (double)\n\n\
+             def doubled -> int32 = double(21)\n",
+            "doubled",
+        ),
+        (
+            "int_square_compose",
+            "module App.Eval\nimport Mylib.Math (square)\nimport Mylib.Math (add)\n\n\
+             def composed -> int32 = add(square(5), square(3))\n",
+            "composed",
+        ),
+    ];
 
-    // Monolithic baseline.
-    let formatted = format_library_plus_snippet(&root, snippet);
-    let baseline = eval(EvalRequest {
-        source_kind: SourceKind::Surf,
-        source: formatted,
-        bindings: BTreeMap::new(),
-    })
-    .expect("baseline eval");
-    let baseline_named = collect_named_roots_json(&baseline.roots, &["main_value"]);
+    for (label, snippet, root_name) in cases {
+        let (_dir, root) = library_fixture();
 
-    // In-context flow.
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
-    let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
-    let result_named = collect_named_roots_json(&result.roots, &["main_value"]);
+        // Monolithic baseline.
+        let formatted = format_library_plus_snippet(&root, snippet);
+        let baseline = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: formatted,
+            bindings: BTreeMap::new(),
+        })
+        .unwrap_or_else(|e| panic!("[{label}] baseline eval failed: {e:?}"));
+        let baseline_named = collect_named_roots_json(&baseline.roots, &[root_name]);
 
-    assert_eq!(
-        baseline_named, result_named,
-        "eval_in_context output must match prepare_eval(format(library + snippet))"
-    );
-}
+        // In-context flow.
+        let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+        let result = eval_in_context(&ctx, snippet)
+            .unwrap_or_else(|e| panic!("[{label}] eval_in_context failed: {e:?}"));
+        let result_named = collect_named_roots_json(&result.roots, &[root_name]);
 
-#[test]
-fn eval_in_context_matches_prepare_eval_int_double() {
-    let (_dir, root) = library_fixture();
-    let snippet = "module App.Eval\nimport Mylib.Math (double)\n\n\
-                   def doubled -> int32 = double(21)\n";
-
-    let formatted = format_library_plus_snippet(&root, snippet);
-    let baseline = eval(EvalRequest {
-        source_kind: SourceKind::Surf,
-        source: formatted,
-        bindings: BTreeMap::new(),
-    })
-    .expect("baseline eval");
-    let baseline_named = collect_named_roots_json(&baseline.roots, &["doubled"]);
-
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
-    let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
-    let result_named = collect_named_roots_json(&result.roots, &["doubled"]);
-
-    assert_eq!(baseline_named, result_named);
-}
-
-#[test]
-fn eval_in_context_matches_prepare_eval_int_square_compose() {
-    let (_dir, root) = library_fixture();
-    let snippet = "module App.Eval\nimport Mylib.Math (square)\nimport Mylib.Math (add)\n\n\
-                   def composed -> int32 = add(square(5), square(3))\n";
-
-    let formatted = format_library_plus_snippet(&root, snippet);
-    let baseline = eval(EvalRequest {
-        source_kind: SourceKind::Surf,
-        source: formatted,
-        bindings: BTreeMap::new(),
-    })
-    .expect("baseline eval");
-    let baseline_named = collect_named_roots_json(&baseline.roots, &["composed"]);
-
-    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
-    let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
-    let result_named = collect_named_roots_json(&result.roots, &["composed"]);
-
-    assert_eq!(baseline_named, result_named);
+        assert_eq!(
+            baseline_named, result_named,
+            "[{label}] eval_in_context output must match prepare_eval(format(library + snippet))"
+        );
+    }
 }
 
 #[test]
