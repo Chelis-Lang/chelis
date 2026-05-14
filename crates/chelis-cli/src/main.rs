@@ -5512,7 +5512,20 @@ fn cmd_lint(
     // common naming carve-outs; path-glob entries with §-cross-refs go
     // here.
     let exceptions: Vec<chelis_lint::Exception> = style_gate::exceptions();
-    let mut blocking_total = 0usize;
+    // Bucket the rendered violation lines by severity instead of
+    // printing them inline as targets are walked. A workspace `chelis
+    // lint --check .` can emit several hundred advisory lines (e.g.
+    // `prefer-pipe-operator` across packages/chelis-std/tests/*); when
+    // a handful of blocking ERROR lines are interleaved into that
+    // stream they are effectively invisible, and CI failure debugging
+    // misreads the cause. The em-dash §8.6 rule has been bitten by
+    // exactly this twice. Buckets let the blocking errors be printed
+    // last, under a distinct header, so they are the final thing in
+    // the CI log. See
+    // docs/investigations/test_toolchain_guards_design.md.
+    let mut error_lines: Vec<String> = Vec::new();
+    let mut warning_lines: Vec<String> = Vec::new();
+    let mut advisory_lines: Vec<String> = Vec::new();
     for target in &targets {
         if fix {
             let applied = apply_lint_fixes(target, workspace_root.as_deref(), &rules, &exceptions)?;
@@ -5545,14 +5558,36 @@ fn cmd_lint(
                 ""
             };
             match severity {
-                chelis_lint::Severity::Error => println!("{v}{suffix}"),
-                chelis_lint::Severity::Warning => println!("warning: {v}{suffix}"),
-                chelis_lint::Severity::Advisory => println!("advisory: {v}{suffix}"),
-            }
-            if severity.blocks_check() {
-                blocking_total += 1;
+                chelis_lint::Severity::Error => error_lines.push(format!("{v}{suffix}")),
+                chelis_lint::Severity::Warning => {
+                    warning_lines.push(format!("warning: {v}{suffix}"))
+                }
+                chelis_lint::Severity::Advisory => {
+                    advisory_lines.push(format!("advisory: {v}{suffix}"))
+                }
             }
         }
+    }
+    // Print advisory and warning lines first (the bulk, non-blocking
+    // noise), then the blocking errors last under a delimited header
+    // and a summary count. Severity::blocks_check() decides what is
+    // blocking; today that is exactly Severity::Error.
+    for line in &advisory_lines {
+        println!("{line}");
+    }
+    for line in &warning_lines {
+        println!("{line}");
+    }
+    let blocking_total = error_lines.len();
+    if blocking_total > 0 {
+        println!("=== {blocking_total} blocking lint error(s) ===");
+        for line in &error_lines {
+            println!("{line}");
+        }
+        println!(
+            "lint --check failed: {blocking_total} blocking error(s) above \
+             (advisory/warning lines, if any, are non-blocking)"
+        );
     }
     if check && blocking_total > 0 {
         Ok(1)
