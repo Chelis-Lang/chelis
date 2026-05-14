@@ -224,6 +224,55 @@ fn lp_leak_b_chelis_check_advisory_emit_does_not_suppress_unfixable_prefer_pipe(
     );
 }
 
+/// LP-LEAK-FIX-1: `chelis check` on a copy(borrow) program must emit
+/// zero `redundant-linearity-call` advisory warnings, because the
+/// autofix would be rejected by the typed-pipeline gate (stripping the
+/// `copy()` off a borrow makes the program fail type-check). This is
+/// the post-fix assertion for LP-LEAK-A: the advisory-emit path
+/// `chelis check` invokes must apply `should_suppress_unfixable_violation`.
+#[test]
+fn lp_leak_fix_chelis_check_suppresses_unfixable_copy_borrow() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("copy_borrow_check.ch");
+    write_file(
+        &path,
+        "def consume_owned[n](x: tensor[n, f32]) -> tensor[n, f32] = realize(x)\n\
+         def caller[n](y: &tensor[n, f32]) -> tensor[n, f32] = consume_owned(copy(y))\n\
+         input = to_tensor([1.0, 2.0])\n\
+         result = caller(&input)\n",
+    );
+    fmt_inplace(&path);
+
+    let (_code, _out, check_err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert!(
+        !check_err.contains("redundant-linearity-call"),
+        "chelis check must suppress the unfixable copy(borrow) warning; stderr={check_err}",
+    );
+}
+
+/// LP-LEAK-FIX-2: positive control. A genuinely-redundant `copy()` on
+/// an OWNED tensor has a safe autofix (the strip type-checks), so the
+/// `redundant-linearity-call` warning must STILL fire via `chelis
+/// check`. Pins that the suppression threaded into the advisory-emit
+/// path does not over-suppress fixable violations.
+#[test]
+fn lp_leak_fix_chelis_check_still_warns_genuine_redundant_copy() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("genuine_check.ch");
+    write_file(
+        &path,
+        "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = realize(copy(x))\n\
+         result = f(to_tensor([1.0, 2.0]))\n",
+    );
+    fmt_inplace(&path);
+
+    let (_code, _out, check_err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert!(
+        check_err.contains("redundant-linearity-call"),
+        "chelis check must still warn on a genuinely-redundant copy() (safe strip); stderr={check_err}",
+    );
+}
+
 // ============================================================
 // §LE workspace-root exception path matching (PR #108)
 // ============================================================
