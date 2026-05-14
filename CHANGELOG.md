@@ -6,6 +6,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added - adversarial coverage for the post-#130 compiled-context cache
+
+Replaced the reverted pre-#130 red-team file (`#128`, reverted in `#131`
+because it was written against the old cache API and asserted the
+path-collision bug as observed behavior) with adversarial coverage that
+compiles against the as-shipped cache and pins the post-#130 correct
+behavior.
+
+- `crates/chelis-compiler-api/tests/redteam_typecheck_cache.rs`: 15
+  tests on the per-PR `ci` profile covering distinct-roots-do-not-
+  collide (negative parity for the original bug), `load_if_fresh`
+  rejecting a foreign-root identity as a clean miss, identity
+  canonicalization equivalence, identity-fingerprint sensitivity to
+  every component and its boundary length-prefix, torn-write /
+  truncation / hostile-byte rejection on the recompute fall-through,
+  the format-version-4 magic and envelope-version rejection of stale
+  files, `stdlib_cache_key` folding `COMPILER_VERSION` and the actual
+  decl bytes, and the `CacheIdentity` bincode round trip.
+
 ## [0.7.10] — 2026-05-14
 
 ### Fixed - negative axes and rank-0 standalone parameters in IR lowering
