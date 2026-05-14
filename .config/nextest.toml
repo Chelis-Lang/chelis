@@ -9,14 +9,18 @@
 #              runs on a nightly `schedule:` and on `workflow_dispatch:` ONLY.
 #              Runs exactly the heavy e2e suite the other two profiles exclude.
 #
-# Heavy e2e == tests that run a real `chelis build` + gcc + run, a real
-# `reef build` / `reef install`, or a full-stdlib `chelis check`. Each one
-# re-typechecks or rebuilds the whole chelis-std transitive graph and costs
-# 9-28s wall, and nextest cannot parallelize within a single test, so leaving
-# them on the per-PR gate sets a hard multi-minute wall-clock floor. They are
-# high-level end-to-end signal, not inner-loop coverage, so they move to a
-# nightly job. The contention-independent unit/integration coverage they sit on
-# top of stays on the per-PR gate.
+# Heavy e2e == tests that run a real `chelis build` + gcc + run, or a real
+# `reef build` / `reef install`. Each one rebuilds the whole chelis-std
+# transitive graph and costs 10-28s wall, and nextest cannot parallelize
+# within a single test, so leaving them on the per-PR gate sets a hard
+# multi-minute wall-clock floor. They are high-level end-to-end signal, not
+# inner-loop coverage, so they move to a nightly job. The
+# contention-independent unit/integration coverage they sit on top of stays
+# on the per-PR gate.
+#
+# `production_stdlib_typechecks` (one `chelis check` per stdlib file) was in
+# the heavy set before the cross-process typecheck cache landed. With the
+# cache, those checks are warm-cache fast and back on the per-PR gate.
 #
 # The heavy set is named explicitly (not by a heuristic) so adding or removing
 # a heavy test is a reviewable diff. The selection is shared between the
@@ -25,13 +29,11 @@
 #
 # Grep targets if this needs revisiting:
 #   - real chelis build + gcc + run / reef build / reef install
-#   - full-stdlib `chelis check` (crates/chelis-cli/tests/production_stdlib_typechecks.rs)
 
 [profile.default]
 default-filter = '''
     not (
-        binary_id(/^chelis-cli::production_stdlib_typechecks$/)
-        + binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
+        binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
         + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
         + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
         + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
@@ -49,8 +51,7 @@ default-filter = '''
 # timing report and the shared exclusion of the heavy e2e suite.
 default-filter = '''
     not (
-        binary_id(/^chelis-cli::production_stdlib_typechecks$/)
-        + binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
+        binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
         + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
         + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
         + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
@@ -73,8 +74,7 @@ path = "junit.xml"
 # default-filter is exactly the set the `default`/`ci` profiles exclude, so
 # the two stay in lockstep: a test is on the per-PR gate XOR the nightly gate.
 default-filter = '''
-    binary_id(/^chelis-cli::production_stdlib_typechecks$/)
-    + binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
+    binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
     + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
     + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
     + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
