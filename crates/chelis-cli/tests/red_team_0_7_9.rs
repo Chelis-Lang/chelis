@@ -603,8 +603,13 @@ fn sr_let_with_if_rhs_lowers_cleanly() {
 /// also passes), so the root cause is in HM inference, not just
 /// `types_structurally_equal`. Filed here as a SR test because
 /// PR #109 extends its reach to additional body shapes.
+/// SR-LEAK-A (TypeCheck-FreeDimVarUnification-F1), Path A: the
+/// `let`-tail-var Shape A body. The body's tail resolves through a
+/// `let` to a bare-var `z` whose inferred type is `&tensor[m, f32]`,
+/// while the declared return is `tensor[n, f32]`. The relaxed-retry's
+/// `types_structurally_equal` guard now compares dim identity, not
+/// just rank, so the divergent dim params `n` and `m` are rejected.
 #[test]
-#[ignore = "documents the dim-var-unification soundness gap inherited from PR #91 and widened by PR #109; flip when types_structurally_equal (or the inference unify step) discriminates distinct dim-var bindings"]
 fn sr_leak_a_dim_var_mismatch_silently_passes() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("dim_mismatch.ch");
@@ -629,4 +634,132 @@ fn sr_leak_a_dim_var_mismatch_silently_passes() {
         out.contains("TypeMismatch"),
         "dim-var mismatch must surface TypeMismatch; out={out}"
     );
+}
+
+/// SR-LEAK-A Path A, bare-var body (PR #91's original Shape A shape).
+/// `def f[n, m](...) -> tensor[n, f32] = y` where `y: &tensor[m, f32]`.
+/// The relaxed-retry's structural guard must reject the divergent dim.
+#[test]
+fn sr_leak_a_path_a_bare_var_divergent_dim_fails() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bare_var_divergent.ch");
+    write_file(
+        &path,
+        "module Repro.BareVarDivergent\n\
+         def f[n, m](x: &tensor[n, f32], y: &tensor[m, f32]) -> tensor[n, f32] = y\n",
+    );
+    fmt_inplace(&path);
+
+    let (_code, out, _err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert!(
+        out.contains("TypeMismatch"),
+        "bare-var body returning the wrong dim param must surface TypeMismatch; out={out}"
+    );
+}
+
+/// SR-LEAK-A Path A POSITIVE CONTROL, bare-var body, same dim var.
+/// `def f[n](x, y: &tensor[n, f32]) -> tensor[n, f32] = y` is genuinely
+/// valid: the body returns a borrow of a param whose dim matches the
+/// declared return. The relaxed-retry must still recover this.
+#[test]
+fn sr_leak_a_path_a_bare_var_same_dim_passes() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bare_var_same.ch");
+    write_file(
+        &path,
+        "module Repro.BareVarSame\n\
+         def f[n](x: &tensor[n, f32], y: &tensor[n, f32]) -> tensor[n, f32] = y\n",
+    );
+    fmt_inplace(&path);
+
+    let (code, out, _err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "check exit 0 expected; out={out}");
+    assert!(out.contains("\"score\": 1"), "score must be 1; out={out}");
+}
+
+/// SR-LEAK-A Path A, `if`-tail-var body, divergent dim. Both branches
+/// resolve to `y: &tensor[m, f32]`, declared return is `tensor[n, f32]`.
+#[test]
+fn sr_leak_a_path_a_if_tail_divergent_dim_fails() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("if_tail_divergent.ch");
+    write_file(
+        &path,
+        "module Repro.IfTailDivergent\n\
+         def f[n, m](c: bool, x: &tensor[n, f32], y: &tensor[m, f32]) -> tensor[n, f32] = \
+         if c then y else y\n",
+    );
+    fmt_inplace(&path);
+
+    let (_code, out, _err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert!(
+        out.contains("TypeMismatch"),
+        "if-tail-var body returning the wrong dim param must surface TypeMismatch; out={out}"
+    );
+}
+
+/// SR-LEAK-A Path A POSITIVE CONTROL, `match`-tail-var body, same dim.
+/// Every arm returns `x: &tensor[n, f32]`, declared return tensor[n, f32].
+#[test]
+fn sr_leak_a_path_a_match_tail_same_dim_passes() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("match_tail_same.ch");
+    write_file(
+        &path,
+        "module Repro.MatchTailSame\n\
+         type Choice = | Left | Right\n\
+         def f[n](c: Choice, x: &tensor[n, f32]) -> tensor[n, f32] = match c with {\n  \
+           | Left => x\n  \
+           | Right => x\n\
+         }\n",
+    );
+    fmt_inplace(&path);
+
+    let (code, out, _err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "check exit 0 expected; out={out}");
+    assert!(out.contains("\"score\": 1"), "score must be 1; out={out}");
+}
+
+/// SR-LEAK-A (TypeCheck-FreeDimVarUnification-F1), Path B: a plain
+/// owned-tensor body that never routes through `types_structurally_equal`
+/// at all. `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
+/// tensor[n, f32] = y` collapses two distinct declared dim params via
+/// free `unify_dim`. The post-body `declared_dvars` rigidity check must
+/// flag the `Var->Var` collapse with a DimensionMismatch.
+#[test]
+fn sr_leak_a_path_b_plain_owned_divergent_dim_fails() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("plain_owned_divergent.ch");
+    write_file(
+        &path,
+        "module Repro.PlainOwnedDivergent\n\
+         def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = y\n",
+    );
+    fmt_inplace(&path);
+
+    let (_code, out, _err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert!(
+        out.contains("DimensionMismatch") || out.contains("TypeMismatch"),
+        "plain owned-tensor body collapsing two declared dim params must fail; out={out}"
+    );
+}
+
+/// SR-LEAK-A Path B POSITIVE CONTROL: a plain owned-tensor body with a
+/// single declared dim param, genuinely valid. `def h[n](x: tensor[n,
+/// f32], y: tensor[n, f32]) -> tensor[n, f32] = y` returns a value
+/// whose dim matches the declared return. No collapse, must pass.
+#[test]
+fn sr_leak_a_path_b_plain_owned_same_dim_passes() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("plain_owned_same.ch");
+    write_file(
+        &path,
+        "module Repro.PlainOwnedSame\n\
+         def h[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = y\n",
+    );
+    fmt_inplace(&path);
+
+    let (code, out, _err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "check exit 0 expected; out={out}");
+    assert!(out.contains("\"score\": 1"), "score must be 1; out={out}");
 }
