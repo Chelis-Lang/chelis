@@ -114,6 +114,18 @@ fn lint_cli_dot_prefix_explicit_path_already_fires_rule() {
 /// path layout so the exception applies, and writes a single file using
 /// the colon form to trigger the rule.
 fn write_exception_fixture(root: &std::path::Path) {
+    // `detect_lint_workspace_root` probes the Cargo workspace root via
+    // `cargo locate-project --workspace`. A synthesized tree that
+    // exercises workspace-rooted exception matching must carry a real
+    // `[workspace]` marker, otherwise the probe finds nothing (the
+    // tempdir lives under the system temp dir, outside any Cargo
+    // workspace) and exception filtering is skipped because no
+    // workspace-rooted glob can apply.
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = []\nresolver = \"2\"\n",
+    )
+    .expect("write workspace marker");
     let dir = root.join("crates/chelis-surf/tests/fixtures");
     fs::create_dir_all(&dir).expect("mkdir fixture dir");
     fs::write(

@@ -27,6 +27,25 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+/// Write a minimal `[workspace]` `Cargo.toml` marker at `root`.
+///
+/// `detect_lint_workspace_root` probes for the Cargo workspace root via
+/// `cargo locate-project --workspace` (LE-LEAK-A fix). A synthesized
+/// test tree that exercises workspace-root detection must therefore
+/// carry a real workspace marker — without it the probe finds nothing
+/// (the tempdir lives under the system temp dir, not inside any Cargo
+/// workspace) and the CLI fails clean by design. A test that omitted
+/// the marker would be exercising the old cwd-assumption shortcut, not
+/// the real detection mechanism.
+fn write_workspace_marker(root: &Path) {
+    fs::create_dir_all(root).expect("create workspace root");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = []\nresolver = \"2\"\n",
+    )
+    .expect("write workspace marker");
+}
+
 fn run_chelis(cwd: &Path, args: &[&str]) -> (i32, String, String) {
     let mut cmd = Command::cargo_bin("chelis").expect("chelis binary");
     cmd.current_dir(cwd);
@@ -164,7 +183,6 @@ fn lp_genuine_redundant_copy_still_flagged_with_fix_marker() {
 ///
 /// This test pins the leak.
 #[test]
-#[ignore = "documents the chelis-check advisory-emit leak; flip when emit_advisory_lint_warnings_for_file applies should_suppress_unfixable_violation"]
 fn lp_leak_a_chelis_check_advisory_emit_does_not_suppress_unfixable_copy_borrow() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("copy_borrow.ch");
@@ -199,7 +217,6 @@ fn lp_leak_a_chelis_check_advisory_emit_does_not_suppress_unfixable_copy_borrow(
 /// `emit_advisory_lint_warnings_for_file`. Pins that the fix to
 /// LP-LEAK-A must apply uniformly across rules with that opt-in.
 #[test]
-#[ignore = "documents the same advisory-emit leak for prefer-pipe-operator; flip when emit_advisory_lint_warnings_for_file applies should_suppress_unfixable_violation"]
 fn lp_leak_b_chelis_check_advisory_emit_does_not_suppress_unfixable_prefer_pipe() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pipe_drop.ch");
@@ -224,6 +241,55 @@ fn lp_leak_b_chelis_check_advisory_emit_does_not_suppress_unfixable_prefer_pipe(
     );
 }
 
+/// LP-LEAK-FIX-1: `chelis check` on a copy(borrow) program must emit
+/// zero `redundant-linearity-call` advisory warnings, because the
+/// autofix would be rejected by the typed-pipeline gate (stripping the
+/// `copy()` off a borrow makes the program fail type-check). This is
+/// the post-fix assertion for LP-LEAK-A: the advisory-emit path
+/// `chelis check` invokes must apply `should_suppress_unfixable_violation`.
+#[test]
+fn lp_leak_fix_chelis_check_suppresses_unfixable_copy_borrow() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("copy_borrow_check.ch");
+    write_file(
+        &path,
+        "def consume_owned[n](x: tensor[n, f32]) -> tensor[n, f32] = realize(x)\n\
+         def caller[n](y: &tensor[n, f32]) -> tensor[n, f32] = consume_owned(copy(y))\n\
+         input = to_tensor([1.0, 2.0])\n\
+         result = caller(&input)\n",
+    );
+    fmt_inplace(&path);
+
+    let (_code, _out, check_err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert!(
+        !check_err.contains("redundant-linearity-call"),
+        "chelis check must suppress the unfixable copy(borrow) warning; stderr={check_err}",
+    );
+}
+
+/// LP-LEAK-FIX-2: positive control. A genuinely-redundant `copy()` on
+/// an OWNED tensor has a safe autofix (the strip type-checks), so the
+/// `redundant-linearity-call` warning must STILL fire via `chelis
+/// check`. Pins that the suppression threaded into the advisory-emit
+/// path does not over-suppress fixable violations.
+#[test]
+fn lp_leak_fix_chelis_check_still_warns_genuine_redundant_copy() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("genuine_check.ch");
+    write_file(
+        &path,
+        "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = realize(copy(x))\n\
+         result = f(to_tensor([1.0, 2.0]))\n",
+    );
+    fmt_inplace(&path);
+
+    let (_code, _out, check_err) = run_chelis(dir.path(), &["check", path.to_str().unwrap()]);
+    assert!(
+        check_err.contains("redundant-linearity-call"),
+        "chelis check must still warn on a genuinely-redundant copy() (safe strip); stderr={check_err}",
+    );
+}
+
 // ============================================================
 // §LE workspace-root exception path matching (PR #108)
 // ============================================================
@@ -235,6 +301,7 @@ fn lp_leak_b_chelis_check_advisory_emit_does_not_suppress_unfixable_prefer_pipe(
 fn le_deep_subtree_walk_applies_workspace_rooted_exception() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
+    write_workspace_marker(root);
     let fixture_dir = root.join("crates/chelis-surf/tests/fixtures");
     fs::create_dir_all(&fixture_dir).expect("mkdir");
     fs::write(
@@ -258,6 +325,7 @@ fn le_deep_subtree_walk_applies_workspace_rooted_exception() {
 fn le_mixed_file_and_dir_targets_apply_workspace_rooted_exception() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
+    write_workspace_marker(root);
     let fixture_dir = root.join("crates/chelis-surf/tests/fixtures");
     fs::create_dir_all(&fixture_dir).expect("mkdir");
     fs::write(
@@ -298,12 +366,16 @@ fn le_mixed_file_and_dir_targets_apply_workspace_rooted_exception() {
 /// root. The customer-visible scope is narrower than the entry implies.
 ///
 /// This test pins the leak with a synthesized workspace tree that
-/// mirrors the real repo's exception structure.
+/// mirrors the real repo's exception structure. The tree carries a
+/// `[workspace]` `Cargo.toml` marker so `detect_lint_workspace_root`'s
+/// `cargo locate-project --workspace` probe can find the real
+/// workspace root; without the fix the probe result is ignored and the
+/// CWD is used directly, breaking the workspace-rooted exception.
 #[test]
-#[ignore = "documents the cwd-as-workspace-root assumption; flip when detect_lint_workspace_root distinguishes workspace root from CWD"]
 fn le_leak_a_cwd_not_workspace_root_breaks_workspace_rooted_exception() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
+    write_workspace_marker(root);
     let fixture_dir = root.join("crates/chelis-surf/tests/fixtures");
     fs::create_dir_all(&fixture_dir).expect("mkdir");
     fs::write(
@@ -323,6 +395,50 @@ fn le_leak_a_cwd_not_workspace_root_breaks_workspace_rooted_exception() {
         crates_dir.display()
     );
     assert_eq!(code, 0, "exit 0 required; out={out}");
+}
+
+/// LE-LEAK-FIX-1: workspace-root detection must produce identical
+/// output for `chelis lint --check <abs-workspace-path>` issued from a
+/// sibling directory OUTSIDE the workspace and for `chelis lint --check
+/// .` issued from the workspace root. Pre-fix, `detect_lint_workspace_root`
+/// returned `canonicalize(cwd)` — so a run from a sibling path anchored
+/// exception matching against the sibling, not the workspace, and the
+/// `crates/chelis-surf/tests/fixtures/*.ch` exception failed to match.
+#[test]
+fn le_leak_fix_sibling_path_invocation_matches_workspace_root_invocation() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    let workspace = root.join("workspace");
+    let sibling = root.join("sibling");
+    fs::create_dir_all(&sibling).expect("mkdir sibling");
+    write_workspace_marker(&workspace);
+    let fixture_dir = workspace.join("crates/chelis-surf/tests/fixtures");
+    fs::create_dir_all(&fixture_dir).expect("mkdir");
+    fs::write(
+        fixture_dir.join("block_binding_expr.ch"),
+        "def f(x: f32): f32 = {\n  y = mul(x, x)\n  add(y, x)\n}\n",
+    )
+    .expect("write fixture");
+
+    // Baseline: from the workspace root, `chelis lint --check .`.
+    let (code_root, out_root, _) = run_chelis(&workspace, &["lint", "--check", "."]);
+    assert!(
+        !out_root.contains("surf-def-arrow-form"),
+        "baseline: workspace-root invocation must apply the exception; out={out_root}"
+    );
+    assert_eq!(code_root, 0, "baseline exit 0 required; out={out_root}");
+
+    // From a sibling dir outside the workspace, lint the workspace by
+    // absolute path. Output must match the workspace-root invocation.
+    let (code_sib, out_sib, _) = run_chelis(
+        &sibling,
+        &["lint", "--check", workspace.to_str().expect("utf8 path")],
+    );
+    assert!(
+        !out_sib.contains("surf-def-arrow-form"),
+        "sibling-path invocation must apply the workspace-rooted exception; out={out_sib}"
+    );
+    assert_eq!(code_sib, 0, "sibling-path exit 0 required; out={out_sib}");
 }
 
 // ============================================================
