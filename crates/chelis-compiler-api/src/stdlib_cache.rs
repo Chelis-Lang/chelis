@@ -105,11 +105,18 @@ pub struct StdLibContext {
 
 /// The 32-byte content-addressed cache key for a chelis-std sub-context.
 ///
-/// Inputs: the struct-format version, the bundled chelis-std version
-/// string, the SHA-256 hex of the bundled archive + shell bytes
+/// Inputs: the struct-format version, the compiler crate version
+/// (`COMPILER_VERSION`), the bundled chelis-std version string, the
+/// SHA-256 hex of the bundled archive + shell bytes
 /// (`chelis-std-bundle`), AND a hash of the actual linked, internal-name-
 /// rewritten chelis-std `Decl` slice that will be type-checked into this
 /// sub-context.
+///
+/// `COMPILER_VERSION` is what pins the compiler *build*:
+/// `STDLIB_CACHE_FORMAT_VERSION` only guards the on-disk struct shape, so
+/// without the compiler version a binary built from different compiler
+/// source but the same bundled chelis-std bytes would stale-hit an older
+/// binary's cached sub-context (stale typecheck / lowering semantics).
 ///
 /// Hashing the actual decls is what makes the key honest. The bundled
 /// archive/shell hashes alone are insufficient: `chelis-std` is the
@@ -127,6 +134,17 @@ pub fn stdlib_cache_key(stdlib_decls: &[chelis_surf::ast::Decl]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"chelis_std_typecheck_v");
     hasher.update(STDLIB_CACHE_FORMAT_VERSION.to_le_bytes());
+    // Compiler build identity. `STDLIB_CACHE_FORMAT_VERSION` only guards
+    // the on-disk struct SHAPE; it does not change when the compiler's
+    // typecheck / lowering SEMANTICS change while the bundled chelis-std
+    // bytes stay the same. Without this, a `chelis` binary built from
+    // different compiler source but the same bundled stdlib would
+    // stale-hit an older binary's cached sub-context. Folding
+    // `COMPILER_VERSION` in flips the key on any compiler rebuild.
+    let compiler_version = crate::COMPILER_VERSION;
+    hasher.update(b"compiler_version");
+    hasher.update((compiler_version.len() as u64).to_le_bytes());
+    hasher.update(compiler_version.as_bytes());
     let version = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
     hasher.update((version.len() as u64).to_le_bytes());
     hasher.update(version.as_bytes());
@@ -410,6 +428,67 @@ mod tests {
         assert_ne!(real, perturb(b"different-version"));
         assert_ne!(real, perturb(b"different-archive-sha"));
         assert_ne!(real, perturb(b"different-shell-sha"));
+    }
+
+    #[test]
+    fn cache_key_depends_on_the_compiler_version() {
+        // Regression for the compiler-build-identity gap: a chelis binary
+        // built from different compiler source but the same bundled
+        // chelis-std must NOT stale-hit an older binary's cached
+        // sub-context. The real key must fold COMPILER_VERSION in.
+        //
+        // We cannot rebuild the compiler mid-test, so we recompute the
+        // key with the compiler-version component perturbed and confirm
+        // the real key differs. This mirrors
+        // `cache_key_depends_on_the_bundle_constants` and pins that the
+        // compiler version is actually an input.
+        let decls = sample_decls("a");
+        let real = stdlib_cache_key(&decls);
+
+        // Recompute the key byte-for-byte the way `stdlib_cache_key`
+        // does, but with a different compiler version string. Every other
+        // input is identical, so a difference proves the compiler version
+        // feeds the key.
+        let recompute_with_compiler_version = |compiler_version: &str| -> [u8; 32] {
+            let mut hasher = Sha256::new();
+            hasher.update(b"chelis_std_typecheck_v");
+            hasher.update(STDLIB_CACHE_FORMAT_VERSION.to_le_bytes());
+            hasher.update(b"compiler_version");
+            hasher.update((compiler_version.len() as u64).to_le_bytes());
+            hasher.update(compiler_version.as_bytes());
+            let version = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
+            hasher.update((version.len() as u64).to_le_bytes());
+            hasher.update(version.as_bytes());
+            let archive = chelis_std_bundle::archive_sha256();
+            hasher.update((archive.len() as u64).to_le_bytes());
+            hasher.update(archive.as_bytes());
+            let shell = chelis_std_bundle::shell_sha256();
+            hasher.update((shell.len() as u64).to_le_bytes());
+            hasher.update(shell.as_bytes());
+            match bincode::serialize(&decls) {
+                Ok(decl_bytes) => {
+                    hasher.update(b"decls");
+                    hasher.update((decl_bytes.len() as u64).to_le_bytes());
+                    hasher.update(&decl_bytes);
+                }
+                Err(_) => hasher.update(b"decls-unserializable"),
+            }
+            hasher.finalize().into()
+        };
+
+        // Recomputing with the REAL compiler version reproduces the key
+        // exactly (proves the recompute mirror is faithful)...
+        assert_eq!(
+            real,
+            recompute_with_compiler_version(crate::COMPILER_VERSION),
+            "recompute mirror must match the real key for the real compiler version"
+        );
+        // ...and recomputing with a DIFFERENT compiler version flips it.
+        assert_ne!(
+            real,
+            recompute_with_compiler_version("0.0.0-some-other-compiler-build"),
+            "a different compiler version must produce a different stdlib cache key"
+        );
     }
 
     #[test]

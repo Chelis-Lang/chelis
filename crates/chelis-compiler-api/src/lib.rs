@@ -11,7 +11,8 @@ pub use compiler::{
     prepare_eval_in_context,
 };
 pub use context::{
-    CacheError, CompiledContext, ContextHash, compile_reef_context, load_or_compile_for_package,
+    CacheError, CacheIdentity, CompiledContext, ContextHash, compile_reef_context,
+    load_or_compile_for_package,
 };
 pub use layered::{LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats};
 pub use stdlib_cache::{

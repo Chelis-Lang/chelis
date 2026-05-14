@@ -38,6 +38,68 @@ use crate::schema::{Diagnostic, Span};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextHash(pub [u8; 32]);
 
+/// Package + build identity for a `CompiledContext` cache entry.
+///
+/// `source_hash` is a pure *content* check: two on-disk packages that
+/// share `(package_name, package_version)` and byte-identical source
+/// files hash identically. That is not enough to key the disk cache.
+///
+/// - Two distinct package checkouts (different `package_root`) with the
+///   same name+version+source bytes would otherwise collide on one
+///   cache file. The second package would silently load the first's
+///   `CompiledContext` — including its `package_root` — which is a
+///   wrong-result bug for `chelis eval --file` and a hard error for the
+///   `chelis test` worker's `package_root` guard.
+/// - A `chelis` binary built from different compiler source but the same
+///   resolved package would otherwise read an older binary's cached
+///   context, applying stale compiler semantics to fresh input.
+///
+/// `CacheIdentity` folds both into the cache file name AND into the
+/// `load_if_fresh` freshness check, so a mismatched-identity entry is a
+/// clean miss (recompile), never a stale hit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheIdentity {
+    /// Canonicalized on-disk location of the root package. Two distinct
+    /// checkouts have distinct roots even with identical source bytes.
+    /// Stored as a string (lossy) so the identity round-trips through
+    /// bincode on every platform.
+    pub package_root: String,
+    /// The compiler crate version (`COMPILER_VERSION`). A binary built
+    /// from different compiler source must not read an older binary's
+    /// cached context.
+    pub compiler_version: String,
+}
+
+impl CacheIdentity {
+    /// Build a `CacheIdentity` from a resolved package root. The path is
+    /// canonicalized so equivalent paths (symlinks, `.`/`..` segments,
+    /// trailing slashes) resolve to one identity; if canonicalization
+    /// fails (path removed mid-build, permission error), the raw path is
+    /// used so the identity is still distinct rather than empty.
+    pub fn for_package_root(package_root: &Path) -> Self {
+        let canonical = fs::canonicalize(package_root)
+            .unwrap_or_else(|_| package_root.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        CacheIdentity {
+            package_root: canonical,
+            compiler_version: crate::COMPILER_VERSION.to_string(),
+        }
+    }
+
+    /// 16-hex-char fingerprint of this identity. Folded into the cache
+    /// file name so distinct identities never share a cache path.
+    fn fingerprint_hex(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update((self.package_root.len() as u64).to_le_bytes());
+        hasher.update(self.package_root.as_bytes());
+        hasher.update((self.compiler_version.len() as u64).to_le_bytes());
+        hasher.update(self.compiler_version.as_bytes());
+        let bytes: [u8; 32] = hasher.finalize().into();
+        hex_prefix(&bytes, 8)
+    }
+}
+
 impl ContextHash {
     /// Combine a sorted slice of `SourceDigest` rows into a single
     /// fixed-width hash. Strings are length-prefixed (u64 little-endian)
@@ -80,6 +142,13 @@ pub struct CompiledContext {
     /// Content hash of every backed source file. Stable across calls
     /// on unchanged sources; changes when ANY source byte changes.
     pub source_hash: ContextHash,
+    /// Package + build identity (canonical `package_root` + compiler
+    /// version). `source_hash` is a content check only; `identity`
+    /// disambiguates two distinct checkouts that share name+version+
+    /// source bytes, and pins the compiler build. `load_if_fresh`
+    /// rejects an entry whose stored `identity` does not match the
+    /// recomputed one as a clean miss.
+    pub identity: CacheIdentity,
     /// The reef state (lockfile-backed package graph + linked library
     /// decls + internal-name maps + dep shells).
     pub(crate) reef_state: PreparedReefGraph,
@@ -129,6 +198,7 @@ impl CompiledContext {
         let envelope = CacheEnvelope {
             version: CACHE_FORMAT_VERSION,
             source_hash: self.source_hash,
+            identity: self.identity.clone(),
             payload_sha256,
             payload,
         };
@@ -265,8 +335,16 @@ impl CompiledContext {
     /// [`CacheError::Corrupt`], NOT silently accepted.
     ///
     /// `_reef_home` is currently unused; reserved for future invalidation
-    /// signals (e.g., compiler-version pinning) that depend on reef-home
-    /// state rather than just `package_dir`.
+    /// signals that depend on reef-home state rather than just
+    /// `package_dir`.
+    ///
+    /// **Identity check:** beyond the `source_hash` content check, the
+    /// stored `CacheIdentity` (canonical `package_root` + compiler
+    /// version) is recomputed from the live `package_dir` and the
+    /// running binary. A mismatch — a different on-disk checkout that
+    /// shares name+version+source bytes, or a cache file written by a
+    /// differently-built `chelis` binary — is treated as a clean miss
+    /// (`Ok(None)`), never a stale hit.
     pub fn load_if_fresh(
         path: &Path,
         _reef_home: &Path,
@@ -323,6 +401,17 @@ impl CompiledContext {
             return Ok(None);
         }
 
+        // Recompute the package + build identity from the live graph and
+        // the running binary. `source_hash` is a content check only: two
+        // distinct checkouts with identical name+version+source bytes
+        // hash the same, and a differently-built binary produces the same
+        // content hash for the same sources. A stored identity that does
+        // not match the live one is a clean miss, not a stale hit.
+        let live_identity = CacheIdentity::for_package_root(&live_graph.package_root);
+        if envelope.identity != live_identity {
+            return Ok(None);
+        }
+
         // Verify the payload SHA-256 matches before paying bincode-decode
         // cost on the inner CompiledContext. A torn write whose envelope
         // happens to bincode-decode but whose payload was truncated is
@@ -354,42 +443,63 @@ impl CompiledContext {
             });
         }
 
+        // Same belt-and-braces check for the identity: the inner
+        // CompiledContext's `identity` must agree with the outer
+        // envelope's copy. A disagreement means the bytes were mutated
+        // between encode and decode → treat as corrupt.
+        if ctx.identity != envelope.identity {
+            return Err(CacheError::IdentityMismatch {
+                envelope: envelope.identity.clone(),
+                inner: ctx.identity.clone(),
+            });
+        }
+
         Ok(Some(ctx))
     }
 
     /// Convenience for callers that only have a `reef_home` + `package_dir`
     /// and want the canonical cache location. Phase H wires `cmd_eval` and
     /// `cmd_check` through this helper; the disk-cache key is
-    /// `<reef_home>/.cache/compiled/<pkg_name>-<pkg_version>-<hash16>.ctx`.
+    /// `<reef_home>/.cache/compiled/<pkg_name>-<pkg_version>-<src16>-<id16>.ctx`.
     ///
-    /// The hash prefix is 16 hex chars (8 bytes of the full hash). Full-hash
-    /// verification still happens inside `load_if_fresh`, so a prefix
-    /// collision on the path is recoverable (returns `Ok(None)`, not silent
-    /// hit).
+    /// `src16` is 16 hex chars of the source-content hash; `id16` is 16
+    /// hex chars of the package + build identity (canonical
+    /// `package_root` plus compiler version). Folding identity into the
+    /// file name keeps two distinct checkouts that share
+    /// name+version+source bytes on SEPARATE cache files. Full
+    /// verification of both still happens inside `load_if_fresh`, so a
+    /// prefix collision on the path is recoverable (returns `Ok(None)`,
+    /// not a silent hit).
     pub fn cache_path_for(
         reef_home: &Path,
         package_id: (&str, &str),
         source_hash: ContextHash,
+        identity: &CacheIdentity,
     ) -> PathBuf {
         reef_home
             .join(".cache")
             .join("compiled")
-            .join(Self::cache_file_name(package_id, source_hash))
+            .join(Self::cache_file_name(package_id, source_hash, identity))
     }
 
-    /// The bare `<name>-<version>-<prefix>.ctx` cache file name for a
-    /// package. Split out from [`cache_path_for`] so callers that resolve
-    /// the cache directory via the XDG-fallback helper
+    /// The bare `<name>-<version>-<src16>-<id16>.ctx` cache file name for
+    /// a package. Split out from [`cache_path_for`] so callers that
+    /// resolve the cache directory via the XDG-fallback helper
     /// (`stdlib_cache::cache_dir_for`) can join the same file name onto
     /// it.
-    pub fn cache_file_name(package_id: (&str, &str), source_hash: ContextHash) -> String {
+    pub fn cache_file_name(
+        package_id: (&str, &str),
+        source_hash: ContextHash,
+        identity: &CacheIdentity,
+    ) -> String {
         let (name, version) = package_id;
-        let prefix_hex = hex_prefix(&source_hash.0, 8);
+        let src_hex = hex_prefix(&source_hash.0, 8);
+        let id_hex = identity.fingerprint_hex();
         // Sanitize to keep the filename POSIX-friendly across odd package
         // names (reef enforces a stricter rule, but we don't trust it here).
         let safe_name = sanitize_path_component(name);
         let safe_version = sanitize_path_component(version);
-        format!("{safe_name}-{safe_version}-{prefix_hex}.ctx")
+        format!("{safe_name}-{safe_version}-{src_hex}-{id_hex}.ctx")
     }
 
     /// Read-only borrow of the underlying [`PreparedReefGraph`]. Phase H
@@ -474,10 +584,16 @@ pub fn load_or_compile_for_package(
         }
     };
     let source_hash = ContextHash::from_digests(&live_digests);
+    // Package + build identity disambiguates two distinct on-disk
+    // checkouts that share name+version+source bytes (which `source_hash`
+    // alone cannot) and pins the compiler build. Folded into the cache
+    // file name AND re-verified inside `load_if_fresh`.
+    let identity = CacheIdentity::for_package_root(&live_graph.package_root);
     let (root_name, root_version) = live_graph.root_package_id();
     let cache_path = cache_dir.join(CompiledContext::cache_file_name(
         (root_name, root_version),
         source_hash,
+        &identity,
     ));
 
     // Step 2: probe the disk cache. A clean miss (Ok(None)) is fine.
@@ -515,13 +631,13 @@ pub fn load_or_compile_for_package(
 /// Magic header bytes for the Phase I disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V3\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V4\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 3;
+const CACHE_FORMAT_VERSION: u32 = 4;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -545,6 +661,11 @@ struct CacheEnvelope {
     /// the inner payload so a fresh-check can be done without paying the
     /// bincode-decode cost on the full `CompiledContext`.
     source_hash: ContextHash,
+    /// A copy of the inner `CompiledContext::identity`. Held outside the
+    /// inner payload so the identity check (canonical `package_root` +
+    /// compiler version) can run before the bincode-decode cost. A
+    /// stored identity that does not match the live one is a clean miss.
+    identity: CacheIdentity,
     /// SHA-256 of the inner payload bytes. Catches torn writes whose
     /// truncated payload still bincode-decodes successfully.
     payload_sha256: [u8; 32],
@@ -586,6 +707,13 @@ pub enum CacheError {
         envelope: ContextHash,
         inner: ContextHash,
     },
+    /// Outer envelope's `identity` and the inner `CompiledContext`'s
+    /// `identity` disagree — bytes were tampered with between encode and
+    /// decode.
+    IdentityMismatch {
+        envelope: CacheIdentity,
+        inner: CacheIdentity,
+    },
     /// `prepare_reef_graph` or `source_digests` failed while
     /// recomputing the live source hash for invalidation. The string
     /// is whatever `chelis_reef` returned.
@@ -614,6 +742,12 @@ impl fmt::Display for CacheError {
                 "cache hash mismatch: envelope={} inner={}",
                 hex_prefix(&envelope.0, 32),
                 hex_prefix(&inner.0, 32)
+            ),
+            CacheError::IdentityMismatch { envelope, inner } => write!(
+                f,
+                "cache identity mismatch: envelope={} inner={}",
+                envelope.fingerprint_hex(),
+                inner.fingerprint_hex()
             ),
             CacheError::Reef(msg) => write!(f, "cache invalidation reef error: {msg}"),
         }
@@ -801,8 +935,15 @@ pub fn compile_reef_context(
         })?;
     log_phase("lower_program_to_library", &mut t);
 
+    // Package + build identity: canonical `package_root` from the
+    // resolved reef graph plus the compiler version. Distinguishes two
+    // distinct checkouts that share name+version+source bytes and pins
+    // the compiler build into the cache key.
+    let identity = CacheIdentity::for_package_root(&reef_state.package_root);
+
     Ok(CompiledContext {
         source_hash,
+        identity,
         reef_state,
         type_env,
         library_checked,
