@@ -1,0 +1,15 @@
+# cargo-nextest configuration.
+#
+# The `ci` profile is used by `scripts/gate.py integration` (and the CI
+# integration job, which calls it). It emits machine-readable per-test
+# timing as JUnit XML so `scripts/test_timing_check.py` can flag tests
+# that regress past their committed budget. See
+# docs/investigations/test_toolchain_guards_design.md.
+
+[profile.ci]
+# Inherit the default run behavior; the only addition is JUnit output.
+
+[profile.ci.junit]
+# Written to `target/nextest/ci/junit.xml`. nextest places JUnit
+# reports under `target/nextest/<profile>/<path>`.
+path = "junit.xml"
