@@ -6,6 +6,48 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed - split heavyweight e2e off the per-PR integration gate
+
+Moved the heavyweight end-to-end tests off the per-PR `Integration
+Tests` job and onto a new nightly workflow, so per-PR CI wall-clock is
+not gated by tests that run a real `chelis build` + gcc + run, a real
+`reef build` / `reef install`, or a full-stdlib `chelis check`. Each of
+those re-typechecks or rebuilds the whole chelis-std transitive graph
+and costs 9-28s wall, and nextest cannot parallelize within a single
+test, so they set a hard multi-minute wall-clock floor on the per-PR
+gate. They are high-level end-to-end signal, not inner-loop coverage.
+
+- `.config/nextest.toml`: rewrote the profile structure. The `default`
+  and `ci` profiles now carry a `default-filter` that excludes the
+  named heavy e2e suite; a new `nightly` profile selects exactly that
+  set and runs with `retries = 2` so a transient gcc/CPU-contention
+  hiccup does not fail the nightly run. The heavy set is named
+  explicitly (per-binary `binary_id()` and per-test `test()` entries)
+  so adding or removing a heavy test is a reviewable diff.
+- `.github/workflows/heavy-e2e.yml`: new workflow running
+  `cargo nextest run --workspace --profile nightly` on a nightly
+  `schedule:` and on `workflow_dispatch:` only. It does not run per-PR
+  and does not run on push-to-main.
+- The previous `gcc-compile-and-run` concurrency-cap test group is
+  removed: capping `max-threads` traded per-PR wall-clock for
+  flake-stability, and once the heavy tests are off the per-PR gate the
+  per-PR contention it addressed is moot. The nightly job's
+  `retries = 2` absorbs any residual transient gcc contention there
+  instead.
+- `crates/chelis-reef/src/lib.rs`: `#[ignore]`-gated
+  `prepare_reef_graph_amortizes_work_across_multiple_files`. Its
+  assertion compares wall-clock elapsed time against a 3x multiplier of
+  a sub-millisecond baseline, which is inherently contention-sensitive.
+  Per CLAUDE.md's separate-perf-from-correctness rule it is now a
+  documented manual perf gate; the contention-independent correctness
+  check lives in `prepare_reef_graph_split_matches_single_shot_semantics`,
+  which stays in the default pass.
+- `docs/manual_gates.md`: registered the newly ignored reef perf gate
+  with its manual command and expected success condition.
+- `docs/investigations/integration_test_suite_trim.md`: recorded the
+  heavy e2e split, the per-test keep/move categorization, and the
+  dedupe candidates flagged for follow-up review.
+
 ### Changed - backend integration test suite parsimony pass
 
 Trimmed redundant gcc/codegen invocations across the backend-crate

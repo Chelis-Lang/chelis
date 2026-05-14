@@ -98,3 +98,93 @@ once in `production_stdlib_typechecks.rs`. Every synthetic type-system /
 adversarial test is retained. Every shipped-fix regression lock named in the
 trim brief still runs. The only behavior removed is *re-running the same
 production-stdlib check N times across N files*.
+
+## Heavy e2e split (per-PR gate vs nightly)
+
+Follow-up to the trim above. The trim deduplicated *redundant* heavy
+invocations; this step removes the *remaining* heavy invocations from the
+per-PR gate entirely, because even one ~28s test sets a hard wall-clock floor
+nextest cannot parallelize away. The heavy e2e suite now runs in a separate
+nightly workflow (`.github/workflows/heavy-e2e.yml`, `nightly` nextest
+profile); the per-PR `ci`/`default` profiles exclude exactly that set.
+
+### Heavy e2e selection (currently ON the per-PR pass, >8s wall)
+
+Measured via `cargo nextest run --workspace --profile ci` per-test timing on a
+32-core box.
+
+| Test | Wall | Path | Verdict |
+|---|---|---|---|
+| `phase3j_pre_std::cross_function_seed_stdlib_normal_like_advances_rng_per_random_op` | ~28s | reef build + gcc + run; `normal_like` RNG-per-op advance | **move to nightly** |
+| `phase3j_pre_std::cross_function_seed_stdlib_kaiming_uniform_uses_handler_seed` | ~28s | reef build + gcc + run; `kaiming_uniform` threads handler seed, asserts generated C | **move to nightly** |
+| `phase3j_pre_std::phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ` | ~28s | reef build + gcc + run; `uniform_like` byte-exact stdout for distinct seeds | **move to nightly** |
+| `cli::phase3a_reef_std_acceptance_oracle` | ~27s | reef-std acceptance oracle | **move to nightly** |
+| `phase_a_bundled_loader::phaseA_bundled_chelis_std_loader_property_oracle` | ~19s | real `reef build`; bundled chelis-std loader property oracle | **move to nightly** |
+| `cli::reef_check_accepts_sig_only_shell_imports` | ~16s | `reef check`, sig-only shell imports | **move to nightly** |
+| `wsa8_monomorphization_build::build_stdlib_linear_succeeds` | ~14s | `chelis build` stdlib `linear.ch` + gcc | **move to nightly** |
+| `wsa8_monomorphization_build::build_stdlib_attention_succeeds` | ~14s | `chelis build` stdlib `attention.ch` + gcc | **move to nightly** |
+| `phase3t_reef_install::reef_install_from_monorepo_populates_registry_and_unblocks_check` | ~10s | `reef install` from monorepo | **move to nightly** |
+| `cli::reef_build_emits_shell_and_archive` | ~10s | `reef build` shell + archive | **move to nightly** |
+| `production_stdlib_typechecks::*` (19 tests) | ~9-10s each | full-stdlib `chelis check`, one per stdlib `.ch` file | **move to nightly** |
+
+The `wsa8_monomorphization_build` binary is moved whole (its 4 fast negative
+`build_rejects_*` tests ride along; keeping the binary together is cleaner than
+splitting it, and they are part of the same monomorphization build-acceptance
+surface).
+
+### Dedupe verdict
+
+The split brief also asked for an aggressive dedupe of the heavy set down to a
+small high-signal suite. The categorization above was done with that lens. The
+verdict: **every heavy test currently on the per-PR pass moves to nightly
+intact; none were deleted in this change.** Reasoning, per the
+"do not guess-delete a load-bearing e2e invariant" constraint:
+
+- `production_stdlib_typechecks::*` (19 tests) is *already* the deduped result
+  of the trim above. The trim audit's explicit invariant is "every production
+  stdlib file that was checked pre-trim is still checked exactly once."
+  Collapsing those 19 into one representative test would re-drop coverage a
+  prior audit deliberately preserved, and would lose per-file failure
+  attribution. Re-deduping it is an orchestrator decision, not a safe
+  mechanical collapse.
+- The three `phase3j_pre_std` RNG-seed tests each pin a *distinct* assertion:
+  byte-exact `uniform_like` output for distinct seeds; `kaiming_uniform`
+  threading the handler seed (verified against generated C, not just stdout);
+  `normal_like` advancing the RNG per random op. They are related but not
+  duplicates. Collapsing them needs a judgment call on which assertions are
+  load-bearing.
+- `cli::phase3a_reef_std_acceptance_oracle` and
+  `phase_a_bundled_loader::phaseA_bundled_chelis_std_loader_property_oracle`
+  are *named architectural property oracles* (see `phase_oracles.md` /
+  `manual_gates.md`). Deleting a named oracle is out of scope for a CI-shape
+  change.
+- `wsa8_monomorphization_build` build tests and `production_stdlib_typechecks`
+  exercise *different paths* (`chelis build` + gcc + codegen vs `chelis
+  check`), so they are not duplicates of each other.
+
+### Dedupe candidates flagged for orchestrator review
+
+Not acted on here; each needs a load-bearing-invariant judgment call:
+
+- `production_stdlib_typechecks::*`: 19 tests, identical operation
+  (`chelis check <stdlib file>`), each re-typechecks the whole transitive
+  stdlib graph. Candidate: keep one representative deepest-import-graph file
+  and drop the rest, accepting the loss of per-file attribution. Counter-
+  argument: the trim audit preserved per-file coverage on purpose.
+- `phase3j_pre_std` three RNG-seed tests: candidate to collapse to one
+  end-to-end RNG-seed-determinism test if the distinct assertions
+  (byte-exact output, handler-seed-in-C, per-op advance) can be folded into a
+  single fixture without losing any of them.
+- `wsa8_monomorphization_build` `build_stdlib_linear_succeeds` vs
+  `build_stdlib_attention_succeeds`: candidate to keep one representative
+  stdlib build if monomorphization coverage does not actually differ between
+  `linear.ch` and `attention.ch`.
+
+The dedupe examples named in the split brief that target *manual-gate*
+(`#[ignore]`'d) tests rather than per-PR tests -- the gelu/rmsnorm numeric
+reference across `phase3j_pre_std` + `phase3j_pre_std_batch3` +
+`phase3t_build_runtime_gaps`, `phase3j_pre_oracle_integrated_build_c` vs the
+per-item `_build_path_repros_*` tests, and the `phase3j_pre_std_batch2/3/3b/4`
+files -- are out of scope for this change: those tests are already 100%
+`#[ignore]`'d, so they are already off the per-PR gate. Deduping the manual-gate
+set is a separate workstream.
