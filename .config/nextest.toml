@@ -31,6 +31,8 @@
 default-filter = '''
     not (
         binary_id(/^chelis-cli::production_stdlib_typechecks$/)
+        + binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
+        + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
         + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
         + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
         + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
@@ -48,6 +50,8 @@ default-filter = '''
 default-filter = '''
     not (
         binary_id(/^chelis-cli::production_stdlib_typechecks$/)
+        + binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
+        + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
         + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
         + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
         + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
@@ -70,6 +74,8 @@ path = "junit.xml"
 # the two stay in lockstep: a test is on the per-PR gate XOR the nightly gate.
 default-filter = '''
     binary_id(/^chelis-cli::production_stdlib_typechecks$/)
+    + binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
+    + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
     + binary_id(/^chelis-cli::wsa8_monomorphization_build$/)
     + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^cross_function_seed_stdlib_/))
     + (binary_id(/^chelis-cli::phase3j_pre_std$/) & test(/^phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ$/))
