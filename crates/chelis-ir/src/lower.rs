@@ -4195,7 +4195,13 @@ impl LowerCtx {
             "gather" if args.len() == 3 => {
                 let values = self.lower_expr_node(&args[0], "gather values");
                 let indices = self.lower_expr_node(&args[1], "gather indices");
-                let axis = self.extract_axis(&args[2]);
+                let values_rank = self
+                    .dag
+                    .get(values)
+                    .map(|n| n.output_type.dims.len())
+                    .unwrap_or(0);
+                let axis_raw = self.extract_axis_raw(&args[2]);
+                let axis = self.normalize_axis(axis_raw, values_rank, "gather", &args[2]);
                 let out_ty = Self::gather_out_ty_from_inputs(&self.dag, values, indices, axis)
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
@@ -4212,7 +4218,13 @@ impl LowerCtx {
                 let base = self.lower_expr_node(&args[0], "scatter_replace base");
                 let indices = self.lower_expr_node(&args[1], "scatter_replace indices");
                 let updates = self.lower_expr_node(&args[2], "scatter_replace updates");
-                let axis = self.extract_axis(&args[3]);
+                let base_rank = self
+                    .dag
+                    .get(base)
+                    .map(|n| n.output_type.dims.len())
+                    .unwrap_or(0);
+                let axis_raw = self.extract_axis_raw(&args[3]);
+                let axis = self.normalize_axis(axis_raw, base_rank, "scatter_replace", &args[3]);
                 let out_ty = self
                     .dag
                     .get(base)
@@ -4227,12 +4239,14 @@ impl LowerCtx {
             }
             "softmax" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "softmax input");
-                let axis = self.extract_axis(&args[1]);
                 let x_ty = self
                     .dag
                     .get(x)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
+                let axis_raw = self.extract_axis_raw(&args[1]);
+                let rank = self.axis_rank(x, ty);
+                let axis = self.normalize_axis(axis_raw, rank, "softmax", &args[1]);
                 let parent_span = self.current_span_id.clone();
                 let node =
                     tier2::lower_softmax(&mut self.dag, x, axis, &x_ty, parent_span.as_deref());
@@ -4240,12 +4254,14 @@ impl LowerCtx {
             }
             "mean" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "mean input");
-                let axis = self.extract_axis(&args[1]);
                 let x_ty = self
                     .dag
                     .get(x)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
+                let axis_raw = self.extract_axis_raw(&args[1]);
+                let rank = self.axis_rank(x, ty);
+                let axis = self.normalize_axis(axis_raw, rank, "mean", &args[1]);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_mean(&mut self.dag, x, axis, &x_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
@@ -4388,18 +4404,19 @@ impl LowerCtx {
             // to recover the user-facing tensor type.
             "sum" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "sum input");
-                let axis = self.extract_axis(&args[1]);
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let axis_raw = self.extract_axis_raw(&args[1]);
+                let axis = self.normalize_axis(axis_raw, x_ty.dims.len(), "sum", &args[1]);
                 let operand_prec = self
                     .dag
                     .get(x)
                     .map(|node| node.output_type.precision)
                     .unwrap_or(ty.precision);
                 let out_dims = if *ty == Self::default_type() {
-                    let x_ty = self
-                        .dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone());
                     let mut dims = x_ty.dims.clone();
                     if axis < dims.len() {
                         dims.remove(axis);
@@ -4468,13 +4485,14 @@ impl LowerCtx {
             }
             "max_reduce" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "max_reduce input");
-                let axis = self.extract_axis(&args[1]);
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let axis_raw = self.extract_axis_raw(&args[1]);
+                let axis = self.normalize_axis(axis_raw, x_ty.dims.len(), "max_reduce", &args[1]);
                 let out_ty = if *ty == Self::default_type() {
-                    let x_ty = self
-                        .dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone());
                     let mut dims = x_ty.dims.clone();
                     if axis < dims.len() {
                         dims.remove(axis);
@@ -4496,13 +4514,14 @@ impl LowerCtx {
             "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce" if args.len() == 2 => {
                 let name = func_name;
                 let x = self.lower_expr_node(&args[0], "reduction input");
-                let axis = self.extract_axis(&args[1]);
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let axis_raw = self.extract_axis_raw(&args[1]);
+                let axis = self.normalize_axis(axis_raw, x_ty.dims.len(), name, &args[1]);
                 let out_ty = if *ty == Self::default_type() {
-                    let x_ty = self
-                        .dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone());
                     let mut dims = x_ty.dims.clone();
                     if axis < dims.len() {
                         dims.remove(axis);
@@ -4641,20 +4660,72 @@ impl LowerCtx {
         }
     }
 
-    /// Extract an axis value from an expression (for sum/max_reduce).
-    fn extract_axis(&self, expr: &Expr) -> usize {
+    /// Extract a raw axis value from an expression (for
+    /// sum/max_reduce/softmax/mean/gather/scatter and the reduction
+    /// family). The value is returned verbatim and may be negative:
+    /// negative axes index from the end of the operand rank and are
+    /// normalized by [`Self::normalize_axis`] once the operand rank is
+    /// known. Returning the raw `i64` keeps the negative-axis
+    /// convention (`-1` is the last axis) intact instead of wrapping
+    /// it to `usize::MAX`.
+    fn extract_axis_raw(&self, expr: &Expr) -> i64 {
         match expr {
-            Expr::Atom(Atom::Int(n), _) => *n as usize,
+            Expr::Atom(Atom::Int(n), _) => *n,
             // Handle (lit {} n) form.
             Expr::List(list, _) => {
                 if let Some(Expr::Atom(Atom::Int(n), _)) = list.elements.get(2) {
-                    *n as usize
+                    *n
                 } else {
                     0
                 }
             }
             _ => 0,
         }
+    }
+
+    /// Best-effort operand rank for axis normalization. Prefers the
+    /// operand's lowered node type, but falls back to the ascribed
+    /// `app`-form type when the operand node is still `default_type()`
+    /// (rank-0). For the axis-taking ops handled here (softmax / mean /
+    /// reductions) the operand and the `app` result share a rank, so
+    /// this recovers a usable rank even when sub-expression lowering
+    /// did not attach `type` metadata to the operand node.
+    fn axis_rank(&self, operand: NodeId, ascribed_ty: &TensorType) -> usize {
+        let operand_rank = self
+            .dag
+            .get(operand)
+            .map(|n| n.output_type.dims.len())
+            .unwrap_or(0);
+        if operand_rank > 0 {
+            return operand_rank;
+        }
+        if *ascribed_ty != Self::default_type() {
+            return ascribed_ty.dims.len();
+        }
+        0
+    }
+
+    /// Normalize a possibly-negative axis literal against a known
+    /// operand `rank`. A negative axis `a` means `rank + a` (so `-1`
+    /// is the last axis). An axis still out of `0..rank` after
+    /// normalization is a clean lowering diagnostic, never a panic --
+    /// `require_dim` in `tier2` must stay unreachable from user input.
+    ///
+    /// `axis_expr` supplies the span so the diagnostic points at the
+    /// offending axis literal.
+    fn normalize_axis(&self, raw: i64, rank: usize, op: &str, axis_expr: &Expr) -> usize {
+        let normalized = if raw < 0 { raw + rank as i64 } else { raw };
+        if normalized < 0 || normalized as usize >= rank {
+            raise_lowering_error(
+                format!(
+                    "`{op}` axis {raw} is out of range for an operand of rank {rank} \
+                     (valid axes are 0..{rank} or -{rank}..-1)"
+                ),
+                Some(axis_expr.span()),
+                axis_expr.span_id().map(ToOwned::to_owned),
+            );
+        }
+        normalized as usize
     }
 
     fn gather_out_ty_from_inputs(

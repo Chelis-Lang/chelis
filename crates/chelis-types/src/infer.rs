@@ -16,6 +16,90 @@ use crate::linearity::LinearityInfo;
 use crate::types::*;
 use crate::unify::*;
 
+use std::cell::RefCell;
+
+thread_local! {
+    /// Per-annotation-pass map from a def name to its declared
+    /// parameter type *expressions*, taken verbatim from the matching
+    /// `(defsig name (t-fn arg-exprs... ret))` node.
+    ///
+    /// `annotate_fn_children` consults this when stamping a def's
+    /// `(params ...)` node so a parameter whose type comes from a
+    /// separate `sig` declaration gets the declared type -- preserving
+    /// `&` borrow wrappers -- written where IR lowering reads it.
+    /// Defs with no `defsig` are absent from the map and keep bare
+    /// params, leaving read-only/borrow inference to
+    /// `infer_signature_metadata`.
+    ///
+    /// Populated for the duration of `annotate_ir_program` /
+    /// `annotate_ir_program_with_context` and cleared afterwards.
+    static DECLARED_SIG_PARAM_TYPES: RefCell<HashMap<String, Vec<deep::Expr>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Scan `exprs` for `(defsig name (t-fn ...))` nodes and install a
+/// name -> declared-param-type-exprs map into `DECLARED_SIG_PARAM_TYPES`
+/// for the duration of the returned guard. Restores the previous map
+/// (typically empty) on drop so nested / re-entrant annotation passes
+/// do not leak state.
+fn install_declared_sig_param_types(exprs: &[deep::Expr]) -> DeclaredSigGuard {
+    let mut map: HashMap<String, Vec<deep::Expr>> = HashMap::new();
+    for expr in exprs {
+        collect_defsig_param_types(expr, &mut map);
+    }
+    let previous =
+        DECLARED_SIG_PARAM_TYPES.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), map));
+    DeclaredSigGuard { previous }
+}
+
+struct DeclaredSigGuard {
+    previous: HashMap<String, Vec<deep::Expr>>,
+}
+
+impl Drop for DeclaredSigGuard {
+    fn drop(&mut self) {
+        let restored = std::mem::take(&mut self.previous);
+        DECLARED_SIG_PARAM_TYPES.with(|cell| *cell.borrow_mut() = restored);
+    }
+}
+
+/// Recursively collect `(defsig name (t-fn arg-exprs... ret))` entries,
+/// descending through `(module ...)` wrappers. Only the leading
+/// argument type expressions are stored (the trailing return type is
+/// dropped). A re-declared name keeps the first sig seen.
+fn collect_defsig_param_types(expr: &deep::Expr, map: &mut HashMap<String, Vec<deep::Expr>>) {
+    let deep::Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        Some("module") => {
+            for child in children(list) {
+                collect_defsig_param_types(child, map);
+            }
+        }
+        Some("defsig") => {
+            let kids = children(list);
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                return;
+            };
+            let Some(deep::Expr::List(fn_list, _)) = kids.get(1) else {
+                return;
+            };
+            if get_tag(fn_list) != Some("t-fn") {
+                return;
+            }
+            let fn_kids = children(fn_list);
+            if fn_kids.len() < 2 {
+                return;
+            }
+            // All but the trailing return type are parameter types.
+            let param_type_exprs: Vec<deep::Expr> = fn_kids[..fn_kids.len() - 1].to_vec();
+            map.entry(name.to_string()).or_insert(param_type_exprs);
+        }
+        _ => {}
+    }
+}
+
 /// Result of running type inference on a program.
 #[derive(Debug)]
 pub struct InferResult {
@@ -319,6 +403,12 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
     // ones. Mirrors the monolithic `check_ir_program` flow which
     // calls `annotate_ir_program` then `build_ir_type_env` on
     // the annotated result.
+    //
+    // Install the declared-`defsig` parameter type map so library defs
+    // with separate `sig` declarations get borrow-correct
+    // `(params ...)` stamps, consistent with every other annotation
+    // entry point.
+    let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
         .map(|e| {
@@ -420,6 +510,13 @@ pub fn build_compiled_library_context(
     // Previously `build_type_env_from_library` did one annotation here
     // (~13.8s on Coral) and `check_ir_with_context(empty, library)`
     // did a separate, redundant inference+annotation pass (~16.8s).
+    //
+    // Install the declared-`defsig` parameter type map so the `def`
+    // arm of `annotate_expr_with_scope` stamps borrow-correct types
+    // onto each library def's `(params ...)` node -- the library
+    // compile path is exactly where chelis-std's separate-`sig` defs
+    // (`Std.Loss.CrossEntropy.loss` etc.) are annotated.
+    let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
         .map(|e| {
@@ -533,7 +630,11 @@ pub fn build_compiled_library_context_with_base(
     let _ = result.errors.drain(..);
 
     // Annotate ONLY the `library_exprs`, starting from the populated
-    // `state` so base names resolve during annotation.
+    // `state` so base names resolve during annotation. Install the
+    // declared-`defsig` parameter type map for this layer's exprs so
+    // separate-`sig` defs get borrow-correct `(params ...)` stamps,
+    // matching `build_compiled_library_context`.
+    let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
         .map(|e| {
@@ -3891,6 +3992,90 @@ fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
     (0..rank).contains(&axis).then_some(axis as usize)
 }
 
+/// Resolve one member of a two-axis builtin (`trace`, `diagonal`)
+/// against the operand `tensor_ty`. Like [`resolve_builtin_axis`], a
+/// negative literal indexes from the end; a still-out-of-range axis
+/// pushes a diagnostic and returns `Err(())`. When the axis argument
+/// is absent (not a literal) the historical positional `default` is
+/// used so the prior `unwrap_or(0)` / `unwrap_or(1)` behavior is
+/// preserved for the no-arg case.
+fn resolve_axis_pair_member(
+    op: &str,
+    axis_expr: Option<&deep::Expr>,
+    tensor_ty: &Type,
+    default: usize,
+    list: &deep::List,
+    errors: &mut Vec<CheckError>,
+) -> Result<usize, ()> {
+    match axis_expr.and_then(extract_int_literal) {
+        Some(raw) => match tensor_ty {
+            Type::Tensor(dims, _) => match normalize_static_axis(dims.len(), raw) {
+                Some(axis) => Ok(axis),
+                None => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!("{op} axis {raw} out of bounds for rank {}", dims.len()),
+                        ),
+                        vec![],
+                    ));
+                    Err(())
+                }
+            },
+            // Non-tensor operand: keep a non-negative literal verbatim
+            // and let the downstream shape checker surface the real
+            // mismatch.
+            _ => Ok(if raw >= 0 { raw as usize } else { default }),
+        },
+        None => Ok(default),
+    }
+}
+
+/// Resolve the axis argument of an axis-taking builtin against the
+/// operand `tensor_ty`, normalizing a negative literal to index from
+/// the end (`-1` is the last axis). On an axis still out of range
+/// after normalization, push an out-of-bounds diagnostic and return
+/// `None` so the caller bails to `Type::Error`.
+///
+/// When the operand is not a concrete tensor or the axis is not a
+/// literal, falls back to the prior lenient behavior: a non-negative
+/// literal is taken verbatim, anything else defaults to `0` and the
+/// downstream shape checker surfaces any real mismatch. The negative
+/// normalization itself only needs the operand rank, which a
+/// `Type::Tensor` always carries.
+fn resolve_builtin_axis(
+    op: &str,
+    axis_expr: Option<&deep::Expr>,
+    tensor_ty: &Type,
+    list: &deep::List,
+    errors: &mut Vec<CheckError>,
+) -> Option<usize> {
+    let raw_axis = axis_expr.and_then(extract_int_literal);
+    match (tensor_ty, raw_axis) {
+        (Type::Tensor(dims, _), Some(raw)) => match normalize_static_axis(dims.len(), raw) {
+            Some(axis) => Some(axis),
+            None => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("{op} axis {raw} out of bounds for rank {}", dims.len()),
+                    ),
+                    vec![],
+                ));
+                None
+            }
+        },
+        _ => Some(
+            raw_axis
+                .filter(|raw| *raw >= 0)
+                .map(|raw| raw as usize)
+                .unwrap_or(0),
+        ),
+    }
+}
+
 fn gather_result_shape(base: &[usize], indices: &[usize], axis: usize) -> Vec<usize> {
     let mut shape = Vec::with_capacity(base.len().saturating_sub(1) + indices.len());
     shape.extend_from_slice(&base[..axis]);
@@ -3948,6 +4133,11 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     let mut adt_reg = AdtRegistry::new();
     builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
     let mut declaration_errors = Vec::new();
+
+    // Declared `defsig` parameter type expressions, visible to the
+    // `def` arm of `annotate_expr_with_scope` for the duration of this
+    // pass. Restored on drop.
+    let _declared_sig_guard = install_declared_sig_param_types(exprs);
 
     for expr in exprs {
         collect_declarations(
@@ -4017,6 +4207,10 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
     }
     let mut state = context.inner().clone();
     let mut declaration_errors = Vec::new();
+
+    // Declared `defsig` parameter type expressions for the new-code
+    // exprs being annotated here. Restored on drop.
+    let _declared_sig_guard = install_declared_sig_param_types(exprs);
 
     for expr in exprs {
         collect_declarations(
@@ -4152,8 +4346,61 @@ fn annotate_expr_with_scope(
             let tag = get_tag(list);
             let (annotated_children, fn_ty_override) = match tag {
                 Some("fn") => {
-                    let (kids, fn_ty) = annotate_fn_children(list, env, vg, subst, adt_reg);
+                    let (kids, fn_ty) = annotate_fn_children(list, env, vg, subst, adt_reg, None);
                     (kids, Some(fn_ty))
+                }
+                // `(def name (fn ...))`: when the def has a separate
+                // `defsig`, its declared parameter type expressions
+                // (captured verbatim in `DECLARED_SIG_PARAM_TYPES`)
+                // preserve `&` borrow wrappers that neither the bare
+                // `fn` literal nor the inferred function type carry.
+                // Stamp those onto the def's `(params ...)` node so a
+                // standalone-lowered borrowed param keeps its borrow
+                // and IR lowering sees a non-rank-0 type. Defs without
+                // a `defsig` are absent from the map and fall through
+                // to the plain recursion (bare params, owned by
+                // `infer_signature_metadata`).
+                Some("def") => {
+                    let kids = children(list);
+                    let declared_param_types =
+                        kids.first().and_then(symbol_name).and_then(|name| {
+                            DECLARED_SIG_PARAM_TYPES.with(|cell| cell.borrow().get(name).cloned())
+                        });
+                    let annotated: Vec<deep::Expr> = kids
+                        .iter()
+                        .map(|child| {
+                            if let (Some(declared), deep::Expr::List(fn_list, fn_span)) =
+                                (declared_param_types.as_ref(), child)
+                                && get_tag(fn_list) == Some("fn")
+                            {
+                                let (fn_kids, fn_ty) = annotate_fn_children(
+                                    fn_list,
+                                    env,
+                                    vg,
+                                    subst,
+                                    adt_reg,
+                                    Some(declared),
+                                );
+                                let mut elements = vec![
+                                    fn_list.elements[0].clone(),
+                                    annotated_meta_map_with_override(
+                                        fn_list,
+                                        child,
+                                        env,
+                                        vg,
+                                        subst,
+                                        adt_reg,
+                                        Some(fn_ty),
+                                    ),
+                                ];
+                                elements.extend(fn_kids);
+                                deep::Expr::List(deep::List { elements }, *fn_span)
+                            } else {
+                                annotate_expr_with_scope(child, env, vg, subst, adt_reg)
+                            }
+                        })
+                        .collect();
+                    (annotated, None)
                 }
                 Some("let") => (annotate_let_children(list, env, vg, subst, adt_reg), None),
                 Some("match") => (annotate_match_children(list, env, vg, subst, adt_reg), None),
@@ -4184,12 +4431,96 @@ fn annotate_expr_with_scope(
     }
 }
 
+/// True for the `(t-var _)` placeholder that `desugar_fun_def` emits
+/// in a synthesized sig for a parameter that had no declared type.
+fn is_wildcard_tvar_expr(expr: &deep::Expr) -> bool {
+    let deep::Expr::List(list, _) = expr else {
+        return false;
+    };
+    get_tag(list) == Some("t-var") && children(list).first().and_then(symbol_name) == Some("_")
+}
+
+/// Rebuild a `(params ...)` node so every previously-bare parameter
+/// symbol carries a `{type: ...}` metadata entry, using the declared
+/// signature's parameter type *expressions* (`declared_param_type_exprs`).
+///
+/// The desugarer only attaches type metadata to parameters with an
+/// inline annotation (`def f(x: T)`); parameters whose types come from
+/// a separate `sig` declaration desugar to bare symbols. IR lowering's
+/// `lower_fn` reads param types straight off this node, so without this
+/// step a standalone-lowered def's params fall back to a rank-0
+/// `default_type()` and any shape-sensitive op on them panics in
+/// `tier2`.
+///
+/// The declared type *expressions* are copied verbatim, so `(t-ref ...)`
+/// borrow wrappers survive intact (a `Type` round-trip via the inferred
+/// function type drops them, which would make the linearity checker
+/// treat a borrowed param as owned).
+///
+/// Parameters that already carry a type annotation are left untouched.
+fn annotate_params_node(
+    params_expr: &deep::Expr,
+    declared_param_type_exprs: &[deep::Expr],
+) -> deep::Expr {
+    let deep::Expr::List(list, span) = params_expr else {
+        return params_expr.clone();
+    };
+    if get_tag(list) != Some("params") {
+        return params_expr.clone();
+    }
+    let mut elements = vec![list.elements[0].clone(), list.elements[1].clone()];
+    for (index, param) in children(list).iter().enumerate() {
+        match param {
+            deep::Expr::Atom(deep::Atom::Symbol(name), atom_span) => {
+                // A synthesized sig from `desugar_fun_def` uses
+                // `(t-var _)` as the placeholder for a parameter with
+                // no declared type. That is not a real declared type:
+                // stamping it would pre-empt `infer_signature_metadata`'s
+                // read-only/borrow inference, so the param is left bare.
+                let declared = declared_param_type_exprs
+                    .get(index)
+                    .filter(|expr| !is_wildcard_tvar_expr(expr));
+                match declared {
+                    Some(type_expr) => {
+                        elements.push(deep::Expr::List(
+                            deep::List {
+                                elements: vec![
+                                    deep::Expr::Atom(deep::Atom::Symbol(name.clone()), *atom_span),
+                                    deep::Expr::Map(
+                                        deep::MetaMap {
+                                            entries: vec![("type".to_string(), type_expr.clone())],
+                                        },
+                                        *atom_span,
+                                    ),
+                                ],
+                            },
+                            *atom_span,
+                        ));
+                    }
+                    None => elements.push(param.clone()),
+                }
+            }
+            // Already-typed params (MetaExpr / List forms) are left as-is.
+            _ => elements.push(param.clone()),
+        }
+    }
+    deep::Expr::List(deep::List { elements }, *span)
+}
+
+/// Annotate the children of a `(fn ...)` node.
+///
+/// `declared_param_type_exprs`, when present, is the parameter type
+/// expression list from the enclosing def's declared `sig`. It is used
+/// to stamp the `(params ...)` node, preserving `(t-ref ...)` borrow
+/// wrappers verbatim. `fn` literals with no declared signature pass
+/// `None` and keep bare params.
 fn annotate_fn_children(
     list: &deep::List,
     env: &Env,
     vg: &VarGen,
     subst: &Subst,
     adt_reg: &AdtRegistry,
+    declared_param_type_exprs: Option<&[deep::Expr]>,
 ) -> (Vec<deep::Expr>, Type) {
     let kids = children(list);
     if kids.is_empty() {
@@ -4220,7 +4551,23 @@ fn annotate_fn_children(
         fn_env.bind(name.clone(), Scheme::mono(ty));
     }
 
-    let mut result = vec![annotate_expr_with_scope(&kids[0], env, vg, subst, adt_reg)];
+    // Only stamp parameter types when they come from the def's
+    // declared `sig`. A bare `fn` literal with no declared signature
+    // keeps bare params: the inferred function type loses `&` borrow
+    // wrappers, and stamping it would also pre-empt the
+    // read-only/borrow inference that `infer_signature_metadata`
+    // performs on parameters left bare.
+    let annotated_params = match declared_param_type_exprs {
+        Some(declared) => annotate_params_node(&kids[0], declared),
+        None => kids[0].clone(),
+    };
+    let mut result = vec![annotate_expr_with_scope(
+        &annotated_params,
+        env,
+        vg,
+        subst,
+        adt_reg,
+    )];
     if let Some(body) = kids.get(1) {
         result.push(annotate_expr_with_scope(body, &fn_env, vg, subst, adt_reg));
     }
@@ -4680,10 +5027,14 @@ fn ir_builtin_axis_dim(
         .get(3 + tensor_arg_index)
         .and_then(|expr| expr_type_expr(expr, type_env))
         .and_then(|ty| tensor_dims_from_type_expr(&ty))?;
-    let axis = list
+    // Negative axes index from the end; normalize against the operand
+    // rank so this concrete-extent check inspects the same axis the op
+    // actually reduces.
+    let raw_axis = list
         .elements
         .get(3 + axis_arg_index)
-        .and_then(extract_axis_literal)?;
+        .and_then(extract_int_literal)?;
+    let axis = normalize_static_axis(tensor_dims.len(), raw_axis)?;
     tensor_dims.get(axis).copied()
 }
 
@@ -4692,10 +5043,6 @@ fn app_result_type_is_concrete(list: &deep::List) -> bool {
         .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
         .map(|(_, ty)| type_expr_is_ir_concrete(ty))
         .unwrap_or(false)
-}
-
-fn extract_axis_literal(expr: &deep::Expr) -> Option<usize> {
-    extract_int_literal(expr).and_then(|axis| (axis >= 0).then_some(axis as usize))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6293,6 +6640,31 @@ fn infer_app(
                         }
                     }
                 }
+
+                // softmax does not go through `check_reduction_signature`
+                // (it is shape-preserving, not shape-reducing), so its
+                // axis range is validated here. Negative axes index from
+                // the end via `normalize_static_axis`, consistent with
+                // the reductions and gather/scatter.
+                if fname == "softmax"
+                    && let Some(first_arg) = arg_tys.first()
+                    && let Type::Tensor(dims, _) = type_for_readonly_check(first_arg, subst)
+                    && let Some(raw) = kids.get(2).and_then(extract_int_literal)
+                    && normalize_static_axis(dims.len(), raw).is_none()
+                {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "softmax axis {raw} is out of bounds for rank {} tensor",
+                                dims.len()
+                            ),
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
             }
 
             if let Some(ref fname) = func_name
@@ -7046,9 +7418,13 @@ fn infer_app(
                         if arg_tys.len() != 3 {
                             return Type::Error;
                         }
-                        let axis = kids.get(3).and_then(extract_axis_literal).unwrap_or(0);
                         let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let indices_ty = type_for_readonly_check(&arg_tys[1], subst);
+                        let Some(axis) =
+                            resolve_builtin_axis("gather", kids.get(3), &tensor_ty, list, errors)
+                        else {
+                            return Type::Error;
+                        };
                         match infer_gather_result_type(&tensor_ty, &indices_ty, axis) {
                             Ok(ty) => return ty,
                             Err(message) => {
@@ -7120,23 +7496,18 @@ fn infer_app(
                         if arg_tys.len() != 2 {
                             return Type::Error;
                         }
-                        let axis = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
-                        match type_for_readonly_check(&arg_tys[0], subst) {
+                        let cumsum_operand = type_for_readonly_check(&arg_tys[0], subst);
+                        let Some(_axis) = resolve_builtin_axis(
+                            "cumsum",
+                            kids.get(2),
+                            &cumsum_operand,
+                            list,
+                            errors,
+                        ) else {
+                            return Type::Error;
+                        };
+                        match cumsum_operand {
                             Type::Tensor(dims, precision) => {
-                                if axis >= dims.len() {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "cumsum axis {axis} out of bounds for rank {}",
-                                                dims.len()
-                                            ),
-                                        ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
-                                }
                                 return Type::Tensor(dims, precision);
                             }
                             Type::Var(_) | Type::Error => return result_ty,
@@ -7157,13 +7528,30 @@ fn infer_app(
                         if arg_tys.len() != 3 {
                             return Type::Error;
                         }
-                        let axis1 = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
-                        let axis2 = kids.get(3).and_then(extract_axis_literal).unwrap_or(1);
-                        match infer_diagonal_result_type(
-                            &type_for_readonly_check(&arg_tys[0], subst),
-                            axis1,
-                            axis2,
+                        let diagonal_operand = type_for_readonly_check(&arg_tys[0], subst);
+                        let axis1 = match resolve_axis_pair_member(
+                            "diagonal",
+                            kids.get(2),
+                            &diagonal_operand,
+                            0,
+                            list,
+                            errors,
                         ) {
+                            Ok(axis) => axis,
+                            Err(()) => return Type::Error,
+                        };
+                        let axis2 = match resolve_axis_pair_member(
+                            "diagonal",
+                            kids.get(3),
+                            &diagonal_operand,
+                            1,
+                            list,
+                            errors,
+                        ) {
+                            Ok(axis) => axis,
+                            Err(()) => return Type::Error,
+                        };
+                        match infer_diagonal_result_type(&diagonal_operand, axis1, axis2) {
                             Ok(ty) => return ty,
                             Err(message) => {
                                 errors.push(CheckError::new(
@@ -7182,13 +7570,30 @@ fn infer_app(
                         if arg_tys.len() != 3 {
                             return Type::Error;
                         }
-                        let axis1 = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
-                        let axis2 = kids.get(3).and_then(extract_axis_literal).unwrap_or(1);
-                        match infer_trace_result_type(
-                            &type_for_readonly_check(&arg_tys[0], subst),
-                            axis1,
-                            axis2,
+                        let trace_operand = type_for_readonly_check(&arg_tys[0], subst);
+                        let axis1 = match resolve_axis_pair_member(
+                            "trace",
+                            kids.get(2),
+                            &trace_operand,
+                            0,
+                            list,
+                            errors,
                         ) {
+                            Ok(axis) => axis,
+                            Err(()) => return Type::Error,
+                        };
+                        let axis2 = match resolve_axis_pair_member(
+                            "trace",
+                            kids.get(3),
+                            &trace_operand,
+                            1,
+                            list,
+                            errors,
+                        ) {
+                            Ok(axis) => axis,
+                            Err(()) => return Type::Error,
+                        };
+                        match infer_trace_result_type(&trace_operand, axis1, axis2) {
                             Ok(ty) => return ty,
                             Err(message) => {
                                 errors.push(CheckError::new(
@@ -7262,23 +7667,14 @@ fn infer_app(
                         if arg_tys.len() != 2 {
                             return Type::Error;
                         }
-                        let axis = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
-                        match type_for_readonly_check(&arg_tys[0], subst) {
+                        let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
+                        let Some(_axis) =
+                            resolve_builtin_axis("sort", kids.get(2), &sort_operand, list, errors)
+                        else {
+                            return Type::Error;
+                        };
+                        match sort_operand {
                             Type::Tensor(dims, precision) => {
-                                if axis >= dims.len() {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "sort axis {axis} out of bounds for rank {}",
-                                                dims.len()
-                                            ),
-                                        ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
-                                }
                                 return Type::Tuple(vec![
                                     Type::Tensor(dims.clone(), precision),
                                     Type::Tensor(dims, TensorPrec::Concrete(Prim::Int64)),
@@ -7305,7 +7701,11 @@ fn infer_app(
                         let base_ty = subst.apply(&arg_tys[0]);
                         let indices_ty = subst.apply(&arg_tys[1]);
                         let updates_ty = subst.apply(&arg_tys[2]);
-                        let axis = kids.get(4).and_then(extract_axis_literal).unwrap_or(0);
+                        let Some(axis) =
+                            resolve_builtin_axis("scatter", kids.get(4), &base_ty, list, errors)
+                        else {
+                            return Type::Error;
+                        };
                         let mode = kids.get(5).and_then(extract_string_literal);
                         match mode.as_deref() {
                             Some("replace") | Some("add") => {}
@@ -7354,7 +7754,15 @@ fn infer_app(
                         let base_ty = subst.apply(&arg_tys[0]);
                         let indices_ty = subst.apply(&arg_tys[1]);
                         let updates_ty = subst.apply(&arg_tys[2]);
-                        let axis = kids.get(4).and_then(extract_axis_literal).unwrap_or(0);
+                        let Some(axis) = resolve_builtin_axis(
+                            "scatter_replace",
+                            kids.get(4),
+                            &base_ty,
+                            list,
+                            errors,
+                        ) else {
+                            return Type::Error;
+                        };
                         match infer_gather_result_type(&base_ty, &indices_ty, axis) {
                             Ok(expected_updates) => {
                                 if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
@@ -7562,21 +7970,28 @@ fn infer_app(
                                     ));
                                     return Type::Error;
                                 }
-                                let axis = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
-                                if axis >= dims.len() {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "split axis {axis} out of bounds for rank {}",
-                                                dims.len()
-                                            ),
-                                        ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
-                                }
+                                // Negative axes index from the end.
+                                let raw_axis = kids.get(2).and_then(extract_int_literal);
+                                let axis = match raw_axis {
+                                    Some(raw) => match normalize_static_axis(dims.len(), raw) {
+                                        Some(axis) => axis,
+                                        None => {
+                                            errors.push(CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "split axis {raw} out of bounds for rank {}",
+                                                        dims.len()
+                                                    ),
+                                                ),
+                                                vec![],
+                                            ));
+                                            return Type::Error;
+                                        }
+                                    },
+                                    None => 0,
+                                };
                                 let mut piece_dims = dims.clone();
                                 piece_dims[axis] = Dim::Wildcard;
                                 return Type::Adt(
@@ -9655,30 +10070,28 @@ fn check_reduction_signature(
         }
     };
 
+    // Negative axes index from the end (`-1` is the last axis), per
+    // spec/05-risc-primitives.md and the formula examples that already
+    // use `axis=-1`. `normalize_static_axis` maps `rank + axis` and
+    // bounds-checks; gather/scatter use the same helper, so reductions
+    // stay consistent with them and with IR lowering's `normalize_axis`.
     let axis = match arg_exprs.get(1).and_then(extract_int_literal) {
-        Some(axis) if axis >= 0 => axis as usize,
-        Some(axis) => {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!("{name} requires non-negative axis, got {axis}"),
-                vec![],
-            ));
-            return Type::Error;
-        }
+        Some(raw) => match normalize_static_axis(dims.len(), raw) {
+            Some(axis) => axis,
+            None => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "{name} axis {raw} is out of bounds for rank {} tensor",
+                        dims.len()
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+        },
         None => return subst.apply(result_ty),
     };
-
-    if axis >= dims.len() {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "{name} axis {axis} is out of bounds for rank {} tensor",
-                dims.len()
-            ),
-            vec![],
-        ));
-        return Type::Error;
-    }
 
     let mut out_dims = dims;
     out_dims.remove(axis);
