@@ -6,6 +6,40 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed - package-identity and compiler-version in compiled-context cache keys
+
+The Phase K `CompiledContext` disk cache keyed its cache file name only
+on `(package_name, package_version, source_hash)` and re-verified only
+`source_hash` in `load_if_fresh`, a content check that never checked
+package identity. After PR #127 routed the no-`CHELIS_REEF_HOME` case
+through the XDG compiled cache, two distinct on-disk packages that
+shared name+version+byte-identical source collided on one cache file:
+the second silently loaded the first's `CompiledContext`, including its
+`package_root`. The `phase3t_*` integration tests reuse deterministic
+package names without setting `CHELIS_REEF_HOME`, so a cold workspace
+test run wrote `.ctx` files into the real `~/.cache/chelis/compiled/`
+and every subsequent warm run failed. `chelis eval --file`'s
+`run_eval_in_context` had no `package_root` guard, so the same
+collision was a silent wrong-result risk there.
+
+- `crates/chelis-compiler-api/src/context.rs`: added a `CacheIdentity`
+  (canonical `package_root` + `COMPILER_VERSION`) to `CompiledContext`
+  and the on-disk `CacheEnvelope`. `cache_file_name` / `cache_path_for`
+  now fold an identity fingerprint into the file name so two distinct
+  checkouts land on separate cache files. `load_if_fresh` recomputes
+  the identity from the live package and the running binary and treats
+  a mismatch as a clean miss, not a stale hit. The cache format version
+  and magic bumped to `4`, so pre-existing `V3` entries are rejected as
+  `UnsupportedVersion`.
+- `crates/chelis-compiler-api/src/stdlib_cache.rs`: folded
+  `COMPILER_VERSION` into `stdlib_cache_key`. `STDLIB_CACHE_FORMAT_VERSION`
+  only guards the on-disk struct shape, so without this a chelis binary
+  built from different compiler source but the same bundled chelis-std
+  could read an older binary's cached sub-context.
+- Regression coverage in `phase_i_disk_cache.rs` and
+  `stdlib_cache.rs` tests: the warm-run package-identity collision and
+  the compiler-version skew are both pinned, on the per-PR `ci` profile.
+
 ### Changed - split heavyweight e2e off the per-PR integration gate
 
 Moved the heavyweight end-to-end tests off the per-PR `Integration

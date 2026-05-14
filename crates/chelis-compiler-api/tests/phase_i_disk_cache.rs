@@ -13,7 +13,12 @@
 //! - Permission / bincode-shape mismatch: `load_if_fresh` returns
 //!   `Err(_)` or `Ok(None)`, never silently uses the bad bytes.
 //! - Cache file path layout: lives under
-//!   `<reef_home>/.cache/compiled/<pkg>-<ver>-<hash16>.ctx`.
+//!   `<reef_home>/.cache/compiled/<pkg>-<ver>-<src16>-<id16>.ctx`.
+//! - Package-identity collision safety: two distinct checkouts that
+//!   share name+version+source bytes do NOT collide on one cache file,
+//!   and a foreign-identity entry on a shared path is a clean miss.
+//! - Compiler-version skew: a cache entry written by a differently-
+//!   built compiler is a clean miss, not a stale hit.
 //!
 //! Re-uses the path-dep fixture shape from `context.rs::tests` as the
 //! library substrate.
@@ -435,7 +440,7 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
 
 #[test]
 fn cache_path_for_uses_dot_cache_compiled_layout_with_hash_prefix() {
-    use chelis_compiler_api::ContextHash;
+    use chelis_compiler_api::{CacheIdentity, ContextHash};
     let reef_home = Path::new("/tmp/fakehome");
     let mut bytes = [0u8; 32];
     bytes[0] = 0xde;
@@ -447,24 +452,35 @@ fn cache_path_for_uses_dot_cache_compiled_layout_with_hash_prefix() {
     bytes[6] = 0xfa;
     bytes[7] = 0xce;
     let hash = ContextHash(bytes);
+    let identity = CacheIdentity::for_package_root(Path::new("/tmp/some-pkg-root"));
 
-    let p = CompiledContext::cache_path_for(reef_home, ("mypkg", "0.1.0"), hash);
+    let p = CompiledContext::cache_path_for(reef_home, ("mypkg", "0.1.0"), hash, &identity);
     let s = p.to_string_lossy();
+    // File name is `<name>-<ver>-<src16>-<id16>.ctx`: the source-hash
+    // prefix is fixed by the bytes above; the identity prefix varies with
+    // the package root, so only the stable portion is asserted here.
     assert!(
-        s.contains(".cache/compiled/mypkg-0.1.0-deadbeeffeedface.ctx")
-            || s.contains(r".cache\compiled\mypkg-0.1.0-deadbeeffeedface.ctx"),
-        "cache_path_for must use <reef_home>/.cache/compiled/<name>-<ver>-<hash16>.ctx (got {s})"
+        s.contains(".cache/compiled/mypkg-0.1.0-deadbeeffeedface-")
+            || s.contains(r".cache\compiled\mypkg-0.1.0-deadbeeffeedface-"),
+        "cache_path_for must use <reef_home>/.cache/compiled/<name>-<ver>-<src16>-<id16>.ctx \
+         (got {s})"
+    );
+    assert!(
+        s.ends_with(".ctx"),
+        "cache file must end with .ctx (got {s})"
     );
 }
 
 #[test]
 fn cache_path_for_sanitizes_unsafe_characters() {
-    use chelis_compiler_api::ContextHash;
+    use chelis_compiler_api::{CacheIdentity, ContextHash};
     let reef_home = Path::new("/tmp/fakehome");
     let hash = ContextHash([0u8; 32]);
+    let identity = CacheIdentity::for_package_root(Path::new("/tmp/some-pkg-root"));
     // Slash in package name would otherwise let the cache file escape its
     // intended directory.
-    let p = CompiledContext::cache_path_for(reef_home, ("evil/../../escape", "v1"), hash);
+    let p =
+        CompiledContext::cache_path_for(reef_home, ("evil/../../escape", "v1"), hash, &identity);
     let s = p.to_string_lossy();
     assert!(
         !s.contains("evil/../"),
@@ -533,4 +549,127 @@ fn repeated_save_overwrites_cleanly() {
         .expect("load")
         .expect("hit");
     assert_eq!(loaded.source_hash, ctx2.source_hash);
+}
+
+// ---- Package-identity collision (the PR #127 regression) ---------------
+
+#[test]
+fn two_packages_same_name_version_source_but_different_root_do_not_collide() {
+    // Regression for the cross-process compiled-context cache bug. PR
+    // #127 routed the no-CHELIS_REEF_HOME case through the XDG compiled
+    // cache. The Phase K cache file name keyed only on
+    // (package_name, package_version, source_hash) and load_if_fresh
+    // re-verified only source_hash, a CONTENT check. Two distinct on-disk
+    // checkouts that share name+version+byte-identical source collided on
+    // ONE cache file: the second one silently loaded the first's
+    // CompiledContext, including its package_root.
+    //
+    // `library_fixture()` is deterministic, so two calls produce two
+    // package roots with byte-identical sources -- exactly the colliding
+    // pair. The cache file name must differ (identity folded into the
+    // name) AND, even forced onto a shared path, load_if_fresh must treat
+    // the foreign-identity entry as a clean miss, never a stale hit.
+    use chelis_compiler_api::CacheIdentity;
+
+    let (_dir_a, root_a) = library_fixture();
+    let (_dir_b, root_b) = library_fixture();
+    assert_ne!(
+        root_a, root_b,
+        "test setup: the two checkouts must live at different roots"
+    );
+
+    let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx a");
+    let ctx_b = compile_reef_context(Path::new("/tmp/x"), &root_b).expect("ctx b");
+
+    // Same name+version+source bytes: the content hash is identical.
+    assert_eq!(
+        ctx_a.source_hash, ctx_b.source_hash,
+        "test setup: byte-identical sources must share a source_hash"
+    );
+    // But the package identity (canonical package_root) must differ.
+    assert_ne!(
+        ctx_a.identity, ctx_b.identity,
+        "two distinct checkouts must have distinct CacheIdentity"
+    );
+
+    // The canonical cache file name must differ, so the two packages land
+    // on SEPARATE cache files rather than colliding.
+    let id_a = CacheIdentity::for_package_root(&root_a);
+    let id_b = CacheIdentity::for_package_root(&root_b);
+    let name_a = CompiledContext::cache_file_name(("myapp", "0.1.0"), ctx_a.source_hash, &id_a);
+    let name_b = CompiledContext::cache_file_name(("myapp", "0.1.0"), ctx_b.source_hash, &id_b);
+    assert_ne!(
+        name_a, name_b,
+        "two checkouts sharing name+version+source must NOT share a cache file name"
+    );
+
+    // Defense in depth: even forced onto a SHARED path, B must not get a
+    // stale hit on A's entry. load_if_fresh recomputes the identity from
+    // B's live package_dir; the stored identity is A's, so it is a clean
+    // miss (Ok(None)), never Ok(Some(ctx_a)).
+    let shared_path = root_a.join(".cache/compiled/shared-identity-collision.ctx");
+    ctx_a.save(&shared_path).expect("save a");
+
+    let hit_a = CompiledContext::load_if_fresh(&shared_path, Path::new("/tmp/x"), &root_a)
+        .expect("load a should not error")
+        .expect("A must hit its own entry");
+    assert_eq!(hit_a.identity, ctx_a.identity);
+
+    let outcome_b = CompiledContext::load_if_fresh(&shared_path, Path::new("/tmp/x"), &root_b)
+        .expect("load b should not error");
+    assert!(
+        outcome_b.is_none(),
+        "B must NOT silently load A's CompiledContext from a shared cache path; \
+         a mismatched package identity is a clean miss, not a stale hit"
+    );
+}
+
+// ---- Compiler-version skew (RT-1 MEDIUM finding) -----------------------
+
+#[test]
+fn cache_entry_from_a_different_compiler_build_is_a_clean_miss() {
+    // Regression for the compiler-build-identity gap. A chelis binary
+    // built from different compiler source but the same resolved package
+    // produced the same source_hash, so a newer binary could read an
+    // older binary's cached context and apply stale compiler semantics.
+    // CacheIdentity folds COMPILER_VERSION in; an entry whose stored
+    // identity carries a different compiler version must be a clean miss.
+    //
+    // We cannot rebuild the compiler mid-test, so we construct an
+    // envelope whose stored identity carries the SAME package_root but a
+    // bumped compiler version, save it, and confirm load_if_fresh treats
+    // it as a miss because the live identity (real COMPILER_VERSION) does
+    // not match.
+    use chelis_compiler_api::CacheIdentity;
+
+    let (_dir, root) = library_fixture();
+    let cache_path = root.join(".cache/compiled/compiler-skew.ctx");
+
+    // A real, valid context for this package.
+    let mut ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let live_identity = ctx.identity.clone();
+    assert_eq!(
+        live_identity.compiler_version, COMPILER_VERSION,
+        "test setup: a fresh context must carry the running compiler version"
+    );
+
+    // Forge an identity that looks like it came from a DIFFERENT compiler
+    // build (same package root, bumped compiler version).
+    let stale_identity = CacheIdentity {
+        package_root: live_identity.package_root.clone(),
+        compiler_version: format!("{COMPILER_VERSION}-stale-other-build"),
+    };
+    assert_ne!(stale_identity, live_identity);
+    ctx.identity = stale_identity;
+    ctx.save(&cache_path).expect("save forged-identity entry");
+
+    // load_if_fresh recomputes the identity from the running binary; the
+    // stored compiler version does not match, so this is a clean miss.
+    let outcome = CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/x"), &root)
+        .expect("load_if_fresh must not error on a compiler-version-skewed entry");
+    assert!(
+        outcome.is_none(),
+        "a cache entry written by a differently-built compiler must be a clean miss, \
+         not a stale hit"
+    );
 }
