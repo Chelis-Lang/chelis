@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed - backend integration test suite parsimony pass
+
+Trimmed redundant gcc/codegen invocations across the backend-crate
+integration test cluster without losing coverage.
+
+- `crates/chelis-backend-c/tests/simd_reductions.rs`: collapsed the
+  30-test 5-op-by-6-size matrix into 5 tests (one per reduction op).
+  Each test now emits one C program that sweeps every size internally,
+  cutting gcc compile-and-run invocations from 30 to 5 while still
+  checking scalar-vs-SIMD agreement at every AVX2 lane-boundary size.
+- `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs`:
+  removed; its two Perf-F1 structural acceptance cases were moved into
+  `red_team_w5_strided_batched.rs` (the keep-by-default strided-batched
+  lock file), since the W5 adversarial cases did not subsume the rank-3
+  literal-stride dispatch and broadcasted-lhs helper-loop fallback.
+- `crates/chelis-backend-metal/tests/codegen_structure.rs`: removed the
+  three `wsm1_{f32,f16,bf16}_matmul_routes_to_*` tests, which duplicated
+  the per-dtype routing assertions in
+  `dtype_matrix.rs::matmul_{f32,f16,bf16}_*` (the canonical per-dtype
+  home). The non-routing `wsm1` tests (subgraph folding, M/N/K uniform
+  packing) stay.
+- `crates/chelis-backend-hip/tests/gpu_correctness.rs`: removed
+  `ws_a3_hip_admits_bf16_matmul_at_codegen`, a "does not panic" subset
+  of `ws_a3_bf16_f16_matmul.rs::bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper`,
+  which additionally asserts the emitted bf16 GemmEx wrapper and link
+  flag.
+
 ## [0.7.9] — 2026-05-14
 
 ### Fixed - chelis check advisory warnings now match chelis lint --check

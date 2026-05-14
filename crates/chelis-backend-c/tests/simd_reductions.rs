@@ -3,9 +3,19 @@
 //! Each test generates a standalone C program that includes chelis_simd.h
 //! directly (without the rest of the runtime), compiles it with gcc -mavx2,
 //! runs it, and verifies the result matches naive scalar computation.
+//!
+//! There is one test per reduction op. Each test emits a single C program
+//! that exercises every size in `SIZES` internally, so the AVX2 lane-boundary
+//! sweep still runs at sizes 1, 7, 8, 9, 1024, and 100003 while keeping gcc
+//! invocations to one per op.
 
 use std::path::PathBuf;
 use std::process::Command;
+
+/// Size sweep probing every AVX2 lane-boundary case: below one lane (1),
+/// just under a full lane (7), exactly one lane (8), one past a lane (9),
+/// many full lanes (1024), and a large non-lane-multiple (100003).
+const SIZES: &[usize] = &[1, 7, 8, 9, 1024, 100003];
 
 fn simd_include_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
@@ -114,53 +124,6 @@ fn naive_argmin(data: &[f32]) -> usize {
 // C program templates.
 // ---------------------------------------------------------------------------
 
-/// Generate a C program that calls a float-returning SIMD function and
-/// prints the result with %f. Uses malloc for large arrays to avoid stack
-/// overflow.
-fn make_c_program_float(fn_name: &str, data: &[f32]) -> String {
-    let n = data.len();
-    let init = to_c_float_list(data);
-    format!(
-        r#"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "chelis_simd.h"
-
-static float g_data[{n}] = {{ {init} }};
-
-int main(void) {{
-    float result = {fn_name}(g_data, {n});
-    printf("%.8g\n", (double)result);
-    return 0;
-}}
-"#
-    )
-}
-
-/// Generate a C program that calls an int-returning SIMD function and
-/// prints the result with %d.
-fn make_c_program_int(fn_name: &str, data: &[f32]) -> String {
-    let n = data.len();
-    let init = to_c_float_list(data);
-    format!(
-        r#"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "chelis_simd.h"
-
-static float g_data[{n}] = {{ {init} }};
-
-int main(void) {{
-    int result = {fn_name}(g_data, {n});
-    printf("%d\n", result);
-    return 0;
-}}
-"#
-    )
-}
-
 /// Build a comma-separated C float literal list from a slice.
 fn to_c_float_list(data: &[f32]) -> String {
     data.iter()
@@ -177,6 +140,94 @@ fn to_c_float_list(data: &[f32]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Emit `static float g_data_<n>[<n>] = { ... };` declarations for every
+/// size, returning the joined declaration block.
+fn emit_data_arrays() -> String {
+    SIZES
+        .iter()
+        .map(|&n| {
+            let init = to_c_float_list(&test_data(n));
+            format!("static float g_data_{n}[{n}] = {{ {init} }};")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Generate a C program that calls a float-returning SIMD function once per
+/// size and prints `n result` lines (one per size).
+fn make_c_program_float_sweep(fn_name: &str) -> String {
+    let arrays = emit_data_arrays();
+    let calls = SIZES
+        .iter()
+        .map(|&n| format!("    printf(\"{n} %.8g\\n\", (double){fn_name}(g_data_{n}, {n}));"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "chelis_simd.h"
+
+{arrays}
+
+int main(void) {{
+{calls}
+    return 0;
+}}
+"#
+    )
+}
+
+/// Generate a C program that calls an int-returning SIMD function once per
+/// size and prints `n result` lines (one per size).
+fn make_c_program_int_sweep(fn_name: &str) -> String {
+    let arrays = emit_data_arrays();
+    let calls = SIZES
+        .iter()
+        .map(|&n| format!("    printf(\"{n} %d\\n\", {fn_name}(g_data_{n}, {n}));"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "chelis_simd.h"
+
+{arrays}
+
+int main(void) {{
+{calls}
+    return 0;
+}}
+"#
+    )
+}
+
+/// Parse `n value` lines from sweep-program stdout into a map from size to
+/// the raw value string.
+fn parse_sweep_output(out: &str) -> std::collections::HashMap<usize, String> {
+    let mut map = std::collections::HashMap::new();
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let n: usize = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("malformed sweep line: {line:?}"));
+        let value = parts
+            .next()
+            .unwrap_or_else(|| panic!("malformed sweep line: {line:?}"))
+            .to_string();
+        map.insert(n, value);
+    }
+    map
 }
 
 // ---------------------------------------------------------------------------
@@ -200,368 +251,133 @@ fn test_data(n: usize) -> Vec<f32> {
 }
 
 // ---------------------------------------------------------------------------
-// chelis_sum_f32 tests
+// One test per reduction op. Each emits a single C program that sweeps every
+// size in SIZES, so scalar-vs-SIMD agreement is checked at every AVX2
+// lane-boundary case with a single gcc invocation.
 // ---------------------------------------------------------------------------
 
-fn run_sum_test(n: usize) {
-    let data = test_data(n);
-    let expected = naive_sum(&data);
-    let src = make_c_program_float("chelis_sum_f32", &data);
-    let out = compile_and_run(&format!("sum_{n}"), &src);
-    let got: f32 = out
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("sum n={n}: could not parse output {:?}", out.trim()));
-    // Tolerate 1e-3 relative error; SIMD horizontal adds can reorder ops.
-    let tol = (expected.abs() * 1e-3).max(1e-2);
-    assert!(
-        (got - expected).abs() <= tol,
-        "sum n={n}: expected {expected}, got {got} (tol {tol})"
-    );
-}
-
 #[test]
-fn simd_sum_n1() {
+fn simd_sum_f32_all_sizes() {
     if !gcc_available() {
         eprintln!("gcc not available, skipping");
         return;
     }
-    run_sum_test(1);
+    let src = make_c_program_float_sweep("chelis_sum_f32");
+    let out = compile_and_run("sum_sweep", &src);
+    let results = parse_sweep_output(&out);
+    for &n in SIZES {
+        let data = test_data(n);
+        let expected = naive_sum(&data);
+        let got: f32 = results
+            .get(&n)
+            .unwrap_or_else(|| panic!("sum: no output for n={n}"))
+            .parse()
+            .unwrap_or_else(|_| panic!("sum n={n}: could not parse output {:?}", results.get(&n)));
+        // Tolerate 1e-3 relative error; SIMD horizontal adds can reorder ops.
+        let tol = (expected.abs() * 1e-3).max(1e-2);
+        assert!(
+            (got - expected).abs() <= tol,
+            "sum n={n}: expected {expected}, got {got} (tol {tol})"
+        );
+    }
 }
 
 #[test]
-fn simd_sum_n7() {
+fn simd_max_f32_all_sizes() {
     if !gcc_available() {
         eprintln!("gcc not available, skipping");
         return;
     }
-    run_sum_test(7);
+    let src = make_c_program_float_sweep("chelis_max_f32");
+    let out = compile_and_run("max_sweep", &src);
+    let results = parse_sweep_output(&out);
+    for &n in SIZES {
+        let data = test_data(n);
+        let expected = naive_max(&data);
+        let got: f32 = results
+            .get(&n)
+            .unwrap_or_else(|| panic!("max: no output for n={n}"))
+            .parse()
+            .unwrap_or_else(|_| panic!("max n={n}: could not parse output {:?}", results.get(&n)));
+        assert!(
+            (got - expected).abs() <= 1e-5,
+            "max n={n}: expected {expected}, got {got}"
+        );
+    }
 }
 
 #[test]
-fn simd_sum_n8() {
+fn simd_min_f32_all_sizes() {
     if !gcc_available() {
         eprintln!("gcc not available, skipping");
         return;
     }
-    run_sum_test(8);
+    let src = make_c_program_float_sweep("chelis_min_f32");
+    let out = compile_and_run("min_sweep", &src);
+    let results = parse_sweep_output(&out);
+    for &n in SIZES {
+        let data = test_data(n);
+        let expected = naive_min(&data);
+        let got: f32 = results
+            .get(&n)
+            .unwrap_or_else(|| panic!("min: no output for n={n}"))
+            .parse()
+            .unwrap_or_else(|_| panic!("min n={n}: could not parse output {:?}", results.get(&n)));
+        assert!(
+            (got - expected).abs() <= 1e-5,
+            "min n={n}: expected {expected}, got {got}"
+        );
+    }
 }
 
 #[test]
-fn simd_sum_n9() {
+fn simd_argmax_f32_all_sizes() {
     if !gcc_available() {
         eprintln!("gcc not available, skipping");
         return;
     }
-    run_sum_test(9);
+    let src = make_c_program_int_sweep("chelis_argmax_f32");
+    let out = compile_and_run("argmax_sweep", &src);
+    let results = parse_sweep_output(&out);
+    for &n in SIZES {
+        let data = test_data(n);
+        let expected = naive_argmax(&data);
+        let got: usize = results
+            .get(&n)
+            .unwrap_or_else(|| panic!("argmax: no output for n={n}"))
+            .parse()
+            .unwrap_or_else(|_| {
+                panic!("argmax n={n}: could not parse output {:?}", results.get(&n))
+            });
+        assert_eq!(
+            got, expected,
+            "argmax n={n}: expected {expected}, got {got}"
+        );
+    }
 }
 
 #[test]
-fn simd_sum_n1024() {
+fn simd_argmin_f32_all_sizes() {
     if !gcc_available() {
         eprintln!("gcc not available, skipping");
         return;
     }
-    run_sum_test(1024);
-}
-
-#[test]
-fn simd_sum_n100003() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
+    let src = make_c_program_int_sweep("chelis_argmin_f32");
+    let out = compile_and_run("argmin_sweep", &src);
+    let results = parse_sweep_output(&out);
+    for &n in SIZES {
+        let data = test_data(n);
+        let expected = naive_argmin(&data);
+        let got: usize = results
+            .get(&n)
+            .unwrap_or_else(|| panic!("argmin: no output for n={n}"))
+            .parse()
+            .unwrap_or_else(|_| {
+                panic!("argmin n={n}: could not parse output {:?}", results.get(&n))
+            });
+        assert_eq!(
+            got, expected,
+            "argmin n={n}: expected {expected}, got {got}"
+        );
     }
-    run_sum_test(100003);
-}
-
-// ---------------------------------------------------------------------------
-// chelis_max_f32 tests
-// ---------------------------------------------------------------------------
-
-fn run_max_test(n: usize) {
-    let data = test_data(n);
-    let expected = naive_max(&data);
-    let src = make_c_program_float("chelis_max_f32", &data);
-    let out = compile_and_run(&format!("max_{n}"), &src);
-    let got: f32 = out
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("max n={n}: could not parse output {:?}", out.trim()));
-    assert!(
-        (got - expected).abs() <= 1e-5,
-        "max n={n}: expected {expected}, got {got}"
-    );
-}
-
-#[test]
-fn simd_max_n1() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_max_test(1);
-}
-
-#[test]
-fn simd_max_n7() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_max_test(7);
-}
-
-#[test]
-fn simd_max_n8() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_max_test(8);
-}
-
-#[test]
-fn simd_max_n9() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_max_test(9);
-}
-
-#[test]
-fn simd_max_n1024() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_max_test(1024);
-}
-
-#[test]
-fn simd_max_n100003() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_max_test(100003);
-}
-
-// ---------------------------------------------------------------------------
-// chelis_min_f32 tests
-// ---------------------------------------------------------------------------
-
-fn run_min_test(n: usize) {
-    let data = test_data(n);
-    let expected = naive_min(&data);
-    let src = make_c_program_float("chelis_min_f32", &data);
-    let out = compile_and_run(&format!("min_{n}"), &src);
-    let got: f32 = out
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("min n={n}: could not parse output {:?}", out.trim()));
-    assert!(
-        (got - expected).abs() <= 1e-5,
-        "min n={n}: expected {expected}, got {got}"
-    );
-}
-
-#[test]
-fn simd_min_n1() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_min_test(1);
-}
-
-#[test]
-fn simd_min_n7() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_min_test(7);
-}
-
-#[test]
-fn simd_min_n8() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_min_test(8);
-}
-
-#[test]
-fn simd_min_n9() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_min_test(9);
-}
-
-#[test]
-fn simd_min_n1024() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_min_test(1024);
-}
-
-#[test]
-fn simd_min_n100003() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_min_test(100003);
-}
-
-// ---------------------------------------------------------------------------
-// chelis_argmax_f32 tests
-// ---------------------------------------------------------------------------
-
-fn run_argmax_test(n: usize) {
-    let data = test_data(n);
-    let expected = naive_argmax(&data);
-    let src = make_c_program_int("chelis_argmax_f32", &data);
-    let out = compile_and_run(&format!("argmax_{n}"), &src);
-    let got: usize = out
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("argmax n={n}: could not parse output {:?}", out.trim()));
-    assert_eq!(
-        got, expected,
-        "argmax n={n}: expected {expected}, got {got}"
-    );
-}
-
-#[test]
-fn simd_argmax_n1() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmax_test(1);
-}
-
-#[test]
-fn simd_argmax_n7() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmax_test(7);
-}
-
-#[test]
-fn simd_argmax_n8() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmax_test(8);
-}
-
-#[test]
-fn simd_argmax_n9() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmax_test(9);
-}
-
-#[test]
-fn simd_argmax_n1024() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmax_test(1024);
-}
-
-#[test]
-fn simd_argmax_n100003() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmax_test(100003);
-}
-
-// ---------------------------------------------------------------------------
-// chelis_argmin_f32 tests
-// ---------------------------------------------------------------------------
-
-fn run_argmin_test(n: usize) {
-    let data = test_data(n);
-    let expected = naive_argmin(&data);
-    let src = make_c_program_int("chelis_argmin_f32", &data);
-    let out = compile_and_run(&format!("argmin_{n}"), &src);
-    let got: usize = out
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("argmin n={n}: could not parse output {:?}", out.trim()));
-    assert_eq!(
-        got, expected,
-        "argmin n={n}: expected {expected}, got {got}"
-    );
-}
-
-#[test]
-fn simd_argmin_n1() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmin_test(1);
-}
-
-#[test]
-fn simd_argmin_n7() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmin_test(7);
-}
-
-#[test]
-fn simd_argmin_n8() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmin_test(8);
-}
-
-#[test]
-fn simd_argmin_n9() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmin_test(9);
-}
-
-#[test]
-fn simd_argmin_n1024() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmin_test(1024);
-}
-
-#[test]
-fn simd_argmin_n100003() {
-    if !gcc_available() {
-        eprintln!("gcc not available, skipping");
-        return;
-    }
-    run_argmin_test(100003);
 }

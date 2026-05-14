@@ -2191,56 +2191,14 @@ fn g21_matmul_f64_gpu_matches_cpu() {
     );
 }
 
-// WS-A3 lifted the HIP-side F1 panic for bf16 (and f16) matmul: the
-// backend now reads the `BlasMatmul.accumulator` field explicitly and
-// dispatches bf16 + spec-default f32 accumulator through
-// `hipblasGemmEx` per spec/04-type-system.md §5.7.1. Replaces the
-// prior `ws_a2_hip_f1_still_rejects_bf16_matmul` rejection assertion.
-// The numerical correctness path lives in
-// `crates/chelis-backend-hip/tests/ws_a3_bf16_f16_matmul.rs`; this
-// test pins only that codegen no longer panics.
-#[test]
-fn ws_a3_hip_admits_bf16_matmul_at_codegen() {
-    use chelis_ir::dag::DimExpr;
-    let mut dag = Dag::new();
-    let bf16_ty = TensorType {
-        dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
-        precision: Prim::Bf16,
-    };
-    let a = dag.add_node(
-        RiscOp::Load { name: "a".into() },
-        vec![],
-        bf16_ty.clone(),
-        None,
-    );
-    let b = dag.add_node(
-        RiscOp::Load { name: "b".into() },
-        vec![],
-        bf16_ty.clone(),
-        None,
-    );
-    let mm_op = RiscOp::BlasMatmul {
-        batch_dims: vec![],
-        m: DimExpr::Concrete(2),
-        n: DimExpr::Concrete(2),
-        k: DimExpr::Concrete(2),
-        accumulator: Prim::F32,
-    };
-    let mm = dag.add_node(mm_op, vec![a, b], bf16_ty, None);
-    dag.add_root(mm);
-
-    let result = std::panic::catch_unwind(|| {
-        let _ = chelis_backend_hip::codegen_hip(&dag, "ws_a3_hip_bf16");
-    });
-    assert!(
-        result.is_ok(),
-        "WS-A3 lifted bf16 matmul; HIP codegen must not panic. Got: {:?}",
-        result.err().and_then(|p| p
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| p.downcast_ref::<&'static str>().map(|s| s.to_string())))
-    );
-}
+// WS-A3 bf16 codegen acceptance ("HIP codegen no longer panics on bf16
+// matmul") is pinned by
+// `crates/chelis-backend-hip/tests/ws_a3_bf16_f16_matmul.rs::
+// bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper`, which is a
+// strict superset: it asserts codegen succeeds AND emits the
+// `chelis_hipblas_bf16_gemm_f32_acc_row_major` wrapper with `-lhipblas`.
+// The former `ws_a3_hip_admits_bf16_matmul_at_codegen` here only asserted
+// "does not panic" and was removed as a duplicate.
 
 // Negative coverage parallel to the bf16 case: i8 matmul stays rejected
 // (WS-A4 admits i8 reduce_sum, but spec/04-type-system.md §5.7.2
