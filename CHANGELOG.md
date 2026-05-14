@@ -50,6 +50,37 @@ identical seed=7 vector. Deleted
 `read_parquet` and `write_parquet`, type-checks a `def` for each, and
 also runs `chelis build`. No invariant coverage was lost.
 
+### Changed - e2e parsimony pass (ir/types/api/e2e/effects test cluster)
+
+Trimmed redundant integration-test boilerplate in the
+chelis-ir / chelis-types / chelis-compiler-api / chelis-e2e cluster
+without dropping any pinned invariant.
+
+- Deleted `crates/chelis-types/tests/rt_lin_div_diagnosis.rs`, a
+  `println!`-only Phase G' investigation scaffold with zero
+  assertions. The Phase G' linearity behavior it probed stays pinned
+  by `phase_e_linearity_with_context.rs`.
+- Deleted two subset tests in `crates/chelis-e2e/tests/bench_phase1e.rs`
+  (`bench_phase1e_missing_pytorch_interpreter_emits_structured_skip_report`,
+  `bench_phase1e_hidden_hip_device_emits_structured_skip_report`); both
+  skip-reason assertions are already covered by
+  `bench_phase1e_linreg_smoke_emits_structured_json`.
+- Folded `parity_pair_1/2/3` in `phase_f_with_context.rs` and the three
+  `eval_in_context_matches_prepare_eval_*` tests in
+  `phase_g_compiled_context.rs` into table-driven tests with identical
+  coverage.
+- Deleted two looser duplicates in `rt1_adversarial.rs`
+  (`cast_scalar_to_u8_rejected_at_check_time`,
+  `out_of_i32_range_literal_default_behavior`); the exact-diagnostic
+  versions in `ws_a0_rt1_unsigned_rejection.rs` and
+  `ws_a0_rt1_int_overflow.rs` assert a strict superset.
+  `d1_diagnostic_mentions_i64_suffix_and_cast` is kept because it
+  exercises an int64-return-position input no `ws_a0_*` test covers.
+- `#[ignore]`-gated the wall-clock perf-ratio test
+  `rt_g_compose.rs::g5_cold_path_overhead_at_most_2x_monolithic`,
+  separating it from the correctness pass per the CLAUDE.md
+  perf-vs-correctness rule, and documented it in `docs/manual_gates.md`.
+
 ## [0.7.9] — 2026-05-14
 
 ### Fixed - chelis check advisory warnings now match chelis lint --check
