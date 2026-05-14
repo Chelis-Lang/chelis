@@ -54,25 +54,11 @@ fn parse_name_rejects_fp32_misspelling() {
     assert_eq!(Prim::parse_name("fp32"), None);
 }
 
-/// §1.1.2 documents the workaround as casting to int32/int64. Verify
-/// `cast(x, u8)` is rejected at type-check time. NEGATIVE-PARITY twin
-/// to the existing f8e4m3 rejection tests, but for the §1.1.2 surface.
-#[test]
-fn cast_scalar_to_u8_rejected_at_check_time() {
-    let src = "def main -> int32 = cast(1, u8)";
-    let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep =
-        res.expect_err("cast to u8 must be a type error per spec §1.1.2 (unsigned out of scope)");
-    let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
-    // The spec doesn't pin exact wording for §1.1.2; just verify the cast
-    // is rejected and `u8` appears somewhere in the diagnostic so the
-    // operator can map it back to the spec.
-    assert!(
-        !rep.errors.is_empty(),
-        "u8 cast must error; got empty error report. messages={messages:?}"
-    );
-}
+// `cast(1, u8)` rejection at check time is pinned with the exact §1.1.2
+// diagnostic by `ws_a0_rt1_unsigned_rejection.rs::
+// cast_scalar_to_u8_rejected_with_spec_1_1_2_diagnostic`, which asserts
+// a strict superset of the looser rejection-only check that previously
+// lived here.
 
 // ---------------------------------------------------------------
 // D. Literal-default rule (§5.3)
@@ -125,39 +111,13 @@ fn bare_float_literal_does_not_satisfy_int64() {
     );
 }
 
-/// §5.3: out-of-i32-range integer literal. `2147483648` = 2^31 fits in
-/// i64 but overflows i32. The spec narrows to int32 mechanically; an
-/// explicit out-of-range diagnostic is the user-friendly behavior.
-///
-/// EXPECTED PER SPEC: error mentioning the literal is out of range for
-/// the int32 default and suggesting a suffix or cast.
-/// ACTUAL: TBD — pin and let the test report the gap.
-#[test]
-fn out_of_i32_range_literal_default_behavior() {
-    let src = "def main -> int32 = 2147483648";
-    let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    // Three possible behaviors:
-    //   (a) error with out-of-range diagnostic mentioning int32
-    //   (b) silently overflow (wraps to -2147483648)
-    //   (c) silently widens to int64
-    // The spec §5.3 contract is no implicit widening; the lexer parses
-    // at i64 then narrows to i32. If narrowing wraps silently, that's
-    // a SPEC-DIVERGENCE finding.
-    match res {
-        Ok(_) => panic!(
-            "spec §5.3: literal `2147483648` does NOT fit int32 (the §5.3 default). \
-             Program type-checked silently, which is silent integer overflow. \
-             Expected an out-of-range diagnostic; got accepted program."
-        ),
-        Err(rep) => {
-            let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
-            // We want the diagnostic to mention "out of range" or the
-            // i32 limit. Just record what we got.
-            eprintln!("out-of-range int32 literal diagnostic shape: {messages:?}");
-        }
-    }
-}
+// The `def main -> int32 = 2147483648` out-of-i32-range default case is
+// pinned with the exact §5.3 range diagnostic by
+// `ws_a0_rt1_int_overflow.rs::
+// literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic`, which
+// asserts a strict superset of the rejection-only check that previously
+// lived here (same source, plus the exact out-of-range phrase, the i64
+// suffix workaround, the cast workaround, and the §5.3 spec citation).
 
 // ---------------------------------------------------------------
 // H. Negative-parity audit on f8e4m3_rejection.rs
@@ -408,6 +368,13 @@ fn unknown_suffix_is_lex_error() {
 /// D1 + WS-B1 interaction (spec §5.3 + §5.5): the i32-overflow
 /// diagnostic now suggests both the `i64` literal suffix AND the
 /// `cast(_, i64)` workaround, since the suffix grammar is shipped.
+///
+/// Distinct input from `ws_a0_rt1_int_overflow.rs`: this snippet
+/// declares an `int64` return position (`def main -> int64 = ...`),
+/// pinning that even an int64-typed context does not rescue a bare
+/// integer literal from the §5.3 int32 default and the D1 diagnostic
+/// still fires. The `ws_a0_*` exact-diagnostic version uses an `int32`
+/// return position, so it does not cover this case.
 #[test]
 fn d1_diagnostic_mentions_i64_suffix_and_cast() {
     let src = "def main -> int64 = 2147483648";
