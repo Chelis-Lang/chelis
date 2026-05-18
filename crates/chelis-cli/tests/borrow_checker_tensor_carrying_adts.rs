@@ -98,6 +98,37 @@ fn borrow_tensorless_adt_is_still_rejected() {
 }
 
 #[test]
+fn borrow_parametric_adt_at_tensor_arg_is_accepted() {
+    // The OR's second branch: `Wrapper[a]` whose definition is just
+    // `Wrapper { value: a }` is NOT a tensor-carrying ADT by name (its
+    // field type is the abstract type variable `a`, not `tensor`). At
+    // the call site, instantiation pins `a = tensor[..]`, so the
+    // `t-adt {} Wrapper (t-tensor ...)` form *should* still be borrow-
+    // eligible via the type-argument walk that the fix preserves with
+    // an `OR`. This test guards that branch — if someone simplifies
+    // the `t-adt` arm to "only consult `tensor_carrying_adts`", this
+    // case starts failing.
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("wrapper_borrow.ch");
+    write_file(
+        &fixture,
+        "module WrapperShape\n\
+         type Wrapper[a] =\n\
+           | Wrapper { value: a }\n\
+         sig borrow_wrapper: &Wrapper[tensor[4, f32]] -> bool\n\
+         def borrow_wrapper(w) = true\n\
+         def consume_wrapper(w: Wrapper[tensor[4, f32]]) -> bool = {\n\
+           borrow_wrapper(&w)\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    check_file(&fixture)
+        .stdout(predicate::str::contains("\"errors\": []"))
+        .stdout(predicate::str::contains("InvalidBorrow").not());
+}
+
+#[test]
 fn borrow_nested_tensor_carrying_adt_is_accepted() {
     // Transitive tensor-carrying: ADT A wraps an ADT B that contains
     // a tensor field. Both A and B end up in `tensor_carrying_adts`

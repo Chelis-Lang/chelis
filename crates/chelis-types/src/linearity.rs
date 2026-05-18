@@ -238,6 +238,13 @@ struct Checker {
     /// (optimizer `_step_tree`) where `&BatchNormParams` /
     /// `&AdamState[tensor[..]]` (with the tensor in a record field,
     /// not the ADT-arg position) was rejected with `InvalidBorrow`.
+    ///
+    /// Keyed on bare ADT name. Today the type checker rejects ADT
+    /// name collisions across modules, so this is safe; once Chelis
+    /// gains qualified ADT names, this set should migrate to a
+    /// `Set<AdtId>` queried off the shared `AdtRegistry` instead of
+    /// reparsing `deftype` exprs here. See the function-level note
+    /// on [`compute_tensor_carrying_adts`].
     tensor_carrying_adts: HashSet<String>,
     /// Depth counter for desugarer-synthesized destructure scopes
     /// (`__chelis_tmp_N` bind chains tagged with `destructure: true`
@@ -379,6 +386,13 @@ pub fn check_linearity_with_context(
     // ADT registry comes from both library and new code — library decls
     // can introduce tensor-carrying ADTs that new-code borrows from, and
     // new-code can also introduce new ones. Walk both expr lists.
+    //
+    // Note: the library half is recomputed on every call. That is
+    // intentional for now — `CheckedProgram` does not cache the
+    // carrier set, and the fixed-point pass is small relative to the
+    // rest of the linearity check. Once `CheckedProgram` exposes a
+    // shared `AdtRegistry`, both halves should query that registry
+    // directly and this recomputation can go away.
     let mut tensor_carrying_adts = compute_tensor_carrying_adts(library_program.annotated_exprs());
     tensor_carrying_adts.extend(compute_tensor_carrying_adts(new_program.annotated_exprs()));
     let mut checker = Checker {
@@ -1589,6 +1603,16 @@ fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>
 /// ADTs (the standard "is this type transitively tensor-carrying?"
 /// graph walk). The pass-count bound matches the number of distinct
 /// ADT defs; in practice 2-3 passes suffice.
+///
+/// Typealiases (`typealias`) are NOT walked here. The inference layer
+/// owns alias resolution — see `resolve_type_aliases` in `infer.rs`
+/// (exercised by `typealias_zero_param_resolves_in_defsig` and
+/// siblings) — and any case where a `typealias` name reaches the
+/// linearity checker still wearing a `(t-adt {} Alias ...)` shape is
+/// a bug in inference, not in this carrier set. If/when the linearity
+/// checker gains direct access to a shared `AdtRegistry`, this helper
+/// retires in favor of querying that registry's variant-field types
+/// (which already know about aliases too).
 fn compute_tensor_carrying_adts(exprs: &[Expr]) -> HashSet<String> {
     // Step 1: collect every (adt_name, field_type_exprs) pair from
     // `(deftype {} Name (params?) (variant {} VariantName [field_or_tyarg]...)...)`
@@ -1642,38 +1666,21 @@ fn compute_tensor_carrying_adts(exprs: &[Expr]) -> HashSet<String> {
 
     // Step 2: fixed-point iteration. An ADT is tensor-carrying iff any
     // of its field types contains a tensor (looking up other ADTs in
-    // the current set). Stop when a pass adds no new names.
+    // the current set). Reuses `type_expr_contains_tensor` against
+    // the in-progress carrier set, so the recursive `t-adt` lookup
+    // walks the same code path used at check time. Stop when a pass
+    // adds no new names; bounded by the ADT count.
     let mut carriers: HashSet<String> = HashSet::new();
-    fn ty_carries(ty: &Expr, carriers: &HashSet<String>) -> bool {
-        let Expr::List(list, _) = ty else {
-            return false;
-        };
-        match get_tag(list) {
-            Some("t-tensor") => true,
-            Some("t-ref") => children(list).iter().any(|c| ty_carries(c, carriers)),
-            Some("t-tuple") => children(list).iter().any(|c| ty_carries(c, carriers)),
-            Some("t-adt") => {
-                let name_carries = children(list)
-                    .first()
-                    .and_then(symbol_name)
-                    .is_some_and(|n| carriers.contains(n));
-                name_carries
-                    || children(list)
-                        .iter()
-                        .skip(1)
-                        .any(|c| ty_carries(c, carriers))
-            }
-            Some("t-fn") => false,
-            _ => false,
-        }
-    }
     loop {
         let mut grew = false;
         for (name, field_tys) in &adt_field_types {
             if carriers.contains(name) {
                 continue;
             }
-            if field_tys.iter().any(|ty| ty_carries(ty, &carriers)) {
+            if field_tys
+                .iter()
+                .any(|ty| type_expr_contains_tensor(ty, &carriers))
+            {
                 carriers.insert(name.clone());
                 grew = true;
             }

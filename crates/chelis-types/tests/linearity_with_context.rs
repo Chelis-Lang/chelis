@@ -467,6 +467,43 @@ def caller(actual: tensor[4, f32]): tensor[4, f32] =
     assert!(with_ctx.is_ok());
 }
 
+// ── Tensor-carrying ADTs ──
+
+#[test]
+fn library_tensor_carrying_adt_borrow_is_accepted_with_context() {
+    // The library declares a record-style ADT (`BatchNormParams`) whose
+    // fields contain `tensor`. New code calls a library function that
+    // takes `&BatchNormParams[n]`. The borrow must succeed without
+    // `InvalidBorrow`, which requires that `check_linearity_with_context`
+    // populates `tensor_carrying_adts` from the LIBRARY half too — not
+    // only the new-code half. Pre-fix, the library declaration was
+    // invisible to the carrier set and the borrow was rejected.
+    let library_src = r#"
+type BatchNormParams[n] =
+  | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }
+
+sig lib_borrow_params: &BatchNormParams[n] -> bool
+def lib_borrow_params(p) = true
+"#;
+    let new_src = r#"
+def use_params[n](p: BatchNormParams[n]): bool = lib_borrow_params(&p)
+"#;
+
+    let with_ctx = check_new_with_context(library_src, new_src);
+    let mono = check_monolithic_combined(library_src, new_src);
+
+    assert_eq!(
+        with_ctx.is_ok(),
+        mono.is_ok(),
+        "library tensor-carrying ADT must be visible to with-context borrow check"
+    );
+    assert!(
+        with_ctx.is_ok(),
+        "borrow of library-declared tensor-carrying ADT must succeed: {:?}",
+        with_ctx.err()
+    );
+}
+
 // ── Empty / degenerate cases ──
 
 #[test]
