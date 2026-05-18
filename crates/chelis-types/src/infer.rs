@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
 
-use crate::adt::AdtRegistry;
+use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
 use crate::context::{TypeEnv, TypeEnvInner};
 use crate::env::Env;
@@ -6311,7 +6311,7 @@ fn infer_app(
     // written for.
     if let Some(ref fname) = ctor_lookup_name
         && let Some((_adt_name, variant)) = adt_reg
-            .lookup_variant_preferring_shape(fname, false)
+            .lookup_variant_preferring_shape(fname, CallShape::Positional)
             .or_else(|| adt_reg.lookup_variant_terminal_unique(fname))
         && !variant.fields.is_empty()
         && variant
