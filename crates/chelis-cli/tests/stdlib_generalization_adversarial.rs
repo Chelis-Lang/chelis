@@ -118,10 +118,23 @@ fn run_build(path: &Path) -> std::process::Output {
     // Use std::process::Command directly because assert_cmd's
     // `.unwrap()` panics on non-zero exit, which is the case we
     // want to inspect.
+    //
+    // Output is pinned to the source file's parent dir (always a
+    // tempdir for these tests) via `-o`. Without this, `chelis build`
+    // emits its C/header bundle into the cargo test runner's CWD
+    // (`crates/chelis-cli/`), littering the working tree with files
+    // like `concrete.c` / `simple_poly_build.c` and forcing
+    // .gitignore allowlists.
+    let out_dir = path.parent().expect("source path has parent");
     let bin = assert_cmd::cargo::cargo_bin("chelis");
     std::process::Command::new(bin)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap()])
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
         .output()
         .expect("spawn chelis")
 }
