@@ -1493,10 +1493,10 @@ impl<'a> EvalContext<'a> {
             "div" => numeric_binop(args, |lhs, rhs| lhs / rhs),
             "mod" => int_binop(args, |lhs, rhs| lhs % rhs),
             "neg" => numeric_unop(args, |value| -value),
-            "exp" => float_unop(args, f64::exp),
-            "log" => float_unop(args, f64::ln),
-            "sin" => float_unop(args, f64::sin),
-            "sqrt" => float_unop(args, f64::sqrt),
+            "exp" => transcendental_unop(args, f64::exp, f32::exp),
+            "log" => transcendental_unop(args, f64::ln, f32::ln),
+            "sin" => transcendental_unop(args, f64::sin, f32::sin),
+            "sqrt" => transcendental_unop(args, f64::sqrt, f32::sqrt),
             "eq" => compare_eq(args),
             "neq" => compare_eq(args).map(|value| match value {
                 RuntimeValue::Bool(value) => RuntimeValue::Bool(!value),
@@ -2939,12 +2939,32 @@ fn int_shift_binop(
     }
 }
 
-fn float_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeValue, String> {
+/// Unary transcendental dispatch shared by `exp`, `log`, `sin`, `sqrt`.
+/// Routes scalar args through `scalar_op` (f64 precision, matching
+/// chelis-std's scalar contract) and tensor args through
+/// `tensor_float_unop_f32` with `tensor_op` (f32 precision, matching
+/// the C backend's host helpers per the activation-dispatch comment
+/// above). This is the symmetric pair for `numeric_unop`, which
+/// handles tensor + scalar uniformly for ops that don't need separate
+/// transcendental precision. Resolves chelis#142, where these four
+/// ops were routed only through `float_unop` and panicked at runtime
+/// on tensor args despite being documented as elementwise in
+/// `packages/chelis-std/SKILL.md`.
+fn transcendental_unop(
+    args: &[RuntimeValue],
+    scalar_op: impl Fn(f64) -> f64,
+    tensor_op: impl Fn(f32) -> f32,
+) -> Result<RuntimeValue, String> {
     match args.first() {
+        Some(RuntimeValue::Tensor(tensor)) => Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+            tensor, tensor_op,
+        ))),
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.bits().as_f64()))
+            RuntimeValue::scalar_like_float(payload.dtype(), scalar_op(payload.bits().as_f64()))
         }
-        other => Err(format!("float op expects float arg, got {other:?}")),
+        other => Err(format!(
+            "transcendental op expects float scalar or tensor arg, got {other:?}"
+        )),
     }
 }
 
