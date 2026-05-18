@@ -6298,9 +6298,20 @@ fn infer_app(
             })
     });
 
+    // The call site uses positional `(app)` syntax here (named-field
+    // record construction lowers through a different builder, not
+    // through `infer_app`). When two ADTs in the dep graph define
+    // same-named constructors with different shapes (chelis#148: e.g.
+    // Coral.Frame.Column.IntCol is positional, School.Data.Dataset.IntCol
+    // is record), prefer the positional variant for this call site so
+    // the call dispatches to the matching ADT instead of erroring on
+    // the colliding record variant. Only emit the "must use named
+    // fields" error when EVERY same-named variant in scope is record-
+    // shaped, which is the original single-package case the error was
+    // written for.
     if let Some(ref fname) = ctor_lookup_name
         && let Some((_adt_name, variant)) = adt_reg
-            .lookup_variant(fname)
+            .lookup_variant_preferring_shape(fname, false)
             .or_else(|| adt_reg.lookup_variant_terminal_unique(fname))
         && !variant.fields.is_empty()
         && variant

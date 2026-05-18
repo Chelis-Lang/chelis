@@ -252,6 +252,41 @@ impl AdtRegistry {
         matches.next().is_none().then_some(first)
     }
 
+    /// Look up a variant by constructor name, preferring the variant whose
+    /// field-naming style matches `call_uses_named_fields`. Resolves
+    /// chelis#148-class collisions where two ADTs in different deps export
+    /// constructors with the same unqualified name but different shapes
+    /// (e.g. School.Data.Dataset.IntCol is a record-style constructor;
+    /// Coral.Frame.Column.IntCol is a positional/tuple constructor). When
+    /// the caller's call syntax is positional, return the positional
+    /// variant; when it's record-style, return the record variant.
+    /// Falls back to the first match if no shape-preferred variant exists.
+    pub fn lookup_variant_preferring_shape(
+        &self,
+        ctor_name: &str,
+        call_uses_named_fields: bool,
+    ) -> Option<(&str, &VariantInfo)> {
+        let candidates: Vec<(&str, &VariantInfo)> = self
+            .defs
+            .iter()
+            .flat_map(|(adt_name, def)| {
+                def.variants.iter().filter_map(move |variant| {
+                    (variant.name == ctor_name).then_some((adt_name.as_str(), variant))
+                })
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let shape_match = candidates.iter().find(|(_, v)| {
+            !v.fields.is_empty()
+                && v.fields
+                    .iter()
+                    .all(|(name, _)| name.is_some() == call_uses_named_fields)
+        });
+        shape_match.copied().or_else(|| candidates.first().copied())
+    }
+
     /// Register a type alias: `typealias Name[params] = Type`.
     pub fn register_alias(
         &mut self,
