@@ -5403,6 +5403,98 @@ ok = test_assert_close_tensor(actual, expected, 0.0001, "gelu pointwise (tanh-ap
     );
 }
 
+// Bucket 3b: float-unary primitive parity for `sqrt`/`log`/`exp`/`sin`
+// on tensor args. Closes the gap surfaced as `float op expects float
+// arg, got Some(Tensor(...))` in #142: the eval-lane dispatcher used
+// `float_unop` (scalar-only) for these four builtins, while the
+// C-backend `host_emit.rs` already emitted `sqrtf`/`logf`/`expf`/`sinf`
+// elementwise. The eval lane now routes tensor args through
+// `tensor_float_unop_f32` so both lanes stay byte-identical (to f32 ulp
+// tolerance), mirroring the activation block above.
+
+#[test]
+fn bucket3b_sqrt_tensor_runs_in_eval_and_c_lanes() {
+    // sqrt is exact for these perfect squares in any precision.
+    run_activation_parity(
+        "bucket3b_sqrt",
+        r#"
+def sqrt_apply(x: tensor[3, f32]) -> tensor[3, f32] = sqrt(x)
+
+input = to_tensor([cast(4.0, f32), cast(9.0, f32), cast(16.0, f32)])
+actual = sqrt_apply(input)
+expected = to_tensor([cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.000001, "sqrt pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3b_log_tensor_runs_in_eval_and_c_lanes() {
+    // log(1) = 0 exactly; log(e) ≈ 1; log(e^2) ≈ 2.
+    run_activation_parity(
+        "bucket3b_log",
+        r#"
+def log_apply(x: tensor[3, f32]) -> tensor[3, f32] = log(x)
+
+input = to_tensor([cast(1.0, f32), cast(2.7182817, f32), cast(7.389056, f32)])
+actual = log_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(2.0, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "log pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3b_exp_tensor_runs_in_eval_and_c_lanes() {
+    // exp(0) = 1 exactly; exp(1) ≈ e; exp(-1) ≈ 1/e.
+    run_activation_parity(
+        "bucket3b_exp",
+        r#"
+def exp_apply(x: tensor[3, f32]) -> tensor[3, f32] = exp(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = exp_apply(input)
+expected = to_tensor([cast(1.0, f32), cast(2.7182817, f32), cast(0.36787945, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "exp pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3b_sin_tensor_runs_in_eval_and_c_lanes() {
+    // sin(0) = 0; sin(pi/2) = 1; sin(pi) ~= 0 (to f32 tolerance).
+    run_activation_parity(
+        "bucket3b_sin",
+        r#"
+def sin_apply(x: tensor[3, f32]) -> tensor[3, f32] = sin(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.5707964, f32), cast(3.1415927, f32)])
+actual = sin_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(0.0, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "sin pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3b_sqrt_scalar_still_works_in_eval() {
+    // Negative-parity guard: the fix must not regress scalar dispatch.
+    // sqrt(16.0) = 4.0 exactly.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bucket3b_sqrt_scalar.ch");
+    write_file(
+        &path,
+        "module Repro\nexport (result)\nresult = sqrt(cast(16.0, f32))\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("4"));
+}
+
 #[test]
 fn target_metal_accepts_gpu_resource_region() {
     let dir = tempdir().expect("tempdir");

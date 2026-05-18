@@ -20,18 +20,19 @@
 //!   * `Attention.scaled_dot_product_attention` — fully eval-clean as of
 //!     this commit; cross-checked under `chelis test` in
 //!     `packages/chelis-std/tests/runtime/attention_eval_cross.ch`
-//!   * `CrossEntropy.loss` — `softmax` works, but the host evaluator's
-//!     `log`/`exp` builtins still only accept scalar floats; piping a
-//!     tensor through `log` errors with `float op expects float arg`.
-//!     Out of scope for this fix.
+//!   * `CrossEntropy.loss` — `softmax` works; `log`/`exp` on tensor args
+//!     also work as of #142's eval-lane fix (`float_unop_with_tensor` in
+//!     `chelis-compiler-api/src/runtime.rs` routes tensor args through
+//!     `tensor_float_unop_f32`, matching the C backend's elementwise
+//!     `logf`/`expf` emit).
 //!   * `RmsNorm.forward` — uses `to_list` + `map` (already eval-clean)
 //!
 //! Self-tests for the `matmul` / `permute` / `sum` / `expand` / `softmax`
 //! host evaluator surface live in `packages/chelis-std/tests/runtime/`.
-//! Closing the remaining `log`-on-tensor and dim-generic-resolution gaps
-//! would let `Linear.forward` and `CrossEntropy.loss` run end-to-end under
-//! `chelis eval` too. Tracked separately from the N2 / expand-softmax
-//! work — those gaps predate this fix.
+//! Closing the remaining dim-generic-resolution gap would let
+//! `Linear.forward` run end-to-end under `chelis eval` too. Tracked
+//! separately from the N2 / expand-softmax work — those gaps predate
+//! this fix.
 //!
 //! These integration tests close that gap on the build path: stage
 //! chelis-std into a tempdir reef home, write a `main.ch` that calls the

@@ -1493,10 +1493,10 @@ impl<'a> EvalContext<'a> {
             "div" => numeric_binop(args, |lhs, rhs| lhs / rhs),
             "mod" => int_binop(args, |lhs, rhs| lhs % rhs),
             "neg" => numeric_unop(args, |value| -value),
-            "exp" => float_unop(args, f64::exp),
-            "log" => float_unop(args, f64::ln),
-            "sin" => float_unop(args, f64::sin),
-            "sqrt" => float_unop(args, f64::sqrt),
+            "exp" => float_unop_with_tensor(args, f64::exp, f32::exp),
+            "log" => float_unop_with_tensor(args, f64::ln, f32::ln),
+            "sin" => float_unop_with_tensor(args, f64::sin, f32::sin),
+            "sqrt" => float_unop_with_tensor(args, f64::sqrt, f32::sqrt),
             "eq" => compare_eq(args),
             "neq" => compare_eq(args).map(|value| match value {
                 RuntimeValue::Bool(value) => RuntimeValue::Bool(!value),
@@ -2945,6 +2945,25 @@ fn float_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeV
             RuntimeValue::scalar_like_float(payload.dtype(), op(payload.bits().as_f64()))
         }
         other => Err(format!("float op expects float arg, got {other:?}")),
+    }
+}
+
+/// Float unary that accepts both scalar floats and tensors. Scalar args
+/// run in `f64` via `scalar_op` (matching the C backend's libm `sqrt`/
+/// `exp`/`log`/`sin` scalar emit in `host_emit.rs`). Tensor args run
+/// elementwise in `f32` via `tensor_op` (matching the C backend's
+/// `expf`/`logf`/`sinf`/`sqrtf` tensor emit and the activation-block
+/// `f32` parity rule above).
+fn float_unop_with_tensor(
+    args: &[RuntimeValue],
+    scalar_op: impl Fn(f64) -> f64,
+    tensor_op: impl Fn(f32) -> f32,
+) -> Result<RuntimeValue, String> {
+    match args.first() {
+        Some(RuntimeValue::Tensor(tensor)) => Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+            tensor, tensor_op,
+        ))),
+        _ => float_unop(args, scalar_op),
     }
 }
 
