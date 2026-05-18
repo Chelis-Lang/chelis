@@ -296,7 +296,7 @@ impl AdtRegistry {
         if candidates.is_empty() {
             return None;
         }
-        candidates.sort_by(|(a, _), (b, _)| a.cmp(b));
+        candidates.sort_by_key(|(a, _)| *a);
         let want_named = matches!(call_shape, CallShape::Record);
         let shape_match = candidates.iter().find(|(_, v)| {
             !v.fields.is_empty()
