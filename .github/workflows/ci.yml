@@ -207,13 +207,13 @@ jobs:
             RANGE="HEAD~1..HEAD"
           fi
           FOUND=0
-          # Patterns covering Claude, OpenAI, Codex, ChatGPT, Copilot, generic AI
+          # Patterns covering Claude, Kiro, OpenAI, Codex, ChatGPT, Copilot, generic AI
           AI_MSG_PATTERNS=(
-            '(Co-)?Authored-By:.*(claude|anthropic|openai|codex|chatgpt|copilot)'
-            'Generated (with|by).*(claude|openai|codex|chatgpt|copilot|gpt-[0-9]|ai|llm)'
+            '(Co-)?Authored-By:.*(claude|anthropic|kiro|openai|codex|chatgpt|copilot)'
+            'Generated (with|by).*(claude|kiro|openai|codex|chatgpt|copilot|gpt-[0-9]|ai|llm)'
           )
           AI_IDENTITY_PATTERNS=(
-            '(claude|anthropic|openai|codex|chatgpt|copilot)'
+            '(claude|anthropic|kiro|openai|codex|chatgpt|copilot)'
           )
           for SHA in $(git rev-list "$RANGE"); do
             MSG="$(git log -1 --format="%B" "$SHA")"
