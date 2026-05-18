@@ -422,6 +422,18 @@ pub fn unify_tensor_prec(
 }
 
 /// Unify two dimensions.
+///
+/// Wildcard semantics (chelis#143 fix): when a Wildcard meets a dim
+/// variable, succeed WITHOUT binding the variable. Binding `Var(v)` to
+/// `Wildcard` is semantically the same as leaving `v` unbound (since
+/// `apply_dim(Wildcard)` always succeeds against anything), but the
+/// bind makes the variable "stuck" — a later position in the same sig
+/// that ought to unify `Var(v)` with a concrete `Lit(n)` instead hits
+/// `Wildcard ↔ Lit(n)` (Wildcard wins, no constraint) and the
+/// cross-position dim equality the sig promises is silently dropped.
+/// Leaving `v` free lets a concrete arg in any later position bind it,
+/// and a subsequent concrete arg with a different value then trips the
+/// `Lit ↔ Lit` mismatch as the sig demands.
 pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
     let d1 = subst.apply_dim(d1);
     let d2 = subst.apply_dim(d2);
@@ -429,6 +441,7 @@ pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError>
     match (&d1, &d2) {
         (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Ok(()),
         (Dim::Lit(l1), Dim::Lit(l2)) if l1 == l2 => Ok(()),
+        (Dim::Wildcard, Dim::Var(_)) | (Dim::Var(_), Dim::Wildcard) => Ok(()),
         (Dim::Wildcard, _) | (_, Dim::Wildcard) => Ok(()),
         (Dim::Var(v), _) => bind_dvar(*v, &d2, subst),
         (_, Dim::Var(v)) => bind_dvar(*v, &d1, subst),
