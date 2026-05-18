@@ -1625,7 +1625,10 @@ fn compute_tensor_carrying_adts(exprs: &[Expr]) -> HashSet<String> {
         let tag = get_tag(list);
         match tag {
             Some("module") => {
-                for child in list.elements.iter().skip(3) {
+                // `(module {} name body...)` — `children()` skips tag
+                // and meta, leaving `[name, body...]`; skip the name
+                // for the same shape the `deftype` branch below uses.
+                for child in children(list).iter().skip(1) {
                     collect(child, out);
                 }
             }

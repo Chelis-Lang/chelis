@@ -19,7 +19,7 @@
 // rejected with the same `InvalidBorrow` error.
 
 use assert_cmd::Command;
-use predicates::prelude::*;
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
@@ -31,11 +31,29 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
-fn check_file(path: &Path) -> assert_cmd::assert::Assert {
-    Command::cargo_bin("chelis")
+/// Run `chelis check <path>` and return the parsed JSON stdout.
+/// Parsing the output (rather than substring-matching it) keeps these
+/// regression tests insensitive to whitespace/key-order changes in
+/// `chelis check`'s machine-facing output.
+fn run_check(path: &Path) -> Value {
+    let output = Command::cargo_bin("chelis")
         .expect("binary")
         .args(["check", path.to_str().unwrap()])
         .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).expect("check output should be json")
+}
+
+fn error_kinds(json: &Value) -> Vec<String> {
+    json["errors"]
+        .as_array()
+        .expect("errors should be a json array")
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap_or("").to_string())
+        .collect()
 }
 
 fn fmt_inplace(path: &Path) {
@@ -68,10 +86,13 @@ fn borrow_tensor_carrying_record_adt_is_accepted() {
     );
     fmt_inplace(&fixture);
 
-    check_file(&fixture)
-        .stdout(predicate::str::contains("\"score\": 1"))
-        .stdout(predicate::str::contains("\"errors\": []"))
-        .stdout(predicate::str::contains("InvalidBorrow").not());
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "borrowing a tensor-carrying record ADT must produce no errors; got {kinds:?}"
+    );
 }
 
 #[test]
@@ -94,7 +115,12 @@ fn borrow_tensorless_adt_is_still_rejected() {
     );
     fmt_inplace(&fixture);
 
-    check_file(&fixture).stdout(predicate::str::contains("InvalidBorrow"));
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.iter().any(|k| k == "InvalidBorrow"),
+        "tensorless ADT borrow must still produce InvalidBorrow; got {kinds:?}"
+    );
 }
 
 #[test]
@@ -123,9 +149,12 @@ fn borrow_parametric_adt_at_tensor_arg_is_accepted() {
     );
     fmt_inplace(&fixture);
 
-    check_file(&fixture)
-        .stdout(predicate::str::contains("\"errors\": []"))
-        .stdout(predicate::str::contains("InvalidBorrow").not());
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.is_empty(),
+        "parametric ADT at tensor arg must still borrow cleanly; got {kinds:?}"
+    );
 }
 
 #[test]
@@ -150,7 +179,10 @@ fn borrow_nested_tensor_carrying_adt_is_accepted() {
     );
     fmt_inplace(&fixture);
 
-    check_file(&fixture)
-        .stdout(predicate::str::contains("\"errors\": []"))
-        .stdout(predicate::str::contains("InvalidBorrow").not());
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.is_empty(),
+        "transitive tensor-carrying ADT must borrow cleanly; got {kinds:?}"
+    );
 }
