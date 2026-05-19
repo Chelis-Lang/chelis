@@ -33,6 +33,16 @@ pub enum CheckErrorKind {
     /// A tensor type uses a precision the Phase 0f backend cannot represent
     /// (currently f16, bf16, f64, f8e4m3). Host scalar precisions are unaffected.
     UnsupportedTensorPrecision,
+    /// A `deftype` or `typealias` reuses a name already bound by an
+    /// earlier `deftype`, `typealias`, or prelude ADT in the same
+    /// program. Type names share one flat namespace in `AdtRegistry`
+    /// (keyed on bare strings), so silent last-write-wins would let a
+    /// later declaration overwrite the original — propagating wrong
+    /// constructor types, wrong variant sets, and (per
+    /// `compute_tensor_carrying_adts` in `linearity.rs`) order-
+    /// dependent borrow semantics. Reject the collision at declaration
+    /// time instead.
+    DuplicateDefinition,
     Other,
 }
 
@@ -53,6 +63,7 @@ impl CheckErrorKind {
             CheckErrorKind::InvalidBorrow => 0.8,
             CheckErrorKind::CycleDetected => 0.9,
             CheckErrorKind::UnsupportedTensorPrecision => 0.8,
+            CheckErrorKind::DuplicateDefinition => 0.9,
             CheckErrorKind::Other => 0.5,
         }
     }

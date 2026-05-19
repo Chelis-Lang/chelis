@@ -546,6 +546,79 @@ def consume_outer[n](o: Outer[n]): bool = borrow_outer(&o)
     );
 }
 
+// ── Carrier-set always-recompute invariant ──
+//
+// `check_linearity_with_context` chains the library and new-code
+// `annotated_exprs()` into a single `compute_tensor_carrying_adts`
+// call so the fixed-point pass resolves cross-package transitive
+// carriers in one go. The function holds no per-call state and
+// `CheckedProgram` deliberately does NOT cache the carrier set:
+// any future change that introduces caching MUST preserve the
+// always-recompute-from-union contract, or a stale cache will
+// silently desync borrow semantics. These tests lock that in.
+
+#[test]
+fn check_linearity_with_context_is_pure_across_repeated_calls() {
+    // Call the function repeatedly, alternating between a library
+    // that makes the borrow legal and one that doesn't. Each call's
+    // outcome must depend ONLY on the library passed in — no
+    // in-process state may leak between calls.
+    //
+    // Library A declares a tensor-carrying ADT named `Carrier`; new
+    // code wraps it in `Outer` and borrows `&o`. Against library A
+    // the borrow is accepted (Outer is transitively tensor-carrying).
+    // Library B declares an unrelated, non-carrying ADT and provides
+    // its own `Carrier` shaped WITHOUT a tensor field — under
+    // library B, `Outer.inner: Carrier` is no longer tensor-carrying,
+    // so `&o` would be rejected with `InvalidBorrow` if linearity
+    // saw it correctly. A stale cached carrier set from a prior
+    // call to library A would silently mis-accept it.
+    let lib_a = r#"
+type Carrier[n] =
+  | Carrier { values: tensor[n, f32] }
+"#;
+    let lib_b = r#"
+type Carrier[n] =
+  | Carrier { tag: int32 }
+"#;
+    let new_src = r#"
+type Outer[n] =
+  | Outer { inner: Carrier[n] }
+
+sig borrow_outer: &Outer[n] -> bool
+def borrow_outer(o) = true
+def consume_outer[n](o: Outer[n]): bool = borrow_outer(&o)
+"#;
+
+    // Interleave the calls to make any leaked state fail loudly.
+    for _ in 0..3 {
+        let r_a = check_new_with_context(lib_a, new_src);
+        assert!(
+            r_a.is_ok(),
+            "library A (tensor-carrying Carrier) must accept &Outer borrow on every call; \
+             got: {:?}",
+            r_a.err(),
+        );
+
+        let r_b = check_new_with_context(lib_b, new_src);
+        assert!(
+            r_b.is_err(),
+            "library B (Carrier carries no tensor) must reject &Outer borrow on every call; \
+             a stale carrier set from a prior library-A call would silently mis-accept it",
+        );
+        let errors = r_b.expect_err("library B must error");
+        let cites_invalid_borrow = errors
+            .iter()
+            .any(|e| matches!(e.kind, chelis_types::errors::CheckErrorKind::InvalidBorrow));
+        assert!(
+            cites_invalid_borrow,
+            "library B rejection must be `InvalidBorrow` (the carrier-set-driven diagnostic), \
+             got: {:?}",
+            errors,
+        );
+    }
+}
+
 // ── Empty / degenerate cases ──
 
 #[test]

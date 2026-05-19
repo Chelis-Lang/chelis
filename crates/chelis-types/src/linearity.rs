@@ -239,12 +239,18 @@ struct Checker {
     /// `&AdamState[tensor[..]]` (with the tensor in a record field,
     /// not the ADT-arg position) was rejected with `InvalidBorrow`.
     ///
-    /// Keyed on bare ADT name. Today the type checker rejects ADT
-    /// name collisions across modules, so this is safe; once Chelis
-    /// gains qualified ADT names, this set should migrate to a
-    /// `Set<AdtId>` queried off the shared `AdtRegistry` instead of
-    /// reparsing `deftype` exprs here. See the function-level note
-    /// on [`compute_tensor_carrying_adts`].
+    /// Keyed on bare ADT name. Two-name collisions are rejected up
+    /// front by `collect_declarations` in `infer.rs` with
+    /// `CheckErrorKind::DuplicateDefinition`, so by the time the
+    /// linearity checker runs, every name in this set corresponds to
+    /// exactly one `deftype`. That guarantee is what makes a bare
+    /// `String` key safe here; without it the carrier set would be
+    /// order-dependent (last-write-wins via `HashMap::insert` in
+    /// `compute_tensor_carrying_adts`). Once Chelis gains qualified
+    /// ADT names, this set should migrate to a `Set<AdtId>` queried
+    /// off the shared `AdtRegistry` instead of reparsing `deftype`
+    /// exprs here. See the function-level note on
+    /// [`compute_tensor_carrying_adts`].
     tensor_carrying_adts: HashSet<String>,
     /// Depth counter for desugarer-synthesized destructure scopes
     /// (`__chelis_tmp_N` bind chains tagged with `destructure: true`
@@ -383,20 +389,34 @@ pub fn check_linearity_with_context(
 
     // Top-level types come from new_program.type_env(), which Phase C
     // already unioned (library + new-code). New-code types win on shadow.
-    // ADT registry comes from both library and new code — library decls
-    // can introduce tensor-carrying ADTs that new-code borrows from, and
-    // new-code can also introduce new ones. Chain both expr lists into
-    // a single `compute_tensor_carrying_adts` call so the fixed-point
-    // sees every ADT at once: a new-code ADT wrapping a library
-    // tensor-carrying ADT must converge to tensor-carrying in the same
-    // pass, which two independent calls (each with its own local
-    // carriers set) would miss.
     //
-    // The whole thing is recomputed on every call. That is intentional
-    // for now — `CheckedProgram` does not cache the carrier set, and
-    // the fixed-point pass is small relative to the rest of the
-    // linearity check. Once `CheckedProgram` exposes a shared
-    // `AdtRegistry`, the registry query replaces this helper entirely.
+    // The carrier set comes from BOTH library and new code, chained
+    // into one `compute_tensor_carrying_adts` call so the fixed-point
+    // sees every ADT at once. Library decls can introduce tensor-
+    // carrying ADTs that new-code borrows; new-code can introduce
+    // additional ones whose fields reference library ADTs (the
+    // cross-package transitive case). Two independent calls — one
+    // per half, each with its own local set — would miss any new-
+    // code ADT whose carrying status depends on a library ADT, even
+    // though both halves are eventually unioned.
+    //
+    // ALWAYS-RECOMPUTE INVARIANT: this helper is recomputed from the
+    // chained iterator on every call, with no per-call state held by
+    // `Checker`, the library `CheckedProgram`, or any global cache.
+    // The fixed-point bound (`O(adt_count)` passes, each `O(adt_count
+    // * field_count)`) is small relative to the per-expression
+    // linearity walk that follows. Future change risk: if a later
+    // refactor caches `tensor_carrying_adts` per `CheckedProgram` and
+    // composes the library's cached set with a fresh new-code pass,
+    // the fixed-point will not re-resolve new-code ADTs whose
+    // carrying status depends on library ADTs and borrow semantics
+    // will silently desync. The locking test for this contract lives
+    // at `tests/linearity_with_context.rs::
+    // check_linearity_with_context_is_pure_across_repeated_calls`.
+    // Once `CheckedProgram` exposes a shared `AdtRegistry`, the
+    // registry query replaces this helper entirely (and the new
+    // call site is responsible for re-establishing the same union-
+    // and-recompute discipline).
     let tensor_carrying_adts = compute_tensor_carrying_adts(
         library_program
             .annotated_exprs()
@@ -1607,10 +1627,39 @@ fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>
 /// `t-adt` arm of `type_expr_contains_tensor` only inspected the ADT's
 /// type *arguments*, missing tensor fields declared in the variant.
 ///
+/// # Caller contract
+///
+/// The caller MUST pass every `deftype` whose name might appear
+/// (transitively) in the field type of any other `deftype` in the
+/// same call. The fixed point converges only over the ADTs visible
+/// in `exprs`: an unrelated-library ADT whose carrier status would
+/// flip a new-code ADT into the result is invisible if the library
+/// half is not chained in. `check_linearity_with_context` enforces
+/// this by chaining `library_program.annotated_exprs()` with
+/// `new_program.annotated_exprs()` in one call; any future caller
+/// (e.g. an incremental `AdtRegistry`-backed query) must preserve
+/// the same union-and-recompute discipline or the carrier set will
+/// silently desync from the cross-package borrow rules. The locking
+/// regression test is at `tests/linearity_with_context.rs::
+/// check_linearity_with_context_is_pure_across_repeated_calls`.
+///
+/// # Complexity
+///
 /// Fixed-point iteration handles ADTs whose fields reference other
 /// ADTs (the standard "is this type transitively tensor-carrying?"
-/// graph walk). The pass-count bound matches the number of distinct
-/// ADT defs; in practice 2-3 passes suffice.
+/// graph walk). Each pass scans every (adt, field) pair; the loop
+/// terminates after at most `O(adt_count)` passes (one per
+/// transitive layer), giving a worst-case bound of
+/// `O(adt_count^2 * fields_per_adt)`. In practice 2-3 passes suffice
+/// on the existing corpus, so the cost is small relative to the
+/// per-expression linearity walk. The function is recomputed on
+/// every `check_linearity` / `check_linearity_with_context` call —
+/// notably including REPL-driven re-evaluations (`chelis surf`,
+/// `chelis eval`). When that cost becomes load-bearing, the
+/// migration trigger is exposure of a shared `AdtRegistry` query on
+/// `CheckedProgram`: replace this helper with a registry lookup of
+/// variant-field types, keeping the same union-and-recompute
+/// invariant on the lookup side.
 ///
 /// Typealiases (`typealias`) are NOT walked here. The inference layer
 /// owns alias resolution — see `resolve_type_aliases` in `infer.rs`
