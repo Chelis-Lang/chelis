@@ -1107,3 +1107,45 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
 - Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases outside the v1 inference scope.
+
+### 8.4 Tensor-carrying ADTs
+
+An ADT `T` is **tensor-carrying** iff at least one of `T`'s variant fields has a
+type that contains a tensor, where "contains a tensor" is the least relation
+satisfying:
+
+- `tensor[...]` contains a tensor.
+- `(t1, t2, ...)` (tuple) contains a tensor iff some `ti` does.
+- `&U` contains a tensor iff `U` does.
+- `U[arg1, arg2, ...]` (ADT instantiation) contains a tensor iff `U` is itself
+  tensor-carrying, **or** some `argi` contains a tensor.
+- Function types `t-fn` are not treated as containing a tensor for this rule,
+  even when their parameters or return contain one. Closures that capture
+  tensors are handled by the §8.3 capture rule, not the carrier set.
+
+Tensor-carrying ADTs participate in linearity exactly like bare tensors:
+
+- An owned `T` value is linear; it has exactly one terminal path (a consuming
+  use or an inserted `Drop`).
+- `&T` is a valid borrow expression and a valid borrow type, and follows the
+  same auto-borrow rules as `&tensor[...]`.
+- A `match` that scrutinizes an owned tensor-carrying `T` consumes the
+  scrutinee per §8.3; field bindings on the matched variant become the new
+  live owners of any tensor payloads they expose.
+
+The carrier rule is transitive across `deftype` declarations: if `Outer` has a
+field of type `Inner[k]` and `Inner` is tensor-carrying, then `Outer` is
+tensor-carrying. Resolution is a least-fixed-point over all `deftype` decls
+visible at check time. When the linearity checker runs against composed
+contexts (library + new code), both halves are resolved in one pass so a
+new-code `Outer` whose carrier status depends on a library `Inner` is
+recognized correctly.
+
+### 8.5 Type-Name Uniqueness
+
+Within a single checked program, every `deftype` and `typealias` name must be
+unique. The type-name namespace is flat: a `deftype Foo` cannot coexist with
+another `deftype Foo` nor with a `typealias Foo = ...`, and user code cannot
+re-declare a prelude type name (e.g. `Option`, `List`). Collisions are
+rejected at declaration time as `DuplicateDefinition`. This rule is what
+makes the §8.4 carrier set well-defined when keyed on the bare ADT name.

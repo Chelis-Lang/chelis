@@ -228,6 +228,30 @@ struct Checker {
     errors: Vec<CheckError>,
     info: LinearityInfo,
     top_level_types: HashMap<String, Expr>,
+    /// Names of ADTs whose definitions (transitively) carry a tensor
+    /// field. Computed once per `check_linearity` call by walking
+    /// `deftype` declarations in `annotated_exprs`. Used by
+    /// `expr_is_owned_or_borrow_linear` so `&adt_value` is accepted as
+    /// a borrow whenever the ADT's definition contains a tensor, not
+    /// only when the ADT's type *arguments* contain one. Resolves the
+    /// downstream blocker for `School` P1.5 (BatchNorm) and P2.5
+    /// (optimizer `_step_tree`) where `&BatchNormParams` /
+    /// `&AdamState[tensor[..]]` (with the tensor in a record field,
+    /// not the ADT-arg position) was rejected with `InvalidBorrow`.
+    ///
+    /// Keyed on bare ADT name. Two-name collisions are rejected up
+    /// front by `collect_declarations` in `infer.rs` with
+    /// `CheckErrorKind::DuplicateDefinition`, so by the time the
+    /// linearity checker runs, every name in this set corresponds to
+    /// exactly one `deftype`. That guarantee is what makes a bare
+    /// `String` key safe here; without it the carrier set would be
+    /// order-dependent (last-write-wins via `HashMap::insert` in
+    /// `compute_tensor_carrying_adts`). Once Chelis gains qualified
+    /// ADT names, this set should migrate to a `Set<AdtId>` queried
+    /// off the shared `AdtRegistry` instead of reparsing `deftype`
+    /// exprs here. See the function-level note on
+    /// [`compute_tensor_carrying_adts`].
+    tensor_carrying_adts: HashSet<String>,
     /// Depth counter for desugarer-synthesized destructure scopes
     /// (`__chelis_tmp_N` bind chains tagged with `destructure: true`
     /// in their meta-map). Incremented by `check_let` when entering
@@ -288,10 +312,12 @@ fn pre_declare_one(expr: &Expr, type_env: &HashMap<String, Expr>, scope: &mut Li
 }
 
 pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
+    let tensor_carrying_adts = compute_tensor_carrying_adts(program.annotated_exprs());
     let mut checker = Checker {
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: program.type_env().clone(),
+        tensor_carrying_adts,
         destructure_scope_depth: 0,
     };
     let mut scope = LinearScope::default();
@@ -363,10 +389,45 @@ pub fn check_linearity_with_context(
 
     // Top-level types come from new_program.type_env(), which Phase C
     // already unioned (library + new-code). New-code types win on shadow.
+    //
+    // The carrier set comes from BOTH library and new code, chained
+    // into one `compute_tensor_carrying_adts` call so the fixed-point
+    // sees every ADT at once. Library decls can introduce tensor-
+    // carrying ADTs that new-code borrows; new-code can introduce
+    // additional ones whose fields reference library ADTs (the
+    // cross-package transitive case). Two independent calls — one
+    // per half, each with its own local set — would miss any new-
+    // code ADT whose carrying status depends on a library ADT, even
+    // though both halves are eventually unioned.
+    //
+    // ALWAYS-RECOMPUTE INVARIANT: this helper is recomputed from the
+    // chained iterator on every call, with no per-call state held by
+    // `Checker`, the library `CheckedProgram`, or any global cache.
+    // The fixed-point bound (`O(adt_count)` passes, each `O(adt_count
+    // * field_count)`) is small relative to the per-expression
+    // linearity walk that follows. Future change risk: if a later
+    // refactor caches `tensor_carrying_adts` per `CheckedProgram` and
+    // composes the library's cached set with a fresh new-code pass,
+    // the fixed-point will not re-resolve new-code ADTs whose
+    // carrying status depends on library ADTs and borrow semantics
+    // will silently desync. The locking test for this contract lives
+    // at `tests/linearity_with_context.rs::
+    // check_linearity_with_context_is_pure_across_repeated_calls`.
+    // Once `CheckedProgram` exposes a shared `AdtRegistry`, the
+    // registry query replaces this helper entirely (and the new
+    // call site is responsible for re-establishing the same union-
+    // and-recompute discipline).
+    let tensor_carrying_adts = compute_tensor_carrying_adts(
+        library_program
+            .annotated_exprs()
+            .iter()
+            .chain(new_program.annotated_exprs().iter()),
+    );
     let mut checker = Checker {
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
+        tensor_carrying_adts,
         destructure_scope_depth: 0,
     };
 
@@ -704,7 +765,10 @@ impl Checker {
         let captured = free_vars(&kids[1], &params);
         let mut inner_scope = outer_scope.clone();
         for name in captured {
-            if outer_scope.ty(&name).is_some_and(type_expr_contains_tensor) {
+            if outer_scope
+                .ty(&name)
+                .is_some_and(|ty| type_expr_contains_tensor(ty, &self.tensor_carrying_adts))
+            {
                 self.read_or_error(name.as_str(), expr, outer_scope);
                 outer_scope.consume(
                     &name,
@@ -1026,7 +1090,10 @@ impl Checker {
         let Some((ty, state)) = scope.pop(name) else {
             return;
         };
-        if !ty.as_ref().is_some_and(type_expr_is_owned_linear) {
+        if !ty
+            .as_ref()
+            .is_some_and(|ty| type_expr_is_owned_linear(ty, &self.tensor_carrying_adts))
+        {
             return;
         }
         let BindingState::Live { borrow_sites } = state else {
@@ -1090,12 +1157,12 @@ impl Checker {
 
     fn expr_is_owned_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
         self.expr_type(expr, scope)
-            .is_some_and(type_expr_is_owned_linear)
+            .is_some_and(|ty| type_expr_is_owned_linear(ty, &self.tensor_carrying_adts))
     }
 
     fn expr_is_owned_or_borrow_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
         self.expr_type(expr, scope)
-            .is_some_and(type_expr_contains_tensor)
+            .is_some_and(|ty| type_expr_contains_tensor(ty, &self.tensor_carrying_adts))
     }
 }
 
@@ -1510,14 +1577,36 @@ fn bind_introduces_destructure_tmp(bind_list: &List) -> bool {
     })
 }
 
-fn type_expr_contains_tensor(expr: &Expr) -> bool {
+fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &HashSet<String>) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
     match get_tag(list) {
         Some("t-tensor") => true,
-        Some("t-ref") => children(list).iter().any(type_expr_contains_tensor),
-        Some("t-tuple") | Some("t-adt") => children(list).iter().any(type_expr_contains_tensor),
+        Some("t-ref") => children(list)
+            .iter()
+            .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts)),
+        Some("t-tuple") => children(list)
+            .iter()
+            .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts)),
+        Some("t-adt") => {
+            // An ADT is tensor-carrying if EITHER one of its type
+            // arguments is (the original behavior — e.g. `Wrapper[a]`
+            // where `a` is `tensor[..]`), OR the ADT's own definition
+            // has a variant with a tensor-carrying field (the
+            // chelis#153 fix for `&BatchNormParams { weight: tensor[..],
+            // ... }`). The pre-computed set in `tensor_carrying_adts`
+            // already accounts for transitive ADT-field tensor-carry.
+            let name_carries = children(list)
+                .first()
+                .and_then(symbol_name)
+                .is_some_and(|n| tensor_carrying_adts.contains(n));
+            name_carries
+                || children(list)
+                    .iter()
+                    .skip(1) // skip the name; only check type args
+                    .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts))
+        }
         Some("t-fn") => false,
         _ => false,
     }
@@ -1527,8 +1616,149 @@ fn type_expr_is_ref(expr: &Expr) -> bool {
     matches!(get_tag_expr(expr), Some("t-ref"))
 }
 
-fn type_expr_is_owned_linear(expr: &Expr) -> bool {
-    type_expr_contains_tensor(expr) && !type_expr_is_ref(expr)
+fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>) -> bool {
+    type_expr_contains_tensor(expr, tensor_carrying_adts) && !type_expr_is_ref(expr)
+}
+
+/// Walk top-level declarations and return the set of ADT names whose
+/// definitions (transitively) carry a tensor field. Used by the
+/// linearity checker to recognize `&MyParams` as a valid borrow when
+/// `MyParams` is a record with a `tensor[...]` field — previously the
+/// `t-adt` arm of `type_expr_contains_tensor` only inspected the ADT's
+/// type *arguments*, missing tensor fields declared in the variant.
+///
+/// # Caller contract
+///
+/// The caller MUST pass every `deftype` whose name might appear
+/// (transitively) in the field type of any other `deftype` in the
+/// same call. The fixed point converges only over the ADTs visible
+/// in `exprs`: an unrelated-library ADT whose carrier status would
+/// flip a new-code ADT into the result is invisible if the library
+/// half is not chained in. `check_linearity_with_context` enforces
+/// this by chaining `library_program.annotated_exprs()` with
+/// `new_program.annotated_exprs()` in one call; any future caller
+/// (e.g. an incremental `AdtRegistry`-backed query) must preserve
+/// the same union-and-recompute discipline or the carrier set will
+/// silently desync from the cross-package borrow rules. The locking
+/// regression test is at `tests/linearity_with_context.rs::
+/// check_linearity_with_context_is_pure_across_repeated_calls`.
+///
+/// # Complexity
+///
+/// Fixed-point iteration handles ADTs whose fields reference other
+/// ADTs (the standard "is this type transitively tensor-carrying?"
+/// graph walk). Each pass scans every (adt, field) pair; the loop
+/// terminates after at most `O(adt_count)` passes (one per
+/// transitive layer), giving a worst-case bound of
+/// `O(adt_count^2 * fields_per_adt)`. In practice 2-3 passes suffice
+/// on the existing corpus, so the cost is small relative to the
+/// per-expression linearity walk. The function is recomputed on
+/// every `check_linearity` / `check_linearity_with_context` call —
+/// notably including REPL-driven re-evaluations (`chelis surf`,
+/// `chelis eval`). When that cost becomes load-bearing, the
+/// migration trigger is exposure of a shared `AdtRegistry` query on
+/// `CheckedProgram`: replace this helper with a registry lookup of
+/// variant-field types, keeping the same union-and-recompute
+/// invariant on the lookup side.
+///
+/// Typealiases (`typealias`) are NOT walked here. The inference layer
+/// owns alias resolution — see `resolve_type_aliases` in `infer.rs`
+/// (exercised by `typealias_zero_param_resolves_in_defsig` and
+/// siblings) — and any case where a `typealias` name reaches the
+/// linearity checker still wearing a `(t-adt {} Alias ...)` shape is
+/// a bug in inference, not in this carrier set. If/when the linearity
+/// checker gains direct access to a shared `AdtRegistry`, this helper
+/// retires in favor of querying that registry's variant-field types
+/// (which already know about aliases too).
+fn compute_tensor_carrying_adts<'a, I>(exprs: I) -> HashSet<String>
+where
+    I: IntoIterator<Item = &'a Expr>,
+{
+    // Step 1: collect every (adt_name, field_type_exprs) pair from
+    // `(deftype {} Name (params?) (variant {} VariantName [field_or_tyarg]...)...)`
+    // declarations, descending through `(module {} name ...)` wrappers.
+    //
+    // The caller decides what to include: a single program passes its
+    // own `annotated_exprs()`; the with-context entry chains library
+    // and new-code so cross-package field references (a new-code ADT
+    // wrapping a library tensor-carrying ADT) are resolved by the same
+    // fixed-point pass instead of two independent ones.
+    let mut adt_field_types: HashMap<String, Vec<Expr>> = HashMap::new();
+    fn collect(expr: &Expr, out: &mut HashMap<String, Vec<Expr>>) {
+        let Expr::List(list, _) = expr else {
+            return;
+        };
+        let tag = get_tag(list);
+        match tag {
+            Some("module") => {
+                // `(module {} name body...)` — `children()` skips tag
+                // and meta, leaving `[name, body...]`; skip the name
+                // for the same shape the `deftype` branch below uses.
+                for child in children(list).iter().skip(1) {
+                    collect(child, out);
+                }
+            }
+            Some("deftype") => {
+                let kids = children(list);
+                let Some(name) = kids.first().and_then(symbol_name) else {
+                    return;
+                };
+                let mut field_tys: Vec<Expr> = Vec::new();
+                for child in kids.iter().skip(1) {
+                    let Expr::List(inner, _) = child else {
+                        continue;
+                    };
+                    if get_tag(inner) != Some("variant") {
+                        continue;
+                    }
+                    // variant children: name, then either `(field name ty)`
+                    // entries (record-style) or bare type exprs (positional).
+                    for v in children(inner).iter().skip(1) {
+                        match v {
+                            Expr::List(vlist, _) if get_tag(vlist) == Some("field") => {
+                                if let Some(ty) = children(vlist).get(1) {
+                                    field_tys.push(ty.clone());
+                                }
+                            }
+                            other => field_tys.push(other.clone()),
+                        }
+                    }
+                }
+                out.insert(name.to_string(), field_tys);
+            }
+            _ => {}
+        }
+    }
+    for expr in exprs {
+        collect(expr, &mut adt_field_types);
+    }
+
+    // Step 2: fixed-point iteration. An ADT is tensor-carrying iff any
+    // of its field types contains a tensor (looking up other ADTs in
+    // the current set). Reuses `type_expr_contains_tensor` against
+    // the in-progress carrier set, so the recursive `t-adt` lookup
+    // walks the same code path used at check time. Stop when a pass
+    // adds no new names; bounded by the ADT count.
+    let mut carriers: HashSet<String> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for (name, field_tys) in &adt_field_types {
+            if carriers.contains(name) {
+                continue;
+            }
+            if field_tys
+                .iter()
+                .any(|ty| type_expr_contains_tensor(ty, &carriers))
+            {
+                carriers.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    carriers
 }
 
 fn type_expr_fn_arg(expr: &Expr, index: usize) -> Option<&Expr> {

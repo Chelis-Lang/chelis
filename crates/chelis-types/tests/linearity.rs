@@ -176,6 +176,43 @@ def bad(x: tensor[4, f32]): tensor[4, f32] =
 }
 
 #[test]
+fn closure_capture_consumes_outer_tensor_carrying_adt() {
+    // Mirrors `closure_capture_consumes_outer_tensor` but for a
+    // record-style ADT whose tensor lives in a variant field, not in
+    // a type-argument position. Locks the parameterized
+    // `type_expr_contains_tensor` call inside `check_fn`'s capture
+    // pass at `linearity.rs:737-740`: if that predicate ever stops
+    // consulting `tensor_carrying_adts`, this case would silently
+    // regress — the outer `p` would survive the closure capture and
+    // the second `use_params(p)` would type-check, hiding a use-after-
+    // consume.
+    let errors = check_surf(
+        r#"
+type Params[n] =
+  | Params { weight: tensor[n, f32] }
+
+sig use_params: Params[n] -> bool
+def use_params(p) = true
+
+def bad[n](p: Params[n]): bool =
+  {
+    f = fn () -> use_params(p)
+    use_params(p)
+  }
+"#,
+    )
+    .expect_err("capturing a tensor-carrying ADT must consume it");
+
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::UseAfterConsume)
+                && error.message.contains("closure capture")
+        }),
+        "expected UseAfterConsume with closure-capture site; got {errors:?}"
+    );
+}
+
+#[test]
 fn match_consumes_tuple_scrutinee() {
     let errors = check_surf(
         r#"

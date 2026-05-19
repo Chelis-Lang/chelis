@@ -55,7 +55,11 @@ use tempfile::{TempDir, tempdir};
 /// whole-graph cache key differs from any stdlib file's, but the
 /// chelis-std *sub-context* key is identical, so the sub-cache is what
 /// gives it a warm hit.
-fn stdlib_corpus() -> Vec<PathBuf> {
+///
+/// `scratch` is a per-test tempdir into which the non-std fixture is
+/// copied — without staging, `chelis check`/`build` writes `reef.lock`
+/// next to the fixture's `reef.toml`, leaking into the working tree.
+fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let std_root = manifest.join("../../packages/chelis-std");
     let mut paths: Vec<PathBuf> = [
@@ -74,18 +78,25 @@ fn stdlib_corpus() -> Vec<PathBuf> {
             .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
     })
     .collect();
-    paths.push(non_std_fixture());
+    paths.push(stage_non_std_fixture(scratch));
     paths
 }
 
-/// A non-chelis-std reef package whose only dependency is the bundled
-/// chelis-std. Distinct whole-graph key from any stdlib file; identical
-/// chelis-std sub-context key.
-fn non_std_fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/pseudo_nautilus/src/special.ch")
+/// Copy the pseudo_nautilus fixture into `scratch` and return the path
+/// to the staged `src/special.ch`. Staging is required because `chelis
+/// check`/`build` writes `reef.lock` next to the resolved `reef.toml`;
+/// running directly against the real fixture path leaks the lockfile
+/// into the source tree.
+fn stage_non_std_fixture(scratch: &Path) -> PathBuf {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pseudo_nautilus")
         .canonicalize()
-        .expect("pseudo_nautilus fixture must exist")
+        .expect("pseudo_nautilus fixture must exist");
+    let dst = scratch.join("pseudo_nautilus");
+    copy_dir_recursive(&src, &dst);
+    dst.join("src/special.ch")
+        .canonicalize()
+        .expect("staged special.ch must exist")
 }
 
 /// Run `chelis <subcommand> <file>` with the cache directory isolated to
@@ -129,7 +140,7 @@ fn fresh_cache_home() -> (TempDir, PathBuf) {
 #[test]
 fn cold_vs_warm_check_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
-    for file in stdlib_corpus() {
+    for file in stdlib_corpus(_guard.path()) {
         // Cold: empty cache dir, this run computes + writes the artifact.
         let cold = run_capture("check", &file, &cache_home, &[], None);
         // Warm: same cache dir, the artifact now exists — must hit.
@@ -147,7 +158,7 @@ fn cold_vs_warm_check_byte_identical() {
 #[test]
 fn cold_vs_warm_build_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
-    for file in stdlib_corpus() {
+    for file in stdlib_corpus(_guard.path()) {
         // One shared out dir: `chelis build` echoes the resolved `-o`
         // path in its stdout, so cold and warm must build into the SAME
         // directory for the comparison to isolate the cache effect from
@@ -176,7 +187,7 @@ fn cold_vs_warm_build_byte_identical() {
 #[test]
 fn monolithic_vs_incontext_check_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
-    for file in stdlib_corpus() {
+    for file in stdlib_corpus(_guard.path()) {
         // Monolithic: cache disabled, runs the monolithic check_typed_program
         // pipeline over the whole merged program.
         let monolithic = run_capture(
@@ -204,7 +215,7 @@ fn monolithic_vs_incontext_check_byte_identical() {
 #[test]
 fn monolithic_vs_incontext_build_byte_identical() {
     let (_guard, cache_home) = fresh_cache_home();
-    for file in stdlib_corpus() {
+    for file in stdlib_corpus(_guard.path()) {
         // One shared out dir for the same reason as
         // `cold_vs_warm_build_byte_identical`: `chelis build` echoes the
         // resolved `-o` path, so the monolithic and in-context runs must
@@ -254,9 +265,12 @@ fn stale_stdlib_byte_mutation_misses_not_stale_hit() {
     // unit-tested in `chelis-compiler-api`.
     let work = tempdir().expect("work dir");
 
-    // Pristine run: bundled stdlib, isolated cache home A.
+    // Pristine run: bundled stdlib, isolated cache home A. Stage the
+    // non-std fixture into the same tempdir so its lockfile lands
+    // there instead of next to the real fixture's `reef.toml`.
     let (_guard_a, cache_home_a) = fresh_cache_home();
-    let pristine_out = run_capture("check", &non_std_fixture(), &cache_home_a, &[], None);
+    let pristine_fixture = stage_non_std_fixture(_guard_a.path());
+    let pristine_out = run_capture("check", &pristine_fixture, &cache_home_a, &[], None);
     let pristine_artifacts = cache_artifacts(&cache_home_a);
     assert!(
         !pristine_artifacts.is_empty(),

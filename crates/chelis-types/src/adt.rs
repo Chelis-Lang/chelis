@@ -220,6 +220,26 @@ impl AdtRegistry {
         self.defs.get(name)
     }
 
+    /// If `name` is already bound (by a `deftype`, `typealias`, or
+    /// prelude ADT registered earlier in this program), return the
+    /// human-readable kind of the existing definition so the caller
+    /// can emit a `DuplicateDefinition` diagnostic. Returns `None` if
+    /// the name is free.
+    ///
+    /// Type names share one flat string-keyed namespace here, so a
+    /// `deftype Foo` cannot coexist with either a second `deftype Foo`
+    /// or a `typealias Foo = ...` — `HashMap::insert` is last-write-
+    /// wins and silently corrupts the registry otherwise.
+    pub fn existing_kind(&self, name: &str) -> Option<&'static str> {
+        if self.defs.contains_key(name) {
+            Some("deftype")
+        } else if self.aliases.contains_key(name) {
+            Some("typealias")
+        } else {
+            None
+        }
+    }
+
     /// Get all variant names for an ADT (for exhaustiveness checking).
     pub fn variant_names(&self, adt_name: &str) -> Option<Vec<String>> {
         self.defs

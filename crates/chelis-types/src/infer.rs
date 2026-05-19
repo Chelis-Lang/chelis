@@ -5419,7 +5419,7 @@ fn collect_declarations(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
-    _errors: &mut Vec<CheckError>,
+    errors: &mut Vec<CheckError>,
 ) {
     let list = match expr {
         deep::Expr::List(list, _) => list,
@@ -5435,6 +5435,24 @@ fn collect_declarations(
 
     match tag {
         "deftype" => {
+            // Reject same-namespace collisions (another `deftype`, a
+            // `typealias`, or a prelude ADT registered earlier in this
+            // program). Without this check `AdtRegistry::defs` is
+            // silently last-write-wins, which propagates wrong
+            // constructor types and (per `compute_tensor_carrying_adts`
+            // in linearity.rs) order-dependent borrow semantics.
+            if let Some(name) = kids.first().and_then(symbol_name)
+                && let Some(prior_kind) = adt_reg.existing_kind(name)
+            {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DuplicateDefinition,
+                    format!(
+                        "duplicate type definition: `{name}` was already declared as a {prior_kind}"
+                    ),
+                    vec![format!("rename one of the `{name}` declarations")],
+                ));
+                return;
+            }
             let ctors = adt_reg.register_deftype(kids, vg);
             for (name, scheme) in ctors {
                 env.bind(name, scheme);
@@ -5455,6 +5473,16 @@ fn collect_declarations(
             if kids.len() >= 3
                 && let Some(name) = symbol_name(&kids[0])
             {
+                if let Some(prior_kind) = adt_reg.existing_kind(name) {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DuplicateDefinition,
+                        format!(
+                            "duplicate type definition: `{name}` was already declared as a {prior_kind}"
+                        ),
+                        vec![format!("rename one of the `{name}` declarations")],
+                    ));
+                    return;
+                }
                 let params = match &kids[1] {
                     deep::Expr::List(list, _) => list
                         .elements
@@ -12931,16 +12959,16 @@ mod tests {
     #[test]
     fn adt_deftype_and_construct() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42)))",
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42)))",
         );
     }
 
     #[test]
     fn adt_nullary_constructor() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
-             (def {} x (var {} None))",
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
+             (def {} x (var {} MyNone))",
         );
     }
 
@@ -12952,28 +12980,99 @@ mod tests {
         );
     }
 
+    // ── Duplicate type-definition rejection ──────────────────────
+    // The carrier-set in `linearity::compute_tensor_carrying_adts`
+    // keys on bare ADT names, so silent last-write-wins on duplicate
+    // `deftype`s would produce order-dependent borrow semantics. The
+    // type checker rejects collisions at declaration time
+    // (`CheckErrorKind::DuplicateDefinition`); the tests below pin
+    // both sides of that rule.
+
+    #[test]
+    fn duplicate_deftype_in_same_program_is_rejected() {
+        check_err(
+            "(deftype {} Dup () (variant {} A))
+             (deftype {} Dup () (variant {} B))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn distinct_deftypes_with_overlapping_variant_names_are_accepted() {
+        // Two ADTs may share a variant name; only ADT-name collisions
+        // are duplicates. This pins that the rejection is scoped to
+        // the type name, not to constructor names.
+        check_ok(
+            "(deftype {} Lhs () (variant {} A))
+             (deftype {} Rhs () (variant {} B))
+             (def {} x (var {} A))
+             (def {} y (var {} B))",
+        );
+    }
+
+    #[test]
+    fn deftype_colliding_with_prelude_option_is_rejected() {
+        // `Option[a]` is registered by `register_prelude_adts` before
+        // `collect_declarations` runs. User code re-declaring it would
+        // overwrite the prelude entry under `HashMap::insert`.
+        check_err(
+            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn deftype_then_typealias_with_same_name_is_rejected() {
+        // `deftype` and `typealias` share the same type-name namespace
+        // (both live in `AdtRegistry`). A later `typealias Holder = ...`
+        // would silently overwrite an earlier `deftype Holder`.
+        check_err(
+            "(deftype {} Holder () (variant {} V))
+             (typealias {} Holder () (t-prim {} int32))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn typealias_then_deftype_with_same_name_is_rejected() {
+        check_err(
+            "(typealias {} Holder () (t-prim {} int32))
+             (deftype {} Holder () (variant {} V))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn duplicate_typealias_is_rejected() {
+        check_err(
+            "(typealias {} Alias () (t-prim {} int32))
+             (typealias {} Alias () (t-prim {} f32))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
     // ── Match tests ──────────────────────────────────────────────
 
     #[test]
     fn match_simple_adt() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42)))
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42)))
              (def {} result
                (match {} (var {} x)
-                 (arm {} (pat-ctor {} Some (pat-var {} v)) () (var {} v))
-                 (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} int32)} 0))))",
+                 (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))
+                 (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} int32)} 0))))",
         );
     }
 
     #[test]
     fn match_non_exhaustive() {
         check_err(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42)))
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42)))
              (def {} result
                (match {} (var {} x)
-                 (arm {} (pat-ctor {} Some (pat-var {} v)) () (var {} v))))",
+                 (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))))",
             CheckErrorKind::NonExhaustiveMatch,
         );
     }
@@ -13347,8 +13446,8 @@ mod tests {
     #[test]
     fn fix6a_wildcard_exhaustive() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None)) \
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42))) \
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone)) \
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42))) \
              (def {} result \
                (match {} (var {} x) \
                  (arm {} (pat-wild {}) () (lit {type: (t-prim {} int32)} 0))))",
@@ -13359,8 +13458,8 @@ mod tests {
     #[test]
     fn fix6b_pat_as_binds_name() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None)) \
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42))) \
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone)) \
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42))) \
              (def {} result \
                (match {} (var {} x) \
                  (arm {} (pat-as {} whole (pat-wild {})) () (var {} whole))))",
