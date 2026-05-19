@@ -684,6 +684,73 @@ mod tests {
         assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
     }
 
+    #[test]
+    fn unify_dim_cannot_recover_lit_from_two_var_tensors() {
+        // chelis#158 cause partition: when two tensors both arrive at
+        // a shared-dim sig with `Var(d)` (or `Wildcard`) dims and
+        // never with a concrete `Lit(_)` source, `unify_dim` cannot
+        // manufacture a mismatch. This is the unify-layer half of
+        // chelis#158's root cause: `to_tensor` and `pad_sequences_to`
+        // emit shape-erased tensors that reach the sig with no `Lit`
+        // in any position; unify_dim correctly succeeds on every pair
+        // and the sig's shared dim var stays free.
+        //
+        // The fix for chelis#158 must inject a `Lit` somewhere
+        // UPSTREAM of unify (most likely in the desugarer when
+        // `to_tensor` is applied to a statically-known list literal).
+        // This test pins the unify-layer contract so any future
+        // "unify_dim should be smarter" proposal can be measured
+        // against the constraint that follows: from Var/Wildcard
+        // inputs alone, no concrete dim can be inferred.
+        let mut g = var_gen();
+        let d_sig = g.fresh_dvar();
+
+        // Two sig-instantiated tensor params that share `d_sig`.
+        let sig_arg1 = Type::Tensor(vec![Dim::Var(d_sig)], tprec(Prim::F32));
+        let sig_arg2 = Type::Tensor(vec![Dim::Var(d_sig)], tprec(Prim::F32));
+
+        // Two caller tensors, both shape-erased to fresh `Var(d_caller_*)`
+        // (modeling two independent to_tensor outputs).
+        let d_caller_a = g.fresh_dvar();
+        let d_caller_b = g.fresh_dvar();
+        let caller_a = Type::Tensor(vec![Dim::Var(d_caller_a)], tprec(Prim::F32));
+        let caller_b = Type::Tensor(vec![Dim::Var(d_caller_b)], tprec(Prim::F32));
+
+        let mut s = Subst::new();
+        // Simulate `pair_id(caller_a, caller_b)` where pair_id's sig
+        // is `&tensor[d_sig, f32] -> &tensor[d_sig, f32] -> ...`.
+        assert!(unify(&sig_arg1, &caller_a, &mut s).is_ok());
+        assert!(unify(&sig_arg2, &caller_b, &mut s).is_ok());
+
+        // After both unifications, `d_sig` is bound to (some chain
+        // of) dim vars but never to a concrete `Lit`.
+        let resolved = s.apply_dim(&Dim::Var(d_sig));
+        assert!(
+            matches!(resolved, Dim::Var(_) | Dim::Wildcard),
+            "sig dim var resolved to a concrete value despite no \
+             Lit source in either caller; this would mean unify_dim \
+             manufactured a constraint from nothing, which is the \
+             wrong place to fix chelis#158. Got: {resolved:?}"
+        );
+
+        // Symmetric: replacing one caller's Var with Wildcard (the
+        // actual shape-erased symptom from to_tensor) also leaves
+        // d_sig unable to bind to a Lit. No mismatch is producible.
+        let mut s2 = Subst::new();
+        let caller_a_wild = Type::Tensor(vec![Dim::Wildcard], tprec(Prim::F32));
+        let caller_b_wild = Type::Tensor(vec![Dim::Wildcard], tprec(Prim::F32));
+        assert!(unify(&sig_arg1, &caller_a_wild, &mut s2).is_ok());
+        assert!(unify(&sig_arg2, &caller_b_wild, &mut s2).is_ok());
+        let resolved2 = s2.apply_dim(&Dim::Var(d_sig));
+        assert!(
+            matches!(resolved2, Dim::Var(_) | Dim::Wildcard),
+            "with Wildcard caller dims, d_sig also cannot resolve to \
+             a concrete Lit. Got: {resolved2:?}. The fix for \
+             chelis#158 must introduce a Lit at the desugar/builder \
+             layer."
+        );
+    }
+
     // === WS-A5 precision polymorphism unification ===
 
     #[test]
