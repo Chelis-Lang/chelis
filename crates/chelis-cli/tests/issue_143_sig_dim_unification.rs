@@ -91,13 +91,18 @@ fn sig_dim_unification_matched_concrete_args_passes_dim_check() {
 }
 
 #[test]
-fn sig_dim_unification_wildcard_arg_with_var_does_not_lock_var() {
+fn sig_dim_unification_wildcard_arg_does_not_mask_downstream_mismatch() {
     // When one arg has `Wildcard` (e.g. from `to_tensor`'s untyped
-    // result) and the other has a concrete `Lit`, the `Wildcard`
-    // should not bind the sig's dim var. The concrete arg's `Lit`
-    // should bind the var so the caller's full inferred shape carries
-    // the concrete dim through. Pre-fix: var was bound to Wildcard
-    // first and the concrete arg silently passed.
+    // result) and the other has a concrete `Lit`, the `Wildcard` must
+    // not bind the sig's dim var. The concrete arg's `Lit` should bind
+    // the var so the call's return type carries the concrete dim
+    // through, and a downstream sig that demands a *different*
+    // concrete dim then trips DimensionMismatch.
+    //
+    // Pre-fix: the wildcard locked the sig var, the return type became
+    // tensor[Wildcard, _], and the downstream sig's `Lit(3)` silently
+    // unified with Wildcard — the cross-arg contract was dropped end
+    // to end, not just at the immediate call site.
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("wildcard_then_concrete.ch");
     write_file(
@@ -105,20 +110,23 @@ fn sig_dim_unification_wildcard_arg_with_var_does_not_lock_var() {
         "module DimUnify\n\
          sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
          def pair_id(x, y) = x\n\
-         def call_it(a: &tensor[2, f32]) -> tensor[2, f32] = {\n\
-           wild = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n\
-           pair_id(&wild, a)\n}\n",
+         sig expect_three: &tensor[3, f32] -> f32\n\
+         def expect_three(t) = cast(0.0, f32)\n\
+         def call_it(a: &tensor[2, f32]) -> f32 = {\n\
+           wild = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
+           result = pair_id(&wild, a)\n\
+           expect_three(&result)\n}\n",
     );
     fmt_inplace(&fixture);
 
-    // The test passes as long as the unify path itself completes
-    // without panicking and chelis check returns a clean diagnostic
-    // (success or a structured error — never an internal panic). The
-    // pre-fix behavior was to silently bind the dim var to Wildcard,
-    // which compromised the sig's cross-arg dim contract for any
-    // downstream call. Post-fix the var stays free for later args to
-    // constrain.
+    // Post-fix: `a` binds the sig var to `Lit(2)`, `result` is
+    // `tensor[2, f32]`, and the `expect_three(&result)` call unifies
+    // `Lit(2)` against `Lit(3)` — DimensionMismatch with both literals
+    // in the diagnostic. Pre-fix: zero DimensionMismatch entries here,
+    // because every concrete dim went through a Wildcard sentinel that
+    // matched-anything.
     check_file(&fixture)
-        .stdout(predicate::str::contains("panic").not())
-        .stdout(predicate::str::contains("\"score\""));
+        .stdout(predicate::str::contains("DimensionMismatch"))
+        .stdout(predicate::str::contains("Lit(2)"))
+        .stdout(predicate::str::contains("Lit(3)"));
 }

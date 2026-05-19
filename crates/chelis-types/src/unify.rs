@@ -423,17 +423,17 @@ pub fn unify_tensor_prec(
 
 /// Unify two dimensions.
 ///
-/// Wildcard semantics (chelis#143 fix): when a Wildcard meets a dim
-/// variable, succeed WITHOUT binding the variable. Binding `Var(v)` to
-/// `Wildcard` is semantically the same as leaving `v` unbound (since
-/// `apply_dim(Wildcard)` always succeeds against anything), but the
-/// bind makes the variable "stuck" — a later position in the same sig
-/// that ought to unify `Var(v)` with a concrete `Lit(n)` instead hits
-/// `Wildcard ↔ Lit(n)` (Wildcard wins, no constraint) and the
-/// cross-position dim equality the sig promises is silently dropped.
-/// Leaving `v` free lets a concrete arg in any later position bind it,
-/// and a subsequent concrete arg with a different value then trips the
-/// `Lit ↔ Lit` mismatch as the sig demands.
+/// Wildcard ↔ Var invariant: `unify_dim(Wildcard, Var(v))` succeeds
+/// without binding `v`. The `(Wildcard, _) | (_, Wildcard) => Ok(())`
+/// arm matches before the `(Var(v), _) => bind_dvar(...)` arm and
+/// returns `Ok(())` with no side effects, so the dim var stays free.
+/// This is intentional — binding `v := Wildcard` would freeze `v` and
+/// make a later concrete arg in the same sig unable to constrain it
+/// (`apply_dim` would resolve `Var(v) → Wildcard` and the permissive
+/// Wildcard arm would silently accept any value). Leaving `v` free
+/// lets a concrete arg in any later position bind it, after which a
+/// different concrete value trips the `Lit ↔ Lit` mismatch as the sig
+/// demands.
 pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
     let d1 = subst.apply_dim(d1);
     let d2 = subst.apply_dim(d2);
@@ -441,7 +441,6 @@ pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError>
     match (&d1, &d2) {
         (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Ok(()),
         (Dim::Lit(l1), Dim::Lit(l2)) if l1 == l2 => Ok(()),
-        (Dim::Wildcard, Dim::Var(_)) | (Dim::Var(_), Dim::Wildcard) => Ok(()),
         (Dim::Wildcard, _) | (_, Dim::Wildcard) => Ok(()),
         (Dim::Var(v), _) => bind_dvar(*v, &d2, subst),
         (_, Dim::Var(v)) => bind_dvar(*v, &d1, subst),
@@ -625,6 +624,52 @@ mod tests {
         let t1 = Type::Tensor(vec![Dim::Wildcard], tprec(Prim::F32));
         let t2 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F32));
         assert!(unify(&t1, &t2, &mut s).is_ok());
+    }
+
+    #[test]
+    fn unify_wildcard_with_var_leaves_var_free() {
+        // chelis#143 invariant: `unify_dim(Wildcard, Var(v))` must
+        // succeed without binding `v`. Binding `v := Wildcard` would
+        // freeze the dim var; a later concrete arg in the same sig
+        // couldn't then constrain `v` because `apply_dim` would
+        // resolve `Var(v) → Wildcard` and the permissive Wildcard arm
+        // would silently accept any concrete value.
+        //
+        // The current implementation satisfies this because the
+        // `(Wildcard, _) | (_, Wildcard) => Ok(())` arm matches before
+        // the `(Var(_), _) => bind_dvar(...)` arm (Rust `match` is
+        // first-match-wins) and returns `Ok(())` without touching the
+        // substitution. This test pins the property in case a future
+        // refactor reorders the arms or adds an explicit
+        // `(Wildcard, Var)` arm that does bind.
+        let mut g = var_gen();
+        let dv = g.fresh_dvar();
+        let mut s = Subst::new();
+
+        // Wildcard ↔ Var: succeeds, var remains free.
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(dv), &mut s).is_ok());
+        assert_eq!(
+            s.apply_dim(&Dim::Var(dv)),
+            Dim::Var(dv),
+            "Wildcard ↔ Var must not bind the var to Wildcard",
+        );
+
+        // Symmetric direction: Var ↔ Wildcard also leaves the var
+        // free.
+        let dv2 = g.fresh_dvar();
+        assert!(unify_dim(&Dim::Var(dv2), &Dim::Wildcard, &mut s).is_ok());
+        assert_eq!(s.apply_dim(&Dim::Var(dv2)), Dim::Var(dv2));
+
+        // A subsequent concrete unification with the still-free var
+        // binds it to the concrete dim.
+        assert!(unify_dim(&Dim::Var(dv), &Dim::Lit(2), &mut s).is_ok());
+        assert_eq!(s.apply_dim(&Dim::Var(dv)), Dim::Lit(2));
+
+        // And once the var is concretely bound, a conflicting concrete
+        // value trips DimensionMismatch — the cross-position contract
+        // the sig promised is now enforced end to end.
+        let err = unify_dim(&Dim::Var(dv), &Dim::Lit(3), &mut s).unwrap_err();
+        assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
     }
 
     #[test]
