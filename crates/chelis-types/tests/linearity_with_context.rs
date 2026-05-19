@@ -504,6 +504,48 @@ def use_params[n](p: BatchNormParams[n]): bool = lib_borrow_params(&p)
     );
 }
 
+#[test]
+fn new_code_adt_wrapping_library_tensor_adt_borrow_is_accepted_with_context() {
+    // Cross-package transitive carry: the library declares a
+    // tensor-carrying ADT (`Inner`); new code declares an ADT
+    // (`Outer`) whose only field is `Inner`. `&Outer` must be
+    // recognized as borrow-eligible, which requires that the
+    // fixed-point pass that decides `tensor_carrying_adts` sees BOTH
+    // the library's `Inner` and the new-code's `Outer` in the same
+    // run — otherwise the new-code pass cannot resolve `Inner` as
+    // already-known carrier when deciding `Outer`'s status. Pre-fix
+    // (`compute_tensor_carrying_adts` called twice with independent
+    // local sets, then unioned) this regressed silently: `Outer` was
+    // not in the carrier set and `&o` was rejected with
+    // `InvalidBorrow`.
+    let library_src = r#"
+type Inner[n] =
+  | Inner { values: tensor[n, f32] }
+"#;
+    let new_src = r#"
+type Outer[n] =
+  | Outer { inner: Inner[n] }
+
+sig borrow_outer: &Outer[n] -> bool
+def borrow_outer(o) = true
+def consume_outer[n](o: Outer[n]): bool = borrow_outer(&o)
+"#;
+
+    let with_ctx = check_new_with_context(library_src, new_src);
+    let mono = check_monolithic_combined(library_src, new_src);
+
+    assert_eq!(
+        with_ctx.is_ok(),
+        mono.is_ok(),
+        "with-context must agree with monolithic on cross-package ADT composition"
+    );
+    assert!(
+        with_ctx.is_ok(),
+        "new-code ADT wrapping a library tensor-carrying ADT must borrow cleanly: {:?}",
+        with_ctx.err()
+    );
+}
+
 // ── Empty / degenerate cases ──
 
 #[test]

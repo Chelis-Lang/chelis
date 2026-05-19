@@ -385,16 +385,24 @@ pub fn check_linearity_with_context(
     // already unioned (library + new-code). New-code types win on shadow.
     // ADT registry comes from both library and new code — library decls
     // can introduce tensor-carrying ADTs that new-code borrows from, and
-    // new-code can also introduce new ones. Walk both expr lists.
+    // new-code can also introduce new ones. Chain both expr lists into
+    // a single `compute_tensor_carrying_adts` call so the fixed-point
+    // sees every ADT at once: a new-code ADT wrapping a library
+    // tensor-carrying ADT must converge to tensor-carrying in the same
+    // pass, which two independent calls (each with its own local
+    // carriers set) would miss.
     //
-    // Note: the library half is recomputed on every call. That is
-    // intentional for now — `CheckedProgram` does not cache the
-    // carrier set, and the fixed-point pass is small relative to the
-    // rest of the linearity check. Once `CheckedProgram` exposes a
-    // shared `AdtRegistry`, both halves should query that registry
-    // directly and this recomputation can go away.
-    let mut tensor_carrying_adts = compute_tensor_carrying_adts(library_program.annotated_exprs());
-    tensor_carrying_adts.extend(compute_tensor_carrying_adts(new_program.annotated_exprs()));
+    // The whole thing is recomputed on every call. That is intentional
+    // for now — `CheckedProgram` does not cache the carrier set, and
+    // the fixed-point pass is small relative to the rest of the
+    // linearity check. Once `CheckedProgram` exposes a shared
+    // `AdtRegistry`, the registry query replaces this helper entirely.
+    let tensor_carrying_adts = compute_tensor_carrying_adts(
+        library_program
+            .annotated_exprs()
+            .iter()
+            .chain(new_program.annotated_exprs().iter()),
+    );
     let mut checker = Checker {
         errors: Vec::new(),
         info: LinearityInfo::default(),
@@ -1566,7 +1574,7 @@ fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &HashSet<String>
             // arguments is (the original behavior — e.g. `Wrapper[a]`
             // where `a` is `tensor[..]`), OR the ADT's own definition
             // has a variant with a tensor-carrying field (the
-            // chelis#PR-N fix for `&BatchNormParams { weight: tensor[..],
+            // chelis#153 fix for `&BatchNormParams { weight: tensor[..],
             // ... }`). The pre-computed set in `tensor_carrying_adts`
             // already accounts for transitive ADT-field tensor-carry.
             let name_carries = children(list)
@@ -1613,10 +1621,19 @@ fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>
 /// checker gains direct access to a shared `AdtRegistry`, this helper
 /// retires in favor of querying that registry's variant-field types
 /// (which already know about aliases too).
-fn compute_tensor_carrying_adts(exprs: &[Expr]) -> HashSet<String> {
+fn compute_tensor_carrying_adts<'a, I>(exprs: I) -> HashSet<String>
+where
+    I: IntoIterator<Item = &'a Expr>,
+{
     // Step 1: collect every (adt_name, field_type_exprs) pair from
     // `(deftype {} Name (params?) (variant {} VariantName [field_or_tyarg]...)...)`
     // declarations, descending through `(module {} name ...)` wrappers.
+    //
+    // The caller decides what to include: a single program passes its
+    // own `annotated_exprs()`; the with-context entry chains library
+    // and new-code so cross-package field references (a new-code ADT
+    // wrapping a library tensor-carrying ADT) are resolved by the same
+    // fixed-point pass instead of two independent ones.
     let mut adt_field_types: HashMap<String, Vec<Expr>> = HashMap::new();
     fn collect(expr: &Expr, out: &mut HashMap<String, Vec<Expr>>) {
         let Expr::List(list, _) = expr else {
