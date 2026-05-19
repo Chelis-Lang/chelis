@@ -22,4 +22,5 @@ tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
+chelis-validate = { path = "../chelis-validate" }
 predicates = "3"

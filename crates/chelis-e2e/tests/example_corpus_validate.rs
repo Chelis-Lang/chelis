@@ -1,12 +1,23 @@
-use assert_cmd::Command;
+//! Phase 1f — examples + specs agree with the compiler parser AND the
+//! executable grammar validator (`chelis-validate`).
+//!
+//! The validator path used to shell out to `chelis validate <mode> <file>`
+//! once per corpus entry. Each `#[test]` here iterates the executable +
+//! illustrative example corpora plus a handful of spec fixtures, which
+//! meant ~30 sequential `chelis` cold-starts inside a single test
+//! function — unparallelizable by nextest. The validator is a thin
+//! library (`chelis_validate::validate_{surf,deep,desugared}`) and the
+//! deep renderer is the same `chelis_surf::desugar` +
+//! `chelis_macros::expand_program` + `chelis_deep::printer::print_canonical`
+//! pipeline the `chelis deep` CLI uses, so this file now drives both
+//! in-process. Style-gate enforcement is a CLI-only concern (it ran in
+//! the old subprocess path via `CHELIS_STYLE_GATE_DISABLE=1`, which the
+//! library calls don't see anyway).
+
 use chelis_deep::parser::parse_str_strict as parse_deep_strict;
 use chelis_surf::parser::parse_str as parse_surf;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
-use std::process::Output;
-use std::sync::OnceLock;
-use tempfile::{Builder, NamedTempFile};
+use std::path::PathBuf;
 
 #[derive(Debug)]
 struct CodeBlock {
@@ -19,25 +30,6 @@ fn repo_root() -> PathBuf {
         .join("../..")
         .canonicalize()
         .expect("repo root should exist")
-}
-
-fn chelis_bin() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let debug_bin = repo_root().join("target/debug/chelis");
-        if debug_bin.exists() {
-            return debug_bin;
-        }
-
-        let status = StdCommand::new("cargo")
-            .args(["build", "-p", "chelis-cli"])
-            .current_dir(repo_root())
-            .status()
-            .expect("build chelis-cli");
-        assert!(status.success(), "cargo build -p chelis-cli failed");
-        repo_root().join("target/debug/chelis")
-    })
-    .as_path()
 }
 
 fn examples_dir() -> PathBuf {
@@ -78,32 +70,16 @@ fn extract_code_blocks(markdown: &str) -> Vec<CodeBlock> {
     blocks
 }
 
-fn run_validate(mode: &str, path: &Path) -> Output {
-    Command::new(chelis_bin())
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["validate", mode, path.to_str().unwrap()])
-        .output()
-        .expect("run chelis validate")
-}
-
-fn render_deep(path: &Path) -> Vec<u8> {
-    Command::new(chelis_bin())
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["deep", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone()
-}
-
-fn write_temp_file(ext: &str, contents: &str) -> NamedTempFile {
-    let file = Builder::new()
-        .suffix(&format!(".{ext}"))
-        .tempfile()
-        .expect("temp file");
-    fs::write(file.path(), contents).expect("write fixture");
-    file
+/// Render a Surf source string to canonical Deep output, mirroring what
+/// `chelis deep <file>` produces (parse Surf → desugar → macro expand →
+/// canonical Deep print).
+fn render_deep_from_surf(source: &str) -> Result<String, String> {
+    let decls = chelis_surf::parser::parse_str(source).map_err(|e| e.to_string())?;
+    let deep = chelis_surf::desugar::desugar_program(&decls);
+    let expanded =
+        chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
+            .map_err(|e| e.to_string())?;
+    Ok(chelis_deep::printer::print_canonical(expanded.exprs()))
 }
 
 #[test]
@@ -140,9 +116,8 @@ fn phase1f_surf_examples_and_specs_agree_with_parser() {
             parse_surf(&source).is_ok(),
             "compiler parser should accept {label}"
         );
-        let file = write_temp_file("ch", &source);
         assert!(
-            run_validate("--surf", file.path()).status.success(),
+            chelis_validate::validate_surf(&source).is_ok(),
             "validator should accept {label}"
         );
     }
@@ -155,11 +130,10 @@ fn phase1f_deep_examples_and_specs_agree_with_strict_parser() {
     for entry in fs::read_dir(examples_dir()).expect("read_dir") {
         let path = entry.expect("entry").path();
         if path.extension().and_then(|ext| ext.to_str()) == Some("ch") {
-            let output = render_deep(&path);
-            deep_inputs.push((
-                format!("deep output for {}", path.display()),
-                String::from_utf8(output).expect("utf8 deep output"),
-            ));
+            let source = fs::read_to_string(&path).expect("read surf");
+            let rendered = render_deep_from_surf(&source)
+                .unwrap_or_else(|e| panic!("render deep for {}: {e}", path.display()));
+            deep_inputs.push((format!("deep output for {}", path.display()), rendered));
         }
     }
 
@@ -173,20 +147,16 @@ fn phase1f_deep_examples_and_specs_agree_with_strict_parser() {
             parse_deep_strict(&source).is_ok(),
             "strict compiler parser should accept {label}"
         );
-        let file = write_temp_file("dp", &source);
         assert!(
-            run_validate("--deep", file.path()).status.success(),
+            chelis_validate::validate_deep(&source).is_ok(),
             "validator should accept {label}"
         );
     }
 
-    let dotted_module_surf =
-        write_temp_file("ch", "module Foo.Bar\nimport Baz.Qux(..)\ndef f(x) = x\n");
-    let dotted_deep =
-        String::from_utf8(render_deep(dotted_module_surf.path())).expect("utf8 deep output");
-    let dotted_file = write_temp_file("dp", &dotted_deep);
+    let dotted_deep = render_deep_from_surf("module Foo.Bar\nimport Baz.Qux(..)\ndef f(x) = x\n")
+        .expect("render dotted module surf");
     assert!(
-        run_validate("--deep", dotted_file.path()).status.success(),
+        chelis_validate::validate_deep(&dotted_deep).is_ok(),
         "validator should accept canonical Deep with dotted module/import paths"
     );
 }
@@ -205,9 +175,8 @@ fn phase1f_skill_blocks_agree_with_compiler_paths() {
                     "compiler parser should accept SKILL surf block {}",
                     index + 1
                 );
-                let file = write_temp_file("ch", &block.body);
                 assert!(
-                    run_validate("--surf", file.path()).status.success(),
+                    chelis_validate::validate_surf(&block.body).is_ok(),
                     "validator should accept SKILL surf block {}",
                     index + 1
                 );
@@ -218,14 +187,12 @@ fn phase1f_skill_blocks_agree_with_compiler_paths() {
                     "compiler strict parser should accept SKILL deep block {}",
                     index + 1
                 );
-                let file = write_temp_file("dp", &block.body);
-                let output = run_validate("--deep", file.path());
-                assert!(
-                    output.status.success(),
-                    "validator should accept SKILL deep block {}: {}",
-                    index + 1,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
+                if let Err(err) = chelis_validate::validate_deep(&block.body) {
+                    panic!(
+                        "validator should accept SKILL deep block {}: {err}",
+                        index + 1
+                    );
+                }
             }
             _ => {}
         }
@@ -237,20 +204,19 @@ fn phase1f_desugar_accepts_executable_examples() {
     for entry in fs::read_dir(examples_dir()).expect("read_dir") {
         let path = entry.expect("entry").path();
         if path.extension().and_then(|ext| ext.to_str()) == Some("ch") {
+            let source = fs::read_to_string(&path).expect("read surf");
             assert!(
-                run_validate("--desugar", &path).status.success(),
-                "--desugar should accept {}",
+                chelis_validate::validate_desugared(&source).is_ok(),
+                "desugar validator should accept {}",
                 path.display()
             );
         }
     }
 
-    let dotted_paths = write_temp_file("ch", "module Foo.Bar\nimport Baz.Qux(..)\ndef f(x) = x\n");
+    let dotted_paths = "module Foo.Bar\nimport Baz.Qux(..)\ndef f(x) = x\n";
     assert!(
-        run_validate("--desugar", dotted_paths.path())
-            .status
-            .success(),
-        "--desugar should accept dotted module/import paths"
+        chelis_validate::validate_desugared(dotted_paths).is_ok(),
+        "desugar validator should accept dotted module/import paths"
     );
 }
 
@@ -262,13 +228,12 @@ fn phase1f_negative_fixtures_fail_in_validator_and_compiler() {
         "type Option[a] = | Some(a\n",
     ];
     for source in bad_surf {
-        let file = write_temp_file("ch", source);
         assert!(
             parse_surf(source).is_err(),
             "compiler parser should reject {source:?}"
         );
         assert!(
-            !run_validate("--surf", file.path()).status.success(),
+            chelis_validate::validate_surf(source).is_err(),
             "validator should reject {source:?}"
         );
     }
@@ -280,13 +245,12 @@ fn phase1f_negative_fixtures_fail_in_validator_and_compiler() {
         "(fn {} x body)\n",
     ];
     for source in bad_deep {
-        let file = write_temp_file("dp", source);
         assert!(
             parse_deep_strict(source).is_err(),
             "strict compiler parser should reject {source:?}"
         );
         assert!(
-            !run_validate("--deep", file.path()).status.success(),
+            chelis_validate::validate_deep(source).is_err(),
             "validator should reject {source:?}"
         );
     }
