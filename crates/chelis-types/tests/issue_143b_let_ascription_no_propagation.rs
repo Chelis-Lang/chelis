@@ -157,3 +157,100 @@ def caller() -> tensor[3, f32] =
         errors_summary(&errors)
     );
 }
+
+// ── Direct diagnostic-template tests (review comment 1) ─────────────
+//
+// The three tests above validate the patch indirectly via downstream
+// shared-sig-dim unification. The tests below exercise the patch's
+// most direct property: a let-binding whose declared type literally
+// disagrees with the inferred RHS type produces a clean diagnostic
+// with the right `CheckErrorKind` AND the chelis#159 substring
+// template.
+
+fn errors_contain_kind_and_message(
+    errors: &[CheckError],
+    kind: &CheckErrorKind,
+    msg_substring: &str,
+) -> bool {
+    errors.iter().any(|e| {
+        std::mem::discriminant(&e.kind) == std::mem::discriminant(kind)
+            && e.message.contains(msg_substring)
+    })
+}
+
+#[test]
+fn let_ascription_dim_mismatch_reports_dimension_mismatch_with_template() {
+    // Direct dim mismatch: declared `tensor[3, f32]`, RHS has concrete
+    // dim 2 (via a parameter ascription). Must report
+    // DimensionMismatch with the chelis#159 substring template.
+    let errors = typecheck_surf(
+        r#"
+def caller(t: &tensor[2, f32]) -> &tensor[2, f32] =
+  {
+    x: &tensor[3, f32] = t
+    x
+  }
+"#,
+    );
+    assert!(
+        errors_contain_kind_and_message(
+            &errors,
+            &CheckErrorKind::DimensionMismatch,
+            "let-binding `x` ascription does not match RHS",
+        ),
+        "expected DimensionMismatch with the chelis#159 substring template, got errors:\n{}",
+        errors_summary(&errors)
+    );
+}
+
+#[test]
+fn let_ascription_precision_mismatch_reports_precision_mismatch_with_template() {
+    // Direct precision mismatch: declared `f64`, RHS is an explicitly
+    // f32-cast scalar. Must report PrecisionMismatch with the
+    // chelis#159 substring template.
+    let errors = typecheck_surf(
+        r#"
+def caller() -> f64 =
+  {
+    x: f64 = cast(1.0, f32)
+    x
+  }
+"#,
+    );
+    assert!(
+        errors_contain_kind_and_message(
+            &errors,
+            &CheckErrorKind::PrecisionMismatch,
+            "let-binding `x` ascription does not match RHS",
+        ),
+        "expected PrecisionMismatch with the chelis#159 substring template, got errors:\n{}",
+        errors_summary(&errors)
+    );
+}
+
+#[test]
+fn let_ascription_type_mismatch_reports_type_mismatch_with_template() {
+    // Direct top-level type mismatch: declared `tensor[3, f32]`, RHS
+    // is a scalar `f32`. Must report TypeMismatch with the
+    // chelis#159 substring template (a unify-level type-shape
+    // failure — Tensor vs Prim — surfaces under TypeMismatch, not
+    // DimensionMismatch or PrecisionMismatch).
+    let errors = typecheck_surf(
+        r#"
+def caller() -> tensor[3, f32] =
+  {
+    x: tensor[3, f32] = cast(1.0, f32)
+    to_tensor([1.0, 2.0, 3.0])
+  }
+"#,
+    );
+    assert!(
+        errors_contain_kind_and_message(
+            &errors,
+            &CheckErrorKind::TypeMismatch,
+            "let-binding `x` ascription does not match RHS",
+        ),
+        "expected TypeMismatch with the chelis#159 substring template, got errors:\n{}",
+        errors_summary(&errors)
+    );
+}

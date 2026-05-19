@@ -10778,6 +10778,19 @@ fn infer_let(
                             )],
                         ));
                     }
+                    // On unify failure, bind `name` to the declared
+                    // type rather than the inferred RHS type. This
+                    // produces a cleaner error cascade: downstream uses
+                    // of `name` see what the user said they meant, not
+                    // what the (already-rejected) RHS inferred to, so
+                    // a single ascription-mismatch diagnostic stands
+                    // alone instead of fanning out into multiple
+                    // downstream errors. The trade-off: pathological
+                    // bodies where the user's ascription is *also*
+                    // independently wrong against later code may have
+                    // a second mismatch masked. The single-error
+                    // cascade is the better default for chelis#159's
+                    // user-facing diagnostic ergonomics.
                     declared_ty
                 } else {
                     expr_ty

@@ -309,7 +309,7 @@ declared type, and the inferred RHS type.
   diagnostic (`PrecisionMismatch`, `DimensionMismatch`, `TypeMismatch`
   per the unify outcome) with the binding name in the message.
 
-**Not covered (top-level lets, path 1a):**
+**Not covered (top-level lets, path 1a) — tracked in chelis#162:**
 - `name: T = expr` at module scope still routes through `Decl::LetDef`
   and emits a sibling `defsig`. The annotation pass filters those to
   `t-fn` only, so top-level non-fn ascriptions remain inert. A
@@ -321,10 +321,13 @@ declared type, and the inferred RHS type.
     `inject_type_metadata` like the block-scoped path, unifying the
     two paths.
 
-The first option is smaller. Either way, the work is straightforward
-once block-scoped is settled. Probe tests for the top-level case
-are not part of this branch and should be added when the second
-patch lands.
+The second option is cleaner — it unifies the two paths so future
+work doesn't have to handle them separately. The risk is that other
+passes (lint, decompile, format) may consume the sibling-defsig
+shape and would need updating. Either way, the work is
+straightforward once block-scoped is settled. Probe tests for the
+top-level case live with the follow-up patch (chelis#162), not this
+branch.
 
 ### Side observation
 
@@ -336,3 +339,53 @@ principles that the sig machinery cannot manufacture a `Lit` from
 contract to fire must inject the concrete dim *upstream*. For
 ascribed let-bindings, "upstream" means right after the RHS
 inference, which is exactly what this prototype does.
+
+### Dim-name capture behavior (review comment 4)
+
+A reviewer asked whether the prototype's call to
+`deep_type_to_resolved_type(ty_expr, vg, adt_reg, &mut HashMap::new())`
+correctly shares dim variables with the enclosing function signature,
+or creates fresh ones per let-binding. The answer turns out to be
+"neither, because the question is upstream of the wrong abstraction."
+
+`deep_type_to_resolved_type`'s `&mut HashMap` argument is a
+`HashMap<String, TypeVar>` — a **type variable** map. Dim variables
+are not threaded through it. Dim names in user-written types parse
+to `Dim::Name(String)` (`infer.rs:12007-12013`), i.e. string labels,
+not capturing variables. At unification time (`unify.rs::unify_dim`):
+
+- `Dim::Name(n1) ↔ Dim::Name(n2)` succeeds iff `n1 == n2`.
+- `Dim::Name(n) ↔ Dim::Var(v)` binds `v := Name(n)`.
+
+So `n` in a let-ascription is a label that unifies by string equality
+for `Name ↔ Name` and binds any fresh `Var` to itself. It does NOT
+capture the enclosing sig's `n` per-binding; cross-position contracts
+within a sig are enforced by the sig's instantiation step (one fresh
+dim var per quantified name per instantiation, shared across all
+positions that named the same dim), not by let-ascription naming.
+
+Observed behavior, pinned in
+`crates/chelis-types/tests/issue_159_let_ascription_dim_capture.rs`:
+
+1. **Matching sig dim names succeed.** Sig `&tensor[n, f32] -> &tensor[n, f32]`
+   with body `x: &tensor[n, f32] = a; y: &tensor[n, f32] = b`
+   typechecks cleanly. The shared sig dim var (instantiated once for
+   both params) accepts the user's `Name("n")` on both bindings.
+
+2. **Concrete-dim mismatches still error.** Declaring `x: &tensor[3, f32] = t`
+   where `t: &tensor[2, f32]` reports `DimensionMismatch` via the
+   chelis#159 diagnostic template.
+
+3. **Dim names do NOT enforce sig-cross-position contracts via
+   ascription naming.** With a sig `&tensor[n, f32] -> &tensor[m, f32]`
+   (distinct dim names), writing both let-ascriptions as `n` does
+   NOT produce a `DimensionMismatch` — both fresh sig vars
+   independently bind to `Name("n")`. The user-intended contract
+   (both `x` and `y` have the same dim) is not enforced. This is the
+   pre-existing language semantics, not a bug introduced by chelis#159.
+
+If the design ever needs to change so that let-ascription dim names
+truly capture the enclosing sig's dim vars, the trip-wire is test 3
+in that probe file. Today the test is a positive assertion of "no
+error"; if the language semantics flip, the test would need to be
+inverted along with the surrounding implementation.
