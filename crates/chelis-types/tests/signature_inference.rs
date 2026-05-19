@@ -107,10 +107,19 @@ def caller(a, b: tensor[4, f32]) = {
 
 #[test]
 fn later_helper_does_not_retroactively_make_earlier_unconstrained_call_read_only() {
+    // The call to `helper(a, b)` here is truly unconstrained: no
+    // ascription is placed on `z`, so the result type comes solely
+    // from `helper`'s scheme as known at the point `caller` is
+    // analyzed (forward reference). Pre-chelis#159 the test had
+    // `z: tensor[4, f32]` but the let-binding ascription was silently
+    // dropped, masking what the test claimed to assert. Post-fix
+    // dropping the ascription restores the intent: `z` stays
+    // unconstrained, `a` stays unconstrained, and read-only inference
+    // correctly defaults to owned for the unknown-type param.
     let checked = checked_surf(
         r#"
 def caller(a, b: tensor[4, f32]) = {
-  z: tensor[4, f32] = helper(a, b)
+  z = helper(a, b)
   add(a, z)
 }
 def helper(x, y: tensor[4, f32]) = add(x, y)

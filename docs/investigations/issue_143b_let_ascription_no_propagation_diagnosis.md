@@ -11,12 +11,15 @@ Cross-references:
 - Sibling diagnosis: `docs/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md`
 - Design note: `docs/investigations/issue_143_pad_sequences_to_design_note.md`
 - Pinning test: `crates/chelis-types/tests/issue_143b_let_ascription_no_propagation.rs`
-  (one `#[ignore]` probe + two passing counter-probes)
+  (three regression tests; the formerly-`#[ignore]` probe is now passing
+  under the prototype patch — see "Prototype validation" below)
+- Prototype patch: `crates/chelis-types/src/infer.rs::infer_let` (~30 lines added)
 - Spec: `spec/04-type-system.md` (no explicit rule for let-binding
   ascription propagation today; the existing §5.6 element-type
   narrowing covers only Position 1 *literal* RHS, not generic-builtin RHS)
 
-No code changes in this commit.
+The prototype patch lands in this branch — see "Prototype validation"
+at the end.
 
 ## Bug surface
 
@@ -54,11 +57,15 @@ The bug is specifically in the let-binding ascription path.
 
 ## Bug site
 
-Three pieces of evidence cooperate:
+The bug has **two distinct desugar paths**, both of which lose the
+ascription before it reaches inference. The probe test in this branch
+exercises the block-scoped path; the top-level path is a related but
+not-yet-fixed sub-bug.
 
-### 1. Desugar emits the ascription as a `defsig`
+### 1a. Top-level let desugar emits a sibling `defsig`
 
-`crates/chelis-surf/src/desugar.rs:664-682`:
+`crates/chelis-surf/src/desugar.rs:664-682` (`Decl::LetDef` with
+`ty: Some(t)`):
 
 ```rust
 Decl::LetDef {
@@ -75,10 +82,35 @@ Decl::LetDef {
 }
 ```
 
-So the ascription survives desugar. The Deep program contains the
-declared type as a sibling `defsig` next to the `def`.
+The Deep program contains the declared type as a sibling `defsig`
+node next to the `def`. The annotation pass at `infer.rs:45-99`
+(`install_declared_sig_param_types`, `collect_defsig_param_types`)
+picks up `defsig` entries but filters to `t-fn` only at line 88
+(`if get_tag(fn_list) != Some("t-fn")`), so let-binding ascriptions
+on non-fn types (tensor, prim, adt, etc.) are silently dropped.
 
-### 2. `infer_let` ignores the declared sig
+### 1b. Block-scoped let desugar injects `"type"` metadata onto the RHS
+
+`crates/chelis-surf/src/desugar.rs:1353-1393` (`desugar_let_bindings`):
+
+```rust
+if let Some(ty) = &binding.ty {
+    out = bind_name_value(
+        name,
+        inject_type_metadata(value, desugar_type(ty)),
+        out,
+    );
+}
+```
+
+`inject_type_metadata` (`desugar.rs:314-335`) embeds the type
+expression as the `"type"` key of the RHS node's metadata map. No
+sibling `defsig` is emitted for this path.
+
+This is the path my probe test exercises: ascriptions appear inside
+`{ ... }` blocks (function bodies), not as top-level declarations.
+
+### 2. `infer_let` ignores both desugar paths
 
 `crates/chelis-types/src/infer.rs:10708-10760`:
 
@@ -115,8 +147,13 @@ The function:
 - Calls `infer_expr` on the RHS with no expected-type hint.
 - Generalizes the result and binds it.
 
-There is no parameter for, or lookup of, the declared sig type. The
-ascription that desugar carefully preserved is never consulted.
+There is no parameter for, or lookup of, the declared type. For the
+**top-level** path (1a) the sibling `defsig` is filtered out by the
+annotation pass's `t-fn` guard. For the **block-scoped** path (1b)
+the `"type"` metadata sits on the RHS list node itself, but
+`infer_expr` only consults that metadata for `lit` nodes
+(`infer_lit` at `infer.rs:6087-6193`); for `app` / `var` / `let` /
+other tag handlers, the metadata is silently ignored.
 
 ### 3. The parameter-ascription path uses a different mechanism
 
@@ -219,3 +256,83 @@ ascribe gets the ascription silently ignored when the RHS is generic.
 
 Both should ship; (B) is the smaller change and unblocks the
 workaround pattern, so land it first.
+
+## Prototype validation
+
+The block-scoped path (1b) is patched in this branch's prototype
+commit. The fix lives in `crates/chelis-types/src/infer.rs::infer_let`
+(~30 lines inside the existing `while i + 1 < bind_children.len()`
+loop): after `infer_expr` returns the RHS type, the code looks for a
+`"type"` key in the RHS list's metadata and, if present, converts
+it to a `Type` via `deep_type_to_resolved_type` and `unify`s the
+inferred type against the declared type before `generalize` + `bind`.
+A failed unify pushes a `CheckError` carrying the binding name, the
+declared type, and the inferred RHS type.
+
+### Results
+
+- **Probe test:** `crates/chelis-types/tests/issue_143b_let_ascription_no_propagation.rs::let_binding_ascription_propagates_to_to_tensor_rhs`
+  was `#[ignore]`'d in the previous commit (asserted desired behavior
+  that did not hold). Under the prototype patch the test passes, so
+  the `#[ignore]` attribute has been dropped and the test name was
+  rewritten to drop the now-stale "should" framing.
+- **Repo gate:** `python3 scripts/gate.py` exits 0 on the prototype
+  branch (3131/3131 nextest tests pass, lint/clippy/fmt clean).
+- **Two latent test bugs surfaced and were fixed.** They were
+  previously masked by the bug this prototype fixes:
+  - `crates/chelis-types/tests/linearity.rs::tensor_to_scalar_does_not_consume_tensor_input`
+    and `::tensor_to_scalar_still_flags_use_after_genuine_consume`
+    both wrote `v: f64 = tensor_to_scalar(x)` where `x: tensor[f32]`.
+    `tensor_to_scalar` has custom inference at `infer.rs:7323-7363`
+    that returns the input tensor's precision (`f32` here), so the
+    `f64` ascription was always wrong but silently dropped. The
+    fix correctly reports `PrecisionMismatch`; the tests are updated
+    to `v: f32 = ...` so they correctly exercise the linearity
+    behavior they claim to test.
+  - `crates/chelis-types/tests/signature_inference.rs::later_helper_does_not_retroactively_make_earlier_unconstrained_call_read_only`
+    had `z: tensor[4, f32] = helper(a, b)` in a test whose name
+    asserted "unconstrained call." Pre-fix the ascription was
+    dropped so `z` stayed unconstrained; post-fix the ascription
+    correctly propagates and constrains `z`, which through `add(a, z)`
+    propagates to `a`, which then makes `a` read-only-inferrable.
+    The test source was updated to drop the ascription on `z`,
+    matching the test's stated intent. Test passes.
+
+### Scope: what the prototype does and does not cover
+
+**Covered (block-scoped lets, path 1b):**
+- `def f(...) = { name: T = expr; ... }` ascriptions now propagate.
+- Generic-builtin RHSes like `to_tensor(...)`, `pad_sequences_to(...)`,
+  `tensor_to_scalar(...)`, etc. are correctly constrained by the
+  ascription.
+- A mismatch between ascription and inferred RHS now reports a
+  diagnostic (`PrecisionMismatch`, `DimensionMismatch`, `TypeMismatch`
+  per the unify outcome) with the binding name in the message.
+
+**Not covered (top-level lets, path 1a):**
+- `name: T = expr` at module scope still routes through `Decl::LetDef`
+  and emits a sibling `defsig`. The annotation pass filters those to
+  `t-fn` only, so top-level non-fn ascriptions remain inert. A
+  follow-up patch should either:
+  - Broaden `collect_defsig_param_types` to also gather non-fn
+    defsigs into a parallel map and have `infer_let` (or the top-level
+    `def` handler) consult it; or
+  - Change the top-level `Decl::LetDef` desugar to use
+    `inject_type_metadata` like the block-scoped path, unifying the
+    two paths.
+
+The first option is smaller. Either way, the work is straightforward
+once block-scoped is settled. Probe tests for the top-level case
+are not part of this branch and should be added when the second
+patch lands.
+
+### Side observation
+
+The micro-test `unify_dim_cannot_recover_lit_from_two_var_tensors`
+added to `crates/chelis-types/src/unify.rs` (Phase 3) corroborates
+that this fix shape is the right one. That test shows from first
+principles that the sig machinery cannot manufacture a `Lit` from
+`Var`/`Wildcard` inputs alone — any fix that wants the sig dim
+contract to fire must inject the concrete dim *upstream*. For
+ascribed let-bindings, "upstream" means right after the RHS
+inference, which is exactly what this prototype does.

@@ -258,7 +258,7 @@ fn tensor_to_scalar_does_not_consume_tensor_input() {
         r#"
 def ok(x: tensor[f32]): tensor[f32] =
   {
-    v: f64 = tensor_to_scalar(x)
+    v: f32 = tensor_to_scalar(x)
     _ = drop(v)
     y: tensor[f32] = relu(x)
     _ = drop(x)
@@ -276,7 +276,7 @@ fn tensor_to_scalar_still_flags_use_after_genuine_consume() {
 def bad(x: tensor[f32]): tensor[f32] =
   {
     y: tensor[f32] = realize(x)
-    v: f64 = tensor_to_scalar(x)
+    v: f32 = tensor_to_scalar(x)
     y
   }
 "#,

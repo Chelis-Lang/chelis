@@ -81,9 +81,7 @@ fn errors_summary(errors: &[CheckError]) -> String {
 }
 
 #[test]
-#[ignore = "tracking: chelis#159 — let-binding ascription not propagated to RHS; \
-            see docs/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md"]
-fn let_binding_ascription_should_propagate_to_to_tensor_rhs() {
+fn let_binding_ascription_propagates_to_to_tensor_rhs() {
     // Desired post-fix behavior: the ascription `a: tensor[3, f32]`
     // should unify with the RHS `to_tensor([1.0, 2.0, 3.0])`, binding
     // `a` to `tensor[Lit(3), f32]`. The follow-on `pair_id(&a, &b)`
@@ -107,7 +105,7 @@ def caller() -> tensor[3, f32] =
     );
     assert!(
         has_dimension_mismatch(&errors),
-        "expected DimensionMismatch — ascriptions should propagate to to_tensor RHS, \
+        "expected DimensionMismatch - ascriptions should propagate to to_tensor RHS, \
          allowing sig `n` to bind to 3 from `a` and conflict with 5 from `b`; \
          got errors:\n{}",
         errors_summary(&errors)

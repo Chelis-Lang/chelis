@@ -71,7 +71,7 @@ fn errors_summary(errors: &[CheckError]) -> String {
 }
 
 #[test]
-#[ignore = "tracking: chelis#158 — to_tensor erases list-literal shape; \
+#[ignore = "tracking: chelis#158 - to_tensor erases list-literal shape; \
             see docs/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md"]
 fn to_tensor_mismatched_list_lengths_should_trip_dim_mismatch() {
     // Desired post-fix behavior:

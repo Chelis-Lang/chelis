@@ -10730,8 +10730,9 @@ fn infer_let(
         let mut i = 0;
         while i + 1 < bind_children.len() {
             if let Some(name) = symbol_name(&bind_children[i]) {
+                let rhs_expr = &bind_children[i + 1];
                 let expr_ty = infer_expr(
-                    &bind_children[i + 1],
+                    rhs_expr,
                     &mut let_env,
                     vg,
                     subst,
@@ -10740,7 +10741,49 @@ fn infer_let(
                     typed_nodes,
                     total_nodes,
                 );
-                let scheme = let_env.generalize(&expr_ty, subst);
+
+                // chelis#159: block-scoped `let name: T = expr` desugars
+                // inject the declared type `T` as a `"type"` metadata
+                // entry on the RHS node (crates/chelis-surf/src/desugar.rs:1374-1379
+                // via `inject_type_metadata`). Pre-fix, infer_let did
+                // not consult that metadata, so a generic-builtin RHS
+                // like `to_tensor(...)` left its output type var free
+                // and the ascription was silently dropped. Unify the
+                // inferred RHS type against the declared type so the
+                // ascription propagates into downstream sig calls.
+                let final_ty = if let deep::Expr::List(rhs_list, _) = rhs_expr
+                    && let Some(meta) = get_meta(rhs_list)
+                    && let Some(declared_ty_expr) = meta
+                        .entries
+                        .iter()
+                        .find(|(k, _)| k == "type")
+                        .map(|(_, v)| v)
+                {
+                    let declared_ty = deep_type_to_resolved_type(
+                        declared_ty_expr,
+                        vg,
+                        adt_reg,
+                        &mut HashMap::new(),
+                    );
+                    if let Err(e) = unify(&expr_ty, &declared_ty, subst) {
+                        errors.push(CheckError::new(
+                            check_error_kind_from_type_error_kind(&e.kind),
+                            format!(
+                                "let-binding `{name}` ascription does not match RHS: {}",
+                                e.message
+                            ),
+                            vec![format!(
+                                "Declared type for `{name}` is {declared_ty}; \
+                                 RHS inferred to {expr_ty}"
+                            )],
+                        ));
+                    }
+                    declared_ty
+                } else {
+                    expr_ty
+                };
+
+                let scheme = let_env.generalize(&final_ty, subst);
                 let_env.bind(name.to_string(), scheme);
             }
             i += 2;

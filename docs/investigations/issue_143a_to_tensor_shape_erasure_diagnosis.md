@@ -11,13 +11,20 @@ Cross-references:
 - Sibling diagnosis: `docs/investigations/issue_143b_let_ascription_no_propagation_diagnosis.md`
 - Design note for the harder case: `docs/investigations/issue_143_pad_sequences_to_design_note.md`
 - Pinning test: `crates/chelis-types/tests/issue_143a_to_tensor_shape_erasure.rs`
-  (one `#[ignore]` probe + two passing counter-probes)
+  (one `#[ignore]` probe + two passing counter-probes; the probe
+  still fails as expected after the sub-issue (B) prototype lands —
+  the (A) bug is genuinely independent of (B))
+- Unify-layer corroboration test: `crates/chelis-types/src/unify.rs`
+  `unify_dim_cannot_recover_lit_from_two_var_tensors` (proves the
+  fix-site must be upstream of `unify_dim`)
 - Prior-work signal: `crates/chelis-types/tests/contextual_tensor_literal.rs:1-21`
   (WS-B2 §P10b / §5.6, element-type contextual narrowing — *not* shape
   inference)
 - Spec: `spec/02-surf-syntax.md` §P10b, `spec/04-type-system.md` §5.6
 
-No code changes in this commit.
+No code changes for sub-issue (A) in this branch — only a unify-layer
+corroboration test (see "Unify-layer corroboration" below). The full
+fix for (A) requires spec amendment work and a desugar change.
 
 ## Bug surface
 
@@ -219,3 +226,74 @@ asserting on runtime-fail substrings in negative tests; the static
 catch the spec implies is not actually shipped. Worth filing as a
 distinct workstream rather than rolling into the next phase
 miscellaneously.
+
+## Unify-layer corroboration
+
+The pre-existing diagnosis above (file-by-file source-reading)
+concluded that the bug must be upstream of `unify_dim` because
+`to_tensor`'s scheme contains no dim variables — there is no place
+for shape info to enter the type system through that builtin. The
+diagnosis is now corroborated empirically by a focused unit test:
+
+`crates/chelis-types/src/unify.rs::tests::unify_dim_cannot_recover_lit_from_two_var_tensors`
+
+The test directly constructs the scenario the chelis#158 repro hits:
+
+- Two sig-instantiated tensor parameters that share a single dim
+  variable `d_sig` — modeling `pair_id : &tensor[d_sig, f32] ->
+  &tensor[d_sig, f32] -> ...`.
+- Two caller tensors with fresh dim variables `d_caller_a` and
+  `d_caller_b` (modeling the shape-erased output of `to_tensor`).
+- Symmetric case: two caller tensors with `Dim::Wildcard` (the
+  actual variant that to_tensor's generic output forces into the
+  unifier when paired with a tensor-shaped sig position).
+
+For both shapes, the test unifies each caller arg against the
+matching sig position and asserts that after both unifications,
+`subst.apply_dim(Dim::Var(d_sig))` resolves to *something that is
+not a `Lit`* — specifically `Dim::Var(_)` or `Dim::Wildcard`. The
+test passes today.
+
+What this proves:
+
+1. **Unify is correct.** Given `Var`/`Wildcard`-only inputs, the
+   unify-layer behavior is exactly what the type theory demands:
+   no constraint, no error, no manufactured value.
+2. **The fix site is upstream.** A future "make unify smarter"
+   proposal cannot fix #158 without violating this contract — the
+   information needed to bind `d_sig` to a concrete value never
+   reaches unify in the first place.
+3. **The minimum-change point for (A)** is exactly where the
+   diagnosis recommends: in the desugar pass for `to_tensor` over
+   list literals, where `items.len()` is observable and can be
+   threaded into the resulting tensor type as a `Lit` dim.
+
+The micro-test pins this contract so any future PR claiming to fix
+#158 in `unify_dim` can be checked against the asserted property:
+if the test fails under your change, your fix is in the wrong place.
+
+## Why the (B) prototype does not also fix (A)
+
+The (B) prototype patch (in `infer_let`, on this same investigation
+branch) makes block-scoped let-binding ascriptions propagate into
+generic-builtin RHSes. So an ASCRIBED let-binding now correctly
+constrains `to_tensor`'s output:
+
+```chelis
+// Post-(B), with explicit ascription, the shape is now constrained:
+a: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])  // a: tensor[Lit(3), f32]
+```
+
+But the (A) probe test uses UNASCRIBED let-bindings:
+
+```chelis
+a = to_tensor([1.0, 2.0, 3.0])  // a: tensor[Var(?), f32]
+b = to_tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+```
+
+With no ascription, no metadata is injected by the desugarer, and
+the (B) prototype has no hook to grab onto. The (A) probe continues
+to fail with the same `body has type () -> &tensor[Var(DimVar(40)),
+f32]` diagnostic before and after (B) lands. The bugs are
+orthogonal: (B) covers the ascribed-but-erased path; (A) covers the
+unascribed-but-should-be-inferrable path.
