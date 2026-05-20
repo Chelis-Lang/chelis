@@ -3642,9 +3642,16 @@ fn tensor_reduce_host(
     }
     let out_numel = tensor_numel(&out_shape);
     let mut out = vec![0.0_f64; out_numel];
+    let sum_in_f32 = matches!(op, ReduceOp::Sum) && tensor.precision == Prim::F32;
     #[allow(clippy::needless_range_loop)]
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
+        // Stride-4 ILP cascade lanes for Sum (issue #163, parity with
+        // torch's CPU `row_sum` at n <= 16). Other reductions keep a
+        // single accumulator since they're either associative
+        // (Min/Prod) or position-tracking (Argmax/Argmin).
+        let mut sum_lanes = [0.0_f64; 4];
+        let mut sum_lanes_f32 = [0.0_f32; 4];
         let mut best_value = match op {
             ReduceOp::Sum => 0.0,
             ReduceOp::Min => f64::INFINITY,
@@ -3668,7 +3675,11 @@ fn tensor_reduce_host(
             let value = tensor.value.data[in_linear];
             match op {
                 ReduceOp::Sum => {
-                    best_value += value;
+                    if sum_in_f32 {
+                        sum_lanes_f32[k & 3] += value as f32;
+                    } else {
+                        sum_lanes[k & 3] += value;
+                    }
                 }
                 ReduceOp::Min => {
                     if value < best_value {
@@ -3693,7 +3704,15 @@ fn tensor_reduce_host(
             }
         }
         out[out_linear] = match op {
-            ReduceOp::Sum | ReduceOp::Min | ReduceOp::Prod => best_value,
+            ReduceOp::Sum => {
+                if sum_in_f32 {
+                    ((sum_lanes_f32[0] + sum_lanes_f32[1]) + (sum_lanes_f32[2] + sum_lanes_f32[3]))
+                        as f64
+                } else {
+                    (sum_lanes[0] + sum_lanes[1]) + (sum_lanes[2] + sum_lanes[3])
+                }
+            }
+            ReduceOp::Min | ReduceOp::Prod => best_value,
             // Argmax/Argmin: store integer indices as integer-valued F32 per
             // the Phase 3j-pre Batch 1 caveat (documented on RiscOp::Argmax
             // and adv_argmax_output_stores_integer_valued_floats).
@@ -5403,6 +5422,86 @@ y = sum(a, cast(0, int32))
             .expect("sum on axis 0 should evaluate");
         assert_eq!(first_tensor_shape(&outcome, "y"), vec![3]);
         assert_eq!(first_tensor_data(&outcome, "y"), vec![5.0, 7.0, 9.0]);
+    }
+
+    // Issue Chelis-Lang/chelis#163: `sum` on f32 must use the stride-4 ILP
+    // cascade (torch's CPU `row_sum`) reduction order, not the previous
+    // strict left-fold. The 11-element reflected-pad sequence below is
+    // the issue's exact reproducer pattern: the same multiset summed in
+    // two different orderings produces the same result under stride-4
+    // (matches torch/numpy) but differs by 1 ULP under left-fold.
+    //
+    // Source values: torch.rand(6) with manual_seed(0); each f32 value
+    // is expressed as the f64 string that round-trips back to the same
+    // f32 bit pattern via the Surf `cast(_, f32)` path.
+    #[test]
+    fn host_runtime_sum_f32_uses_pairwise_order_for_issue_163_repro() {
+        // right-pad: [v0, v1, v2, v3, v4, v5, v4, v3, v2, v1, v0]
+        let checked_right = checked_surf(
+            r#"
+seq = to_tensor([
+    cast(0.49625658988952637, f32),
+    cast(0.7682217955589294, f32),
+    cast(0.08847743272781372, f32),
+    cast(0.13203048706054688, f32),
+    cast(0.30742114782333374, f32),
+    cast(0.6340786814689636, f32),
+    cast(0.30742114782333374, f32),
+    cast(0.13203048706054688, f32),
+    cast(0.08847743272781372, f32),
+    cast(0.7682217955589294, f32),
+    cast(0.49625658988952637, f32)
+])
+y = sum(seq, cast(0, int32))
+"#,
+        );
+        let outcome_right = evaluate_host_program(&checked_right, &HashMap::new())
+            .expect("right-pad reflected sum should evaluate");
+        let right = first_tensor_data(&outcome_right, "y");
+        assert_eq!(right.len(), 1);
+        // Stride-4 ILP cascade f32 result (matches numpy `.sum()` and
+        // torch's `row_sum` algorithm bit-exactly for n <= 16). The old
+        // strict left-fold would have produced 4.218894004821777 here
+        // — a 1-ULP drift that the parity harness now no longer needs
+        // to carve out (issue #163 acceptance criterion).
+        assert_eq!(
+            (right[0] as f32).to_bits(),
+            (4.218893527984619_f64 as f32).to_bits(),
+            "expected stride-4 cascade result; got {}",
+            right[0]
+        );
+
+        // Same multiset, left-pad ordering. Both stride-4 and the old
+        // left-fold happen to agree here — pinning to prove parity stays
+        // intact across the algorithm change.
+        let checked_left = checked_surf(
+            r#"
+seq = to_tensor([
+    cast(0.30742114782333374, f32),
+    cast(0.13203048706054688, f32),
+    cast(0.08847743272781372, f32),
+    cast(0.7682217955589294, f32),
+    cast(0.49625658988952637, f32),
+    cast(0.49625658988952637, f32),
+    cast(0.7682217955589294, f32),
+    cast(0.08847743272781372, f32),
+    cast(0.13203048706054688, f32),
+    cast(0.30742114782333374, f32),
+    cast(0.6340786814689636, f32)
+])
+y = sum(seq, cast(0, int32))
+"#,
+        );
+        let outcome_left = evaluate_host_program(&checked_left, &HashMap::new())
+            .expect("left-pad reflected sum should evaluate");
+        let left = first_tensor_data(&outcome_left, "y");
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            (left[0] as f32).to_bits(),
+            (4.218893527984619_f64 as f32).to_bits(),
+            "left-pad ordering must produce same result as right-pad under stride-4; got {}",
+            left[0]
+        );
     }
 
     #[test]

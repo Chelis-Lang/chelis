@@ -24,45 +24,33 @@
 
 /* ------------------------------------------------------------------ */
 /* chelis_sum_f32                                                       */
+/*                                                                      */
+/* Stride-4 ILP cascade matching torch's CPU `row_sum` (issue #163,     */
+/* `num_levels=4 ilp_factor=4` in                                       */
+/* pytorch/aten/src/ATen/native/cpu/SumKernel.cpp). Bit-exact with      */
+/* torch's `.sum()` for n <= 16 on f32. The earlier AVX2 _hadd_ps       */
+/* path produced a different roundoff than torch's cascade; we trade    */
+/* a small constant factor of peak throughput for parity. Modern        */
+/* compilers (-O3) auto-vectorize the four independent lanes well.      */
 /* ------------------------------------------------------------------ */
 static inline float chelis_sum_f32(const float * CHELIS_RESTRICT data, int n) {
-#ifdef __AVX2__
-    __m256 vacc = _mm256_setzero_ps();
-    int i = 0;
-    for (; i + 7 < n; i += 8) {
-        vacc = _mm256_add_ps(vacc, _mm256_loadu_ps(data + i));
-    }
-    /* horizontal reduction of 8-lane accumulator */
-    __m256 h0 = _mm256_hadd_ps(vacc, vacc);
-    __m256 h1 = _mm256_hadd_ps(h0, h0);
-    /* extract low 128 and high 128, add them */
-    __m128 lo = _mm256_castps256_ps128(h1);
-    __m128 hi = _mm256_extractf128_ps(h1, 1);
-    __m128 sum128 = _mm_add_ps(lo, hi);
-    float result = _mm_cvtss_f32(sum128);
-    /* scalar tail */
-    for (; i < n; i++) {
-        result += data[i];
-    }
-    return result;
-#elif defined(__ARM_NEON)
-    float32x4_t vacc = vdupq_n_f32(0.0f);
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
     int i = 0;
     for (; i + 3 < n; i += 4) {
-        vacc = vaddq_f32(vacc, vld1q_f32(data + i));
+        acc0 += data[i];
+        acc1 += data[i + 1];
+        acc2 += data[i + 2];
+        acc3 += data[i + 3];
     }
-    float result = vaddvq_f32(vacc);
     for (; i < n; i++) {
-        result += data[i];
+        switch (i & 3) {
+            case 0: acc0 += data[i]; break;
+            case 1: acc1 += data[i]; break;
+            case 2: acc2 += data[i]; break;
+            default: acc3 += data[i]; break;
+        }
     }
-    return result;
-#else
-    float result = 0.0f;
-    for (int i = 0; i < n; i++) {
-        result += data[i];
-    }
-    return result;
-#endif
+    return (acc0 + acc1) + (acc2 + acc3);
 }
 
 /* ------------------------------------------------------------------ */

@@ -151,6 +151,37 @@ explicitly request a narrower-than-default accumulator are a type error per
 and does not lose precision the way a long sum does, so the result element
 type matches the operand element type.
 
+**Reduction order (`sum` only).** `sum` evaluates the reduction with a
+**stride-4 ILP cascade** — four independent accumulator lanes loaded
+in round-robin (`acc[i & 3] += value[i]`), combined at the end as
+`(acc0 + acc1) + (acc2 + acc3)`. This matches PyTorch's CPU
+`row_sum` (`num_levels=4 ilp_factor=4`) and NumPy's pairwise sum in
+the small-n regime, so f32 `sum` is bit-exact with `torch.sum(...)`
+for `n ≤ 16` on the reduced axis. For `n > 16` the result may differ
+from torch by up to ~1 ULP until the multi-level cascade lands as a
+follow-up. The order is purely positional so the algorithm is
+deterministic across runs and hosts; `#pragma omp parallel for` is
+applied to the outer (output-element) loop only, never the inner
+reduction.
+
+This change is observable for floating-point operands — the prior
+strict left-fold could diverge from torch by ~1 ULP at unfavorable
+seeds and forced parity-oracle carve-outs in downstream harnesses
+(issue Chelis-Lang/chelis#163). Integer reductions are unchanged
+(integer addition is associative). The accumulator-precision rule
+above is orthogonal to the reduction order: the lane type is the
+accumulator type, and the final combine happens in the same
+precision.
+
+**GPU caveat.** The HIP and Metal backends keep their existing
+device reduction kernels (single-accumulator per-thread + tree
+combine for Metal; single-accumulator for HIP). Bit-exact GPU
+parity with torch's CPU `row_sum` is out of scope for this change
+— torch itself uses a different kernel (`cub::DeviceReduce`) on
+GPU. CPU eval, `chelis eval`, and the C backend all match
+`row_sum`; the HIP and Metal backends may differ from each other
+and from CPU at the ~1 ULP level on f32.
+
 ### 2.4 Movement
 
 | Name | Signature | Semantics |
