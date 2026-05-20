@@ -8966,6 +8966,20 @@ fn infer_app(
                             errors.push(te.into());
                             return Type::Error;
                         }
+                        // The padded (axis-1) dimension equals the `width`
+                        // argument. When `width` is a literal — including
+                        // `cast(N, int64)`, the form every caller uses —
+                        // propagate `Dim::Lit(N)` so the padded width is a
+                        // concrete dim that participates in shape checking.
+                        // A non-literal or non-positive width stays
+                        // `Dim::Wildcard` (the runtime validates the value).
+                        // `extract_int_for_dim` (not `extract_int_literal`)
+                        // is the cast-aware extractor used for dim contexts.
+                        let width_dim = children(list)
+                            .get(2)
+                            .and_then(extract_int_for_dim)
+                            .filter(|width| *width > 0)
+                            .map_or(Dim::Wildcard, Dim::Lit);
                         match seqs_ty {
                             Type::Adt(outer_name, outer_args)
                                 if outer_name == "List" && outer_args.len() == 1 =>
@@ -8981,7 +8995,7 @@ fn infer_app(
                                         match subst.apply(&inner_args[0]) {
                                             Type::Prim(precision) if precision.is_numeric() => {
                                                 return Type::Tensor(
-                                                    vec![Dim::Wildcard, Dim::Wildcard],
+                                                    vec![Dim::Wildcard, width_dim],
                                                     TensorPrec::Concrete(precision),
                                                 );
                                             }
@@ -13682,6 +13696,70 @@ padded = pad_sequences_to([[cast(1, int64)], [cast(2, int64), cast(3, int64)]], 
 "#,
         );
         assert!(checked.annotated_exprs().len() >= 9);
+    }
+
+    // #143: `pad_sequences_to`'s padded (axis-1) dimension equals its
+    // literal `width` argument. The result type carries `Dim::Lit(width)`
+    // for that axis (not `Dim::Wildcard`), so a declared return type with
+    // the matching concrete width type-checks and a mismatched one is
+    // rejected. The width arrives as `cast(N, int64)` in every caller.
+
+    #[test]
+    fn pad_sequences_to_literal_width_matches_declared_shape() {
+        let decls = chelis_surf::parser::parse_str(
+            "def f() -> tensor[1, 4, f32] = \
+             pad_sequences_to([[cast(10.0, f32)]], cast(4, int64), cast(0.0, f32))\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let result = infer_ir_program(&exprs);
+        assert!(
+            result.errors.is_empty(),
+            "literal pad width 4 should match declared tensor[1, 4, f32], got {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn pad_sequences_to_wrong_literal_width_is_rejected() {
+        let decls = chelis_surf::parser::parse_str(
+            "def f() -> tensor[1, 5, f32] = \
+             pad_sequences_to([[cast(10.0, f32)]], cast(4, int64), cast(0.0, f32))\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let result = infer_ir_program(&exprs);
+        assert!(
+            !result.errors.is_empty(),
+            "pad width 4 declared as tensor[1, 5, f32] should be a type error"
+        );
+    }
+
+    #[test]
+    fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
+        // The two `pad_sequences_to` results flow into a function whose
+        // sig declares the same dim variable `d` on both parameters.
+        // Different literal widths (8 vs 5) must collide on `d`.
+        let decls = chelis_surf::parser::parse_str(
+            "sig demo_unify: &tensor[s, d, p] -> &tensor[s, d, p] -> tensor[s, d, p]\n\
+             def demo_unify(a, b) = a\n\
+             def test_mismatch() -> tensor[s, d, f32] = {\n\
+               q = pad_sequences_to([[cast(0.0, f32)]], cast(8, int64), cast(0.0, f32))\n\
+               k = pad_sequences_to([[cast(0.0, f32)]], cast(5, int64), cast(0.0, f32))\n\
+               demo_unify(q, k)\n\
+             }\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let result = infer_ir_program(&exprs);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+            "widths 8 and 5 sharing sig dim `d` should surface a DimensionMismatch, got {:?}",
+            result.errors
+        );
     }
 
     #[test]
