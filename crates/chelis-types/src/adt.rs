@@ -33,6 +33,18 @@ pub struct TypeAliasDef {
     pub body: Type,
 }
 
+/// Shape of a constructor call site, used by
+/// [`AdtRegistry::lookup_variant_preferring_shape`] to disambiguate
+/// same-named variants across colliding ADTs (chelis#148).
+///
+/// `Positional` covers `Ctor(arg1, arg2)` form (lowered to `app`);
+/// `Record` covers `Ctor { field1: ..., field2: ... }` form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallShape {
+    Positional,
+    Record,
+}
+
 /// Registry of all ADT definitions and type aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdtRegistry {
@@ -270,6 +282,49 @@ impl AdtRegistry {
         });
         let first = matches.next()?;
         matches.next().is_none().then_some(first)
+    }
+
+    /// Look up a variant by constructor name, preferring the variant whose
+    /// field-naming style matches `call_shape`. Resolves chelis#148-class
+    /// collisions where two ADTs in different deps export constructors with
+    /// the same unqualified name but different shapes (e.g.
+    /// School.Data.Dataset.IntCol is a record-style constructor;
+    /// Coral.Frame.Column.IntCol is a positional/tuple constructor). When
+    /// the caller's call syntax is positional, return the positional
+    /// variant; when it's record-style, return the record variant.
+    /// Falls back to the first match if no shape-preferred variant exists.
+    ///
+    /// Candidates are sorted by ADT name before the shape filter, so
+    /// dispatch is deterministic across runs even when multiple variants
+    /// of the same shape collide. Without the sort, `self.defs.iter()`
+    /// (HashMap) leaks iteration-order non-determinism into the choice
+    /// of "first match" in both the shape-match and the fallback path.
+    pub fn lookup_variant_preferring_shape(
+        &self,
+        ctor_name: &str,
+        call_shape: CallShape,
+    ) -> Option<(&str, &VariantInfo)> {
+        let mut candidates: Vec<(&str, &VariantInfo)> = self
+            .defs
+            .iter()
+            .flat_map(|(adt_name, def)| {
+                def.variants.iter().filter_map(move |variant| {
+                    (variant.name == ctor_name).then_some((adt_name.as_str(), variant))
+                })
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_by_key(|(a, _)| *a);
+        let want_named = matches!(call_shape, CallShape::Record);
+        let shape_match = candidates.iter().find(|(_, v)| {
+            !v.fields.is_empty()
+                && v.fields
+                    .iter()
+                    .all(|(name, _)| name.is_some() == want_named)
+        });
+        shape_match.copied().or_else(|| candidates.first().copied())
     }
 
     /// Register a type alias: `typealias Name[params] = Type`.
