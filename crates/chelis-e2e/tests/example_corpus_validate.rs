@@ -13,6 +13,15 @@
 //! in-process. Style-gate enforcement is a CLI-only concern (it ran in
 //! the old subprocess path via `CHELIS_STYLE_GATE_DISABLE=1`, which the
 //! library calls don't see anyway).
+//!
+//! User-authored Deep input (the `chelis-deep` fences in `SKILL.md`)
+//! is run through `chelis_validate::strip_deep_lint_directive_lines`
+//! before strict-parse + validate, matching what `chelis validate
+//! --deep` and `chelis surf <file.dp>` do at `crates/chelis-cli/src/main.rs`.
+//! The strip is required: `validate_deep`'s pest grammar rejects a
+//! leading `; chelis-lint:` line (locked by a unit test in
+//! `chelis-validate`). Rendered-Deep inputs from `render_deep_from_surf`
+//! never contain directive lines, so the strip is a no-op there.
 
 use chelis_deep::parser::parse_str_strict as parse_deep_strict;
 use chelis_surf::parser::parse_str as parse_surf;
@@ -182,12 +191,13 @@ fn phase1f_skill_blocks_agree_with_compiler_paths() {
                 );
             }
             "chelis-deep" => {
+                let body = chelis_validate::strip_deep_lint_directive_lines(&block.body);
                 assert!(
-                    parse_deep_strict(&block.body).is_ok(),
+                    parse_deep_strict(&body).is_ok(),
                     "compiler strict parser should accept SKILL deep block {}",
                     index + 1
                 );
-                if let Err(err) = chelis_validate::validate_deep(&block.body) {
+                if let Err(err) = chelis_validate::validate_deep(&body) {
                     panic!(
                         "validator should accept SKILL deep block {}: {err}",
                         index + 1

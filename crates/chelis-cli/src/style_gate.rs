@@ -16,6 +16,7 @@
 //! why the case is exempt — free-form prose is not part of the schema.
 
 use chelis_lint::{Exception, Violation};
+pub use chelis_validate::strip_deep_lint_directive_lines;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -223,16 +224,6 @@ fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
             path: file.to_path_buf(),
         })
     }
-}
-
-pub fn strip_deep_lint_directive_lines(source: &str) -> String {
-    source
-        .split_inclusive('\n')
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            !(trimmed.starts_with(';') && trimmed.contains("chelis-lint:"))
-        })
-        .collect()
 }
 
 fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {

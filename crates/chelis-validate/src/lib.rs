@@ -124,6 +124,31 @@ pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
     validate_deep(&canonical)
 }
 
+/// Strip `; chelis-lint: ...` directive lines from a Deep source.
+///
+/// `validate_deep`'s pest grammar accepts `;` line comments between
+/// nodes but rejects them as the very first non-whitespace input —
+/// `program = { SOI ~ spacing ~ node+ ~ EOI }` matches the initial
+/// `spacing`, but pest's auto-WHITESPACE between subrules then
+/// re-anchors before `node+` and "expected node" wins. The hand-rolled
+/// `chelis_deep::parser::parse_str_strict` has no such quirk. Callers
+/// that hand `validate_deep` (or the strict parser, defensively)
+/// user-authored Deep — `chelis validate --deep`, `chelis surf <file.dp>`,
+/// the format-equality check in `chelis fmt --check`, and the SKILL.md
+/// fence walker in `chelis-e2e` — should run input through this
+/// stripper first so a directive comment doesn't masquerade as a parse
+/// failure. The strip is a no-op for input that contains no directive
+/// lines.
+pub fn strip_deep_lint_directive_lines(source: &str) -> String {
+    source
+        .split_inclusive('\n')
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !(trimmed.starts_with(';') && trimmed.contains("chelis-lint:"))
+        })
+        .collect()
+}
+
 fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
     let span = pair.as_span();
     let mut inner = pair.into_inner();
@@ -304,7 +329,9 @@ fn validate_effects_children(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_deep, validate_desugared, validate_surf};
+    use super::{
+        strip_deep_lint_directive_lines, validate_deep, validate_desugared, validate_surf,
+    };
 
     #[test]
     fn surf_accepts_top_level_binding_program() {
@@ -372,5 +399,36 @@ mod tests {
     fn desugared_accepts_executable_example_shape() {
         let source = "module HelloTensor\n\ndef main() -> tensor[f32] = 1\n";
         validate_desugared(source).expect("desugared Deep should validate");
+    }
+
+    #[test]
+    fn validate_deep_rejects_leading_directive_and_strip_recovers() {
+        // Lock the contract: callers that may receive directive-bearing
+        // Deep MUST strip first. If pest's grammar ever stops needing
+        // the strip, this test breaks loudly and the helper can be
+        // retired.
+        let with_directive = "; chelis-lint: disable=foo\n(module {} hello)\n";
+        validate_deep(with_directive)
+            .expect_err("validate_deep's pest grammar should reject a leading `;` directive line");
+        let stripped = strip_deep_lint_directive_lines(with_directive);
+        validate_deep(&stripped)
+            .expect("validate_deep should accept the same source after stripping directives");
+    }
+
+    #[test]
+    fn strip_deep_lint_directive_lines_is_a_noop_on_clean_input() {
+        let clean =
+            "(module {} hello)\n(def {} f (fn {} (params {}) (lit {type: (t-prim {} int32)} 1)))\n";
+        assert_eq!(strip_deep_lint_directive_lines(clean), clean);
+    }
+
+    #[test]
+    fn strip_deep_lint_directive_lines_preserves_non_directive_comments() {
+        // Non-directive `;` comments must survive — only lines whose
+        // trimmed prefix is `;` AND that contain `chelis-lint:` are
+        // removed. A plain `; note` is left alone.
+        let mixed = "; ordinary explanatory comment\n; chelis-lint: disable=foo\n(module {} m)\n";
+        let stripped = strip_deep_lint_directive_lines(mixed);
+        assert_eq!(stripped, "; ordinary explanatory comment\n(module {} m)\n");
     }
 }
