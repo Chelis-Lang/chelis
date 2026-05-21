@@ -6503,12 +6503,12 @@ fn infer_app(
                         "matmul" | "layer_norm" | "normalize" => {
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                         }
-                        "add" | "mul" | "sub" | "div" | "max_elem" | "min_elem" | "neg" => {
+                        "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" => {
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
                         "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
-                        | "gelu" => {
+                        | "gelu" | "div" | "recip" => {
                             // WS-A8 / RT-3 F3: spec/04-type-system.md §5.4
                             // restricts transcendental ops to float
                             // precisions (f32, f64, bf16, f16). The
@@ -6560,6 +6560,8 @@ fn infer_app(
                                 | "tanh"
                                 | "silu"
                                 | "gelu"
+                                | "div"
+                                | "recip"
                         );
                         let (kind, message, hints) = if is_transcendental
                             && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
