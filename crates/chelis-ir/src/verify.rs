@@ -1121,6 +1121,83 @@ mod tests {
         assert!(verify(&dag).is_empty());
     }
 
+    #[test]
+    fn div_arity_one_rejected() {
+        // Div is binary; a single-input Div node must surface the
+        // binary-arity diagnostic alongside Add/Mul/CmpLt/MaxElem.
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Div, vec![a], scalar_f32(), None);
+        let errs = verify(&dag);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("binary op") && e.contains("expected 2")),
+            "Div with 1 input must produce a binary-arity error; got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn div_arity_three_rejected() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Div, vec![a, b, c], scalar_f32(), None);
+        let errs = verify(&dag);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("binary op") && e.contains("expected 2")),
+            "Div with 3 inputs must produce a binary-arity error; got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn recip_arity_two_rejected() {
+        // Recip is unary; a two-input Recip node must surface the
+        // unary-arity diagnostic alongside the other unary elementwise
+        // ops.
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Recip, vec![a, b], scalar_f32(), None);
+        let errs = verify(&dag);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("unary op") && e.contains("expected 1")),
+            "Recip with 2 inputs must produce a unary-arity error; got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn recip_arity_zero_rejected() {
+        let mut dag = Dag::new();
+        dag.add_node(RiscOp::Recip, vec![], scalar_f32(), None);
+        let errs = verify(&dag);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("unary op") && e.contains("expected 1")),
+            "Recip with 0 inputs must produce a unary-arity error; got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn div_and_recip_arity_two_and_one_accepted() {
+        // Positive parity: well-formed Div(binary) and Recip(unary)
+        // nodes must verify cleanly. Recip feeds Div so the DAG has a
+        // single root and no dangling nodes.
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 6.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        let recip = dag.add_node(RiscOp::Recip, vec![b], scalar_f32(), None);
+        let div = dag.add_node(RiscOp::Div, vec![a, recip], scalar_f32(), None);
+        dag.add_root(div);
+        let errs = verify(&dag);
+        assert!(
+            errs.is_empty(),
+            "well-formed Div(binary) and Recip(unary) must verify clean; got {errs:?}"
+        );
+    }
+
     /// F4: the IR validation pass for Metal must accept admissible
     /// dtypes and reject f64 with the spec-pinned diagnostic.
     #[test]

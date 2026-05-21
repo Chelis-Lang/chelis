@@ -301,6 +301,80 @@ def call(q: &tensor[4, 4, {dtype}], k: &tensor[4, 4, {dtype}], v: &tensor[4, 4, 
 }
 
 // =================================================================
+// PR #176 red-team finding: polymorphic wrappers around `div` and
+// `recip` silently accept integer instantiations because the IR
+// primitives were promoted without adding them to the
+// `TRANSCENDENTAL_FLOAT_ONLY_OPS` gate that catches polymorphic
+// stdlib bodies. Without this, `def my_div(a, b) = div(a, b)`
+// instantiated at `int32` type-checks clean and reaches the C
+// backend, which then emits truncating integer division
+// (`__out[i] = __in_a[i] / __in_b[i]` on `int32_t*`) — silent
+// IEEE-divergence.
+// =================================================================
+
+#[test]
+fn polymorphic_div_wrapper_rejects_integer_call_site() {
+    for dtype in INTEGER_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("div_wrapper_int.ch");
+        let src = format!(
+            r#"sig my_div: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+def my_div(a, b) = div(a, b)
+def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_div(x, y)
+"#
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        let errs = errors(&json);
+        assert!(
+            !errs.is_empty(),
+            "PR #176 red-team: polymorphic `div` wrapper at integer \
+             dtype `{dtype}` must reject per spec/04-type-system.md \
+             \u{00a7}5.4; got clean. errs={errs:?}"
+        );
+        let messages = error_messages(&json);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("5.4") && m.contains("div")),
+            "PR #176 red-team: rejection of div(`{dtype}`) wrapper \
+             must cite \u{00a7}5.4 and name `div`; got {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn polymorphic_recip_wrapper_rejects_integer_call_site() {
+    for dtype in INTEGER_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("recip_wrapper_int.ch");
+        let src = format!(
+            r#"sig my_recip: tensor[4, p] -> tensor[4, p]
+def my_recip(x) = recip(x)
+def call(y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_recip(y)
+"#
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        let errs = errors(&json);
+        assert!(
+            !errs.is_empty(),
+            "PR #176 red-team: polymorphic `recip` wrapper at integer \
+             dtype `{dtype}` must reject per spec/04-type-system.md \
+             \u{00a7}5.4; got clean. errs={errs:?}"
+        );
+        let messages = error_messages(&json);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("5.4") && m.contains("recip")),
+            "PR #176 red-team: rejection of recip(`{dtype}`) wrapper \
+             must cite \u{00a7}5.4 and name `recip`; got {messages:?}"
+        );
+    }
+}
+
+// =================================================================
 // FINDING 3: tensor-form transcendentals silently accept integer
 // operands. This is the upstream root cause of findings 1 + 2.
 // =================================================================

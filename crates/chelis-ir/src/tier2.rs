@@ -1331,17 +1331,46 @@ mod tests {
         let result = lower_sigmoid(&mut dag, x, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
-        // sigmoid no longer inlines `exp(neg(log(_)))`;
-        // the final reciprocal is a single `RiscOp::Recip` node.
-        // Chain: x, neg(x), exp(neg(x)), const(1), add, recip = 6 nodes.
+        // sigmoid(x) = recip(1 + exp(-x)). Chain: x, neg(x),
+        // exp(neg(x)), const(1), add, recip = 6 nodes; ends in Recip.
         assert_eq!(dag.len(), 6);
         let result_node = dag.get(result).unwrap();
         assert_eq!(result_node.op, RiscOp::Recip);
-        // Regression guard: the historically lowering inlined a Log node;
-        // the new lowering must not produce one.
+
+        // Tighten the structural pin so a future refactor can't quietly
+        // re-introduce a `Log` step or drop one of the inner ops while
+        // still ending at `Recip`.
+        let ops: Vec<&RiscOp> = dag.nodes().iter().map(|n| &n.op).collect();
         assert!(
-            dag.nodes().iter().all(|n| !matches!(n.op, RiscOp::Log)),
-            "sigmoid lowering must not contain Log "
+            ops.iter().any(|op| matches!(op, RiscOp::Neg)),
+            "sigmoid must contain Neg(x)"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, RiscOp::Exp)),
+            "sigmoid must contain Exp(neg(x))"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, RiscOp::Add)),
+            "sigmoid must contain Add(const(1), exp(neg(x)))"
+        );
+        assert_eq!(
+            ops.iter().filter(|op| matches!(op, RiscOp::Recip)).count(),
+            1,
+            "sigmoid must contain exactly one Recip"
+        );
+        assert!(
+            ops.iter().all(|op| !matches!(op, RiscOp::Log)),
+            "sigmoid lowering must not contain Log"
+        );
+
+        // Verify the Recip's input is the Add node (the structural
+        // pin the prior one-way root-op check would have missed).
+        let recip_node = dag.get(result).unwrap();
+        let recip_input = dag.get(recip_node.inputs[0]).unwrap();
+        assert!(
+            matches!(recip_input.op, RiscOp::Add),
+            "Recip must consume the Add node directly, got {:?}",
+            recip_input.op
         );
     }
 

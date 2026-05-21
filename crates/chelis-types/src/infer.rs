@@ -3251,6 +3251,13 @@ const TRANSCENDENTAL_FLOAT_ONLY_OPS: &[&str] = &[
     "gelu",
     "layer_norm",
     "normalize",
+    // `div` and `recip` are float-only IEEE-754 primitives per
+    // spec/05-risc-primitives.md §2.1 / §2.2. They join this list so
+    // a polymorphic stdlib wrapper (e.g. `def my_div(a, b) = div(a, b)`)
+    // also rejects integer instantiations at the call site, not just
+    // the direct-call validator at `validate_polymorphic_op_constraints`.
+    "div",
+    "recip",
 ];
 
 const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];

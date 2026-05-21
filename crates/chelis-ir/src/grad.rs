@@ -2577,10 +2577,10 @@ mod tests {
 
     #[test]
     fn adv_div_gradient() {
-        // div(a, b) = a * exp(neg(log(b)))
-        // d(a/b)/da = 1/b
-        // d(a/b)/db = -a/b^2
-        // Test at a=6, b=3: d/da=1/3, d/db=-6/9=-2/3
+        // div(a, b) lowers to RiscOp::Div(a, b); the closed-form
+        // adjoint pair is da = g / b, db = -g * y / b (where y =
+        // a / b is the forward output). At a=6, b=3 the expected
+        // gradients are d/da = 1/3, d/db = -6/9 = -2/3.
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::Load { name: "a".into() },
