@@ -1,14 +1,14 @@
 # Lines of Code Report
 
-Generated: 2026-05-20 16:39 UTC
+Generated: 2026-05-21 05:18 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 312 | 124,516 | 14,432 | 46,627 | 185,575 | Compiler, CLI, runtime, backends, type checker |
+| Rust | 312 | 124,721 | 14,449 | 46,707 | 185,877 | Compiler, CLI, runtime, backends, type checker |
 | C | 13 | 33,418 | 255 | 736 | 34,409 | Generated runtime, headers |
 | JSON | 23 | 7,092 | 0 | 2,736 | 9,828 | Package metadata, test fixtures |
 | Python | 31 | 3,496 | 754 | 1,142 | 5,392 | PyO3 bindings, tools, benchmarks |
-| **Chelis Surf** (.ch) | **102** | **3,036** | **24** | **15** | **3,075** | **Examples, std library, test fixtures** |
+| **Chelis Surf** (.ch) | **102** | **3,035** | **24** | **7** | **3,066** | **Examples, std library, test fixtures** |
 | TOML | 33 | 525 | 55 | 71 | 651 | Cargo/reef manifests |
 | YAML | 3 | 348 | 65 | 83 | 496 | CI workflows |
 | PEG Grammars (.pest) | 2 | 262 | 0 | 28 | 290 | Validator grammars (Surf + Deep) |
@@ -19,4 +19,4 @@ Generated: 2026-05-20 16:39 UTC
 | Tree-sitter Queries (.scm) | 2 | 102 | 0 | 6 | 108 | Syntax highlighting for Surf and Deep |
 | Markdown | 191 | 0 | 18,250 | 9,040 | 27,290 | Specs, design docs, plans |
 | __generated__ | 1 | 0 | 0 | 0 | 0 |  |
-| **Total** | **724** | **173,660** | **34,009** | **60,617** | **268,286** | |
+| **Total** | **724** | **173,864** | **34,026** | **60,689** | **268,579** | |
