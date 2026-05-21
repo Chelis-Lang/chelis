@@ -6459,6 +6459,7 @@ fn infer_app(
         "sub",
         "div",
         "neg",
+        "recip",
         "exp",
         "log",
         "sin",

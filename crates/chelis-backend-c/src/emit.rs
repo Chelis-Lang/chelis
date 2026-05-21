@@ -1384,20 +1384,24 @@ impl CEmitter {
         self.line("}");
     }
 
-    // ---- Reciprocal (issue #175) ----
+    // ---- Reciprocal ----
     // Emits IEEE `1.0 / x`. Kept separate from `emit_unary` because the
     // numerator is a precision-typed constant, not a prefix operator.
+    // The pointer aliases are hoisted out of the contiguity branch so
+    // both paths share the same `__in_a_{id}` / `__out_{id}` names; the
+    // strided branch reuses them via `__in_a_{id}[idx]` rather than
+    // re-casting `t{a}->data` inline.
     fn emit_recip(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         let one = if Self::is_f64(ty) { "1.0" } else { "1.0f" };
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
-        self.indent += 1;
         self.line(&format!("{et}* restrict __out_{id} = ({et}*)t{id}->data;"));
         self.line(&format!(
             "const {et}* restrict __in_a_{id} = (const {et}*)t{a}->data;"
         ));
+        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+        self.indent += 1;
         self.line("#pragma omp parallel for simd");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -1417,9 +1421,7 @@ impl CEmitter {
         self.line(&format!(
             "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
         ));
-        self.line(&format!(
-            "(({et}*)t{id}->data)[i] = {one} / (({et}*)t{a}->data)[idx];"
-        ));
+        self.line(&format!("__out_{id}[i] = {one} / __in_a_{id}[idx];"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;

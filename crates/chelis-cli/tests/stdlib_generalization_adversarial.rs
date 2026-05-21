@@ -315,6 +315,11 @@ fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
         ("log", "log(x)"),
         ("sin", "sin(x)"),
         ("sqrt", "sqrt(x)"),
+        // `div` and `recip` are float-only IEEE-754 primitives per
+        // spec/05-risc-primitives.md §2.1 / §2.2. Tensor instantiations
+        // on integer dtypes must reject under the same §5.4 rule.
+        ("div", "div(x, x)"),
+        ("recip", "recip(x)"),
     ];
     for (name, body) in probes {
         let dir = tempdir().expect("tempdir");

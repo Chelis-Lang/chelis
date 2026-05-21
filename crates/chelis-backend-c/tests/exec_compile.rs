@@ -396,6 +396,115 @@ int main() {{
     assert!(output.contains("PASS"), "ReduceSum wrong output:\n{output}");
 }
 
+// ---- IEEE-754 corner cases for Div and Recip ----
+// Exercise the C-backend codegen (`emit_binary` for Div, `emit_recip`
+// for Recip) end-to-end on the four corner cases an
+// `exp(neg(log(b)))` decomposition would mishandle: 5/-2, 1/0, -1/0,
+// 0/0 for Div; recip(-2) and recip(0) for Recip. Path: chelis IR →
+// emitted C → gcc → run.
+
+#[test]
+fn exec_div_ieee_corner_cases() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
+    dag.add_node(RiscOp::Div, vec![a, b], vec_f32(4), None);
+    let dag = fuse(&dag);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_div_ieee",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    );
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <math.h>
+extern void test_div_ieee(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float a_data[4] = {{ 5.0f,  1.0f, -1.0f, 0.0f }};
+    float b_data[4] = {{-2.0f,  0.0f,  0.0f, 0.0f }};
+    chelis_tensor a_t = make_view_1d(a_data, 4);
+    chelis_tensor b_t = make_view_1d(b_data, 4);
+    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_div_ieee(inputs, 2, outputs, 1);
+
+    float* o = outputs[0]->data;
+    int ok = 1;
+    if (o[0] != -2.5f) {{ printf("MISMATCH 5/-2: got %f want -2.5\n", o[0]); ok = 0; }}
+    if (!(isinf(o[1]) && o[1] > 0)) {{ printf("MISMATCH 1/0: got %f want +inf\n", o[1]); ok = 0; }}
+    if (!(isinf(o[2]) && o[2] < 0)) {{ printf("MISMATCH -1/0: got %f want -inf\n", o[2]); ok = 0; }}
+    if (!isnan(o[3])) {{ printf("MISMATCH 0/0: got %f want NaN\n", o[3]); ok = 0; }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("div_ieee", src, &harness) else {
+        panic!("Div IEEE kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C-backend Div must produce IEEE results for the four corner cases:\n{output}"
+    );
+}
+
+#[test]
+fn exec_recip_ieee_corner_cases() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(3), None);
+    dag.add_node(RiscOp::Recip, vec![a], vec_f32(3), None);
+    let dag = fuse(&dag);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_recip_ieee",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    );
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <math.h>
+extern void test_recip_ieee(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float a_data[3] = {{-2.0f, 0.0f, 4.0f}};
+    chelis_tensor a_t = make_view_1d(a_data, 3);
+    chelis_tensor* inputs[1] = {{&a_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_recip_ieee(inputs, 1, outputs, 1);
+
+    float* o = outputs[0]->data;
+    int ok = 1;
+    if (o[0] != -0.5f) {{ printf("MISMATCH recip(-2): got %f want -0.5\n", o[0]); ok = 0; }}
+    if (!(isinf(o[1]) && o[1] > 0)) {{ printf("MISMATCH recip(0): got %f want +inf\n", o[1]); ok = 0; }}
+    if (o[2] != 0.25f) {{ printf("MISMATCH recip(4): got %f want 0.25\n", o[2]); ok = 0; }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("recip_ieee", src, &harness) else {
+        panic!("Recip IEEE kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C-backend Recip must produce IEEE results for the corner cases:\n{output}"
+    );
+}
+
 // ---- Test 5: Zero-size tensor does not crash ----
 
 #[test]

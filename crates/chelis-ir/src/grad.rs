@@ -1244,6 +1244,35 @@ mod tests {
     }
 
     #[test]
+    fn grad_div_lhs() {
+        let (dag, x, _y, out) = build_binary_dag(|dag, a, b, ty| {
+            dag.add_node(RiscOp::Div, vec![a, b], ty.clone(), None)
+        });
+        let (a, n) = finite_diff(&dag, out, x, "x", &[("y", 4.0)], 2.0, 1e-5);
+        assert_grad_close(a, n);
+        assert!((a - 0.25).abs() < 1e-6, "d(x/y)/dx at y=4 should be 0.25, got {a}");
+    }
+
+    #[test]
+    fn grad_div_rhs() {
+        let (dag, _x, y, out) = build_binary_dag(|dag, a, b, ty| {
+            dag.add_node(RiscOp::Div, vec![a, b], ty.clone(), None)
+        });
+        let (a, n) = finite_diff(&dag, out, y, "y", &[("x", 2.0)], 4.0, 1e-5);
+        assert_grad_close(a, n);
+        assert!((a - (-0.125)).abs() < 1e-6, "d(x/y)/dy at x=2,y=4 should be -0.125, got {a}");
+    }
+
+    #[test]
+    fn grad_recip() {
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Recip, vec![a], ty.clone(), None));
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
+        assert_grad_close(a, n);
+        assert!((a - (-0.25)).abs() < 1e-6, "d(1/x)/dx at x=2 should be -0.25, got {a}");
+    }
+
+    #[test]
     fn grad_neg() {
         let (dag, x, out) =
             build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Neg, vec![a], ty.clone(), None));
