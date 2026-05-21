@@ -1,6 +1,5 @@
 module PseudoNautilus.Special
 export (erf_approx)
-
 -- Abramowitz-Stegun 7.1.26 rational approximation to erf.
 --
 -- For x >= 0:
@@ -28,7 +27,6 @@ def erf_approx_nonneg(x: f32) -> f32 = {
   decay = exp(neg(mul(x, x)))
   sub(cast(1.0, f32), mul(poly, decay))
 }
-
 def erf_approx(x: f32) -> f32 = {
   is_negative = gt(cast(0.0, f32), x)
   abs_x = if is_negative then sub(cast(0.0, f32), x) else x

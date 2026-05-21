@@ -83,7 +83,47 @@ pub enum LexError {
     },
 }
 
+/// A source comment captured for round-trip formatting.
+///
+/// Comments are not part of the token stream the parser consumes — they
+/// carry no semantics — but `chelis fmt` must re-emit them, so the
+/// lexer records them on a side channel keyed by source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    /// The verbatim comment text including its delimiters: a `--` line
+    /// comment keeps its leading `--`; a `{- -}` block comment keeps
+    /// both braces.
+    pub text: String,
+    /// Byte span of the comment in the original source.
+    pub span: Span,
+    pub kind: CommentKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentKind {
+    /// `-- ...` to end of line.
+    Line,
+    /// `{- ... -}`, possibly nested.
+    Block,
+}
+
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
+    lex_inner(source, None)
+}
+
+/// Lex `source`, returning the token stream plus every comment in
+/// source order. The token stream is identical to [`lex`]'s — comments
+/// never become tokens — so the parser is unaffected.
+pub fn lex_with_comments(source: &str) -> Result<(Vec<Token>, Vec<Comment>), LexError> {
+    let mut comments = Vec::new();
+    let tokens = lex_inner(source, Some(&mut comments))?;
+    Ok((tokens, comments))
+}
+
+fn lex_inner(
+    source: &str,
+    mut comments: Option<&mut Vec<Comment>>,
+) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let bytes = source.as_bytes();
     let mut i = 0;
@@ -120,8 +160,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 
         // Line comments: -- to end of line
         if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            let comment_start = i;
             while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
+            }
+            if let Some(comments) = comments.as_deref_mut() {
+                comments.push(Comment {
+                    text: source[comment_start..i].to_string(),
+                    span: Span::new(comment_start, i - comment_start),
+                    kind: CommentKind::Line,
+                });
             }
             continue;
         }
@@ -145,6 +193,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             if depth > 0 {
                 return Err(LexError::UnterminatedBlockComment {
                     offset: comment_start,
+                });
+            }
+            if let Some(comments) = comments.as_deref_mut() {
+                comments.push(Comment {
+                    text: source[comment_start..i].to_string(),
+                    span: Span::new(comment_start, i - comment_start),
+                    kind: CommentKind::Block,
                 });
             }
             continue;
@@ -902,6 +957,38 @@ mod tests {
             lex("{- unclosed"),
             Err(LexError::UnterminatedBlockComment { .. })
         ));
+    }
+
+    #[test]
+    fn lex_with_comments_captures_line_and_block() {
+        let (tokens, comments) = lex_with_comments("1 -- line one\n{- block -} 2").expect("lex");
+        // The token stream is unchanged — comments never become tokens.
+        assert_eq!(
+            tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>(),
+            vec![TokenKind::Int(1), TokenKind::Newline, TokenKind::Int(2)]
+        );
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].text, "-- line one");
+        assert_eq!(comments[0].kind, CommentKind::Line);
+        assert_eq!(comments[1].text, "{- block -}");
+        assert_eq!(comments[1].kind, CommentKind::Block);
+    }
+
+    #[test]
+    fn lex_with_comments_captures_nested_block_verbatim() {
+        let (_tokens, comments) =
+            lex_with_comments("{- outer {- inner -} still outer -} 42").expect("lex");
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].text, "{- outer {- inner -} still outer -}");
+        assert_eq!(comments[0].kind, CommentKind::Block);
+    }
+
+    #[test]
+    fn lex_with_comments_token_stream_matches_plain_lex() {
+        let src = "module Foo\n-- doc\ndef f() -> f32 = cast(1.0, f32)\n";
+        let plain = lex(src).expect("lex");
+        let (with_comments, _) = lex_with_comments(src).expect("lex_with_comments");
+        assert_eq!(plain, with_comments);
     }
 
     // ===== Ident vs TypeIdent =====

@@ -695,9 +695,9 @@ fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::e
         let deep_exprs = chelis_deep::parser::parse_str_strict(&source)?;
         chelis_deep::printer::print_canonical(&deep_exprs)
     } else {
-        // .ch: parse Surf -> pretty-print Surf while preserving surface choices
-        let decls = chelis_surf::parser::parse_str(&source)?;
-        chelis_surf::format::format_program(&decls)
+        // .ch: parse Surf -> pretty-print Surf while preserving surface
+        // choices and source comments.
+        chelis_surf::format::format_source(&source)?
     };
     if check {
         if output == source {
