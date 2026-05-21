@@ -327,6 +327,11 @@ extern \"C\" __global__ void {kernel_name}(
 /// Emits `1.0f / a[idx]` (or `1.0 / a[idx]` for f64) — kept separate
 /// from `unary_prefix` because the numerator is a typed constant, not
 /// a prefix operator.
+///
+/// f32 / f64 only by `ElemKind` definition. Half-precision (`f16`,
+/// `bf16`) coverage is tracked under the WS-A1 backlog (issue #174);
+/// a future ElemKind extension that admits those dtypes must update
+/// this `match` exhaustively.
 pub fn unary_recip(kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let one = match kind {

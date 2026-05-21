@@ -298,18 +298,12 @@ impl CEmitter {
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
             RiscOp::Mul => self.emit_binary(id, "*", &node.inputs, &node.output_type),
-            // IEEE-754 elementwise division. Same emit
-            // path as add/mul (`a / b`); C's `/` is IEEE on every
-            // supported target. Native, single op.
             RiscOp::Div => self.emit_binary(id, "/", &node.inputs, &node.output_type),
             RiscOp::MaxElem => {
                 self.emit_binary_func(id, "fmaxf", &node.inputs, &node.output_type);
             }
             RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type),
             RiscOp::Neg => self.emit_unary(id, "-", &node.inputs, &node.output_type),
-            // IEEE-754 elementwise reciprocal. Emits
-            // `1.0f / x` (or `1.0 / x` for f64). Used by
-            // `lower_sigmoid` and any other reciprocal-shaped lowering.
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
             RiscOp::Exp => self.emit_unary_func(id, "expf", &node.inputs, &node.output_type),
             RiscOp::Log => self.emit_unary_func(id, "logf", &node.inputs, &node.output_type),
@@ -1599,6 +1593,13 @@ impl CEmitter {
     }
 
     /// Emit one fused-step expression for the scalar fast/tail path.
+    ///
+    /// The fused-elem and fused-reduce entry points (`emit_fused_elem`,
+    /// `emit_fused_reduce`) panic at the WS-A1 guard if any non-f32
+    /// precision reaches them, so this emitter is f32-only by
+    /// construction. The `1.0f` literal in `Recip` / `CmpLt`
+    /// reflects that invariant; widening to f64 requires lifting the
+    /// guard first.
     fn scalar_step_expr(
         op: &FusedStepOp,
         resolve: &dyn Fn(&FusedInput) -> String,

@@ -661,9 +661,9 @@ fn tier2_sub_nodes_inherit_parent_span() {
     assert!(matches!(dag.get(result).unwrap().op, RiscOp::Recip));
 }
 
-/// Issue  collapsed `lower_div` from a 4-node cascade to a single
-/// `RiscOp::Div` node. The span-propagation rule still applies to that
-/// lone synthesized node.
+/// `lower_div` is a degenerate Tier 2 lowering: it emits a single
+/// synthesized `RiscOp::Div` node. The span-propagation rule still
+/// applies to that lone node.
 #[test]
 fn tier2_lower_div_synthesized_node_inherits_parent_span() {
     let mut dag = Dag::new();
@@ -674,7 +674,7 @@ fn tier2_lower_div_synthesized_node_inherits_parent_span() {
     let node = dag.get(result).unwrap();
     assert!(
         matches!(node.op, RiscOp::Div),
-        ": lower_div emits a single RiscOp::Div node"
+        "lower_div emits a single RiscOp::Div node"
     );
     assert_eq!(node.span_id.as_deref(), Some("div.expr"));
 }

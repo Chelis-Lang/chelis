@@ -217,7 +217,7 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 | Name | Lowering to RISC |
 |---|---|
 | `relu(x)` | `max_elem(x, const(0.0, x.shape))` |
-| `sigmoid(x)` | `recip(add(const(1.0), exp(neg(x))))`` and earlier still the `exp(neg(log(_)))` cascade) |
+| `sigmoid(x)` | `recip(add(const(1.0), exp(neg(x))))` |
 
 ### 3.4 Higher-Level Operations
 

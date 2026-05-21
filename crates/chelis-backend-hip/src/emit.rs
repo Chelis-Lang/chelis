@@ -847,9 +847,6 @@ impl HipEmitter {
                 "kernel_mul{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
-            // IEEE elementwise division. Same dispatch
-            // pattern as Add/Mul — f32 unsuffixed, others get the
-            // dtype suffix.
             RiscOp::Div => Some(format!(
                 "kernel_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -865,7 +862,6 @@ impl HipEmitter {
                 Some(format!("kernel_cmplt_{}", operand_kind.suffix()))
             }
             RiscOp::Neg => Some(format!("kernel_neg_{}", kind_for_node(node).suffix())),
-            // IEEE elementwise reciprocal.
             RiscOp::Recip => Some(format!("kernel_recip_{}", kind_for_node(node).suffix())),
             RiscOp::Exp => Some(format!("kernel_exp_{}", kind_for_node(node).suffix())),
             RiscOp::Log => Some(format!("kernel_log_{}", kind_for_node(node).suffix())),
@@ -1065,23 +1061,27 @@ impl HipEmitter {
                     kernels::binary_elementwise_typed(name, "*", Self::dtype_c_type(prec))
                 }
             }
-            // IEEE elementwise division. Same dispatch as
-            // Mul / Add — float dtypes route through the WS-A2
-            // `ElemKind` template; narrow integers (i8/i16) route
-            // through the typed template (though div on integers is
-            // generally not meaningful — float operands are the
-            // expected use).
+            // IEEE elementwise division. The type checker rejects
+            // integer operands at every entry point (the direct-call
+            // arm in `validate_polymorphic_op_constraints` and the
+            // polymorphic-wrapper arm in
+            // `TRANSCENDENTAL_FLOAT_ONLY_OPS`), so only f32/f64 can
+            // reach codegen here. A `debug_assert!` guards the
+            // invariant; release-mode builds will still emit a
+            // float kernel for whatever precision lands here.
             RiscOp::Div => {
                 let prec = operand_prec();
-                if matches!(prec, Prim::F32 | Prim::F64) {
-                    kernels::binary_elementwise(
-                        name,
-                        "/",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
-                    )
-                } else {
-                    kernels::binary_elementwise_typed(name, "/", Self::dtype_c_type(prec))
-                }
+                debug_assert!(
+                    matches!(prec, Prim::F32 | Prim::F64),
+                    "RiscOp::Div on non-float precision `{prec:?}` reached HIP \
+                     codegen; the type checker should reject this at \
+                     spec/04-type-system.md \u{00a7}5.4 before lowering"
+                );
+                kernels::binary_elementwise(
+                    name,
+                    "/",
+                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+                )
             }
             RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem_for_unary()),
             RiscOp::CmpLt => kernels::cmplt(
@@ -1315,7 +1315,6 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            // IEEE elementwise division.
             RiscOp::Div => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name(),
@@ -1337,7 +1336,6 @@ impl HipEmitter {
             RiscOp::Neg => {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
-            // IEEE elementwise reciprocal.
             RiscOp::Recip => {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }

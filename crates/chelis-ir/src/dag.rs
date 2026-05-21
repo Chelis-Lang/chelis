@@ -466,12 +466,10 @@ pub enum RiscOp {
     // --- Binary elementwise ---
     Add,
     Mul,
-    /// Element-wise IEEE-754 division `a / b`. promoted to
-    /// a primitive so that division is correct on the full real line
-    /// (the prior `mul(a, exp(neg(log(b))))` tier2 lowering returned
-    /// NaN for `b ≤ 0` because `log(b)` is undefined there). Backends
-    /// emit native `/`; the Rust evaluator uses native `f32`/`f64`
-    /// division.
+    /// Element-wise IEEE-754 division `a / b`. Primitive because the
+    /// algebraic rewrite `mul(a, exp(neg(log(b))))` is NaN for
+    /// `b ≤ 0` (`log(b)` is undefined there). Backends emit native
+    /// `/`; the Rust evaluator uses native `f32`/`f64` division.
     Div,
     CmpLt,
     MaxElem,
@@ -488,11 +486,11 @@ pub enum RiscOp {
     Abs,
     Floor,
     Ceil,
-    /// Element-wise IEEE-754 reciprocal `1.0 / x`. promoted
-    /// to a primitive alongside `Div` so `lower_sigmoid` (and any future
-    /// reciprocal-shaped lowering) can produce a single op instead of
-    /// inlining the `exp(neg(log(x)))` chain. Backends emit `1.0f / x`
-    /// (or the f64 / mixed-precision analog).
+    /// Element-wise IEEE-754 reciprocal `1.0 / x`. Primitive so that
+    /// `lower_sigmoid` (and any other reciprocal-shaped lowering)
+    /// emits a single op rather than the `exp(neg(log(x)))` chain
+    /// that would NaN on non-positive inputs. Backends emit
+    /// `1.0f / x` (or the f64 / mixed-precision analog).
     Recip,
     UniformLike {
         low: f64,

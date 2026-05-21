@@ -306,11 +306,10 @@ fn spec_sigmoid_decomposes() {
             (var {} sigmoid) (var {} x)))
     "#;
     let dag = lower_deep(src);
-    // sigmoid(x) = recip(1 + exp(-x)) — decomposes to
-    // Exp + Neg + Add + Recip (4 ops). The historically lowering inlined
-    // an `exp(neg(log(_)))` reciprocal which produced a `Log` node;
-    // that is now a regression: a `Log` in the lowered DAG means the
-    // recip cascade has returned.
+    // sigmoid(x) = recip(1 + exp(-x)) decomposes to Exp + Neg + Add
+    // + Recip (4 ops). An `exp(neg(log(_)))` reciprocal chain would
+    // produce a `Log` node; that is a regression — the chain NaNs
+    // on non-positive inputs.
     let has_exp = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Exp));
     let has_neg = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Neg));
     let has_add = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Add));

@@ -1493,7 +1493,6 @@ impl<'a> EvalContext<'a> {
             "div" => numeric_binop(args, |lhs, rhs| lhs / rhs),
             "mod" => int_binop(args, |lhs, rhs| lhs % rhs),
             "neg" => numeric_unop(args, |value| -value),
-            // IEEE elementwise reciprocal as a Surf builtin.
             "recip" => numeric_unop(args, |value| 1.0 / value),
             "exp" => float_unop_with_tensor(args, f64::exp, f32::exp),
             "log" => float_unop_with_tensor(args, f64::ln, f32::ln),
@@ -5237,10 +5236,10 @@ y = matmul(a, b)
         assert_eq!(first_tensor_data(&outcome, "y"), vec![3.0, 5.0, 7.0, 11.0]);
     }
 
-    // Promote `Div` and `Recip` to RISC primitives. The
-    // historically lowering `div(a, b) = mul(a, exp(neg(log(b))))` returned
-    // NaN for any `b ≤ 0` because `log(b)` is undefined there. These
-    // tests pin the IEEE-correct outputs on the runtime evaluator path.
+    // IEEE-754 corner cases for `Div` and `Recip` on the runtime
+    // evaluator path. A `mul(a, exp(neg(log(b))))` decomposition
+    // would NaN on every non-positive operand below; these tests
+    // pin the IEEE-correct outputs and serve as regression guards.
     #[test]
     fn host_runtime_div_negative_divisor_returns_finite_value() {
         let checked = checked_surf(
@@ -5252,7 +5251,8 @@ y = div(a, b)
         );
         let outcome = evaluate_host_program(&checked, &HashMap::new())
             .expect("div with negative divisor should evaluate");
-        // NaN (from log(-2.0)). -2.5.
+        // IEEE: 5 / -2 = -2.5 (an `exp(neg(log(-2)))` decomposition
+        // would NaN here).
         assert_eq!(first_tensor_data(&outcome, "y"), vec![-2.5]);
     }
 
@@ -5322,7 +5322,8 @@ y = recip(a)
         );
         let outcome =
             evaluate_host_program(&checked, &HashMap::new()).expect("recip(-2.0) should evaluate");
-        // NaN. -0.5.
+        // IEEE: 1 / -2 = -0.5 (an `exp(neg(log(-2)))` decomposition
+        // would NaN here).
         assert_eq!(first_tensor_data(&outcome, "y"), vec![-0.5]);
     }
 

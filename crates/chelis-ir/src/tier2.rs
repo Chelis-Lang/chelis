@@ -68,13 +68,11 @@ pub fn lower_relu(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option
 
 /// `sigmoid(x)` = `1 / (1 + exp(-x))`
 ///
-/// Lowered as `recip(add(const(1), exp(neg(x))))`.
-///
-/// Pre- this inlined its own `exp(neg(log(_)))` reciprocal chain,
-/// which inherited the same NaN-on-non-positive-input bug as the old
-/// `lower_div`. With `RiscOp::Recip` as a primitive the reciprocal
-/// step is a single op and produces the IEEE-correct value
-/// (`1 / 0 = +inf`, never NaN-from-log).
+/// Lowered as `recip(add(const(1), exp(neg(x))))`. The reciprocal
+/// step is a single `RiscOp::Recip` so the lowering produces the
+/// IEEE-correct value (`1 / 0 = +inf`) rather than the
+/// NaN-from-log that an `exp(neg(log(_)))` decomposition would
+/// produce on non-positive inputs.
 pub fn lower_sigmoid(
     dag: &mut Dag,
     x: NodeId,
@@ -229,11 +227,11 @@ pub fn lower_gelu(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option
 
 /// `div(a, b)` — IEEE-754 elementwise division.
 ///
-/// Pre- this was lowered as `mul(a, exp(neg(log(b))))`, which
-/// returned NaN for any `b ≤ 0` because `log(b)` is undefined there
-/// (silent miscompile of every divide-by-negative through `mean`,
-/// `softmax`, `layer_norm`, etc.). The new `RiscOp::Div` primitive
-/// delegates to native IEEE `/` on every supported target.
+/// Lowers directly to `RiscOp::Div`. An algebraic `mul(a,
+/// exp(neg(log(b))))` rewrite is only valid for `b > 0`; for
+/// `b ≤ 0` `log(b)` is undefined and the result is NaN. The
+/// primitive delegates to native IEEE `/` on every supported
+/// target.
 pub fn lower_div(
     dag: &mut Dag,
     a: NodeId,
@@ -1375,7 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn div_produces_mul_recip() {
+    fn lower_div_emits_single_div_node() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 6.0 }, vec![], scalar_f32(), None);
         let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
@@ -1388,13 +1386,15 @@ mod tests {
         let result_node = dag.get(result).unwrap();
         assert_eq!(result_node.op, RiscOp::Div);
         assert_eq!(result_node.inputs, vec![a, b]);
-        // Regression guard: the historically lowering decomposed through
-        // Log/Exp/Neg; none should appear in the DAG anymore.
+        // Regression guard: a Log/Exp/Neg trio would indicate the
+        // recip-via-log decomposition has crept back in. That path
+        // NaNs on non-positive divisors; none of those ops should
+        // appear in the DAG.
         assert!(
             dag.nodes()
                 .iter()
                 .all(|n| !matches!(n.op, RiscOp::Log | RiscOp::Exp | RiscOp::Neg)),
-            "div lowering must not contain Log/Exp/Neg "
+            "div lowering must not contain Log/Exp/Neg"
         );
     }
 
@@ -1682,7 +1682,7 @@ mod tests {
         // (used to come from the div-via-recip-via-log decomposition).
         assert!(
             ops.iter().all(|op| !matches!(op, RiscOp::Log)),
-            "softmax lowering must not contain Log "
+            "softmax lowering must not contain Log"
         );
     }
 
@@ -1715,7 +1715,7 @@ mod tests {
         assert!(
             ops.iter()
                 .all(|op| !matches!(op, RiscOp::Log | RiscOp::Exp | RiscOp::Neg)),
-            "mean lowering must not contain Log/Exp/Neg "
+            "mean lowering must not contain Log/Exp/Neg"
         );
     }
 
