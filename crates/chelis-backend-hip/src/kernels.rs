@@ -323,6 +323,38 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+/// Generate kernel source for IEEE elementwise reciprocal (issue #175).
+/// Emits `1.0f / a[idx]` (or `1.0 / a[idx]` for f64) — kept separate
+/// from `unary_prefix` because the numerator is a typed constant, not
+/// a prefix operator.
+pub fn unary_recip(kernel_name: &str, kind: ElemKind) -> String {
+    let ty = kind.c_type();
+    let one = match kind {
+        ElemKind::F32 => "1.0f",
+        ElemKind::F64 => "1.0",
+    };
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {ty} *a, {a_strides}, int a_ndim, int a_size,
+    {ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  out[i] = {one} / a[idx];
+}}
+",
+        a_strides = stride_params("a"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
 /// Generate kernel source for a unary function op (expf, logf, sinf,
 /// sqrtf). `func` is the f32-suffixed libm name; for f64 the f-suffix is
 /// dropped per [`ElemKind::func`].
@@ -726,6 +758,11 @@ fn fused_step_lines(
                 let b = resolve_fused_input(&step.input_indices[1]);
                 format!("{a} * {b}")
             }
+            FusedStepOp::Div => {
+                let a = resolve_fused_input(&step.input_indices[0]);
+                let b = resolve_fused_input(&step.input_indices[1]);
+                format!("{a} / {b}")
+            }
             FusedStepOp::MaxElem => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let b = resolve_fused_input(&step.input_indices[1]);
@@ -740,6 +777,10 @@ fn fused_step_lines(
             FusedStepOp::Neg => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 format!("-{a}")
+            }
+            FusedStepOp::Recip => {
+                let a = resolve_fused_input(&step.input_indices[0]);
+                format!("{one} / {a}")
             }
             FusedStepOp::Exp => {
                 let a = resolve_fused_input(&step.input_indices[0]);

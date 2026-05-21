@@ -615,30 +615,40 @@ fn cse_does_not_fabricate_spans() {
 // S3.6 — Tier 2 decomposition: sub-nodes inherit parent span (or marker)
 // ─────────────────────────────────────────────────────────────────────
 
-/// When a Tier 2 helper (e.g. `lower_div`) decomposes into sub-nodes,
-/// each sub-node inherits the decomposed parent's `span_id`. Per
+/// When a Tier 2 helper decomposes into sub-nodes, each sub-node
+/// inherits the decomposed parent's `span_id`. Per
 /// spec/design/chelis_span_survival.md §2.3 Tier 2 row.
+///
+/// Post-issue-#175 `lower_div` is a degenerate decomposition (one
+/// synthesized `RiscOp::Div` node — the cascade was collapsed), so
+/// we exercise the rule with `lower_sigmoid` which still decomposes
+/// into 4 synthesized sub-nodes (`Neg`, `Exp`, `Add`, `Recip`). The
+/// single-node `lower_div` span attribution is locked separately
+/// below in `tier2_lower_div_synthesized_node_inherits_parent_span`.
 #[test]
 fn tier2_sub_nodes_inherit_parent_span() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 6.0 }, vec![], scalar_f32(), None);
-    let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
-    // Decompose div(a, b) with parent span "div.expr". Every synthesized
-    // sub-node (Log, Neg, Exp, Mul) should carry span_id="div.expr".
-    let result = tier2::lower_div(&mut dag, a, b, &scalar_f32(), Some("div.expr"));
+    let x = dag.add_node(RiscOp::Const { value: 0.5 }, vec![], scalar_f32(), None);
+    let result = tier2::lower_sigmoid(&mut dag, x, &scalar_f32(), Some("sigmoid.expr"));
 
-    // The two operand consts (a, b) have no span (None). The sub-nodes
-    // are nodes 2..=5: Log(b), Neg(log_b), Exp(neg_log), Mul(a, recip).
+    // The operand const has no span. The sub-nodes are Neg, Exp, Add,
+    // and Recip. Every synthesized one should carry span_id =
+    // "sigmoid.expr".
     let mut synth_count = 0usize;
     for node in dag.nodes() {
         if matches!(node.op, RiscOp::Const { .. }) {
-            // Operand consts; not synthesized.
+            // Operand consts (and the synthesized const(1.0) inside
+            // lower_sigmoid) — the const(1.0) is also synthesized and
+            // should carry the span; check it explicitly.
+            if matches!(node.span_id.as_deref(), Some("sigmoid.expr")) {
+                synth_count += 1;
+            }
             continue;
         }
         synth_count += 1;
         assert_eq!(
             node.span_id.as_deref(),
-            Some("div.expr"),
+            Some("sigmoid.expr"),
             "Tier 2 sub-node {:?} ({:?}) should inherit parent span",
             node.id,
             node.op,
@@ -646,9 +656,27 @@ fn tier2_sub_nodes_inherit_parent_span() {
     }
     assert!(
         synth_count >= 4,
-        "expected at least 4 tier2 sub-nodes, got {synth_count}"
+        "expected at least 4 tier2 sub-nodes carrying parent span, got {synth_count}"
     );
-    assert!(matches!(dag.get(result).unwrap().op, RiscOp::Mul));
+    assert!(matches!(dag.get(result).unwrap().op, RiscOp::Recip));
+}
+
+/// Issue #175 collapsed `lower_div` from a 4-node cascade to a single
+/// `RiscOp::Div` node. The span-propagation rule still applies to that
+/// lone synthesized node.
+#[test]
+fn tier2_lower_div_synthesized_node_inherits_parent_span() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 6.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+    let result = tier2::lower_div(&mut dag, a, b, &scalar_f32(), Some("div.expr"));
+
+    let node = dag.get(result).unwrap();
+    assert!(
+        matches!(node.op, RiscOp::Div),
+        "issue #175: lower_div emits a single RiscOp::Div node"
+    );
+    assert_eq!(node.span_id.as_deref(), Some("div.expr"));
 }
 
 /// When the parent op had no source span (e.g. a hand-written

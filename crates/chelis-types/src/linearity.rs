@@ -1429,6 +1429,7 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
         (name, arg_index),
         (
             "neg"
+                | "recip"
                 | "exp"
                 | "log"
                 | "sin"

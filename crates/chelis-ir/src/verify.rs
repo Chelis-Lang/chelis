@@ -55,7 +55,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
-            RiscOp::Add | RiscOp::Mul | RiscOp::CmpLt | RiscOp::MaxElem => {
+            RiscOp::Add | RiscOp::Mul | RiscOp::Div | RiscOp::CmpLt | RiscOp::MaxElem => {
                 if arity != 2 {
                     errors.push(format!(
                         "binary op at node {} has {} inputs (expected 2)",
@@ -256,6 +256,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 verify_scatter_like(node, dag, *axis, "scatter_replace", &mut errors);
             }
             RiscOp::Neg
+            | RiscOp::Recip
             | RiscOp::Exp
             | RiscOp::Log
             | RiscOp::Sin

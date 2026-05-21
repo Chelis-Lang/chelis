@@ -2261,9 +2261,11 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
     match op {
         RiscOp::Add => WireRiscOp::Add,
         RiscOp::Mul => WireRiscOp::Mul,
+        RiscOp::Div => WireRiscOp::Div,
         RiscOp::CmpLt => WireRiscOp::CmpLt,
         RiscOp::MaxElem => WireRiscOp::MaxElem,
         RiscOp::Neg => WireRiscOp::Neg,
+        RiscOp::Recip => WireRiscOp::Recip,
         RiscOp::Exp => WireRiscOp::Exp,
         RiscOp::Log => WireRiscOp::Log,
         RiscOp::Sin => WireRiscOp::Sin,
@@ -2331,9 +2333,11 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                     op: match step.op {
                         FusedStepOp::Add => WireFusedStepOp::Add,
                         FusedStepOp::Mul => WireFusedStepOp::Mul,
+                        FusedStepOp::Div => WireFusedStepOp::Div,
                         FusedStepOp::MaxElem => WireFusedStepOp::MaxElem,
                         FusedStepOp::CmpLt => WireFusedStepOp::CmpLt,
                         FusedStepOp::Neg => WireFusedStepOp::Neg,
+                        FusedStepOp::Recip => WireFusedStepOp::Recip,
                         FusedStepOp::Exp => WireFusedStepOp::Exp,
                         FusedStepOp::Log => WireFusedStepOp::Log,
                         FusedStepOp::Sin => WireFusedStepOp::Sin,

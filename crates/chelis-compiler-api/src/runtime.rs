@@ -1493,6 +1493,8 @@ impl<'a> EvalContext<'a> {
             "div" => numeric_binop(args, |lhs, rhs| lhs / rhs),
             "mod" => int_binop(args, |lhs, rhs| lhs % rhs),
             "neg" => numeric_unop(args, |value| -value),
+            // Issue #175: IEEE elementwise reciprocal as a Surf builtin.
+            "recip" => numeric_unop(args, |value| 1.0 / value),
             "exp" => float_unop_with_tensor(args, f64::exp, f32::exp),
             "log" => float_unop_with_tensor(args, f64::ln, f32::ln),
             "sin" => float_unop_with_tensor(args, f64::sin, f32::sin),
@@ -5233,6 +5235,95 @@ y = matmul(a, b)
             .expect("matmul should evaluate under host runtime");
         assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
         assert_eq!(first_tensor_data(&outcome, "y"), vec![3.0, 5.0, 7.0, 11.0]);
+    }
+
+    // Issue #175: Promote `Div` and `Recip` to RISC primitives. The
+    // pre-#175 lowering `div(a, b) = mul(a, exp(neg(log(b))))` returned
+    // NaN for any `b ≤ 0` because `log(b)` is undefined there. These
+    // tests pin the IEEE-correct outputs on the runtime evaluator path.
+    #[test]
+    fn host_runtime_div_negative_divisor_returns_finite_value() {
+        let checked = checked_surf(
+            r#"
+a = to_tensor([cast(5.0, f32)])
+b = to_tensor([cast(-2.0, f32)])
+y = div(a, b)
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("div with negative divisor should evaluate");
+        // Pre-#175: NaN (from log(-2.0)). Post-#175: -2.5.
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![-2.5]);
+    }
+
+    #[test]
+    fn host_runtime_div_by_positive_zero_is_positive_infinity() {
+        let checked = checked_surf(
+            r#"
+a = to_tensor([cast(1.0, f32)])
+b = to_tensor([cast(0.0, f32)])
+y = div(a, b)
+"#,
+        );
+        let outcome =
+            evaluate_host_program(&checked, &HashMap::new()).expect("div by zero should evaluate");
+        let v = first_tensor_data(&outcome, "y");
+        assert_eq!(v.len(), 1);
+        assert!(
+            v[0].is_infinite() && v[0] > 0.0,
+            "expected +inf, got {}",
+            v[0]
+        );
+    }
+
+    #[test]
+    fn host_runtime_div_negative_one_by_zero_is_negative_infinity() {
+        let checked = checked_surf(
+            r#"
+a = to_tensor([cast(-1.0, f32)])
+b = to_tensor([cast(0.0, f32)])
+y = div(a, b)
+"#,
+        );
+        let outcome =
+            evaluate_host_program(&checked, &HashMap::new()).expect("-1/0 should evaluate");
+        let v = first_tensor_data(&outcome, "y");
+        assert_eq!(v.len(), 1);
+        assert!(
+            v[0].is_infinite() && v[0] < 0.0,
+            "expected -inf, got {}",
+            v[0]
+        );
+    }
+
+    #[test]
+    fn host_runtime_div_zero_by_zero_is_nan() {
+        let checked = checked_surf(
+            r#"
+a = to_tensor([cast(0.0, f32)])
+b = to_tensor([cast(0.0, f32)])
+y = div(a, b)
+"#,
+        );
+        let outcome =
+            evaluate_host_program(&checked, &HashMap::new()).expect("0/0 should evaluate (NaN)");
+        let v = first_tensor_data(&outcome, "y");
+        assert_eq!(v.len(), 1);
+        assert!(v[0].is_nan(), "expected NaN, got {}", v[0]);
+    }
+
+    #[test]
+    fn host_runtime_recip_negative_value_is_negative_reciprocal() {
+        let checked = checked_surf(
+            r#"
+a = to_tensor([cast(-2.0, f32)])
+y = recip(a)
+"#,
+        );
+        let outcome =
+            evaluate_host_program(&checked, &HashMap::new()).expect("recip(-2.0) should evaluate");
+        // Pre-#175: NaN. Post-#175: -0.5.
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![-0.5]);
     }
 
     #[test]

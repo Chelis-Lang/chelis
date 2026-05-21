@@ -221,9 +221,11 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
     match op {
         RiscOp::Add => "add",
         RiscOp::Mul => "mul",
+        RiscOp::Div => "div",
         RiscOp::CmpLt => "cmplt",
         RiscOp::MaxElem => "max_elem",
         RiscOp::Neg => "neg",
+        RiscOp::Recip => "recip",
         RiscOp::Exp => "exp",
         RiscOp::Log => "log",
         RiscOp::Sin => "sin",
@@ -492,6 +494,19 @@ fn compute_adjoints(
             let db = dag.add_node(RiscOp::Mul, vec![g, a], ty, None);
             Some(vec![(a, da), (b, db)])
         }
+        RiscOp::Div => {
+            // y = a / b
+            // dL/da = g / b           = Div(g, b)
+            // dL/db = -g * a / b^2    = -g * y / b   (using y = a/b ⇒ a/b² = y/b)
+            let a = node.inputs[0];
+            let b = node.inputs[1];
+            let ty = forward.get(a).unwrap().output_type.clone();
+            let da = dag.add_node(RiscOp::Div, vec![g, b], ty.clone(), None);
+            let g_times_y = dag.add_node(RiscOp::Mul, vec![g, node.id], ty.clone(), None);
+            let g_y_over_b = dag.add_node(RiscOp::Div, vec![g_times_y, b], ty.clone(), None);
+            let db = dag.add_node(RiscOp::Neg, vec![g_y_over_b], ty, None);
+            Some(vec![(a, da), (b, db)])
+        }
         RiscOp::CmpLt => {
             let a = node.inputs[0];
             let b = node.inputs[1];
@@ -535,6 +550,15 @@ fn compute_adjoints(
             let ty = forward.get(x).unwrap().output_type.clone();
             let dg = dag.add_node(RiscOp::Neg, vec![g], ty, None);
             Some(vec![(x, dg)])
+        }
+        RiscOp::Recip => {
+            // y = 1/x  ⇒  dL/dx = -g * y * y   (using y = 1/x ⇒ -1/x² = -y²)
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let y_sq = dag.add_node(RiscOp::Mul, vec![node.id, node.id], ty.clone(), None);
+            let g_y_sq = dag.add_node(RiscOp::Mul, vec![g, y_sq], ty.clone(), None);
+            let dx = dag.add_node(RiscOp::Neg, vec![g_y_sq], ty, None);
+            Some(vec![(x, dx)])
         }
         RiscOp::Exp => {
             // d/dx exp(x) = exp(x). Reuse the forward exp node.
