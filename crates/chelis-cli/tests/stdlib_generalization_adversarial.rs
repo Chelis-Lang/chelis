@@ -301,6 +301,70 @@ def call(q: &tensor[4, 4, {dtype}], k: &tensor[4, 4, {dtype}], v: &tensor[4, 4, 
 }
 
 // =================================================================
+// `div` is admitted on integer operands with C/Rust truncating
+// semantics per spec/05-risc-primitives.md §2.1 (used by
+// `Std.Decimal` for scale shifts). `recip` is float-only per §2.2
+// because an integer reciprocal has no useful IEEE-754
+// interpretation. These tests pin both sides: polymorphic `div`
+// wrappers must accept integer instantiations; polymorphic `recip`
+// wrappers must reject them.
+// =================================================================
+
+#[test]
+fn polymorphic_div_wrapper_accepts_integer_call_site() {
+    for dtype in INTEGER_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("div_wrapper_int.ch");
+        let src = format!(
+            r#"sig my_div: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+def my_div(a, b) = div(a, b)
+def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_div(x, y)
+"#
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        let errs = errors(&json);
+        assert!(
+            errs.is_empty(),
+            "polymorphic `div` wrapper at integer dtype `{dtype}` must \
+             type-check clean (C/Rust truncating semantics per \
+             spec/05-risc-primitives.md \u{00a7}2.1); got {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn polymorphic_recip_wrapper_rejects_integer_call_site() {
+    for dtype in INTEGER_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("recip_wrapper_int.ch");
+        let src = format!(
+            r#"sig my_recip: tensor[4, p] -> tensor[4, p]
+def my_recip(x) = recip(x)
+def call(y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_recip(y)
+"#
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        let errs = errors(&json);
+        assert!(
+            !errs.is_empty(),
+            "PR #176 red-team: polymorphic `recip` wrapper at integer \
+             dtype `{dtype}` must reject per spec/04-type-system.md \
+             \u{00a7}5.4; got clean. errs={errs:?}"
+        );
+        let messages = error_messages(&json);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("5.4") && m.contains("recip")),
+            "PR #176 red-team: rejection of recip(`{dtype}`) wrapper \
+             must cite \u{00a7}5.4 and name `recip`; got {messages:?}"
+        );
+    }
+}
+
+// =================================================================
 // FINDING 3: tensor-form transcendentals silently accept integer
 // operands. This is the upstream root cause of findings 1 + 2.
 // =================================================================
@@ -315,6 +379,13 @@ fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
         ("log", "log(x)"),
         ("sin", "sin(x)"),
         ("sqrt", "sqrt(x)"),
+        // `recip` is float-only per spec/05-risc-primitives.md §2.2
+        // because integer reciprocal has no useful IEEE-754 meaning.
+        // `div` is NOT in this list — integer div is admitted with
+        // C/Rust truncating semantics per spec §2.1, used by
+        // `Std.Decimal` for scale shifts; that case is locked by the
+        // positive-parity tests below.
+        ("recip", "recip(x)"),
     ];
     for (name, body) in probes {
         let dir = tempdir().expect("tempdir");

@@ -396,6 +396,193 @@ int main() {{
     assert!(output.contains("PASS"), "ReduceSum wrong output:\n{output}");
 }
 
+// ---- IEEE-754 corner cases for Div and Recip ----
+// Exercise the C-backend codegen (`emit_binary` for Div, `emit_recip`
+// for Recip) end-to-end on the four corner cases an
+// `exp(neg(log(b)))` decomposition would mishandle: 5/-2, 1/0, -1/0,
+// 0/0 for Div; recip(-2) and recip(0) for Recip. Path: chelis IR →
+// emitted C → gcc → run.
+
+#[test]
+fn exec_div_ieee_corner_cases() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
+    dag.add_node(RiscOp::Div, vec![a, b], vec_f32(4), None);
+    let dag = fuse(&dag);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_div_ieee",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    );
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <math.h>
+extern void test_div_ieee(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float a_data[4] = {{ 5.0f,  1.0f, -1.0f, 0.0f }};
+    float b_data[4] = {{-2.0f,  0.0f,  0.0f, 0.0f }};
+    chelis_tensor a_t = make_view_1d(a_data, 4);
+    chelis_tensor b_t = make_view_1d(b_data, 4);
+    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_div_ieee(inputs, 2, outputs, 1);
+
+    float* o = outputs[0]->data;
+    int ok = 1;
+    if (o[0] != -2.5f) {{ printf("MISMATCH 5/-2: got %f want -2.5\n", o[0]); ok = 0; }}
+    if (!(isinf(o[1]) && o[1] > 0)) {{ printf("MISMATCH 1/0: got %f want +inf\n", o[1]); ok = 0; }}
+    if (!(isinf(o[2]) && o[2] < 0)) {{ printf("MISMATCH -1/0: got %f want -inf\n", o[2]); ok = 0; }}
+    if (!isnan(o[3])) {{ printf("MISMATCH 0/0: got %f want NaN\n", o[3]); ok = 0; }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("div_ieee", src, &harness) else {
+        panic!("Div IEEE kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C-backend Div must produce IEEE results for the four corner cases:\n{output}"
+    );
+}
+
+#[test]
+fn exec_recip_ieee_corner_cases() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(3), None);
+    dag.add_node(RiscOp::Recip, vec![a], vec_f32(3), None);
+    let dag = fuse(&dag);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_recip_ieee",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    );
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <math.h>
+extern void test_recip_ieee(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float a_data[3] = {{-2.0f, 0.0f, 4.0f}};
+    chelis_tensor a_t = make_view_1d(a_data, 3);
+    chelis_tensor* inputs[1] = {{&a_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_recip_ieee(inputs, 1, outputs, 1);
+
+    float* o = outputs[0]->data;
+    int ok = 1;
+    if (o[0] != -0.5f) {{ printf("MISMATCH recip(-2): got %f want -0.5\n", o[0]); ok = 0; }}
+    if (!(isinf(o[1]) && o[1] > 0)) {{ printf("MISMATCH recip(0): got %f want +inf\n", o[1]); ok = 0; }}
+    if (o[2] != 0.25f) {{ printf("MISMATCH recip(4): got %f want 0.25\n", o[2]); ok = 0; }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("recip_ieee", src, &harness) else {
+        panic!("Recip IEEE kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C-backend Recip must produce IEEE results for the corner cases:\n{output}"
+    );
+}
+
+// spec/05-risc-primitives.md §2.1: integer `div` uses C/Rust
+// truncating semantics (round toward zero). This is what
+// chelis-std's `Std.Decimal::normalize` relies on for scale shifts
+// (`div(coefficient, cast(10, int64))`). The C backend emits
+// `int32_t / int32_t` which truncates by language definition; this
+// exec-compile test pins that contract end-to-end.
+#[test]
+fn exec_div_int32_truncates_toward_zero() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
+    dag.add_node(RiscOp::Div, vec![a, b], vec_i32(4), None);
+    let dag = fuse(&dag);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_div_i32_trunc",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    );
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void test_div_i32_trunc(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    int32_t a_data[4] = {{ 7,  7, -7, -7}};
+    int32_t b_data[4] = {{ 2, -2,  2, -2}};
+    int32_t expected[4] = {{ 3, -3, -3,  3}};
+
+    chelis_tensor a_t;
+    memset(&a_t, 0, sizeof(a_t));
+    a_t.data = (float*)a_data;
+    a_t.shape[0] = 4; a_t.strides[0] = 1; a_t.ndim = 1;
+    a_t.dtype = CHELIS_I32; a_t.size = 4;
+
+    chelis_tensor b_t;
+    memset(&b_t, 0, sizeof(b_t));
+    b_t.data = (float*)b_data;
+    b_t.shape[0] = 4; b_t.strides[0] = 1; b_t.ndim = 1;
+    b_t.dtype = CHELIS_I32; b_t.size = 4;
+
+    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_div_i32_trunc(inputs, 2, outputs, 1);
+
+    int ok = 1;
+    int32_t* o = (int32_t*)outputs[0]->data;
+    if (outputs[0]->dtype != CHELIS_I32) {{
+        printf("FAIL: output dtype %d, expected CHELIS_I32 (%d)\n",
+               outputs[0]->dtype, CHELIS_I32);
+        ok = 0;
+    }}
+    for (int i = 0; i < 4 && ok; i++) {{
+        if (o[i] != expected[i]) {{
+            printf("MISMATCH idx=%d a=%d b=%d got=%d want=%d\n",
+                   i, a_data[i], b_data[i], o[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("div_i32_trunc", src, &harness) else {
+        panic!("int32 div truncating kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C-backend Div on int32 must truncate toward zero:\n{output}"
+    );
+}
+
 // ---- Test 5: Zero-size tensor does not crash ----
 
 #[test]

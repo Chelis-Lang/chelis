@@ -2106,7 +2106,7 @@
   "chelis-ir::tier2::tests::batched_matmul_rank4_produces_batched_sum_axis": 0.013,
   "chelis-ir::tier2::tests::conv2d_produces_im2col_style_sequence": 0.011,
   "chelis-ir::tier2::tests::conv2d_rejects_missing_output_shape": 0.01,
-  "chelis-ir::tier2::tests::div_produces_mul_recip": 0.008,
+  "chelis-ir::tier2::tests::lower_div_emits_single_div_node": 0.008,
   "chelis-ir::tier2::tests::eq_produces_not_or_cmplt": 0.012,
   "chelis-ir::tier2::tests::gt_swaps_args_to_cmplt": 0.009,
   "chelis-ir::tier2::tests::gte_produces_not_cmplt": 0.01,

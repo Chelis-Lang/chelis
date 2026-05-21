@@ -434,9 +434,11 @@ pub struct FusedStep {
 pub enum FusedStepOp {
     Add,
     Mul,
+    Div,
     MaxElem,
     CmpLt,
     Neg,
+    Recip,
     Exp,
     Log,
     Sin,
@@ -464,6 +466,11 @@ pub enum RiscOp {
     // --- Binary elementwise ---
     Add,
     Mul,
+    /// Element-wise IEEE-754 division `a / b`. Primitive because the
+    /// algebraic rewrite `mul(a, exp(neg(log(b))))` is NaN for
+    /// `b ≤ 0` (`log(b)` is undefined there). Backends emit native
+    /// `/`; the Rust evaluator uses native `f32`/`f64` division.
+    Div,
     CmpLt,
     MaxElem,
 
@@ -479,6 +486,12 @@ pub enum RiscOp {
     Abs,
     Floor,
     Ceil,
+    /// Element-wise IEEE-754 reciprocal `1.0 / x`. Primitive so that
+    /// `lower_sigmoid` (and any other reciprocal-shaped lowering)
+    /// emits a single op rather than the `exp(neg(log(x)))` chain
+    /// that would NaN on non-positive inputs. Backends emit
+    /// `1.0f / x` (or the f64 / mixed-precision analog).
+    Recip,
     UniformLike {
         low: f64,
         high: f64,

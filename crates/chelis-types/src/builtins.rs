@@ -16,6 +16,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mul",
     "max_elem",
     "neg",
+    "recip",
     "exp",
     "log",
     "sin",
@@ -579,9 +580,14 @@ pub fn builtin_env() -> (Env, VarGen) {
     // Tier 1: RISC Primitives
     tensor_binop("add", &mut env, &mut vg);
     tensor_binop("mul", &mut env, &mut vg);
+    // `div` and `recip` were promoted from a Tier 2
+    // `exp(neg(log(_)))` decomposition to native Tier 1 primitives
+    // (IEEE-754 semantics, correct on the full real line).
+    tensor_binop("div", &mut env, &mut vg);
     tensor_binop("max_elem", &mut env, &mut vg);
 
     tensor_unop("neg", &mut env, &mut vg);
+    tensor_unop("recip", &mut env, &mut vg);
     tensor_unop("exp", &mut env, &mut vg);
     tensor_unop("log", &mut env, &mut vg);
     tensor_unop("sin", &mut env, &mut vg);
@@ -598,7 +604,6 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     // Tier 2: Derived built-ins
     tensor_binop("sub", &mut env, &mut vg);
-    tensor_binop("div", &mut env, &mut vg);
     generic_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);

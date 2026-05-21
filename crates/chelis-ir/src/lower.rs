@@ -3965,6 +3965,24 @@ impl LowerCtx {
                         .add_node(RiscOp::Neg, vec![x], out_ty, self.current_span_id.clone());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
+            // `recip(x)` lowers directly to `RiscOp::Recip`,
+            // exposing IEEE `1.0 / x` to Surf without going through a
+            // `div(const(1), x)` round-trip.
+            "recip" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "recip input");
+                let out_ty = if *ty == Self::default_type() {
+                    self.dag
+                        .get(x)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                };
+                let node =
+                    self.dag
+                        .add_node(RiscOp::Recip, vec![x], out_ty, self.current_span_id.clone());
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
             "exp" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "exp input");
                 let node = self.lower_transcendental(RiscOp::Exp, x, ty);

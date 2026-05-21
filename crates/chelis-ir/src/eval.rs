@@ -744,7 +744,13 @@ where
                 &values[&node.inputs[1]],
                 |a, b| a * b,
             ),
+            RiscOp::Div => binary_map(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                |a, b| a / b,
+            ),
             RiscOp::Neg => unary_map(&values[&node.inputs[0]], |x| -x),
+            RiscOp::Recip => unary_map(&values[&node.inputs[0]], |x| 1.0 / x),
             RiscOp::Exp => unary_map(&values[&node.inputs[0]], f64::exp),
             RiscOp::Log => unary_map(&values[&node.inputs[0]], f64::ln),
             RiscOp::Sin => unary_map(&values[&node.inputs[0]], f64::sin),
@@ -843,6 +849,11 @@ where
                             resolve(&step.input_indices[1]),
                             |a, b| a * b,
                         ),
+                        FusedStepOp::Div => binary_map(
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                            |a, b| a / b,
+                        ),
                         FusedStepOp::MaxElem => binary_map(
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
@@ -855,6 +866,9 @@ where
                         ),
                         // Unary ops
                         FusedStepOp::Neg => unary_map(resolve(&step.input_indices[0]), |x| -x),
+                        FusedStepOp::Recip => {
+                            unary_map(resolve(&step.input_indices[0]), |x| 1.0 / x)
+                        }
                         FusedStepOp::Exp => unary_map(resolve(&step.input_indices[0]), f64::exp),
                         FusedStepOp::Log => unary_map(resolve(&step.input_indices[0]), f64::ln),
                         FusedStepOp::Sin => unary_map(resolve(&step.input_indices[0]), f64::sin),

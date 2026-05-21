@@ -298,11 +298,13 @@ impl CEmitter {
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
             RiscOp::Mul => self.emit_binary(id, "*", &node.inputs, &node.output_type),
+            RiscOp::Div => self.emit_binary(id, "/", &node.inputs, &node.output_type),
             RiscOp::MaxElem => {
                 self.emit_binary_func(id, "fmaxf", &node.inputs, &node.output_type);
             }
             RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type),
             RiscOp::Neg => self.emit_unary(id, "-", &node.inputs, &node.output_type),
+            RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
             RiscOp::Exp => self.emit_unary_func(id, "expf", &node.inputs, &node.output_type),
             RiscOp::Log => self.emit_unary_func(id, "logf", &node.inputs, &node.output_type),
             RiscOp::Sin => self.emit_unary_func(id, "sinf", &node.inputs, &node.output_type),
@@ -1376,6 +1378,50 @@ impl CEmitter {
         self.line("}");
     }
 
+    // ---- Reciprocal ----
+    // Emits IEEE `1.0 / x`. Kept separate from `emit_unary` because the
+    // numerator is a precision-typed constant, not a prefix operator.
+    // The pointer aliases are hoisted out of the contiguity branch so
+    // both paths share the same `__in_a_{id}` / `__out_{id}` names; the
+    // strided branch reuses them via `__in_a_{id}[idx]` rather than
+    // re-casting `t{a}->data` inline.
+    fn emit_recip(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        let a = inputs[0].0;
+        let et = Self::elem_type(ty);
+        let one = if Self::is_f64(ty) { "1.0" } else { "1.0f" };
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("{et}* restrict __out_{id} = ({et}*)t{id}->data;"));
+        self.line(&format!(
+            "const {et}* restrict __in_a_{id} = (const {et}*)t{a}->data;"
+        ));
+        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+        self.indent += 1;
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("__out_{id}[i] = {one} / __in_a_{id}[i];"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!("__out_{id}[i] = {one} / __in_a_{id}[idx];"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     // ---- Unary func (expf, logf, sinf, sqrtf) ----
     fn emit_unary_func(&mut self, id: usize, func: &str, inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
@@ -1547,6 +1593,13 @@ impl CEmitter {
     }
 
     /// Emit one fused-step expression for the scalar fast/tail path.
+    ///
+    /// The fused-elem and fused-reduce entry points (`emit_fused_elem`,
+    /// `emit_fused_reduce`) panic at the WS-A1 guard if any non-f32
+    /// precision reaches them, so this emitter is f32-only by
+    /// construction. The `1.0f` literal in `Recip` / `CmpLt`
+    /// reflects that invariant; widening to f64 requires lifting the
+    /// guard first.
     fn scalar_step_expr(
         op: &FusedStepOp,
         resolve: &dyn Fn(&FusedInput) -> String,
@@ -1563,6 +1616,11 @@ impl CEmitter {
                 let b = resolve(&inputs[1]);
                 format!("{a} * {b}")
             }
+            FusedStepOp::Div => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("{a} / {b}")
+            }
             FusedStepOp::MaxElem => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
@@ -1576,6 +1634,10 @@ impl CEmitter {
             FusedStepOp::Neg => {
                 let a = resolve(&inputs[0]);
                 format!("-{a}")
+            }
+            FusedStepOp::Recip => {
+                let a = resolve(&inputs[0]);
+                format!("1.0f / {a}")
             }
             FusedStepOp::Exp => {
                 let a = resolve(&inputs[0]);
@@ -1637,6 +1699,11 @@ impl CEmitter {
                 let b = resolve(&inputs[1]);
                 format!("_mm256_mul_ps({a}, {b})")
             }
+            FusedStepOp::Div => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("_mm256_div_ps({a}, {b})")
+            }
             FusedStepOp::MaxElem => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
@@ -1652,6 +1719,10 @@ impl CEmitter {
             FusedStepOp::Neg => {
                 let a = resolve(&inputs[0]);
                 format!("_mm256_sub_ps(_mm256_setzero_ps(), {a})")
+            }
+            FusedStepOp::Recip => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_div_ps(_mm256_set1_ps(1.0f), {a})")
             }
             FusedStepOp::Exp => {
                 let a = resolve(&inputs[0]);
@@ -2962,6 +3033,11 @@ impl CEmitter {
                     let b = resolve(&step.input_indices[1]);
                     format!("{a} * {b}")
                 }
+                FusedStepOp::Div => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("{a} / {b}")
+                }
                 FusedStepOp::MaxElem => {
                     let a = resolve(&step.input_indices[0]);
                     let b = resolve(&step.input_indices[1]);
@@ -2975,6 +3051,10 @@ impl CEmitter {
                 FusedStepOp::Neg => {
                     let a = resolve(&step.input_indices[0]);
                     format!("-{a}")
+                }
+                FusedStepOp::Recip => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("1.0f / {a}")
                 }
                 FusedStepOp::Exp => {
                     let a = resolve(&step.input_indices[0]);

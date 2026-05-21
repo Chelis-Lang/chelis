@@ -822,9 +822,11 @@ pub struct WireFusedStep {
 pub enum WireFusedStepOp {
     Add,
     Mul,
+    Div,
     MaxElem,
     CmpLt,
     Neg,
+    Recip,
     Exp,
     Log,
     Sin,
@@ -849,9 +851,11 @@ pub enum WireFusedInput {
 pub enum WireRiscOp {
     Add,
     Mul,
+    Div,
     CmpLt,
     MaxElem,
     Neg,
+    Recip,
     Exp,
     Log,
     Sin,

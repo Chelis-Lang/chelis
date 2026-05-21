@@ -56,8 +56,31 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 |---|---|---|---|
 | `add` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise addition | `(g, g)` |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise multiplication | `(g * y, g * x)` |
+| `div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 division `a / b` | `(g / b, -g * (a/b) / b)` (= `(g/b, -g*y/b)` using `y = a/b`) |
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | Element-wise less-than comparison | Non-differentiable (zero gradient) |
 | `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise maximum | `(g * (x >= y), g * (x < y))` — gradient flows to the max input |
+
+**`div` semantics.** `div(a, b)` lowers to the target's native
+`/` operator.
+
+- **Float operands** (f32, f64, f16, bf16) — IEEE-754 division.
+  Corner cases follow IEEE: `1/0 = +inf`, `1/-0 = -inf`,
+  `0/0 = NaN`, `1/-1 = -1`, `(any non-NaN) / -2.0` yields the
+  algebraic value. A historical `mul(a, exp(neg(log(b))))`
+  decomposition returned NaN for any `b ≤ 0` because `log(b)` is
+  undefined there; that decomposition is not reachable from any
+  Tier 2 op.
+
+- **Integer operands** (int8, int16, int32, int64) — C/Rust
+  truncating division (round toward zero). `7 / 2 == 3`,
+  `-7 / 2 == -3`, `1 / 0` traps (implementation-defined per C; the
+  evaluator panics, the C backend follows the platform's
+  signal). This differs from torch's `true_divide` and JAX's
+  default `jnp.divide`, both of which upcast integers to float
+  and return float. Chelis matches the C-language convention
+  because chelis-std's `Std.Decimal` arithmetic uses
+  `div(int64, int64)` for scale shifts; float-only would force a
+  separate `int_div` primitive without benefit.
 
 **Dimension rule:** Both inputs must have identical dimension lists. Output has the same dimensions. No broadcasting.
 
@@ -68,10 +91,17 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | Name | Signature | Semantics | AD Adjoint |
 |---|---|---|---|
 | `neg` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise negation: -x | `-g` |
+| `recip` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 reciprocal `1.0 / x` | `-g * y * y` (= `-g / x^2`, using `y = 1/x`) |
 | `exp` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise e^x | `g * exp(x)` |
 | `log` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ln(x) | `g / x` |
 | `sin` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sin(x) | `g * cos(x)` where `cos(x) = sin(x + π/2)` |
 | `sqrt` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sqrt(x) | `g / (2 * sqrt(x))` |
+
+**`recip`.** Native IEEE-754 reciprocal, used inside
+`lower_sigmoid` (and any other reciprocal-shaped lowering) to
+produce a single op instead of the prior `exp(neg(log(x)))` chain.
+`recip(0) = +inf`, `recip(-0) = -inf`, `recip(-x) = -recip(x)` for
+finite x — never NaN-from-log.
 
 **Precision rule:** Float types only (f32, f64, f16, bf16). Not valid on integer types (type error).
 
@@ -177,9 +207,12 @@ These are convenience functions emitted by the desugarer. The compiler lowers th
 | Name | Lowering to RISC |
 |---|---|
 | `sub(a, b)` | `add(a, neg(b))` |
-| `div(a, b)` | `mul(a, recip(b))` where `recip(x) = exp(neg(log(x)))` or specialized |
 
-Note: `neg` is a Tier 1 RISC primitive (see §2), not listed here. `recip` is a lowering-only helper (see §3.5).
+Note: `div` and `neg` are Tier 1 RISC primitives (see §2.1, §2.2),
+not Tier 2 derived built-ins. `recip` is also a Tier 1 primitive
+(§2.2). The historically `div(a, b) = mul(a,
+exp(neg(log(b))))` lowering — which returned NaN for `b ≤ 0` — is
+no longer reachable from any Tier2 op.
 
 ### 3.2 Comparison
 
@@ -198,7 +231,7 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 | Name | Lowering to RISC |
 |---|---|
 | `relu(x)` | `max_elem(x, const(0.0, x.shape))` |
-| `sigmoid(x)` | `div(const(1.0), add(const(1.0), exp(neg(x))))` |
+| `sigmoid(x)` | `recip(add(const(1.0), exp(neg(x))))` |
 
 ### 3.4 Higher-Level Operations
 
@@ -225,7 +258,6 @@ pattern-matched operations. Most decompose into Tier 1 primitives:
 
 | Helper | Decomposes to |
 |---|---|
-| `recip(x)` | `exp(neg(log(x)))` or backend-optimized |
 | `cos(x)` | `sin(add(x, const(π/2)))` |
 | `argmax(x, axis)` | comparison chain via `cmplt` + `max_elem` |
 | `gather(x, idx, axis)` | one-hot encoding via `reshape`, `expand`, `mul`, `sum` |

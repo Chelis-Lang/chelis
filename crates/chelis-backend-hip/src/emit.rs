@@ -847,6 +847,10 @@ impl HipEmitter {
                 "kernel_mul{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
+            RiscOp::Div => Some(format!(
+                "kernel_div{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
             // WS-A2: float-only kernel templates remain `_<f32|f64>`-suffixed.
             RiscOp::MaxElem => Some(format!("kernel_max_elem_{}", kind_for_node(node).suffix())),
             RiscOp::CmpLt => {
@@ -858,6 +862,7 @@ impl HipEmitter {
                 Some(format!("kernel_cmplt_{}", operand_kind.suffix()))
             }
             RiscOp::Neg => Some(format!("kernel_neg_{}", kind_for_node(node).suffix())),
+            RiscOp::Recip => Some(format!("kernel_recip_{}", kind_for_node(node).suffix())),
             RiscOp::Exp => Some(format!("kernel_exp_{}", kind_for_node(node).suffix())),
             RiscOp::Log => Some(format!("kernel_log_{}", kind_for_node(node).suffix())),
             RiscOp::Sin => Some(format!("kernel_sin_{}", kind_for_node(node).suffix())),
@@ -1056,12 +1061,36 @@ impl HipEmitter {
                     kernels::binary_elementwise_typed(name, "*", Self::dtype_c_type(prec))
                 }
             }
+            // IEEE elementwise division. The type checker rejects
+            // integer operands at every entry point (the direct-call
+            // arm in `validate_polymorphic_op_constraints` and the
+            // polymorphic-wrapper arm in
+            // `TRANSCENDENTAL_FLOAT_ONLY_OPS`), so only f32/f64 can
+            // reach codegen here. A `debug_assert!` guards the
+            // invariant; release-mode builds will still emit a
+            // float kernel for whatever precision lands here.
+            RiscOp::Div => {
+                let prec = operand_prec();
+                debug_assert!(
+                    matches!(prec, Prim::F32 | Prim::F64),
+                    "RiscOp::Div on non-float precision `{prec:?}` reached HIP \
+                     codegen; the type checker should reject this at \
+                     spec/04-type-system.md \u{00a7}5.4 before lowering"
+                );
+                kernels::binary_elementwise(
+                    name,
+                    "/",
+                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
+                )
+            }
             RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem_for_unary()),
             RiscOp::CmpLt => kernels::cmplt(
                 name,
                 Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
             ),
             RiscOp::Neg => kernels::unary_prefix(name, "-", elem_for_unary()),
+            // IEEE reciprocal kernel.
+            RiscOp::Recip => kernels::unary_recip(name, elem_for_unary()),
             RiscOp::Exp => kernels::unary_func(name, "expf", elem_for_unary()),
             RiscOp::Log => kernels::unary_func(name, "logf", elem_for_unary()),
             RiscOp::Sin => kernels::unary_func(name, "sinf", elem_for_unary()),
@@ -1286,6 +1315,12 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
+            RiscOp::Div => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name(),
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::MaxElem => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name(),
@@ -1299,6 +1334,9 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::Neg => {
+                self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
+            }
+            RiscOp::Recip => {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
             RiscOp::Exp => {
@@ -2782,9 +2820,11 @@ impl HipEmitter {
             | RiscOp::Const { .. }
             | RiscOp::Add
             | RiscOp::Mul
+            | RiscOp::Div
             | RiscOp::MaxElem
             | RiscOp::CmpLt
             | RiscOp::Neg
+            | RiscOp::Recip
             | RiscOp::Exp
             | RiscOp::Log
             | RiscOp::Sin
