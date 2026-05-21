@@ -60,13 +60,27 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | Element-wise less-than comparison | Non-differentiable (zero gradient) |
 | `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise maximum | `(g * (x >= y), g * (x < y))` — gradient flows to the max input |
 
-**`div` IEEE semantics.** `div(a, b)` is the native
-IEEE-754 division on every supported target. Corner cases follow
-IEEE: `1/0 = +inf`, `1/-0 = -inf`, `0/0 = NaN`, `1/-1 = -1`,
-`(any non-NaN) / -2.0` yields the algebraic value. The historically
-tier2 lowering `mul(a, exp(neg(log(b))))` returned NaN for any
-`b ≤ 0` (because `log(b)` is undefined there) — that decomposition
-is no longer reachable from any Tier2 op.
+**`div` semantics.** `div(a, b)` lowers to the target's native
+`/` operator.
+
+- **Float operands** (f32, f64, f16, bf16) — IEEE-754 division.
+  Corner cases follow IEEE: `1/0 = +inf`, `1/-0 = -inf`,
+  `0/0 = NaN`, `1/-1 = -1`, `(any non-NaN) / -2.0` yields the
+  algebraic value. A historical `mul(a, exp(neg(log(b))))`
+  decomposition returned NaN for any `b ≤ 0` because `log(b)` is
+  undefined there; that decomposition is not reachable from any
+  Tier 2 op.
+
+- **Integer operands** (int8, int16, int32, int64) — C/Rust
+  truncating division (round toward zero). `7 / 2 == 3`,
+  `-7 / 2 == -3`, `1 / 0` traps (implementation-defined per C; the
+  evaluator panics, the C backend follows the platform's
+  signal). This differs from torch's `true_divide` and JAX's
+  default `jnp.divide`, both of which upcast integers to float
+  and return float. Chelis matches the C-language convention
+  because chelis-std's `Std.Decimal` arithmetic uses
+  `div(int64, int64)` for scale shifts; float-only would force a
+  separate `int_div` primitive without benefit.
 
 **Dimension rule:** Both inputs must have identical dimension lists. Output has the same dimensions. No broadcasting.
 

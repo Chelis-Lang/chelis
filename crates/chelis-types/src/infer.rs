@@ -3251,12 +3251,13 @@ const TRANSCENDENTAL_FLOAT_ONLY_OPS: &[&str] = &[
     "gelu",
     "layer_norm",
     "normalize",
-    // `div` and `recip` are float-only IEEE-754 primitives per
-    // spec/05-risc-primitives.md §2.1 / §2.2. They join this list so
-    // a polymorphic stdlib wrapper (e.g. `def my_div(a, b) = div(a, b)`)
-    // also rejects integer instantiations at the call site, not just
-    // the direct-call validator at `validate_polymorphic_op_constraints`.
-    "div",
+    // `recip` is float-only per spec/05-risc-primitives.md §2.2: an
+    // integer reciprocal has no meaningful IEEE-754 interpretation
+    // (would always be 0 for |x| > 1 and undefined for x = 0).
+    // `div` is intentionally absent — integer division is admitted with
+    // C/Rust truncating semantics per spec §2.1, so chelis-std's
+    // Decimal arithmetic (`div(int64, int64)` for scale shifts) keeps
+    // type-checking through polymorphic wrappers.
     "recip",
 ];
 
@@ -6511,12 +6512,21 @@ fn infer_app(
                         "matmul" | "layer_norm" | "normalize" => {
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                         }
-                        "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" => {
+                        "add" | "mul" | "sub" | "div" | "max_elem" | "min_elem" | "neg" => {
+                            // `div` is numeric (not float-only) so that
+                            // integer Decimal arithmetic in chelis-std
+                            // (e.g. `Std.Decimal::normalize` doing
+                            // `div(coefficient, cast(10, int64))` for
+                            // scale shifts) continues to type-check.
+                            // The IEEE-754 semantics in
+                            // spec/05-risc-primitives.md §2.1 apply
+                            // for float operands; integer operands use
+                            // C/Rust native truncating division.
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
                         "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
-                        | "gelu" | "div" | "recip" => {
+                        | "gelu" | "recip" => {
                             // WS-A8 / RT-3 F3: spec/04-type-system.md §5.4
                             // restricts transcendental ops to float
                             // precisions (f32, f64, bf16, f16). The
@@ -6568,7 +6578,6 @@ fn infer_app(
                                 | "tanh"
                                 | "silu"
                                 | "gelu"
-                                | "div"
                                 | "recip"
                         );
                         let (kind, message, hints) = if is_transcendental
