@@ -323,7 +323,7 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
-/// Generate kernel source for IEEE elementwise reciprocal (issue #175).
+/// Generate kernel source for IEEE elementwise reciprocal.
 /// Emits `1.0f / a[idx]` (or `1.0 / a[idx]` for f64) — kept separate
 /// from `unary_prefix` because the numerator is a typed constant, not
 /// a prefix operator.

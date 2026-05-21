@@ -306,8 +306,8 @@ fn spec_sigmoid_decomposes() {
             (var {} sigmoid) (var {} x)))
     "#;
     let dag = lower_deep(src);
-    // Issue #175: sigmoid(x) = recip(1 + exp(-x)) — decomposes to
-    // Exp + Neg + Add + Recip (4 ops). The pre-#175 lowering inlined
+    // sigmoid(x) = recip(1 + exp(-x)) — decomposes to
+    // Exp + Neg + Add + Recip (4 ops). The historically lowering inlined
     // an `exp(neg(log(_)))` reciprocal which produced a `Log` node;
     // that is now a regression: a `Log` in the lowered DAG means the
     // recip cascade has returned.
@@ -321,11 +321,11 @@ fn spec_sigmoid_decomposes() {
     assert!(has_add, "sigmoid decomposition should contain Add");
     assert!(
         has_recip,
-        "sigmoid decomposition should contain Recip (the IEEE reciprocal primitive added in #175)"
+        "sigmoid decomposition should contain Recip (the IEEE reciprocal primitive primitive)"
     );
     assert!(
         !has_log,
-        "sigmoid decomposition must not contain Log; a Log node would indicate the pre-#175 \
+        "sigmoid decomposition must not contain Log; a Log node would indicate the historically \
          recip-via-log cascade has returned"
     );
 }

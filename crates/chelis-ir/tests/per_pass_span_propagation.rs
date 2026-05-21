@@ -619,7 +619,7 @@ fn cse_does_not_fabricate_spans() {
 /// inherits the decomposed parent's `span_id`. Per
 /// spec/design/chelis_span_survival.md §2.3 Tier 2 row.
 ///
-/// Post-issue-#175 `lower_div` is a degenerate decomposition (one
+/// In the current lowering, `lower_div` is a degenerate decomposition (one
 /// synthesized `RiscOp::Div` node — the cascade was collapsed), so
 /// we exercise the rule with `lower_sigmoid` which still decomposes
 /// into 4 synthesized sub-nodes (`Neg`, `Exp`, `Add`, `Recip`). The
@@ -661,7 +661,7 @@ fn tier2_sub_nodes_inherit_parent_span() {
     assert!(matches!(dag.get(result).unwrap().op, RiscOp::Recip));
 }
 
-/// Issue #175 collapsed `lower_div` from a 4-node cascade to a single
+/// Issue  collapsed `lower_div` from a 4-node cascade to a single
 /// `RiscOp::Div` node. The span-propagation rule still applies to that
 /// lone synthesized node.
 #[test]
@@ -674,7 +674,7 @@ fn tier2_lower_div_synthesized_node_inherits_parent_span() {
     let node = dag.get(result).unwrap();
     assert!(
         matches!(node.op, RiscOp::Div),
-        "issue #175: lower_div emits a single RiscOp::Div node"
+        ": lower_div emits a single RiscOp::Div node"
     );
     assert_eq!(node.span_id.as_deref(), Some("div.expr"));
 }

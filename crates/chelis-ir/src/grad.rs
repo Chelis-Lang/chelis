@@ -1250,7 +1250,10 @@ mod tests {
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[("y", 4.0)], 2.0, 1e-5);
         assert_grad_close(a, n);
-        assert!((a - 0.25).abs() < 1e-6, "d(x/y)/dx at y=4 should be 0.25, got {a}");
+        assert!(
+            (a - 0.25).abs() < 1e-6,
+            "d(x/y)/dx at y=4 should be 0.25, got {a}"
+        );
     }
 
     #[test]
@@ -1260,7 +1263,10 @@ mod tests {
         });
         let (a, n) = finite_diff(&dag, out, y, "y", &[("x", 2.0)], 4.0, 1e-5);
         assert_grad_close(a, n);
-        assert!((a - (-0.125)).abs() < 1e-6, "d(x/y)/dy at x=2,y=4 should be -0.125, got {a}");
+        assert!(
+            (a - (-0.125)).abs() < 1e-6,
+            "d(x/y)/dy at x=2,y=4 should be -0.125, got {a}"
+        );
     }
 
     #[test]
@@ -1269,7 +1275,10 @@ mod tests {
             build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Recip, vec![a], ty.clone(), None));
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
         assert_grad_close(a, n);
-        assert!((a - (-0.25)).abs() < 1e-6, "d(1/x)/dx at x=2 should be -0.25, got {a}");
+        assert!(
+            (a - (-0.25)).abs() < 1e-6,
+            "d(1/x)/dx at x=2 should be -0.25, got {a}"
+        );
     }
 
     #[test]

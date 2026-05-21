@@ -298,7 +298,7 @@ impl CEmitter {
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
             RiscOp::Mul => self.emit_binary(id, "*", &node.inputs, &node.output_type),
-            // IEEE-754 elementwise division — issue #175. Same emit
+            // IEEE-754 elementwise division. Same emit
             // path as add/mul (`a / b`); C's `/` is IEEE on every
             // supported target. Native, single op.
             RiscOp::Div => self.emit_binary(id, "/", &node.inputs, &node.output_type),
@@ -307,7 +307,7 @@ impl CEmitter {
             }
             RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type),
             RiscOp::Neg => self.emit_unary(id, "-", &node.inputs, &node.output_type),
-            // IEEE-754 elementwise reciprocal — issue #175. Emits
+            // IEEE-754 elementwise reciprocal. Emits
             // `1.0f / x` (or `1.0 / x` for f64). Used by
             // `lower_sigmoid` and any other reciprocal-shaped lowering.
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),

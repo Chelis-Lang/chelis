@@ -68,9 +68,9 @@ pub fn lower_relu(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option
 
 /// `sigmoid(x)` = `1 / (1 + exp(-x))`
 ///
-/// Lowered as `recip(add(const(1), exp(neg(x))))` (issue #175).
+/// Lowered as `recip(add(const(1), exp(neg(x))))`.
 ///
-/// Pre-#175 this inlined its own `exp(neg(log(_)))` reciprocal chain,
+/// Pre- this inlined its own `exp(neg(log(_)))` reciprocal chain,
 /// which inherited the same NaN-on-non-positive-input bug as the old
 /// `lower_div`. With `RiscOp::Recip` as a primitive the reciprocal
 /// step is a single op and produces the IEEE-correct value
@@ -227,9 +227,9 @@ pub fn lower_gelu(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option
     add_synth(dag, RiscOp::Mul, vec![half, x_mul], ty.clone(), parent_span)
 }
 
-/// `div(a, b)` — IEEE-754 elementwise division (issue #175).
+/// `div(a, b)` — IEEE-754 elementwise division.
 ///
-/// Pre-#175 this was lowered as `mul(a, exp(neg(log(b))))`, which
+/// Pre- this was lowered as `mul(a, exp(neg(log(b))))`, which
 /// returned NaN for any `b ≤ 0` because `log(b)` is undefined there
 /// (silent miscompile of every divide-by-negative through `mean`,
 /// `softmax`, `layer_norm`, etc.). The new `RiscOp::Div` primitive
@@ -1331,17 +1331,17 @@ mod tests {
         let result = lower_sigmoid(&mut dag, x, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
-        // Issue #175: sigmoid no longer inlines `exp(neg(log(_)))`;
+        // sigmoid no longer inlines `exp(neg(log(_)))`;
         // the final reciprocal is a single `RiscOp::Recip` node.
         // Chain: x, neg(x), exp(neg(x)), const(1), add, recip = 6 nodes.
         assert_eq!(dag.len(), 6);
         let result_node = dag.get(result).unwrap();
         assert_eq!(result_node.op, RiscOp::Recip);
-        // Regression guard: the pre-#175 lowering inlined a Log node;
+        // Regression guard: the historically lowering inlined a Log node;
         // the new lowering must not produce one.
         assert!(
             dag.nodes().iter().all(|n| !matches!(n.op, RiscOp::Log)),
-            "sigmoid lowering must not contain Log after issue #175"
+            "sigmoid lowering must not contain Log "
         );
     }
 
@@ -1353,19 +1353,19 @@ mod tests {
         let result = lower_div(&mut dag, a, b, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
-        // Issue #175: lower_div emits a single `RiscOp::Div(a, b)` node
+        // lower_div emits a single `RiscOp::Div(a, b)` node
         // (was 4 ops: log, neg, exp, mul). Chain: a, b, div = 3 nodes.
         assert_eq!(dag.len(), 3);
         let result_node = dag.get(result).unwrap();
         assert_eq!(result_node.op, RiscOp::Div);
         assert_eq!(result_node.inputs, vec![a, b]);
-        // Regression guard: the pre-#175 lowering decomposed through
+        // Regression guard: the historically lowering decomposed through
         // Log/Exp/Neg; none should appear in the DAG anymore.
         assert!(
             dag.nodes()
                 .iter()
                 .all(|n| !matches!(n.op, RiscOp::Log | RiscOp::Exp | RiscOp::Neg)),
-            "div lowering must not contain Log/Exp/Neg after issue #175"
+            "div lowering must not contain Log/Exp/Neg "
         );
     }
 
@@ -1645,7 +1645,7 @@ mod tests {
             "expected Neg (from sub)"
         );
 
-        // Issue #175: the final result is now a single `Div` node
+        // the final result is now a single `Div` node
         // (was `Mul` from the recip-via-log decomposition).
         let result_node = dag.get(result).unwrap();
         assert_eq!(result_node.op, RiscOp::Div);
@@ -1653,7 +1653,7 @@ mod tests {
         // (used to come from the div-via-recip-via-log decomposition).
         assert!(
             ops.iter().all(|op| !matches!(op, RiscOp::Log)),
-            "softmax lowering must not contain Log after issue #175"
+            "softmax lowering must not contain Log "
         );
     }
 
@@ -1677,7 +1677,7 @@ mod tests {
                 .any(|op| matches!(op, RiscOp::Const { value } if *value == 5.0)),
             "expected Const(5.0) for dimension size"
         );
-        // Issue #175: mean is now `Div(sum, const(dim_size))` — a
+        // mean is now `Div(sum, const(dim_size))` — a
         // single `Div` node, not the prior `mul(sum, exp(neg(log(_))))`
         // chain.
         let result_node = dag.get(result).unwrap();
@@ -1686,7 +1686,7 @@ mod tests {
         assert!(
             ops.iter()
                 .all(|op| !matches!(op, RiscOp::Log | RiscOp::Exp | RiscOp::Neg)),
-            "mean lowering must not contain Log/Exp/Neg after issue #175"
+            "mean lowering must not contain Log/Exp/Neg "
         );
     }
 

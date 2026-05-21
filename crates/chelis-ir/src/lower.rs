@@ -3965,7 +3965,7 @@ impl LowerCtx {
                         .add_node(RiscOp::Neg, vec![x], out_ty, self.current_span_id.clone());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
-            // Issue #175: `recip(x)` lowers directly to `RiscOp::Recip`,
+            // `recip(x)` lowers directly to `RiscOp::Recip`,
             // exposing IEEE `1.0 / x` to Surf without going through a
             // `div(const(1), x)` round-trip.
             "recip" if args.len() == 1 => {

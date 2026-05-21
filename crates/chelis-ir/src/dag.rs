@@ -466,7 +466,7 @@ pub enum RiscOp {
     // --- Binary elementwise ---
     Add,
     Mul,
-    /// Element-wise IEEE-754 division `a / b`. Issue #175: promoted to
+    /// Element-wise IEEE-754 division `a / b`. promoted to
     /// a primitive so that division is correct on the full real line
     /// (the prior `mul(a, exp(neg(log(b))))` tier2 lowering returned
     /// NaN for `b ≤ 0` because `log(b)` is undefined there). Backends
@@ -488,7 +488,7 @@ pub enum RiscOp {
     Abs,
     Floor,
     Ceil,
-    /// Element-wise IEEE-754 reciprocal `1.0 / x`. Issue #175: promoted
+    /// Element-wise IEEE-754 reciprocal `1.0 / x`. promoted
     /// to a primitive alongside `Div` so `lower_sigmoid` (and any future
     /// reciprocal-shaped lowering) can produce a single op instead of
     /// inlining the `exp(neg(log(x)))` chain. Backends emit `1.0f / x`

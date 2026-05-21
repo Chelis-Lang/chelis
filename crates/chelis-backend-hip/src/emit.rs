@@ -847,7 +847,7 @@ impl HipEmitter {
                 "kernel_mul{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
-            // Issue #175: IEEE elementwise division. Same dispatch
+            // IEEE elementwise division. Same dispatch
             // pattern as Add/Mul — f32 unsuffixed, others get the
             // dtype suffix.
             RiscOp::Div => Some(format!(
@@ -865,7 +865,7 @@ impl HipEmitter {
                 Some(format!("kernel_cmplt_{}", operand_kind.suffix()))
             }
             RiscOp::Neg => Some(format!("kernel_neg_{}", kind_for_node(node).suffix())),
-            // Issue #175: IEEE elementwise reciprocal.
+            // IEEE elementwise reciprocal.
             RiscOp::Recip => Some(format!("kernel_recip_{}", kind_for_node(node).suffix())),
             RiscOp::Exp => Some(format!("kernel_exp_{}", kind_for_node(node).suffix())),
             RiscOp::Log => Some(format!("kernel_log_{}", kind_for_node(node).suffix())),
@@ -1065,7 +1065,7 @@ impl HipEmitter {
                     kernels::binary_elementwise_typed(name, "*", Self::dtype_c_type(prec))
                 }
             }
-            // Issue #175: IEEE elementwise division. Same dispatch as
+            // IEEE elementwise division. Same dispatch as
             // Mul / Add — float dtypes route through the WS-A2
             // `ElemKind` template; narrow integers (i8/i16) route
             // through the typed template (though div on integers is
@@ -1089,7 +1089,7 @@ impl HipEmitter {
                 Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type),
             ),
             RiscOp::Neg => kernels::unary_prefix(name, "-", elem_for_unary()),
-            // Issue #175: IEEE reciprocal kernel.
+            // IEEE reciprocal kernel.
             RiscOp::Recip => kernels::unary_recip(name, elem_for_unary()),
             RiscOp::Exp => kernels::unary_func(name, "expf", elem_for_unary()),
             RiscOp::Log => kernels::unary_func(name, "logf", elem_for_unary()),
@@ -1315,7 +1315,7 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            // Issue #175: IEEE elementwise division.
+            // IEEE elementwise division.
             RiscOp::Div => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name(),
@@ -1337,7 +1337,7 @@ impl HipEmitter {
             RiscOp::Neg => {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }
-            // Issue #175: IEEE elementwise reciprocal.
+            // IEEE elementwise reciprocal.
             RiscOp::Recip => {
                 self.emit_unary_launch(id, &resolved_kernel_name(), &node.inputs, &node.output_type)
             }

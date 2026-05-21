@@ -1493,7 +1493,7 @@ impl<'a> EvalContext<'a> {
             "div" => numeric_binop(args, |lhs, rhs| lhs / rhs),
             "mod" => int_binop(args, |lhs, rhs| lhs % rhs),
             "neg" => numeric_unop(args, |value| -value),
-            // Issue #175: IEEE elementwise reciprocal as a Surf builtin.
+            // IEEE elementwise reciprocal as a Surf builtin.
             "recip" => numeric_unop(args, |value| 1.0 / value),
             "exp" => float_unop_with_tensor(args, f64::exp, f32::exp),
             "log" => float_unop_with_tensor(args, f64::ln, f32::ln),
@@ -5237,8 +5237,8 @@ y = matmul(a, b)
         assert_eq!(first_tensor_data(&outcome, "y"), vec![3.0, 5.0, 7.0, 11.0]);
     }
 
-    // Issue #175: Promote `Div` and `Recip` to RISC primitives. The
-    // pre-#175 lowering `div(a, b) = mul(a, exp(neg(log(b))))` returned
+    // Promote `Div` and `Recip` to RISC primitives. The
+    // historically lowering `div(a, b) = mul(a, exp(neg(log(b))))` returned
     // NaN for any `b ≤ 0` because `log(b)` is undefined there. These
     // tests pin the IEEE-correct outputs on the runtime evaluator path.
     #[test]
@@ -5252,7 +5252,7 @@ y = div(a, b)
         );
         let outcome = evaluate_host_program(&checked, &HashMap::new())
             .expect("div with negative divisor should evaluate");
-        // Pre-#175: NaN (from log(-2.0)). Post-#175: -2.5.
+        // NaN (from log(-2.0)). -2.5.
         assert_eq!(first_tensor_data(&outcome, "y"), vec![-2.5]);
     }
 
@@ -5322,7 +5322,7 @@ y = recip(a)
         );
         let outcome =
             evaluate_host_program(&checked, &HashMap::new()).expect("recip(-2.0) should evaluate");
-        // Pre-#175: NaN. Post-#175: -0.5.
+        // NaN. -0.5.
         assert_eq!(first_tensor_data(&outcome, "y"), vec![-0.5]);
     }
 

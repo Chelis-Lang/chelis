@@ -580,7 +580,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     // Tier 1: RISC Primitives
     tensor_binop("add", &mut env, &mut vg);
     tensor_binop("mul", &mut env, &mut vg);
-    // Issue #175: `div` and `recip` were promoted from a Tier 2
+    // `div` and `recip` were promoted from a Tier 2
     // `exp(neg(log(_)))` decomposition to native Tier 1 primitives
     // (IEEE-754 semantics, correct on the full real line).
     tensor_binop("div", &mut env, &mut vg);
