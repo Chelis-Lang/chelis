@@ -206,8 +206,10 @@ fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
             Err(_) => return None,
         }
     } else {
-        match chelis_surf::parser::parse_str(source) {
-            Ok(decls) => chelis_surf::format::format_program(&decls),
+        match chelis_surf::format::format_source(source) {
+            Ok(canonical) => canonical,
+            // If the file doesn't lex/parse, the regular compile path
+            // surfaces that error with a better message.
             Err(_) => return None,
         }
     };

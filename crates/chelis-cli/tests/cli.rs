@@ -3239,6 +3239,52 @@ fn fmt_check_accepts_trailing_newline_terminated_canonical_surf() {
         .success();
 }
 
+// #144: `chelis fmt --inplace` must preserve `--` line comments and
+// `{- -}` block comments instead of deleting them, and the result must
+// pass `fmt --check` (be idempotent).
+#[test]
+fn fmt_inplace_preserves_surf_comments() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("commented.ch");
+    write_file(
+        &path,
+        "module School.Comment_Test\n\
+         -- regular comment 1\n\
+         --- triple-dash\n\
+         {- block comment -}\n\
+         def main() -> f32 = cast(1.0, f32)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    let after = fs::read_to_string(&path).expect("read back");
+    assert!(
+        after.contains("-- regular comment 1"),
+        "line comment was stripped by fmt; got:\n{after}"
+    );
+    assert!(
+        after.contains("--- triple-dash"),
+        "triple-dash comment was stripped by fmt; got:\n{after}"
+    );
+    assert!(
+        after.contains("{- block comment -}"),
+        "block comment was stripped by fmt; got:\n{after}"
+    );
+
+    // The formatted-with-comments output must itself be canonical.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .success();
+}
+
 #[test]
 fn fmt_check_fails_for_noncanonical_deep() {
     let dir = tempdir().expect("tempdir");
