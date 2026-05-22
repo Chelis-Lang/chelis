@@ -2,9 +2,16 @@
 //! PascalCase, including each word inside a compound (§6.3). Catches
 //! lowercase-after-first compound-looking components like `Examplerootfind`
 //! (should be `ExampleRootFind`) and `Hellotensor` (should be `HelloTensor`).
+//!
+//! This rule is advisory-only. Its "long lowercase run, no internal capital
+//! is a suspected compound" heuristic false-positives on real single English
+//! words, so it is wired through `registry::non_blocking_rules` and does not
+//! fail `chelis lint --check` or the style-gated build/check/eval/validate
+//! paths. See
+//! `spec/upstream-bugs/module-pascal-components-flags-single-words.md`.
 
 use super::module_decl::find_module_decls;
-use crate::{Context, Rule, Surface, Violation};
+use crate::{Context, Rule, Severity, Surface, Violation};
 
 pub struct ModulePascalComponents;
 
@@ -23,6 +30,14 @@ impl Rule for ModulePascalComponents {
 
     fn summary(&self) -> &str {
         "module ladder components use PascalCase per word; long lowercase runs without internal caps are suspicious"
+    }
+
+    fn severity(&self) -> Severity {
+        // Advisory, not blocking. The long-lowercase-run heuristic
+        // false-positives on real single English words, so it reports but
+        // must not fail `chelis lint --check`. See
+        // `spec/upstream-bugs/module-pascal-components-flags-single-words.md`.
+        Severity::Advisory
     }
 
     fn check(&self, ctx: &Context<'_>) -> Vec<Violation> {
@@ -198,6 +213,17 @@ const KNOWN_SINGLE_WORDS: &[&str] = &[
     "Classification",
     "Regression",
     "Clustering",
+    // Calcify shell. `Calcify` is the shell's module prefix; the remaining
+    // entries are real single English words that appear as translated-module
+    // components when Calcify emits Chelis from single-word Python filenames
+    // (e.g. `comprehension.py` -> `Calcify.Comprehension`). Each is one
+    // PascalCase English word per §6.3, not a hidden compound; the
+    // long-lowercase-run heuristic flags them only because they are long.
+    "Calcify",
+    "Translation",
+    "Comprehension",
+    "Conditional",
+    "Exception",
 ];
 
 /// Known PascalCase compound module/type names in the Chelis ecosystem.
@@ -506,6 +532,38 @@ mod tests {
                 "extended single-word `{name}` should pass §6.3",
             );
         }
+    }
+
+    // §6.3 Calcify-shell allowlist gap. The Calcify translator emits module
+    // ladders of the form `Calcify.<Stem>` where `<Stem>` is the
+    // PascalCased Python filename. A single-word filename produces a
+    // single-word component (`comprehension.py` -> `Calcify.Comprehension`);
+    // each name below is a real single English word that trips the
+    // long-lowercase-run heuristic only because it is long.
+    #[test]
+    fn accepts_calcify_shell_single_words() {
+        for name in [
+            "Calcify",
+            "Translation",
+            "Comprehension",
+            "Conditional",
+            "Exception",
+        ] {
+            assert_eq!(
+                component_violation(name),
+                None,
+                "Calcify-shell single-word `{name}` should pass §6.3",
+            );
+        }
+    }
+
+    #[test]
+    fn module_pascal_components_is_advisory() {
+        // The rule reports but must not block `chelis lint --check`. Its
+        // heuristic false-positives on real single English words, so it is
+        // wired through `registry::non_blocking_rules`.
+        assert_eq!(ModulePascalComponents.severity(), Severity::Advisory);
+        assert!(!ModulePascalComponents.severity().blocks_check());
     }
 
     #[test]
