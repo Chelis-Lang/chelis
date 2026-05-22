@@ -150,6 +150,62 @@ def libdir_for(venv_python: Path) -> str:
     return libdir
 
 
+def python_abi_version(venv_python: Path) -> str:
+    """Query the venv interpreter's ABI version string (e.g. '3.11')."""
+    result = subprocess.run(
+        [
+            str(venv_python),
+            "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    abi = result.stdout.strip()
+    if not abi:
+        raise RuntimeError(f"`{venv_python}` returned empty version_info")
+    return abi
+
+
+def ensure_link_symlink(libdir: Path, abi: str) -> None:
+    """Ensure `libpython<abi>.{so,dylib}` exists in `libdir` for `-lpython<abi>`.
+
+    uv-managed Python on Linux ships `libpython3.X.so.1.0` (with SONAME
+    suffix) but not always the unversioned `libpython3.X.so` symlink.
+    GNU ld and rust-lld resolve `-lpython3.X` to `libpython3.X.so` (or
+    `.a`), not to the SONAME-suffixed file, so the link step fails with
+    `unable to find library -lpython3.X`. This helper creates the
+    missing symlink. macOS uses `.dylib` and uv already ships
+    `libpython3.X.dylib` unversioned, so the symlink check is a no-op
+    there but kept symmetric in case a future uv build changes that.
+    """
+    if platform.system() == "Linux":
+        link_name = libdir / f"libpython{abi}.so"
+        target = libdir / f"libpython{abi}.so.1.0"
+    elif platform.system() == "Darwin":
+        link_name = libdir / f"libpython{abi}.dylib"
+        # uv on macOS ships the unversioned dylib already; nothing to do.
+        if link_name.exists():
+            return
+        target = libdir / f"libpython{abi}.dylib"
+    else:
+        return
+
+    if link_name.exists() or link_name.is_symlink():
+        return  # Already there (or a real file).
+    if not target.exists():
+        # If neither the unversioned link nor the SONAME-suffixed file
+        # exists, something else is wrong with the uv install — surface
+        # it loudly rather than silently leaving a broken link.
+        raise RuntimeError(
+            f"expected `{target}` to exist in uv-managed Python libdir; "
+            f"`{link_name}` cannot be auto-symlinked. Check the uv install."
+        )
+    link_name.symlink_to(target.name)
+    print(f"linked {link_name} -> {target.name}")
+
+
 def append_to_github_env(var: str, value: str) -> None:
     """Append `var=<value>:<existing>` to `$GITHUB_ENV`, deduplicating.
 
@@ -191,6 +247,10 @@ def main() -> int:
     var = runner_libpath_var()
     venv_python = create_venv(python_version)
     libdir = libdir_for(venv_python)
+    abi = python_abi_version(venv_python)
+    # Ensure the linker can resolve `-lpython<abi>` — uv on Linux ships
+    # the SONAME-suffixed `.so.1.0` but not the unversioned `.so`.
+    ensure_link_symlink(Path(libdir), abi)
     append_to_github_env(var, libdir)
     return 0
 

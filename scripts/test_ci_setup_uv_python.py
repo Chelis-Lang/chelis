@@ -221,5 +221,86 @@ class PinnedPythonVersionTest(unittest.TestCase):
                 path.unlink()
 
 
+class PythonAbiVersionTest(unittest.TestCase):
+    def test_returns_major_minor(self) -> None:
+        fake_python = Path("/fake/.venv/bin/python")
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="3.11\n", stderr=""
+        )
+        with mock.patch("subprocess.run", return_value=fake_result):
+            self.assertEqual(
+                ci_setup_uv_python.python_abi_version(fake_python),
+                "3.11",
+            )
+
+    def test_empty_stdout_raises(self) -> None:
+        fake_python = Path("/fake/.venv/bin/python")
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="   \n", stderr=""
+        )
+        with mock.patch("subprocess.run", return_value=fake_result):
+            with self.assertRaisesRegex(RuntimeError, "empty"):
+                ci_setup_uv_python.python_abi_version(fake_python)
+
+
+class EnsureLinkSymlinkTest(unittest.TestCase):
+    """The Linux symlink path is the one that mattered for PR #184 CI;
+    macOS is no-op and tested for symmetry. Use real temp dirs so the
+    symlink syscall actually executes."""
+
+    def test_linux_creates_symlink_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            libdir = Path(td)
+            target = libdir / "libpython3.11.so.1.0"
+            target.touch()
+            link_name = libdir / "libpython3.11.so"
+            self.assertFalse(link_name.exists())
+            with mock.patch("platform.system", return_value="Linux"):
+                ci_setup_uv_python.ensure_link_symlink(libdir, "3.11")
+            self.assertTrue(link_name.is_symlink())
+            self.assertEqual(
+                Path(os.readlink(link_name)),
+                Path("libpython3.11.so.1.0"),
+            )
+
+    def test_linux_noop_when_symlink_already_present(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            libdir = Path(td)
+            target = libdir / "libpython3.11.so.1.0"
+            target.touch()
+            link_name = libdir / "libpython3.11.so"
+            link_name.symlink_to(target.name)
+            mtime_before = link_name.lstat().st_mtime
+            with mock.patch("platform.system", return_value="Linux"):
+                ci_setup_uv_python.ensure_link_symlink(libdir, "3.11")
+            self.assertEqual(link_name.lstat().st_mtime, mtime_before)
+
+    def test_linux_raises_when_target_missing(self) -> None:
+        # If neither the unversioned .so nor the SONAME-suffixed file
+        # is present, surface the broken uv install rather than silently
+        # leaving a dangling link.
+        with tempfile.TemporaryDirectory() as td:
+            libdir = Path(td)
+            with mock.patch("platform.system", return_value="Linux"):
+                with self.assertRaisesRegex(RuntimeError, "expected"):
+                    ci_setup_uv_python.ensure_link_symlink(libdir, "3.11")
+
+    def test_darwin_noop_when_dylib_present(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            libdir = Path(td)
+            dylib = libdir / "libpython3.11.dylib"
+            dylib.touch()
+            with mock.patch("platform.system", return_value="Darwin"):
+                ci_setup_uv_python.ensure_link_symlink(libdir, "3.11")
+            self.assertTrue(dylib.is_file())  # Untouched.
+
+    def test_unsupported_platform_is_silent_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            libdir = Path(td)
+            with mock.patch("platform.system", return_value="Windows"):
+                ci_setup_uv_python.ensure_link_symlink(libdir, "3.11")
+            self.assertEqual(list(libdir.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()
