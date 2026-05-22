@@ -6811,7 +6811,7 @@ additional_sources = ["properties"]
         }
         let installed = install_from_monorepo(
             &monorepo,
-            &[("chelis-std".to_string(), Some("0.3.0".to_string()))],
+            &[("chelis-std".to_string(), Some("0.4.0".to_string()))],
         )
         .expect("install chelis-std into fresh registry");
         assert_eq!(installed.len(), 1);
@@ -6838,7 +6838,7 @@ compiler = "{ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.3.0" }}
+chelis-std = {{ version = "0.4.0" }}
 "#,
                 ver = CURRENT_COMPILER_VERSION,
             ),
