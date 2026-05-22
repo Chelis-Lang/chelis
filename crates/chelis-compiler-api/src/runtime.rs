@@ -5608,8 +5608,8 @@ seq = to_tensor([
 y = sum(seq, cast(0, int32))
 "#,
         );
-        let outcome = evaluate_host_program(&checked, &HashMap::new())
-            .expect("inf-pair sum should evaluate");
+        let outcome =
+            evaluate_host_program(&checked, &HashMap::new()).expect("inf-pair sum should evaluate");
         let result = first_tensor_data(&outcome, "y");
         assert_eq!(result.len(), 1);
         assert!(

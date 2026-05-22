@@ -649,12 +649,7 @@ int main() {{
 fn exec_reduce_sum_issue_163_repro_is_bit_exact_with_evaluator() {
     let scalar_ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
-    let a = dag.add_node(
-        RiscOp::Load { name: "a".into() },
-        vec![],
-        vec_f32(11),
-        None,
-    );
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(11), None);
     dag.add_node(
         RiscOp::Sum {
             axis: 0,
