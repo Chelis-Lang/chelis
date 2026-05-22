@@ -5459,16 +5459,33 @@ y = sum(seq, cast(0, int32))
             .expect("right-pad reflected sum should evaluate");
         let right = first_tensor_data(&outcome_right, "y");
         assert_eq!(right.len(), 1);
-        // Stride-4 ILP cascade f32 result (matches numpy `.sum()` and
-        // torch's `row_sum` algorithm bit-exactly for n <= 16). The old
-        // strict left-fold would have produced 4.218894004821777 here
-        // — a 1-ULP drift that the parity harness now no longer needs
-        // to carve out (issue #163 acceptance criterion).
+        // Stride-4 ILP cascade f32 result. Matches torch's CPU
+        // `row_sum` bit-exactly for n <= 16; coincides with
+        // `numpy.sum` only because this specific 11-element multiset
+        // happens to round the same way under both the stride-4
+        // cascade and numpy's pairwise tree — the two algorithms
+        // disagree in general (numpy uses a divide-and-conquer
+        // pairwise tree with 128-element blocks). The old strict
+        // left-fold would have produced 4.218894004821777 here — a
+        // 1-ULP drift that the parity harness now no longer needs to
+        // carve out (issue #163 acceptance criterion).
+        let stride4 = (4.218893527984619_f64 as f32).to_bits();
+        let left_fold = 4.218894004821777_f32.to_bits();
         assert_eq!(
             (right[0] as f32).to_bits(),
-            (4.218893527984619_f64 as f32).to_bits(),
+            stride4,
             "expected stride-4 cascade result; got {}",
             right[0]
+        );
+        // Negative regression-lock: the test must also assert the OLD
+        // left-fold result is NOT produced, so a future change that
+        // accidentally reverts to a left-fold (or to a different
+        // tree shape that lands on the old value) fails loudly here.
+        assert_ne!(
+            (right[0] as f32).to_bits(),
+            left_fold,
+            "regression: result matches the old left-fold value 4.218894004821777, \
+             which the stride-4 cascade was supposed to replace"
         );
 
         // Same multiset, left-pad ordering. Both stride-4 and the old
@@ -5501,6 +5518,104 @@ y = sum(seq, cast(0, int32))
             (4.218893527984619_f64 as f32).to_bits(),
             "left-pad ordering must produce same result as right-pad under stride-4; got {}",
             left[0]
+        );
+    }
+
+    // PR #168 review LOW #5: NaN/Inf/n<4 edge-case coverage for the
+    // stride-4 ILP cascade. Tail handling (n < 4 where the lane-fill
+    // doesn't complete a full cycle) and special-value propagation
+    // are load-bearing invariants of the cascade; without these
+    // tests, a future change to the tail loop or lane combine could
+    // silently regress them.
+
+    /// Stride-4 reference for n < 4: the lanes are assigned naturally
+    /// (acc0=x[0], acc1=x[1], acc2=x[2]); the combine is
+    /// `(acc0 + acc1) + (acc2 + 0.0)` which equals a left-fold for
+    /// n ≤ 3. The expected bit pattern is therefore the straight-
+    /// forward sum.
+    #[test]
+    fn host_runtime_sum_f32_n1_n2_n3_bit_exact() {
+        for (n, expr, expected) in [
+            (1, "to_tensor([cast(1.5, f32)])", 1.5_f32),
+            (2, "to_tensor([cast(1.5, f32), cast(0.25, f32)])", 1.75_f32),
+            (
+                3,
+                "to_tensor([cast(1.5, f32), cast(0.25, f32), cast(0.125, f32)])",
+                1.875_f32,
+            ),
+        ] {
+            let src = format!(
+                "seq = {expr}\n\
+                 y = sum(seq, cast(0, int32))\n"
+            );
+            let checked = checked_surf(&src);
+            let outcome = evaluate_host_program(&checked, &HashMap::new())
+                .unwrap_or_else(|_| panic!("n={n} sum should evaluate"));
+            let result = first_tensor_data(&outcome, "y");
+            assert_eq!(result.len(), 1);
+            assert_eq!(
+                (result[0] as f32).to_bits(),
+                expected.to_bits(),
+                "n={n}: expected {expected}, got {}",
+                result[0]
+            );
+        }
+    }
+
+    #[test]
+    fn host_runtime_sum_f32_propagates_nan() {
+        // A single NaN anywhere in the input must propagate to the
+        // final result. Pinned bit-exactly so a future change to the
+        // lane combine that hides NaN through e.g. min/max can't slip
+        // by.
+        let checked = checked_surf(
+            r#"
+seq = to_tensor([
+    cast(1.0, f32),
+    cast(2.0, f32),
+    cast(0.0, f32) / cast(0.0, f32),
+    cast(4.0, f32),
+    cast(5.0, f32)
+])
+y = sum(seq, cast(0, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("nan-bearing sum should evaluate");
+        let result = first_tensor_data(&outcome, "y");
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0] as f32).is_nan(),
+            "sum with NaN must propagate NaN; got {}",
+            result[0]
+        );
+    }
+
+    #[test]
+    fn host_runtime_sum_f32_inf_plus_neg_inf_is_nan() {
+        // +Inf + -Inf is IEEE-754 NaN. The stride-4 cascade must
+        // produce this regardless of which lanes the two infinities
+        // land in (`x[0]` and `x[1]` here land in acc0/acc1; under
+        // stride-4 the cascade still adds them and the result is NaN).
+        let checked = checked_surf(
+            r#"
+seq = to_tensor([
+    cast(1.0, f32) / cast(0.0, f32),
+    cast(-1.0, f32) / cast(0.0, f32),
+    cast(2.0, f32),
+    cast(3.0, f32)
+])
+y = sum(seq, cast(0, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("inf-pair sum should evaluate");
+        let result = first_tensor_data(&outcome, "y");
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0] as f32).is_nan(),
+            "sum with +Inf and -Inf must produce NaN; got {}",
+            result[0]
         );
     }
 

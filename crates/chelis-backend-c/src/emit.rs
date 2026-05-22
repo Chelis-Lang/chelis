@@ -3260,8 +3260,17 @@ impl CEmitter {
         ));
         self.indent += 1;
         // Stride-4 ILP cascade (issue #163). Integer addition is
-        // associative so output bytes are unchanged; kept symmetric
-        // with the float path for consistency.
+        // associative so output bytes are unchanged for non-overflowing
+        // sums; kept symmetric with the float path for consistency.
+        // CAVEAT: for int sums whose true sum exceeds the accumulator
+        // type's range, the lane-wise pattern wraps modulo 2^N
+        // independently per lane and then re-wraps at the lane combine,
+        // which can differ from a strict left-fold's wrap result on the
+        // same inputs. The runtime host evaluator stores integer tensor
+        // elements in f64 and does not overflow (up to 2^53), so a
+        // backend/evaluator disagreement is possible at and beyond that
+        // boundary. Not observed in practice; chelis programs rarely
+        // sum 2^31+ int32 values into an int32 accumulator.
         self.line(&format!(
             "{acc_c_ty} acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;"
         ));

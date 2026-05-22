@@ -155,14 +155,17 @@ type matches the operand element type.
 **stride-4 ILP cascade** — four independent accumulator lanes loaded
 in round-robin (`acc[i & 3] += value[i]`), combined at the end as
 `(acc0 + acc1) + (acc2 + acc3)`. This matches PyTorch's CPU
-`row_sum` (`num_levels=4 ilp_factor=4`) and NumPy's pairwise sum in
-the small-n regime, so f32 `sum` is bit-exact with `torch.sum(...)`
-for `n ≤ 16` on the reduced axis. For `n > 16` the result may differ
-from torch by up to ~1 ULP until the multi-level cascade lands as a
-follow-up. The order is purely positional so the algorithm is
-deterministic across runs and hosts; `#pragma omp parallel for` is
-applied to the outer (output-element) loop only, never the inner
-reduction.
+`row_sum` (`num_levels=4 ilp_factor=4`), so f32 `sum` is bit-exact
+with `torch.sum(...)` for `n ≤ 16` on the reduced axis. NumPy's
+`sum` uses a divide-and-conquer pairwise tree with 128-element
+blocks — structurally different from the stride-4 cascade — so the
+two coincide only by accident on specific inputs; chelis `sum` is
+**not** in general bit-exact with `numpy.sum`. For `n > 16` the
+result may differ from torch by up to ~1 ULP until the multi-level
+cascade lands as a follow-up. The order is purely positional so the
+algorithm is deterministic across runs and hosts; `#pragma omp
+parallel for` is applied to the outer (output-element) loop only,
+never the inner reduction.
 
 This change is observable for floating-point operands — the prior
 strict left-fold could diverge from torch by ~1 ULP at unfavorable
