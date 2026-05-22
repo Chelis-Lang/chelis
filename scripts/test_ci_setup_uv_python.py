@@ -398,5 +398,83 @@ class DiscoverPythonLibdirsTest(unittest.TestCase):
             self.assertEqual(len(result), 1)
 
 
+class EnsureDefaultUvRootMirrorTest(unittest.TestCase):
+    """The mirror exists to defeat pyo3-build-config caching that may
+    persist a -L flag pointing at `~/.local/share/uv/python/<install>/lib`
+    even when uv staged Python elsewhere."""
+
+    def test_mirrors_libpython_to_default_root(self) -> None:
+        with tempfile.TemporaryDirectory() as actual_root_str:
+            with tempfile.TemporaryDirectory() as fake_home_str:
+                actual_root = Path(actual_root_str)
+                install = actual_root / "cpython-3.11.15-linux-x86_64-gnu"
+                libdir = install / "lib"
+                libdir.mkdir(parents=True)
+                lib_file = libdir / "libpython3.11.so.1.0"
+                lib_file.touch()
+                fake_home = Path(fake_home_str)
+                with mock.patch("platform.system", return_value="Linux"):
+                    with mock.patch.object(Path, "home", return_value=fake_home):
+                        ci_setup_uv_python.ensure_default_uv_root_mirror(
+                            str(libdir), "3.11"
+                        )
+                mirror = (
+                    fake_home
+                    / ".local"
+                    / "share"
+                    / "uv"
+                    / "python"
+                    / "cpython-3.11.15-linux-x86_64-gnu"
+                    / "lib"
+                    / "libpython3.11.so"
+                )
+                self.assertTrue(mirror.is_symlink())
+                self.assertEqual(
+                    Path(os.readlink(mirror)),
+                    lib_file.resolve(),
+                )
+
+    def test_noop_when_libdir_is_not_uv_style(self) -> None:
+        # System Python lives at /usr/lib/python3.11; libdir is /usr/lib
+        # whose parent is /usr, not a cpython-X install. Helper should
+        # noop rather than create a mirror.
+        with tempfile.TemporaryDirectory() as actual_root_str:
+            with tempfile.TemporaryDirectory() as fake_home_str:
+                libdir = Path(actual_root_str) / "lib"
+                libdir.mkdir()
+                (libdir / "libpython3.11.so.1.0").touch()
+                fake_home = Path(fake_home_str)
+                with mock.patch("platform.system", return_value="Linux"):
+                    with mock.patch.object(Path, "home", return_value=fake_home):
+                        ci_setup_uv_python.ensure_default_uv_root_mirror(
+                            str(libdir), "3.11"
+                        )
+                # No mirror should have been created.
+                default_root = fake_home / ".local" / "share" / "uv" / "python"
+                self.assertFalse(default_root.exists())
+
+    def test_noop_when_libdir_has_no_libpython(self) -> None:
+        with tempfile.TemporaryDirectory() as actual_root_str:
+            with tempfile.TemporaryDirectory() as fake_home_str:
+                install = Path(actual_root_str) / "cpython-3.11.15-linux-x86_64-gnu"
+                libdir = install / "lib"
+                libdir.mkdir(parents=True)
+                # No libpython file in this dir.
+                fake_home = Path(fake_home_str)
+                with mock.patch("platform.system", return_value="Linux"):
+                    with mock.patch.object(Path, "home", return_value=fake_home):
+                        ci_setup_uv_python.ensure_default_uv_root_mirror(
+                            str(libdir), "3.11"
+                        )
+                default_root = fake_home / ".local" / "share" / "uv" / "python"
+                # The dir might exist as we mkdir'd it, but no symlink
+                # should have been created.
+                if default_root.exists():
+                    mirror_libdir = (
+                        default_root / "cpython-3.11.15-linux-x86_64-gnu" / "lib"
+                    )
+                    self.assertFalse((mirror_libdir / "libpython3.11.so").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

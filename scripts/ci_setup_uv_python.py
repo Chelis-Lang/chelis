@@ -280,6 +280,62 @@ def ensure_link_symlink(libdir: Path, abi: str) -> None:
     print(f"linked {link_name} -> {target.name}")
 
 
+def ensure_default_uv_root_mirror(libdir: str, abi: str) -> None:
+    """Create a libpython symlink at the default uv install root.
+
+    Workaround for the case where pyo3-build-config emits a `-L` flag
+    pointing at `~/.local/share/uv/python/cpython-<install>/lib/` even
+    when uv staged the actual install elsewhere (via
+    `$UV_PYTHON_INSTALL_DIR` or via a stale path cached from a prior
+    build). The path can also persist in cached pyo3-build-config
+    output that Swatinem/rust-cache restores between runs.
+
+    Strategy:
+    1. Find the basename of the actual install directory by walking up
+       from `libdir` (`libdir/../` should be `cpython-<abi>-...-...`).
+    2. Mirror that basename under `~/.local/share/uv/python/`.
+    3. Symlink `libpython<abi>.{so,dylib}` there to the actual lib
+       file by absolute path.
+
+    Idempotent. No-op if the basename doesn't look like a uv install
+    (e.g., libdir is a system Python). No-op if the default root
+    already has a working entry.
+    """
+    suffix = ".so" if platform.system() == "Linux" else (
+        ".dylib" if platform.system() == "Darwin" else None
+    )
+    if suffix is None:
+        return
+
+    libdir_path = Path(libdir)
+    actual_install = libdir_path.parent  # e.g. .../uv-python-dir/cpython-3.11.15-...
+    if not actual_install.name.startswith(f"cpython-{abi}"):
+        # Not a uv-style install layout; nothing to mirror.
+        return
+
+    # Find the actual libpython file inside libdir_path.
+    pattern = f"libpython{abi}{suffix}*"
+    candidates = sorted(
+        (p for p in libdir_path.glob(pattern) if p.is_file()),
+        key=lambda p: len(p.name),
+    )
+    if not candidates:
+        return
+    real_lib = candidates[0].resolve()
+
+    default_root = Path.home() / ".local" / "share" / "uv" / "python"
+    mirror_libdir = default_root / actual_install.name / "lib"
+    mirror_libdir.mkdir(parents=True, exist_ok=True)
+    mirror_link = mirror_libdir / f"libpython{abi}{suffix}"
+    if mirror_link.is_file() or (mirror_link.is_symlink() and mirror_link.exists()):
+        print(f"default-root mirror already present: {mirror_link}")
+        return
+    if mirror_link.is_symlink():
+        mirror_link.unlink()  # stale broken link
+    mirror_link.symlink_to(real_lib)  # absolute target
+    print(f"mirrored {mirror_link} -> {real_lib}")
+
+
 def append_to_github_env(var: str, value: str) -> None:
     """Append `var=<value>:<existing>` to `$GITHUB_ENV`, deduplicating.
 
@@ -330,6 +386,13 @@ def main() -> int:
     # unversioned name at every install root we can find so the
     # linker resolves regardless of which path pyo3 picked.
     install_libdirs = discover_python_libdirs(libdir, abi)
+    # If pyo3 keeps emitting `-L ~/.local/share/uv/python/<install>/lib`
+    # even when uv installed Python elsewhere (cached path from a prior
+    # build, or pyo3's own path canonicalization through sys.base_prefix),
+    # create a mirror dir at the default uv root with a symlink to the
+    # real libpython. Cheap and safe — if no install_libdirs are found,
+    # this no-ops; if pyo3 doesn't look there, it's an unused symlink.
+    ensure_default_uv_root_mirror(libdir, abi)
     linked_any = False
     for d in install_libdirs:
         try:
