@@ -125,6 +125,14 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - **Never shell.** Do not write `.sh` scripts. If a CI step needs a one-liner, invoke
   Python instead. Shell is fragile and untestable.
 - Existing `scripts/` directory uses Python; follow that convention.
+- **Use the uv-managed Python** at `.venv/bin/python`, not the system Python.
+  `py/pyproject.toml` pins `requires-python = ">=3.11"`; create the venv once
+  with `uv venv --python 3.11` from the repo root. `.cargo/config.toml` sets
+  `PYO3_PYTHON` to `.venv/bin/python` so the `chelis-python` link step finds
+  the right `libpython`. On macOS the system `python3` is Apple's bundled
+  3.9, whose `sysconfig.LIBDIR` references a non-existent Xcode framework
+  path and breaks the PyO3 build. See [`README.md`](README.md) for the full
+  setup commands.
 
 ## Build And Gate Commands
 
