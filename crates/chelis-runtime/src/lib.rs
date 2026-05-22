@@ -17,8 +17,11 @@ pub const CHELIS_F64: c_int = 1;
 pub const CHELIS_I32: c_int = 2;
 pub const CHELIS_BOOL: c_int = 3;
 pub const CHELIS_I64: c_int = 4;
-// WS-A3: bf16 / f16 dtype tags. Two-byte storage; the host runtime
-// does not implement bf16/f16 arithmetic in this cycle. Mirrors the
+// WS-A3 introduced bf16 / f16 dtype tags as storage-only; WS-1 (dtype +
+// Metal cleanup cycle) promotes them to arithmetic-supported on the C
+// backend via host-side convert-to-f32 helpers (`chelis_bf16_to_f32` /
+// `chelis_f16_to_f32` in `chelis_runtime.h`) and convert-then-
+// `cblas_sgemm` for matmul. Storage stays two bytes. Mirrors the
 // matching macros in `crates/chelis-runtime/include/chelis_runtime.h`.
 pub const CHELIS_BF16: c_int = 5;
 pub const CHELIS_F16: c_int = 6;
@@ -728,6 +731,184 @@ pub unsafe extern "C" fn chelis_fill_i64(t: *mut chelis_tensor, val: i64) {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_fill_f64(t: *mut chelis_tensor, val: f64) {
     f64::fill(t, val);
+}
+
+/// WS-1: write a precomputed bf16 bit pattern into every element of a
+/// bf16-typed tensor. The C backend computes the literal's bf16
+/// representation at codegen time via the `half` crate and emits
+/// `chelis_fill_bf16(t, 0xXXXXu)`; the runtime stamps that pattern
+/// into each of the `size` two-byte slots.
+///
+/// # Safety
+///
+/// `t` must point to a live `chelis_tensor` whose dtype is
+/// `CHELIS_BF16`. Misuse violates the storage-width contract.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_fill_bf16(t: *mut chelis_tensor, bits: u16) {
+    debug_assert_eq!(unsafe { (*t).dtype }, CHELIS_BF16);
+    let ptr = unsafe { (*t).data as *mut u16 };
+    let size = unsafe { (*t).size } as isize;
+    for i in 0..size {
+        unsafe { *ptr.offset(i) = bits };
+    }
+}
+
+/// WS-1: f16 sibling of `chelis_fill_bf16`. Same contract; the bit
+/// pattern is the IEEE 754 binary16 encoding of the IR literal.
+///
+/// # Safety
+///
+/// `t` must point to a live `chelis_tensor` whose dtype is
+/// `CHELIS_F16`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_fill_f16(t: *mut chelis_tensor, bits: u16) {
+    debug_assert_eq!(unsafe { (*t).dtype }, CHELIS_F16);
+    let ptr = unsafe { (*t).data as *mut u16 };
+    let size = unsafe { (*t).size } as isize;
+    for i in 0..size {
+        unsafe { *ptr.offset(i) = bits };
+    }
+}
+
+/// WS-1: bulk-convert a bf16 buffer to f32. Used by the C-backend
+/// matmul wrapper to populate the f32 scratch buffer that
+/// `cblas_sgemm` consumes for bf16/f16 operands.
+///
+/// # Safety
+///
+/// `src` must be a valid pointer to `n` `u16` elements; `dst` must be
+/// a valid pointer to `n` `f32` elements. The buffers may overlap
+/// only if the same starting address is shared (in-place conversion
+/// is not supported because the destination is wider).
+#[no_mangle]
+pub unsafe extern "C" fn chelis_bf16_buffer_to_f32(src: *const u16, dst: *mut f32, n: i64) {
+    for i in 0..n {
+        let bits = unsafe { *src.offset(i as isize) };
+        let expanded = (bits as u32) << 16;
+        unsafe { *dst.offset(i as isize) = f32::from_bits(expanded) };
+    }
+}
+
+/// WS-1: bulk-convert an f32 buffer to bf16 with round-to-nearest-even
+/// on the truncated 16 mantissa bits. NaN payloads are coerced to a
+/// canonical quiet NaN so the result remains NaN.
+///
+/// # Safety
+///
+/// As `chelis_bf16_buffer_to_f32`, with src and dst types swapped.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_f32_buffer_to_bf16(src: *const f32, dst: *mut u16, n: i64) {
+    for i in 0..n {
+        let v = unsafe { *src.offset(i as isize) };
+        let bits = v.to_bits();
+        let out = if (bits & 0x7F80_0000) == 0x7F80_0000 && (bits & 0x007F_FFFF) != 0 {
+            // NaN: preserve NaN-ness with a canonical payload.
+            ((bits >> 16) | 0x0040) as u16
+        } else {
+            let lsb = (bits >> 16) & 1;
+            let rounded = bits.wrapping_add(0x7FFF).wrapping_add(lsb);
+            (rounded >> 16) as u16
+        };
+        unsafe { *dst.offset(i as isize) = out };
+    }
+}
+
+/// WS-1: bulk-convert an f16 buffer to f32 with IEEE 754 binary16
+/// semantics (subnormals, inf, NaN preserved).
+///
+/// # Safety
+///
+/// As `chelis_bf16_buffer_to_f32`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_f16_buffer_to_f32(src: *const u16, dst: *mut f32, n: i64) {
+    for i in 0..n {
+        let bits = unsafe { *src.offset(i as isize) };
+        unsafe { *dst.offset(i as isize) = f16_bits_to_f32(bits) };
+    }
+}
+
+/// WS-1: bulk-convert an f32 buffer to f16 with round-to-nearest-even,
+/// handling subnormals, inf, NaN, and overflow.
+///
+/// # Safety
+///
+/// As `chelis_f32_buffer_to_bf16`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_f32_buffer_to_f16(src: *const f32, dst: *mut u16, n: i64) {
+    for i in 0..n {
+        let v = unsafe { *src.offset(i as isize) };
+        unsafe { *dst.offset(i as isize) = f32_to_f16_bits(v) };
+    }
+}
+
+/// Internal helper mirroring the `chelis_f16_to_f32` static inline in
+/// `chelis_runtime.h`. Kept in sync byte-for-byte; the runtime crate
+/// uses it directly, the emitted C code uses the header version.
+#[inline]
+fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = ((bits as u32) & 0x8000) << 16;
+    let exp = ((bits as u32) & 0x7C00) >> 10;
+    let mant = (bits as u32) & 0x03FF;
+    let out_bits = if exp == 0 {
+        if mant == 0 {
+            sign
+        } else {
+            let mut m = mant;
+            let mut shift = 0i32;
+            while (m & 0x0400) == 0 {
+                m <<= 1;
+                shift += 1;
+            }
+            m &= 0x03FF;
+            let exp32 = (127i32 - 15 - shift + 1) as u32;
+            sign | (exp32 << 23) | (m << 13)
+        }
+    } else if exp == 0x1F {
+        sign | 0x7F80_0000 | (mant << 13)
+    } else {
+        let exp32 = exp + (127 - 15);
+        sign | (exp32 << 23) | (mant << 13)
+    };
+    f32::from_bits(out_bits)
+}
+
+/// Internal helper mirroring the `chelis_f32_to_f16` static inline in
+/// `chelis_runtime.h`. Round-to-nearest-even on truncated mantissa bits.
+#[inline]
+fn f32_to_f16_bits(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let raw_exp = ((bits >> 23) & 0xFF) as i32;
+    let mant = bits & 0x007F_FFFF;
+    if raw_exp == 0xFF {
+        if mant != 0 {
+            return sign | 0x7E00;
+        }
+        return sign | 0x7C00;
+    }
+    let exp = raw_exp - 127 + 15;
+    if exp >= 0x1F {
+        return sign | 0x7C00;
+    }
+    if exp <= 0 {
+        if exp < -10 {
+            return sign;
+        }
+        let m = (mant | 0x0080_0000) >> (1 - exp);
+        let rounded = m + 0x0000_1000;
+        return sign | (rounded >> 13) as u16;
+    }
+    let lsb = (mant >> 13) & 1;
+    let mut rounded = mant + 0x0000_0FFF + lsb;
+    let mut e = exp;
+    if (rounded & 0x0080_0000) != 0 {
+        rounded = 0;
+        e += 1;
+        if e >= 0x1F {
+            return sign | 0x7C00;
+        }
+    }
+    sign | ((e as u32) << 10) as u16 | (rounded >> 13) as u16
 }
 
 #[no_mangle]

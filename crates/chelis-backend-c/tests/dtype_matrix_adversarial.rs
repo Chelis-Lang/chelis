@@ -48,12 +48,17 @@ fn ln(s: &str) -> LoadStoreName {
 }
 
 // ----------------------------------------------------------------
-// C-backend C-side rejection diagnostics for bf16 / f16.
+// C-backend admission of bf16 / f16 matmul post-WS-1 (cycle: dtype +
+// Metal cleanup). The pre-WS-1 behavior was a panic with a citation
+// of the F1 guard; post-WS-1 the matmul wrapper routes through
+// convert-then-`cblas_sgemm` with f32 scratch buffers per
+// spec/04-type-system.md §5.7.1. These tests pin the new routing so
+// a future regression that emits `cblas_sgemm` directly on the
+// `uint16_t` operand bytes trips here.
 // ----------------------------------------------------------------
 
 #[test]
-#[should_panic(expected = "bf16")]
-fn c_backend_blas_matmul_bf16_panics_with_bf16_in_message() {
+fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::Load { name: ln("a") },
@@ -80,15 +85,23 @@ fn c_backend_blas_matmul_bf16_panics_with_bf16_in_message() {
         None,
     );
     dag.add_root(mm);
-    // F1 guard at C-backend's validate_supported_precisions panics here
-    // with a message that must include "bf16" so the user knows what's
-    // missing.
-    let _ = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn");
+    assert!(
+        src.contains("chelis_bf16_buffer_to_f32"),
+        "WS-1: bf16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
+    );
+    assert!(
+        src.contains("cblas_sgemm"),
+        "WS-1: bf16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
+    );
+    assert!(
+        src.contains("chelis_f32_buffer_to_bf16"),
+        "WS-1: bf16 matmul must downcast the f32 accumulator buffer back to bf16 storage; got:\n{src}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "f16")]
-fn c_backend_blas_matmul_f16_panics_with_f16_in_message() {
+fn c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::Load { name: ln("a") },
@@ -115,7 +128,19 @@ fn c_backend_blas_matmul_f16_panics_with_f16_in_message() {
         None,
     );
     dag.add_root(mm);
-    let _ = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn");
+    assert!(
+        src.contains("chelis_f16_buffer_to_f32"),
+        "WS-1: f16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
+    );
+    assert!(
+        src.contains("cblas_sgemm"),
+        "WS-1: f16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
+    );
+    assert!(
+        src.contains("chelis_f32_buffer_to_f16"),
+        "WS-1: f16 matmul must downcast the f32 accumulator buffer back to f16 storage; got:\n{src}"
+    );
 }
 
 // ----------------------------------------------------------------

@@ -89,17 +89,17 @@ admits every active dtype. This sub-section is the authoritative per-backend
 matrix. Any "Metal supports X" or "C backend supports Y" claim elsewhere in
 the spec or in user-facing docs must resolve to a cell in this table.
 
-| dtype  | C backend                               | HIP backend                | Metal backend                                | Evaluator |
-|--------|-----------------------------------------|----------------------------|----------------------------------------------|-----------|
-| f32    | admitted                                | admitted                   | admitted                                     | admitted  |
-| f64    | admitted                                | admitted                   | **rejected (hardware)**                      | admitted  |
-| bf16   | rejected (deferred)                     | admitted (matmul + load/store via `hipblasGemmEx`) | admitted on Apple7+ (M3 or later) | admitted |
-| f16    | rejected (deferred)                     | admitted (matmul + load/store via `hipblasGemmEx`) | admitted                          | admitted |
-| int8   | admitted                                | admitted                   | admitted                                     | admitted  |
-| int16  | admitted                                | admitted                   | admitted                                     | admitted  |
-| int32  | admitted                                | admitted                   | admitted                                     | admitted  |
-| int64  | admitted                                | admitted                   | admitted                                     | admitted  |
-| bool   | admitted                                | admitted                   | admitted                                     | admitted  |
+| dtype  | C backend                                                                                                         | HIP backend                                          | Metal backend                                | Evaluator |
+|--------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------|----------------------------------------------|-----------|
+| f32    | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| f64    | admitted                                                                                                          | admitted                                             | **rejected (hardware)**                      | admitted  |
+| bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted on Apple7+ (M3 or later)            | admitted  |
+| f16    | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted                                     | admitted  |
+| int8   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| int16  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| int32  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| int64  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| bool   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
 
 Cell semantics:
 

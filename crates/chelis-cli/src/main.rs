@@ -4237,15 +4237,24 @@ fn reject_unsupported_metal_ops(
 /// Decide whether a tensor precision is supported by the C backend.
 ///
 /// Mirrors the admit-list in `validate_supported_precisions` inside
-/// `chelis-backend-c::emit`. The C backend admits f32/f64/bool plus the
-/// integer family (int8/int16/int32/int64). bf16/f16 are rejected here so
-/// users get a structured CLI diagnostic instead of a `panic!` from the
-/// emitter (RT-4 F4).
+/// `chelis-backend-c::emit`. WS-1 admits bf16 and f16 (storage as
+/// `uint16_t`; arithmetic via `chelis_bf16_to_f32` / `chelis_f16_to_f32`
+/// per spec/04-type-system.md §5.7.1; matmul via convert-then-`cblas_sgemm`
+/// with f32 scratch buffers). The C backend now admits the full active
+/// numeric dtype set; f8e4m3 remains deferred per §1.1.1.
 fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
     use chelis_types::types::Prim;
     matches!(
         precision,
-        Prim::F32 | Prim::F64 | Prim::Bool | Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
+        Prim::F32
+            | Prim::F64
+            | Prim::Bool
+            | Prim::Bf16
+            | Prim::F16
+            | Prim::Int8
+            | Prim::Int16
+            | Prim::Int32
+            | Prim::Int64
     )
 }
 
@@ -4271,9 +4280,8 @@ fn reject_unsupported_c_precisions_host(
                 return Err(format!(
                     "`chelis build --target c` host-program lane does not yet support \
                      tensor precision `{}` ({}). The C backend admits \
-                     f32/f64/bool/int8/int16/int32/int64 today; bf16/f16 are admitted \
-                     only on `--target hip`. \
-                     See spec/04-type-system.md §5.7.1.",
+                     f32/f64/bf16/f16/bool/int8/int16/int32/int64; f8e4m3 is \
+                     deferred per spec/04-type-system.md §1.1.1.",
                     t.precision.name(),
                     context
                 )
@@ -4310,8 +4318,8 @@ fn reject_unsupported_c_precisions_host(
                 return Err(format!(
                     "`chelis build --target c` host-program lane does not yet support \
                      tensor precision `{}` (helper `{}` input `{}` in {}). \
-                     bf16/f16 are admitted only on `--target hip`. \
-                     See spec/04-type-system.md §5.7.1.",
+                     The C backend admits f32/f64/bf16/f16/bool/int8/int16/int32/int64; \
+                     f8e4m3 is deferred per spec/04-type-system.md §1.1.1.",
                     input.ty.precision.name(),
                     helper.name,
                     input.name,
@@ -4324,8 +4332,8 @@ fn reject_unsupported_c_precisions_host(
             return Err(format!(
                 "`chelis build --target c` host-program lane does not yet support \
                  tensor precision `{}` (helper `{}` output in {}). \
-                 bf16/f16 are admitted only on `--target hip`. \
-                 See spec/04-type-system.md §5.7.1.",
+                 The C backend admits f32/f64/bf16/f16/bool/int8/int16/int32/int64; \
+                 f8e4m3 is deferred per spec/04-type-system.md §1.1.1.",
                 helper.output.precision.name(),
                 helper.name,
                 context
@@ -4337,8 +4345,8 @@ fn reject_unsupported_c_precisions_host(
                 return Err(format!(
                     "`chelis build --target c` host-program lane does not yet support \
                      tensor precision `{}` (helper `{}` node {} in {}). \
-                     bf16/f16 are admitted only on `--target hip`. \
-                     See spec/04-type-system.md §5.7.1.",
+                     The C backend admits f32/f64/bf16/f16/bool/int8/int16/int32/int64; \
+                     f8e4m3 is deferred per spec/04-type-system.md §1.1.1.",
                     node.output_type.precision.name(),
                     helper.name,
                     node.id.0,
@@ -4396,14 +4404,19 @@ fn reject_unsupported_c_precisions(
     for node in dag.nodes() {
         match node.output_type.precision {
             chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
+            // WS-1: bf16 / f16 are admitted on the C-backend DAG path
+            // post-cycle. The emitter routes elementwise ops through
+            // `chelis_<x>_to_f32` convert-load helpers and matmul
+            // through `convert-then-cblas_sgemm` per spec §5.7.1.
+            chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {}
             chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
                 if sparse_index_nodes.contains(&node.id) => {}
             other => {
                 return Err(format!(
-                    "`chelis build --target c` DAG path only supports f32/bool tensors, \
+                    "`chelis build --target c` DAG path only supports f32/bool/bf16/f16 tensors, \
                      plus int32/int64 tensors when they are consumed as sparse indices; \
                      node {} carries precision `{}`. \
-                     Non-f32/bool tensors must flow through the host-lane wrapper \
+                     Non-f32/bool/bf16/f16 tensors must flow through the host-lane wrapper \
                      (use `to_tensor([...])`/`pad_sequences` or declare a helper fn \
                      that the host lane can emit as a real C symbol).",
                     node.id.0,
