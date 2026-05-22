@@ -70,6 +70,7 @@ const KNOWN_SINGLE_WORDS: &[&str] = &[
     "Shoals",
     "Octant",
     "Capstone",
+    "Hydronnx",
     "Std",
     // Nautilus subsystems
     "Distance",
@@ -537,6 +538,11 @@ mod tests {
             // Currently shipped reef shells (canonical reference §"Shell
             // Ecosystem" — Active and current-phase rows).
             "Nautilus", "Coral", "Shoals", "Octant",
+            // Downstream shell repo (ONNX shell; canonical reference
+            // §"Shell Ecosystem"). `Hydronnx` is 1 leading cap + 7
+            // lowercase ("ydronnx"), tripping the >=7 long-run heuristic
+            // like `Capstone`, so it must be in KNOWN_SINGLE_WORDS.
+            "Hydronnx",
             // Post-Phase-3 stub shells (canonical reference §"Shell
             // Ecosystem" — Stub / Future rows).
             "School", "Darwin", "Hull", "Beacon",
