@@ -1923,11 +1923,7 @@ mod tests {
     #[test]
     fn pat_var_with_type_metadata_returns_some_ty() {
         // (pat-var {type: <ty>} x)
-        let pat = node(
-            "pat-var",
-            vec![("type", tensor_4_f32())],
-            vec![sym("x")],
-        );
+        let pat = node("pat-var", vec![("type", tensor_4_f32())], vec![sym("x")]);
         let bindings = pattern_named_types(&pat);
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].0, "x");
@@ -1949,11 +1945,7 @@ mod tests {
             "pat-tuple",
             vec![],
             vec![
-                node(
-                    "pat-var",
-                    vec![("type", tensor_4_f32())],
-                    vec![sym("a")],
-                ),
+                node("pat-var", vec![("type", tensor_4_f32())], vec![sym("a")]),
                 node("pat-var", vec![], vec![sym("b")]),
             ],
         );
@@ -1976,11 +1968,7 @@ mod tests {
                     vec![],
                     vec![
                         sym("x"),
-                        node(
-                            "pat-var",
-                            vec![("type", tensor_4_f32())],
-                            vec![sym("x")],
-                        ),
+                        node("pat-var", vec![("type", tensor_4_f32())], vec![sym("x")]),
                     ],
                 ),
             ],
@@ -2010,10 +1998,7 @@ mod tests {
         let pat = node(
             "pat-as",
             vec![("type", tensor_4_f32())],
-            vec![
-                sym("whole"),
-                node("pat-var", vec![], vec![sym("x")]),
-            ],
+            vec![sym("whole"), node("pat-var", vec![], vec![sym("x")])],
         );
         let bindings = pattern_named_types(&pat);
         assert_eq!(bindings.len(), 2);

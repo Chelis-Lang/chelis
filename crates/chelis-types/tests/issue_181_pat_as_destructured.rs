@@ -108,9 +108,8 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
         .find_map(|e| find_tagged(e, "pat-as"))
         .expect("annotated tree must contain the pat-as node");
 
-    let pat_as_type = type_metadata(pat_as).expect(
-        "stamper must attach :type to pat-as so linearity can resolve the outer binding",
-    );
+    let pat_as_type = type_metadata(pat_as)
+        .expect("stamper must attach :type to pat-as so linearity can resolve the outer binding");
     let pat_as_rendered = render(pat_as_type);
     assert!(
         pat_as_rendered.contains("FooState") && pat_as_rendered.contains("t-tensor"),
@@ -125,9 +124,8 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
         .find_map(|e| find_tagged(e, "pat-var"))
         .expect("annotated tree must contain at least one pat-var");
 
-    let pat_var_type = type_metadata(inner_pat_var).expect(
-        "stamper must attach :type to pat-var so linearity can resolve the field binding",
-    );
+    let pat_var_type = type_metadata(inner_pat_var)
+        .expect("stamper must attach :type to pat-var so linearity can resolve the field binding");
     let pat_var_rendered = render(pat_var_type);
     assert!(
         pat_var_rendered.contains("t-tensor"),
