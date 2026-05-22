@@ -78,16 +78,41 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             })?
         }
     };
-    // Atomic copy: write to a temp file in the same dir, then rename.
-    let tmp = canonical.with_extension("a.tmp");
+    // Use a PID-suffixed tmp filename so concurrent test binaries (this
+    // file and dtype_matrix_bf16_f16.rs both call into this helper, and
+    // nextest runs them in parallel) do not race on a shared tmp path.
+    // Each process writes its own tmp and renames into the shared
+    // canonical location; last writer wins, but the content is
+    // identical so the race is harmless. Without the PID, two
+    // processes that interleave `fs::copy` and `fs::rename` produce an
+    // ENOENT on the second rename because the first rename moved the
+    // shared tmp away.
+    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
     fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
+    // The rename can still race with another process renaming its own
+    // unique tmp into the same canonical path. On POSIX, rename onto an
+    // existing file is atomic, so this is fine. If a peer beat us to
+    // it, treat NotFound from a follow-up cleanup as benign.
+    match fs::rename(&tmp, canonical) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(deps_dir)? {
+    let entries = match fs::read_dir(deps_dir) {
+        Ok(it) => it,
+        // Truly cold target dirs may not have `deps/` yet; let the
+        // caller fall through to the explicit `cargo build` fallback.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
