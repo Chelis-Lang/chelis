@@ -92,6 +92,26 @@ fn naive_sum(data: &[f32]) -> f32 {
     data.iter().map(|&x| x as f64).sum::<f64>() as f32
 }
 
+/// Reference stride-4 ILP cascade in pure Rust f32 — mirrors the shape
+/// the C backend's `chelis_sum_f32` emits (see `chelis_simd.h:45` and
+/// `crates/chelis-runtime/include/chelis_simd.h`). Used to bit-exact-
+/// compare against the SIMD helper for sizes ≤ 16, where the helper
+/// has no SIMD body to execute and reduces to scalar stride-4.
+///
+/// Algorithm: four f32 accumulator lanes loaded in round-robin via
+/// `acc[i & 3] += value[i]`, combined as `(acc0 + acc1) + (acc2 +
+/// acc3)`. For n < 4 the tail handles all elements in their natural
+/// lane assignment (acc0 = x[0], acc1 = x[1], acc2 = x[2]); the
+/// combine is then `(acc0 + acc1) + (acc2 + 0.0)` which equals the
+/// natural left-fold for n ≤ 3.
+fn stride4_sum_f32(data: &[f32]) -> f32 {
+    let mut acc = [0.0_f32; 4];
+    for (i, &v) in data.iter().enumerate() {
+        acc[i & 3] += v;
+    }
+    (acc[0] + acc[1]) + (acc[2] + acc[3])
+}
+
 fn naive_max(data: &[f32]) -> f32 {
     data.iter().copied().fold(f32::NEG_INFINITY, f32::max)
 }
@@ -267,18 +287,46 @@ fn simd_sum_f32_all_sizes() {
     let results = parse_sweep_output(&out);
     for &n in SIZES {
         let data = test_data(n);
-        let expected = naive_sum(&data);
         let got: f32 = results
             .get(&n)
             .unwrap_or_else(|| panic!("sum: no output for n={n}"))
             .parse()
             .unwrap_or_else(|_| panic!("sum n={n}: could not parse output {:?}", results.get(&n)));
-        // Tolerate 1e-3 relative error; SIMD horizontal adds can reorder ops.
-        let tol = (expected.abs() * 1e-3).max(1e-2);
-        assert!(
-            (got - expected).abs() <= tol,
-            "sum n={n}: expected {expected}, got {got} (tol {tol})"
-        );
+        if n <= 16 {
+            // For n ≤ 16 the SIMD helper executes no SIMD body (the
+            // AVX2 path requires n ≥ 32) — it reduces to scalar
+            // stride-4 cascade. That contract is the whole point of
+            // PR #168 (issue #163), so the test must enforce
+            // bit-exact agreement here. A loose tolerance would
+            // silently mask a regression to left-fold or a different
+            // tree shape.
+            let expected_stride4 = stride4_sum_f32(&data);
+            assert_eq!(
+                got.to_bits(),
+                expected_stride4.to_bits(),
+                "sum n={n}: expected stride-4 bit-exact {expected_stride4} \
+                 (bits 0x{:08x}), got {got} (bits 0x{:08x})",
+                expected_stride4.to_bits(),
+                got.to_bits(),
+            );
+        } else {
+            // For n > 16 the AVX2 SIMD body executes and the
+            // horizontal-add at the end of the SIMD register can
+            // produce a different rounding tree than stride-4
+            // scalar. Bound the error tightly to ~1 ULP scaled by
+            // sqrt(n) (the standard pairwise-reduction error model),
+            // not the 1e-3 relative bound the test previously used.
+            // f32::EPSILON ≈ 1.19e-7; for n=100003 sqrt(n)≈316, so
+            // tol ≈ 3.8e-5 of |expected| — tight enough to catch a
+            // real regression while permitting normal SIMD reordering.
+            let expected = naive_sum(&data);
+            let tol = (expected.abs() * f32::EPSILON * (n as f32).sqrt()).max(1e-6);
+            assert!(
+                (got - expected).abs() <= tol,
+                "sum n={n}: expected {expected} ± {tol}, got {got} (delta {})",
+                (got - expected).abs()
+            );
+        }
     }
 }
 

@@ -3642,9 +3642,16 @@ fn tensor_reduce_host(
     }
     let out_numel = tensor_numel(&out_shape);
     let mut out = vec![0.0_f64; out_numel];
+    let sum_in_f32 = matches!(op, ReduceOp::Sum) && tensor.precision == Prim::F32;
     #[allow(clippy::needless_range_loop)]
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
+        // Stride-4 ILP cascade lanes for Sum (issue #163, parity with
+        // torch's CPU `row_sum` at n <= 16). Other reductions keep a
+        // single accumulator since they're either associative
+        // (Min/Prod) or position-tracking (Argmax/Argmin).
+        let mut sum_lanes = [0.0_f64; 4];
+        let mut sum_lanes_f32 = [0.0_f32; 4];
         let mut best_value = match op {
             ReduceOp::Sum => 0.0,
             ReduceOp::Min => f64::INFINITY,
@@ -3668,7 +3675,11 @@ fn tensor_reduce_host(
             let value = tensor.value.data[in_linear];
             match op {
                 ReduceOp::Sum => {
-                    best_value += value;
+                    if sum_in_f32 {
+                        sum_lanes_f32[k & 3] += value as f32;
+                    } else {
+                        sum_lanes[k & 3] += value;
+                    }
                 }
                 ReduceOp::Min => {
                     if value < best_value {
@@ -3693,7 +3704,15 @@ fn tensor_reduce_host(
             }
         }
         out[out_linear] = match op {
-            ReduceOp::Sum | ReduceOp::Min | ReduceOp::Prod => best_value,
+            ReduceOp::Sum => {
+                if sum_in_f32 {
+                    ((sum_lanes_f32[0] + sum_lanes_f32[1]) + (sum_lanes_f32[2] + sum_lanes_f32[3]))
+                        as f64
+                } else {
+                    (sum_lanes[0] + sum_lanes[1]) + (sum_lanes[2] + sum_lanes[3])
+                }
+            }
+            ReduceOp::Min | ReduceOp::Prod => best_value,
             // Argmax/Argmin: store integer indices as integer-valued F32 per
             // the Phase 3j-pre Batch 1 caveat (documented on RiscOp::Argmax
             // and adv_argmax_output_stores_integer_valued_floats).
@@ -5403,6 +5422,206 @@ y = sum(a, cast(0, int32))
             .expect("sum on axis 0 should evaluate");
         assert_eq!(first_tensor_shape(&outcome, "y"), vec![3]);
         assert_eq!(first_tensor_data(&outcome, "y"), vec![5.0, 7.0, 9.0]);
+    }
+
+    // Issue Chelis-Lang/chelis#163: `sum` on f32 must use the stride-4 ILP
+    // cascade (torch's CPU `row_sum`) reduction order, not the previous
+    // strict left-fold. The 11-element reflected-pad sequence below is
+    // the issue's exact reproducer pattern: the same multiset summed in
+    // two different orderings produces the same result under stride-4
+    // (matches torch/numpy) but differs by 1 ULP under left-fold.
+    //
+    // Source values: torch.rand(6) with manual_seed(0); each f32 value
+    // is expressed as the f64 string that round-trips back to the same
+    // f32 bit pattern via the Surf `cast(_, f32)` path.
+    #[test]
+    fn host_runtime_sum_f32_uses_pairwise_order_for_issue_163_repro() {
+        // right-pad: [v0, v1, v2, v3, v4, v5, v4, v3, v2, v1, v0]
+        let checked_right = checked_surf(
+            r#"
+seq = to_tensor([
+    cast(0.49625658988952637, f32),
+    cast(0.7682217955589294, f32),
+    cast(0.08847743272781372, f32),
+    cast(0.13203048706054688, f32),
+    cast(0.30742114782333374, f32),
+    cast(0.6340786814689636, f32),
+    cast(0.30742114782333374, f32),
+    cast(0.13203048706054688, f32),
+    cast(0.08847743272781372, f32),
+    cast(0.7682217955589294, f32),
+    cast(0.49625658988952637, f32)
+])
+y = sum(seq, cast(0, int32))
+"#,
+        );
+        let outcome_right = evaluate_host_program(&checked_right, &HashMap::new())
+            .expect("right-pad reflected sum should evaluate");
+        let right = first_tensor_data(&outcome_right, "y");
+        assert_eq!(right.len(), 1);
+        // Stride-4 ILP cascade f32 result. Matches torch's CPU
+        // `row_sum` bit-exactly for n <= 16; coincides with
+        // `numpy.sum` only because this specific 11-element multiset
+        // happens to round the same way under both the stride-4
+        // cascade and numpy's pairwise tree — the two algorithms
+        // disagree in general (numpy uses a divide-and-conquer
+        // pairwise tree with 128-element blocks). The old strict
+        // left-fold would have produced 4.218894004821777 here — a
+        // 1-ULP drift that the parity harness now no longer needs to
+        // carve out (issue #163 acceptance criterion).
+        // Bit patterns rather than f32 decimal literals: clippy's
+        // `excessive_precision` lint would rewrite the source
+        // literals to shorter decimals that round to the SAME bits
+        // but obscure intent. This regression-lock IS about exact
+        // bits, so encode them directly.
+        let stride4 = 0x4087012d_u32; // = 4.218893527984619 -> f32 (stride-4 cascade)
+        let left_fold = 0x4087012e_u32; // = 4.218894004821777_f32 (old left-fold)
+        assert_eq!(
+            (right[0] as f32).to_bits(),
+            stride4,
+            "expected stride-4 cascade result; got {}",
+            right[0]
+        );
+        // Negative regression-lock: the test must also assert the OLD
+        // left-fold result is NOT produced, so a future change that
+        // accidentally reverts to a left-fold (or to a different
+        // tree shape that lands on the old value) fails loudly here.
+        assert_ne!(
+            (right[0] as f32).to_bits(),
+            left_fold,
+            "regression: result matches the old left-fold value 4.218894004821777, \
+             which the stride-4 cascade was supposed to replace"
+        );
+
+        // Same multiset, left-pad ordering. Both stride-4 and the old
+        // left-fold happen to agree here — pinning to prove parity stays
+        // intact across the algorithm change.
+        let checked_left = checked_surf(
+            r#"
+seq = to_tensor([
+    cast(0.30742114782333374, f32),
+    cast(0.13203048706054688, f32),
+    cast(0.08847743272781372, f32),
+    cast(0.7682217955589294, f32),
+    cast(0.49625658988952637, f32),
+    cast(0.49625658988952637, f32),
+    cast(0.7682217955589294, f32),
+    cast(0.08847743272781372, f32),
+    cast(0.13203048706054688, f32),
+    cast(0.30742114782333374, f32),
+    cast(0.6340786814689636, f32)
+])
+y = sum(seq, cast(0, int32))
+"#,
+        );
+        let outcome_left = evaluate_host_program(&checked_left, &HashMap::new())
+            .expect("left-pad reflected sum should evaluate");
+        let left = first_tensor_data(&outcome_left, "y");
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            (left[0] as f32).to_bits(),
+            stride4,
+            "left-pad ordering must produce same result as right-pad under stride-4; got {}",
+            left[0]
+        );
+    }
+
+    // PR #168 review LOW #5: NaN/Inf/n<4 edge-case coverage for the
+    // stride-4 ILP cascade. Tail handling (n < 4 where the lane-fill
+    // doesn't complete a full cycle) and special-value propagation
+    // are load-bearing invariants of the cascade; without these
+    // tests, a future change to the tail loop or lane combine could
+    // silently regress them.
+
+    /// Stride-4 reference for n < 4: the lanes are assigned naturally
+    /// (acc0=x[0], acc1=x[1], acc2=x[2]); the combine is
+    /// `(acc0 + acc1) + (acc2 + 0.0)` which equals a left-fold for
+    /// n ≤ 3. The expected bit pattern is therefore the straight-
+    /// forward sum.
+    #[test]
+    fn host_runtime_sum_f32_n1_n2_n3_bit_exact() {
+        for (n, expr, expected) in [
+            (1, "to_tensor([cast(1.5, f32)])", 1.5_f32),
+            (2, "to_tensor([cast(1.5, f32), cast(0.25, f32)])", 1.75_f32),
+            (
+                3,
+                "to_tensor([cast(1.5, f32), cast(0.25, f32), cast(0.125, f32)])",
+                1.875_f32,
+            ),
+        ] {
+            let src = format!(
+                "seq = {expr}\n\
+                 y = sum(seq, cast(0, int32))\n"
+            );
+            let checked = checked_surf(&src);
+            let outcome = evaluate_host_program(&checked, &HashMap::new())
+                .unwrap_or_else(|_| panic!("n={n} sum should evaluate"));
+            let result = first_tensor_data(&outcome, "y");
+            assert_eq!(result.len(), 1);
+            assert_eq!(
+                (result[0] as f32).to_bits(),
+                expected.to_bits(),
+                "n={n}: expected {expected}, got {}",
+                result[0]
+            );
+        }
+    }
+
+    #[test]
+    fn host_runtime_sum_f32_propagates_nan() {
+        // A single NaN anywhere in the input must propagate to the
+        // final result. Pinned bit-exactly so a future change to the
+        // lane combine that hides NaN through e.g. min/max can't slip
+        // by.
+        let checked = checked_surf(
+            r#"
+seq = to_tensor([
+    cast(1.0, f32),
+    cast(2.0, f32),
+    cast(0.0, f32) / cast(0.0, f32),
+    cast(4.0, f32),
+    cast(5.0, f32)
+])
+y = sum(seq, cast(0, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("nan-bearing sum should evaluate");
+        let result = first_tensor_data(&outcome, "y");
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0] as f32).is_nan(),
+            "sum with NaN must propagate NaN; got {}",
+            result[0]
+        );
+    }
+
+    #[test]
+    fn host_runtime_sum_f32_inf_plus_neg_inf_is_nan() {
+        // +Inf + -Inf is IEEE-754 NaN. The stride-4 cascade must
+        // produce this regardless of which lanes the two infinities
+        // land in (`x[0]` and `x[1]` here land in acc0/acc1; under
+        // stride-4 the cascade still adds them and the result is NaN).
+        let checked = checked_surf(
+            r#"
+seq = to_tensor([
+    cast(1.0, f32) / cast(0.0, f32),
+    cast(-1.0, f32) / cast(0.0, f32),
+    cast(2.0, f32),
+    cast(3.0, f32)
+])
+y = sum(seq, cast(0, int32))
+"#,
+        );
+        let outcome =
+            evaluate_host_program(&checked, &HashMap::new()).expect("inf-pair sum should evaluate");
+        let result = first_tensor_data(&outcome, "y");
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0] as f32).is_nan(),
+            "sum with +Inf and -Inf must produce NaN; got {}",
+            result[0]
+        );
     }
 
     #[test]

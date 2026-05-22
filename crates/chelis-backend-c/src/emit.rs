@@ -3112,7 +3112,14 @@ impl CEmitter {
             "for (int outer = 0; outer < t{id}->size; outer++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("{acc_et} acc = {acc_zero};"));
+        // Stride-4 ILP cascade matching torch's CPU `row_sum`
+        // (`num_levels=4, ilp_factor=4` in
+        // pytorch/aten/src/ATen/native/cpu/SumKernel.cpp). Bit-exact
+        // with torch's `.sum()` for n <= 16 (issue
+        // Chelis-Lang/chelis#163).
+        self.line(&format!(
+            "{acc_et} acc0 = {acc_zero}, acc1 = {acc_zero}, acc2 = {acc_zero}, acc3 = {acc_zero};"
+        ));
         self.line("int out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
             "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
@@ -3145,11 +3152,19 @@ impl CEmitter {
         // the accumulator type; C handles the implicit widening for the
         // f32→f64 case, and integer accumulators preserve exact values.
         self.line(&format!(
-            "acc += ({acc_et})((const {operand_et}*)t{a}->data)[src_idx];"
+            "{acc_et} __v = ({acc_et})((const {operand_et}*)t{a}->data)[src_idx];"
         ));
+        self.line("switch (__reduce_i & 3) {");
+        self.line("  case 0: acc0 += __v; break;");
+        self.line("  case 1: acc1 += __v; break;");
+        self.line("  case 2: acc2 += __v; break;");
+        self.line("  default: acc3 += __v; break;");
+        self.line("}");
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("(({acc_et}*)t{id}->data)[outer] = acc;"));
+        self.line(&format!(
+            "(({acc_et}*)t{id}->data)[outer] = (acc0 + acc1) + (acc2 + acc3);"
+        ));
         self.indent -= 1;
         self.line("}");
         if can_simd_fast_path {
@@ -3244,7 +3259,21 @@ impl CEmitter {
             "for (int outer = 0; outer < t{id}->size; outer++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("{acc_c_ty} acc = 0;"));
+        // Stride-4 ILP cascade (issue #163). Integer addition is
+        // associative so output bytes are unchanged for non-overflowing
+        // sums; kept symmetric with the float path for consistency.
+        // CAVEAT: for int sums whose true sum exceeds the accumulator
+        // type's range, the lane-wise pattern wraps modulo 2^N
+        // independently per lane and then re-wraps at the lane combine,
+        // which can differ from a strict left-fold's wrap result on the
+        // same inputs. The runtime host evaluator stores integer tensor
+        // elements in f64 and does not overflow (up to 2^53), so a
+        // backend/evaluator disagreement is possible at and beyond that
+        // boundary. Not observed in practice; chelis programs rarely
+        // sum 2^31+ int32 values into an int32 accumulator.
+        self.line(&format!(
+            "{acc_c_ty} acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;"
+        ));
         self.line("int out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
             "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
@@ -3277,11 +3306,19 @@ impl CEmitter {
         // -56 (which would be the wrap-around if accumulation happened
         // at the source width).
         self.line(&format!(
-            "acc += ({acc_c_ty})(({src_c_ty}*)t{a}->data)[src_idx];"
+            "{acc_c_ty} __v = ({acc_c_ty})(({src_c_ty}*)t{a}->data)[src_idx];"
         ));
+        self.line("switch (__reduce_i & 3) {");
+        self.line("  case 0: acc0 += __v; break;");
+        self.line("  case 1: acc1 += __v; break;");
+        self.line("  case 2: acc2 += __v; break;");
+        self.line("  default: acc3 += __v; break;");
+        self.line("}");
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("(({acc_c_ty}*)t{id}->data)[outer] = acc;"));
+        self.line(&format!(
+            "(({acc_c_ty}*)t{id}->data)[outer] = (acc0 + acc1) + (acc2 + acc3);"
+        ));
         self.indent -= 1;
         self.line("}");
     }
@@ -3783,7 +3820,13 @@ impl CEmitter {
         } else {
             "-INFINITY"
         };
-        self.line(&format!("float acc = {init};"));
+        // Sum uses a stride-4 ILP cascade (issue #163, torch parity);
+        // max keeps a single accumulator since `fmaxf` is associative.
+        if reduce_kind == "sum" {
+            self.line("float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;");
+        } else {
+            self.line(&format!("float acc = {init};"));
+        }
         self.line("int out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
             "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
@@ -3910,13 +3953,24 @@ impl CEmitter {
         // Accumulate the last step's result
         let last = ops.len() - 1;
         if reduce_kind == "sum" {
-            self.line(&format!("acc += v{last};"));
+            self.line("switch (__reduce_i & 3) {");
+            self.line(&format!("  case 0: acc0 += v{last}; break;"));
+            self.line(&format!("  case 1: acc1 += v{last}; break;"));
+            self.line(&format!("  case 2: acc2 += v{last}; break;"));
+            self.line(&format!("  default: acc3 += v{last}; break;"));
+            self.line("}");
         } else {
             self.line(&format!("acc = fmaxf(acc, v{last});"));
         }
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("t{id}->data[outer] = acc;"));
+        if reduce_kind == "sum" {
+            self.line(&format!(
+                "t{id}->data[outer] = (acc0 + acc1) + (acc2 + acc3);"
+            ));
+        } else {
+            self.line(&format!("t{id}->data[outer] = acc;"));
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -4351,7 +4405,11 @@ mod tests {
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
-        assert!(c.contains("acc +="));
+        // Stride-4 ILP cascade (issue #163): four independent
+        // accumulators rather than a single `acc +=` chain.
+        assert!(c.contains("acc0 += __v"));
+        assert!(c.contains("acc3 += __v"));
+        assert!(c.contains("(acc0 + acc1) + (acc2 + acc3)"));
         assert!(c.contains("for (int __reduce_i"));
     }
 
@@ -4684,7 +4742,9 @@ mod tests {
         );
         dag.add_node(RiscOp::Neg, vec![s], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
-        assert!(c.contains("acc +="));
+        // Stride-4 ILP cascade (issue #163).
+        assert!(c.contains("acc0 += __v"));
+        assert!(c.contains("(acc0 + acc1) + (acc2 + acc3)"));
         // The slow (non-contiguous) path emits a typed pointer cast then negates.
         assert!(c.contains("((float*)t1->data)[idx]"));
     }

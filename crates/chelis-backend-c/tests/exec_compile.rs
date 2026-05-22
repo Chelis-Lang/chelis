@@ -631,6 +631,92 @@ int main() {{
     );
 }
 
+// ---- Test 10b: Cross-backend f32 bit-exactness oracle for issue #163 ----
+//
+// PR #168 review MED #3: pin C-backend / host-evaluator agreement on
+// the issue #163 reproducer at the bit level, end-to-end. The
+// host-evaluator test in `chelis-compiler-api::runtime` asserts the
+// stride-4 ILP cascade result on the same 11-element multiset; this
+// test does the same against the C backend's output by compiling the
+// generated C with gcc, running it, and verifying the printed result
+// is bit-exactly `0x4087012d` (= 4.218893527984619_f32). Without
+// this end-to-end test, a future divergence between the evaluator
+// lane and the codegen lane (e.g., a subtle lane-assignment shift in
+// `chelis_sum_f32` vs `host_runtime::reduce_f32`) would not be caught
+// by either layer's own tests.
+
+#[test]
+fn exec_reduce_sum_issue_163_repro_is_bit_exact_with_evaluator() {
+    let scalar_ty = TensorType::scalar_f32();
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(11), None);
+    dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![a],
+        scalar_ty,
+        None,
+    );
+    let dag = fuse(&dag);
+    let result = chelis_backend_c::codegen(&dag, "test_issue_163_sum");
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void test_issue_163_sum(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    // Issue #163 right-pad reflected sequence: the issue's exact
+    // reproducer multiset, identical to the host-runtime test in
+    // chelis-compiler-api::runtime::host_runtime_sum_f32_uses_pairwise_order_for_issue_163_repro.
+    float in_data[11] = {{
+        0.49625658988952637f,
+        0.7682217955589294f,
+        0.08847743272781372f,
+        0.13203048706054688f,
+        0.30742114782333374f,
+        0.6340786814689636f,
+        0.30742114782333374f,
+        0.13203048706054688f,
+        0.08847743272781372f,
+        0.7682217955589294f,
+        0.49625658988952637f,
+    }};
+    chelis_tensor in_t = make_view_1d(in_data, 11);
+    chelis_tensor* inputs[1] = {{ &in_t }};
+    chelis_tensor* out_slot = NULL;
+    chelis_tensor* outputs[1] = {{ out_slot }};
+
+    test_issue_163_sum(inputs, 1, outputs, 1);
+
+    float got = outputs[0]->data[0];
+    uint32_t got_bits;
+    memcpy(&got_bits, &got, sizeof(got_bits));
+    // 4.218893527984619_f32 is the stride-4 ILP cascade result the
+    // host runtime emits for the same multiset. Bit-exact equality
+    // is the whole point of this PR.
+    uint32_t expected_bits = 0x4087012d;
+    printf("got=%.17g bits=0x%08x expected_bits=0x%08x\n", (double)got, got_bits, expected_bits);
+    printf("%s\n", got_bits == expected_bits ? "PASS" : "FAIL");
+    return got_bits == expected_bits ? 0 : 1;
+}}
+"#,
+        HARNESS_HEADER = HARNESS_HEADER,
+    );
+
+    let src = &result.c_source;
+    let Some(output) = compile_and_run_kernel("issue_163_sum", src, &harness) else {
+        panic!("issue #163 sum kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C backend's stride-4 cascade must match the host evaluator bit-exactly \
+         for the issue #163 multiset; got: {output}"
+    );
+}
+
 // ---- Test 5: Zero-size tensor does not crash ----
 
 #[test]
