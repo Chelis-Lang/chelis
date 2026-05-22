@@ -4214,53 +4214,110 @@ impl CEmitter {
     // `convert_scalar_data`); this site mirrors those semantics in emitted
     // C.
     //
-    // Validated precision set (see the validator around line 558):
-    //   F32 | F64 | Int32 | Int64. `bool` and reduced floats are not valid
-    // cast targets and panic before reaching this site.
+    // Validated precision set (see `validate_supported_precisions`):
+    //   F32 | F64 | Bf16 | F16 | Int8 | Int16 | Int32 | Int64. `Bool` is
+    // not a valid cast target and panics upstream.
+    //
+    // RT-Cleanup BLOCKER fix (WS-Cleanup-Fixups): casts that touch the
+    // reduced floats (`Bf16` / `F16`) MUST route through the runtime
+    // conversion helpers (`chelis_bf16_to_f32` / `chelis_f32_to_bf16` /
+    // `chelis_f16_to_f32` / `chelis_f32_to_f16`). The previous emit used
+    // the C language cast `(uint16_t)v` on a float, which integer-
+    // truncates the float value (so `(uint16_t)1.5f == 1`) and writes
+    // bit pattern `0x0001` instead of `bf16(1.5)=0x3FC0` /
+    // `f16(1.5)=0x3E00`. Symmetric corruption on the widening direction
+    // (the cast `(float)(uint16_t)0x3FC0 == 16320.0f`, not `1.5f`).
+    // Cross-narrow-float casts (`Bf16 <-> F16`) chain through `f32` as
+    // the canonical intermediate so each leg uses the spec-correct
+    // conversion. Pairs not involving `Bf16` / `F16` keep the existing
+    // C primitive cast semantics.
     fn emit_cast(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType, dag: &Dag) {
         let a = inputs[0].0;
         let src_ty = &dag
             .get(inputs[0])
             .expect("cast input must resolve in dag")
             .output_type;
+        let src_prec = src_ty.precision;
+        let dst_prec = ty.precision;
         let src_et = Self::elem_type(src_ty);
         let dst_et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
-        if src_ty.precision == ty.precision {
+        if src_prec == dst_prec {
             // Same-dtype cast: copy directly using the per-dtype size.
             // Models a same-dtype cast as a structural identity copy
             // matching the runtime's per-dtype storage layout.
             self.line(&format!(
                 "memcpy(t{id}->data, t{a}->data, t{id}->size * sizeof({dst_et}));"
             ));
-        } else {
-            // Cross-dtype value-converting cast. Strided element-wise
-            // loop: the output is freshly allocated and contiguous, so
-            // the destination index is the flat loop index. The source
-            // may be non-contiguous; resolve its element via the
-            // standard `chelis_flat_to_indices` + `chelis_indices_to_flat`
-            // dance used by `emit_realize` and friends. A C-level
-            // primitive cast `(dst_et)src` performs the precision
-            // conversion; canonical C semantics for f32<->f64 rounding,
-            // float->int truncate-toward-zero, and int->float widening,
-            // matching the runtime evaluator's `convert_scalar_data`
-            // semantics on the validated precision set.
-            self.line("#pragma omp parallel for");
-            self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
-            self.indent += 1;
-            self.line("int indices[CHELIS_MAX_DIM];");
-            self.line(&format!(
-                "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
-            ));
-            self.line(&format!(
-                "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
-            ));
-            self.line(&format!(
-                "(({dst_et}*)t{id}->data)[i] = ({dst_et})(({src_et}*)t{a}->data)[idx];"
-            ));
-            self.indent -= 1;
-            self.line("}");
+            return;
         }
+        // Cross-dtype value-converting cast. Strided element-wise loop:
+        // the output is freshly allocated and contiguous, so the
+        // destination index is the flat loop index. The source may be
+        // non-contiguous; resolve its element via the standard
+        // `chelis_flat_to_indices` + `chelis_indices_to_flat` dance
+        // used by `emit_realize` and friends.
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        let src_elem = format!("(({src_et}*)t{a}->data)[idx]");
+        let dst_elem = format!("(({dst_et}*)t{id}->data)[i]");
+        let src_reduced = Self::is_reduced_float_prec(src_prec);
+        let dst_reduced = Self::is_reduced_float_prec(dst_prec);
+        let assignment = if src_reduced && dst_reduced {
+            // bf16 <-> f16: chain `src -> f32 -> dst` so each leg uses
+            // the spec-correct rounding helpers; the intermediate `f32`
+            // is exact for both bf16 and f16 (both fit in the f32
+            // exponent and mantissa range).
+            let load = Self::reduced_to_f32_fn(src_prec);
+            let store = Self::f32_to_reduced_fn(dst_prec);
+            format!("{dst_elem} = {store}({load}({src_elem}));")
+        } else if src_reduced {
+            // bf16/f16 -> {f32, f64, intN}: decode to f32 first, then
+            // let the C primitive cast handle the rest. The C cast
+            // `(double)f32`, `(int32_t)f32`, etc. matches the
+            // evaluator's `convert_scalar_data` semantics.
+            let load = Self::reduced_to_f32_fn(src_prec);
+            if dst_prec == Prim::F32 {
+                format!("{dst_elem} = {load}({src_elem});")
+            } else {
+                format!("{dst_elem} = ({dst_et}){load}({src_elem});")
+            }
+        } else if dst_reduced {
+            // {f32, f64, intN} -> bf16/f16: convert to f32 first (the
+            // C cast `(float)x` rounds f64/int to f32 per canonical
+            // semantics), then encode via the rounding helper.
+            let store = Self::f32_to_reduced_fn(dst_prec);
+            if src_prec == Prim::F32 {
+                format!("{dst_elem} = {store}({src_elem});")
+            } else {
+                format!("{dst_elem} = {store}((float){src_elem});")
+            }
+        } else {
+            // Neither side is a reduced float: the C primitive cast
+            // (`(double)f32`, `(int64_t)f32`, `(int32_t)i64`, ...) is
+            // the spec-correct conversion and matches the runtime
+            // evaluator's `convert_scalar_data`.
+            format!("{dst_elem} = ({dst_et}){src_elem};")
+        };
+        self.line(&assignment);
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// True for the reduced-precision float dtypes whose host storage is
+    /// `uint16_t` and whose value semantics require routing through the
+    /// runtime conversion helpers rather than a C language cast. Mirrors
+    /// `is_reduced_float` but takes `Prim` directly for cast-site use.
+    fn is_reduced_float_prec(prec: Prim) -> bool {
+        matches!(prec, Prim::Bf16 | Prim::F16)
     }
 
     // ---- Store ----

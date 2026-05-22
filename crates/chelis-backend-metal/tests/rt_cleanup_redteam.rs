@@ -178,34 +178,95 @@ fn rt_metal_const_f16_bf16_pathological_values_emit_correct_bit_pattern() {
     }
 }
 
-/// COVERAGE GAP: `host_const_fill_body(F32, NaN, ...)` emits `p[i] = NaNf;`
-/// which is invalid C++ (`NaNf` is not a valid literal; the C++ literal
-/// for NaN is `NAN` or `__builtin_nanf("")`). Same for `INFINITY`
-/// (`inff` is not valid C++). Today this only fires if a Const node
-/// with a NaN/Inf value reaches the Metal codegen (IR validation does
-/// not reject those values), so this is a latent coverage gap rather
-/// than a today-BLOCKER for typical programs.
-///
-/// Asserting the spec-correct behavior would require the formatter
-/// to emit `NAN` instead of `NaNf` and `INFINITY` instead of `inff`.
-/// This test documents the divergence; if/when the fix lands, drop the
-/// `#[ignore]`.
+/// Post WS-Cleanup-Fixups: `host_const_fill_body(F32, NaN, ...)` no
+/// longer emits the invalid C++ literal `NaNf`. The F32 arm now
+/// discriminates `f64::is_nan()` / `is_infinite()` and emits the C99
+/// `(float)NAN` / `(float)INFINITY` / `-(float)INFINITY` macros which
+/// are well-formed C++ tokens. Finite values keep the previous
+/// `{value:?}f` shape (byte-for-byte unchanged).
 #[test]
-#[ignore = "SPEC-DIVERGENCE: host_const_fill_body(F32, NaN/Inf, ...) emits invalid C++ literal NaNf/inff"]
 fn rt_metal_emit_const_f32_nan_does_not_emit_invalid_c_literal_nanf() {
     let body = dtype::host_const_fill_body(Prim::F32, f64::NAN, "buf", 4);
     assert!(
         !body.contains("NaNf"),
         "F32 NaN must not emit the invalid C literal `NaNf`; got: {body}"
     );
+    assert!(
+        body.contains("NAN"),
+        "F32 NaN must emit the C99 `NAN` macro: got: {body}"
+    );
 }
 
 #[test]
-#[ignore = "SPEC-DIVERGENCE: host_const_fill_body(F32, NaN/Inf, ...) emits invalid C++ literal NaNf/inff"]
 fn rt_metal_emit_const_f32_infinity_does_not_emit_invalid_c_literal_inff() {
     let body = dtype::host_const_fill_body(Prim::F32, f64::INFINITY, "buf", 4);
     assert!(
         !body.contains("inff"),
         "F32 +inf must not emit the invalid C literal `inff`; got: {body}"
+    );
+    assert!(
+        body.contains("INFINITY"),
+        "F32 +inf must emit the C99 `INFINITY` macro: got: {body}"
+    );
+}
+
+/// Sibling: `-Inf` must emit `-(float)INFINITY`, not the invalid
+/// `-inff` token. Catches a future regression where the sign branch
+/// gets re-introduced via `{value:?}f` formatting.
+#[test]
+fn rt_metal_emit_const_f32_negative_infinity_emits_negated_infinity_macro() {
+    let body = dtype::host_const_fill_body(Prim::F32, f64::NEG_INFINITY, "buf", 4);
+    assert!(
+        !body.contains("inff"),
+        "F32 -inf must not emit the invalid C literal `-inff`; got: {body}"
+    );
+    assert!(
+        body.contains("-(float)INFINITY"),
+        "F32 -inf must emit `-(float)INFINITY`: got: {body}"
+    );
+}
+
+/// F16 / Bf16 NaN and +/-Inf go through `half::{f16,bf16}::from_f64`
+/// which produces well-formed `uint16_t` bit patterns (NaN: 0x7E00 /
+/// 0x7FC0; +Inf: 0x7C00 / 0x7F80; -Inf: 0xFC00 / 0xFF80) and the
+/// helper writes them as `0xXXXXu` integer literals, so the F16/Bf16
+/// arms are unaffected by the F32 NaN/Inf bug; pin that explicitly
+/// so a future refactor that switches narrow-float fill to use a
+/// `(half)` cast does not silently re-introduce the broken token.
+#[test]
+fn rt_metal_emit_const_f16_bf16_nan_inf_emit_well_formed_integer_literal() {
+    let cases = [
+        (Prim::F16, f64::NAN, 0x7E00_u16),
+        (Prim::F16, f64::INFINITY, 0x7C00),
+        (Prim::F16, f64::NEG_INFINITY, 0xFC00),
+        (Prim::Bf16, f64::NAN, 0x7FC0),
+        (Prim::Bf16, f64::INFINITY, 0x7F80),
+        (Prim::Bf16, f64::NEG_INFINITY, 0xFF80),
+    ];
+    for (prec, value, expected_bits) in cases {
+        let body = dtype::host_const_fill_body(prec, value, "buf", 4);
+        let needle = format!("0x{expected_bits:04X}u");
+        assert!(
+            body.contains(&needle),
+            "{prec:?}({value}) must emit `{needle}` integer literal; got: {body}"
+        );
+        assert!(
+            !body.contains("NaN") && !body.contains("inff") && !body.contains("NaNf"),
+            "{prec:?}({value}) must not emit any NaN/inff token; got: {body}"
+        );
+    }
+}
+
+/// Finite values keep the byte-for-byte shape of the pre-fix emission.
+#[test]
+fn rt_metal_emit_const_f32_finite_value_keeps_typed_float_literal_form() {
+    let body = dtype::host_const_fill_body(Prim::F32, 2.5, "buf", 4);
+    assert!(
+        body.contains("p[i] = 2.5f"),
+        "F32 finite value must keep the `{{value:?}}f` form: got: {body}"
+    );
+    assert!(
+        !body.contains("NAN"),
+        "F32 finite emission must not mention NAN: got: {body}"
     );
 }

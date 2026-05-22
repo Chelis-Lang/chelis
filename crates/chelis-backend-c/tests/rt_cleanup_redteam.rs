@@ -894,11 +894,12 @@ int main(void) {{
 /// pattern 0x3FC0 (the encoding of 1.5), NOT 0x0001 (the result of
 /// `(uint16_t)1.5f`, which truncates the float to int).
 ///
-/// BLOCKER on current main: `emit_cast` uses the C cast `(uint16_t)v`
-/// for the f32 → bf16 conversion, which silently corrupts the value.
-/// Asserting spec-correct behavior means this test fails on main.
+/// Post WS-Cleanup-Fixups: `emit_cast` routes f32 → bf16 through
+/// `chelis_f32_to_bf16` (and the symmetric helpers for the other three
+/// reduced-float cast directions), so this test pins the spec-correct
+/// IEEE 754 rounding instead of the previous integer-truncation bug
+/// (`(uint16_t)1.5f` → 0x0001 instead of bf16(1.5)=0x3FC0).
 #[test]
-#[ignore = "BLOCKER: emit_cast f32->bf16 uses C integer cast not chelis_f32_to_bf16; see RT-Cleanup report"]
 fn cast_f32_to_bf16_preserves_value_per_ieee_754() {
     if !gcc_available() {
         return;
@@ -944,10 +945,10 @@ int main(void) {{
 }
 
 /// Cast bf16 → f32: the bf16 storage is `uint16_t` bit pattern 0x3FC0
-/// (= 1.5). The cast must produce f32(1.5) (= 0x3FC00000), not f32(0xFFC0)
-/// (the int-to-float widening of the uint16_t value).
+/// (= 1.5). Post WS-Cleanup-Fixups, the cast routes through
+/// `chelis_bf16_to_f32` so the result is f32(1.5) (= 0x3FC00000), not
+/// the previous int-to-float widening of the uint16_t value (16320.0).
 #[test]
-#[ignore = "BLOCKER: emit_cast bf16->f32 uses C integer cast not chelis_bf16_to_f32; see RT-Cleanup report"]
 fn cast_bf16_to_f32_preserves_value_per_ieee_754() {
     if !gcc_available() {
         return;
@@ -992,8 +993,10 @@ int main(void) {{
     );
 }
 
+/// Post WS-Cleanup-Fixups: f32 → f16 cast routes through
+/// `chelis_f32_to_f16`, pinning IEEE 754 binary16 round-to-nearest-even
+/// instead of the previous integer-truncation bug.
 #[test]
-#[ignore = "BLOCKER: emit_cast f32->f16 uses C integer cast not chelis_f32_to_f16; see RT-Cleanup report"]
 fn cast_f32_to_f16_preserves_value_per_ieee_754() {
     if !gcc_available() {
         return;
