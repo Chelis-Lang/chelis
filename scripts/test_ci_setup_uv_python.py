@@ -336,5 +336,67 @@ class EnsureLinkSymlinkTest(unittest.TestCase):
             self.assertEqual(list(libdir.iterdir()), [])
 
 
+class DiscoverPythonLibdirsTest(unittest.TestCase):
+    """Discovery walks UV_PYTHON_INSTALL_DIR + ~/.local/share/uv/python/
+    to find every libpython install. Needed because pyo3-build-config
+    can query a different uv install copy than `.venv/bin/python`."""
+
+    def test_primary_libdir_included_first(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            libdir = Path(td)
+            (libdir / "libpython3.11.so.1.0").touch()
+            with mock.patch("platform.system", return_value="Linux"):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    result = ci_setup_uv_python.discover_python_libdirs(str(libdir), "3.11")
+            self.assertGreaterEqual(len(result), 1)
+            self.assertEqual(result[0].resolve(), libdir.resolve())
+
+    def test_primary_libdir_skipped_when_no_libpython(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            empty = Path(td) / "empty"
+            empty.mkdir()
+            with mock.patch("platform.system", return_value="Linux"):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    with mock.patch.object(Path, "home", return_value=Path("/nonexistent")):
+                        result = ci_setup_uv_python.discover_python_libdirs(str(empty), "3.11")
+            self.assertEqual(result, [])
+
+    def test_finds_uv_python_install_dir_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            install = root / "cpython-3.11.15-linux-x86_64-gnu"
+            (install / "lib").mkdir(parents=True)
+            (install / "lib" / "libpython3.11.so.1.0").touch()
+            with mock.patch("platform.system", return_value="Linux"):
+                with mock.patch.dict(
+                    os.environ,
+                    {"UV_PYTHON_INSTALL_DIR": str(root)},
+                    clear=True,
+                ):
+                    with mock.patch.object(Path, "home", return_value=Path("/nonexistent")):
+                        result = ci_setup_uv_python.discover_python_libdirs(
+                            "/some/primary/that/does/not/exist", "3.11"
+                        )
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].name, "lib")
+
+    def test_dedupes_roots_that_resolve_to_same_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            install = root / "cpython-3.11.15-linux-x86_64-gnu"
+            (install / "lib").mkdir(parents=True)
+            (install / "lib" / "libpython3.11.so.1.0").touch()
+            libdir = install / "lib"
+            with mock.patch("platform.system", return_value="Linux"):
+                with mock.patch.dict(
+                    os.environ,
+                    {"UV_PYTHON_INSTALL_DIR": str(root)},
+                    clear=True,
+                ):
+                    with mock.patch.object(Path, "home", return_value=Path("/nonexistent")):
+                        result = ci_setup_uv_python.discover_python_libdirs(str(libdir), "3.11")
+            self.assertEqual(len(result), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -177,6 +177,55 @@ def _list_libdir(libdir: Path) -> str:
         return f"<unreadable: {exc}>"
 
 
+def discover_python_libdirs(primary_libdir: str, abi: str) -> list[Path]:
+    """Return every plausible lib/ dir that contains a libpython<abi> file.
+
+    The primary libdir from `sysconfig.LIBDIR` is the authoritative
+    answer for the venv's interpreter, but pyo3-build-config can end up
+    invoking a different copy of uv's Python install whose sys-paths
+    differ. Searches the documented uv install roots (default
+    `~/.local/share/uv/python/`, plus the `UV_PYTHON_INSTALL_DIR`
+    override) for any `cpython-<abi>*` install and includes its
+    `lib/` subdir if libpython files are present there.
+
+    Returns a de-duplicated list with `primary_libdir` first so the
+    caller links it before any siblings.
+    """
+    results: list[Path] = []
+    seen: set[Path] = set()
+
+    def maybe_add(p: Path) -> None:
+        try:
+            resolved = p.resolve()
+        except OSError:
+            return
+        if resolved in seen:
+            return
+        if not resolved.is_dir():
+            return
+        # Only include lib dirs that actually contain a libpython<abi>
+        # file (versioned or not). Skip unrelated dirs.
+        suffix = ".so" if platform.system() == "Linux" else ".dylib"
+        if not any(resolved.glob(f"libpython{abi}{suffix}*")):
+            return
+        seen.add(resolved)
+        results.append(p)
+
+    maybe_add(Path(primary_libdir))
+
+    candidate_roots: list[Path] = []
+    if "UV_PYTHON_INSTALL_DIR" in os.environ:
+        candidate_roots.append(Path(os.environ["UV_PYTHON_INSTALL_DIR"]))
+    candidate_roots.append(Path.home() / ".local" / "share" / "uv" / "python")
+    for root in candidate_roots:
+        if not root.is_dir():
+            continue
+        for install in sorted(root.glob(f"cpython-{abi}*")):
+            maybe_add(install / "lib")
+
+    return results
+
+
 def ensure_link_symlink(libdir: Path, abi: str) -> None:
     """Ensure `libpython<abi>.{so,dylib}` exists in `libdir`.
 
@@ -273,9 +322,28 @@ def main() -> int:
     venv_python = create_venv(python_version)
     libdir = libdir_for(venv_python)
     abi = python_abi_version(venv_python)
-    # Ensure the linker can resolve `-lpython<abi>` — uv on Linux ships
-    # the SONAME-suffixed `.so.1.0` but not the unversioned `.so`.
-    ensure_link_symlink(Path(libdir), abi)
+    # Ensure the linker can resolve `-lpython<abi>`. The venv's
+    # interpreter reports `sysconfig.LIBDIR` for its actual install
+    # location, but uv may stage Python installs at multiple roots
+    # (`$UV_PYTHON_INSTALL_DIR` and `~/.local/share/uv/python/`) and
+    # pyo3-build-config can end up querying either. Symlink the
+    # unversioned name at every install root we can find so the
+    # linker resolves regardless of which path pyo3 picked.
+    install_libdirs = discover_python_libdirs(libdir, abi)
+    linked_any = False
+    for d in install_libdirs:
+        try:
+            ensure_link_symlink(d, abi)
+            linked_any = True
+        except RuntimeError as exc:
+            # A specific install root might be a stale cache without a
+            # libpython; non-fatal unless NONE of the roots had one.
+            print(f"warning: skipping {d}: {exc}", file=sys.stderr)
+    if not linked_any:
+        raise RuntimeError(
+            "could not link libpython at any uv install root; "
+            "checked: " + ", ".join(str(p) for p in install_libdirs)
+        )
     append_to_github_env(var, libdir)
     return 0
 
