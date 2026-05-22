@@ -181,7 +181,7 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
     assert!(helper.params[0].inferred_read_only);
     assert!(
         caller.params[0].inferred_read_only,
-        "module-wrapped caller's `a` SHOULD become read-only — helper's signature \
+        "module-wrapped caller's `a` SHOULD become read-only: helper's signature \
          is visible at caller-annotation time after the #183 module-descent fix"
     );
 }
