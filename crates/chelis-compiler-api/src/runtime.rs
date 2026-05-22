@@ -5469,8 +5469,13 @@ y = sum(seq, cast(0, int32))
         // left-fold would have produced 4.218894004821777 here — a
         // 1-ULP drift that the parity harness now no longer needs to
         // carve out (issue #163 acceptance criterion).
-        let stride4 = (4.218893527984619_f64 as f32).to_bits();
-        let left_fold = 4.218894004821777_f32.to_bits();
+        // Bit patterns rather than f32 decimal literals: clippy's
+        // `excessive_precision` lint would rewrite the source
+        // literals to shorter decimals that round to the SAME bits
+        // but obscure intent. This regression-lock IS about exact
+        // bits, so encode them directly.
+        let stride4 = 0x4087012d_u32; // = 4.218893527984619 -> f32 (stride-4 cascade)
+        let left_fold = 0x4087012e_u32; // = 4.218894004821777_f32 (old left-fold)
         assert_eq!(
             (right[0] as f32).to_bits(),
             stride4,
@@ -5515,7 +5520,7 @@ y = sum(seq, cast(0, int32))
         assert_eq!(left.len(), 1);
         assert_eq!(
             (left[0] as f32).to_bits(),
-            (4.218893527984619_f64 as f32).to_bits(),
+            stride4,
             "left-pad ordering must produce same result as right-pad under stride-4; got {}",
             left[0]
         );
