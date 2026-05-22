@@ -1364,10 +1364,20 @@ impl<'a> HostEmitter<'a> {
                         chelis_types::types::Prim::Int16 => "CHELIS_I16",
                         chelis_types::types::Prim::Int32 => "CHELIS_I32",
                         chelis_types::types::Prim::Int64 => "CHELIS_I64",
-                        // bf16/f16/f8e4m3 host literals are rejected
-                        // by the C backend's precision gate; if we
-                        // reach here, fall through to the legacy
-                        // entry so the diagnostic surfaces consistently.
+                        // WS-1: bf16 / f16 admitted on `--target c`;
+                        // typed host-lane construction stamps the
+                        // declared 16-bit pattern into the tensor
+                        // buffer via the runtime's `CHELIS_BF16` /
+                        // `CHELIS_F16` allocator path.
+                        chelis_types::types::Prim::Bf16 => "CHELIS_BF16",
+                        chelis_types::types::Prim::F16 => "CHELIS_F16",
+                        // f8e4m3 host literals are rejected by the C
+                        // backend's precision gate (deferred per spec
+                        // §1.1.1); if we reach here, fall through to
+                        // the legacy entry so the diagnostic surfaces
+                        // consistently. String tensors and any other
+                        // non-numeric precision class are also routed
+                        // through the legacy path.
                         _ => "",
                     };
                     if !dtype_macro.is_empty() {
@@ -3682,13 +3692,31 @@ fn callback_param(callback: &HostCallback, index: usize) -> &HostParam {
 /// `CEmitter::elem_type`. Kept as a module-level helper here so the
 /// summary-derived sparse emission path can reuse the same dtype
 /// table without depending on `CEmitter`'s `self`.
+///
+/// WS-1: the prior fallthrough default-arm silently downgraded
+/// f64/i8/i16/bf16/f16 sparse payloads to single-precision storage,
+/// which is exactly the destructure-default footgun the WS-A0 F1
+/// guard targets. Replaced with explicit per-dtype arms plus a
+/// panic on truly unsupported dtypes so a future dtype lift cannot
+/// fall through to a quiet wrong-width read.
 fn sparse_elem_type(prim: Prim) -> &'static str {
     match prim {
         Prim::F32 | Prim::Bool => "float",
         Prim::F64 => "double",
+        Prim::Int8 => "int8_t",
+        Prim::Int16 => "int16_t",
         Prim::Int32 => "int32_t",
         Prim::Int64 => "int64_t",
-        _ => "float",
+        // bf16/f16 sparse payloads share the `uint16_t` storage
+        // contract with the dense path; per-element gather/scatter
+        // moves the 2-byte slot verbatim. The HIP / Metal backends
+        // route through their own bf16/f16 paths and do not depend
+        // on this helper.
+        Prim::Bf16 | Prim::F16 => "uint16_t",
+        other => panic!(
+            "C backend sparse path has no element type for `{}` (spec/04-type-system.md §1.1)",
+            other.name()
+        ),
     }
 }
 
@@ -3700,8 +3728,13 @@ fn sparse_dtype_macro(prim: Prim) -> &'static str {
         Prim::F32 => "CHELIS_F32",
         Prim::F64 => "CHELIS_F64",
         Prim::Bool => "CHELIS_BOOL",
+        Prim::Int8 => "CHELIS_I8",
+        Prim::Int16 => "CHELIS_I16",
         Prim::Int32 => "CHELIS_I32",
         Prim::Int64 => "CHELIS_I64",
+        // WS-1: bf16 / f16 routed via the runtime's matching tags.
+        Prim::Bf16 => "CHELIS_BF16",
+        Prim::F16 => "CHELIS_F16",
         other => panic!(
             "C backend sparse summary does not support {} tensors",
             other.name()

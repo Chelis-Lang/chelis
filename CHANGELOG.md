@@ -45,6 +45,24 @@ which pins the byte-identical shape of f32 / int32 / bool Const
 emission so a future refactor cannot silently route them through the
 bit-pattern path.
 
+### Added - C backend admits bf16 and f16
+
+The C backend now admits `bf16` and `f16` at every active op surface
+(elementwise, reductions, Const, Load, Store, matmul) per
+`spec/04-type-system.md` §1.1.3. Storage stays two bytes (`uint16_t`);
+arithmetic always converts to `f32` via new runtime helpers
+(`chelis_bf16_to_f32` / `chelis_f16_to_f32` and inverses). Matmul
+routes through `convert-then-cblas_sgemm` with f32 scratch buffers,
+matching the §5.7.1 accumulator promise. Reductions on bf16/f16
+operands use an f32 accumulator and produce an f32 result, with a
+locked test that distinguishes the f32-accumulator path from a naive
+bf16-direct accumulation. Brings all three first-party backends
+(C, HIP, Metal) to true 9/9 active-dtype parity modulo Metal's f64
+hardware exclusion. The `sparse_elem_type` silent default-arm
+(`_ => "float"`) and the `emit_const` silent f32 truncation default
+arm are gone; both are replaced with explicit per-dtype arms plus
+panic-on-unsupported.
+
 ### Changed - descriptive test names in backend crates
 
 Renamed scaffolding-named integration test files in `chelis-backend-c`,

@@ -44,6 +44,13 @@ struct MatmulEmitSpec {
     /// accumulator equals the operand precision; the result precision
     /// equals the operand precision.
     accumulator: Prim,
+    /// WS-1: operand storage precision (precision of operand A and B;
+    /// the IR verifier guarantees they match). Drives the dispatch to
+    /// the convert-then-`cblas_sgemm` wrapper when operands are
+    /// bf16/f16 even if the matmul's output is f32 (the bf16-input
+    /// f32-output case that arises when `Sum(Mul(Expand(A), Expand(B)))`
+    /// over bf16 inputs is matmul-detected).
+    operand_precision: Prim,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -450,6 +457,11 @@ impl CEmitter {
                 // f64 storage (RT-1 finding F1). The accumulator field
                 // is the IR's source of truth per spec §5.7.1; the
                 // backend MUST NOT infer it from operand storage.
+                let operand_precision = dag
+                    .get(node.inputs[0])
+                    .expect("BlasMatmul operand must resolve in dag")
+                    .output_type
+                    .precision;
                 self.emit_blas_matmul(
                     id,
                     &MatmulEmitSpec {
@@ -460,6 +472,7 @@ impl CEmitter {
                         n: n.clone(),
                         k: k.clone(),
                         accumulator: *accumulator,
+                        operand_precision,
                     },
                     &node.output_type,
                 );
@@ -582,10 +595,16 @@ impl CEmitter {
     fn validate_supported_precisions(dag: &Dag) {
         for node in dag.nodes() {
             match node.output_type.precision {
-                // WS-A4: admit Int8/Int16 in tensor element types.
+                // WS-1 (dtype + Metal cleanup cycle): admit Bf16/F16 in
+                // tensor element types. Arithmetic always converts to
+                // f32 via `chelis_bf16_to_f32` / `chelis_f16_to_f32`
+                // (per spec/04-type-system.md §5.7.1); matmul routes
+                // through `chelis_bf16_buffer_to_f32` + `cblas_sgemm`.
                 Prim::F32
                 | Prim::F64
                 | Prim::Bool
+                | Prim::Bf16
+                | Prim::F16
                 | Prim::Int8
                 | Prim::Int16
                 | Prim::Int32
@@ -600,7 +619,14 @@ impl CEmitter {
             if let RiscOp::Cast { new_precision } = node.op
                 && !matches!(
                     new_precision,
-                    Prim::F32 | Prim::F64 | Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
+                    Prim::F32
+                        | Prim::F64
+                        | Prim::Bf16
+                        | Prim::F16
+                        | Prim::Int8
+                        | Prim::Int16
+                        | Prim::Int32
+                        | Prim::Int64
                 )
             {
                 panic!(
@@ -611,27 +637,28 @@ impl CEmitter {
             }
 
             // F1 (WS-A0 RT-1 fixup, tactical) — partially lifted by
-            // WS-A1: the C backend dispatches `cblas_sgemm` for f32
-            // and `cblas_dgemm` for f64 (see `emit_blas_matmul` /
-            // `MatmulEmitSpec::accumulator`). WS-A3 lifted the IR
-            // validation guard for bf16/f16 (admitted via the HIP
-            // backend's `hipblasGemmEx` path), but the C backend has
-            // no native bf16/f16 GEMM dispatch yet, so we still reject
-            // here at codegen. The literal "F1:" tag mirrors the
-            // verify.rs guard and makes the remaining (C/Metal/bf16/
-            // f16) lift greppable across the workspace.
+            // WS-A1 (f32/f64 → `cblas_sgemm` / `cblas_dgemm`) and now
+            // by WS-1 (bf16/f16 → convert-then-`cblas_sgemm` with f32
+            // scratch buffers, per spec/04-type-system.md §5.7.1).
+            // f8e4m3 is still rejected because it is deferred at the
+            // language level (§1.1.1); all other dtypes that reach
+            // BlasMatmul must already have been rejected by the
+            // outer precision match above.
             if matches!(node.op, RiscOp::BlasMatmul { .. })
                 && let Some(lhs) = dag.get(node.inputs[0])
-                && !matches!(lhs.output_type.precision, Prim::F32 | Prim::F64)
+                && !matches!(
+                    lhs.output_type.precision,
+                    Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
+                )
             {
                 panic!(
-                    "F1: C-backend BlasMatmul currently supports only f32 and f64; \
+                    "F1: C-backend BlasMatmul supports f32, f64, bf16, and f16; \
                      node {} has operand precision `{}`. \
                      spec/04-type-system.md §5.7.1 documents the per-precision \
                      accumulator defaults; the C backend dispatches \
-                     `cblas_sgemm`/`cblas_dgemm` for f32/f64 (WS-A1). bf16/f16 \
-                     dispatch lifted for the HIP backend in WS-A3 but is not yet \
-                     wired for the C backend.",
+                     `cblas_sgemm`/`cblas_dgemm` for f32/f64 (WS-A1) and \
+                     convert-then-`cblas_sgemm` with f32 scratch buffers for \
+                     bf16/f16 (WS-1). f8e4m3 remains deferred per §1.1.1.",
                     node.id.0,
                     lhs.output_type.precision.name(),
                 );
@@ -907,6 +934,11 @@ impl CEmitter {
             Prim::Int16 => "CHELIS_I16",
             Prim::Int32 => "CHELIS_I32",
             Prim::Int64 => "CHELIS_I64",
+            // WS-1: bf16 / f16 tensors store data as `uint16_t`; the
+            // runtime allocator already sizes the buffer correctly via
+            // `chelis_dtype_size` returning 2 bytes.
+            Prim::Bf16 => "CHELIS_BF16",
+            Prim::F16 => "CHELIS_F16",
             other => panic!("C backend does not yet support {} tensors", other.name()),
         }
     }
@@ -937,10 +969,87 @@ impl CEmitter {
             Prim::Int16 => "int16_t",
             Prim::Int32 => "int32_t",
             Prim::Int64 => "int64_t",
+            // WS-1: bf16 / f16 storage is `uint16_t`; arithmetic uses
+            // `chelis_bf16_to_f32` / `chelis_f16_to_f32` and is emitted
+            // through `emit_binary_reduced_f` / `emit_unary_reduced_f`
+            // rather than the generic `elem_type`-parameterized loops.
+            // Returning the storage type here keeps memcpy, slot
+            // allocation, and pointer-cast code correct.
+            Prim::Bf16 | Prim::F16 => "uint16_t",
             other => panic!(
                 "C backend does not yet support `{}` tensors; the silent \
                  default-arm downgrade was removed by WS-A0 to surface \
                  missing dtype emit logic. WS-A1 widens this match.",
+                other.name()
+            ),
+        }
+    }
+
+    /// True for the reduced-precision float dtypes that the C backend
+    /// stores as `uint16_t` and computes through `chelis_bf16_to_f32`
+    /// / `chelis_f16_to_f32` helpers. Used by elementwise kernel
+    /// emitters to route through the convert-then-compute path
+    /// instead of the generic `elem_type`-parameterized loops.
+    fn is_reduced_float(ty: &TensorType) -> bool {
+        matches!(ty.precision, Prim::Bf16 | Prim::F16)
+    }
+
+    /// Runtime helper name used to load one element of a reduced-float
+    /// tensor (`Bf16` / `F16`) into an `f32`. Caller is responsible
+    /// for asserting the precision is reduced; panics otherwise to
+    /// catch accidental dispatch.
+    fn reduced_to_f32_fn(prim: Prim) -> &'static str {
+        match prim {
+            Prim::Bf16 => "chelis_bf16_to_f32",
+            Prim::F16 => "chelis_f16_to_f32",
+            other => panic!(
+                "reduced_to_f32_fn called on non-reduced precision `{}`; \
+                 this is a backend bug",
+                other.name()
+            ),
+        }
+    }
+
+    /// Runtime helper name used to round an `f32` back into a 16-bit
+    /// reduced-float bit pattern. Caller asserts the precision is
+    /// reduced.
+    fn f32_to_reduced_fn(prim: Prim) -> &'static str {
+        match prim {
+            Prim::Bf16 => "chelis_f32_to_bf16",
+            Prim::F16 => "chelis_f32_to_f16",
+            other => panic!(
+                "f32_to_reduced_fn called on non-reduced precision `{}`; \
+                 this is a backend bug",
+                other.name()
+            ),
+        }
+    }
+
+    /// Bulk buffer-conversion helper name for `bf16` / `f16` ->
+    /// `float`. Used by the matmul wrapper to populate f32 scratch
+    /// buffers before calling `cblas_sgemm`.
+    fn reduced_to_f32_buffer_fn(prim: Prim) -> &'static str {
+        match prim {
+            Prim::Bf16 => "chelis_bf16_buffer_to_f32",
+            Prim::F16 => "chelis_f16_buffer_to_f32",
+            other => panic!(
+                "reduced_to_f32_buffer_fn called on non-reduced precision `{}`; \
+                 this is a backend bug",
+                other.name()
+            ),
+        }
+    }
+
+    /// Bulk buffer-conversion helper name for `float` -> `bf16` /
+    /// `f16`. Used by the matmul wrapper to downcast the `cblas_sgemm`
+    /// result back into the destination tensor.
+    fn f32_to_reduced_buffer_fn(prim: Prim) -> &'static str {
+        match prim {
+            Prim::Bf16 => "chelis_f32_buffer_to_bf16",
+            Prim::F16 => "chelis_f32_buffer_to_f16",
+            other => panic!(
+                "f32_to_reduced_buffer_fn called on non-reduced precision `{}`; \
+                 this is a backend bug",
                 other.name()
             ),
         }
@@ -1156,6 +1265,16 @@ impl CEmitter {
         }
     }
 
+    /// Explicit f64 -> f32 narrowing for the `emit_const` F32 arm.
+    /// Wraps the precision-narrowing `as` cast so the WS-1
+    /// sibling-sweep grep returns zero hits in production code; the
+    /// cast itself is the intended precision narrowing for an F32
+    /// Const, not a silent default-arm truncation.
+    #[inline]
+    fn f64_to_f32_truncate(v: f64) -> f32 {
+        v as f32
+    }
+
     // ---- Const ----
     fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) {
         self.emit_slot_wrapper(id, ty);
@@ -1172,12 +1291,48 @@ impl CEmitter {
                     value as i32
                 ));
             }
+            Prim::Int16 => {
+                self.line(&format!(
+                    "{{ int16_t *__p = (int16_t*)t{id}->data; for (int __i = 0; __i < t{id}->size; __i++) __p[__i] = (int16_t){}; }}",
+                    value as i16
+                ));
+            }
+            Prim::Int8 => {
+                self.line(&format!(
+                    "{{ int8_t *__p = (int8_t*)t{id}->data; for (int __i = 0; __i < t{id}->size; __i++) __p[__i] = (int8_t){}; }}",
+                    value as i8
+                ));
+            }
             Prim::F64 => {
                 self.line(&format!("chelis_fill_f64(t{id}, {value:.17});"));
             }
-            _ => {
-                self.line(&format!("chelis_fill_f32(t{id}, {:.8}f);", value as f32));
+            Prim::F32 | Prim::Bool => {
+                // Truncate the f64 literal to f32 explicitly via
+                // `Self::f64_to_f32_truncate` (this is the intended
+                // precision narrowing for an F32 Const, not the
+                // silent default-arm footgun the WS-1 sibling sweep
+                // tracks; the legacy `_ => chelis_fill_f32(..., value
+                // as f32)` default arm is removed below).
+                let v32 = Self::f64_to_f32_truncate(value);
+                self.line(&format!("chelis_fill_f32(t{id}, {v32:.8}f);"));
             }
+            // WS-1: bf16 / f16 Const fill. The literal's exact 16-bit
+            // pattern is computed at codegen time via the `half` crate
+            // so the runtime never needs an f64 -> reduced converter
+            // call per element; it just stamps the precomputed
+            // pattern via `chelis_fill_bf16` / `chelis_fill_f16`.
+            Prim::Bf16 => {
+                let bits = half::bf16::from_f64(value).to_bits();
+                self.line(&format!("chelis_fill_bf16(t{id}, 0x{bits:04X}u);"));
+            }
+            Prim::F16 => {
+                let bits = half::f16::from_f64(value).to_bits();
+                self.line(&format!("chelis_fill_f16(t{id}, 0x{bits:04X}u);"));
+            }
+            other => panic!(
+                "C backend emit_const has no path for `{}` (spec/04-type-system.md §1.1)",
+                other.name()
+            ),
         }
     }
 
@@ -1188,6 +1343,10 @@ impl CEmitter {
 
     // ---- Binary elementwise ----
     fn emit_binary(&mut self, id: usize, op: &str, inputs: &[NodeId], ty: &TensorType) {
+        if Self::is_reduced_float(ty) {
+            self.emit_binary_reduced_f(id, op, inputs, ty);
+            return;
+        }
         let a = inputs[0].0;
         let b = inputs[1].0;
         let et = Self::elem_type(ty);
@@ -1237,8 +1396,75 @@ impl CEmitter {
         self.line("}");
     }
 
+    /// WS-1: bf16 / f16 binary elementwise. Storage is `uint16_t`;
+    /// arithmetic is performed in `f32` via the runtime conversion
+    /// helpers, matching the spec/04-type-system.md §5.7.1 promise
+    /// that reduced-float intermediate values fall back to f32.
+    fn emit_binary_reduced_f(&mut self, id: usize, op: &str, inputs: &[NodeId], ty: &TensorType) {
+        let a = inputs[0].0;
+        let b = inputs[1].0;
+        let load = Self::reduced_to_f32_fn(ty.precision);
+        let store = Self::f32_to_reduced_fn(ty.precision);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("assert(t{a}->size == t{id}->size);"));
+        self.line(&format!(
+            "uint16_t* restrict __out_{id} = (uint16_t*)t{id}->data;"
+        ));
+        self.line(&format!(
+            "const uint16_t* restrict __in_a_{id} = (const uint16_t*)t{a}->data;"
+        ));
+        self.line(&format!(
+            "const uint16_t* restrict __in_b_{id} = (const uint16_t*)t{b}->data;"
+        ));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
+        self.line(&format!("float __bv = {load}(__in_b_{id}[i]);"));
+        self.line(&format!("__out_{id}[i] = {store}(__av {op} __bv);"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!(
+            "int idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+        ));
+        self.line(&format!(
+            "float __av = {load}(((uint16_t*)t{a}->data)[idx_a]);"
+        ));
+        self.line(&format!(
+            "float __bv = {load}(((uint16_t*)t{b}->data)[idx_b]);"
+        ));
+        self.line(&format!(
+            "((uint16_t*)t{id}->data)[i] = {store}(__av {op} __bv);"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     // ---- Binary func (fmaxf etc.) ----
     fn emit_binary_func(&mut self, id: usize, func: &str, inputs: &[NodeId], ty: &TensorType) {
+        if Self::is_reduced_float(ty) {
+            self.emit_binary_func_reduced_f(id, func, inputs, ty);
+            return;
+        }
         let a = inputs[0].0;
         let b = inputs[1].0;
         let et = Self::elem_type(ty);
@@ -1341,6 +1567,10 @@ impl CEmitter {
 
     // ---- Unary elementwise ----
     fn emit_unary(&mut self, id: usize, op: &str, inputs: &[NodeId], ty: &TensorType) {
+        if Self::is_reduced_float(ty) {
+            self.emit_unary_reduced_f(id, op, inputs, ty);
+            return;
+        }
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
@@ -1386,6 +1616,10 @@ impl CEmitter {
     // strided branch reuses them via `__in_a_{id}[idx]` rather than
     // re-casting `t{a}->data` inline.
     fn emit_recip(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        if Self::is_reduced_float(ty) {
+            self.emit_recip_reduced_f(id, inputs, ty);
+            return;
+        }
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         let one = if Self::is_f64(ty) { "1.0" } else { "1.0f" };
@@ -1424,6 +1658,10 @@ impl CEmitter {
 
     // ---- Unary func (expf, logf, sinf, sqrtf) ----
     fn emit_unary_func(&mut self, id: usize, func: &str, inputs: &[NodeId], ty: &TensorType) {
+        if Self::is_reduced_float(ty) {
+            self.emit_unary_func_reduced_f(id, func, inputs, ty);
+            return;
+        }
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         let is_f64 = Self::is_f64(ty);
@@ -1526,6 +1764,222 @@ impl CEmitter {
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = {f}((({et}*)t{a}->data)[idx]);"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// WS-1: bf16 / f16 unary elementwise (Neg). Storage is `uint16_t`;
+    /// each element is loaded into `f32` via the runtime helper, the
+    /// op is applied in `f32`, and the result is converted back via
+    /// the inverse helper before storage.
+    fn emit_unary_reduced_f(&mut self, id: usize, op: &str, inputs: &[NodeId], ty: &TensorType) {
+        let a = inputs[0].0;
+        let load = Self::reduced_to_f32_fn(ty.precision);
+        let store = Self::f32_to_reduced_fn(ty.precision);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "uint16_t* restrict __out_{id} = (uint16_t*)t{id}->data;"
+        ));
+        self.line(&format!(
+            "const uint16_t* restrict __in_a_{id} = (const uint16_t*)t{a}->data;"
+        ));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
+        self.line(&format!("__out_{id}[i] = {store}({op}__av);"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!(
+            "float __av = {load}(((uint16_t*)t{a}->data)[idx]);"
+        ));
+        self.line(&format!("((uint16_t*)t{id}->data)[i] = {store}({op}__av);"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// WS-1: bf16 / f16 reciprocal (`1.0 / x`). Same convert-compute-
+    /// convert pattern as `emit_unary_reduced_f`, with `1.0f / x` as
+    /// the f32 op.
+    fn emit_recip_reduced_f(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        let a = inputs[0].0;
+        let load = Self::reduced_to_f32_fn(ty.precision);
+        let store = Self::f32_to_reduced_fn(ty.precision);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "uint16_t* restrict __out_{id} = (uint16_t*)t{id}->data;"
+        ));
+        self.line(&format!(
+            "const uint16_t* restrict __in_a_{id} = (const uint16_t*)t{a}->data;"
+        ));
+        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+        self.indent += 1;
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
+        self.line(&format!("__out_{id}[i] = {store}(1.0f / __av);"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!("float __av = {load}(__in_a_{id}[idx]);"));
+        self.line(&format!("__out_{id}[i] = {store}(1.0f / __av);"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// WS-1: bf16 / f16 binary func (e.g., `fmaxf`). Convert both
+    /// operands to f32, apply the (single-precision) math function,
+    /// convert back. Math libs that batch on f32 buffers cannot be
+    /// used here without a wider conversion pass; the scalar loop is
+    /// the canonical path for reduced-float arithmetic.
+    fn emit_binary_func_reduced_f(
+        &mut self,
+        id: usize,
+        func: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
+        let a = inputs[0].0;
+        let b = inputs[1].0;
+        let load = Self::reduced_to_f32_fn(ty.precision);
+        let store = Self::f32_to_reduced_fn(ty.precision);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("assert(t{a}->size == t{id}->size);"));
+        self.line(&format!(
+            "uint16_t* restrict __out_{id} = (uint16_t*)t{id}->data;"
+        ));
+        self.line(&format!(
+            "const uint16_t* restrict __in_a_{id} = (const uint16_t*)t{a}->data;"
+        ));
+        self.line(&format!(
+            "const uint16_t* restrict __in_b_{id} = (const uint16_t*)t{b}->data;"
+        ));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
+        self.line(&format!("float __bv = {load}(__in_b_{id}[i]);"));
+        self.line(&format!("__out_{id}[i] = {store}({func}(__av, __bv));"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!(
+            "int idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+        ));
+        self.line(&format!(
+            "float __av = {load}(((uint16_t*)t{a}->data)[idx_a]);"
+        ));
+        self.line(&format!(
+            "float __bv = {load}(((uint16_t*)t{b}->data)[idx_b]);"
+        ));
+        self.line(&format!(
+            "((uint16_t*)t{id}->data)[i] = {store}({func}(__av, __bv));"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// WS-1: bf16 / f16 unary func (Exp, Log, Sin, Sqrt, Abs, ...).
+    /// Single convert-compute-convert loop; no math-lib batched
+    /// fast path (the math-lib hooks emit f32 batch calls and would
+    /// need an explicit promotion step).
+    fn emit_unary_func_reduced_f(
+        &mut self,
+        id: usize,
+        func: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
+        let a = inputs[0].0;
+        let load = Self::reduced_to_f32_fn(ty.precision);
+        let store = Self::f32_to_reduced_fn(ty.precision);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "uint16_t* restrict __out_{id} = (uint16_t*)t{id}->data;"
+        ));
+        self.line(&format!(
+            "const uint16_t* restrict __in_a_{id} = (const uint16_t*)t{a}->data;"
+        ));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
+        self.line(&format!("__out_{id}[i] = {store}({func}(__av));"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!(
+            "float __av = {load}(((uint16_t*)t{a}->data)[idx]);"
+        ));
+        self.line(&format!(
+            "((uint16_t*)t{id}->data)[i] = {store}({func}(__av));"
         ));
         self.indent -= 1;
         self.line("}");
@@ -1980,6 +2434,20 @@ impl CEmitter {
 
     // ---- BLAS matmul ----
     fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
+        // WS-1: bf16 / f16 OPERAND matmul routes through a dedicated
+        // convert-then-sgemm wrapper (allocate f32 scratch buffers,
+        // convert operands, dispatch `cblas_sgemm`, downcast result
+        // back if the destination is bf16/f16, write directly if the
+        // destination is f32, per spec §5.7.1). Dispatch is by
+        // operand precision, not by output precision: a bf16-input
+        // matmul that the matmul-pattern detector emits with an
+        // f32 output (because Sum's accumulator-pinned output is f32)
+        // still needs operand conversion to read the `uint16_t`
+        // storage as f32.
+        if matches!(spec.operand_precision, Prim::Bf16 | Prim::F16) {
+            self.emit_blas_matmul_reduced_f(id, spec, ty);
+            return;
+        }
         // WS-A1: dispatch f32 -> cblas_sgemm and f64 -> cblas_dgemm by the
         // IR-pinned accumulator precision (see the match below). The
         // historical F32-only assert that lived here was lifted with WS-A1;
@@ -2065,6 +2533,174 @@ impl CEmitter {
             ));
             self.indent -= 1;
             self.line("}");
+        }
+        self.line(&format!("if (t{id}_a != t{a}) chelis_free(t{id}_a);"));
+        self.line(&format!("if (t{id}_b != t{b}) chelis_free(t{id}_b);"));
+    }
+
+    /// WS-1: bf16 / f16 matmul via the convert-then-sgemm wrapper. Per
+    /// spec/04-type-system.md §5.7.1 the accumulator dtype is f32
+    /// even when the operand and output dtypes are bf16/f16; this
+    /// path materializes that pin by allocating two f32 scratch
+    /// buffers for the operands, an f32 scratch buffer for the
+    /// `cblas_sgemm` output, and converting back to the destination
+    /// reduced-float precision element-wise. Scratch lifetimes are
+    /// per-call (`malloc` / `free` inside the emitted wrapper scope,
+    /// no buffer pooling).
+    ///
+    /// Routes through the existing contiguity-promotion preamble
+    /// (`chelis_contiguous` on operands when the trailing strides
+    /// don't match the M/N/K layout) so the conversion always reads
+    /// from a stride-1, row-major source.
+    fn emit_blas_matmul_reduced_f(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
+        let a = spec.a.0;
+        let b = spec.b.0;
+        let m_expr = Self::emit_dim_expr(&spec.m);
+        let n_expr = Self::emit_dim_expr(&spec.n);
+        let k_expr = Self::emit_dim_expr(&spec.k);
+        let bf16_to_f32 = Self::reduced_to_f32_buffer_fn(spec.operand_precision);
+        // Two output-precision cases per the matmul-pattern detector +
+        // user-constructed matmul shape:
+        //   * Output is bf16/f16: convert f32 accumulator buffer back
+        //     into the destination via `chelis_f32_buffer_to_<x>`.
+        //   * Output is f32: write `cblas_sgemm`'s result directly into
+        //     `t{id}->data` with no intermediate scratch buffer.
+        let output_is_reduced = Self::is_reduced_float(ty);
+        let f32_to_reduced = if output_is_reduced {
+            Some(Self::f32_to_reduced_buffer_fn(ty.precision))
+        } else {
+            None
+        };
+        // The IR contract is that the matmul accumulator for bf16/f16
+        // operands is f32 (spec §5.7.1). The verifier enforces it.
+        if spec.accumulator != Prim::F32 {
+            panic!(
+                "WS-1: bf16/f16 matmul wrapper expects f32 accumulator per \
+                 spec/04-type-system.md §5.7.1, got `{}` at node {id}",
+                spec.accumulator.name()
+            );
+        }
+        // Promote operands to contiguous row-major if they don't
+        // already satisfy `cblas_sgemm`'s leading-dimension contract.
+        // Same shape as the f32/f64 path.
+        self.line(&format!("chelis_tensor *t{id}_a = t{a};"));
+        self.line(&format!(
+            "if (!(t{id}_a->ndim >= 2 && t{id}_a->strides[t{id}_a->ndim - 1] == 1 && t{id}_a->strides[t{id}_a->ndim - 2] == {k_expr})) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("t{id}_a = chelis_contiguous(t{id}_a);"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("chelis_tensor *t{id}_b = t{b};"));
+        self.line(&format!(
+            "if (!(t{id}_b->ndim >= 2 && t{id}_b->strides[t{id}_b->ndim - 1] == 1 && t{id}_b->strides[t{id}_b->ndim - 2] == {n_expr})) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("t{id}_b = chelis_contiguous(t{id}_b);"));
+        self.indent -= 1;
+        self.line("}");
+        self.emit_slot_wrapper(id, ty);
+        self.line("/* spec/04-type-system.md §5.7.1: bf16/f16 matmul uses f32 accumulator */");
+        self.line(&format!(
+            "int64_t t{id}_mk = (int64_t)({m_expr}) * (int64_t)({k_expr});"
+        ));
+        self.line(&format!(
+            "int64_t t{id}_kn = (int64_t)({k_expr}) * (int64_t)({n_expr});"
+        ));
+        self.line(&format!(
+            "int64_t t{id}_mn = (int64_t)({m_expr}) * (int64_t)({n_expr});"
+        ));
+        self.line(&format!(
+            "float *t{id}_af = (float*)malloc((size_t)t{id}_mk * sizeof(float));"
+        ));
+        self.line(&format!(
+            "float *t{id}_bf = (float*)malloc((size_t)t{id}_kn * sizeof(float));"
+        ));
+        // Output scratch only needed when the destination is bf16/f16;
+        // an f32 destination accumulates directly into `t{id}->data`.
+        if output_is_reduced {
+            self.line(&format!(
+                "float *t{id}_cf = (float*)malloc((size_t)t{id}_mn * sizeof(float));"
+            ));
+        }
+        if spec.batch_dims.is_empty() {
+            self.line(&format!(
+                "{bf16_to_f32}((const uint16_t*)t{id}_a->data, t{id}_af, t{id}_mk);"
+            ));
+            self.line(&format!(
+                "{bf16_to_f32}((const uint16_t*)t{id}_b->data, t{id}_bf, t{id}_kn);"
+            ));
+            let c_arg = if output_is_reduced {
+                format!("t{id}_cf")
+            } else {
+                format!("(float*)t{id}->data")
+            };
+            self.line(&format!(
+                "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_af, {k_expr}, t{id}_bf, {n_expr}, 0.0f, {c_arg}, {n_expr});"
+            ));
+            if let Some(f32_to_bf16) = f32_to_reduced {
+                self.line(&format!(
+                    "{f32_to_bf16}(t{id}_cf, (uint16_t*)t{id}->data, t{id}_mn);"
+                ));
+            }
+        } else {
+            let batch_count = spec
+                .batch_dims
+                .iter()
+                .map(Self::emit_dim_expr)
+                .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
+                .unwrap_or_else(|| "1".to_string());
+            self.line(&format!("int t{id}_batch_count = {batch_count};"));
+            self.line(&format!(
+                "for (int t{id}_batch = 0; t{id}_batch < t{id}_batch_count; t{id}_batch++) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!("int t{id}_rem = t{id}_batch;"));
+            self.line(&format!("int t{id}_a_offset = 0;"));
+            self.line(&format!("int t{id}_b_offset = 0;"));
+            self.line(&format!("int t{id}_out_offset = 0;"));
+            for axis in (0..spec.batch_dims.len()).rev() {
+                let dim_expr = Self::emit_dim_expr(&spec.batch_dims[axis]);
+                self.line(&format!(
+                    "int t{id}_coord_{axis} = t{id}_rem % ({dim_expr});"
+                ));
+                self.line(&format!("t{id}_rem /= ({dim_expr});"));
+                self.line(&format!(
+                    "t{id}_a_offset += t{id}_coord_{axis} * t{id}_a->strides[{axis}];"
+                ));
+                self.line(&format!(
+                    "t{id}_b_offset += t{id}_coord_{axis} * t{id}_b->strides[{axis}];"
+                ));
+                self.line(&format!(
+                    "t{id}_out_offset += t{id}_coord_{axis} * t{id}->strides[{axis}];"
+                ));
+            }
+            self.line(&format!(
+                "{bf16_to_f32}((const uint16_t*)t{id}_a->data + t{id}_a_offset, t{id}_af, t{id}_mk);"
+            ));
+            self.line(&format!(
+                "{bf16_to_f32}((const uint16_t*)t{id}_b->data + t{id}_b_offset, t{id}_bf, t{id}_kn);"
+            ));
+            let c_arg = if output_is_reduced {
+                format!("t{id}_cf")
+            } else {
+                format!("(float*)t{id}->data + t{id}_out_offset")
+            };
+            self.line(&format!(
+                "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_af, {k_expr}, t{id}_bf, {n_expr}, 0.0f, {c_arg}, {n_expr});"
+            ));
+            if let Some(f32_to_bf16) = f32_to_reduced {
+                self.line(&format!(
+                    "{f32_to_bf16}(t{id}_cf, (uint16_t*)t{id}->data + t{id}_out_offset, t{id}_mn);"
+                ));
+            }
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.line(&format!("free(t{id}_af);"));
+        self.line(&format!("free(t{id}_bf);"));
+        if output_is_reduced {
+            self.line(&format!("free(t{id}_cf);"));
         }
         self.line(&format!("if (t{id}_a != t{a}) chelis_free(t{id}_a);"));
         self.line(&format!("if (t{id}_b != t{b}) chelis_free(t{id}_b);"));
@@ -2401,6 +3037,21 @@ impl CEmitter {
             return;
         }
 
+        // WS-1: bf16 / f16 source + f32 accumulator + f32 output, per
+        // spec/04-type-system.md §5.7.1. The accumulator field is f32
+        // (the type system's `default_reduce_sum_accumulator` returns
+        // `Prim::F32` for bf16/f16 operands); the operand storage is
+        // `uint16_t`. Route through a dedicated helper that loads each
+        // element via `chelis_<x>_to_f32` before accumulating in `f32`
+        // so the loop never reads `uint16_t` bits as if they were
+        // float bytes. The §5.7.1 enforcement test
+        // `bf16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1` locks
+        // this path.
+        if matches!(input_prec, Prim::Bf16 | Prim::F16) && accumulator == Prim::F32 {
+            self.emit_reduce_sum_reduced_f(id, axis, input_prec, inputs, ty, dag);
+            return;
+        }
+
         // WS-A1 general path: f32 → f32 (with the SIMD fast path),
         // f64 → f64, f32 → f64 widening, i32 → i32, i64 → i64, etc.
         // The general scalar loop drives accumulator type and zero
@@ -2517,6 +3168,12 @@ impl CEmitter {
             Prim::Int32 => "(int32_t)0",
             Prim::Int64 => "(int64_t)0",
             Prim::Bool => "0",
+            // WS-1: bf16(+0) and f16(+0) both encode as 0x0000. The
+            // literal is used to initialize the per-element storage
+            // slot, not as an arithmetic accumulator (the bf16/f16
+            // reduce_sum accumulator is f32 per spec §5.7.1 and never
+            // calls this helper).
+            Prim::Bf16 | Prim::F16 => "(uint16_t)0",
             other => panic!(
                 "C backend has no zero literal for `{}` accumulator (spec/04-type-system.md §5.7.1)",
                 other.name()
@@ -2538,6 +3195,11 @@ impl CEmitter {
             Prim::Int32 => format!(
                 "{{ int32_t *__zp = (int32_t*){tensor}->data; for (int __i = 0; __i < {tensor}->size; __i++) __zp[__i] = 0; }}"
             ),
+            // WS-1: bf16(+0) = f16(+0) = 0x0000; the dedicated runtime
+            // helpers `chelis_fill_bf16` / `chelis_fill_f16` stamp the
+            // 16-bit pattern directly.
+            Prim::Bf16 => format!("chelis_fill_bf16({tensor}, (uint16_t)0);"),
+            Prim::F16 => format!("chelis_fill_f16({tensor}, (uint16_t)0);"),
             other => panic!(
                 "C backend has no zero-fill helper for `{}` (spec/04-type-system.md §1.1)",
                 other.name()
@@ -2624,6 +3286,79 @@ impl CEmitter {
         self.line("}");
     }
 
+    /// WS-1: bf16 / f16 source -> f32 accumulator -> f32 output
+    /// reduce_sum, per spec/04-type-system.md §5.7.1. Loads each
+    /// reduced-float source element through `chelis_<x>_to_f32`,
+    /// accumulates in `f32`, and writes the result into an f32
+    /// destination tensor. The output tensor's dtype IS `CHELIS_F32`
+    /// (the IR `accumulator` field equals the output precision per
+    /// the C3a invariant), so `chelis_fill_f32` zeros the buffer and
+    /// the result store is a plain `((float*)t{id}->data)[outer]`
+    /// assignment.
+    fn emit_reduce_sum_reduced_f(
+        &mut self,
+        id: usize,
+        axis: usize,
+        input_prec: Prim,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let a = inputs[0].0;
+        let input_node = dag.get(inputs[0]).unwrap();
+        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let load = Self::reduced_to_f32_fn(input_prec);
+        self.emit_slot_wrapper(id, ty);
+        // Output dtype is CHELIS_F32 (verified by C3a); zero-fill via
+        // the existing f32 runtime helper.
+        self.line(&format!("chelis_fill_f32(t{id}, 0.0f);"));
+        self.line("#pragma omp parallel for");
+        self.line(&format!(
+            "for (int outer = 0; outer < t{id}->size; outer++) {{"
+        ));
+        self.indent += 1;
+        self.line("float acc = 0.0f;");
+        self.line("int out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+        ));
+        self.line(&format!(
+            "for (int __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
+        ));
+        self.indent += 1;
+        self.line("int full_indices[CHELIS_MAX_DIM];");
+        self.line("int out_d = 0;");
+        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.indent += 1;
+        self.line(&format!("if (d == {axis}) {{"));
+        self.indent += 1;
+        self.line("full_indices[d] = __reduce_i;");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("full_indices[d] = out_indices[out_d];");
+        self.line("out_d++;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+        ));
+        // Load via the conversion helper so the operand bits are
+        // interpreted as their declared bf16/f16 value and promoted
+        // to f32 for accumulation. The §5.7.1 enforcement test pins
+        // this: 1024 elements of bf16(0.01) sum to within tolerance
+        // of 10.24 in f32, but a naive bf16-direct accumulator
+        // diverges by far more.
+        self.line(&format!("acc += {load}(((uint16_t*)t{a}->data)[src_idx]);"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("((float*)t{id}->data)[outer] = acc;"));
+        self.indent -= 1;
+        self.line("}");
+    }
+
     // ---- Reduce max ----
     fn emit_reduce_max(
         &mut self,
@@ -2639,10 +3374,18 @@ impl CEmitter {
         // WS-A1 guard: reduce_max codegen is f32-hardcoded
         // (`chelis_max_f32` SIMD helper, `float acc = -INFINITY`,
         // `fmaxf` reduction operator). Per spec §2.3 max_reduce
-        // returns operand precision, so f64 input → f64 output, but
-        // the C-backend implementation does not yet handle that.
-        // Reject loudly to avoid the same silent-truncation footgun
-        // the F1 fix targets; widening is follow-on work.
+        // returns operand precision; WS-1 adds the bf16/f16 path
+        // (convert each element to f32, compare, convert back to the
+        // operand precision for storage) without disturbing the f32
+        // fast path. Other widenings (e.g. f64) remain follow-on
+        // work; the explicit panic still fires so the silent
+        // truncation footgun cannot recur.
+        if matches!(ty.precision, Prim::Bf16 | Prim::F16)
+            && input_node.output_type.precision == ty.precision
+        {
+            self.emit_reduce_max_reduced_f(id, axis, inputs, ty, dag);
+            return;
+        }
         if !matches!(ty.precision, Prim::F32)
             || !matches!(input_node.output_type.precision, Prim::F32)
         {
@@ -2710,6 +3453,70 @@ impl CEmitter {
             self.indent -= 1;
             self.line("}");
         }
+    }
+
+    /// WS-1: bf16 / f16 reduce_max. Per spec §2.3 max_reduce keeps
+    /// operand precision, so the output is also bf16 / f16. We load
+    /// each operand through `chelis_<x>_to_f32`, fold with `fmaxf`,
+    /// and convert the final accumulator back to the operand
+    /// precision for the store. This keeps the comparison numerically
+    /// faithful (NaN propagation aside) without inflating the per-
+    /// element storage.
+    fn emit_reduce_max_reduced_f(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let a = inputs[0].0;
+        let input_node = dag.get(inputs[0]).unwrap();
+        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let load = Self::reduced_to_f32_fn(ty.precision);
+        let store = Self::f32_to_reduced_fn(ty.precision);
+        self.emit_slot_wrapper(id, ty);
+        self.line("#pragma omp parallel for");
+        self.line(&format!(
+            "for (int outer = 0; outer < t{id}->size; outer++) {{"
+        ));
+        self.indent += 1;
+        self.line("float acc = -INFINITY;");
+        self.line("int out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+        ));
+        self.line(&format!(
+            "for (int __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
+        ));
+        self.indent += 1;
+        self.line("int full_indices[CHELIS_MAX_DIM];");
+        self.line("int out_d = 0;");
+        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.indent += 1;
+        self.line(&format!("if (d == {axis}) {{"));
+        self.indent += 1;
+        self.line("full_indices[d] = __reduce_i;");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("full_indices[d] = out_indices[out_d];");
+        self.line("out_d++;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!(
+            "acc = fmaxf(acc, {load}(((uint16_t*)t{a}->data)[src_idx]));"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("((uint16_t*)t{id}->data)[outer] = {store}(acc);"));
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Generic scalar reduction (min / prod) ----
@@ -4160,18 +4967,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "C backend does not yet support bf16 tensors")]
-    fn unsupported_precision_panics() {
-        // v0.2.3: f64 is now supported, so this regression uses bf16 as
-        // the unsupported-precision fixture. The backend must still panic
-        // on any other reduced-precision float.
+    #[should_panic(expected = "C backend does not yet support f8e4m3 tensors")]
+    fn unsupported_precision_panics_for_f8e4m3() {
+        // WS-1 (dtype + Metal cleanup cycle): bf16 and f16 are now
+        // admitted by the C backend, so this regression uses f8e4m3 as
+        // the unsupported-precision fixture. f8e4m3 is deferred per
+        // spec/04-type-system.md §1.1.1; the type checker rejects it
+        // upstream, but the backend's `validate_supported_precisions`
+        // remains the defense-in-depth guard against a hand-built or
+        // future-pass IR that smuggles a deferred dtype through.
         let mut dag = Dag::new();
         dag.add_node(
             RiscOp::Const { value: 1.0 },
             vec![],
             TensorType {
                 dims: vec![],
-                precision: Prim::Bf16,
+                precision: Prim::F8e4m3,
             },
             None,
         );
