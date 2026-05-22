@@ -4,14 +4,16 @@ Run via `python3 -m unittest scripts/test_ci_setup_uv_python.py` from the
 repo root.
 
 The script's two side effects are (1) `uv venv` and (2) writing to
-`$GITHUB_ENV`. We test the pure helpers in isolation. Integration is
-covered by CI itself (the LD_LIBRARY_PATH wiring proves out via the
-chelis-python test binaries successfully loading libpython).
+`$GITHUB_ENV`. We test the pure helpers in isolation and use mocks to
+exercise the subprocess wrappers without actually invoking uv. Real
+end-to-end proof lives in CI itself (the LD_LIBRARY_PATH wiring proves
+out via the chelis-python test binaries successfully loading libpython).
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -48,7 +50,6 @@ class AppendToGithubEnvTest(unittest.TestCase):
                 {"GITHUB_ENV": github_env_path},
                 clear=False,
             ):
-                # Ensure the var doesn't already exist in the env we mock.
                 if "FOO_VAR" in os.environ:
                     del os.environ["FOO_VAR"]
                 ci_setup_uv_python.append_to_github_env("FOO_VAR", "/foo/lib")
@@ -77,12 +78,147 @@ class AppendToGithubEnvTest(unittest.TestCase):
         finally:
             os.unlink(github_env_path)
 
+    def test_dedupes_repeated_path_entries(self) -> None:
+        # When the same lib dir is already present in the existing value
+        # (e.g., a workflow step ran this helper twice within one job),
+        # the dedupe step collapses repeats while preserving first-
+        # occurrence order. Without this, the value grows linearly on
+        # re-runs.
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".env") as fh:
+            github_env_path = fh.name
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GITHUB_ENV": github_env_path,
+                    "BAZ_VAR": "/foo/lib:/other/lib",
+                },
+                clear=False,
+            ):
+                ci_setup_uv_python.append_to_github_env("BAZ_VAR", "/foo/lib")
+            with open(github_env_path, encoding="utf-8") as fh:
+                contents = fh.read()
+            self.assertEqual(contents, "BAZ_VAR=/foo/lib:/other/lib\n")
+        finally:
+            os.unlink(github_env_path)
+
     def test_no_github_env_is_noop(self) -> None:
         # If GITHUB_ENV isn't set, the function logs to stderr and returns
         # without writing anywhere — used as a local dry-run guard.
         with mock.patch.dict(os.environ, {}, clear=True):
-            # Should not raise.
-            ci_setup_uv_python.append_to_github_env("BAZ", "/baz")
+            ci_setup_uv_python.append_to_github_env("BAZ", "/baz")  # no raise
+
+
+class LibdirForTest(unittest.TestCase):
+    def test_returns_stripped_stdout(self) -> None:
+        fake_python = Path("/fake/.venv/bin/python")
+        fake_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="/some/lib/dir\n",
+            stderr="",
+        )
+        with mock.patch("subprocess.run", return_value=fake_result) as run:
+            self.assertEqual(
+                ci_setup_uv_python.libdir_for(fake_python),
+                "/some/lib/dir",
+            )
+            run.assert_called_once()
+            args = run.call_args.args[0]
+            self.assertEqual(args[0], str(fake_python))
+            self.assertIn("sysconfig.get_config_var", args[2])
+
+    def test_empty_stdout_raises(self) -> None:
+        # Bare-empty stdout (rare) must surface as a runtime error rather
+        # than silently writing "" to GITHUB_ENV.
+        fake_python = Path("/fake/.venv/bin/python")
+        fake_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="   \n",
+            stderr="",
+        )
+        with mock.patch("subprocess.run", return_value=fake_result):
+            with self.assertRaisesRegex(RuntimeError, "returned empty"):
+                ci_setup_uv_python.libdir_for(fake_python)
+
+    def test_subprocess_failure_propagates(self) -> None:
+        fake_python = Path("/fake/.venv/bin/python")
+        with mock.patch(
+            "subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["fake"], stderr="boom"),
+        ):
+            with self.assertRaises(subprocess.CalledProcessError):
+                ci_setup_uv_python.libdir_for(fake_python)
+
+
+class CreateVenvTest(unittest.TestCase):
+    def test_uv_not_installed_raises_systemexit_with_hint(self) -> None:
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            with self.assertRaises(SystemExit) as cm:
+                ci_setup_uv_python.create_venv("3.11")
+        self.assertIn("`uv` not found on PATH", str(cm.exception))
+
+    def test_uv_venv_failure_raises_systemexit_with_hint(self) -> None:
+        err = subprocess.CalledProcessError(1, ["uv", "venv", "--python", "3.11"])
+        with mock.patch("subprocess.run", side_effect=err):
+            with self.assertRaises(SystemExit) as cm:
+                ci_setup_uv_python.create_venv("3.11")
+        msg = str(cm.exception)
+        self.assertIn("uv venv", msg)
+        self.assertIn("3.11", msg)
+        self.assertIn("exited with code 1", msg)
+
+    def test_venv_python_missing_after_uv_success_raises(self) -> None:
+        # Defensive: if `uv venv` returns 0 but the expected interpreter
+        # path doesn't materialize, surface that as a FileNotFoundError
+        # rather than silently returning a non-existent path.
+        with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
+            with mock.patch.object(Path, "exists", return_value=False):
+                with self.assertRaises(FileNotFoundError):
+                    ci_setup_uv_python.create_venv("3.11")
+
+
+class PinnedPythonVersionTest(unittest.TestCase):
+    def test_reads_version_from_actual_pyproject(self) -> None:
+        # Lock that the script can parse the repo's actual pyproject.
+        # Asserts the shape, not a specific value, so a future bump
+        # doesn't require updating this test.
+        version = ci_setup_uv_python.pinned_python_version()
+        self.assertRegex(version, r"^\d+\.\d+(?:\.\d+)?$")
+
+    def test_missing_pyproject_raises(self) -> None:
+        fake_path = Path("/nonexistent/pyproject.toml")
+        with self.assertRaisesRegex(RuntimeError, "not found"):
+            ci_setup_uv_python.pinned_python_version(fake_path)
+
+    def test_unparseable_pyproject_raises(self) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".toml") as fh:
+            fh.write("[project]\nname = 'foo'\n")  # no requires-python
+            bad_path = Path(fh.name)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "could not parse"):
+                ci_setup_uv_python.pinned_python_version(bad_path)
+        finally:
+            bad_path.unlink()
+
+    def test_parses_various_requires_python_styles(self) -> None:
+        for spec, expected in [
+            ('requires-python = ">=3.11"', "3.11"),
+            ("requires-python = '~=3.12'", "3.12"),
+            ('requires-python = ">= 3.10"', "3.10"),
+            ('requires-python = "==3.11.4"', "3.11.4"),
+        ]:
+            with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".toml") as fh:
+                fh.write(f"[project]\n{spec}\n")
+                path = Path(fh.name)
+            try:
+                self.assertEqual(
+                    ci_setup_uv_python.pinned_python_version(path),
+                    expected,
+                )
+            finally:
+                path.unlink()
 
 
 if __name__ == "__main__":

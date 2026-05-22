@@ -1,22 +1,30 @@
 # Point pyo3-build-config at the uv-managed Python 3.11 in `.venv/`
-# instead of letting it auto-detect Apple's bundled Python 3.9, whose
-# `sysconfig.LIBDIR` references a non-existent
-# `/Applications/Xcode.app/.../Python3.framework/.../lib` path on
-# workstations with only the Command Line Tools installed. That stale
-# LIBDIR ends up as `-L` to the linker and `chelis-python` fails with
-# `library 'python3.9' not found`.
+# instead of letting it auto-detect a system Python. On macOS, Apple's
+# bundled Python 3.9 reports a `sysconfig.LIBDIR` of
+# `/Applications/Xcode.app/.../Python3.framework/.../lib` (baked at
+# framework build time), which doesn't exist on workstations with
+# only the Command Line Tools installed; pyo3 emits that stale path
+# as `-L` to the linker and `chelis-python` fails with
+# `library 'python3.9' not found`. The same uv-managed Python is the
+# project policy on every platform (see AGENTS.md "Scripting Language
+# Policy") so behavior is consistent across dev and CI.
 #
-# The uv venv is the project-local Python; reef.toml-style developer
-# setup creates it via `uv venv --python 3.11` (see AGENTS.md). The
-# `relative = true` flag resolves `.venv/bin/python` against the
+# REQUIRES: a `.venv/` at the repo root. Create it once with:
+#     uv venv --python 3.11
+# (see README.md "Prerequisites"). On a fresh clone without `.venv/`,
+# `cargo build` for any crate that transitively pulls pyo3 (today
+# only `chelis-python`) will fail with
+# `failed to run the Python interpreter at .venv/bin/python: No such
+# file or directory`. This is the project policy, not a bug: run
+# `uv venv --python 3.11` first.
+#
+# The `relative = true` flag resolves `.venv/bin/python` against the
 # directory containing this config.toml, so the setting works from
 # any subdir and on any developer's machine.
 #
-# CI builds chelis-python on Linux runners where the system Python's
-# LIBDIR is correct; PYO3_PYTHON here is a no-op there because
-# pyo3-build-config will still find a working Python. Override with
-# `PYO3_PYTHON=...` in the environment if you need a different
-# interpreter (a different Python version, a system-wide install,
-# etc.) — env vars take precedence over `[env]` in cargo config.
+# Override: env vars take precedence over `[env]` in cargo config
+# (cargo `[env]` defaults to `force = false`). Export
+# `PYO3_PYTHON=/path/to/python` in your shell to use a different
+# interpreter.
 [env]
 PYO3_PYTHON = { value = ".venv/bin/python", relative = true }

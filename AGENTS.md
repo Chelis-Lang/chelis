@@ -126,13 +126,19 @@ When a public surface has an implicit invariant, make it explicit and test it.
   Python instead. Shell is fragile and untestable.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use the uv-managed Python** at `.venv/bin/python`, not the system Python.
-  `py/pyproject.toml` pins `requires-python = ">=3.11"`; create the venv once
-  with `uv venv --python 3.11` from the repo root. `.cargo/config.toml` sets
-  `PYO3_PYTHON` to `.venv/bin/python` so the `chelis-python` link step finds
-  the right `libpython`. On macOS the system `python3` is Apple's bundled
-  3.9, whose `sysconfig.LIBDIR` references a non-existent Xcode framework
-  path and breaks the PyO3 build. See [`README.md`](README.md) for the full
-  setup commands.
+  Create it once with `uv venv --python 3.11` from the repo root. `py/pyproject.toml`
+  pins `requires-python = ">=3.11"`. See [`README.md`](README.md) for the full setup.
+
+## Build Toolchain
+
+`chelis-python` links against `libpython` and `.cargo/config.toml` sets
+`PYO3_PYTHON` to `.venv/bin/python` so the link step finds the project-pinned
+interpreter. This is a hard prerequisite on every platform: `cargo build` for
+any crate that transitively pulls pyo3 will fail without a `.venv/`. On macOS
+specifically, Apple's bundled `python3` is 3.9 and reports a stale
+`sysconfig.LIBDIR` pointing at a non-existent Xcode framework path; using the
+uv-managed interpreter sidesteps that. Run `uv venv --python 3.11` once before
+building.
 
 ## Build And Gate Commands
 
