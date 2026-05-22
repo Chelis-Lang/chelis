@@ -241,6 +241,57 @@ fn destructured_generic_adt_field_borrow_with_nested_adt() {
 }
 
 #[test]
+fn destructured_generic_adt_nontensor_field_borrow_is_rejected() {
+    // Negative parity for `destructured_generic_adt_field_borrow_is_accepted`
+    // (CLAUDE.md "Negative Test Parity"): the same `match | FooState { x, y } => copy(&x)`
+    // shape must STILL be rejected when the scrutinee's ADT instantiation pins
+    // `a` to a non-tensor primitive. Without this guard, a future refactor that
+    // broadens the destructured-field type lookup (e.g., defaulting to tensor
+    // when ADT resolution loses the instantiation) could silently start
+    // accepting borrows of `int64` fields.
+    //
+    // Expected behavior: type-check produces a TypeMismatch (or InvalidBorrow)
+    // mentioning `int64` since `&int64` is not a valid borrow target.
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("destructured_nontensor_borrow.ch");
+    write_file(
+        &fixture,
+        "module DestructuredNontensorShape\n\
+         type FooState[a] =\n\
+           | FooState { x: a, y: a }\n\
+         def use_foo(state: FooState[int64]) -> int64 = {\n\
+           match state with {\n\
+             | FooState { x: x, y: y } => {\n\
+               _ = copy(&x)\n\
+               y\n\
+             }\n\
+           }\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
+        "borrowing a destructured non-tensor field must be rejected; got {kinds:?}"
+    );
+    // The diagnostic must surface the offending type so the user can act.
+    let messages: Vec<String> = json["errors"]
+        .as_array()
+        .expect("errors")
+        .iter()
+        .map(|e| e["message"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("int64")),
+        "rejection diagnostic should mention `int64`; got {messages:?}"
+    );
+}
+
+#[test]
 fn borrow_nested_tensor_carrying_adt_is_accepted() {
     // Transitive tensor-carrying: ADT A wraps an ADT B that contains
     // a tensor field. Both A and B end up in `tensor_carrying_adts`

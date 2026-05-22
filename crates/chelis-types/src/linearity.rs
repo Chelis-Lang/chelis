@@ -1868,3 +1868,164 @@ fn borrow_site(expr: &Expr) -> String {
 fn expr_scope_end(expr: &Expr) -> usize {
     expr.span().offset + expr.span().len
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the private linearity helpers. Locks the contract
+    //! `pattern_named_types` must uphold for `check_match` to populate
+    //! arm scopes with the correct binding types after the issue #181
+    //! substitution fix.
+
+    use super::*;
+    use chelis_deep::Span;
+    use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+
+    fn span() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn sym(name: &str) -> Expr {
+        Expr::Atom(Atom::Symbol(name.to_string()), span())
+    }
+
+    fn meta(entries: Vec<(&str, Expr)>) -> Expr {
+        Expr::Map(
+            MetaMap {
+                entries: entries
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+            },
+            span(),
+        )
+    }
+
+    /// Build `(tag {meta} children...)`.
+    fn node(tag: &str, meta_entries: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
+        let mut elements = vec![sym(tag), meta(meta_entries)];
+        elements.extend(children);
+        Expr::List(List { elements }, span())
+    }
+
+    /// Build a synthetic `(t-tensor {} (d-lit 4) (t-prim f32))` so the
+    /// tests can assert metadata is the exact `Expr` we stamped.
+    fn tensor_4_f32() -> Expr {
+        node(
+            "t-tensor",
+            vec![],
+            vec![
+                node("d-lit", vec![], vec![Expr::Atom(Atom::Int(4), span())]),
+                node("t-prim", vec![], vec![sym("f32")]),
+            ],
+        )
+    }
+
+    #[test]
+    fn pat_var_with_type_metadata_returns_some_ty() {
+        // (pat-var {type: <ty>} x)
+        let pat = node(
+            "pat-var",
+            vec![("type", tensor_4_f32())],
+            vec![sym("x")],
+        );
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].0, "x");
+        assert_eq!(bindings[0].1, Some(tensor_4_f32()));
+    }
+
+    #[test]
+    fn pat_var_without_type_metadata_returns_none() {
+        // (pat-var {} y)
+        let pat = node("pat-var", vec![], vec![sym("y")]);
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings, vec![("y".to_string(), None)]);
+    }
+
+    #[test]
+    fn pat_tuple_walks_into_children() {
+        // (pat-tuple {} (pat-var {type:<ty>} a) (pat-var {} b))
+        let pat = node(
+            "pat-tuple",
+            vec![],
+            vec![
+                node(
+                    "pat-var",
+                    vec![("type", tensor_4_f32())],
+                    vec![sym("a")],
+                ),
+                node("pat-var", vec![], vec![sym("b")]),
+            ],
+        );
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0], ("a".to_string(), Some(tensor_4_f32())));
+        assert_eq!(bindings[1], ("b".to_string(), None));
+    }
+
+    #[test]
+    fn pat_record_walks_into_kv_children() {
+        // (pat-record {} FooState (kv {} x (pat-var {type:<ty>} x)))
+        let pat = node(
+            "pat-record",
+            vec![],
+            vec![
+                sym("FooState"),
+                node(
+                    "kv",
+                    vec![],
+                    vec![
+                        sym("x"),
+                        node(
+                            "pat-var",
+                            vec![("type", tensor_4_f32())],
+                            vec![sym("x")],
+                        ),
+                    ],
+                ),
+            ],
+        );
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings, vec![("x".to_string(), Some(tensor_4_f32()))]);
+    }
+
+    #[test]
+    fn pat_ctor_walks_into_positional_subpatterns() {
+        // (pat-ctor {} Some (pat-var {type:<ty>} v))
+        let pat = node(
+            "pat-ctor",
+            vec![],
+            vec![
+                sym("Some"),
+                node("pat-var", vec![("type", tensor_4_f32())], vec![sym("v")]),
+            ],
+        );
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings, vec![("v".to_string(), Some(tensor_4_f32()))]);
+    }
+
+    #[test]
+    fn pat_as_returns_outer_and_inner_bindings() {
+        // (pat-as {type:<ty>} whole (pat-var {} x))
+        let pat = node(
+            "pat-as",
+            vec![("type", tensor_4_f32())],
+            vec![
+                sym("whole"),
+                node("pat-var", vec![], vec![sym("x")]),
+            ],
+        );
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0], ("whole".to_string(), Some(tensor_4_f32())));
+        assert_eq!(bindings[1], ("x".to_string(), None));
+    }
+
+    #[test]
+    fn pat_wild_returns_no_bindings() {
+        // (pat-wild {})
+        let pat = node("pat-wild", vec![], vec![]);
+        let bindings = pattern_named_types(&pat);
+        assert!(bindings.is_empty());
+    }
+}

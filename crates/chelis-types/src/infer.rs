@@ -4673,6 +4673,20 @@ fn annotate_match_children(
         {
             let arm_kids = children(arm_list);
             let mut arm_env = env.clone();
+            // `pattern_vg` and `pattern_subst` are clones rather than
+            // shared refs with the outer state. The clone is safe
+            // because the primary inference pass (`infer_program` →
+            // `infer_top_level` → `infer_match`) has already executed
+            // `pattern_bindings` against the unshared outer `subst`,
+            // populating it with the same type-parameter unifications
+            // we're about to (re-)derive here. So the body annotation
+            // below using the outer `subst` sees the same mappings the
+            // pattern-binding stamper would have written to
+            // `pattern_subst`. If a future caller invokes
+            // `annotate_ir_program` against a `Subst` that hasn't been
+            // pre-populated by `infer_program`, this invariant breaks
+            // and body-annotation type variables go stale; that's a bug
+            // in the caller, not here.
             let mut pattern_vg = vg.clone();
             let mut pattern_subst = subst.clone();
             let mut pattern_errors = Vec::new();
@@ -4764,6 +4778,21 @@ fn stamp_pattern_binding_types(
             // The binding's name lives at the first child for both
             // `pat-var` and `pat-as`. Other pattern tags carry no
             // direct binding here (their sub-patterns recurse).
+            //
+            // The `Type::Error` filter is intentional: when a pattern
+            // earlier in the same arm raised an error (e.g., unknown
+            // record field), `pattern_bindings` stores `Type::Error`
+            // for the bind name. Stamping that onto the metadata would
+            // round-trip through `type_to_deep_expr` as
+            // `(t-var {} _)` (see line ~4962) and the linearity check
+            // would read it as an opaque type variable, possibly
+            // surfacing a cascading "borrow requires tensor or
+            // tensor-carrying input, got ?N" on top of the original
+            // unknown-field error. Suppressing the stamp here lets the
+            // linearity check fall through to its `None`-typed path,
+            // which already produces a cleaner "borrowed arguments
+            // must be tensor or tensor-carrying values" diagnostic
+            // without inventing a fictional type for the binding.
             let resolved_ty = if needs_type_stamp {
                 kids.first()
                     .and_then(symbol_name)
@@ -11307,7 +11336,20 @@ fn pattern_bindings(
                                 let _ = unify(&ret, scrutinee_ty, subst);
                                 arg_types
                             }
-                            _ => Vec::new(),
+                            // Nullary constructor: the scheme body is the
+                            // ADT type itself, no Fn-wrapping. Still unify
+                            // with the scrutinee so the ADT's type
+                            // parameters are pinned to its concrete
+                            // instantiation, mirroring `pat-ctor`'s
+                            // positional path. There are no fields to
+                            // bind for `Foo {}`, so the empty
+                            // `instantiated_arg_types` is the right
+                            // return value either way; the unify is the
+                            // side-effect that matters.
+                            other => {
+                                let _ = unify(&other, scrutinee_ty, subst);
+                                Vec::new()
+                            }
                         }
                     } else {
                         Vec::new()
@@ -11333,17 +11375,58 @@ fn pattern_bindings(
                                                 .position(|nm| nm.as_deref() == Some(n));
                                             match pos.and_then(|i| instantiated_arg_types.get(i)) {
                                                 Some(ty) => subst.apply(ty),
-                                                // Fallback: un-instantiated declared
-                                                // field type when the constructor
-                                                // scheme wasn't found in `env`.
-                                                None => variant_info
-                                                    .and_then(|(_, vi)| {
-                                                        vi.fields.iter().find_map(|(name, ty)| {
-                                                            (name.as_deref() == Some(n))
-                                                                .then(|| ty.clone())
+                                                None => {
+                                                    // Fallback: un-instantiated declared field
+                                                    // type when the constructor scheme isn't
+                                                    // in `env`. This branch SHOULD be
+                                                    // unreachable in practice: every `deftype`
+                                                    // registered in `adt_reg` via
+                                                    // `collect_declarations` also binds its
+                                                    // constructor scheme in `env` in the same
+                                                    // call. If that invariant drifts (e.g., a
+                                                    // future code path populates `adt_reg`
+                                                    // without binding into `env`), the
+                                                    // fallback would silently produce
+                                                    // `Var(T_a)` from the un-instantiated
+                                                    // VariantInfo — exactly the bug #181 fixed.
+                                                    // The debug_assert below flags the drift
+                                                    // in tests; the runtime fallback to
+                                                    // `vi.fields[i]` preserves pre-fix
+                                                    // behavior in release builds.
+                                                    debug_assert!(
+                                                        false,
+                                                        "env/adt_reg sync invariant violated: \
+                                                         field `{n}` of constructor `{ctor_name}` \
+                                                         is known to `adt_reg` (variant_info found) \
+                                                         but the constructor scheme is missing from \
+                                                         `env`. See infer.rs pat-record fallback note."
+                                                    );
+                                                    variant_info
+                                                        .and_then(|(_, vi)| {
+                                                            vi.fields.iter().find_map(
+                                                                |(name, ty)| {
+                                                                    (name.as_deref() == Some(n))
+                                                                        .then(|| ty.clone())
+                                                                },
+                                                            )
                                                         })
-                                                    })
-                                                    .unwrap_or_else(|| vg.fresh_type()),
+                                                        // Per the loop guard `known_field_set
+                                                        // .contains(n)` and the fact that
+                                                        // `known_field_set` is derived from
+                                                        // `declared_field_names` whose
+                                                        // `Some(_)` entries are exactly the
+                                                        // named fields of `vi.fields`, the
+                                                        // find_map above always returns Some
+                                                        // here. The expect makes that explicit;
+                                                        // if it ever fires, both data sources
+                                                        // are themselves out of sync — a bug
+                                                        // upstream of this site.
+                                                        .expect(
+                                                            "known_field_set is derived from \
+                                                             vi.fields' named entries; mismatch \
+                                                             indicates a corrupted AdtRegistry",
+                                                        )
+                                                }
                                             }
                                         } else if !known_field_set.is_empty() {
                                             // Unknown field name — error
