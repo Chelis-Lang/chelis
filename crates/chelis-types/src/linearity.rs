@@ -852,9 +852,13 @@ impl Checker {
                 continue;
             }
             let mut arm_scope = scope.clone();
-            let pattern_names = pattern_names(&arm_kids[0]);
-            for name in &pattern_names {
-                arm_scope.declare(name.clone(), None);
+            let pattern_bindings = pattern_named_types(&arm_kids[0]);
+            let pattern_names: Vec<String> = pattern_bindings
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            for (name, ty) in &pattern_bindings {
+                arm_scope.declare(name.clone(), ty.clone());
             }
             self.check_expr(&arm_kids[1], &mut arm_scope);
             self.check_expr(&arm_kids[2], &mut arm_scope);
@@ -1308,6 +1312,45 @@ fn collect_pattern_names(expr: &Expr, names: &mut Vec<String>) {
         _ => {
             for child in children(list) {
                 collect_pattern_names(child, names);
+            }
+        }
+    }
+}
+
+/// Like [`pattern_names`], but also returns each binding's resolved
+/// type expression when the inferencer stamped one onto the pattern
+/// node's metadata. Used by `check_match` to populate arm `LinearScope`
+/// entries with their concrete types — required for destructured
+/// fields whose type comes from the scrutinee's ADT instantiation
+/// rather than a `let`-style RHS. (closes #181)
+fn pattern_named_types(expr: &Expr) -> Vec<(String, Option<Expr>)> {
+    let mut bindings = Vec::new();
+    collect_pattern_named_types(expr, &mut bindings);
+    bindings
+}
+
+fn collect_pattern_named_types(expr: &Expr, bindings: &mut Vec<(String, Option<Expr>)>) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        Some("pat-var") => {
+            if let Some(name) = children(list).first().and_then(symbol_name) {
+                bindings.push((name.to_string(), type_metadata(expr).cloned()));
+            }
+        }
+        Some("pat-as") => {
+            let kids = children(list);
+            if let Some(name) = kids.first().and_then(symbol_name) {
+                bindings.push((name.to_string(), type_metadata(expr).cloned()));
+            }
+            if let Some(inner) = kids.get(1) {
+                collect_pattern_named_types(inner, bindings);
+            }
+        }
+        _ => {
+            for child in children(list) {
+                collect_pattern_named_types(child, bindings);
             }
         }
     }

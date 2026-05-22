@@ -158,6 +158,89 @@ fn borrow_parametric_adt_at_tensor_arg_is_accepted() {
 }
 
 #[test]
+fn destructured_generic_adt_field_borrow_is_accepted() {
+    // Issue #181 (residual gap after #154): the linearity-side fix in
+    // PR #153 handled `&adt_value` for tensor-carrying ADTs, but
+    // `copy(&field)` against a *destructured* tensor field of a
+    // generic ADT still failed because the destructured binding's
+    // type stayed as a fresh type variable instead of being unified
+    // with the ADT's concrete instantiation at the match site. With
+    // the substitution fix, `match state with | FooState { x, y } =>
+    // copy(&x)` resolves `x` to `tensor[n, f32]` from the scrutinee's
+    // `FooState[tensor[n, f32]]` and the borrow checker accepts the
+    // `&x` borrow.
+    //
+    // Downstream impact (per the issue body): unblocks the natural
+    // shape for stateful optimizer `_step_tree` variants (RMSProp,
+    // Lion, Adam) and Train-mode forward passes on stateful layers
+    // (BatchNorm), removing the `to_list → to_tensor` workaround
+    // adopted in School PR #36.
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("destructured_field_borrow.ch");
+    write_file(
+        &fixture,
+        "module DestructuredShape\n\
+         type FooState[a] =\n\
+           | FooState { x: a, y: a }\n\
+         def use_foo[n](state: FooState[tensor[n, f32]]) -> tensor[n, f32] = {\n\
+           match state with {\n\
+             | FooState { x: x, y: y } => {\n\
+               x_copy = copy(&x)\n\
+               _ = y\n\
+               x_copy\n\
+             }\n\
+           }\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "borrowing a destructured tensor field of a generic ADT must produce no errors; got {kinds:?}"
+    );
+}
+
+#[test]
+fn destructured_generic_adt_field_borrow_with_nested_adt() {
+    // Transitive variant of #181: the field type is itself an ADT
+    // (Inner[a]) parameterized by the outer ADT's type parameter.
+    // After the substitution fix, the nested ADT's type argument also
+    // pins to the scrutinee's instantiation, so `&inner` borrows
+    // cleanly against the linearity carrier set.
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("nested_destructured_field_borrow.ch");
+    write_file(
+        &fixture,
+        "module NestedDestructuredShape\n\
+         type Inner[a] =\n\
+           | Inner { value: a }\n\
+         type Outer[a] =\n\
+           | Outer { inner: Inner[a] }\n\
+         sig borrow_inner: &Inner[tensor[n, f32]] -> bool\n\
+         def borrow_inner(i) = true\n\
+         def use_outer[n](o: Outer[tensor[n, f32]]) -> bool = {\n\
+           match o with {\n\
+             | Outer { inner: inner } => {\n\
+               borrow_inner(&inner)\n\
+             }\n\
+           }\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "borrowing a destructured nested ADT field must produce no errors; got {kinds:?}"
+    );
+}
+
+#[test]
 fn borrow_nested_tensor_carrying_adt_is_accepted() {
     // Transitive tensor-carrying: ADT A wraps an ADT B that contains
     // a tensor field. Both A and B end up in `tensor_carrying_adts`
