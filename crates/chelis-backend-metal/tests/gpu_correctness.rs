@@ -734,3 +734,153 @@ fn m6_span_attributed_program_compiles_and_matches_evaluator() {
         "Neg kernel string must embed both merged spans:\n{kernel_block}"
     );
 }
+
+/// WS-2 macOS compile-and-run gate: Const-rooted f16 and bf16 DAGs must
+/// compile under `xcrun clang++ -fobjc-arc` (the .mm has no `half` /
+/// `bfloat` host type in scope) and the runtime buffer must hold the
+/// pinned IEEE-754 bit pattern. `cfg(target_os = "macos")` rather than
+/// just `#[ignore]` so this never silently compiles on Linux runners.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn metal_const_f16_bf16_compiles_under_objc_arc_and_produces_exact_bits() {
+    use chelis_ir::dag::RiscOp;
+
+    fn vec_prec(n: usize, prec: Prim) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: prec,
+        }
+    }
+
+    fn build_driver_for_uint16_output(func_name: &str, n: usize) -> String {
+        format!(
+            r#"#import <Foundation/Foundation.h>
+#include "chelis_runtime.h"
+#include <stdio.h>
+#include <stdint.h>
+
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in,
+                            chelis_tensor **outputs, int n_out);
+
+int main(void) {{
+    @autoreleasepool {{
+        chelis_tensor *outputs[1] = {{0}};
+        {func_name}(NULL, 0, outputs, 1);
+        if (outputs[0] == NULL) {{ fprintf(stderr, "output 0 is NULL\n"); return 2; }}
+        uint16_t *bits = (uint16_t*)outputs[0]->data;
+        for (int i = 0; i < {n}; i++) {{
+            if (i > 0) printf(" ");
+            printf("0x%04X", bits[i]);
+        }}
+        printf("\n");
+        chelis_free(outputs[0]);
+    }}
+    return 0;
+}}
+"#
+        )
+    }
+
+    fn compile_and_run_uint16_bits(dag: &Dag, func_name: &str, n: usize) -> Vec<u16> {
+        require_clangxx();
+        let result = codegen_metal(dag, func_name);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let metal_rt = metal_runtime_src_dir();
+        write_temp_file(
+            tmp.path(),
+            "chelis_metal_runtime.h",
+            &fs::read_to_string(metal_rt.join("chelis_metal_runtime.h"))
+                .expect("metal runtime header"),
+        );
+        copy_runtime_artifacts(tmp.path());
+        write_temp_file(tmp.path(), "model.mm", &result.mm_source);
+        write_temp_file(
+            tmp.path(),
+            "driver.mm",
+            &build_driver_for_uint16_output(func_name, n),
+        );
+
+        let bin_path = tmp.path().join("metal_const_bits_bin");
+        let mut compile_cmd = Command::new("xcrun");
+        compile_cmd.args(["-sdk", "macosx", "clang++"]);
+        compile_cmd.arg("-O2");
+        compile_cmd.args(&result.compile_flags);
+        compile_cmd.arg(tmp.path().join("driver.mm"));
+        compile_cmd.arg(tmp.path().join("model.mm"));
+        compile_cmd.arg(format!("-I{}", tmp.path().display()));
+        compile_cmd.arg(format!("-L{}", tmp.path().display()));
+        compile_cmd.arg("-lchelis_runtime");
+        compile_cmd.args(&result.link_flags);
+        compile_cmd.arg("-o");
+        compile_cmd.arg(&bin_path);
+        let compile = compile_cmd.output().expect("run clang++");
+        assert!(
+            compile.status.success(),
+            "clang++ failed (Const-rooted f16/bf16 must compile under -fobjc-arc):\nstderr: {}\nsource:\n{}",
+            String::from_utf8_lossy(&compile.stderr),
+            result.mm_source
+        );
+
+        let run = Command::new(&bin_path).output().expect("run metal binary");
+        assert!(
+            run.status.success(),
+            "Metal binary failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let stdout = String::from_utf8(run.stdout).expect("utf8 stdout");
+        stdout
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .split_whitespace()
+            .map(|token| {
+                let stripped = token.trim_start_matches("0x");
+                u16::from_str_radix(stripped, 16).expect("parse hex u16")
+            })
+            .collect()
+    }
+
+    // Pinned bit-pattern sweep per WS-2 plan. The same 8 (prec, value, bits)
+    // tuples that the Linux structural test asserts, but here verified
+    // end-to-end by reading the runtime buffer's raw bytes.
+    let cases = [
+        (Prim::F16, 2.5_f64, 0x4100_u16, "k_f16_2p5"),
+        (Prim::Bf16, 2.5, 0x4020, "k_bf16_2p5"),
+        (Prim::F16, 1.5, 0x3E00, "k_f16_1p5"),
+        (Prim::Bf16, 1.5, 0x3FC0, "k_bf16_1p5"),
+        (Prim::F16, -1.0, 0xBC00, "k_f16_neg1"),
+        (Prim::Bf16, -1.0, 0xBF80, "k_bf16_neg1"),
+        (Prim::F16, 0.0, 0x0000, "k_f16_zero"),
+        (Prim::Bf16, 0.0, 0x0000, "k_bf16_zero"),
+    ];
+
+    const N: usize = 4;
+    for (prec, value, expected_bits, func_name) in cases {
+        let mut dag = Dag::new();
+        let c = dag.add_node(RiscOp::Const { value }, vec![], vec_prec(N, prec), None);
+        let stored = dag.add_node(
+            RiscOp::Store { name: "out".into() },
+            vec![c],
+            vec_prec(N, prec),
+            None,
+        );
+        dag.add_root(stored);
+
+        let actual = compile_and_run_uint16_bits(&dag, func_name, N);
+        assert_eq!(
+            actual.len(),
+            N,
+            "{prec:?}({value}): expected {N} elements, got {}",
+            actual.len()
+        );
+        for (i, &bits) in actual.iter().enumerate() {
+            assert_eq!(
+                bits, expected_bits,
+                "{prec:?}({value}) element {i}: got 0x{bits:04X}, expected 0x{expected_bits:04X}"
+            );
+        }
+    }
+}

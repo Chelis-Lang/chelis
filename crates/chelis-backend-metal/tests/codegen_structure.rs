@@ -670,3 +670,219 @@ fn m4_axis_nonzero_reduction_falls_through_to_stub() {
         result.mm_source
     );
 }
+
+/// WS-2 structural lock: Const-rooted f16 / bf16 DAGs must emit host-side
+/// fill loops that route through `uint16_t*` and an IEEE-754 bit-pattern
+/// literal, never through the MSL-only `half` / `bfloat` types which are
+/// invisible to host `clang++ -fobjc-arc`. Pre-WS-2 emission used the MSL
+/// type for both the cast and the sizeof; both must now be host-safe.
+///
+/// Runs on Linux CI without a Metal toolchain: we only inspect the
+/// generated `mm_source` string. The macOS compile-and-run gate lives in
+/// `tests/gpu_correctness.rs`.
+#[test]
+fn ws2_emit_const_f16_bf16_use_uint16_bit_pattern_not_msl_kernel_types() {
+    use chelis_ir::dag::RiscOp;
+
+    fn vec_prec(n: usize, prec: Prim) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: prec,
+        }
+    }
+
+    fn build_const_root_dag(prec: Prim, value: f64) -> Dag {
+        let mut dag = Dag::new();
+        let c = dag.add_node(RiscOp::Const { value }, vec![], vec_prec(4, prec), None);
+        let stored = dag.add_node(
+            RiscOp::Store { name: "out".into() },
+            vec![c],
+            vec_prec(4, prec),
+            None,
+        );
+        dag.add_root(stored);
+        dag
+    }
+
+    // Pinned bit-pattern sweep per WS-2 plan. Values chosen to land in
+    // distinct nibbles in both f16 and bf16 so a swap or truncation would
+    // be visible in any single case.
+    let cases = [
+        (Prim::F16, 2.5_f64, 0x4100_u16),
+        (Prim::Bf16, 2.5, 0x4020),
+        (Prim::F16, 1.5, 0x3E00),
+        (Prim::Bf16, 1.5, 0x3FC0),
+        (Prim::F16, -1.0, 0xBC00),
+        (Prim::Bf16, -1.0, 0xBF80),
+        (Prim::F16, 0.0, 0x0000),
+        (Prim::Bf16, 0.0, 0x0000),
+    ];
+
+    for (prec, value, expected_bits) in cases {
+        let dag = build_const_root_dag(prec, value);
+        let result = codegen_metal(&dag, "const_fill_test");
+        let src = &result.mm_source;
+
+        // The emitter still references MSL `half`/`bfloat` inside the MSL
+        // raw-string kernel block for Load/Store kernels; that is correct
+        // (MSL kernels see those types). The structural lock is on the
+        // host-side fill in the `// node N = Const ...` block: it must not
+        // contain `(half*)`, `(bfloat*)`, `sizeof(half)`, `sizeof(bfloat)`.
+        let const_marker = format!("= Const {value}");
+        let const_pos = src.find(&const_marker).unwrap_or_else(|| {
+            panic!(
+                "missing `// node N = Const {value}` marker in emitted source for {prec:?}:\n{src}"
+            )
+        });
+        // The host-side fill block immediately follows the marker and
+        // ends at the next `// node` comment or end-of-source.
+        let after_marker = &src[const_pos..];
+        let next_node = after_marker[const_marker.len()..]
+            .find("// node ")
+            .map(|off| const_marker.len() + off)
+            .unwrap_or(after_marker.len());
+        let fill_block = &after_marker[..next_node];
+
+        assert!(
+            !fill_block.contains("(half*)"),
+            "{prec:?}: host-side Const fill must not cast to `(half*)`:\n{fill_block}"
+        );
+        assert!(
+            !fill_block.contains("(bfloat*)"),
+            "{prec:?}: host-side Const fill must not cast to `(bfloat*)`:\n{fill_block}"
+        );
+        assert!(
+            !fill_block.contains("sizeof(half)"),
+            "{prec:?}: host-side Const fill must not use `sizeof(half)`:\n{fill_block}"
+        );
+        assert!(
+            !fill_block.contains("sizeof(bfloat)"),
+            "{prec:?}: host-side Const fill must not use `sizeof(bfloat)`:\n{fill_block}"
+        );
+        assert!(
+            fill_block.contains("(uint16_t*)"),
+            "{prec:?}: host-side Const fill must cast to `(uint16_t*)`:\n{fill_block}"
+        );
+        assert!(
+            fill_block.contains("sizeof(uint16_t)"),
+            "{prec:?}: host-side Const fill must use `sizeof(uint16_t)`:\n{fill_block}"
+        );
+        let bits_literal = format!("0x{expected_bits:04X}u");
+        assert!(
+            fill_block.contains(&bits_literal),
+            "{prec:?}({value}): host-side Const fill must contain bit literal `{bits_literal}`:\n{fill_block}"
+        );
+    }
+}
+
+/// WS-2 byte-identity lock: F32 / integer / bool Const emission must be
+/// unchanged by the host-fill refactor (no msl_ty drift, no widened cast).
+/// This pins the pre-WS-2 shape so a future refactor doesn't accidentally
+/// route F32 through the bit-pattern path.
+#[test]
+fn ws2_emit_const_f32_integer_bool_paths_unchanged() {
+    use chelis_ir::dag::RiscOp;
+
+    fn vec_prec(n: usize, prec: Prim) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: prec,
+        }
+    }
+
+    fn extract_fill_block<'a>(src: &'a str, value_str: &str) -> &'a str {
+        let const_marker = format!("= Const {value_str}");
+        let const_pos = src
+            .find(&const_marker)
+            .unwrap_or_else(|| panic!("missing `= Const {value_str}` marker:\n{src}"));
+        let after = &src[const_pos..];
+        let next_node = after[const_marker.len()..]
+            .find("// node ")
+            .map(|off| const_marker.len() + off)
+            .unwrap_or(after.len());
+        &after[..next_node]
+    }
+
+    let mut f32_dag = Dag::new();
+    let c = f32_dag.add_node(
+        RiscOp::Const { value: 2.5 },
+        vec![],
+        vec_prec(4, Prim::F32),
+        None,
+    );
+    let stored = f32_dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![c],
+        vec_prec(4, Prim::F32),
+        None,
+    );
+    f32_dag.add_root(stored);
+    let result = codegen_metal(&f32_dag, "f32_const");
+    let block = extract_fill_block(&result.mm_source, "2.5");
+    assert!(
+        block.contains("float *p = (float*)"),
+        "F32 must use `(float*)` cast: {block}"
+    );
+    assert!(
+        block.contains("sizeof(float)"),
+        "F32 must use `sizeof(float)`: {block}"
+    );
+    assert!(
+        block.contains("2.5f"),
+        "F32 must use `f`-suffixed literal: {block}"
+    );
+
+    let mut i32_dag = Dag::new();
+    let c = i32_dag.add_node(
+        RiscOp::Const { value: 7.0 },
+        vec![],
+        vec_prec(4, Prim::Int32),
+        None,
+    );
+    let stored = i32_dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![c],
+        vec_prec(4, Prim::Int32),
+        None,
+    );
+    i32_dag.add_root(stored);
+    let result = codegen_metal(&i32_dag, "i32_const");
+    let block = extract_fill_block(&result.mm_source, "7");
+    assert!(
+        block.contains("int32_t *p = (int32_t*)"),
+        "Int32 must use `(int32_t*)` cast: {block}"
+    );
+    assert!(
+        block.contains("sizeof(int32_t)"),
+        "Int32 must use `sizeof(int32_t)`: {block}"
+    );
+    assert!(
+        block.contains("(int32_t)7"),
+        "Int32 must use `(int32_t)` cast on value: {block}"
+    );
+
+    let mut bool_dag = Dag::new();
+    let c = bool_dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        vec_prec(4, Prim::Bool),
+        None,
+    );
+    let stored = bool_dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![c],
+        vec_prec(4, Prim::Bool),
+        None,
+    );
+    bool_dag.add_root(stored);
+    let result = codegen_metal(&bool_dag, "bool_const");
+    let block = extract_fill_block(&result.mm_source, "1");
+    assert!(
+        block.contains("bool *p = (bool*)"),
+        "Bool must use `(bool*)` cast: {block}"
+    );
+    assert!(
+        block.contains("p[i] = true"),
+        "Bool(1.0) must emit `true`: {block}"
+    );
+}

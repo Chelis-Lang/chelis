@@ -6,6 +6,45 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed - Metal `emit_const` host-fill for f16/bf16 (WS-2)
+
+`crates/chelis-backend-metal/src/emit.rs::emit_const` previously emitted
+host Objective-C++ code using the MSL-only kernel types `half` and
+`bfloat` for both the typed-pointer cast and the value cast inside the
+CPU fill loop. Those types are not visible to host `clang++ -fobjc-arc`,
+so any Const-rooted f16 or bf16 program produced a `.mm` that failed to
+compile. The CLI gate (`reject_unsupported_metal_ops`) admits all 8
+active Metal dtypes post-PR #112, so this was a live bug, not latent.
+
+The fix factors the host-fill block through a new
+`dtype::host_const_fill_body` helper that routes through host-safe
+types per dtype: typed `float*` for f32, `uint16_t*` plus IEEE-754
+bit-pattern literal (computed at codegen time via
+`half::f16::from_f64(...).to_bits()` and the bf16 analogue) for f16 /
+bf16, matching `intN_t*` with an explicit integral cast for the
+integer family, and C++ `bool*` for bool. The pre-existing
+`sizeof(msl_ty)` was already routed through `host_sizeof_expr` in PR
+#112; the WS-2 change finishes the migration on the value-write side.
+
+Locked by two new tests:
+
+- `crates/chelis-backend-metal/tests/codegen_structure.rs::ws2_emit_const_f16_bf16_use_uint16_bit_pattern_not_msl_kernel_types`
+  — Linux structural assertion that the emitted source uses
+  `uint16_t*` plus the pinned bit-pattern literal and never `(half*)`,
+  `(bfloat*)`, `sizeof(half)`, or `sizeof(bfloat)` for f16/bf16
+  Const fills. Sweeps eight pinned (precision, value, bits) tuples
+  covering 2.5, 1.5, -1.0, and 0.0.
+- `crates/chelis-backend-metal/tests/gpu_correctness.rs::metal_const_f16_bf16_compiles_under_objc_arc_and_produces_exact_bits`
+  — macOS-only (`#[cfg(target_os = "macos")]`, `#[ignore]`) compile +
+  run gate that builds Const-rooted f16/bf16 DAGs, links them via
+  `xcrun clang++ -fobjc-arc`, runs the binary, and asserts the
+  runtime buffer holds the exact pinned bit patterns.
+
+Plus `crates/chelis-backend-metal/tests/codegen_structure.rs::ws2_emit_const_f32_integer_bool_paths_unchanged`
+which pins the byte-identical shape of f32 / int32 / bool Const
+emission so a future refactor cannot silently route them through the
+bit-pattern path.
+
 ### Changed - descriptive test names in backend crates
 
 Renamed scaffolding-named integration test files in `chelis-backend-c`,
