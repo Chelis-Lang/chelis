@@ -4147,7 +4147,14 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     // pass. Restored on drop.
     let _declared_sig_guard = install_declared_sig_param_types(exprs);
 
-    for expr in exprs {
+    // Descend through `(module {} name ...)` wrappers when collecting
+    // declarations, matching `infer_program`. Without this, module-
+    // wrapped user ADTs and defsigs never reach `env` / `adt_reg`
+    // during annotation, so `pat-record`'s constructor lookup (#181)
+    // and every other annotation-time env query for a user-declared
+    // name silently misses. See `infer_program` line 274 for the
+    // parallel iteration.
+    for expr in top_level_decl_items(exprs) {
         collect_declarations(
             expr,
             &mut env,
@@ -4168,19 +4175,29 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
         } else {
             None
         };
+        // Run `infer_top_level` on the unit being annotated; for a
+        // `(module {} ...)` wrapper, this means inferring every inner
+        // decl before annotating the wrapper, so that annotation's
+        // recursive walk sees fully-inferred bindings for each inner
+        // decl. For a bare top-level decl, this preserves the original
+        // per-expr alternation (infer THIS decl, then annotate THIS
+        // decl) that signature-inference forward-reference assertions
+        // depend on. (closes #181)
         let mut step_errors = Vec::new();
         let mut typed_nodes = 0;
         let mut total_nodes = 0;
-        infer_top_level(
-            expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &adt_reg,
-            &mut step_errors,
-            &mut typed_nodes,
-            &mut total_nodes,
-        );
+        for decl in top_level_decl_items(std::slice::from_ref(expr)) {
+            infer_top_level(
+                decl,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                &mut step_errors,
+                &mut typed_nodes,
+                &mut total_nodes,
+            );
+        }
 
         let annotated_expr = annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg);
         if let Some(t0) = t0 {
@@ -4220,7 +4237,10 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
     // exprs being annotated here. Restored on drop.
     let _declared_sig_guard = install_declared_sig_param_types(exprs);
 
-    for expr in exprs {
+    // Descend through `(module {} name ...)` wrappers when collecting
+    // declarations; mirrors the `infer_program` shape and the parallel
+    // fix in `annotate_ir_program`. (closes #181)
+    for expr in top_level_decl_items(exprs) {
         collect_declarations(
             expr,
             &mut state.env,
@@ -4241,19 +4261,25 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
         } else {
             None
         };
+        // See the parallel comment in `annotate_ir_program`: infer
+        // every inner decl of a module wrapper before annotating, so
+        // user-declared ADT constructors and defsigs are visible at
+        // annotation time; preserve per-expr alternation otherwise.
         let mut step_errors = Vec::new();
         let mut typed_nodes = 0;
         let mut total_nodes = 0;
-        infer_top_level(
-            expr,
-            &mut state.env,
-            &mut state.var_gen,
-            &mut state.subst,
-            &state.adt_reg,
-            &mut step_errors,
-            &mut typed_nodes,
-            &mut total_nodes,
-        );
+        for decl in top_level_decl_items(std::slice::from_ref(expr)) {
+            infer_top_level(
+                decl,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                &mut step_errors,
+                &mut typed_nodes,
+                &mut total_nodes,
+            );
+        }
 
         let annotated_expr = annotate_expr_with_scope(
             expr,
@@ -4647,6 +4673,20 @@ fn annotate_match_children(
         {
             let arm_kids = children(arm_list);
             let mut arm_env = env.clone();
+            // `pattern_vg` and `pattern_subst` are clones rather than
+            // shared refs with the outer state. The clone is safe
+            // because the primary inference pass (`infer_program` →
+            // `infer_top_level` → `infer_match`) has already executed
+            // `pattern_bindings` against the unshared outer `subst`,
+            // populating it with the same type-parameter unifications
+            // we're about to (re-)derive here. So the body annotation
+            // below using the outer `subst` sees the same mappings the
+            // pattern-binding stamper would have written to
+            // `pattern_subst`. If a future caller invokes
+            // `annotate_ir_program` against a `Subst` that hasn't been
+            // pre-populated by `infer_program`, this invariant breaks
+            // and body-annotation type variables go stale; that's a bug
+            // in the caller, not here.
             let mut pattern_vg = vg.clone();
             let mut pattern_subst = subst.clone();
             let mut pattern_errors = Vec::new();
@@ -4668,7 +4708,17 @@ fn annotate_match_children(
 
             let mut elements = vec![arm_list.elements[0].clone(), arm_list.elements[1].clone()];
             if let Some(pattern) = arm_kids.first() {
-                elements.push(annotate_expr_with_scope(pattern, env, vg, subst, adt_reg));
+                // Stamp pattern-binding types onto `pat-var`/`pat-as`
+                // nodes so the linearity checker (which consumes the
+                // annotated Deep) can declare scope entries with the
+                // resolved binding type rather than `None`. Without
+                // this, a destructured tensor field's `&x` borrow
+                // fails the linearity check because `expr_type` can't
+                // resolve the binding's type. (closes #181)
+                let annotated_pattern = annotate_expr_with_scope(pattern, env, vg, subst, adt_reg);
+                let annotated_pattern =
+                    stamp_pattern_binding_types(&annotated_pattern, &arm_env, &pattern_subst);
+                elements.push(annotated_pattern);
             }
             if let Some(guard) = arm_kids.get(1) {
                 elements.push(annotate_expr_with_scope(
@@ -4685,6 +4735,104 @@ fn annotate_match_children(
     }
 
     result
+}
+
+/// Walk a pattern AST and stamp the resolved binding type onto each
+/// `pat-var` (and `pat-as`) node's metadata map under the `type` key.
+///
+/// The binding type is looked up by name in `arm_env`, which was just
+/// populated by `pattern_bindings` against `pattern_subst`. We re-apply
+/// `pattern_subst` here so any post-unify substitutions (e.g. the ADT
+/// type-parameter pinning that happens when `pat-record` unifies the
+/// constructor's return ADT against the scrutinee) flow into the
+/// stamped metadata.
+///
+/// The downstream consumer is `linearity::check_match`, which reads
+/// each pattern var's stamped `:type` to populate the arm's
+/// `LinearScope`. Without this, destructured field bindings stay
+/// untyped at linearity time and `&field` fails `expr_is_owned_or_borrow_linear`.
+/// (closes #181)
+fn stamp_pattern_binding_types(
+    pat: &deep::Expr,
+    arm_env: &Env,
+    pattern_subst: &Subst,
+) -> deep::Expr {
+    match pat {
+        deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => pat.clone(),
+        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                expr: Box::new(stamp_pattern_binding_types(
+                    &meta.expr,
+                    arm_env,
+                    pattern_subst,
+                )),
+                entries: meta.entries.clone(),
+            },
+            *span,
+        ),
+        deep::Expr::List(list, span) => {
+            let tag = get_tag(list);
+            let kids = children(list);
+            let needs_type_stamp = matches!(tag, Some("pat-var") | Some("pat-as"));
+
+            // The binding's name lives at the first child for both
+            // `pat-var` and `pat-as`. Other pattern tags carry no
+            // direct binding here (their sub-patterns recurse).
+            //
+            // The `Type::Error` filter is intentional: when a pattern
+            // earlier in the same arm raised an error (e.g., unknown
+            // record field), `pattern_bindings` stores `Type::Error`
+            // for the bind name. Stamping that onto the metadata would
+            // round-trip through `type_to_deep_expr` as
+            // `(t-var {} _)` (see line ~4962) and the linearity check
+            // would read it as an opaque type variable, possibly
+            // surfacing a cascading "borrow requires tensor or
+            // tensor-carrying input, got ?N" on top of the original
+            // unknown-field error. Suppressing the stamp here lets the
+            // linearity check fall through to its `None`-typed path,
+            // which already produces a cleaner "borrowed arguments
+            // must be tensor or tensor-carrying values" diagnostic
+            // without inventing a fictional type for the binding.
+            let resolved_ty = if needs_type_stamp {
+                kids.first()
+                    .and_then(symbol_name)
+                    .and_then(|name| arm_env.lookup(name))
+                    .map(|scheme| pattern_subst.apply(&scheme.body))
+                    .filter(|ty| !matches!(ty, Type::Error))
+            } else {
+                None
+            };
+
+            let meta_expr =
+                match list.elements.get(1) {
+                    Some(deep::Expr::Map(meta, meta_span)) => {
+                        if let Some(ty) = resolved_ty.as_ref() {
+                            let mut entries = meta.entries.clone();
+                            let ty_expr = type_to_deep_expr(ty);
+                            if let Some((_, existing)) =
+                                entries.iter_mut().find(|(key, _)| key == "type")
+                            {
+                                *existing = ty_expr;
+                            } else {
+                                entries.push(("type".to_string(), ty_expr));
+                            }
+                            deep::Expr::Map(deep::MetaMap { entries }, *meta_span)
+                        } else {
+                            list.elements[1].clone()
+                        }
+                    }
+                    _ => list.elements.get(1).cloned().unwrap_or_else(|| {
+                        deep::Expr::Map(deep::MetaMap { entries: vec![] }, *span)
+                    }),
+                };
+
+            let mut elements = vec![list.elements[0].clone(), meta_expr];
+            for child in kids {
+                elements.push(stamp_pattern_binding_types(child, arm_env, pattern_subst));
+            }
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+    }
 }
 
 fn annotated_meta_map_with_override(
@@ -11152,18 +11300,60 @@ fn pattern_bindings(
                 if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
                     covered_variants.push(ctor_name.to_string());
 
-                    // Look up variant in ADT registry to get field types
+                    // Look up variant in ADT registry for the canonical
+                    // field order and known field-name set used for
+                    // validation diagnostics.
                     let variant_info = adt_reg
                         .lookup_variant(ctor_name)
                         .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name));
-                    let declared_fields: std::collections::HashMap<&str, &Type> = variant_info
-                        .map(|(_, vi)| {
-                            vi.fields
-                                .iter()
-                                .filter_map(|(name, ty)| name.as_deref().map(|n| (n, ty)))
-                                .collect()
-                        })
+                    let declared_field_names: Vec<Option<String>> = variant_info
+                        .map(|(_, vi)| vi.fields.iter().map(|(n, _)| n.clone()).collect())
                         .unwrap_or_default();
+                    let known_field_set: std::collections::HashSet<&str> = declared_field_names
+                        .iter()
+                        .filter_map(|n| n.as_deref())
+                        .collect();
+
+                    // Mirror the `pat-ctor` (positional) path: instantiate
+                    // the constructor scheme and unify its return type
+                    // with the scrutinee so the ADT's type parameters get
+                    // pinned to the scrutinee's concrete instantiation
+                    // (e.g. `FooState[a] -> FooState[tensor[n, f32]]`).
+                    // The instantiated function's arg types are the
+                    // properly substituted per-field types. Without this
+                    // step, the declared field types still reference the
+                    // ADT's abstract `a`, leaving record-pattern bindings
+                    // stuck as fresh type variables and breaking
+                    // downstream linearity/borrow checks. (closes #181)
+                    let instantiated_arg_types: Vec<Type> = if let Some(scheme) = env
+                        .lookup(ctor_name)
+                        .or_else(|| env.lookup_terminal_unique(ctor_name))
+                    {
+                        let scheme = scheme.clone();
+                        let ctor_ty = env.instantiate(&scheme, vg);
+                        match ctor_ty {
+                            Type::Fn(arg_types, ret) => {
+                                let _ = unify(&ret, scrutinee_ty, subst);
+                                arg_types
+                            }
+                            // Nullary constructor: the scheme body is the
+                            // ADT type itself, no Fn-wrapping. Still unify
+                            // with the scrutinee so the ADT's type
+                            // parameters are pinned to its concrete
+                            // instantiation, mirroring `pat-ctor`'s
+                            // positional path. There are no fields to
+                            // bind for `Foo {}`, so the empty
+                            // `instantiated_arg_types` is the right
+                            // return value either way; the unify is the
+                            // side-effect that matters.
+                            other => {
+                                let _ = unify(&other, scrutinee_ty, subst);
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    };
 
                     for kv_expr in kids.iter().skip(1) {
                         if let deep::Expr::List(kv_list, _) = kv_expr
@@ -11174,9 +11364,71 @@ fn pattern_bindings(
                                 let field_name = symbol_name(&kv_kids[0]);
                                 // Look up declared field type — reject unknown fields
                                 let field_ty = match field_name {
-                                    Some(n) => match declared_fields.get(n) {
-                                        Some(ty) => (*ty).clone(),
-                                        None if !declared_fields.is_empty() => {
+                                    Some(n) => {
+                                        if known_field_set.contains(n) {
+                                            // Prefer the instantiated arg type from
+                                            // the constructor scheme so the
+                                            // scrutinee's concrete type arguments
+                                            // are reflected in the pattern binding.
+                                            let pos = declared_field_names
+                                                .iter()
+                                                .position(|nm| nm.as_deref() == Some(n));
+                                            match pos.and_then(|i| instantiated_arg_types.get(i)) {
+                                                Some(ty) => subst.apply(ty),
+                                                None => {
+                                                    // Fallback: un-instantiated declared field
+                                                    // type when the constructor scheme isn't
+                                                    // in `env`. This branch SHOULD be
+                                                    // unreachable in practice: every `deftype`
+                                                    // registered in `adt_reg` via
+                                                    // `collect_declarations` also binds its
+                                                    // constructor scheme in `env` in the same
+                                                    // call. If that invariant drifts (e.g., a
+                                                    // future code path populates `adt_reg`
+                                                    // without binding into `env`), the
+                                                    // fallback would silently produce
+                                                    // `Var(T_a)` from the un-instantiated
+                                                    // VariantInfo — exactly the bug #181 fixed.
+                                                    // The debug_assert below flags the drift
+                                                    // in tests; the runtime fallback to
+                                                    // `vi.fields[i]` preserves pre-fix
+                                                    // behavior in release builds.
+                                                    debug_assert!(
+                                                        false,
+                                                        "env/adt_reg sync invariant violated: \
+                                                         field `{n}` of constructor `{ctor_name}` \
+                                                         is known to `adt_reg` (variant_info found) \
+                                                         but the constructor scheme is missing from \
+                                                         `env`. See infer.rs pat-record fallback note."
+                                                    );
+                                                    variant_info
+                                                        .and_then(|(_, vi)| {
+                                                            vi.fields.iter().find_map(
+                                                                |(name, ty)| {
+                                                                    (name.as_deref() == Some(n))
+                                                                        .then(|| ty.clone())
+                                                                },
+                                                            )
+                                                        })
+                                                        // Per the loop guard `known_field_set
+                                                        // .contains(n)` and the fact that
+                                                        // `known_field_set` is derived from
+                                                        // `declared_field_names` whose
+                                                        // `Some(_)` entries are exactly the
+                                                        // named fields of `vi.fields`, the
+                                                        // find_map above always returns Some
+                                                        // here. The expect makes that explicit;
+                                                        // if it ever fires, both data sources
+                                                        // are themselves out of sync — a bug
+                                                        // upstream of this site.
+                                                        .expect(
+                                                            "known_field_set is derived from \
+                                                             vi.fields' named entries; mismatch \
+                                                             indicates a corrupted AdtRegistry",
+                                                        )
+                                                }
+                                            }
+                                        } else if !known_field_set.is_empty() {
                                             // Unknown field name — error
                                             errors.push(CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
@@ -11186,13 +11438,17 @@ fn pattern_bindings(
                                                 ),
                                                 vec![format!(
                                                     "known fields: {:?}",
-                                                    declared_fields.keys().collect::<Vec<_>>()
+                                                    declared_field_names
+                                                        .iter()
+                                                        .filter_map(|f| f.as_deref())
+                                                        .collect::<Vec<_>>()
                                                 )],
                                             ));
                                             Type::Error
+                                        } else {
+                                            vg.fresh_type() // no ADT info available
                                         }
-                                        None => vg.fresh_type(), // no ADT info available
-                                    },
+                                    }
                                     None => vg.fresh_type(),
                                 };
                                 pattern_bindings(
