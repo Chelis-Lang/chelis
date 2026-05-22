@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 chelis-ir = { path = "../chelis-ir" }
 chelis-types = { path = "../chelis-types" }
+half = { workspace = true }
 
 [dev-dependencies]
 chelis-runtime = { path = "../chelis-runtime" }
