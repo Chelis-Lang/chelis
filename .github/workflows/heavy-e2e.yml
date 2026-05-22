@@ -56,8 +56,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
-      - name: Create uv-managed venv (for PYO3_PYTHON)
-        run: uv venv --python 3.11
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
 
       # The `nightly` nextest profile (.config/nextest.toml) selects
       # exactly the heavy e2e suite via its default-filter and sets
