@@ -53,8 +53,41 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
         .parent()
         .expect("canonical lib path has no parent")
         .join("deps");
+    // First-pass scan of the deps dir.
+    let hashed = find_newest_runtime_archive(&deps_dir)?;
+    // If cargo's incremental cache reused the rlib without re-emitting
+    // the staticlib (observed on CI cold-cache runs against
+    // `chelis-runtime` as a transitive dev-dep), force a rebuild of
+    // the lib target and rescan. `cargo build -p chelis-runtime --lib`
+    // emits both crate-types declared in chelis-runtime/Cargo.toml,
+    // producing the `libchelis_runtime-<hash>.a` artifact the
+    // gcc-link harness needs.
+    let hashed = match hashed {
+        Some(path) => path,
+        None => {
+            std::process::Command::new(env!("CARGO"))
+                .args(["build", "-p", "chelis-runtime", "--lib"])
+                .status()
+                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
+            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "no libchelis_runtime-*.a found in {} after explicit `cargo build -p \
+                     chelis-runtime --lib`",
+                    deps_dir.display()
+                ))
+            })?
+        }
+    };
+    // Atomic copy: write to a temp file in the same dir, then rename.
+    let tmp = canonical.with_extension("a.tmp");
+    fs::copy(&hashed, &tmp)?;
+    fs::rename(&tmp, canonical)?;
+    Ok(())
+}
+
+fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
+    for entry in fs::read_dir(deps_dir)? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -67,17 +100,7 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             }
         }
     }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    // Atomic copy: write to a temp file in the same dir, then rename.
-    let tmp = canonical.with_extension("a.tmp");
-    fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
+    Ok(newest.map(|(_, p)| p))
 }
 
 fn runtime_lib_path() -> PathBuf {
