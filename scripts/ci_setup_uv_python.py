@@ -168,40 +168,65 @@ def python_abi_version(venv_python: Path) -> str:
     return abi
 
 
-def ensure_link_symlink(libdir: Path, abi: str) -> None:
-    """Ensure `libpython<abi>.{so,dylib}` exists in `libdir` for `-lpython<abi>`.
+def _list_libdir(libdir: Path) -> str:
+    """Render a one-line snapshot of `libdir` for error diagnostics."""
+    try:
+        entries = sorted(p.name for p in libdir.iterdir())
+        return ", ".join(entries) if entries else "<empty>"
+    except OSError as exc:
+        return f"<unreadable: {exc}>"
 
-    uv-managed Python on Linux ships `libpython3.X.so.1.0` (with SONAME
-    suffix) but not always the unversioned `libpython3.X.so` symlink.
-    GNU ld and rust-lld resolve `-lpython3.X` to `libpython3.X.so` (or
-    `.a`), not to the SONAME-suffixed file, so the link step fails with
-    `unable to find library -lpython3.X`. This helper creates the
-    missing symlink. macOS uses `.dylib` and uv already ships
-    `libpython3.X.dylib` unversioned, so the symlink check is a no-op
-    there but kept symmetric in case a future uv build changes that.
+
+def ensure_link_symlink(libdir: Path, abi: str) -> None:
+    """Ensure `libpython<abi>.{so,dylib}` exists in `libdir`.
+
+    The linker resolves `-lpython<abi>` to `libpython<abi>.so` on Linux
+    or `libpython<abi>.dylib` on macOS. Versioned `.so.<X>` files don't
+    match. uv-managed Python on Linux ships the versioned file but not
+    always the unversioned link; on macOS uv ships the unversioned
+    dylib already.
+
+    Strategy:
+    1. If the unversioned name already resolves to a real file, no-op.
+    2. Otherwise glob for `libpython<abi>{suffix}*` candidates in
+       `libdir`, pick the one with the shortest name (prefers
+       `.so.1.0` over `.so.1.0.X.Y`), and symlink the unversioned name
+       to it.
+    3. If no candidate is found, raise with a directory listing so
+       failure diagnostics are actionable in CI logs.
     """
-    if platform.system() == "Linux":
-        link_name = libdir / f"libpython{abi}.so"
-        target = libdir / f"libpython{abi}.so.1.0"
-    elif platform.system() == "Darwin":
-        link_name = libdir / f"libpython{abi}.dylib"
-        # uv on macOS ships the unversioned dylib already; nothing to do.
-        if link_name.exists():
-            return
-        target = libdir / f"libpython{abi}.dylib"
+    system = platform.system()
+    if system == "Linux":
+        suffix = ".so"
+    elif system == "Darwin":
+        suffix = ".dylib"
     else:
         return
 
-    if link_name.exists() or link_name.is_symlink():
-        return  # Already there (or a real file).
-    if not target.exists():
-        # If neither the unversioned link nor the SONAME-suffixed file
-        # exists, something else is wrong with the uv install — surface
-        # it loudly rather than silently leaving a broken link.
+    link_name = libdir / f"libpython{abi}{suffix}"
+    # If a real file (or working symlink) already resolves, we're done.
+    # `.is_symlink() and .exists()` catches working symlinks; `.is_file()`
+    # catches actual files. Broken symlinks fall through to be replaced.
+    if link_name.is_file() or (link_name.is_symlink() and link_name.exists()):
+        print(f"libpython link already present: {link_name}")
+        return
+
+    # Glob for versioned siblings.
+    pattern = f"libpython{abi}{suffix}*"
+    candidates = sorted(
+        (p for p in libdir.glob(pattern) if p != link_name),
+        key=lambda p: len(p.name),
+    )
+    if not candidates:
         raise RuntimeError(
-            f"expected `{target}` to exist in uv-managed Python libdir; "
-            f"`{link_name}` cannot be auto-symlinked. Check the uv install."
+            f"no libpython{abi} files found in {libdir} matching {pattern!r}. "
+            f"Directory contents: {_list_libdir(libdir)}. "
+            f"Check the uv install or pin a different Python build."
         )
+    target = candidates[0]
+    # Remove any stale broken symlink at link_name before re-creating.
+    if link_name.is_symlink():
+        link_name.unlink()
     link_name.symlink_to(target.name)
     print(f"linked {link_name} -> {target.name}")
 

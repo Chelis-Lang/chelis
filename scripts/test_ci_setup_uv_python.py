@@ -276,14 +276,48 @@ class EnsureLinkSymlinkTest(unittest.TestCase):
             self.assertEqual(link_name.lstat().st_mtime, mtime_before)
 
     def test_linux_raises_when_target_missing(self) -> None:
-        # If neither the unversioned .so nor the SONAME-suffixed file
-        # is present, surface the broken uv install rather than silently
+        # If no libpython files at all are present, surface the broken
+        # uv install with a directory listing rather than silently
         # leaving a dangling link.
         with tempfile.TemporaryDirectory() as td:
             libdir = Path(td)
             with mock.patch("platform.system", return_value="Linux"):
-                with self.assertRaisesRegex(RuntimeError, "expected"):
+                with self.assertRaisesRegex(RuntimeError, "no libpython3.11 files found"):
                     ci_setup_uv_python.ensure_link_symlink(libdir, "3.11")
+
+    def test_linux_glob_picks_shortest_versioned_name(self) -> None:
+        # uv may ship multiple versioned files (e.g., `.so.1.0` AND
+        # `.so.1.0.X` for a debug build). The helper picks the shortest
+        # name so the linker resolves to the canonical SONAME target.
+        with tempfile.TemporaryDirectory() as td:
+            libdir = Path(td)
+            (libdir / "libpython3.11.so.1.0").touch()
+            (libdir / "libpython3.11.so.1.0.debug").touch()
+            link_name = libdir / "libpython3.11.so"
+            with mock.patch("platform.system", return_value="Linux"):
+                ci_setup_uv_python.ensure_link_symlink(libdir, "3.11")
+            self.assertEqual(
+                Path(os.readlink(link_name)),
+                Path("libpython3.11.so.1.0"),
+            )
+
+    def test_linux_replaces_broken_symlink(self) -> None:
+        # If a previous run left a broken symlink (target deleted), the
+        # helper replaces it rather than skipping or crashing.
+        with tempfile.TemporaryDirectory() as td:
+            libdir = Path(td)
+            broken_target = libdir / "missing.so"
+            link_name = libdir / "libpython3.11.so"
+            link_name.symlink_to(broken_target.name)
+            self.assertTrue(link_name.is_symlink())
+            self.assertFalse(link_name.exists())  # broken
+            (libdir / "libpython3.11.so.1.0").touch()
+            with mock.patch("platform.system", return_value="Linux"):
+                ci_setup_uv_python.ensure_link_symlink(libdir, "3.11")
+            self.assertEqual(
+                Path(os.readlink(link_name)),
+                Path("libpython3.11.so.1.0"),
+            )
 
     def test_darwin_noop_when_dylib_present(self) -> None:
         with tempfile.TemporaryDirectory() as td:
