@@ -46,9 +46,10 @@ jobs:
       # runners need a matching uv-managed venv before any cargo run
       # (pyo3-build-config is a transitive build-dep that runs before
       # main compilation). See ci.yml lint-and-unit job for the same
-      # pattern.
+      # pattern and for why the version is pinned to v8.1.0 rather
+      # than @v8.
       - name: Install uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.1.0
 
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
