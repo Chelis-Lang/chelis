@@ -197,9 +197,35 @@ pub fn requires_msl_320_guard(prec: Prim) -> bool {
 /// build.
 pub fn host_const_fill_body(prec: Prim, value: f64, buf: &str, n: usize) -> String {
     match prec {
-        Prim::F32 => format!(
-            "{{ float *p = (float*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = {value:?}f; }}",
-        ),
+        Prim::F32 => {
+            // SPEC-DIVERGENCE fix (WS-Cleanup-Fixups): Rust's `{:?}` for
+            // `f64::NAN` formats as the literal token `NaN`, which when
+            // appended with `f` produces `NaNf`, an invalid C/C++ float
+            // literal. Same for `f64::INFINITY` -> `inff`. Discriminate
+            // NaN / +-Inf explicitly and emit the C99 `NAN` / `INFINITY`
+            // macros (cast to `float` so the literal type is `float`,
+            // matching the surrounding pointer type and the byte-for-byte
+            // shape of the existing finite-value emission). Finite values
+            // keep the existing `{value:?}f` form: typical finite f64 is
+            // formatted by Rust as a decimal that round-trips back through
+            // `strtod` (and clang++'s f64-literal parser) to the same f64
+            // bit pattern, then the trailing `f` narrows to f32 with the
+            // canonical round-to-nearest-even rule.
+            let value_lit = if value.is_nan() {
+                "(float)NAN".to_string()
+            } else if value.is_infinite() {
+                if value.is_sign_negative() {
+                    "-(float)INFINITY".to_string()
+                } else {
+                    "(float)INFINITY".to_string()
+                }
+            } else {
+                format!("{value:?}f")
+            };
+            format!(
+                "{{ float *p = (float*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = {value_lit}; }}",
+            )
+        }
         Prim::F16 => {
             let bits = half::f16::from_f64(value).to_bits();
             format!(

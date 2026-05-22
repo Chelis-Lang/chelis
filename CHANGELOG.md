@@ -6,6 +6,75 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed - C backend `emit_cast` corruption on bf16/f16 boundaries (WS-Cleanup-Fixups)
+
+`crates/chelis-backend-c/src/emit.rs::emit_cast` previously emitted the
+C language cast `((dst_et*)t->data)[i] = (dst_et)((src_et*)t->data)[idx]`
+for every cross-precision arm, including the four arms that touch the
+reduced-float dtypes (`Bf16` and `F16`). Those dtypes store as
+`uint16_t`, so the cast `(uint16_t)1.5f` integer-truncates the float to
+`1` and writes bit pattern `0x0001` instead of `bf16(1.5)=0x3FC0` /
+`f16(1.5)=0x3E00`. The widening direction was symmetrically broken:
+`(float)(uint16_t)0x3FC0` is `16320.0f`, not `1.5f`. Three RT-Cleanup
+BLOCKER tests (cast_f32_to_bf16, cast_bf16_to_f32, cast_f32_to_f16) were
+gated on this fix.
+
+The fix routes every cast that touches `Bf16` or `F16` through the
+existing WS-1 runtime helpers (`chelis_f32_to_bf16` /
+`chelis_bf16_to_f32` / `chelis_f32_to_f16` / `chelis_f16_to_f32`).
+Cross-narrow-float casts (`Bf16 <-> F16`) chain through `f32` as the
+intermediate. Casts between reduced floats and `intN` / `f64` route
+through `f32` for the reduced-float leg and use the C primitive cast for
+the other. Pairs not involving reduced floats keep the existing C cast
+semantics.
+
+Locked by un-ignoring the three RT-Cleanup BLOCKER tests in
+`crates/chelis-backend-c/tests/rt_cleanup_redteam.rs`
+(`cast_f32_to_bf16_preserves_value_per_ieee_754`,
+`cast_bf16_to_f32_preserves_value_per_ieee_754`,
+`cast_f32_to_f16_preserves_value_per_ieee_754`) plus a new
+`crates/chelis-backend-c/tests/dtype_matrix_bf16_f16_extended.rs` with
+bit-pattern + round-trip tests for all six reduced-float cast
+directions and a sweep over non-round operand values (0.5, 2.5, -1.75,
+100.0, 0.125).
+
+### Fixed - Metal `host_const_fill_body` invalid C++ literal for F32 NaN/Inf (WS-Cleanup-Fixups)
+
+`crates/chelis-backend-metal/src/dtype.rs::host_const_fill_body` formatted
+the F32 fill value with `{value:?}f`. Rust formats `f64::NAN` as the
+token `NaN`, so the emitted code carried `p[i] = NaNf;` which is not a
+valid C/C++ float literal. The infinity path emitted `inff` with the
+same shape. Latent today because no Phase 0 corpus exercises Metal
+Const with NaN/Inf, but locked as a SPEC-DIVERGENCE by RT-Cleanup.
+
+The fix discriminates `f64::is_nan()` / `f64::is_infinite()` on the F32
+arm and emits the C99 `(float)NAN` / `(float)INFINITY` /
+`-(float)INFINITY` macros, which are well-formed C++ tokens. Finite
+values keep the existing `{value:?}f` shape (byte-identical to the
+pre-fix emission). The F16/Bf16 arms already use the bit-pattern
+literal path (`0x{bits:04X}u`) and so were unaffected; a regression
+test pins that behavior.
+
+Locked by un-ignoring two RT-Cleanup SPEC-DIVERGENCE tests plus three
+new regression tests in
+`crates/chelis-backend-metal/tests/rt_cleanup_redteam.rs`:
+`rt_metal_emit_const_f32_negative_infinity_emits_negated_infinity_macro`,
+`rt_metal_emit_const_f32_finite_value_keeps_typed_float_literal_form`,
+`rt_metal_emit_const_f16_bf16_nan_inf_emit_well_formed_integer_literal`.
+
+### Added - C backend bf16/f16 elementwise + cast coverage (WS-Cleanup-Fixups)
+
+`crates/chelis-backend-c/tests/dtype_matrix_bf16_f16_extended.rs` closes
+the RT-Cleanup coverage gap for ops the original WS-1 matrix did not
+exercise directly. Per-dtype evaluator-agreement tests at `BF16_TOL =
+1e-2` / `F16_TOL = 1e-3` for `Div`, `Recip`, `Sqrt`, `Sin`, `Cos`,
+`Tan`, `Atan`, `Floor`, `Ceil`, plus bit-pattern + round-trip locks for
+all six reduced-float cast directions. `MinReduce` and `ProdReduce` on
+bf16/f16 are pinned with `#[should_panic]` tests against the
+pre-existing `emit_reduce_simple` f32-hardcoded guard
+(`crates/chelis-backend-c/src/emit.rs:3540`); widening that path to
+reduced floats is follow-on work outside the WS-Cleanup-Fixups scope.
+
 ### Fixed - Metal `emit_const` host-fill for f16/bf16 (WS-2)
 
 `crates/chelis-backend-metal/src/emit.rs::emit_const` previously emitted
