@@ -1019,8 +1019,19 @@ fn validate_ir_program(exprs: &[deep::Expr], type_env: &IrTypeEnv, errors: &mut 
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     let mut static_env = HashMap::new();
+    // Names of let-bindings whose RHS validation already emitted a
+    // diagnostic (so their derived output type is unknown). Downstream
+    // shape-sensitive calls that consume such a name emit a redundant
+    // cascade diagnostic; suppress it. See RT-205 round-2 F3.
+    let mut failed_let_names: HashSet<String> = HashSet::new();
     for expr in top_level_decl_items(exprs) {
-        validate_ir_expr(expr, type_env, &mut static_env, errors);
+        validate_ir_expr(
+            expr,
+            type_env,
+            &mut static_env,
+            &mut failed_let_names,
+            errors,
+        );
     }
 }
 
@@ -3365,13 +3376,14 @@ fn validate_ir_expr(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
     static_env: &mut HashMap<String, StaticValue>,
+    failed_let_names: &mut HashSet<String>,
     errors: &mut Vec<CheckError>,
 ) -> StaticValue {
     match expr {
         deep::Expr::List(list, _) => {
             if get_tag(list) == Some("module") {
                 for elem in list.elements.iter().skip(3) {
-                    validate_ir_expr(elem, type_env, static_env, errors);
+                    validate_ir_expr(elem, type_env, static_env, failed_let_names, errors);
                 }
                 return StaticValue::Unknown;
             }
@@ -3383,7 +3395,8 @@ fn validate_ir_expr(
                 let Some(value_expr) = kids.get(1) else {
                     return StaticValue::Unknown;
                 };
-                let value = validate_ir_expr(value_expr, type_env, static_env, errors);
+                let value =
+                    validate_ir_expr(value_expr, type_env, static_env, failed_let_names, errors);
                 static_env.insert(name.to_string(), value);
                 return StaticValue::Unknown;
             }
@@ -3392,7 +3405,13 @@ fn validate_ir_expr(
                 let mut scoped_static_env = static_env.clone();
                 bind_fn_params_unknown(list, &mut scoped_static_env);
                 for elem in &list.elements {
-                    validate_ir_expr(elem, &scoped_env, &mut scoped_static_env, errors);
+                    validate_ir_expr(
+                        elem,
+                        &scoped_env,
+                        &mut scoped_static_env,
+                        failed_let_names,
+                        errors,
+                    );
                 }
                 return StaticValue::Unknown;
             }
@@ -3414,10 +3433,18 @@ fn validate_ir_expr(
                     while index + 1 < bind_children.len() {
                         if let Some(name) = symbol_name(&bind_children[index]) {
                             let value_expr = &bind_children[index + 1];
+                            // Snapshot the error count so we can detect
+                            // whether the RHS validation itself pushed any
+                            // diagnostics. If it did, mark `name` as
+                            // failed-derivation so downstream uses get the
+                            // cascade-suppression treatment (RT-205 round-2
+                            // F3).
+                            let errs_before = errors.len();
                             let value = validate_ir_expr(
                                 value_expr,
                                 &scoped_type_env,
                                 &mut scoped_static_env,
+                                failed_let_names,
                                 errors,
                             );
                             scoped_static_env.insert(name.to_string(), value);
@@ -3425,10 +3452,30 @@ fn validate_ir_expr(
                             // whose output type is derivable from its args,
                             // register the derived type so downstream uses
                             // of `name` resolve correctly.
-                            if let Some(ty) =
-                                derive_ir_builtin_output_type(value_expr, &scoped_type_env)
-                            {
-                                scoped_type_env.insert(name.to_string(), ty);
+                            let derived =
+                                derive_ir_builtin_output_type(value_expr, &scoped_type_env);
+                            match derived {
+                                Some(ty) => {
+                                    scoped_type_env.insert(name.to_string(), ty);
+                                }
+                                None => {
+                                    // Mark as failed-derivation when the
+                                    // RHS is a recognized shape-sensitive
+                                    // app whose derivation failed AND the
+                                    // RHS validation itself emitted at
+                                    // least one diagnostic. The latter
+                                    // guard avoids suppressing legitimate
+                                    // downstream errors when the RHS just
+                                    // happens to be an unrecognized op.
+                                    if errors.len() > errs_before
+                                        && let deep::Expr::List(rhs_list, _) = value_expr
+                                        && get_tag(rhs_list) == Some("app")
+                                        && let Some(rhs_func) = ir_builtin_name(rhs_list)
+                                        && is_ir_shape_sensitive_builtin(rhs_func)
+                                    {
+                                        failed_let_names.insert(name.to_string());
+                                    }
+                                }
                             }
                         }
                         index += 2;
@@ -3439,6 +3486,7 @@ fn validate_ir_expr(
                         body,
                         &scoped_type_env,
                         &mut scoped_static_env,
+                        failed_let_names,
                         errors,
                     );
                 }
@@ -3454,7 +3502,13 @@ fn validate_ir_expr(
                     && let Some(func_name) = ir_builtin_name(list)
                     && is_ir_shape_sensitive_builtin(func_name)
                 {
-                    validate_ir_builtin_symbolic_requirements(list, func_name, type_env, errors);
+                    validate_ir_builtin_symbolic_requirements(
+                        list,
+                        func_name,
+                        type_env,
+                        failed_let_names,
+                        errors,
+                    );
                 }
             }
 
@@ -3477,7 +3531,9 @@ fn validate_ir_expr(
                 let kids = children(list);
                 return kids
                     .first()
-                    .map(|inner| validate_ir_expr(inner, type_env, static_env, errors))
+                    .map(|inner| {
+                        validate_ir_expr(inner, type_env, static_env, failed_let_names, errors)
+                    })
                     .unwrap_or(StaticValue::Unknown);
             }
             if get_tag(list) == Some("app") {
@@ -3486,7 +3542,9 @@ fn validate_ir_expr(
                 let arg_values = kids
                     .iter()
                     .skip(1)
-                    .map(|arg| validate_ir_expr(arg, type_env, static_env, errors))
+                    .map(|arg| {
+                        validate_ir_expr(arg, type_env, static_env, failed_let_names, errors)
+                    })
                     .collect::<Vec<_>>();
                 if func_name == Some("Cons") && arg_values.len() == 2 {
                     if let StaticValue::List(mut tail) = arg_values[1].clone() {
@@ -3502,21 +3560,21 @@ fn validate_ir_expr(
             }
 
             for elem in &list.elements {
-                validate_ir_expr(elem, type_env, static_env, errors);
+                validate_ir_expr(elem, type_env, static_env, failed_let_names, errors);
             }
             StaticValue::Unknown
         }
         deep::Expr::Map(map, _) => {
             for (_, value) in &map.entries {
-                validate_ir_expr(value, type_env, static_env, errors);
+                validate_ir_expr(value, type_env, static_env, failed_let_names, errors);
             }
             StaticValue::Unknown
         }
         deep::Expr::MetaExpr(meta, _) => {
             for (_, value) in &meta.entries {
-                validate_ir_expr(value, type_env, static_env, errors);
+                validate_ir_expr(value, type_env, static_env, failed_let_names, errors);
             }
-            validate_ir_expr(&meta.expr, type_env, static_env, errors)
+            validate_ir_expr(&meta.expr, type_env, static_env, failed_let_names, errors)
         }
         deep::Expr::Atom(_, _) => literal_static_value(expr),
     }
@@ -5144,10 +5202,11 @@ fn validate_ir_builtin_symbolic_requirements(
     list: &deep::List,
     func_name: &str,
     type_env: &IrTypeEnv,
+    failed_let_names: &HashSet<String>,
     errors: &mut Vec<CheckError>,
 ) {
     match func_name {
-        "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, errors),
+        "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, failed_let_names, errors),
         "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
@@ -5177,6 +5236,28 @@ fn validate_ir_builtin_symbolic_requirements(
         }
         _ => {}
     }
+}
+
+/// Return `true` if any of `list`'s tensor arguments (positional 3, 4)
+/// is a `(var <name>)` whose `name` is in `failed_let_names`. Used by
+/// `validate_conv2d_symbolic_requirements` to suppress the cascade
+/// diagnostic when a let-bound name's own derivation already emitted
+/// the owning diagnostic (RT-205 round-2 F3).
+fn conv2d_input_is_failed_let_name(list: &deep::List, failed_let_names: &HashSet<String>) -> bool {
+    if failed_let_names.is_empty() {
+        return false;
+    }
+    for arg in list.elements.iter().skip(3).take(2) {
+        let inner = peel_borrow(arg);
+        if let deep::Expr::List(arg_list, _) = inner
+            && get_tag(arg_list) == Some("var")
+            && let Some(name) = children(arg_list).first().and_then(symbol_name)
+            && failed_let_names.contains(name)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Build a `CheckError` for a validator-arm diagnostic that
@@ -5236,8 +5317,17 @@ fn validator_span_suffix(call_site: &deep::List) -> Option<String> {
 fn validate_conv2d_symbolic_requirements(
     list: &deep::List,
     type_env: &IrTypeEnv,
+    failed_let_names: &HashSet<String>,
     errors: &mut Vec<CheckError>,
 ) {
+    // RT-205 round-2 F3: if either tensor arg is a `(var <name>)`
+    // whose `name` is in the failed-derivation set, the owning
+    // diagnostic was already emitted for the let-binding's own RHS.
+    // Suppress the cascade so the user sees one error per root cause,
+    // not one per consumer.
+    if conv2d_input_is_failed_let_name(list, failed_let_names) {
+        return;
+    }
     // Args at elements[3]..[6] for the canonical 4-arg call shape:
     // (app {} (var conv2d) input kernel stride padding).
     for arg in list.elements.iter().skip(3).take(2) {

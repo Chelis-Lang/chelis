@@ -744,6 +744,77 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
     );
 }
 
+/// EXPECT (RT-205 round-2 F3): chained conv2d where the first call
+/// fails for a real reason (non-concrete input dim) produces exactly
+/// ONE diagnostic, not a duplicate cascade. The validator suppresses
+/// the second call's "concrete tensor argument metadata" error when
+/// its input is a `(var name)` whose let-binding's own RHS already
+/// pushed a diagnostic.
+#[test]
+fn red_team_205_round2_f3_cascading_errors_dedupe() {
+    let src = r#"
+def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = conv2d(&x, &k1, 1, 0)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for non-concrete input dim");
+    let conv2d_metadata_errors: Vec<_> = rep
+        .errors
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("requires concrete tensor argument metadata")
+        })
+        .collect();
+    assert_eq!(
+        conv2d_metadata_errors.len(),
+        1,
+        "expected exactly 1 metadata-cascade error, got {:?}",
+        conv2d_metadata_errors
+            .iter()
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 round-2 F3 negative parity): two independent
+/// (non-cascading) failures still produce two errors. The
+/// suppression key is "let-bound name whose RHS already failed",
+/// not "any duplicate-shaped message".
+#[test]
+fn red_team_205_round2_f3_independent_failures_not_suppressed() {
+    let src = r#"
+def f(x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8, 3, 3, 3, f32]) -> (tensor[1, 8, 6, 6, f32], tensor[1, 8, 6, 6, f32]) = {
+  y1 = conv2d(&x1, &k, 1, 0)
+  y2 = conv2d(&x2, &k, 1, 0)
+  (y1, y2)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for non-concrete input dim");
+    let conv2d_metadata_errors: Vec<_> = rep
+        .errors
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("requires concrete tensor argument metadata")
+        })
+        .collect();
+    assert_eq!(
+        conv2d_metadata_errors.len(),
+        2,
+        "expected 2 independent metadata errors (one per call), got {:?}",
+        conv2d_metadata_errors
+            .iter()
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable
