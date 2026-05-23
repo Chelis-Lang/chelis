@@ -208,9 +208,84 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = stride(&x, "two")
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on non-int stride");
     assert!(
-        rep.errors.iter().any(|e| e.message.to_lowercase().contains("stride")
-            && (e.message.contains("int") || e.message.contains("integer") || e.message.contains("type"))),
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("stride")
+                && (e.message.contains("int")
+                    || e.message.contains("integer")
+                    || e.message.contains("type"))),
         "expected a stride type error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sibling sweep: `pad` had the same `tensor_unop`-vs-parameterized antipattern
+// (registered as 1-arg, lowering reads padding from args[1] and fill from
+// args[2]). Fixed in the same PR per the issue #187 sibling-sweep policy.
+// ---------------------------------------------------------------------------
+
+/// EXPECT: `pad(&x, [[0, 1], [0, 1]], 0.0)` on a `tensor[2, 4, f32]`
+/// type-checks to `tensor[3, 5, f32]` (input dim plus lo plus hi per axis).
+#[test]
+fn issue187_sibling_pad_parameterized_typechecks() {
+    let src = r#"
+def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[0, 1], [0, 1]], 0.0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for parameterized pad, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT: bare `pad(&x)` is rejected with an arity error.
+#[test]
+fn issue187_sibling_pad_bare_is_arity_error() {
+    let src = r#"
+def p(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = pad(&x)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on bare pad(&x)");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("pad")
+                && (e.message.contains("padding") || e.message.contains("arity"))),
+        "expected a pad/arity error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT: `pad(&x, [[0, 1]], 0.0)` on a rank-2 tensor is rejected
+/// (wrong-rank padding list).
+#[test]
+fn issue187_sibling_pad_wrong_rank_is_error() {
+    let src = r#"
+def p(x: tensor[2, 4, f32]) -> tensor[3, 4, f32] = pad(&x, [[0, 1]], 0.0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on wrong-rank pad padding");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("pad")
+                && (e.message.contains("rank") || e.message.contains("padding"))),
+        "expected a pad rank/padding error, got {:?}",
         rep.errors
             .iter()
             .map(|e| e.message.clone())
