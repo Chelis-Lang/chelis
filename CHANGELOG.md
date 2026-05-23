@@ -6,6 +6,37 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.12] — 2026-05-23
+
+Cut to surface the post-`v0.7.11` `main` work — in particular two
+downstream-blocking lint fixes — to consumers (hydronnx v0.1.0 release
+is gated on this).
+
+### Fixed - `module-pascal-components` lint demoted to advisory
+
+`crates/chelis-lint/src/rules/module_pascal_components.rs` was
+demoted from a blocking error to an advisory warning. The heuristic
+("module component looks like a multi-word compound but has no
+internal capital") is genuinely useful for catching `tabularmlp`-style
+typos in user code, but its blocking posture broke every legitimate
+single-word module name not on the hardcoded `KNOWN_SINGLE_WORDS`
+allowlist (the downstream `Hydronnx` shell hit this on every emitted
+module). The advisory demotion means the rule still surfaces the
+finding in `chelis check` output but does not fail the build.
+
+### Fixed - `Hydronnx` re-allowlisted in `module-pascal-components`
+
+`crates/chelis-lint/src/rules/module_pascal_components.rs` re-adds
+`Hydronnx` to `KNOWN_SINGLE_WORDS` so the lint never even fires the
+advisory warning for it (the shell-ecosystem prefix is a known
+single-word compound name, per spec §6.3 "Shell Ecosystem"). This is
+belt-and-braces with the advisory demotion above: even if a future
+change re-promotes the rule to blocking, the prefix stays clean.
+
+### Other work since `v0.7.11`
+
+Everything previously under `[Unreleased]` shipped in this release.
+
 ### Fixed - C backend `emit_cast` corruption on bf16/f16 boundaries (WS-Cleanup-Fixups)
 
 `crates/chelis-backend-c/src/emit.rs::emit_cast` previously emitted the
