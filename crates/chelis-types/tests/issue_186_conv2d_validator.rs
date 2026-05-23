@@ -141,6 +141,50 @@ def call_conv(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[
     );
 }
 
+/// EXPECT (sibling sweep, `mean` arm): a `mean(&x, axis)` call where the
+/// reduced axis is non-concrete is still rejected. Before the fix the
+/// validator's `expr_type_expr` did not peek through `(borrow {} ...)`,
+/// so `tensor_dims_from_type_expr` returned None and the
+/// "concrete reduced axis extent" error never fired for borrowed inputs.
+#[test]
+fn issue186_surf_mean_borrowed_nonconcrete_axis_rejected() {
+    let src = r#"
+def call_mean(x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for borrowed mean with non-concrete axis");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("requires a concrete reduced axis extent")),
+        "expected mean concrete-reduced-axis error, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (sibling sweep, `layer_norm` arm): a `layer_norm(&x, &g, &b)`
+/// call whose normalized axis is non-concrete is still rejected. Same
+/// borrow-blindness root cause as the mean arm above.
+#[test]
+fn issue186_surf_layer_norm_borrowed_nonconcrete_axis_rejected() {
+    let src = r#"
+def call_ln(x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tensor[32, n, f32] =
+  layer_norm(&x, &g, &b)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep =
+        res.expect_err("expected check failure for borrowed layer_norm with non-concrete axis");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("requires a concrete normalized axis extent")),
+        "expected layer_norm concrete-normalized-axis error, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable
