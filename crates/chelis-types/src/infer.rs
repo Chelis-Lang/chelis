@@ -3460,18 +3460,30 @@ fn validate_ir_expr(
                                 }
                                 None => {
                                     // Mark as failed-derivation when the
-                                    // RHS is a recognized shape-sensitive
-                                    // app whose derivation failed AND the
-                                    // RHS validation itself emitted at
-                                    // least one diagnostic. The latter
-                                    // guard avoids suppressing legitimate
-                                    // downstream errors when the RHS just
-                                    // happens to be an unrecognized op.
+                                    // RHS validation emitted at least one
+                                    // diagnostic AND its output type could
+                                    // not be derived. The derivation
+                                    // function already recurses through
+                                    // R2-F2 passthrough wrappers (relu,
+                                    // add, etc.), so a `None` from it on
+                                    // an errored RHS means some inner
+                                    // shape-sensitive part failed: the
+                                    // outer name is "failed by
+                                    // association". This broader rule
+                                    // catches `y = relu(conv2d(bad))` in
+                                    // addition to `y = conv2d(bad)`
+                                    // (RT-205 round-3 F-A).
+                                    //
+                                    // The errs_before guard keeps the
+                                    // rule narrow: a clean RHS that
+                                    // simply isn't a recognized
+                                    // shape-sensitive call (e.g. a
+                                    // user-defined fn) does NOT cause
+                                    // suppression downstream, so
+                                    // legitimate "really wrong arg" cases
+                                    // still surface their own diagnostic.
                                     if errors.len() > errs_before
-                                        && let deep::Expr::List(rhs_list, _) = value_expr
-                                        && get_tag(rhs_list) == Some("app")
-                                        && let Some(rhs_func) = ir_builtin_name(rhs_list)
-                                        && is_ir_shape_sensitive_builtin(rhs_func)
+                                        && let deep::Expr::List(_, _) = value_expr
                                     {
                                         failed_let_names.insert(name.to_string());
                                     }

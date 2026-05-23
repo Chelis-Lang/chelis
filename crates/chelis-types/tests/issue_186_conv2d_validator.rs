@@ -868,6 +868,109 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8,
     );
 }
 
+// ─── Red Team #205 round-3 follow-up findings ────────────────────
+
+/// EXPECT (RT-205 round-3 F-A): cascade dedup must apply when the
+/// let RHS is a shape-passthrough wrapper over a failed
+/// shape-sensitive call. Before the fix, `failed_let_names` was
+/// only populated when the immediate outer call was itself
+/// shape-sensitive; `y = relu(conv2d(bad))` left `y` unmarked and
+/// the downstream `conv2d(&y, ...)` produced a redundant cascade
+/// error.
+#[test]
+fn red_team_205_round3_f_a_cascade_through_passthrough_relu() {
+    let src = r#"
+def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = relu(conv2d(&x, &k1, 1, 0))
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for non-concrete input dim");
+    let conv2d_metadata_errors: Vec<_> = rep
+        .errors
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("requires concrete tensor argument metadata")
+        })
+        .collect();
+    assert_eq!(
+        conv2d_metadata_errors.len(),
+        1,
+        "expected exactly 1 metadata-cascade error through relu wrapper, got {:?}",
+        conv2d_metadata_errors
+            .iter()
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 round-3 F-A): same dedup through a binary
+/// passthrough wrapper. `add(conv2d(bad), &b)` is the canonical
+/// conv+bias pattern; the cascade dedup must reach through it
+/// when the inner conv2d fails.
+#[test]
+fn red_team_205_round3_f_a_cascade_through_passthrough_add() {
+    let src = r#"
+def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = add(conv2d(&x, &k1, 1, 0), &b)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for non-concrete input dim");
+    let conv2d_metadata_errors: Vec<_> = rep
+        .errors
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("requires concrete tensor argument metadata")
+        })
+        .collect();
+    assert_eq!(
+        conv2d_metadata_errors.len(),
+        1,
+        "expected exactly 1 metadata-cascade error through add wrapper, got {:?}",
+        conv2d_metadata_errors
+            .iter()
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 round-3 F-A negative parity): when the
+/// relu-wrapped first conv2d is FINE but the second conv2d has an
+/// independent issue (wrong kernel rank), both diagnostics still
+/// fire. The dedup must not suppress legitimately independent
+/// errors.
+#[test]
+fn red_team_205_round3_f_a_independent_second_failure_not_suppressed() {
+    // First conv2d: clean. relu(conv2d(...)) registers y as
+    // tensor[1, 8, 6, 6, f32]. Second conv2d: kernel is rank 3
+    // (tensor[8, 3, 3, f32]) instead of rank 4, so HM + validator
+    // both surface the kernel rank-4 error. There's no f64 cascade
+    // here, so we just count any errors with "rank-4 kernel" wording.
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = relu(conv2d(&x, &k1, 1, 0))
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure on second conv2d kernel rank");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("rank-4 kernel tensor")),
+        "expected rank-4 kernel error on second call, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable
