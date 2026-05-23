@@ -5384,13 +5384,12 @@ fn validate_conv2d_symbolic_requirements(
     // symbolic batch through. All OTHER input axes (in_c, h, w) and
     // all kernel axes must remain concrete -- they appear in the
     // im2col/matmul lowering and must be statically knowable.
-    if !conv2d_input_dims_concrete_modulo_batch(
-        list.elements.get(3).map(|e| peel_borrow(e)),
-        type_env,
-    ) || !expr_tensor_type_is_concrete(
-        list.elements.get(4).expect("arity already implicit"),
-        type_env,
-    ) {
+    if !conv2d_input_dims_concrete_modulo_batch(list.elements.get(3).map(peel_borrow), type_env)
+        || !expr_tensor_type_is_concrete(
+            list.elements.get(4).expect("arity already implicit"),
+            type_env,
+        )
+    {
         errors.push(validator_error(
             CheckErrorKind::DimensionMismatch,
             list,
