@@ -5536,15 +5536,14 @@ fn validate_conv2d_symbolic_requirements(
             return;
         };
         if val <= 0 {
-            // The hint text quotes `in_extent + 2 * padding`; this is
-            // a fresh computation (not the `padded` variable from the
-            // formula). On overflow we fall back to a saturating
-            // formatter so the diagnostic still produces a useful
-            // message rather than panicking again here.
-            let padded_hint = in_extent
-                .checked_add(padding.saturating_mul(2))
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "<overflow>".to_string());
+            // Reaching this branch implies `conv2d_output_extent`
+            // returned `Some(val)`, which in turn means
+            // `padding.checked_mul(2)` and
+            // `in_extent.checked_add(2 * padding)` both succeeded
+            // upstream. Plain arithmetic is safe here; the
+            // saturating-mul + checked-add fallback that earlier
+            // code carried is unreachable. (RT-205 round-3 F-D.)
+            let padded_hint = in_extent + 2 * padding;
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
                 list,
