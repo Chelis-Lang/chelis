@@ -1096,6 +1096,29 @@ fn copy_cost_human(file: &Path, summary: &chelis_ir::analysis::CopyCostSummary) 
     out
 }
 
+/// Exit-code contract (intentional, RT-205 F7):
+///
+/// `chelis check` always exits 0 when it produced a parseable
+/// fitness report, EVEN WHEN the JSON `errors` array is non-empty.
+/// The report is the product; the JSON shape is the machine-facing
+/// contract that consumer tooling (editor LSP fallback, CI scorers,
+/// the in-repo `defsig_dimension_enforcement` / `check_in_reef_context`
+/// suites, downstream graders) reads via stdout. A non-zero exit on
+/// "type errors found" would force every JSON consumer to special-case
+/// the success-with-errors path, and would break the existing
+/// `assert!.success()` pattern used across the CLI test suite (see
+/// crates/chelis-cli/tests/check_in_reef_context.rs:138,
+/// crates/chelis-cli/tests/defsig_dimension_enforcement.rs:45,79).
+///
+/// Non-zero exit IS used when the check could not be RUN to completion
+/// (style-gate violation, parser/reef failure, IO error). That is the
+/// orthogonal "tooling broken" failure, not "the program has type
+/// errors".
+///
+/// If a consumer wants to fail on errors, they should parse the JSON
+/// and inspect `report.errors[]`. Do not "fix" this by adding a
+/// non-zero exit gate; the directory variant below has its own
+/// `had_error` only for per-file processing failures, not type errors.
 fn cmd_check(
     target: &Path,
     show_inferred: bool,
