@@ -971,6 +971,173 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
     );
 }
 
+/// EXPECT (RT-205 round-3 F-B): `max_elem` is the canonical IR name
+/// per spec/05 §2.1, not `maximum`. The binary passthrough allowlist
+/// previously contained `maximum`/`minimum` which do not exist in
+/// the IR vocabulary, so `y = max_elem(conv2d(...), &b)` cascade was
+/// silently broken.
+#[test]
+fn red_team_205_round3_f_b_max_elem_passthrough() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = max_elem(conv2d(&x, &k1, 1, 0), &b)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for max_elem-wrapped chain, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT (RT-205 round-3 F-B): `min_elem` is the canonical IR name
+/// per spec/05 §3.4, not `minimum`. Same shape as the max_elem fix.
+#[test]
+fn red_team_205_round3_f_b_min_elem_passthrough() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = min_elem(conv2d(&x, &k1, 1, 0), &b)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for min_elem-wrapped chain, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT (RT-205 round-3 F-B): one positive probe per
+/// newly-added or audit-confirmed UNARY allowlist entry, locking the
+/// contract against future allowlist drift. Each test wraps a clean
+/// conv2d call with the unary op and chains into a second conv2d;
+/// the chain must type-check cleanly. The `softmax(...)` case takes
+/// a tensor + axis, but its output shape matches the input shape so
+/// the unary passthrough path handles it.
+#[test]
+fn red_team_205_round3_f_b_unary_passthrough_audit() {
+    let unary_ops = [
+        "relu", "tanh", "sigmoid", "gelu", "silu", "exp", "log", "neg", "recip", "sqrt", "abs",
+        "sin", "cos", "tan", "atan", "floor", "ceil",
+    ];
+    for op in &unary_ops {
+        let src = format!(
+            r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {{
+  y = {op}(conv2d(&x, &k1, 1, 0))
+  conv2d(&y, &k2, 1, 0)
+}}
+"#
+        );
+        let deep = surf_to_deep(&src);
+        let res = check_ir_program(&deep);
+        if let Err(rep) = res {
+            for err in &rep.errors {
+                eprintln!("op={op} unexpected error: {:?}: {}", err.kind, err.message);
+            }
+            panic!(
+                "unary op `{op}` passthrough failed: got {} error(s)",
+                rep.errors.len()
+            );
+        }
+    }
+}
+
+/// EXPECT (RT-205 round-3 F-B): one positive probe per
+/// newly-added or audit-confirmed BINARY allowlist entry. Each test
+/// wraps a clean conv2d with the binary op + same-shape bias and
+/// chains into a second conv2d; the chain must type-check cleanly.
+///
+/// `cmplt`, `gt`, `gte`, `lte`, `eq`, `neq` and `and`/`or` return
+/// tensor[D, bool], so the downstream call cannot be a conv2d (which
+/// requires f-prec). For those we only check that the let-binder's
+/// own validation produces a clean type (no second conv2d).
+#[test]
+fn red_team_205_round3_f_b_binary_passthrough_audit_arith() {
+    // Arithmetic binaries preserve precision and shape; chain into a
+    // second conv2d to exercise the downstream registration.
+    let arith_ops = ["add", "sub", "mul", "div", "max_elem", "min_elem"];
+    for op in &arith_ops {
+        let src = format!(
+            r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {{
+  y = {op}(conv2d(&x, &k1, 1, 0), &b)
+  conv2d(&y, &k2, 1, 0)
+}}
+"#
+        );
+        let deep = surf_to_deep(&src);
+        let res = check_ir_program(&deep);
+        if let Err(rep) = res {
+            for err in &rep.errors {
+                eprintln!("op={op} unexpected error: {:?}: {}", err.kind, err.message);
+            }
+            panic!(
+                "binary arith op `{op}` passthrough failed: got {} error(s)",
+                rep.errors.len()
+            );
+        }
+    }
+}
+
+/// EXPECT (RT-205 round-3 F-B): the cascade-dedup path triggers
+/// when a let-bound name's RHS is a comparison/bool binary whose
+/// own validation failed. The passthrough allowlist contains
+/// `cmplt`, `lt`, `gt`, `gte`, `lte`, `eq`, `neq`, `and`, `or`, so
+/// when one of these chains over a failed inner shape-sensitive
+/// call, the cascade-dedup helper sees through them. Probe each by
+/// wrapping a non-concrete-dim conv2d and checking that exactly ONE
+/// metadata diagnostic fires (not two).
+#[test]
+fn red_team_205_round3_f_b_binary_compare_cascade_dedup() {
+    let compare_ops = ["cmplt", "lt", "gt", "gte", "lte", "eq", "neq"];
+    for op in &compare_ops {
+        // x has non-concrete h, so conv2d(&x, ...) fails. y = op(conv2d(...), &b);
+        // downstream conv2d(&y, ...) should NOT produce its own cascade error.
+        let src = format!(
+            r#"
+def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {{
+  y = {op}(conv2d(&x, &k1, 1, 0), &b)
+  conv2d(&y, &k2, 1, 0)
+}}
+"#
+        );
+        let deep = surf_to_deep(&src);
+        let res = check_ir_program(&deep);
+        let rep = res.expect_err("expected check failure for non-concrete input");
+        let metadata_errors: Vec<_> = rep
+            .errors
+            .iter()
+            .filter(|e| {
+                e.message
+                    .contains("requires concrete tensor argument metadata")
+            })
+            .collect();
+        assert_eq!(
+            metadata_errors.len(),
+            1,
+            "op `{op}` cascade-dedup failed: expected 1 metadata error, got {:?}",
+            metadata_errors
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable

@@ -5564,23 +5564,42 @@ fn derive_ir_builtin_output_type(expr: &deep::Expr, type_env: &IrTypeEnv) -> Opt
     match func_name {
         "conv2d" => derive_conv2d_output_type(list, type_env),
         // Shape-preserving unary point-wise: output type == input type.
-        // Limited to ops whose IR semantics guarantee
-        // `output_shape == input_shape`. Reductions (sum, mean,
-        // max_reduce, argmax_reduce, prod_reduce, min_reduce,
-        // argmin_reduce) and movement ops (reshape, permute, gather,
-        // pad, shrink, stride, expand) are EXCLUDED -- they change
-        // rank or shape, and need per-op derivation.
+        // Each entry below is cross-verified against the lowerer's
+        // accepted name set in `crates/chelis-ir/src/lower.rs` (the
+        // canonical IR vocabulary) and spec/05-risc-primitives.md
+        // §2.2 / §3.3 (RT-205 round-3 F-B audit).
+        //
+        // Reductions (sum, mean, max_reduce, argmax_reduce,
+        // prod_reduce, min_reduce, argmin_reduce) and movement ops
+        // (reshape, permute, gather, pad, shrink, stride, expand) are
+        // EXCLUDED: they change rank or shape and need per-op
+        // derivation.
+        //
+        // softmax takes a (tensor, axis) tuple but its output shape
+        // equals the input tensor's shape, so it fits the unary
+        // passthrough path (positional [3] is the tensor).
         "relu" | "tanh" | "sigmoid" | "gelu" | "silu" | "exp" | "log" | "neg" | "recip"
-        | "sqrt" | "abs" | "sin" | "cos" | "softmax" => {
-            derive_unary_shape_passthrough(list, type_env)
-        }
+        | "sqrt" | "abs" | "sin" | "cos" | "tan" | "atan" | "floor" | "ceil" | "not"
+        | "softmax" => derive_unary_shape_passthrough(list, type_env),
         // Shape-preserving binary point-wise: output type == first
         // operand's type. Broadcasting cases are caught by HM
         // elsewhere; here we fall through to None if the first
         // operand's type is not derivable and try the second.
-        "add" | "sub" | "mul" | "div" | "maximum" | "minimum" | "cmplt" | "lt" | "gt" | "eq" => {
-            derive_binary_shape_passthrough(list, type_env)
-        }
+        //
+        // RT-205 round-3 F-B: `maximum` and `minimum` were the wrong
+        // names. The canonical IR names per spec/05 §2.1 and §3.4 are
+        // `max_elem` (Tier 1) and `min_elem` (Tier 2). The lowerer
+        // accepts `max_elem`/`min_elem` (lower.rs:1329-1330);
+        // `maximum`/`minimum` do not appear anywhere in the IR
+        // vocabulary, so the old allowlist never matched.
+        //
+        // `lt` is an alias for `cmplt` accepted at lowerer.rs:3913
+        // (kept). `gte`, `lte`, `neq` are Tier 2 comparison ops
+        // (spec/05 §3.2) accepted by the lowerer (lower.rs:1349-1352)
+        // and added here so passthrough recognizes them. `and`, `or`
+        // are bool binaries (lower.rs:1353-1354).
+        "add" | "sub" | "mul" | "div" | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte"
+        | "lte" | "eq" | "neq" | "and" | "or" => derive_binary_shape_passthrough(list, type_env),
         _ => None,
     }
 }
