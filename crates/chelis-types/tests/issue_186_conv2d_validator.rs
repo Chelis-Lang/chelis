@@ -363,6 +363,58 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     }
 }
 
+/// EXPECT (RT-205 F5): chained conv2d via let-binding type-checks
+/// cleanly. The validator's per-let-scope type env now registers
+/// the conv2d call's derivable output type so downstream
+/// shape-sensitive calls that consume the let-bound name can
+/// resolve to a concrete tensor type.
+#[test]
+fn red_team_205_f5_chained_conv2d_via_let_typechecks() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = conv2d(&x, &k1, 1, 0)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for chained conv2d, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT (RT-205 F5 negative parity): a chained conv2d whose second
+/// call uses ill-formed args (oversize kernel for the first conv2d's
+/// output) is still rejected, with the F4 output-extent diagnostic.
+/// This pins that the let-bind type registration does not silently
+/// blind the validator: the second call's args now resolve, so the
+/// F4 formula evaluates against them.
+#[test]
+fn red_team_205_f5_chained_conv2d_second_call_ill_formed_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 9, 9, f32]) -> tensor[1, 16, 1, 1, f32] = {
+  y = conv2d(&x, &k1, 1, 0)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for ill-formed second conv2d");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("output height") || e.message.contains("output width")),
+        "expected output-extent error from second conv2d, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable

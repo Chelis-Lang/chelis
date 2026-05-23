@@ -3399,6 +3399,13 @@ fn validate_ir_expr(
             if get_tag(list) == Some("let") {
                 let kids = children(list);
                 let mut scoped_static_env = static_env.clone();
+                // Clone the type env on let-scope entry so each binding's
+                // derivable IR-shape-sensitive type (e.g. conv2d's output
+                // dims) can extend the env visible to the let body. Without
+                // this the validator cannot resolve `(var y)` for a let-
+                // bound `y = conv2d(...)` and silently rejects the next
+                // shape-sensitive call that consumes `y` (RT-205 F5).
+                let mut scoped_type_env = type_env.clone();
                 if let Some(deep::Expr::List(bind_list, _)) = kids.first()
                     && get_tag(bind_list) == Some("bind")
                 {
@@ -3406,19 +3413,34 @@ fn validate_ir_expr(
                     let mut index = 0;
                     while index + 1 < bind_children.len() {
                         if let Some(name) = symbol_name(&bind_children[index]) {
+                            let value_expr = &bind_children[index + 1];
                             let value = validate_ir_expr(
-                                &bind_children[index + 1],
-                                type_env,
+                                value_expr,
+                                &scoped_type_env,
                                 &mut scoped_static_env,
                                 errors,
                             );
                             scoped_static_env.insert(name.to_string(), value);
+                            // If the RHS is a shape-sensitive IR builtin
+                            // whose output type is derivable from its args,
+                            // register the derived type so downstream uses
+                            // of `name` resolve correctly.
+                            if let Some(ty) =
+                                derive_ir_builtin_output_type(value_expr, &scoped_type_env)
+                            {
+                                scoped_type_env.insert(name.to_string(), ty);
+                            }
                         }
                         index += 2;
                     }
                 }
                 if let Some(body) = kids.get(1) {
-                    return validate_ir_expr(body, type_env, &mut scoped_static_env, errors);
+                    return validate_ir_expr(
+                        body,
+                        &scoped_type_env,
+                        &mut scoped_static_env,
+                        errors,
+                    );
                 }
                 return StaticValue::Unknown;
             }
@@ -5331,6 +5353,139 @@ fn conv2d_output_extent(input: i64, kernel: i64, stride: i64, padding: i64) -> i
     let padded = input + 2 * padding;
     let numerator = padded - kernel;
     numerator.div_euclid(stride) + 1
+}
+
+/// If `expr` is a recognizable shape-sensitive IR builtin call whose
+/// output tensor type can be derived from its argument types and
+/// literal scalar args, return that type as a Deep `(t-tensor ...)`
+/// expression. Used to extend the validator's per-let-scope type env
+/// so downstream uses of a let-bound name resolve to a concrete
+/// tensor type (RT-205 F5).
+///
+/// Returns `None` when the call shape is unrecognized, the args are
+/// non-concrete, or the derived output would be ill-formed (in which
+/// case the validator's own arm will report the diagnostic).
+fn derive_ir_builtin_output_type(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("app") {
+        return None;
+    }
+    let func_name = ir_builtin_name(list)?;
+    match func_name {
+        "conv2d" => derive_conv2d_output_type(list, type_env),
+        _ => None,
+    }
+}
+
+/// Derive a conv2d call's output tensor type (rank-4 `[N, F, outH, outW]`
+/// with the input's precision) from its argument types and literal
+/// stride/padding values. Returns `None` if any arg is non-concrete,
+/// stride/padding are not int literals, ranks are wrong, or the
+/// output dims would be non-positive.
+fn derive_conv2d_output_type(list: &deep::List, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let input_ty = list
+        .elements
+        .get(3)
+        .and_then(|e| arg_tensor_type_expr(e, type_env))?;
+    let kernel_ty = list
+        .elements
+        .get(4)
+        .and_then(|e| arg_tensor_type_expr(e, type_env))?;
+    let input_dims = tensor_dims_from_type_expr(&input_ty)?;
+    let kernel_dims = tensor_dims_from_type_expr(&kernel_ty)?;
+    if input_dims.len() != 4 || kernel_dims.len() != 4 {
+        return None;
+    }
+    let stride = extract_int_literal(list.elements.get(5)?)?;
+    let padding = extract_int_literal(list.elements.get(6)?)?;
+    if stride <= 0 || padding < 0 {
+        return None;
+    }
+    let n = match input_dims[0] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let f = match kernel_dims[0] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let in_h = match input_dims[2] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let in_w = match input_dims[3] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let k_h = match kernel_dims[2] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let k_w = match kernel_dims[3] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let out_h = conv2d_output_extent(in_h, k_h, stride, padding);
+    let out_w = conv2d_output_extent(in_w, k_w, stride, padding);
+    if out_h <= 0 || out_w <= 0 {
+        return None;
+    }
+    // Build `(t-tensor {} (d-lit {} n) (d-lit {} f) (d-lit {} out_h)
+    // (d-lit {} out_w) <precision-expr>)` from the input's precision.
+    // Input dims is len 4 so the precision is the input tensor's last
+    // child; recover it from the input tensor's Expr structure.
+    let prec_expr = tensor_precision_expr(&input_ty)?;
+    Some(build_tensor_type_expr(&[n, f, out_h, out_w], prec_expr))
+}
+
+/// Extract the precision sub-expression (last child) of a
+/// `(t-tensor {} dim1 dim2 ... precision)` expression. Returns the
+/// raw Deep `Expr` so it can be re-used unchanged when synthesizing
+/// a derived tensor type.
+fn tensor_precision_expr(ty: &deep::Expr) -> Option<deep::Expr> {
+    let deep::Expr::List(list, _) = ty else {
+        return None;
+    };
+    if get_tag(list) == Some("t-ref") {
+        return children(list).first().and_then(tensor_precision_expr);
+    }
+    if get_tag(list) != Some("t-tensor") {
+        return None;
+    }
+    let kids = children(list);
+    kids.last().cloned()
+}
+
+/// Build `(t-tensor {} (d-lit {} dim0) (d-lit {} dim1) ... prec)` for
+/// downstream type-env consumption. Spans are zeroed because the
+/// derived type is synthetic; downstream lookups care only about the
+/// structural shape.
+fn build_tensor_type_expr(dims: &[i64], prec: deep::Expr) -> deep::Expr {
+    let zero = zero_span();
+    let empty_meta = || deep::MetaMap { entries: vec![] };
+    let make_d_lit = |v: i64| {
+        deep::Expr::List(
+            deep::List {
+                elements: vec![
+                    deep::Expr::Atom(deep::Atom::Symbol("d-lit".to_string()), zero),
+                    deep::Expr::Map(empty_meta(), zero),
+                    deep::Expr::Atom(deep::Atom::Int(v), zero),
+                ],
+            },
+            zero,
+        )
+    };
+    let mut elements = vec![
+        deep::Expr::Atom(deep::Atom::Symbol("t-tensor".to_string()), zero),
+        deep::Expr::Map(empty_meta(), zero),
+    ];
+    for &d in dims {
+        elements.push(make_d_lit(d));
+    }
+    elements.push(prec);
+    deep::Expr::List(deep::List { elements }, zero)
 }
 
 /// Look up positional arg `idx` of a `conv2d` call, attempt to
