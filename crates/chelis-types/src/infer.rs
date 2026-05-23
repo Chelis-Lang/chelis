@@ -5357,16 +5357,33 @@ fn validate_conv2d_symbolic_requirements(
         DeepDimKind::Lit(v) => v,
         DeepDimKind::NonConcrete => return,
     };
-    let out_h = conv2d_output_extent(in_h, k_h, stride, padding);
-    let out_w = conv2d_output_extent(in_w, k_w, stride, padding);
-    for (axis, name, val, in_extent, k_extent) in [
-        ("H", "height", out_h, in_h, k_h),
-        ("W", "width", out_w, in_w, k_w),
-    ]
-    .iter()
-    .map(|(short, long, val, inp, kr)| (*short, *long, *val, *inp, *kr))
+    for (axis, name, in_extent, k_extent) in [("H", "height", in_h, k_h), ("W", "width", in_w, k_w)]
+        .iter()
+        .map(|(short, long, inp, kr)| (*short, *long, *inp, *kr))
     {
+        let Some(val) = conv2d_output_extent(in_extent, k_extent, stride, padding) else {
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                format!(
+                    "IR builtin `conv2d` output {name} (axis {axis}) cannot be computed: input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding} overflows i64 in the canonical formula"
+                ),
+                vec![
+                    "Use input/kernel/stride/padding values whose intermediate `input + 2 * padding - kernel` and final `+ 1` fit in a signed 64-bit integer".to_string(),
+                ],
+            ));
+            return;
+        };
         if val <= 0 {
+            // The hint text quotes `in_extent + 2 * padding`; this is
+            // a fresh computation (not the `padded` variable from the
+            // formula). On overflow we fall back to a saturating
+            // formatter so the diagnostic still produces a useful
+            // message rather than panicking again here.
+            let padded_hint = in_extent
+                .checked_add(padding.saturating_mul(2))
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "<overflow>".to_string());
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
                 list,
@@ -5374,8 +5391,7 @@ fn validate_conv2d_symbolic_requirements(
                     "IR builtin `conv2d` output {name} (axis {axis}) evaluates to {val} for input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding}; output dims must be positive"
                 ),
                 vec![format!(
-                    "Increase padding, decrease stride, or shrink the kernel so the padded input ({}) is at least the kernel size ({k_extent})",
-                    in_extent + 2 * padding
+                    "Increase padding, decrease stride, or shrink the kernel so the padded input ({padded_hint}) is at least the kernel size ({k_extent})"
                 )],
             ));
             return;
@@ -5394,10 +5410,17 @@ fn validate_conv2d_symbolic_requirements(
 /// negative output value rather than truncating toward zero.
 /// `stride` is required to be positive by the caller, which is what
 /// makes `div_euclid` equivalent to mathematical floor here.
-fn conv2d_output_extent(input: i64, kernel: i64, stride: i64, padding: i64) -> i64 {
-    let padded = input + 2 * padding;
-    let numerator = padded - kernel;
-    numerator.div_euclid(stride) + 1
+///
+/// Returns `None` on integer overflow in any intermediate (RT-205
+/// round-2 F1). Callers must treat `None` as "input parameters
+/// outside the representable range" and emit a diagnostic; previously
+/// a huge `padding` like `i64::MAX/2` triggered `attempt to multiply
+/// with overflow` and panicked `chelis check`.
+fn conv2d_output_extent(input: i64, kernel: i64, stride: i64, padding: i64) -> Option<i64> {
+    let two_p = padding.checked_mul(2)?;
+    let padded = input.checked_add(two_p)?;
+    let numerator = padded.checked_sub(kernel)?;
+    numerator.checked_div_euclid(stride)?.checked_add(1)
 }
 
 /// If `expr` is a recognizable shape-sensitive IR builtin call whose
@@ -5472,8 +5495,12 @@ fn derive_conv2d_output_type(list: &deep::List, type_env: &IrTypeEnv) -> Option<
         DeepDimKind::Lit(v) => v,
         DeepDimKind::NonConcrete => return None,
     };
-    let out_h = conv2d_output_extent(in_h, k_h, stride, padding);
-    let out_w = conv2d_output_extent(in_w, k_w, stride, padding);
+    // `conv2d_output_extent` returns None on integer overflow (RT-205
+    // round-2 F1); in that case there's no valid output tensor type
+    // to register, so the caller falls back to no extension and the
+    // validator's own arm will emit the overflow diagnostic.
+    let out_h = conv2d_output_extent(in_h, k_h, stride, padding)?;
+    let out_w = conv2d_output_extent(in_w, k_w, stride, padding)?;
     if out_h <= 0 || out_w <= 0 {
         return None;
     }
@@ -10452,8 +10479,13 @@ fn compute_concrete_conv2d_spatial(
         Dim::Lit(v) => v,
         _ => return None,
     };
-    let out_h = conv2d_output_extent(in_h, k_h, stride, padding);
-    let out_w = conv2d_output_extent(in_w, k_w, stride, padding);
+    // `conv2d_output_extent` returns None on i64 overflow (RT-205
+    // round-2 F1); fall back to fresh dim-vars in that case so the
+    // validator's arm reports the overflow with a precise diagnostic
+    // rather than us computing here with saturating math and
+    // producing a confusing dim-lit-vs-dim-lit mismatch.
+    let out_h = conv2d_output_extent(in_h, k_h, stride, padding)?;
+    let out_w = conv2d_output_extent(in_w, k_w, stride, padding)?;
     if out_h <= 0 || out_w <= 0 {
         // Let the validator's arm emit the diagnostic; here we just
         // fall back to fresh dim-vars so the inference pass produces

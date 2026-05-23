@@ -547,6 +547,102 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 4,
     );
 }
 
+// ─── Red Team #205 round-2 follow-up findings ────────────────────
+
+/// EXPECT (RT-205 round-2 F1): conv2d with an i64-near-max padding
+/// value MUST NOT panic chelis check. Before the fix
+/// `conv2d_output_extent` did `input + 2 * padding` unchecked and
+/// triggered `attempt to multiply with overflow` at runtime. The
+/// fix routes through `checked_mul`/`checked_add`/`checked_sub`
+/// and emits a DimensionMismatch instead.
+///
+/// Driven through the direct-Deep entry so we can pass an i64
+/// literal without tripping Surf's int32 default-literal range
+/// guard (which would mask the actual validator overflow path).
+/// The lit's declared `:type` is left as int32 because
+/// `extract_int_literal` reads the atom value (i64-wide) regardless
+/// of the declared type tag and the HM signature expects int32
+/// stride/padding; using int32 here keeps HM clean so the
+/// validator's overflow check is the only diagnostic that fires.
+#[test]
+fn red_team_205_round2_f1_padding_near_i64_max_does_not_panic() {
+    // padding = 4611686018427387905 ~ i64::MAX / 2; padding * 2
+    // overflows i64.
+    let src = "(def {} x (lit {type: (t-tensor {} (d-lit {} 1) (d-lit {} 3) (d-lit {} 8) (d-lit {} 8) (t-prim {} f32))} 0)) \
+               (def {} k (lit {type: (t-tensor {} (d-lit {} 8) (d-lit {} 3) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0)) \
+               (def {} y \
+                 (app {} (var {} conv2d) (var {} x) (var {} k) \
+                   (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 4611686018427387905)))";
+    let deep = parse_deep(src).expect("deep parse");
+    // Must NOT panic. Result is allowed to be Err with the overflow
+    // diagnostic.
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected overflow rejection");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("overflows i64")),
+        "expected overflow diagnostic, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 round-2 F1): the `input + 2 * padding` add path
+/// also has a checked guard. With a representable `2 * padding`,
+/// `input + 2 * padding` overflows when `input` itself is at the
+/// i64 ceiling.
+///
+/// stride/padding lit type tag is kept int32 because
+/// `extract_int_literal` reads the atom's i64 value regardless of
+/// tag; the input dim is a `d-lit` (dimension-level int) so the
+/// out-of-range-for-int32 value-literal validator does not fire on
+/// it.
+#[test]
+fn red_team_205_round2_f1_input_plus_padding_overflow_does_not_panic() {
+    // input H = i64::MAX (carried as a d-lit dim, not a value literal);
+    // padding = 1. 2 * padding = 2 fits. input + 2 overflows.
+    let huge_in = i64::MAX;
+    let src = format!(
+        "(def {{}} x (lit {{type: (t-tensor {{}} (d-lit {{}} 1) (d-lit {{}} 3) (d-lit {{}} {huge_in}) (d-lit {{}} {huge_in}) (t-prim {{}} f32))}} 0)) \
+         (def {{}} k (lit {{type: (t-tensor {{}} (d-lit {{}} 8) (d-lit {{}} 3) (d-lit {{}} 3) (d-lit {{}} 3) (t-prim {{}} f32))}} 0)) \
+         (def {{}} y \
+           (app {{}} (var {{}} conv2d) (var {{}} x) (var {{}} k) \
+             (lit {{type: (t-prim {{}} int32)}} 1) (lit {{type: (t-prim {{}} int32)}} 1)))"
+    );
+    let deep = parse_deep(&src).expect("deep parse");
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected overflow rejection");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("overflows i64")),
+        "expected overflow diagnostic, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 round-2 F1 positive parity): canonical small
+/// shapes still produce a clean check. Overflow guards must not
+/// regress the happy path.
+#[test]
+fn red_team_205_round2_f1_canonical_shape_still_accepted() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check post-R2-F1, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable
