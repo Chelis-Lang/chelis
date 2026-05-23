@@ -14,7 +14,7 @@
 //!     pass does not stamp inferred app types back into Deep metadata, and
 //!     the annotation pass that does (`annotate_ir_program_with_context`)
 //!     runs AFTER `validate_ir_program`. So the output-dims check is
-//!     structurally always-false for any Surf source — concrete or not.
+//!     structurally always-false for any Surf source, concrete or not.
 //!   - The `expr_tensor_type_is_concrete` helper resolves args via
 //!     `expr_type_expr`, which does not peek through `(borrow {} ...)`.
 //!     Surf programs that use `&x` / `&k` (the idiomatic read-only form,
@@ -155,9 +155,9 @@ def call_mean(x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for borrowed mean with non-concrete axis");
     assert!(
-        rep.errors
-            .iter()
-            .any(|e| e.message.contains("requires a concrete reduced axis extent")),
+        rep.errors.iter().any(|e| e
+            .message
+            .contains("requires a concrete reduced axis extent")),
         "expected mean concrete-reduced-axis error, got {:?}",
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
@@ -177,9 +177,9 @@ def call_ln(x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tens
     let rep =
         res.expect_err("expected check failure for borrowed layer_norm with non-concrete axis");
     assert!(
-        rep.errors
-            .iter()
-            .any(|e| e.message.contains("requires a concrete normalized axis extent")),
+        rep.errors.iter().any(|e| e
+            .message
+            .contains("requires a concrete normalized axis extent")),
         "expected layer_norm concrete-normalized-axis error, got {:?}",
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
@@ -201,11 +201,11 @@ fn issue186_deep_conv2d_nonliteral_stride_rejected() {
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check failure for non-literal stride");
     assert!(
-        rep.errors.iter().any(|e| e
-            .message
-            .contains("requires a literal integer stride")
-            || e.message
-                .contains("requires concrete tensor argument metadata")),
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("requires a literal integer stride")
+                || e.message
+                    .contains("requires concrete tensor argument metadata")),
         "expected literal-int-stride error, got {:?}",
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
