@@ -1143,8 +1143,8 @@ fn compute_adjoints(
                 "blas matmul operand precisions must match (verifier-checked)",
             );
             let operand_prim = a_ty.precision;
-            let adjoint_accumulator = RiscOp::default_matmul_accumulator(operand_prim)
-                .unwrap_or(operand_prim);
+            let adjoint_accumulator =
+                RiscOp::default_matmul_accumulator(operand_prim).unwrap_or(operand_prim);
 
             // Build the last-two-axes transpose permutation. For
             // rank-2 inputs this is [1, 0]; for rank-N (N >= 2) it is
@@ -1167,12 +1167,8 @@ fn compute_adjoints(
                 dims: bt_dims,
                 precision: operand_prim,
             };
-            let b_transposed = dag.add_node(
-                RiscOp::Permute { axes: bt_axes },
-                vec![b_id],
-                bt_ty,
-                None,
-            );
+            let b_transposed =
+                dag.add_node(RiscOp::Permute { axes: bt_axes }, vec![b_id], bt_ty, None);
             // dA shape = A's shape.
             let da_ty = a_ty.clone();
             let da_op = RiscOp::matmul_with_accumulator(
@@ -1200,12 +1196,8 @@ fn compute_adjoints(
                 dims: at_dims,
                 precision: operand_prim,
             };
-            let a_transposed = dag.add_node(
-                RiscOp::Permute { axes: at_axes },
-                vec![a_id],
-                at_ty,
-                None,
-            );
+            let a_transposed =
+                dag.add_node(RiscOp::Permute { axes: at_axes }, vec![a_id], at_ty, None);
             let db_ty = b_ty.clone();
             let db_op = RiscOp::matmul_with_accumulator(
                 batch_dims.clone(),
