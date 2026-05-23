@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-const BUNDLED_VERSION: &str = "0.3.0";
+const BUNDLED_VERSION: &str = "0.4.0";
 
 fn main() {
     let manifest_dir = PathBuf::from(

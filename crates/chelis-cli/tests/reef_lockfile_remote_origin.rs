@@ -525,7 +525,7 @@ fn oracle_install_from_monorepo_leaves_field_none() {
             "install",
             "--from-monorepo",
             monorepo_root().to_str().unwrap(),
-            "chelis-std=0.3.0",
+            "chelis-std=0.4.0",
         ])
         .assert()
         .success();

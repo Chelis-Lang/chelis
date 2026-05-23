@@ -363,7 +363,7 @@ No deviations in Chelis-authored Python.
 Each component is a single PascalCase word or a Title-case compound.
 
 Examples: `Nautilus.LinAlg`, `Coral.Frame`, `Shoals.Pricing`,
-`Std.Tensor`, `Std.Loss.CrossEntropy`, `Std.Nn.RmsNorm`.
+`Std.Tensor`, `Std.Io.Csv`, `Std.Tokenizer.Bpe`.
 
 ### 6.2 Compound styling: Title-case, not ALL-CAPS
 

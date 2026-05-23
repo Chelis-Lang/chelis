@@ -127,7 +127,7 @@ fn expect_any_error(json: &Value, label: &str) {
 // 2. Newly-generalized stdlib op shapes accept every admissible dtype.
 // =================================================================
 
-/// Std.Nn.Linear.forward shape: matmul + add + expand. Accepts every
+/// Linear.forward shape (matmul + add + expand): accepts every
 /// FLOAT dtype (integer matmul is rejected per spec sec 5.7.2).
 /// Note: the test replicas use single-letter dim names (a, b, c)
 /// because the desugar treats only single-letter and explicit-
@@ -167,7 +167,7 @@ def call(x: &tensor[2, 3, {dtype}], w: &tensor[3, 4, {dtype}], bias_in: &tensor[
 // copy that previously lived here was removed in the e2e parsimony
 // pass.
 
-/// Std.Nn.Embedding.forward shape: gather. The table precision is a
+/// Embedding.forward shape (gather): the table precision is a
 /// tvar; the ids dtype is fixed at int64. Accepts every active dtype
 /// for the table element precision.
 #[test]
@@ -187,7 +187,7 @@ def call(ids: &tensor[1, 2, int64], table: &tensor[4, 3, {dtype}]) -> tensor[1, 
     }
 }
 
-/// Std.Nn.Attention.scaled_dot_product_attention shape: matmul +
+/// Scaled-dot-product-attention shape (matmul +
 /// softmax + permute. Accepts every FLOAT dtype (integer matmul +
 /// integer softmax both reject per spec sec 5.7.2 + sec 5.4).
 #[test]
@@ -218,7 +218,7 @@ def call(q: &tensor[4, 4, {dtype}], k: &tensor[4, 4, {dtype}], v: &tensor[4, 4, 
     }
 }
 
-/// Std.Loss.Metrics.accuracy shape: sort returns int64 indices for any
+/// Classification-accuracy shape (sort returns int64 indices for any
 /// input precision, so accuracy admits every active arithmetic dtype
 /// as the logits precision.
 #[test]
@@ -241,7 +241,7 @@ def call(xs: &tensor[1, 3, {dtype}]) -> int64 = row_argmax(xs)
     }
 }
 
-/// Std.Optim.tensor_add / tensor_sub / tensor_mul / tensor_div shape:
+/// Optimizer tensor_add / tensor_sub / tensor_mul / tensor_div shape:
 /// pure delegation to the underlying primitive. Each accepts every
 /// active arithmetic dtype. The four variants share an identical
 /// shape, so they are exercised by one table-driven test over the
@@ -414,10 +414,10 @@ def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> unit ! { Test } 
 
 /// f32-pinned stdlib ops reject non-f32 input at the sig.
 ///
-/// * Std.Nn.Silu.forward is f32-pinned per spec sec 5.4 transcendental
+/// * Silu.forward is f32-pinned per spec sec 5.4 transcendental
 ///   row (uses exp).
-/// * Std.Loss.CrossEntropy.loss is f32-pinned (uses softmax + log).
-/// * Std.Optim.AdamW step is f32-pinned (Config carries f32 fields).
+/// * CrossEntropy.loss is f32-pinned (uses softmax + log).
+/// * AdamW step is f32-pinned (Config carries f32 fields).
 ///
 /// All three share the identical "f32-pinned sig rejects non-f32 at
 /// the call site" shape, so they are exercised by one table-driven

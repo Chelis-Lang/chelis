@@ -2873,19 +2873,20 @@ fn activation_silu_f32(x: f32) -> f32 {
     x * activation_sigmoid_f32(x)
 }
 
-/// `gelu(x)` via the tanh approximation, matching `Std.Nn.Gelu`'s
-/// `gelu_scalar` (`packages/chelis-std/src/nn/gelu.ch`):
+/// `gelu(x)` via the tanh approximation:
 ///
 ///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
 ///
-/// We use the tanh-approx (not the erf-exact form) because the
-/// C-backend host helper composes the same way and the Std layer is
-/// the canonical reference. If/when a `Erf` RISC op is added the
-/// exact form can replace this and both lanes must move together.
+/// Matches the C-backend host helper `chelis_host_gelu_f32`
+/// (host_emit.rs) and the IR lowering `lower_gelu` (tier2.rs). We use
+/// the tanh-approx (not the erf-exact form) because all three lanes
+/// must share an identical constant pool. If/when an `Erf` RISC op
+/// lands, the exact form can replace this and all three lanes must
+/// move together.
 fn activation_gelu_f32(x: f32) -> f32 {
-    // The literal is the f64 value that `Std.Nn.Gelu` and the C-backend
-    // helper (`0.7978845608028654f` in host_emit.rs) both encode; the
-    // explicit cast keeps the f32 round-trip identical to those lanes.
+    // The literal is the f64 value that the C-backend helper
+    // (`0.7978845608028654f` in host_emit.rs) also encodes; the
+    // explicit cast keeps the f32 round-trip identical to that lane.
     // `clippy::excessive_precision` complains about the trailing digits
     // being beyond f32 representability — that's intentional (we want
     // the same source-level constant the other lanes use).
@@ -5647,7 +5648,8 @@ y = matmul(a, b)
     // Pins the closure of the second host-runtime gap from the N2 fix:
     // `chelis test` / `chelis eval` erroring with `unsupported builtin
     // 'expand'` / `'softmax'` when those primitives appear in a test's
-    // dependency graph (Std.Nn.Linear, Std.Nn.Attention, Std.Loss.CrossEntropy).
+    // dependency graph (e.g., linear / attention / cross-entropy
+    // patterns that compose multiple shape-changing ops).
 
     #[test]
     fn host_runtime_expand_inserts_new_leading_axis() {

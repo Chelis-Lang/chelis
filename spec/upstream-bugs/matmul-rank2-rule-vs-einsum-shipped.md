@@ -72,10 +72,12 @@ shape.
    and retains the per-batch helper loop only as a fallback for
    broadcasted leading axes or non-uniform leading strides.
 
-3. **It used to block honest expression of `Std.Nn.Attention`.** The
-   `scaled_dot_product_attention` reference shipped in
+3. **It used to block honest expression of attention as a downstream
+   shell.** The `scaled_dot_product_attention` reference shipped in
    `chelis_phase3_plan.md:871` notes it ships as concrete rank-2.
    M3 removes the type-system barrier for heads-as-dim formulations.
+   (The attention module itself has since moved out of chelis-std to
+   School per chelis-std 0.4.0.)
 
 ## Two scope-level questions
 

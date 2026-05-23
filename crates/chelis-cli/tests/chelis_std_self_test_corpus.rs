@@ -1,8 +1,8 @@
 //! Phase 3t — chelis-std self-test corpus integration test.
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
-//! exercise chelis-std's own modules (Std.Tensor, Std.Loss, Std.NN, Std.Init,
-//! Std.Io, Std.Optim, Std.Schedule, Std.Time, Std.Tokenizer, Std.Decimal). It
+//! exercise chelis-std's own modules (Std.Tensor, Std.Init, Std.Io,
+//! Std.Time, Std.Tokenizer, Std.Decimal, Std.Test). It
 //! is run via `chelis test packages/chelis-std/tests/`, but until now nothing
 //! in the default `cargo test --workspace` gate exercised it — a regression
 //! that broke a chelis-std test would only surface when somebody manually
@@ -12,7 +12,7 @@
 //! chelis-std into a tempdir, points CHELIS_REEF_HOME at a tempdir reef home
 //! for isolation from any developer-local reef state, and runs
 //! `chelis test tests/` from inside the staged package. The summary line
-//! `N passed, 0 failed` is parsed and N is asserted >= 160 so we leave
+//! `N passed, 0 failed` is parsed and N is asserted >= 140 so we leave
 //! headroom for new self-tests but catch a silent regression that drops the
 //! corpus below its current floor (205 as of this commit, after adding
 //! 9 host-runtime tests under tests/runtime/ for `expand` / `softmax` and
@@ -28,7 +28,7 @@ use tempfile::tempdir;
 /// Floor on the chelis-std self-test count. Current corpus is 205 passing
 /// tests across 34 files; the floor is set 45 below current to leave headroom
 /// for additions while still failing if a regression silently drops tests.
-const MIN_PASSED: u32 = 160;
+const MIN_PASSED: u32 = 140;
 
 fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

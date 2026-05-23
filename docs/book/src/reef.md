@@ -150,7 +150,7 @@ and rewritten on the next `chelis reef build`.
 ## Import Syntax
 
 ```chelis-surf-fragment
-import Std.Nn.Linear(..)
+import Std.Io.Csv(read_csv)
 import Nautilus.LinAlg(matmul_wrap, transpose)
 ```
 

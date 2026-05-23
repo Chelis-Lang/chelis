@@ -191,7 +191,7 @@ LaTeX document ingestion, Octant Phase 4).
 
 | Package | Kind | Depends On | Status | Contents |
 |---|---|---|---|---|
-| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache, GELU/SiLU/RMSNorm, Conv1d/2d, attention), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss` (including KL, BCEWithLogits, accuracy, perplexity), `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Schedule`, `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests) |
+| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active (0.4.0) | `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests), `Std.Tensor` (construction + reduction helpers). The `Std.Nn` / `Std.Loss` / `Std.Optim` / `Std.Schedule` ML surface migrated to the [School shell](https://github.com/Chelis-Lang/school) as of chelis-std 0.4.0. |
 | `nautilus` | Shell | `chelis-std` | Active (`v0.5.0` released) | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy competitor. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
 | `coral` | Shell | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas competitor. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
 | `shoals` | Shell | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
@@ -401,8 +401,8 @@ that lower into primitive compositions during compilation.
 
 Phase `3h` added the practical tensor surface real model code expects: `einsum`,
 `concat` / `split`, `gather` / `scatter`, `where`, `cumsum`, `sort`, `diagonal` /
-`trace`, and `clamp`. `Std.Nn.Embedding` remains the explicit public shell/library
-surface over `gather`.
+`trace`, and `clamp`. Embedding-style lookups compose directly from `gather`;
+downstream shells (e.g. School's `Nn.Embedding`) wrap that pattern.
 
 Core transforms remain first-class:
 
@@ -494,11 +494,12 @@ They ship as Shells (Chelis packages) in the `Std` namespace.
 
 Expected contents:
 
-- common initializers (Xavier, Kaiming, normal, uniform)
-- standard neural-network building blocks such as `Std.Nn.Embedding`
-- standard optimizers beyond SGD (Adam, AdamW, LAMB — update rules composed from
-  primitives)
-- learning rate schedulers
+- common initializers (Xavier, Kaiming, normal, uniform) in `Std.Init`
+- standard neural-network building blocks (Linear, Embedding,
+  LayerNorm, attention, activations) — ship via the [School
+  shell](https://github.com/Chelis-Lang/school) as of chelis-std 0.4.0
+- standard optimizers beyond SGD (Adam, AdamW, LAMB) — ship via School
+- learning rate schedulers — ship via School
 - data loading utilities
 - tokenizer utilities
 - metric computation (accuracy, F1, AUC)

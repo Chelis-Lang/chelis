@@ -268,8 +268,9 @@ handles BLAS before DCE/codegen. The scoped recognizer matches the internal
   itself lowers further). Spec §4.6 documents the embedding lowering
   via gather.
 - `spec/design/chelis_phase3_plan.md` Phase 3h scope adds gather /
-  scatter as core primitives and ships `Std.Nn.Embedding` as the
-  named user-facing surface.
+  scatter as core primitives. Embedding-style lookups compose
+  directly from `gather`; downstream shells (e.g. School's
+  `Nn.Embedding`) wrap that pattern.
 - **Roadmap status conflict reduced for the scoped sparse path:** first-class
   sparse IR, tensor-lane Surf `gather` lowering, AD, C codegen, HIP codegen,
   and the internal dense §3.5 recognizer now exist. Replace-scatter remains

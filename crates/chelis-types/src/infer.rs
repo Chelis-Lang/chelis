@@ -514,8 +514,8 @@ pub fn build_compiled_library_context(
     // Install the declared-`defsig` parameter type map so the `def`
     // arm of `annotate_expr_with_scope` stamps borrow-correct types
     // onto each library def's `(params ...)` node -- the library
-    // compile path is exactly where chelis-std's separate-`sig` defs
-    // (`Std.Loss.CrossEntropy.loss` etc.) are annotated.
+    // compile path is exactly where downstream defs that declare types
+    // via separate `sig` declarations get annotated.
     let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()

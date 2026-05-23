@@ -6,6 +6,27 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed - chelis-std 0.4.0: ML modules migrated to School
+
+The `Std.Nn` / `Std.Loss` / `Std.Optim` / `Std.Schedule` surface
+shipped with `packages/chelis-std/` is removed and `chelis-std` is
+bumped to `0.4.0`. School (https://github.com/Chelis-Lang/school)
+took these modules over on 2026-05-14 under the `School.*` prefix and
+has shipped a tensor-native refactor (school#45, PRs #47–#51, merged
+2026-05-22) that makes every migrated module at least as good as the
+chelis-std copy — see PR description for the full comparison matrix.
+Deleted source: `packages/chelis-std/src/nn/`,
+`packages/chelis-std/src/loss/`, `packages/chelis-std/src/optim.ch`,
+`packages/chelis-std/src/schedule.ch`. Deleted test corpus:
+`packages/chelis-std/tests/{nn,loss}/`,
+`packages/chelis-std/tests/{optim,schedule}.ch`,
+`packages/chelis-std/tests/runtime/attention_eval_cross.ch`. Deleted
+`crates/chelis-cli/tests/std_{nn_activation_norm,nn_conv_attention,nn_build,loss_init,build_path_runtime_gaps}_acceptance.rs`
+and `downstream_chelis_std_axis_oracle.rs`, plus the Schedule / Optim
+/ Generate-importing tests in `std_package_acceptance.rs`.
+`Std.Init.*` stays in chelis-std per the original migration agreement;
+`io`, `tensor`, `decimal`, `test`, `time`, `tokenizer` are unchanged.
+
 ### Fixed - C backend `emit_cast` corruption on bf16/f16 boundaries (WS-Cleanup-Fixups)
 
 `crates/chelis-backend-c/src/emit.rs::emit_cast` previously emitted the

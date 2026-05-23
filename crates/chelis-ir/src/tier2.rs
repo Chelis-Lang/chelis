@@ -154,9 +154,10 @@ pub fn lower_silu(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option
 ///
 ///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
 ///
-/// Matches `Std.Nn.Gelu.gelu_scalar` and the host-runtime helper
-/// `activation_gelu_f32`. If/when an `Erf` RISC op lands, the
-/// erf-exact form can replace this — both lanes must move together.
+/// Matches the host-runtime helper `activation_gelu_f32` and the
+/// C-backend `chelis_host_gelu_f32`. If/when an `Erf` RISC op lands,
+/// the erf-exact form can replace this — all three lanes must move
+/// together.
 pub fn lower_gelu(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option<&str>) -> NodeId {
     // c = sqrt(2/pi)
     let c = add_synth(
