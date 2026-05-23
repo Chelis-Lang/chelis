@@ -114,7 +114,7 @@ fn tensor_eq_close(label: &str, got: &chelis_ir::eval::TensorValue, want: &[f64]
 /// chosen B is `[1, 1, 1]` for both rows.
 #[test]
 fn issue_199_blas_matmul_grad_wrt_lhs_is_finite_and_correct() {
-    let (dag, a, b, out) = build_blas_matmul_scalar_loss(2, 3, 4);
+    let (dag, a, _b, out) = build_blas_matmul_scalar_loss(2, 3, 4);
     let result = grad_dag_checked(&dag, out, &[a]).expect(
         "BlasMatmul gradient must succeed after the fix (closes Chelis-Lang/chelis#199 Part 1)",
     );
@@ -147,7 +147,7 @@ fn issue_199_blas_matmul_grad_wrt_lhs_is_finite_and_correct() {
 
 #[test]
 fn issue_199_blas_matmul_grad_wrt_rhs_is_finite_and_correct() {
-    let (dag, a, b, out) = build_blas_matmul_scalar_loss(2, 3, 4);
+    let (dag, _a, b, out) = build_blas_matmul_scalar_loss(2, 3, 4);
     let result = grad_dag_checked(&dag, out, &[b])
         .expect("BlasMatmul gradient must succeed for the rhs operand");
     let grad_b = result
@@ -187,7 +187,7 @@ fn issue_199_blas_matmul_grad_wrt_rhs_is_finite_and_correct() {
 /// standard float tolerance.
 #[test]
 fn issue_199_blas_matmul_grad_matches_finite_difference() {
-    let (dag, a, b, out) = build_blas_matmul_scalar_loss(2, 3, 2);
+    let (dag, a, _b, out) = build_blas_matmul_scalar_loss(2, 3, 2);
     let result =
         grad_dag_checked(&dag, out, &[a]).expect("BlasMatmul gradient must succeed for wrt=a");
     let grad_a = result.grad_nodes[&a];

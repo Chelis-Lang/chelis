@@ -1115,7 +1115,114 @@ fn compute_adjoints(
             // un-checked entry point.
             None
         }
-        RiscOp::BlasMatmul { .. } => None,
+        RiscOp::BlasMatmul {
+            batch_dims,
+            m,
+            n,
+            k,
+            ..
+        } => {
+            // Forward: Y = A @ B with A: [..., m, k], B: [..., k, n],
+            // Y: [..., m, n]. Standard reverse-mode adjoint
+            // (well-known matrix-multiply gradient):
+            //   dA = g @ B^T   (shape [..., m, k])
+            //   dB = A^T @ g   (shape [..., k, n])
+            //
+            // We express both via `BlasMatmul` nodes whose accumulator
+            // follows the spec §5.7.1 default for the operand
+            // precision. The transposes use `Permute` over the last
+            // two axes so the rule supports batched matmuls
+            // (`batch_dims.len() >= 0`) without special-casing rank-2
+            // vs rank-N.
+            let a_id = node.inputs[0];
+            let b_id = node.inputs[1];
+            let a_ty = forward.get(a_id).unwrap().output_type.clone();
+            let b_ty = forward.get(b_id).unwrap().output_type.clone();
+            debug_assert!(
+                a_ty.precision == b_ty.precision,
+                "blas matmul operand precisions must match (verifier-checked)",
+            );
+            let operand_prim = a_ty.precision;
+            let adjoint_accumulator = RiscOp::default_matmul_accumulator(operand_prim)
+                .unwrap_or(operand_prim);
+
+            // Build the last-two-axes transpose permutation. For
+            // rank-2 inputs this is [1, 0]; for rank-N (N >= 2) it is
+            // [0, 1, ..., N-3, N-1, N-2].
+            let transpose_last_two = |rank: usize| -> Vec<usize> {
+                assert!(rank >= 2, "blas matmul operand must be rank >= 2");
+                let mut axes: Vec<usize> = (0..rank).collect();
+                axes.swap(rank - 2, rank - 1);
+                axes
+            };
+
+            // --- dA = g @ B^T ---
+            //
+            // B has type [..., k, n] -> B^T has type [..., n, k].
+            let bt_axes = transpose_last_two(b_ty.dims.len());
+            let mut bt_dims = b_ty.dims.clone();
+            let bt_rank = bt_dims.len();
+            bt_dims.swap(bt_rank - 2, bt_rank - 1);
+            let bt_ty = TensorType {
+                dims: bt_dims,
+                precision: operand_prim,
+            };
+            let b_transposed = dag.add_node(
+                RiscOp::Permute { axes: bt_axes },
+                vec![b_id],
+                bt_ty,
+                None,
+            );
+            // dA shape = A's shape.
+            let da_ty = a_ty.clone();
+            let da_op = RiscOp::matmul_with_accumulator(
+                batch_dims.clone(),
+                m.clone(),
+                k.clone(),
+                n.clone(),
+                operand_prim,
+                adjoint_accumulator,
+            )
+            .expect(
+                "adjoint matmul accumulator must be valid for the operand precision \
+                 (spec/04-type-system.md §5.7.1 default for non-integer operand)",
+            );
+            let da = dag.add_node(da_op, vec![g, b_transposed], da_ty, None);
+
+            // --- dB = A^T @ g ---
+            //
+            // A has type [..., m, k] -> A^T has type [..., k, m].
+            let at_axes = transpose_last_two(a_ty.dims.len());
+            let mut at_dims = a_ty.dims.clone();
+            let at_rank = at_dims.len();
+            at_dims.swap(at_rank - 2, at_rank - 1);
+            let at_ty = TensorType {
+                dims: at_dims,
+                precision: operand_prim,
+            };
+            let a_transposed = dag.add_node(
+                RiscOp::Permute { axes: at_axes },
+                vec![a_id],
+                at_ty,
+                None,
+            );
+            let db_ty = b_ty.clone();
+            let db_op = RiscOp::matmul_with_accumulator(
+                batch_dims.clone(),
+                k.clone(),
+                n.clone(),
+                m.clone(),
+                operand_prim,
+                adjoint_accumulator,
+            )
+            .expect(
+                "adjoint matmul accumulator must be valid for the operand precision \
+                 (spec/04-type-system.md §5.7.1 default for non-integer operand)",
+            );
+            let db = dag.add_node(db_op, vec![a_transposed, g], db_ty, None);
+
+            Some(vec![(a_id, da), (b_id, db)])
+        }
     }
 }
 
