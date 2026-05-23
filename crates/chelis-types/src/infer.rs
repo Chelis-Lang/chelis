@@ -5166,10 +5166,12 @@ fn validate_ir_builtin_symbolic_requirements(
 ///
 /// The replacement derives output concreteness from the arguments
 /// (input tensor dims, kernel tensor dims, stride/padding literal
-/// values), all of which are knowable at validation time. If the args
-/// are concrete and the stride/padding are integer literals, the
-/// output is concrete by construction (`floor((in + 2p - k) / s) + 1`
-/// per spatial axis).
+/// values), all of which are knowable at validation time. After
+/// extracting the args this function evaluates the output spatial-
+/// dim formula `floor((in + 2 * padding - kernel) / stride) + 1`
+/// per axis (spec/05-risc-primitives.md §471-483) and rejects calls
+/// whose evaluated output dim is non-positive. Also enforces rank-4
+/// input/kernel and positive-stride / non-negative-padding.
 fn validate_conv2d_symbolic_requirements(
     list: &deep::List,
     type_env: &IrTypeEnv,
@@ -5177,8 +5179,7 @@ fn validate_conv2d_symbolic_requirements(
 ) {
     // Args at elements[3]..[6] for the canonical 4-arg call shape:
     // (app {} (var conv2d) input kernel stride padding).
-    let tensor_args = list.elements.iter().skip(3).take(2);
-    for arg in tensor_args {
+    for arg in list.elements.iter().skip(3).take(2) {
         if !expr_tensor_type_is_concrete(arg, type_env) {
             errors.push(CheckError::new(
                 CheckErrorKind::Other,
@@ -5221,9 +5222,115 @@ fn validate_conv2d_symbolic_requirements(
         ));
         return;
     }
-    // stride and padding are now known good (positive / non-negative);
-    // F4 (output-dim formula evaluation) lands in a follow-up commit.
-    let _ = (stride, padding);
+    // Resolve input + kernel tensor dims so we can evaluate the
+    // output spatial-dim formula. expr_tensor_type_is_concrete above
+    // already established concreteness; the lookups below should both
+    // succeed, but bail gracefully on the unexpected case rather than
+    // unwrap-panicking.
+    let Some(input_dims) = list
+        .elements
+        .get(3)
+        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
+        .and_then(|ty| tensor_dims_from_type_expr(&ty))
+    else {
+        return;
+    };
+    let Some(kernel_dims) = list
+        .elements
+        .get(4)
+        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
+        .and_then(|ty| tensor_dims_from_type_expr(&ty))
+    else {
+        return;
+    };
+    // Rank guard: the canonical conv2d shape is [N, C, H, W] x [F, C, kH, kW].
+    // The HM signature check (check_conv2d_signature, infer.rs:9999+) also
+    // catches rank errors, but those fire as a separate inference pass;
+    // emitting the same diagnostic at validator time makes the failure
+    // surface earlier and uniformly with the other conv2d gate errors.
+    if input_dims.len() != 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "IR builtin `conv2d` requires a rank-4 input tensor, got rank {}",
+                input_dims.len()
+            ),
+            vec!["Pass a [N, C, H, W] tensor as the first argument".to_string()],
+        ));
+        return;
+    }
+    if kernel_dims.len() != 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "IR builtin `conv2d` requires a rank-4 kernel tensor, got rank {}",
+                kernel_dims.len()
+            ),
+            vec!["Pass a [F, C, kH, kW] tensor as the second argument".to_string()],
+        ));
+        return;
+    }
+    // Output spatial-dim formula per spec/05-risc-primitives.md §471-483:
+    //   out = floor((in + 2 * padding - kernel) / stride) + 1
+    // for both H (axis 2) and W (axis 3). If either evaluates to <= 0
+    // the call is ill-formed; without this guard the back-end emits a
+    // less-actionable error after codegen begins.
+    let in_h = match input_dims[2] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return,
+    };
+    let in_w = match input_dims[3] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return,
+    };
+    let k_h = match kernel_dims[2] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return,
+    };
+    let k_w = match kernel_dims[3] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return,
+    };
+    let out_h = conv2d_output_extent(in_h, k_h, stride, padding);
+    let out_w = conv2d_output_extent(in_w, k_w, stride, padding);
+    for (axis, name, val, in_extent, k_extent) in [
+        ("H", "height", out_h, in_h, k_h),
+        ("W", "width", out_w, in_w, k_w),
+    ]
+    .iter()
+    .map(|(short, long, val, inp, kr)| (*short, *long, *val, *inp, *kr))
+    {
+        if val <= 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "IR builtin `conv2d` output {name} (axis {axis}) evaluates to {val} for input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding}; output dims must be positive"
+                ),
+                vec![format!(
+                    "Increase padding, decrease stride, or shrink the kernel so the padded input ({}) is at least the kernel size ({k_extent})",
+                    in_extent + 2 * padding
+                )],
+            ));
+            return;
+        }
+    }
+}
+
+/// Compute the output spatial extent of a conv2d axis using the
+/// canonical formula `floor((in + 2 * padding - kernel) / stride) + 1`
+/// (spec/05-risc-primitives.md §471-483). Returns a signed value so
+/// the validator can detect ill-formed configurations (output <= 0)
+/// before they reach the back-end.
+///
+/// Uses `div_euclid` for floor division so a negative numerator (the
+/// kernel does not fit the padded input) produces an informative
+/// negative output value rather than truncating toward zero.
+/// `stride` is required to be positive by the caller, which is what
+/// makes `div_euclid` equivalent to mathematical floor here.
+fn conv2d_output_extent(input: i64, kernel: i64, stride: i64, padding: i64) -> i64 {
+    let padded = input + 2 * padding;
+    let numerator = padded - kernel;
+    numerator.div_euclid(stride) + 1
 }
 
 /// Look up positional arg `idx` of a `conv2d` call, attempt to

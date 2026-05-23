@@ -275,6 +275,94 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     }
 }
 
+/// EXPECT (RT-205 F4): conv2d with a kernel larger than the padded
+/// input is rejected at check time. Input `[1,3,2,2]` + kernel
+/// `[8,3,5,5]` + stride 1 + padding 0 evaluates output H/W to
+/// `floor((2 + 0 - 5) / 1) + 1 = -2`. Previously slipped through
+/// the validator and only failed during back-end lowering.
+#[test]
+fn red_team_205_f4_oversize_kernel_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, 2, 2, f32], k: tensor[8, 3, 5, 5, f32]) -> tensor[1, 8, 1, 1, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for oversize kernel");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("output height") || e.message.contains("output width")),
+        "expected output-extent error, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 F4): conv2d output dim that evaluates to exactly
+/// zero is also rejected. Input H=3, kernel=3, stride=2, padding=0:
+/// `floor((3 - 3) / 2) + 1 = 1`. So we use kernel=5 on input H=4 to
+/// get `floor(-1/2)+1 = -1+1 = 0`. The validator must reject 0 as
+/// well as negative.
+#[test]
+fn red_team_205_f4_zero_output_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, 4, 8, f32], k: tensor[8, 3, 5, 3, f32]) -> tensor[1, 8, 1, 6, f32] =
+  conv2d(&x, &k, 2, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for zero-extent output");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("evaluates to 0")),
+        "expected zero-output error, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 F4): conv2d with non-rank-4 input tensor is
+/// rejected at check time. Pinned by the validator's rank guard so
+/// the error fires before the back-end lowering pass.
+#[test]
+fn red_team_205_f4_rank3_input_rejected() {
+    let src = r#"
+def f(x: tensor[3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for rank-3 input");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("rank-4 input tensor")),
+        "expected rank-4-input error, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 F4 positive parity): the canonical conv2d
+/// `floor((8 + 0 - 3) / 1) + 1 = 6` shape continues to be accepted.
+#[test]
+fn red_team_205_f4_canonical_output_accepted() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for canonical conv2d shape, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable
