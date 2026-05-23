@@ -472,6 +472,81 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     );
 }
 
+/// EXPECT (RT-205 F8): a Surf conv2d that declares a WRONG output
+/// shape is rejected. Before the fix the HM signature pass
+/// generated fresh dim-vars for output H/W and unified them with
+/// any positive declared dim, so an obviously wrong
+/// `tensor[1, 8, 100, 100]` for the canonical 8x8 input + 3x3
+/// kernel (real output 6x6) silently type-checked. With the fix the
+/// inferred output shape is concrete `[1, 8, 6, 6]`, so the def's
+/// body-vs-declared-sig check (TypeMismatch) catches the mismatch.
+#[test]
+fn red_team_205_f8_wrong_declared_output_dims_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 100, 100, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for wrong declared output dims");
+    // Pin the EXACT computed-vs-declared shape so a future regression
+    // that re-introduces the fresh-dvar placeholder is caught here.
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("Lit(6), Lit(6)")
+                && e.message.contains("Lit(100), Lit(100)")),
+        "expected message naming inferred [..6, 6..] vs declared [..100, 100..], got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 F8 positive parity): when the declared output
+/// dims match the computed `floor((in + 2p - k) / s) + 1` shape
+/// the call still type-checks cleanly.
+#[test]
+fn red_team_205_f8_correct_declared_output_accepted() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for canonical conv2d, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT (RT-205 F8): an output dim that disagrees by exactly 1
+/// (off-by-one) is still caught. Real output for input H=8, kernel
+/// 3, stride 2, padding 0 is `floor((8-3)/2) + 1 = 3`; declaring
+/// `tensor[1, 8, 4, 4]` must be rejected.
+#[test]
+fn red_team_205_f8_off_by_one_output_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 4, 4, f32] =
+  conv2d(&x, &k, 2, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for off-by-one declared output");
+    // Computed output is 3x3; declared is 4x4. Pin both values in
+    // the error message so off-by-one regressions surface here.
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("Lit(3), Lit(3)") && e.message.contains("Lit(4), Lit(4)")),
+        "expected message naming inferred 3x3 vs declared 4x4, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable

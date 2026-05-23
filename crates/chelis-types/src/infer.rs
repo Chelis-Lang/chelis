@@ -7549,7 +7549,14 @@ fn infer_app(
                             check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
                     }
                     "conv2d" => {
-                        result_ty = check_conv2d_signature(&arg_tys, &result_ty, vg, subst, errors);
+                        result_ty = check_conv2d_signature(
+                            &kids[1..],
+                            &arg_tys,
+                            &result_ty,
+                            vg,
+                            subst,
+                            errors,
+                        );
                     }
                     _ => {}
                 }
@@ -10409,7 +10416,56 @@ fn check_layer_norm_signature(
     subst.apply(&canonical)
 }
 
+/// If `arg_exprs[2]` and `arg_exprs[3]` are integer literals and the
+/// input/kernel spatial dims (axes 2, 3) resolve to concrete
+/// `Dim::Lit` values after substitution, return the computed output
+/// spatial extents `(out_h, out_w)`. Returns `None` if any of the
+/// inputs are non-literal or non-concrete; the caller falls back to
+/// fresh dim-vars in that case.
+///
+/// `extract_int_literal` already handles the canonical
+/// `(lit {type: ...} N)` Deep shape used for stride/padding literals.
+fn compute_concrete_conv2d_spatial(
+    arg_exprs: &[deep::Expr],
+    input_dims: &[Dim],
+    kernel_dims: &[Dim],
+    subst: &Subst,
+) -> Option<(i64, i64)> {
+    let stride = arg_exprs.get(2).and_then(extract_int_literal)?;
+    let padding = arg_exprs.get(3).and_then(extract_int_literal)?;
+    if stride <= 0 || padding < 0 {
+        return None;
+    }
+    let in_h = match subst.apply_dim(input_dims.get(2)?) {
+        Dim::Lit(v) => v,
+        _ => return None,
+    };
+    let in_w = match subst.apply_dim(input_dims.get(3)?) {
+        Dim::Lit(v) => v,
+        _ => return None,
+    };
+    let k_h = match subst.apply_dim(kernel_dims.get(2)?) {
+        Dim::Lit(v) => v,
+        _ => return None,
+    };
+    let k_w = match subst.apply_dim(kernel_dims.get(3)?) {
+        Dim::Lit(v) => v,
+        _ => return None,
+    };
+    let out_h = conv2d_output_extent(in_h, k_h, stride, padding);
+    let out_w = conv2d_output_extent(in_w, k_w, stride, padding);
+    if out_h <= 0 || out_w <= 0 {
+        // Let the validator's arm emit the diagnostic; here we just
+        // fall back to fresh dim-vars so the inference pass produces
+        // a useful (declared-vs-fresh) mismatch instead of failing
+        // here with a confusing dim-lit-vs-dim-lit unify error.
+        return None;
+    }
+    Some((out_h, out_w))
+}
+
 fn check_conv2d_signature(
+    arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
     vg: &mut VarGen,
@@ -10487,12 +10543,28 @@ fn check_conv2d_signature(
         return Type::Error;
     }
 
+    // RT-205 F8: when stride/padding are integer literals and the
+    // input/kernel spatial dims are concrete Dim::Lit values, compute
+    // the output spatial dims via the canonical formula
+    // (`floor((in + 2 * padding - kernel) / stride) + 1`) and place
+    // concrete `Dim::Lit` values into the output template. Without
+    // this the placeholders are fresh dim-vars that unify with any
+    // positive declared spatial dim, so an explicit but WRONG
+    // declared output (e.g. `tensor[1, 8, 100, 100]` for the
+    // canonical 8x8 input + 3x3 kernel case whose real output is
+    // 6x6) silently type-checks.
+    let computed_spatial =
+        compute_concrete_conv2d_spatial(arg_exprs, &input_dims, &kernel_dims, subst);
+    let (out_h_dim, out_w_dim) = match computed_spatial {
+        Some((h, w)) => (Dim::Lit(h), Dim::Lit(w)),
+        None => (Dim::Var(vg.fresh_dvar()), Dim::Var(vg.fresh_dvar())),
+    };
     let output_template = Type::Tensor(
         vec![
             subst.apply_dim(&input_dims[0]),
             subst.apply_dim(&kernel_dims[0]),
-            Dim::Var(vg.fresh_dvar()),
-            Dim::Var(vg.fresh_dvar()),
+            out_h_dim,
+            out_w_dim,
         ],
         input_prec.clone(),
     );
