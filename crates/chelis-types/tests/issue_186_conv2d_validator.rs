@@ -815,6 +815,59 @@ def f(x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8, 3
     );
 }
 
+/// EXPECT (RT-205 round-2 F4): a rank-5 input tensor produces
+/// exactly ONE rank-4 diagnostic, not two. Before the fix the HM
+/// signature check and the validator's own rank guard both emitted
+/// their own version of "rank-4 input ... got rank 5", confusing
+/// the user. The validator now suppresses its rank diagnostic when
+/// the HM-side has already emitted the equivalent.
+#[test]
+fn red_team_205_round2_f4_rank5_input_single_diagnostic() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, 2, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for rank-5 input");
+    let rank4_errors: Vec<_> = rep
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("rank-4 input tensor"))
+        .collect();
+    assert_eq!(
+        rank4_errors.len(),
+        1,
+        "expected exactly 1 rank-4 input diagnostic, got {:?}",
+        rank4_errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 round-2 F4): same dedup for rank-5 kernel. The
+/// HM-side and validator both check kernel rank; only one diagnostic
+/// should reach the user.
+#[test]
+fn red_team_205_round2_f4_rank5_kernel_single_diagnostic() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for rank-5 kernel");
+    let rank4_errors: Vec<_> = rep
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("rank-4 kernel tensor"))
+        .collect();
+    assert_eq!(
+        rank4_errors.len(),
+        1,
+        "expected exactly 1 rank-4 kernel diagnostic, got {:?}",
+        rank4_errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable

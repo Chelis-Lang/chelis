@@ -5399,31 +5399,41 @@ fn validate_conv2d_symbolic_requirements(
     };
     // Rank guard: the canonical conv2d shape is [N, C, H, W] x [F, C, kH, kW].
     // The HM signature check (check_conv2d_signature, infer.rs:9999+) also
-    // catches rank errors, but those fire as a separate inference pass;
-    // emitting the same diagnostic at validator time makes the failure
-    // surface earlier and uniformly with the other conv2d gate errors.
+    // catches rank errors and may have already emitted its diagnostic via
+    // `check_conv2d_signature`. Dedupe so the user sees ONE rank error per
+    // role (input/kernel), not two (RT-205 round-2 F4).
     if input_dims.len() != 4 {
-        errors.push(validator_error(
-            CheckErrorKind::DimensionMismatch,
-            list,
-            format!(
-                "IR builtin `conv2d` requires a rank-4 input tensor, got rank {}",
-                input_dims.len()
-            ),
-            vec!["Pass a [N, C, H, W] tensor as the first argument".to_string()],
-        ));
+        let rank = input_dims.len();
+        let hm_emitted = errors.iter().any(|e| {
+            e.message.contains(&format!(
+                "conv2d expects rank-4 input tensor, got rank {rank}"
+            ))
+        });
+        if !hm_emitted {
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                format!("IR builtin `conv2d` requires a rank-4 input tensor, got rank {rank}"),
+                vec!["Pass a [N, C, H, W] tensor as the first argument".to_string()],
+            ));
+        }
         return;
     }
     if kernel_dims.len() != 4 {
-        errors.push(validator_error(
-            CheckErrorKind::DimensionMismatch,
-            list,
-            format!(
-                "IR builtin `conv2d` requires a rank-4 kernel tensor, got rank {}",
-                kernel_dims.len()
-            ),
-            vec!["Pass a [F, C, kH, kW] tensor as the second argument".to_string()],
-        ));
+        let rank = kernel_dims.len();
+        let hm_emitted = errors.iter().any(|e| {
+            e.message.contains(&format!(
+                "conv2d expects rank-4 kernel tensor, got rank {rank}"
+            ))
+        });
+        if !hm_emitted {
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                format!("IR builtin `conv2d` requires a rank-4 kernel tensor, got rank {rank}"),
+                vec!["Pass a [F, C, kH, kW] tensor as the second argument".to_string()],
+            ));
+        }
         return;
     }
     // Output spatial-dim formula per spec/05-risc-primitives.md §471-483:
