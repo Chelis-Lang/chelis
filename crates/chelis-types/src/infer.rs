@@ -5149,8 +5149,9 @@ fn validate_ir_builtin_symbolic_requirements(
     match func_name {
         "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, errors),
         "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
-            errors.push(CheckError::new(
-                CheckErrorKind::Other,
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
                 "IR builtin `mean` requires a concrete reduced axis extent".to_string(),
                 vec!["Use a concrete d-lit dimension on the reduced axis".to_string()],
             ));
@@ -5165,8 +5166,9 @@ fn validate_ir_builtin_symbolic_requirements(
                 x_dims.as_ref().and_then(|dims| dims.last()),
                 Some(DeepDimKind::NonConcrete)
             ) {
-                errors.push(CheckError::new(
-                    CheckErrorKind::Other,
+                errors.push(validator_error(
+                    CheckErrorKind::DimensionMismatch,
+                    list,
                     "IR builtin `layer_norm` requires a concrete normalized axis extent"
                         .to_string(),
                     vec!["Use a concrete d-lit dimension for the final axis".to_string()],
@@ -5175,6 +5177,43 @@ fn validate_ir_builtin_symbolic_requirements(
         }
         _ => {}
     }
+}
+
+/// Build a `CheckError` for a validator-arm diagnostic that
+/// references a specific call site. Appends the call site's `:span`
+/// metadata identifier (if present) to the message so JSON consumers
+/// can locate the offending expression in the source.
+///
+/// All shape-sensitive validator errors flow through this helper so
+/// they uniformly get DimensionMismatch-grade severity and span
+/// suffixes, matching the inference-layer DimensionMismatch surface
+/// that JSON tooling already understands (RT-205 F6).
+fn validator_error(
+    kind: CheckErrorKind,
+    call_site: &deep::List,
+    message: String,
+    suggestions: Vec<String>,
+) -> CheckError {
+    let suffixed = match validator_span_suffix(call_site) {
+        Some(span) => format!("{message} {span}"),
+        None => message,
+    };
+    CheckError::new(kind, suffixed, suggestions)
+}
+
+/// Render the call site's source span as a parenthesized suffix
+/// (e.g. ` (at surf:144..165)`). Returns `None` when the call site
+/// carries no `:span` metadata so the unmodified message is used.
+fn validator_span_suffix(call_site: &deep::List) -> Option<String> {
+    let meta = get_meta(call_site)?;
+    for (key, value) in &meta.entries {
+        if key == "span"
+            && let deep::Expr::Atom(deep::Atom::Str(s), _) = value
+        {
+            return Some(format!("(at {s})"));
+        }
+    }
+    None
 }
 
 /// Validate the symbolic requirements of an IR-level `conv2d` call.
@@ -5203,8 +5242,9 @@ fn validate_conv2d_symbolic_requirements(
     // (app {} (var conv2d) input kernel stride padding).
     for arg in list.elements.iter().skip(3).take(2) {
         if !expr_tensor_type_is_concrete(arg, type_env) {
-            errors.push(CheckError::new(
-                CheckErrorKind::Other,
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
                 "IR builtin `conv2d` requires concrete tensor argument metadata".to_string(),
                 vec!["Use concrete d-lit dimensions for IR lowering".to_string()],
             ));
@@ -5225,8 +5265,9 @@ fn validate_conv2d_symbolic_requirements(
         None => return,
     };
     if stride <= 0 {
-        errors.push(CheckError::new(
-            CheckErrorKind::Other,
+        errors.push(validator_error(
+            CheckErrorKind::DimensionMismatch,
+            list,
             format!("IR builtin `conv2d` requires a positive stride, got {stride}"),
             vec!["Stride must be >= 1; the output dim formula divides by stride".to_string()],
         ));
@@ -5237,8 +5278,9 @@ fn validate_conv2d_symbolic_requirements(
         None => return,
     };
     if padding < 0 {
-        errors.push(CheckError::new(
-            CheckErrorKind::Other,
+        errors.push(validator_error(
+            CheckErrorKind::DimensionMismatch,
+            list,
             format!("IR builtin `conv2d` requires non-negative padding, got {padding}"),
             vec!["Padding must be >= 0".to_string()],
         ));
@@ -5271,8 +5313,9 @@ fn validate_conv2d_symbolic_requirements(
     // emitting the same diagnostic at validator time makes the failure
     // surface earlier and uniformly with the other conv2d gate errors.
     if input_dims.len() != 4 {
-        errors.push(CheckError::new(
+        errors.push(validator_error(
             CheckErrorKind::DimensionMismatch,
+            list,
             format!(
                 "IR builtin `conv2d` requires a rank-4 input tensor, got rank {}",
                 input_dims.len()
@@ -5282,8 +5325,9 @@ fn validate_conv2d_symbolic_requirements(
         return;
     }
     if kernel_dims.len() != 4 {
-        errors.push(CheckError::new(
+        errors.push(validator_error(
             CheckErrorKind::DimensionMismatch,
+            list,
             format!(
                 "IR builtin `conv2d` requires a rank-4 kernel tensor, got rank {}",
                 kernel_dims.len()
@@ -5323,8 +5367,9 @@ fn validate_conv2d_symbolic_requirements(
     .map(|(short, long, val, inp, kr)| (*short, *long, *val, *inp, *kr))
     {
         if val <= 0 {
-            errors.push(CheckError::new(
+            errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
+                list,
                 format!(
                     "IR builtin `conv2d` output {name} (axis {axis}) evaluates to {val} for input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding}; output dims must be positive"
                 ),
@@ -5509,8 +5554,9 @@ fn extract_typed_scalar_literal(
     match extract_int_literal(arg) {
         Some(v) => Some(v),
         None => {
-            errors.push(CheckError::new(
-                CheckErrorKind::Other,
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
                 format!("IR builtin `conv2d` requires a literal integer {label}"),
                 vec![format!(
                     "Pass `{label}` as a constant int literal, not a variable or expression"

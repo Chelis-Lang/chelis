@@ -415,6 +415,63 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
     );
 }
 
+/// EXPECT (RT-205 F6): validator errors flow through CheckError with
+/// `DimensionMismatch` kind (severity 0.8) rather than `Other`
+/// (severity 0.5), matching the surface DimensionMismatch already
+/// uses for inference-layer shape errors.
+#[test]
+fn red_team_205_f6_validator_error_uses_dimension_mismatch_kind() {
+    use chelis_types::errors::CheckErrorKind;
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 0, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for stride 0");
+    let err = rep
+        .errors
+        .iter()
+        .find(|e| e.message.contains("positive stride"))
+        .expect("positive-stride error must be present");
+    assert!(
+        matches!(err.kind, CheckErrorKind::DimensionMismatch),
+        "expected DimensionMismatch kind, got {:?}",
+        err.kind
+    );
+    assert!(
+        (err.severity - 0.8).abs() < 1e-9,
+        "expected severity 0.8, got {}",
+        err.severity
+    );
+}
+
+/// EXPECT (RT-205 F6): validator errors include the call site's
+/// source span identifier as a suffix `(at surf:offset..end)` so
+/// JSON consumers can locate the offending expression. The exact
+/// offsets vary with surrounding whitespace; this test pins only the
+/// presence of the `(at surf:` prefix and the `..` separator.
+#[test]
+fn red_team_205_f6_validator_error_has_span_suffix() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 0, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for stride 0");
+    let err = rep
+        .errors
+        .iter()
+        .find(|e| e.message.contains("positive stride"))
+        .expect("positive-stride error must be present");
+    assert!(
+        err.message.contains("(at surf:") && err.message.contains(".."),
+        "expected span suffix `(at surf:OFFSET..END)`, got message {:?}",
+        err.message
+    );
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable
