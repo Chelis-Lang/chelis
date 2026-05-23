@@ -1138,6 +1138,137 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
     }
 }
 
+/// EXPECT (RT-205 round-3 F-C): symbolic batch dim is accepted in a
+/// conv2d call. Per spec/05 §4.5 the canonical signature is
+/// `tensor[batch, in_c, h, w, p]`; `batch` is named and the IR
+/// lowering carries it through. The validator's arg-concreteness
+/// check now permits axis 0 to be `NonConcrete` while still
+/// requiring concrete `in_c`, `h`, `w` and a fully-concrete kernel.
+#[test]
+fn red_team_205_round3_f_c_symbolic_batch_single_call() {
+    let src = r#"
+def f(x: tensor[batch, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[batch, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for symbolic batch, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT (RT-205 round-3 F-C): symbolic batch flows through a
+/// chained conv2d. The first call's derived output type registers
+/// `y` with `(d-name {} batch)` at axis 0, and the second call
+/// resolves `y` to that same symbolic-batch type. The output
+/// signature is `tensor[batch, 16, 4, 4, f32]`.
+#[test]
+fn red_team_205_round3_f_c_symbolic_batch_chained() {
+    let src = r#"
+def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[batch, 16, 4, 4, f32] = {
+  y = conv2d(&x, &k1, 1, 0)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for symbolic-batch chained conv2d, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT (RT-205 round-3 F-C negative parity): non-concrete
+/// SPATIAL dim (h or w) is still rejected. The lenience is
+/// surgically limited to axis 0 (batch); spatial axes feed the
+/// stride formula and must be concrete.
+#[test]
+fn red_team_205_round3_f_c_nonconcrete_spatial_still_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected rejection for non-concrete spatial dim");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("concrete tensor argument metadata")),
+        "expected concreteness rejection for h, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 round-3 F-C negative parity): non-concrete in_c
+/// (input axis 1) is still rejected. in_c must equal kernel axis 1
+/// and feeds the matmul lowering, so symbolic in_c is not
+/// supported per the F-C scope.
+#[test]
+fn red_team_205_round3_f_c_nonconcrete_in_channels_still_rejected() {
+    let src = r#"
+def f(x: tensor[1, in_c, 8, 8, f32], k: tensor[8, in_c, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected rejection for non-concrete in_c");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("concrete tensor argument metadata")),
+        "expected concreteness rejection for in_c, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 round-3 F-C negative parity): a chained
+/// symbolic-batch conv2d that disagrees on the batch dim between
+/// the two calls is rejected by the def's body-vs-sig check (the
+/// declared return type has a different batch dim than the inferred
+/// one). The F-C fix preserves batch through the chain; HM
+/// signature checking catches an explicit declared/inferred
+/// mismatch.
+#[test]
+fn red_team_205_round3_f_c_batch_dim_mismatch_detected() {
+    // Declared return uses `b2`, but the body's chain carries
+    // `batch` through, so HM should refuse the def.
+    let src = r#"
+def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[b2, 16, 4, 4, f32] = {
+  y = conv2d(&x, &k1, 1, 0)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected rejection on batch dim mismatch");
+    assert!(
+        rep.errors.iter().any(
+            |e| e.message.contains("body doesn't match declared signature")
+                || matches!(
+                    e.kind,
+                    chelis_types::errors::CheckErrorKind::DimensionMismatch
+                )
+        ),
+        "expected batch-dim mismatch error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| (&e.kind, &e.message))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable

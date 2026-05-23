@@ -5210,6 +5210,41 @@ fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &IrTypeEnv) -> bool
         .unwrap_or(false)
 }
 
+/// Check whether a conv2d input tensor argument is concrete in every
+/// dimension EXCEPT axis 0 (batch). Per spec/05-risc-primitives.md
+/// §4.5 the canonical signature is `tensor[batch, in_c, h, w, p]`
+/// and `batch` is named, so symbolic-batch programs are first-class
+/// (RT-205 round-3 F-C). The spatial dims and `in_c` must remain
+/// concrete because they appear in the im2col/matmul lowering.
+///
+/// Returns true when the type resolves to a rank-4 tensor whose
+/// axes 1, 2, 3 are all `Dim::Lit`. Axis 0 may be `Dim::Lit` or
+/// `Dim::NonConcrete`. Returns false on unresolvable type or any
+/// non-concrete axis other than 0.
+fn conv2d_input_dims_concrete_modulo_batch(
+    expr: Option<&deep::Expr>,
+    type_env: &IrTypeEnv,
+) -> bool {
+    let Some(expr) = expr else {
+        return false;
+    };
+    let Some(ty) = arg_tensor_type_expr(expr, type_env) else {
+        return false;
+    };
+    let Some(dims) = tensor_dims_from_type_expr(&ty) else {
+        // Not a tensor; fall back to scalar-prim check.
+        return type_expr_is_ir_concrete(&ty);
+    };
+    if dims.len() != 4 {
+        // Rank mismatch is reported separately; return true so the
+        // rank-4 guard later in the validator can fire instead of
+        // suppressing it with a metadata error.
+        return true;
+    }
+    // axes 1, 2, 3 must be concrete; axis 0 (batch) may be symbolic.
+    dims[1..].iter().all(|d| matches!(d, DeepDimKind::Lit(_)))
+}
+
 fn validate_ir_builtin_symbolic_requirements(
     list: &deep::List,
     func_name: &str,
@@ -5342,16 +5377,30 @@ fn validate_conv2d_symbolic_requirements(
     }
     // Args at elements[3]..[6] for the canonical 4-arg call shape:
     // (app {} (var conv2d) input kernel stride padding).
-    for arg in list.elements.iter().skip(3).take(2) {
-        if !expr_tensor_type_is_concrete(arg, type_env) {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                "IR builtin `conv2d` requires concrete tensor argument metadata".to_string(),
-                vec!["Use concrete d-lit dimensions for IR lowering".to_string()],
-            ));
-            return;
-        }
+    //
+    // RT-205 round-3 F-C: input axis 0 (batch) is allowed to be
+    // NonConcrete per spec/05 §4.5, since it does not enter the
+    // spatial-dim formula and conv2d's IR lowering can carry a
+    // symbolic batch through. All OTHER input axes (in_c, h, w) and
+    // all kernel axes must remain concrete -- they appear in the
+    // im2col/matmul lowering and must be statically knowable.
+    if !conv2d_input_dims_concrete_modulo_batch(
+        list.elements.get(3).map(|e| peel_borrow(e)),
+        type_env,
+    ) || !expr_tensor_type_is_concrete(
+        list.elements.get(4).expect("arity already implicit"),
+        type_env,
+    ) {
+        errors.push(validator_error(
+            CheckErrorKind::DimensionMismatch,
+            list,
+            "IR builtin `conv2d` requires concrete tensor argument metadata".to_string(),
+            vec![
+                "Use concrete d-lit dimensions for IR lowering (axis 0 / batch may be symbolic)"
+                    .to_string(),
+            ],
+        ));
+        return;
     }
     // Extract and range-check stride/padding. The IR lowering relies
     // on these being statically-knowable positive (stride) or
@@ -5646,9 +5695,16 @@ fn resolve_let_value_tensor_type(expr: &deep::Expr, type_env: &IrTypeEnv) -> Opt
 
 /// Derive a conv2d call's output tensor type (rank-4 `[N, F, outH, outW]`
 /// with the input's precision) from its argument types and literal
-/// stride/padding values. Returns `None` if any arg is non-concrete,
-/// stride/padding are not int literals, ranks are wrong, or the
-/// output dims would be non-positive.
+/// stride/padding values. Returns `None` if any non-batch input dim
+/// or any kernel dim is non-concrete, stride/padding are not int
+/// literals, ranks are wrong, or the output dims would be non-positive.
+///
+/// RT-205 round-3 F-C: input axis 0 (batch) is allowed to be
+/// `Dim::NonConcrete` per spec/05 §4.5. When the input batch is
+/// symbolic, the synthesized output type preserves the input
+/// tensor's raw batch-dim expression (e.g. `(d-name {} batch)`)
+/// rather than forcing a `d-lit`. This lets downstream chained
+/// conv2d calls resolve `&y` to the symbolic-batch type.
 fn derive_conv2d_output_type(list: &deep::List, type_env: &IrTypeEnv) -> Option<deep::Expr> {
     let input_ty = list
         .elements
@@ -5668,10 +5724,14 @@ fn derive_conv2d_output_type(list: &deep::List, type_env: &IrTypeEnv) -> Option<
     if stride <= 0 || padding < 0 {
         return None;
     }
-    let n = match input_dims[0] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
+    // Capture the input tensor's raw batch-dim Expr (axis 0) so a
+    // symbolic batch can pass through verbatim into the synthesized
+    // output type. axes 1-3 must be concrete literals (RT-205 r3 F-C).
+    let input_dim_exprs = tensor_dim_exprs_from_type_expr(&input_ty)?;
+    if input_dim_exprs.len() != 4 {
+        return None;
+    }
+    let batch_dim_expr = input_dim_exprs[0].clone();
     let f = match kernel_dims[0] {
         DeepDimKind::Lit(v) => v,
         DeepDimKind::NonConcrete => return None,
@@ -5701,12 +5761,42 @@ fn derive_conv2d_output_type(list: &deep::List, type_env: &IrTypeEnv) -> Option<
     if out_h <= 0 || out_w <= 0 {
         return None;
     }
-    // Build `(t-tensor {} (d-lit {} n) (d-lit {} f) (d-lit {} out_h)
-    // (d-lit {} out_w) <precision-expr>)` from the input's precision.
-    // Input dims is len 4 so the precision is the input tensor's last
-    // child; recover it from the input tensor's Expr structure.
+    // Build `(t-tensor {} <batch-expr> (d-lit {} f) (d-lit {} out_h)
+    // (d-lit {} out_w) <precision-expr>)` from the input's precision
+    // and the captured batch-dim expression (which may be a symbolic
+    // `(d-name {} ...)` per RT-205 r3 F-C).
     let prec_expr = tensor_precision_expr(&input_ty)?;
-    Some(build_tensor_type_expr(&[n, f, out_h, out_w], prec_expr))
+    Some(build_tensor_type_expr_with_batch(
+        batch_dim_expr,
+        &[f, out_h, out_w],
+        prec_expr,
+    ))
+}
+
+/// Return the raw Deep `Expr` for each dimension in a `(t-tensor {} dim1
+/// dim2 ... prec)`. Unlike `tensor_dims_from_type_expr`, which returns a
+/// `DeepDimKind` flattening, this preserves the original
+/// `(d-name {} batch)` / `(d-var {} ...)` / `(d-lit {} N)` sub-expression
+/// so the caller can carry it forward verbatim when synthesizing a
+/// derived tensor type (RT-205 round-3 F-C, symbolic batch propagation).
+fn tensor_dim_exprs_from_type_expr(expr: &deep::Expr) -> Option<Vec<deep::Expr>> {
+    let list = match expr {
+        deep::Expr::List(list, _) => list,
+        _ => return None,
+    };
+    if get_tag(list) == Some("t-ref") {
+        return children(list)
+            .first()
+            .and_then(tensor_dim_exprs_from_type_expr);
+    }
+    if get_tag(list) != Some("t-tensor") {
+        return None;
+    }
+    let kids = children(list);
+    if kids.is_empty() {
+        return None;
+    }
+    Some(kids[..kids.len().saturating_sub(1)].to_vec())
 }
 
 /// Extract the precision sub-expression (last child) of a
@@ -5727,11 +5817,18 @@ fn tensor_precision_expr(ty: &deep::Expr) -> Option<deep::Expr> {
     kids.last().cloned()
 }
 
-/// Build `(t-tensor {} (d-lit {} dim0) (d-lit {} dim1) ... prec)` for
-/// downstream type-env consumption. Spans are zeroed because the
-/// derived type is synthetic; downstream lookups care only about the
-/// structural shape.
-fn build_tensor_type_expr(dims: &[i64], prec: deep::Expr) -> deep::Expr {
+/// Build a synthetic `(t-tensor {} <batch-dim-expr> (d-lit {} d1)
+/// (d-lit {} d2) ... prec)`, placing a verbatim Deep expression at
+/// axis 0 (the batch dim) and integer literals for the remaining
+/// axes. Used to preserve symbolic batch (`(d-name {} batch)`) when
+/// deriving a chained conv2d's output type (RT-205 round-3 F-C).
+/// Spans are zeroed because the derived type is synthetic; downstream
+/// lookups care only about the structural shape.
+fn build_tensor_type_expr_with_batch(
+    batch_dim: deep::Expr,
+    other_dims: &[i64],
+    prec: deep::Expr,
+) -> deep::Expr {
     let zero = zero_span();
     let empty_meta = || deep::MetaMap { entries: vec![] };
     let make_d_lit = |v: i64| {
@@ -5750,7 +5847,8 @@ fn build_tensor_type_expr(dims: &[i64], prec: deep::Expr) -> deep::Expr {
         deep::Expr::Atom(deep::Atom::Symbol("t-tensor".to_string()), zero),
         deep::Expr::Map(empty_meta(), zero),
     ];
-    for &d in dims {
+    elements.push(batch_dim);
+    for &d in other_dims {
         elements.push(make_d_lit(d));
     }
     elements.push(prec);
