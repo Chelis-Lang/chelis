@@ -5188,12 +5188,65 @@ fn validate_conv2d_symbolic_requirements(
             return;
         }
     }
-    for (idx, label) in [(5usize, "stride"), (6usize, "padding")] {
-        let Some(arg) = list.elements.get(idx) else {
-            // Arity mismatch is caught elsewhere; bail without piling on.
-            return;
-        };
-        if extract_int_literal(arg).is_none() {
+    // Extract and range-check stride/padding. The IR lowering relies
+    // on these being statically-knowable positive (stride) or
+    // non-negative (padding) integers; the output spatial dim formula
+    // `floor((in + 2p - k) / s) + 1` (spec/05-risc-primitives.md
+    // §471-483) divides by stride, so `stride <= 0` is undefined and
+    // a negative padding shrinks the effective input below zero.
+    // Without these guards the validator silently accepts the
+    // ill-formed call and the back-end ICEs at codegen time
+    // (issue #186 RT findings F1, F2, F3).
+    let stride = match extract_typed_scalar_literal(list, 5, "stride", errors) {
+        Some(v) => v,
+        None => return,
+    };
+    if stride <= 0 {
+        errors.push(CheckError::new(
+            CheckErrorKind::Other,
+            format!("IR builtin `conv2d` requires a positive stride, got {stride}"),
+            vec!["Stride must be >= 1; the output dim formula divides by stride".to_string()],
+        ));
+        return;
+    }
+    let padding = match extract_typed_scalar_literal(list, 6, "padding", errors) {
+        Some(v) => v,
+        None => return,
+    };
+    if padding < 0 {
+        errors.push(CheckError::new(
+            CheckErrorKind::Other,
+            format!("IR builtin `conv2d` requires non-negative padding, got {padding}"),
+            vec!["Padding must be >= 0".to_string()],
+        ));
+        return;
+    }
+    // stride and padding are now known good (positive / non-negative);
+    // F4 (output-dim formula evaluation) lands in a follow-up commit.
+    let _ = (stride, padding);
+}
+
+/// Look up positional arg `idx` of a `conv2d` call, attempt to
+/// extract it as an integer literal, and emit a clear diagnostic if
+/// the arg is missing or non-literal.
+///
+/// `label` names the role (`"stride"` / `"padding"`) for the error
+/// message. Returns `Some(value)` on success and `None` when an error
+/// was pushed (the caller should bail to avoid piling on cascading
+/// diagnostics).
+fn extract_typed_scalar_literal(
+    list: &deep::List,
+    idx: usize,
+    label: &str,
+    errors: &mut Vec<CheckError>,
+) -> Option<i64> {
+    let Some(arg) = list.elements.get(idx) else {
+        // Arity mismatch is caught elsewhere; bail without piling on.
+        return None;
+    };
+    match extract_int_literal(arg) {
+        Some(v) => Some(v),
+        None => {
             errors.push(CheckError::new(
                 CheckErrorKind::Other,
                 format!("IR builtin `conv2d` requires a literal integer {label}"),
@@ -5201,7 +5254,7 @@ fn validate_conv2d_symbolic_requirements(
                     "Pass `{label}` as a constant int literal, not a variable or expression"
                 )],
             ));
-            return;
+            None
         }
     }
 }

@@ -185,6 +185,96 @@ def call_ln(x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tens
     );
 }
 
+// ─── Red Team #205 follow-up findings ────────────────────────────
+
+/// EXPECT (RT-205 F1): conv2d with stride 0 is rejected at check
+/// time. The output spatial dim formula in spec/05 §471-483
+/// (`floor((in + 2p - k) / s) + 1`) divides by stride; previously
+/// the validator silently accepted `stride == 0` and the back-end
+/// ICE'd at codegen with a symbolic-dim crash. Now blocked with a
+/// `positive stride` diagnostic.
+#[test]
+fn red_team_205_f1_zero_stride_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 0, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for stride == 0");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("requires a positive stride")),
+        "expected positive-stride error, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 F2): conv2d with stride -1 is rejected at check
+/// time. `extract_int_literal` accepts the neg-of-lit form, so a
+/// sign check on the extracted value is required.
+#[test]
+fn red_team_205_f2_negative_stride_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, -1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for negative stride");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("requires a positive stride")),
+        "expected positive-stride error, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 F3): conv2d with negative padding is rejected at
+/// check time. Negative padding shrinks the effective input below
+/// zero in the output formula.
+#[test]
+fn red_team_205_f3_negative_padding_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, -100)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for negative padding");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("requires non-negative padding")),
+        "expected non-negative-padding error, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (RT-205 F1/F2 positive parity): stride 1 + padding 0 is
+/// still accepted. This pins that the new sign checks do not break
+/// the canonical happy path.
+#[test]
+fn red_team_205_f1_f2_stride_one_padding_zero_accepted() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+  conv2d(&x, &k, 1, 0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for stride=1 padding=0, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable
