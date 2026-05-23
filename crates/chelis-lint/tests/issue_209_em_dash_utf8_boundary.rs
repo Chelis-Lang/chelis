@@ -107,7 +107,10 @@ fn issue209_em_dash_inside_multiline_function_docstring_excluded() {
     \"\"\"\n\
     return x\n";
     let v = run_check_and_fix(src);
-    assert!(v.is_empty(), "function docstring em dash must be excluded, got {v:?}");
+    assert!(
+        v.is_empty(),
+        "function docstring em dash must be excluded, got {v:?}"
+    );
 }
 
 #[test]
@@ -119,7 +122,10 @@ fn issue209_em_dash_inside_multiline_class_docstring_excluded() {
     \"\"\"\n\
     pass\n";
     let v = run_check_and_fix(src);
-    assert!(v.is_empty(), "class docstring em dash must be excluded, got {v:?}");
+    assert!(
+        v.is_empty(),
+        "class docstring em dash must be excluded, got {v:?}"
+    );
 }
 
 // --- Positive violations at various source positions --------------------
@@ -211,7 +217,11 @@ fn issue209_em_dash_after_earlier_em_dash_in_docstring() {
 \n\
 print(\"flagged \u{2014} here\")\n";
     let v = run_check_and_fix(src);
-    assert_eq!(v.len(), 1, "expected exactly one (print) violation, got {v:?}");
+    assert_eq!(
+        v.len(),
+        1,
+        "expected exactly one (print) violation, got {v:?}"
+    );
     assert_eq!(v[0].line, Some(3));
 }
 
@@ -227,7 +237,8 @@ fn issue209_plain_ascii_docstring_no_violation() {
 #[test]
 fn issue209_en_dash_in_docstring_no_violation() {
     // En dash (U+2013) is not an em dash. The rule is em-dash specific.
-    let src = "#!/usr/bin/env python3\n\"\"\"Step 13 \u{2013} download.\"\"\"\nprint(\"a \u{2013} b\")\n";
+    let src =
+        "#!/usr/bin/env python3\n\"\"\"Step 13 \u{2013} download.\"\"\"\nprint(\"a \u{2013} b\")\n";
     let v = run_check_and_fix(src);
     assert!(v.is_empty(), "en dash must not fire, got {v:?}");
 }
@@ -236,7 +247,10 @@ fn issue209_en_dash_in_docstring_no_violation() {
 fn issue209_em_dash_in_python_comment_no_violation() {
     let src = "x = 1\n# Python comment with em dash \u{2014} not a string\nprint(x)\n";
     let v = run_check_and_fix(src);
-    assert!(v.is_empty(), "em dash inside # comment must not fire, got {v:?}");
+    assert!(
+        v.is_empty(),
+        "em dash inside # comment must not fire, got {v:?}"
+    );
 }
 
 // --- CLI-end-to-end pin: the issue's actual `chelis lint --check ...`

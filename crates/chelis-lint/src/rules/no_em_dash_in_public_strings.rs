@@ -77,8 +77,7 @@ impl Rule for NoEmDashInPublicStrings {
             .map(|idx| line_start + idx)
             .unwrap_or(source.len());
         let line = &source[line_start..line_end];
-        let dash_in_line = dash - line_start;
-        let spacing = dash_spacing(line, dash_in_line)?;
+        let spacing = dash_spacing(line, line_start, dash)?;
         if !spacing.both_sides {
             return None;
         }
@@ -297,25 +296,40 @@ fn starts_rust_char_literal(source: &str, quote: usize) -> bool {
 #[derive(Debug, Clone, Copy)]
 struct DashSpacing {
     both_sides: bool,
+    /// Source-absolute byte offset of the first byte AFTER the dash
+    /// and its (optional) trailing ASCII whitespace. Callers slice
+    /// `source[..]` with this, so it must be source-absolute even
+    /// though the spacing probe runs against the dash's containing
+    /// line. The earlier shape of this function returned a
+    /// line-relative offset, and `clause_replacement` /
+    /// `spaced_dash_replacement` happily passed it into `source[..]`
+    /// — fine on line 1, panic (or silently wrong rewrite) on every
+    /// other line. See chelis#209.
     after_end: usize,
 }
 
-fn dash_spacing(line: &str, dash: usize) -> Option<DashSpacing> {
-    let before = dash
+/// Probe the ASCII whitespace around the em dash at source-absolute
+/// byte offset `dash`. `line` is the dash's containing line and
+/// `line_start` its source-absolute start, so the spacing scan stays
+/// within the line while the returned `after_end` is source-absolute
+/// and safe to feed back into `source[..]` slices.
+fn dash_spacing(line: &str, line_start: usize, dash: usize) -> Option<DashSpacing> {
+    let dash_in_line = dash.checked_sub(line_start)?;
+    let before = dash_in_line
         .checked_sub(1)
         .and_then(|idx| line.as_bytes().get(idx))
         .is_some_and(|b| b.is_ascii_whitespace());
-    let after_start = dash + '—'.len_utf8();
+    let after_start_in_line = dash_in_line + '—'.len_utf8();
     let after = line
         .as_bytes()
-        .get(after_start)
+        .get(after_start_in_line)
         .is_some_and(|b| b.is_ascii_whitespace());
     if before != after {
         return None;
     }
     Some(DashSpacing {
         both_sides: before && after,
-        after_end: after_start + usize::from(after),
+        after_end: line_start + after_start_in_line + usize::from(after),
     })
 }
 
