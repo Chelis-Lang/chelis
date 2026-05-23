@@ -10434,6 +10434,7 @@ fn infer_reshape_app(
         typed_nodes,
         total_nodes,
     );
+    let input_var_name = symbolic_dim_ref_name(&kids[1]).map(|s| s.to_string());
     match type_for_readonly_check(&input_ty, subst) {
         Type::Prim(precision) => {
             if let Some(shape_expr) = kids.get(2) {
@@ -10453,16 +10454,13 @@ fn infer_reshape_app(
                     errors.push(te.into());
                     return Type::Error;
                 }
-                let dims = list_literal_dims(shape_expr).unwrap_or_else(|| {
-                    let rank = list_literal_len(shape_expr).unwrap_or(1);
-                    vec![Dim::Wildcard; rank]
-                });
+                let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 return Type::Tensor(dims, TensorPrec::Concrete(precision));
             }
 
             Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision))
         }
-        Type::Tensor(_, precision) => {
+        Type::Tensor(input_dims, precision) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(
                     shape_expr,
@@ -10480,10 +10478,8 @@ fn infer_reshape_app(
                     errors.push(te.into());
                     return Type::Error;
                 }
-                let dims = list_literal_dims(shape_expr).unwrap_or_else(|| {
-                    let rank = list_literal_len(shape_expr).unwrap_or(1);
-                    vec![Dim::Wildcard; rank]
-                });
+                let dims =
+                    reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
                 return Type::Tensor(dims, precision);
             }
 
@@ -10531,37 +10527,88 @@ fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
     Some(children(list).len())
 }
 
-/// If `expr` is a list literal whose every element is a concrete int literal
-/// (`5`, `lit 5`, or `cast(5, int64)` / `cast(5, int32)`), return the dim
-/// vector with each element as `Dim::Lit(N)`. Handles both the `(list ...)`
-/// tag form and the desugared Cons/Nil chain — surface list literals lower
-/// to the chain form by the time reshape is type-checked.
+/// Build the output dim list for `reshape(input, shape_list)`.
 ///
-/// Returns `None` if any element is not a concrete integer or the list is
-/// not closed by a `Nil` — the caller falls back to `Dim::Wildcard`.
+/// Walks `shape_expr` element by element. For each element, the first
+/// recognizer that matches wins:
 ///
-/// Without this, `reshape(t, [2, 1, 3])` infers as
-/// `tensor[Wildcard, Wildcard, Wildcard, p]` and a function declared as
-/// `-> tensor[2, 1, 3, f32]` reports a body/signature mismatch — RT-A1W1
-/// CRIT root cause (#35).
-fn list_literal_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
+/// 1. concrete int literal (or `cast(N, int{32,64})`) → `Dim::Lit(N)`;
+/// 2. `cast(shape(input, lit_axis), int64)` where the inner var matches
+///    the reshape input by name and `lit_axis` is a valid axis of the
+///    input → the input's dim at that axis (resolved through `subst`);
+/// 3. fallback → `Dim::Wildcard`.
+///
+/// The shape list itself may surface as the explicit `(list ...)` tag
+/// form or as a `Cons(head, ..., Nil)` chain after desugaring; both are
+/// recognized. If neither form is matched, the rank is inferred from
+/// `list_literal_len` (best-effort), and the whole output is filled
+/// with `Wildcard`s -- the pre-fix behavior.
+///
+/// `input_var_name` is the name of the reshape input expression when it
+/// is a bare `(var {} NAME)`, otherwise `None`. The symbolic-dim
+/// recognizer requires this to match; with a non-var reshape input the
+/// rule conservatively falls back to `Wildcard`.
+///
+/// Pre-fix the body of `infer_reshape_app` ran a literal-only
+/// recognizer (the now-removed `list_literal_dims`) and fell back to
+/// `vec![Wildcard; rank]` for anything else, including the common
+/// runtime-batch pattern `cast(shape(x, axis), int64)`. That blind spot
+/// is chelis#206; this helper closes it. The earlier `Dim::Lit`-only
+/// behavior is also still covered (see the RT-A1W1 CRIT root cause for
+/// chelis#35: `reshape(t, [2, 1, 3])` must yield
+/// `tensor[Lit(2), Lit(1), Lit(3), p]`, not `tensor[Wildcard, ..., p]`).
+fn reshape_output_dims(
+    shape_expr: &deep::Expr,
+    input_var_name: Option<&str>,
+    input_dims: &[Dim],
+    subst: &Subst,
+) -> Vec<Dim> {
+    let elements = match collect_shape_list_elements(shape_expr) {
+        Some(elems) => elems,
+        None => {
+            let rank = list_literal_len(shape_expr).unwrap_or(1);
+            return vec![Dim::Wildcard; rank];
+        }
+    };
+    elements
+        .into_iter()
+        .map(|elem| reshape_output_dim(elem, input_var_name, input_dims, subst))
+        .collect()
+}
+
+/// Recognize a single dim-list element from a reshape shape list.
+fn reshape_output_dim(
+    elem: &deep::Expr,
+    input_var_name: Option<&str>,
+    input_dims: &[Dim],
+    subst: &Subst,
+) -> Dim {
+    if let Some(n) = extract_int_for_dim(elem) {
+        return Dim::Lit(n);
+    }
+    if input_var_name.is_some()
+        && let Some(axis) = extract_shape_axis_of(elem, input_var_name)
+        && let Some(dim) = input_dims.get(axis)
+    {
+        // Resolve through current substitution so a recently-bound dim
+        // var surfaces as its concrete name/lit.
+        return subst.apply_dim(dim);
+    }
+    Dim::Wildcard
+}
+
+/// Collect the elements of a reshape shape-list argument as a flat
+/// `Vec` of expressions, handling both the `(list ...)` tag form and
+/// the desugared `Cons(head, ..., Nil)` chain. Returns `None` if the
+/// shape arg is not a recognized list form (in which case the caller
+/// falls back to all-wildcards with rank inferred from `list_literal_len`).
+fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep::Expr>> {
     if let deep::Expr::List(list, _) = expr
         && get_tag(list) == Some("list")
     {
-        return children(list)
-            .iter()
-            .map(extract_int_for_dim)
-            .map(|opt| opt.map(Dim::Lit))
-            .collect();
+        return Some(children(list).iter().collect());
     }
-    cons_chain_int_dims(expr)
-}
-
-/// Walk a `Cons(head, Cons(head, ..., Nil))` chain and collect each head as
-/// a `Dim::Lit`. Returns `None` if the chain isn't closed by `Nil` or any
-/// head fails to extract as a concrete int.
-fn cons_chain_int_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
-    let mut dims = Vec::new();
+    let mut elems = Vec::new();
     let mut cursor = expr;
     loop {
         let deep::Expr::List(list, _) = cursor else {
@@ -10571,7 +10618,7 @@ fn cons_chain_int_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
             "var" => {
                 let name = children(list).first().and_then(symbol_name)?;
                 if name == "Nil" {
-                    return Some(dims);
+                    return Some(elems);
                 }
                 return None;
             }
@@ -10581,14 +10628,111 @@ fn cons_chain_int_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
                 if !is_builtin_var(func, "Cons") {
                     return None;
                 }
-                let head = app_children.get(1)?;
-                let tail = app_children.get(2)?;
-                dims.push(Dim::Lit(extract_int_for_dim(head)?));
-                cursor = tail;
+                elems.push(app_children.get(1)?);
+                cursor = app_children.get(2)?;
             }
             _ => return None,
         }
     }
+}
+
+/// If `expr` has the syntactic form
+/// `cast(shape(<var named input_var_name>, <concrete int axis>), int64)`,
+/// return the axis. Both `cast` and `shape` may surface either as the
+/// dedicated tag (`(cast {} ...)`, ...) or as `(app {} (var {} cast)
+/// ...)`. The axis expression matches `extract_int_for_dim` -- it
+/// accepts `N`, `lit N`, and `cast(N, int{32,64})`.
+///
+/// Returns `None` when:
+/// - `expr` doesn't match the expected outer cast-to-int64,
+/// - the inner expression is not a `shape(...)` call,
+/// - the shape's tensor arg is not a `var` matching `input_var_name`,
+/// - the axis is not a concrete non-negative int.
+fn extract_shape_axis_of(expr: &deep::Expr, input_var_name: Option<&str>) -> Option<usize> {
+    let input = input_var_name?;
+    let (inner, target_ty) = peel_cast(expr)?;
+    if !is_target_ty(target_ty, Prim::Int64) {
+        return None;
+    }
+    let shape_call = inner_to_list(inner)?;
+    if !is_shape_app(shape_call) {
+        return None;
+    }
+    let shape_args = children(shape_call);
+    let func = shape_args.first()?;
+    if !is_builtin_var(func, "shape") {
+        return None;
+    }
+    let tensor_arg = shape_args.get(1)?;
+    let arg_name = symbolic_dim_ref_name(tensor_arg)?;
+    if arg_name != input {
+        return None;
+    }
+    let axis_expr = shape_args.get(2)?;
+    let axis = extract_int_for_dim(axis_expr)?;
+    if axis < 0 {
+        return None;
+    }
+    Some(axis as usize)
+}
+
+/// Strip one layer of `cast` (tag-form or `app`-form) and return
+/// (inner_expr, target_type_expr).
+fn peel_cast(expr: &deep::Expr) -> Option<(&deep::Expr, &deep::Expr)> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    match get_tag(list)? {
+        "cast" => {
+            let kids = children(list);
+            Some((kids.first()?, kids.get(1)?))
+        }
+        "app" => {
+            let kids = children(list);
+            let func = kids.first()?;
+            if !is_builtin_var(func, "cast") {
+                return None;
+            }
+            Some((kids.get(1)?, kids.get(2)?))
+        }
+        _ => None,
+    }
+}
+
+/// Treat `(t-prim {} <name>)` as the target type marker emitted by
+/// `cast(..., int64)` etc. Returns true iff the marker matches `prim`.
+fn is_target_ty(expr: &deep::Expr, prim: Prim) -> bool {
+    let deep::Expr::List(list, _) = expr else {
+        return false;
+    };
+    if get_tag(list) != Some("t-prim") {
+        return false;
+    }
+    let Some(name_expr) = children(list).first() else {
+        return false;
+    };
+    symbol_name(name_expr) == Some(prim.name())
+}
+
+/// Treat `expr` as an `(app {} ...)` list and return its `deep::List`,
+/// or `None` if it isn't.
+fn inner_to_list(expr: &deep::Expr) -> Option<&deep::List> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) == Some("app") {
+        Some(list)
+    } else {
+        None
+    }
+}
+
+/// True iff `app_list` is an `(app {} (var {} shape) ...)`.
+fn is_shape_app(app_list: &deep::List) -> bool {
+    children(app_list)
+        .first()
+        .map(|f| is_builtin_var(f, "shape"))
+        .unwrap_or(false)
 }
 
 /// Extract an int literal from a Deep expr, looking through `cast(N, int64)`

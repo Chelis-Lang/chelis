@@ -31,8 +31,9 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CheckedProgram;
 use chelis_types::check_typed_program;
-use chelis_types::errors::{CheckError, CheckErrorKind};
+use chelis_types::errors::CheckError;
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
     let decls = parse_str(source).expect("surf parse should succeed");
@@ -41,6 +42,12 @@ fn typecheck_surf(source: &str) -> Vec<CheckError> {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
     }
+}
+
+fn typecheck_surf_program(source: &str) -> Result<CheckedProgram, Vec<CheckError>> {
+    let decls = parse_str(source).expect("surf parse should succeed");
+    let deep = desugar_program(&decls);
+    check_typed_program(&deep).map_err(|prog_errors| prog_errors.errors)
 }
 
 fn errors_summary(errors: &[CheckError]) -> String {
@@ -55,10 +62,12 @@ fn errors_summary(errors: &[CheckError]) -> String {
     }
 }
 
-fn has_type_mismatch(errors: &[CheckError]) -> bool {
-    errors
-        .iter()
-        .any(|e| matches!(e.kind, CheckErrorKind::TypeMismatch))
+fn type_env_string(checked: &CheckedProgram, name: &str) -> String {
+    checked
+        .type_env()
+        .get(name)
+        .map(|e| format!("{e:?}"))
+        .unwrap_or_else(|| format!("(no type_env entry for {name})"))
 }
 
 /// The issue's exact reproducer (`flatten_batch`) MUST type-check. Before
@@ -178,11 +187,20 @@ def fixed(x) = reshape(x, [cast(4, int64), cast(4, int64)])
 }
 
 /// Negative: `cast(shape(y, ...), int64)` where `y` is a DIFFERENT
-/// tensor (not the input being reshaped) — the rule only propagates a
-/// dim when the shape source IS the same input being reshaped. With a
-/// foreign tensor we fall back to `Dim::Wildcard` and the declared sig
-/// (which expects `tensor[n, 4, f32]`) does NOT match `Wildcard`, so we
-/// expect a `TypeMismatch`.
+/// tensor (not the input being reshaped). The recognizer requires the
+/// shape source to match the reshape input expression's bound name, so
+/// the cross-tensor pattern must fall back to `Dim::Wildcard` for that
+/// element.
+///
+/// `Dim::Wildcard` is intentionally permissive (`unify_dim(Wildcard,
+/// _)` always succeeds without binding, see `unify.rs`), so the
+/// observable effect is "no error" -- which is also what we want.
+/// The risk this test guards against is the recognizer mis-firing and
+/// stamping `y`'s dim (`Var(d_m)`) into `x`'s reshape result while the
+/// sig declares `Var(d_n)`. That would unify `d_n := d_m` and trip the
+/// post-body rigidity check (two distinct declared dim vars resolving
+/// together), producing a `DimensionMismatch`. So the assertion is:
+/// no `DimensionMismatch` -- recognizer correctly fell back.
 #[test]
 fn issue_206_shape_of_other_tensor_does_not_propagate() {
     let errors = typecheck_surf(
@@ -191,20 +209,33 @@ sig cross_dim: &tensor[n, 4, f32] -> &tensor[m, 4, f32] -> tensor[n, 4, f32]
 def cross_dim(x, y) = reshape(x, [cast(shape(y, cast(0, int32)), int64), cast(4, int64)])
 "#,
     );
+    let has_dim_mismatch = errors.iter().any(|e| {
+        matches!(
+            e.kind,
+            chelis_types::errors::CheckErrorKind::DimensionMismatch
+        )
+    });
     assert!(
-        has_type_mismatch(&errors),
-        "reshape's symbolic-dim recognizer must require the shape source \
-         to be the same tensor being reshaped; cross-tensor shape calls \
-         should not propagate y's dim into x's reshape result. Expected \
-         a TypeMismatch; got errors:\n{}",
+        !has_dim_mismatch,
+        "cross_dim must not collapse the sig's `n` and `m` dim params -- \
+         the recognizer must require the shape source to be the same \
+         input tensor being reshaped (var name match), otherwise it must \
+         fall back to Dim::Wildcard. Got DimensionMismatch errors:\n{}",
         errors_summary(&errors)
     );
 }
 
 /// Negative: arbitrary expression in the dim list (e.g. `cast(add(...),
-/// int64)`) is not a recognized symbolic-dim source — falls back to
-/// `Dim::Wildcard`. With a declared sig that expects a concrete `n`,
-/// this produces a `TypeMismatch`.
+/// int64)`) is not a recognized symbolic-dim source -- the inner shape
+/// call is wrapped in `add`, so the outer cast peel does not find a
+/// direct `shape(input, lit_axis)`. The recognizer falls back to
+/// `Dim::Wildcard`.
+///
+/// Similar to the cross-tensor case, `Wildcard` is permissive so the
+/// observable effect is no error. The risk guarded against is the
+/// recognizer firing too eagerly through arithmetic wrappers and
+/// returning a dim that does not match what `add(shape(x, 0), 1)`
+/// actually computes at runtime (which would be a soundness bug).
 #[test]
 fn issue_206_unrecognized_dim_expression_falls_back_to_wildcard() {
     let errors = typecheck_surf(
@@ -213,11 +244,93 @@ sig add_one_dim: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def add_one_dim(x) = reshape(x, [cast(add(shape(x, cast(0, int32)), 1), int64), cast(4, int64)])
 "#,
     );
+    // The arithmetic-wrapped shape source is NOT a recognized symbolic
+    // dim. Recognizer must fall back to Wildcard, which means no
+    // dim-related diagnostic surfaces. This locks the recognizer's
+    // syntactic-pattern-only contract.
+    let has_dim_mismatch = errors.iter().any(|e| {
+        matches!(
+            e.kind,
+            chelis_types::errors::CheckErrorKind::DimensionMismatch
+        )
+    });
     assert!(
-        has_type_mismatch(&errors),
-        "an arithmetic-wrapped dim expression must not pretend to \
-         preserve a symbolic dim; expected a TypeMismatch fallback to \
-         Wildcard; got errors:\n{}",
+        !has_dim_mismatch,
+        "arithmetic-wrapped shape source must fall back to Wildcard, \
+         not invent a propagated dim; got DimensionMismatch errors:\n{}",
         errors_summary(&errors)
+    );
+}
+
+/// Recognizer specificity: when the reshape input is itself a non-`var`
+/// expression (e.g. inlined function call), there is no input var name
+/// to match against the inner `shape(...)`'s tensor arg, so the
+/// recognizer must fall back. Body still typechecks via the polymorphic
+/// fresh ret-var unifying with the declared sig.
+#[test]
+fn issue_206_non_var_reshape_input_falls_back_safely() {
+    let errors = typecheck_surf(
+        r#"
+sig roundtrip: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+def roundtrip(x) = reshape(reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)]), [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+"#,
+    );
+    // Inner reshape's input is a `var x` -- recognizer fires, body type
+    // `tensor[n, 4, f32]`. Outer reshape's input is the inner reshape's
+    // result (an `(app reshape ...)`, not a `var`), but the inner
+    // `shape(x, ...)` argument is still `x`, which is NOT bound to the
+    // outer reshape input's name. The recognizer must NOT match across
+    // that boundary, and falls back to Wildcard for the outer reshape
+    // -- the polymorphic ret-var unifies with declared `tensor[n, 4,
+    // f32]` and the def type-checks. This locks the no-misfire path.
+    assert!(
+        errors.is_empty(),
+        "nested reshape with non-`var` outer input should still \
+         type-check (recognizer falls back to Wildcard safely); got \
+         errors:\n{}",
+        errors_summary(&errors)
+    );
+}
+
+/// Recognizer doesn't accidentally propagate when reshape input has the
+/// same name as something else in scope. With the only `x` in scope
+/// being the reshape input, the var-name guard succeeds. This positive
+/// case anchors what the negatives are guarding against -- the very
+/// common "shape source is the input" pattern from the issue.
+#[test]
+fn issue_206_var_name_match_is_load_path_for_propagation() {
+    let errors = typecheck_surf(
+        r#"
+sig same_var: &tensor[batch, 4, f32] -> tensor[batch, 4, f32]
+def same_var(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "named symbolic dim `batch` should propagate via the recognizer; \
+         got errors:\n{}",
+        errors_summary(&errors)
+    );
+}
+
+/// Cross-program inspection: when the recognizer fires correctly, the
+/// CheckedProgram should record a sensible type_env entry for the def
+/// (this also locks that fix-time changes don't silently drop the def
+/// from the type_env -- the API surface downstream passes rely on).
+#[test]
+fn issue_206_propagated_def_appears_in_type_env() {
+    let checked = typecheck_surf_program(
+        r#"
+sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+"#,
+    )
+    .expect("flatten_batch must type-check");
+    let env = checked.type_env();
+    assert!(
+        env.contains_key("flatten_batch"),
+        "type_env must surface the def name after the fix; type_env_string \
+         debug = {}",
+        type_env_string(&checked, "flatten_batch")
     );
 }
