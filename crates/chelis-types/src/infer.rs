@@ -5111,7 +5111,9 @@ fn extend_ir_env_with_fn_params(fn_list: &deep::List, type_env: &IrTypeEnv) -> I
 }
 
 fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &IrTypeEnv) -> bool {
-    expr_type_expr(expr, type_env)
+    // Peel `(borrow {} ...)` so the idiomatic Surf borrow form does
+    // not silently bypass the dim-concreteness check.
+    arg_tensor_type_expr(expr, type_env)
         .map(|ty| type_expr_is_ir_concrete(&ty))
         .unwrap_or(false)
 }
@@ -5123,26 +5125,7 @@ fn validate_ir_builtin_symbolic_requirements(
     errors: &mut Vec<CheckError>,
 ) {
     match func_name {
-        "conv2d" => {
-            if !app_result_type_is_concrete(list) {
-                errors.push(CheckError::new(
-                    CheckErrorKind::Other,
-                    "IR builtin `conv2d` requires concrete output tensor dimensions".to_string(),
-                    vec!["Use concrete d-lit dimensions for IR lowering".to_string()],
-                ));
-            }
-            for arg in list.elements.iter().skip(3).take(2) {
-                if !expr_tensor_type_is_concrete(arg, type_env) {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::Other,
-                        "IR builtin `conv2d` requires concrete tensor argument metadata"
-                            .to_string(),
-                        vec!["Use concrete d-lit dimensions for IR lowering".to_string()],
-                    ));
-                    break;
-                }
-            }
-        }
+        "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, errors),
         "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
             errors.push(CheckError::new(
                 CheckErrorKind::Other,
@@ -5154,7 +5137,7 @@ fn validate_ir_builtin_symbolic_requirements(
             let x_dims = list
                 .elements
                 .get(3)
-                .and_then(|expr| expr_type_expr(expr, type_env))
+                .and_then(|expr| arg_tensor_type_expr(expr, type_env))
                 .and_then(|ty| tensor_dims_from_type_expr(&ty));
             if matches!(
                 x_dims.as_ref().and_then(|dims| dims.last()),
@@ -5172,6 +5155,57 @@ fn validate_ir_builtin_symbolic_requirements(
     }
 }
 
+/// Validate the symbolic requirements of an IR-level `conv2d` call.
+///
+/// The previous implementation read `:type` from the app node's
+/// metadata via `app_result_type_is_concrete` to decide whether the
+/// output dims were concrete. Surf-desugared apps only carry `:span`
+/// metadata; the annotation pass that would stamp inferred app types
+/// back into Deep runs after `validate_ir_program`, so that check was
+/// structurally always-false for any Surf source (see issue #186).
+///
+/// The replacement derives output concreteness from the arguments
+/// (input tensor dims, kernel tensor dims, stride/padding literal
+/// values), all of which are knowable at validation time. If the args
+/// are concrete and the stride/padding are integer literals, the
+/// output is concrete by construction (`floor((in + 2p - k) / s) + 1`
+/// per spatial axis).
+fn validate_conv2d_symbolic_requirements(
+    list: &deep::List,
+    type_env: &IrTypeEnv,
+    errors: &mut Vec<CheckError>,
+) {
+    // Args at elements[3]..[6] for the canonical 4-arg call shape:
+    // (app {} (var conv2d) input kernel stride padding).
+    let tensor_args = list.elements.iter().skip(3).take(2);
+    for arg in tensor_args {
+        if !expr_tensor_type_is_concrete(arg, type_env) {
+            errors.push(CheckError::new(
+                CheckErrorKind::Other,
+                "IR builtin `conv2d` requires concrete tensor argument metadata".to_string(),
+                vec!["Use concrete d-lit dimensions for IR lowering".to_string()],
+            ));
+            return;
+        }
+    }
+    for (idx, label) in [(5usize, "stride"), (6usize, "padding")] {
+        let Some(arg) = list.elements.get(idx) else {
+            // Arity mismatch is caught elsewhere; bail without piling on.
+            return;
+        };
+        if extract_int_literal(arg).is_none() {
+            errors.push(CheckError::new(
+                CheckErrorKind::Other,
+                format!("IR builtin `conv2d` requires a literal integer {label}"),
+                vec![format!(
+                    "Pass `{label}` as a constant int literal, not a variable or expression"
+                )],
+            ));
+            return;
+        }
+    }
+}
+
 fn ir_builtin_axis_dim(
     list: &deep::List,
     type_env: &IrTypeEnv,
@@ -5181,7 +5215,7 @@ fn ir_builtin_axis_dim(
     let tensor_dims = list
         .elements
         .get(3 + tensor_arg_index)
-        .and_then(|expr| expr_type_expr(expr, type_env))
+        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
         .and_then(|ty| tensor_dims_from_type_expr(&ty))?;
     // Negative axes index from the end; normalize against the operand
     // rank so this concrete-extent check inspects the same axis the op
@@ -5194,11 +5228,29 @@ fn ir_builtin_axis_dim(
     tensor_dims.get(axis).copied()
 }
 
-fn app_result_type_is_concrete(list: &deep::List) -> bool {
-    get_meta(list)
-        .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
-        .map(|(_, ty)| type_expr_is_ir_concrete(ty))
-        .unwrap_or(false)
+/// Resolve the tensor type expression of a callsite argument, peeking
+/// through a `(borrow {} <inner>)` wrapper if present.
+///
+/// Surf source idiomatically passes tensors to shape-sensitive IR
+/// builtins via borrows (e.g. the `Std.Nn.Conv.conv2d_small` sig
+/// requires `&tensor[...]`). The validator's lookup helpers need to
+/// see through that wrapper to find the underlying tensor type in the
+/// IR type environment; otherwise the dim-concreteness checks in the
+/// `conv2d`, `mean`, and `layer_norm` arms silently no-op on borrowed
+/// inputs (see issue #186).
+fn arg_tensor_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let inner = peel_borrow(expr);
+    expr_type_expr(inner, type_env)
+}
+
+fn peel_borrow(expr: &deep::Expr) -> &deep::Expr {
+    if let deep::Expr::List(list, _) = expr
+        && get_tag(list) == Some("borrow")
+        && let Some(child) = children(list).first()
+    {
+        return peel_borrow(child);
+    }
+    expr
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
