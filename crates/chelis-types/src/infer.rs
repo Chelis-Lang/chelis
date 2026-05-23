@@ -5430,6 +5430,14 @@ fn conv2d_output_extent(input: i64, kernel: i64, stride: i64, padding: i64) -> O
 /// so downstream uses of a let-bound name resolve to a concrete
 /// tensor type (RT-205 F5).
 ///
+/// In addition to `conv2d` direct calls, this also handles
+/// shape-PRESERVING unary and binary point-wise ops (relu, tanh,
+/// add, mul, etc.) so the canonical CNN layer pattern
+/// `y = relu(conv2d(...))` chains correctly into a downstream
+/// `conv2d(&y, ...)` (RT-205 round-2 F2). Reductions and movement
+/// ops are intentionally NOT handled here; they would need a
+/// separate per-op derivation because they change rank or shape.
+///
 /// Returns `None` when the call shape is unrecognized, the args are
 /// non-concrete, or the derived output would be ill-formed (in which
 /// case the validator's own arm will report the diagnostic).
@@ -5443,8 +5451,66 @@ fn derive_ir_builtin_output_type(expr: &deep::Expr, type_env: &IrTypeEnv) -> Opt
     let func_name = ir_builtin_name(list)?;
     match func_name {
         "conv2d" => derive_conv2d_output_type(list, type_env),
+        // Shape-preserving unary point-wise: output type == input type.
+        // Limited to ops whose IR semantics guarantee
+        // `output_shape == input_shape`. Reductions (sum, mean,
+        // max_reduce, argmax_reduce, prod_reduce, min_reduce,
+        // argmin_reduce) and movement ops (reshape, permute, gather,
+        // pad, shrink, stride, expand) are EXCLUDED -- they change
+        // rank or shape, and need per-op derivation.
+        "relu" | "tanh" | "sigmoid" | "gelu" | "silu" | "exp" | "log" | "neg" | "recip"
+        | "sqrt" | "abs" | "sin" | "cos" | "softmax" => {
+            derive_unary_shape_passthrough(list, type_env)
+        }
+        // Shape-preserving binary point-wise: output type == first
+        // operand's type. Broadcasting cases are caught by HM
+        // elsewhere; here we fall through to None if the first
+        // operand's type is not derivable and try the second.
+        "add" | "sub" | "mul" | "div" | "maximum" | "minimum" | "cmplt" | "lt" | "gt" | "eq" => {
+            derive_binary_shape_passthrough(list, type_env)
+        }
         _ => None,
     }
+}
+
+/// Derive the output tensor type of a shape-preserving unary
+/// point-wise call: it equals the type of the single argument.
+/// Recurses through nested apps so e.g. `relu(conv2d(...))`
+/// resolves to conv2d's derived output type, peeking through any
+/// borrow wrapper as usual (RT-205 round-2 F2).
+fn derive_unary_shape_passthrough(list: &deep::List, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let arg = list.elements.get(3)?;
+    resolve_let_value_tensor_type(arg, type_env)
+}
+
+/// Derive the output tensor type of a shape-preserving binary
+/// point-wise call: it equals the type of whichever operand is
+/// concretely resolvable (typically the first). Broadcasting and
+/// dtype-promotion cases are caught by HM elsewhere; this helper
+/// only needs to surface a shape that the next validator arm can
+/// inspect (RT-205 round-2 F2).
+fn derive_binary_shape_passthrough(list: &deep::List, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let lhs = list.elements.get(3)?;
+    if let Some(ty) = resolve_let_value_tensor_type(lhs, type_env) {
+        return Some(ty);
+    }
+    let rhs = list.elements.get(4)?;
+    resolve_let_value_tensor_type(rhs, type_env)
+}
+
+/// Resolve the tensor type expression of a let-binding RHS or any
+/// nested sub-expression: try the borrow-aware var/lit lookup first,
+/// and if that fails recurse into the sub-expression as another
+/// recognized shape-sensitive call. Used by the unary and binary
+/// passthrough helpers (RT-205 round-2 F2).
+fn resolve_let_value_tensor_type(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    if let Some(ty) = arg_tensor_type_expr(expr, type_env) {
+        return Some(ty);
+    }
+    // Peek through borrow before recursing in case a wrapper op
+    // appears under an `&` borrow (uncommon but cheap).
+    let inner = peel_borrow(expr);
+    derive_ir_builtin_output_type(inner, type_env)
 }
 
 /// Derive a conv2d call's output tensor type (rank-4 `[N, F, outH, outW]`

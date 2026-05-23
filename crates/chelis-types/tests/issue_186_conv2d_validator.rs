@@ -643,6 +643,107 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     }
 }
 
+/// EXPECT (RT-205 round-2 F2): the canonical CNN layer pattern
+/// `y = relu(conv2d(...))` followed by `conv2d(&y, ...)` type-checks
+/// cleanly. F5 originally only handled direct `conv2d` RHS; the F2
+/// fix extends `derive_ir_builtin_output_type` with shape-preserving
+/// unary point-wise ops so the wrapper does not break the chain.
+#[test]
+fn red_team_205_round2_f2_relu_wrapped_chained_conv2d_typechecks() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = relu(conv2d(&x, &k1, 1, 0))
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for relu-wrapped chained conv2d, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT (RT-205 round-2 F2): tanh wrapper is also shape-preserving.
+#[test]
+fn red_team_205_round2_f2_tanh_wrapped_chained_conv2d_typechecks() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = tanh(conv2d(&x, &k1, 1, 0))
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for tanh-wrapped chained conv2d, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT (RT-205 round-2 F2): shape-preserving binary point-wise
+/// `add(conv2d(...), &b)` is handled by the binary passthrough arm.
+/// `b` is a same-shape bias-like tensor; the validator can resolve
+/// `y` to the conv2d output shape via the binary derivation.
+#[test]
+fn red_team_205_round2_f2_add_wrapped_chained_conv2d_typechecks() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = add(conv2d(&x, &k1, 1, 0), &b)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for add-wrapped chained conv2d, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// EXPECT (RT-205 round-2 F2 negative parity): a rank-changing
+/// reduction wrapper (`sum(conv2d(...), 1)`) MUST NOT be handled by
+/// the passthrough arm because sum reduces rank. Downstream
+/// `conv2d(&y, ...)` should still fail the concrete-tensor-arg
+/// check; this pins that the passthrough fix is shape-preserving
+/// only, not a blanket "trust the inner op's output" path.
+#[test]
+fn red_team_205_round2_f2_sum_wrapped_chained_conv2d_still_rejected() {
+    let src = r#"
+def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y = sum(conv2d(&x, &k1, 1, 0), 1)
+  conv2d(&y, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for sum-wrapped chain");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.contains("concrete tensor argument metadata")
+                || e.message.contains("dimension mismatch")
+                || e.message.contains("body doesn't match declared signature")),
+        "expected rejection of sum-wrapped chain, got {:?}",
+        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 /// EXPECT: A direct-Deep conv2d call whose stride argument is a `(var ...)`
 /// rather than an integer literal is rejected with a clear error. The
 /// IR lowering requires the stride/padding to be statically-knowable
