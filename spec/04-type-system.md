@@ -479,6 +479,12 @@ Tensor operations require strict dimension matching. Two dimension lists are com
 - `(d-lit {} 512)` unifies with `(d-lit {} 512)` — same literal.
 - `(d-lit {} 512)` does NOT unify with `(d-lit {} 768)` — different sizes → **type error**.
 - `(d-name {} batch)` unifies with `(d-var {} a)` — binds `a = batch`.
+- `(d-name {} batch)` unifies with `(d-lit {} N)` — a concrete literal satisfies a
+  concrete-but-named slot at the call site. Names are preserved in diagnostics; they do
+  not impose a distinct-from-literal constraint. This is Option A from
+  `Chelis-Lang/chelis#219`, which removes the prior `Name <-> Lit` asymmetry that
+  rejected `f(to_tensor([[1, 2, 3]]))` against `def f(x: tensor[batch, hidden, f32])`
+  even though the corresponding `Var <-> Lit` shape was accepted.
 
 ### 4.2 No Broadcasting
 

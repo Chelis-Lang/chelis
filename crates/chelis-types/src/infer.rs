@@ -10367,12 +10367,21 @@ fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
 /// `TypeCheck-FreeDimVarUnification-F1` (SR-LEAK-A): the Shape A
 /// relaxed-retry must not accept a body whose return dim diverges from
 /// the declared return dim.
+///
+/// Name <-> Lit (issue Chelis-Lang/chelis#219, Option A): mirrors
+/// `unify_dim`'s permissive Name <-> Lit arm. The Shape A relaxed-
+/// retry's structural check must agree with `unify_dim` so the
+/// retry path doesn't silently reject a callee-shape pairing that
+/// the call-site unification would accept.
 fn dims_identical(d1: &Dim, d2: &Dim) -> bool {
     match (d1, d2) {
         (Dim::Wildcard, _) | (_, Dim::Wildcard) => true,
         (Dim::Name(n1), Dim::Name(n2)) => n1 == n2,
         (Dim::Lit(l1), Dim::Lit(l2)) => l1 == l2,
         (Dim::Var(v1), Dim::Var(v2)) => v1 == v2,
+        // Issue #219 Option A: Name and Lit count as identical for
+        // the Shape A relaxed-retry's structural check.
+        (Dim::Name(_), Dim::Lit(_)) | (Dim::Lit(_), Dim::Name(_)) => true,
         _ => false,
     }
 }

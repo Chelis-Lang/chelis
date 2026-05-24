@@ -541,14 +541,21 @@ def call(x: &tensor[3, f32], y: &tensor[3, f32]) -> tensor[3, f32] = add_t(x, y)
 }
 
 // =================================================================
-// FINDING 5: multi-letter dim names in a sig are parsed as d-name
-// (concrete) instead of d-var, so any sig using them rejects all
-// concrete-dim callers.
+// FINDING 5: regression-lock — multi-letter dim sig accepts concrete
+// caller (issue Chelis-Lang/chelis#219, Option A).
 // =================================================================
+//
+// Before #219 Option A, multi-letter dim names in a sig parsed as
+// `d-name` (concrete) and `unify_dim` had an asymmetry where
+// `Var <-> Lit` was accepted but `Name <-> Lit` was rejected. The
+// test below was originally written as a diagnostic pin
+// (`finding_5_multi_letter_dim_in_sig_rejects_concrete_caller`,
+// `#[ignore]`-flagged) to flip when the fix landed. With Option A,
+// the call site now type-checks cleanly; this test pins the
+// post-fix contract so a regression in the unify_dim arm is loud.
 
 #[test]
-#[ignore = "WS-A9 follow-up: multi-letter dim names parsed as d-name (concrete) instead of d-var; out of WS-A8 scope"]
-fn finding_5_multi_letter_dim_in_sig_rejects_concrete_caller() {
+fn finding_5_multi_letter_dim_in_sig_accepts_concrete_caller() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("multi_letter.ch");
     write_file(
@@ -559,15 +566,11 @@ def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = take(xs)
 "#,
     );
     let json = run_check(&path);
-    let kinds = error_kinds(&json);
+    let errs = errors(&json);
     assert!(
-        kinds.iter().any(|k| k == "DimensionMismatch"),
-        "finding-5 regression-flip: multi-letter dim is now treated as d-var. Got kinds {kinds:?}"
-    );
-    let messages = error_messages(&json);
-    assert!(
-        messages.iter().any(|m| m.contains("batch")),
-        "finding-5 expected diagnostic to name 'batch'; got {messages:?}"
+        errs.is_empty(),
+        "finding-5 post-#219 Option A: multi-letter dim sig should accept concrete \
+         caller; got errors {errs:?}"
     );
 }
 
