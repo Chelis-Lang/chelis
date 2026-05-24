@@ -411,19 +411,22 @@ fn issue_218_r3_cons_rank_mismatch_still_rejects() {
 
 #[test]
 fn issue_218_r3_reshape_after_matmul_in_grad_body_builds() {
+    // Surf `reshape(matmul(x, w), [cast(2, int64), cast(1, int64)])`
+    // is grad'd by composing the reshape with a sum reduction so
+    // the function returns a scalar. The named `summed_g` helper
+    // wraps the reshape-into-reduction so `grad(summed_g, wrt=x)`
+    // is a clean tensor->scalar gradient.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("reshape_grad.ch");
     write_file(
         &path,
-        "def g(x: tensor[2, 3, f32]) -> tensor[2, 1, f32] = {\n\
+        "def summed_g(x: tensor[2, 3, f32]) -> tensor[f32] = {\n\
            w = to_tensor([[1.0], [2.0], [3.0]])\n\
-           reshape(matmul(copy(x), w), [cast(2, int64), cast(1, int64)])\n\
+           y = reshape(matmul(copy(x), w), [cast(2, int64), cast(1, int64)])\n\
+           sum(sum(y, 0), 0)\n\
          }\n\
-         def compute_grad(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] = {\n\
-           sum_g = fn (xi: tensor[2, 3, f32]) ->\n\
-             sum(sum(g(copy(xi)), 0), 0)\n\
-           grad(sum_g, wrt=x)(x)\n\
-         }\n\
+         def compute_grad(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =\n\
+           grad(summed_g, wrt=x)(x)\n\
          out = compute_grad(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n",
     );
     let output = run_build(&path);

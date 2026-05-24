@@ -7459,6 +7459,72 @@ fn infer_app(
         return Type::Error;
     }
 
+    // Issue Chelis-Lang/chelis#218 R3 HIGH-CONCAT: when `Cons` is
+    // called with two concrete tensor-typed args (head: tensor,
+    // tail: List<tensor>), skip the generic per-dim equality
+    // unification and produce a per-axis join (Lit(n) when both
+    // dims are Lit(n) and equal; Wildcard otherwise). The generic
+    // `unify` recursion walks dims pairwise and rejects
+    // `Lit(2) vs Lit(3)`, which breaks `concat([a, b], 0)` after
+    // the to_tensor source fix made nested-list literals emit
+    // concrete dims.
+    //
+    // Precondition guards:
+    //   * exactly two args (Cons signature)
+    //   * head is a concrete tensor type
+    //   * tail is `List<tensor[...]>` with a concrete tensor element
+    //   * head and tail-element have matching rank (no rank join;
+    //     mismatched ranks remain structural errors)
+    //   * head and tail-element have matching precision (no
+    //     precision join; mismatched precisions would mask real
+    //     type errors)
+    //
+    // When any precondition fails, fall through to the generic
+    // unify path so other Cons shapes (e.g. `Cons(scalar, list)` or
+    // `Cons(head, Nil)` where `Nil`'s tvar binds the element type)
+    // keep their existing semantics.
+    if matches!(func_name.as_deref(), Some("Cons")) && arg_tys.len() == 2 {
+        let head_resolved = subst.apply(&arg_tys[0]);
+        let tail_resolved = subst.apply(&arg_tys[1]);
+        if let (Type::Tensor(head_dims, head_prec), Type::Adt(list_name, list_args)) =
+            (&head_resolved, &tail_resolved)
+            && list_name == "List"
+            && list_args.len() == 1
+            && let Type::Tensor(tail_dims, tail_prec) = subst.apply(&list_args[0])
+        {
+            if head_dims.len() != tail_dims.len() {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "list element rank mismatch: {} dims vs {} dims",
+                            head_dims.len(),
+                            tail_dims.len(),
+                        ),
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+            if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
+                errors.push(te.into());
+                return Type::Error;
+            }
+            let joined_dims: Vec<Dim> = head_dims
+                .iter()
+                .zip(tail_dims.iter())
+                .map(|(h, t)| match (h, t) {
+                    (Dim::Lit(a), Dim::Lit(b)) if a == b => Dim::Lit(*a),
+                    _ => Dim::Wildcard,
+                })
+                .collect();
+            let joined_prec = subst.apply_tensor_prec(head_prec);
+            let elem = Type::Tensor(joined_dims, joined_prec);
+            return Type::Adt("List".to_string(), vec![elem]);
+        }
+    }
+
     let ret_tv = vg.fresh_type();
 
     // Comparison-op tensor/scalar broadcast: when a comparison op
