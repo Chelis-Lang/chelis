@@ -4107,7 +4107,10 @@ fn resolve_axis_pair_member(
     list: &deep::List,
     errors: &mut Vec<CheckError>,
 ) -> Result<usize, ()> {
-    match axis_expr.and_then(extract_int_literal) {
+    // Issue #216: use the cast-aware extractor so `cast(N, int32)`-wrapped
+    // axis literals trip the infer-time bounds check instead of slipping
+    // through to host-runtime defense-in-depth.
+    match axis_expr.and_then(extract_int_for_dim) {
         Some(raw) => match tensor_ty {
             Type::Tensor(dims, _) => match normalize_static_axis(dims.len(), raw) {
                 Some(axis) => Ok(axis),
@@ -4151,7 +4154,8 @@ fn resolve_builtin_axis(
     list: &deep::List,
     errors: &mut Vec<CheckError>,
 ) -> Option<usize> {
-    let raw_axis = axis_expr.and_then(extract_int_literal);
+    // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
+    let raw_axis = axis_expr.and_then(extract_int_for_dim);
     match (tensor_ty, raw_axis) {
         (Type::Tensor(dims, _), Some(raw)) => match normalize_static_axis(dims.len(), raw) {
             Some(axis) => Some(axis),
@@ -5717,8 +5721,10 @@ fn derive_conv2d_output_type(list: &deep::List, type_env: &IrTypeEnv) -> Option<
     if input_dims.len() != 4 || kernel_dims.len() != 4 {
         return None;
     }
-    let stride = extract_int_literal(list.elements.get(5)?)?;
-    let padding = extract_int_literal(list.elements.get(6)?)?;
+    // Issue #216: cast-aware so `conv2d(x, k, cast(1, int32), cast(0, int32))`
+    // surfaces the same derived output type as the bare-literal form.
+    let stride = extract_int_for_dim(list.elements.get(5)?)?;
+    let padding = extract_int_for_dim(list.elements.get(6)?)?;
     if stride <= 0 || padding < 0 {
         return None;
     }
@@ -5871,7 +5877,12 @@ fn extract_typed_scalar_literal(
         // Arity mismatch is caught elsewhere; bail without piling on.
         return None;
     };
-    match extract_int_literal(arg) {
+    // Issue #216: cast-aware so a cast-wrapped literal (e.g.
+    // `conv2d(x, k, cast(0, int32), 0)`) lands the precise
+    // positive-stride / non-negative-padding diagnostic instead of the
+    // misleading "requires a literal integer stride" message that
+    // pre-fix appeared whenever the literal was wrapped.
+    match extract_int_for_dim(arg) {
         Some(v) => Some(v),
         None => {
             errors.push(validator_error(
@@ -5901,10 +5912,12 @@ fn ir_builtin_axis_dim(
     // Negative axes index from the end; normalize against the operand
     // rank so this concrete-extent check inspects the same axis the op
     // actually reduces.
+    // Issue #216: cast-aware so a `cast(N, int32)`-wrapped axis arg
+    // still resolves through to the operand's concrete dim.
     let raw_axis = list
         .elements
         .get(3 + axis_arg_index)
-        .and_then(extract_int_literal)?;
+        .and_then(extract_int_for_dim)?;
     let axis = normalize_static_axis(tensor_dims.len(), raw_axis)?;
     tensor_dims.get(axis).copied()
 }
@@ -7624,10 +7637,12 @@ fn infer_app(
                 // axis range is validated here. Negative axes index from
                 // the end via `normalize_static_axis`, consistent with
                 // the reductions and gather/scatter.
+                // Issue #216: cast-aware so `softmax(x, cast(N, int32))`
+                // surfaces the bounds-check diagnostic at infer.
                 if fname == "softmax"
                     && let Some(first_arg) = arg_tys.first()
                     && let Type::Tensor(dims, _) = type_for_readonly_check(first_arg, subst)
-                    && let Some(raw) = kids.get(2).and_then(extract_int_literal)
+                    && let Some(raw) = kids.get(2).and_then(extract_int_for_dim)
                     && normalize_static_axis(dims.len(), raw).is_none()
                 {
                     errors.push(CheckError::new(
@@ -8234,8 +8249,12 @@ fn infer_app(
                         } else {
                             None
                         };
+                        // Issue #216: cast-aware so `shape(x, cast(N, int32))`
+                        // (the idiomatic form from issue #206 for runtime-dim
+                        // reshape) surfaces the same diagnostic as the bare-
+                        // literal form.
                         if let Some(axis_expr) = kids.get(2)
-                            && let Some(axis) = extract_int_literal(axis_expr)
+                            && let Some(axis) = extract_int_for_dim(axis_expr)
                         {
                             if axis < 0 {
                                 errors.push(CheckError::new(
@@ -8956,7 +8975,10 @@ fn infer_app(
                                     return Type::Error;
                                 }
                                 // Negative axes index from the end.
-                                let raw_axis = kids.get(2).and_then(extract_int_literal);
+                                // Issue #216: cast-aware so a
+                                // `cast(N, int32)`-wrapped split axis still
+                                // surfaces the bounds diagnostic at infer.
+                                let raw_axis = kids.get(2).and_then(extract_int_for_dim);
                                 let axis = match raw_axis {
                                     Some(raw) => match normalize_static_axis(dims.len(), raw) {
                                         Some(axis) => axis,
@@ -11751,8 +11773,10 @@ fn compute_concrete_conv2d_spatial(
     kernel_dims: &[Dim],
     subst: &Subst,
 ) -> Option<(i64, i64)> {
-    let stride = arg_exprs.get(2).and_then(extract_int_literal)?;
-    let padding = arg_exprs.get(3).and_then(extract_int_literal)?;
+    // Issue #216: cast-aware so cast-wrapped stride/padding still
+    // resolve the concrete spatial output dims at infer time.
+    let stride = arg_exprs.get(2).and_then(extract_int_for_dim)?;
+    let padding = arg_exprs.get(3).and_then(extract_int_for_dim)?;
     if stride <= 0 || padding < 0 {
         return None;
     }
@@ -12105,7 +12129,11 @@ fn check_reduction_signature(
     // use `axis=-1`. `normalize_static_axis` maps `rank + axis` and
     // bounds-checks; gather/scatter use the same helper, so reductions
     // stay consistent with them and with IR lowering's `normalize_axis`.
-    let axis = match arg_exprs.get(1).and_then(extract_int_literal) {
+    //
+    // Issue #216: cast-aware so reductions like `sum(x, cast(-1, int32))`
+    // or `max_reduce(x, cast(7, int32))` surface the bounds diagnostic
+    // at infer time rather than slipping through to host-runtime defense.
+    let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(raw) => match normalize_static_axis(dims.len(), raw) {
             Some(axis) => axis,
             None => {
@@ -13818,11 +13846,17 @@ fn grad_wrt_indices(list: &deep::List, errors: &mut Vec<CheckError>) -> Option<O
         return Some(None);
     };
 
+    // Issue #216: cast-aware so a Deep-direct grad node with cast-wrapped
+    // wrt indices peels to the underlying int and trips the
+    // non-negative-index check at infer time. Surf desugar resolves
+    // parameter names to bare literal ints before reaching here, so the
+    // swap is defense-in-depth for Deep-direct callers (decompiler,
+    // macro output, custom tooling).
     match wrt_expr {
         deep::Expr::List(tuple, _) if get_tag(tuple) == Some("tuple") => {
             let mut indices = Vec::new();
             for item in children(tuple) {
-                let Some(index) = extract_int_literal(item) else {
+                let Some(index) = extract_int_for_dim(item) else {
                     errors.push(CheckError::new(
                         CheckErrorKind::TypeMismatch,
                         "grad `wrt` tuple must contain integer parameter indices".to_string(),
@@ -13843,7 +13877,7 @@ fn grad_wrt_indices(list: &deep::List, errors: &mut Vec<CheckError>) -> Option<O
             Some(Some(indices))
         }
         other => {
-            let Some(index) = extract_int_literal(other) else {
+            let Some(index) = extract_int_for_dim(other) else {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     "grad `wrt` must be an integer parameter index or tuple of indices".to_string(),
@@ -13895,7 +13929,11 @@ fn infer_vmap(
         return Type::Error;
     }
 
-    let axis = kids.get(1).and_then(extract_int_literal).unwrap_or(0);
+    // Issue #216: cast-aware so a Deep-direct vmap node with a cast-
+    // wrapped axis literal peels to the underlying int and trips the
+    // non-negative check. Surf parser restricts vmap's axis to bare
+    // ints, so this is defense-in-depth for Deep-direct callers.
+    let axis = kids.get(1).and_then(extract_int_for_dim).unwrap_or(0);
     if axis < 0 {
         errors.push(CheckError::new(
             CheckErrorKind::DimensionMismatch,
