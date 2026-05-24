@@ -3,9 +3,10 @@ use std::fs;
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
-use chelis_ir::dag::{DimInfo, TensorType};
-use chelis_ir::eval::TensorValue as IrTensorValue;
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::lower::{top_level_lowering_map, try_lower_subexpr_program};
+use chelis_ir::tier2;
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, types::Prim};
 
 use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
@@ -1491,6 +1492,16 @@ impl<'a> EvalContext<'a> {
             "sub" => numeric_binop(args, |lhs, rhs| lhs - rhs),
             "mul" => numeric_binop(args, |lhs, rhs| lhs * rhs),
             "div" => numeric_binop(args, |lhs, rhs| lhs / rhs),
+            // Tier-1 `max_elem` and Tier-2 `min_elem` are element-wise
+            // binary ops. The IR evaluator emits
+            // `binary_map(.., f64::max)` for `RiscOp::MaxElem` and
+            // `lower_min_elem` (`crates/chelis-ir/src/tier2.rs:364`)
+            // synthesizes `neg(max_elem(neg a, neg b))`; the host-runtime
+            // closure form fuses that into a direct `f64::min` for the
+            // same observable result. Wired for issue
+            // Chelis-Lang/chelis#185.
+            "max_elem" => numeric_binop(args, f64::max),
+            "min_elem" => numeric_binop(args, f64::min),
             "mod" => int_binop(args, |lhs, rhs| lhs % rhs),
             "neg" => numeric_unop(args, |value| -value),
             "recip" => numeric_unop(args, |value| 1.0 / value),
@@ -1498,6 +1509,22 @@ impl<'a> EvalContext<'a> {
             "log" => float_unop_with_tensor(args, f64::ln, f32::ln),
             "sin" => float_unop_with_tensor(args, f64::sin, f32::sin),
             "sqrt" => float_unop_with_tensor(args, f64::sqrt, f32::sqrt),
+            // Tier 1 unary primitives wired for issue Chelis-Lang/chelis#185.
+            // Each delegates to the same `float_unop_with_tensor` /
+            // `numeric_unop` helper used by the already-wired siblings; the
+            // tensor lane runs through `f32` to mirror the C backend's libm
+            // emit (`cosf`/`tanf`/`floorf`/`ceilf`/`atanf`), which is the
+            // canonical-evaluator equivalent (per
+            // `feedback_evaluator_byte_identical_gate`).
+            "cos" => float_unop_with_tensor(args, f64::cos, f32::cos),
+            "tan" => float_unop_with_tensor(args, f64::tan, f32::tan),
+            "atan" => float_unop_with_tensor(args, f64::atan, f32::atan),
+            "floor" => float_unop_with_tensor(args, f64::floor, f32::floor),
+            "ceil" => float_unop_with_tensor(args, f64::ceil, f32::ceil),
+            // `abs` accepts ints and floats and is sign-flipping for both;
+            // route through `numeric_unop` so scalar Int64/Int32/F32/F64
+            // inputs all keep their dtype.
+            "abs" => numeric_unop(args, f64::abs),
             "eq" => compare_eq(args),
             "neq" => compare_eq(args).map(|value| match value {
                 RuntimeValue::Bool(value) => RuntimeValue::Bool(!value),
@@ -1541,9 +1568,33 @@ impl<'a> EvalContext<'a> {
                     seed ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 )))
             }
-            "and" => bool_binop(args, |lhs, rhs| lhs && rhs),
-            "or" => bool_binop(args, |lhs, rhs| lhs || rhs),
-            "not" => bool_unop(args, |value| !value),
+            // Logical ops dispatch on the actual argument shape: scalar
+            // bool args (already wired) keep the `bool_binop` /
+            // `bool_unop` path; tensor-bool args route through the
+            // dedicated `tensor_bool_*` helpers wired for issue
+            // Chelis-Lang/chelis#185. Per the brief's pinned decision,
+            // the tensor lane is NOT a transparent extension of the
+            // scalar lane — it pins input precision to `Bool` and
+            // requires matching shapes, which scalar broadcasting
+            // would hide.
+            "and" => match (args.first(), args.get(1)) {
+                (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+                    tensor_bool_binop(lhs, rhs, |a, b| a && b).map(RuntimeValue::Tensor)
+                }
+                _ => bool_binop(args, |lhs, rhs| lhs && rhs),
+            },
+            "or" => match (args.first(), args.get(1)) {
+                (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+                    tensor_bool_binop(lhs, rhs, |a, b| a || b).map(RuntimeValue::Tensor)
+                }
+                _ => bool_binop(args, |lhs, rhs| lhs || rhs),
+            },
+            "not" => match args.first() {
+                Some(RuntimeValue::Tensor(tensor)) => {
+                    tensor_bool_unop(tensor, |value| !value).map(RuntimeValue::Tensor)
+                }
+                _ => bool_unop(args, |value| !value),
+            },
             "bitand" => int_binop(args, |lhs, rhs| lhs & rhs),
             "bitor" => int_binop(args, |lhs, rhs| lhs | rhs),
             "bitxor" => int_binop(args, |lhs, rhs| lhs ^ rhs),
@@ -2354,6 +2405,16 @@ impl<'a> EvalContext<'a> {
                 let axis = expect_int_arg(args, 1)?;
                 tensor_reduce_host(&tensor, axis, ReduceOp::Min).map(RuntimeValue::Tensor)
             }
+            // Mirror of `min_reduce` for issue Chelis-Lang/chelis#185. The
+            // typer's `tensor_reduce_to_out` signature gives both ops the
+            // same shape; the IR evaluator's `RiscOp::MaxReduce` uses
+            // `reduce(.., f64::NEG_INFINITY, f64::max)` which the
+            // `ReduceOp::Max` variant of `tensor_reduce_host` mirrors.
+            "max_reduce" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                tensor_reduce_host(&tensor, axis, ReduceOp::Max).map(RuntimeValue::Tensor)
+            }
             "prod_reduce" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
@@ -2415,6 +2476,49 @@ impl<'a> EvalContext<'a> {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
                 tensor_softmax_host(&tensor, axis).map(RuntimeValue::Tensor)
+            }
+            // Composed Tier-2 ops wired for issue Chelis-Lang/chelis#185.
+            // Each delegates to the canonical IR decomposition in
+            // `crates/chelis-ir/src/tier2.rs` (the same path the C
+            // backend takes) and forward-evaluates the resulting small
+            // DAG through `chelis_ir::eval` — the canonical numerical
+            // oracle per `feedback_evaluator_byte_identical_gate`. We do
+            // not reimplement the math here; that's the path that drifts
+            // when downstream tier2 updates land.
+            "mean" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                let axis = normalize_axis(tensor.value.shape.len(), axis, "mean")?;
+                eval_composed_unary(&tensor, |dag, x, ty| {
+                    tier2::lower_mean(dag, x, axis, ty, None)
+                })
+                .map(RuntimeValue::Tensor)
+            }
+            "layer_norm" => {
+                let x = expect_tensor_arg(args, 0)?;
+                let gamma = expect_tensor_arg(args, 1)?;
+                let beta = expect_tensor_arg(args, 2)?;
+                eval_composed_triop(&x, &gamma, &beta, |dag, x_id, gamma_id, beta_id, tys| {
+                    tier2::lower_layer_norm(
+                        dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, 1e-5, None,
+                    )
+                })
+                .map(RuntimeValue::Tensor)
+            }
+            "conv2d" => {
+                let input = expect_tensor_arg(args, 0)?;
+                let kernel = expect_tensor_arg(args, 1)?;
+                let stride = expect_int_arg(args, 2)?;
+                let padding = expect_int_arg(args, 3)?;
+                if stride < 1 {
+                    return Err(format!("conv2d stride must be >= 1, got {stride}"));
+                }
+                if padding < 0 {
+                    return Err(format!("conv2d padding must be >= 0, got {padding}"));
+                }
+                let stride = stride as usize;
+                let padding = padding as usize;
+                conv2d_host(&input, &kernel, stride, padding).map(RuntimeValue::Tensor)
             }
             // Movement primitives that take parameterized window args. Both
             // delegate to the same arithmetic the IR evaluator at
@@ -3152,6 +3256,73 @@ fn bool_unop(args: &[RuntimeValue], op: impl Fn(bool) -> bool) -> Result<Runtime
     }
 }
 
+/// Element-wise tensor-bool binary op. Per the pinned decision for
+/// issue Chelis-Lang/chelis#185 the tensor-bool arms are SEPARATE from
+/// the scalar `bool_binop` helper: tensor-bool semantics require
+/// explicit precision + shape checking that scalar broadcasting would
+/// hide. The IR evaluator does not have a dedicated bool path —
+/// `tier2::lower_and`/`lower_or` lower to `Mul`/`MaxElem` over
+/// 0.0/1.0-encoded bool tensors — but the host runtime stores
+/// `tensor[D, bool]` as f64 data with `precision == Prim::Bool` (see
+/// `tensor_compare_value` / `tensor_compare_scalar` which produce
+/// 0.0/1.0 entries). Treat the truth value as `element != 0.0`,
+/// re-encode the result the same way, and pin the output precision to
+/// `Bool`.
+fn tensor_bool_binop(
+    lhs: &RuntimeTensorValue,
+    rhs: &RuntimeTensorValue,
+    op: impl Fn(bool, bool) -> bool,
+) -> Result<RuntimeTensorValue, String> {
+    if lhs.precision != Prim::Bool || rhs.precision != Prim::Bool {
+        return Err(format!(
+            "tensor bool op expects tensor[D, bool] inputs, got lhs precision {} and rhs precision {}",
+            lhs.precision.name(),
+            rhs.precision.name()
+        ));
+    }
+    if lhs.value.shape != rhs.value.shape {
+        return Err(format!(
+            "tensor bool op expects matching shapes, got {:?} vs {:?}",
+            lhs.value.shape, rhs.value.shape
+        ));
+    }
+    let data = lhs
+        .value
+        .data
+        .iter()
+        .zip(&rhs.value.data)
+        .map(|(l, r)| if op(*l != 0.0, *r != 0.0) { 1.0 } else { 0.0 })
+        .collect::<Vec<_>>();
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(lhs.value.shape.clone(), data),
+        precision: Prim::Bool,
+    })
+}
+
+/// Element-wise tensor-bool unary op. See `tensor_bool_binop` for the
+/// rationale on keeping this separate from the scalar `bool_unop` arm.
+fn tensor_bool_unop(
+    tensor: &RuntimeTensorValue,
+    op: impl Fn(bool) -> bool,
+) -> Result<RuntimeTensorValue, String> {
+    if tensor.precision != Prim::Bool {
+        return Err(format!(
+            "tensor bool op expects tensor[D, bool] input, got precision {}",
+            tensor.precision.name()
+        ));
+    }
+    let data = tensor
+        .value
+        .data
+        .iter()
+        .map(|value| if op(*value != 0.0) { 1.0 } else { 0.0 })
+        .collect::<Vec<_>>();
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(tensor.value.shape.clone(), data),
+        precision: Prim::Bool,
+    })
+}
+
 fn expect_tensor_arg(args: &[RuntimeValue], index: usize) -> Result<RuntimeTensorValue, String> {
     match args.get(index) {
         Some(RuntimeValue::Tensor(value)) => Ok(value.clone()),
@@ -3653,6 +3824,7 @@ fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<usize>, Stri
 enum ReduceOp {
     Sum,
     Min,
+    Max,
     Prod,
     Argmax,
     Argmin,
@@ -3685,6 +3857,7 @@ fn tensor_reduce_host(
         let mut best_value = match op {
             ReduceOp::Sum => 0.0,
             ReduceOp::Min => f64::INFINITY,
+            ReduceOp::Max => f64::NEG_INFINITY,
             ReduceOp::Prod => 1.0,
             ReduceOp::Argmax => f64::NEG_INFINITY,
             ReduceOp::Argmin => f64::INFINITY,
@@ -3716,6 +3889,11 @@ fn tensor_reduce_host(
                         best_value = value;
                     }
                 }
+                ReduceOp::Max => {
+                    if value > best_value {
+                        best_value = value;
+                    }
+                }
                 ReduceOp::Prod => {
                     best_value *= value;
                 }
@@ -3742,7 +3920,7 @@ fn tensor_reduce_host(
                     (sum_lanes[0] + sum_lanes[1]) + (sum_lanes[2] + sum_lanes[3])
                 }
             }
-            ReduceOp::Min | ReduceOp::Prod => best_value,
+            ReduceOp::Min | ReduceOp::Max | ReduceOp::Prod => best_value,
             // Argmax/Argmin: store integer indices as integer-valued F32 per
             // the Phase 3j-pre Batch 1 caveat (documented on RiscOp::Argmax
             // and adv_argmax_output_stores_integer_valued_floats).
@@ -4207,6 +4385,184 @@ fn tensor_softmax_host(
         value: IrTensorValue::from_vec(in_shape, out),
         precision: tensor.precision,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Composed Tier-2 host-runtime delegation
+//
+// `mean` / `layer_norm` / `conv2d` are not single RISC ops; they
+// decompose into combinations of `RiscOp::Sum`, `RiscOp::Div`,
+// `RiscOp::Sqrt`, `RiscOp::Mul`, `RiscOp::Pad`, etc. The canonical
+// decomposition lives in `crates/chelis-ir/src/tier2.rs::lower_*`. To
+// avoid drift between the host runtime and the C-backend / IR
+// evaluator, we build a small ad-hoc DAG using the same tier2 lowering
+// helper and forward-eval it through `chelis_ir::eval::eval_tensor_*`.
+// This makes the host runtime byte-identical (to documented float
+// tolerance) with what the IR evaluator would produce, per
+// `feedback_evaluator_byte_identical_gate`.
+// ---------------------------------------------------------------------------
+
+const COMPOSED_PLACEHOLDER_PREFIX: &str = "__issue185_composed_arg_";
+
+fn tensor_type_for(tensor: &RuntimeTensorValue) -> TensorType {
+    TensorType {
+        dims: tensor
+            .value
+            .shape
+            .iter()
+            .map(|&size| DimInfo::Lit(size))
+            .collect(),
+        precision: tensor.precision,
+    }
+}
+
+fn add_load(dag: &mut Dag, name: String, ty: TensorType) -> NodeId {
+    dag.add_node(RiscOp::Load { name: name.into() }, Vec::new(), ty, None)
+}
+
+fn extract_root(
+    dag: &Dag,
+    inputs: &HashMap<String, IrTensorValue>,
+    root: NodeId,
+    op_label: &str,
+) -> Result<RuntimeTensorValue, String> {
+    let values = eval_tensor_roots_with(dag, &[root], |name| inputs.get(name).cloned())
+        .map_err(|err| format!("{op_label}: IR eval failed: {err}"))?;
+    let tensor_value = values
+        .get(&root)
+        .cloned()
+        .ok_or_else(|| format!("{op_label}: IR eval produced no value for root node"))?;
+    let precision = dag
+        .get(root)
+        .map(|node| node.output_type.precision)
+        .ok_or_else(|| format!("{op_label}: root node missing from DAG"))?;
+    Ok(RuntimeTensorValue {
+        value: tensor_value,
+        precision,
+    })
+}
+
+/// Build a small DAG whose only input is `x`, attach the supplied
+/// tier2 lowering helper, and forward-eval the resulting root through
+/// the IR evaluator. Used by host-runtime arms that delegate a Tier-2
+/// composed op to its canonical RISC decomposition.
+fn eval_composed_unary<F>(x: &RuntimeTensorValue, build: F) -> Result<RuntimeTensorValue, String>
+where
+    F: FnOnce(&mut Dag, NodeId, &TensorType) -> NodeId,
+{
+    let mut dag = Dag::new();
+    let ty = tensor_type_for(x);
+    let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
+    let x_id = add_load(&mut dag, x_name.clone(), ty.clone());
+    let root = build(&mut dag, x_id, &ty);
+    let mut inputs = HashMap::new();
+    inputs.insert(x_name, x.value.clone());
+    extract_root(&dag, &inputs, root, "composed unary tier2")
+}
+
+/// Build a small DAG with three tensor inputs `(x, gamma, beta)`,
+/// attach the supplied tier2 lowering helper, and forward-eval the
+/// resulting root. Used for `layer_norm`.
+fn eval_composed_triop<F>(
+    x: &RuntimeTensorValue,
+    gamma: &RuntimeTensorValue,
+    beta: &RuntimeTensorValue,
+    build: F,
+) -> Result<RuntimeTensorValue, String>
+where
+    F: FnOnce(&mut Dag, NodeId, NodeId, NodeId, (&TensorType, &TensorType, &TensorType)) -> NodeId,
+{
+    let mut dag = Dag::new();
+    let x_ty = tensor_type_for(x);
+    let g_ty = tensor_type_for(gamma);
+    let b_ty = tensor_type_for(beta);
+    let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
+    let g_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
+    let b_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}2");
+    let x_id = add_load(&mut dag, x_name.clone(), x_ty.clone());
+    let g_id = add_load(&mut dag, g_name.clone(), g_ty.clone());
+    let b_id = add_load(&mut dag, b_name.clone(), b_ty.clone());
+    let root = build(&mut dag, x_id, g_id, b_id, (&x_ty, &g_ty, &b_ty));
+    let mut inputs = HashMap::new();
+    inputs.insert(x_name, x.value.clone());
+    inputs.insert(g_name, gamma.value.clone());
+    inputs.insert(b_name, beta.value.clone());
+    extract_root(&dag, &inputs, root, "composed triop tier2")
+}
+
+/// conv2d forward in the host runtime. `tier2::lower_conv2d` is shape-
+/// polymorphic via its `output_ty` parameter and panics if the spatial
+/// dims of `output_ty` disagree with the arithmetic derived from
+/// `(input_dims, kernel_dims, stride, padding)`. The host runtime does
+/// not have a downstream type-annotation source for the output type,
+/// so we compute it inline from the four spatial parameters: that's
+/// the same formula `lower_conv2d` reaches for via the
+/// `raw_h_out`/`raw_w_out` fallback at
+/// `crates/chelis-ir/src/tier2.rs:973-984`.
+fn conv2d_host(
+    input: &RuntimeTensorValue,
+    kernel: &RuntimeTensorValue,
+    stride: usize,
+    padding: usize,
+) -> Result<RuntimeTensorValue, String> {
+    if input.value.shape.len() != 4 {
+        return Err(format!(
+            "conv2d input must be rank-4 (batch, channels, h, w), got shape {:?}",
+            input.value.shape
+        ));
+    }
+    if kernel.value.shape.len() != 4 {
+        return Err(format!(
+            "conv2d kernel must be rank-4 (out_c, in_c, kh, kw), got shape {:?}",
+            kernel.value.shape
+        ));
+    }
+    let stride = stride.max(1);
+    let batch = input.value.shape[0];
+    let in_c = input.value.shape[1];
+    let h_in = input.value.shape[2];
+    let w_in = input.value.shape[3];
+    let out_c = kernel.value.shape[0];
+    let kernel_in_c = kernel.value.shape[1];
+    let kh = kernel.value.shape[2];
+    let kw = kernel.value.shape[3];
+    if kernel_in_c != in_c {
+        return Err(format!(
+            "conv2d kernel input channels ({kernel_in_c}) must match input channels ({in_c})"
+        ));
+    }
+    let padded_h = h_in + (2 * padding);
+    let padded_w = w_in + (2 * padding);
+    if padded_h < kh || padded_w < kw {
+        return Err(format!(
+            "conv2d kernel dims ({kh}, {kw}) exceed padded input dims ({padded_h}, {padded_w})"
+        ));
+    }
+    let h_out = ((padded_h - kh) / stride) + 1;
+    let w_out = ((padded_w - kw) / stride) + 1;
+    let output_ty = TensorType {
+        dims: vec![
+            DimInfo::Lit(batch),
+            DimInfo::Lit(out_c),
+            DimInfo::Lit(h_out),
+            DimInfo::Lit(w_out),
+        ],
+        precision: input.precision,
+    };
+    let input_ty = tensor_type_for(input);
+    let kernel_ty = tensor_type_for(kernel);
+    let mut dag = Dag::new();
+    let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
+    let k_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
+    let x_id = add_load(&mut dag, x_name.clone(), input_ty.clone());
+    let k_id = add_load(&mut dag, k_name.clone(), kernel_ty.clone());
+    let root = tier2::lower_conv2d(
+        &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, stride, padding, None,
+    );
+    let mut inputs = HashMap::new();
+    inputs.insert(x_name, input.value.clone());
+    inputs.insert(k_name, kernel.value.clone());
+    extract_root(&dag, &inputs, root, "conv2d")
 }
 
 fn tensor_concat_value(parts: &[RuntimeValue], axis: i64) -> Result<RuntimeValue, String> {
