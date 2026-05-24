@@ -315,7 +315,8 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0, 1, 2]])
         rep.errors
             .iter()
             .any(|e| e.message.to_lowercase().contains("shrink")
-                && (e.message.contains("pair") || e.message.contains("2-element")
+                && (e.message.contains("pair")
+                    || e.message.contains("2-element")
                     || e.message.contains("got 3"))),
         "expected a shrink pair/length error, got {:?}",
         rep.errors
@@ -338,7 +339,8 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0]])
         rep.errors
             .iter()
             .any(|e| e.message.to_lowercase().contains("shrink")
-                && (e.message.contains("pair") || e.message.contains("2-element")
+                && (e.message.contains("pair")
+                    || e.message.contains("2-element")
                     || e.message.contains("got 1"))),
         "expected a shrink pair/length error, got {:?}",
         rep.errors
@@ -361,7 +363,8 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1]], 0.0)
         rep.errors
             .iter()
             .any(|e| e.message.to_lowercase().contains("pad")
-                && (e.message.contains("pair") || e.message.contains("2-element")
+                && (e.message.contains("pair")
+                    || e.message.contains("2-element")
                     || e.message.contains("got 1"))),
         "expected a pad pair/length error, got {:?}",
         rep.errors
@@ -385,7 +388,8 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0, 99]], 0.0)
         rep.errors
             .iter()
             .any(|e| e.message.to_lowercase().contains("pad")
-                && (e.message.contains("pair") || e.message.contains("2-element")
+                && (e.message.contains("pair")
+                    || e.message.contains("2-element")
                     || e.message.contains("got 3"))),
         "expected a pad pair/length error, got {:?}",
         rep.errors
@@ -438,7 +442,8 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], tru
         rep.errors
             .iter()
             .any(|e| e.message.to_lowercase().contains("pad")
-                && (e.message.contains("fill") || e.message.contains("scalar")
+                && (e.message.contains("fill")
+                    || e.message.contains("scalar")
                     || e.message.contains("precision"))),
         "expected a pad fill/scalar/precision error, got {:?}",
         rep.errors

@@ -10664,15 +10664,28 @@ fn infer_shrink_app(
         }
     };
 
-    // Try to extract the literal bounds from the (already desugared)
-    // Cons/Nil chain. If we can, validate them against the input rank and
-    // dims and return a precise output type.
-    let Some(bounds) = cons_chain_int_pairs(&kids[2]) else {
-        // The argument is structurally a `List[List[Int32]]` but the
-        // entries aren't concrete literals (e.g. they're variables). Keep
-        // the output rank but make every dim wildcard so downstream
-        // checks don't lock to a specific shape.
-        return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+    // Classify the (already desugared) Cons/Nil chain. The three-way
+    // result distinguishes "concrete literals" (validate precisely)
+    // from "structure looks fine but elements are non-literal" (defer
+    // to runtime, output wildcards) from "structurally malformed"
+    // (reject at infer with a clear axis-tagged message). See PR #214
+    // red team round 1 finding R1-F1.
+    let bounds = match cons_chain_int_pairs(&kids[2]) {
+        PairListShape::Literal(pairs) => pairs,
+        PairListShape::NonLiteralLiterals | PairListShape::Unknown => {
+            return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+        }
+        PairListShape::Malformed { axis, reason } => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("shrink axis {axis} pair {reason}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
     };
 
     if bounds.len() != dims.len() {
@@ -10961,7 +10974,7 @@ fn infer_pad_app(
         typed_nodes,
         total_nodes,
     );
-    let _fill_ty = infer_expr(
+    let fill_ty = infer_expr(
         &kids[3],
         env,
         vg,
@@ -11010,8 +11023,56 @@ fn infer_pad_app(
         }
     };
 
-    let Some(padding) = cons_chain_int_pairs(&kids[2]) else {
-        return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+    // R1-F2: enforce the fill arg is a scalar of the input tensor
+    // precision. The previous code dropped `fill_ty` on the floor, so a
+    // list, tuple, bool, or wrong-precision scalar would slip through to
+    // host-runtime. Per spec/05-risc-primitives.md §2.4, `pad`'s fill
+    // value is a single scalar of the input precision.
+    //
+    // Use unification rather than a hard match so polymorphic-precision
+    // tensors (precision still a `TensorPrec::Var`) generate the
+    // constraint cleanly instead of being rejected. The expected scalar
+    // type is `Type::Prim(p)` where `p` is the tensor's element
+    // precision.
+    let expected_fill_ty = match prec {
+        TensorPrec::Concrete(p) => Type::Prim(p),
+        TensorPrec::Var(_) => {
+            // Precision is still polymorphic; introduce a fresh tvar and
+            // let unification tie it to whatever the tensor lands on.
+            Type::Var(vg.fresh_tvar())
+        }
+    };
+    if let Err(_te) = unify(&fill_ty, &expected_fill_ty, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "pad fill must be a scalar of the input tensor precision ({expected_fill_ty}), got {}",
+                    subst.apply(&fill_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let padding = match cons_chain_int_pairs(&kids[2]) {
+        PairListShape::Literal(pairs) => pairs,
+        PairListShape::NonLiteralLiterals | PairListShape::Unknown => {
+            return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+        }
+        PairListShape::Malformed { axis, reason } => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("pad axis {axis} pair {reason}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
     };
 
     if padding.len() != dims.len() {
@@ -11055,85 +11116,187 @@ fn infer_pad_app(
     Type::Tensor(out_dims, prec)
 }
 
+/// Three-way result of inspecting a `[[s_0, e_0], [s_1, e_1], ...]` list
+/// literal arg: well-formed concrete literals, structurally malformed
+/// (wrong inner length, missing `Nil`, etc.), or "structure looks fine
+/// but inner entries are non-literal" (e.g. variables) so the caller
+/// should fall back to a wildcard output shape.
+///
+/// Red team round 1 on PR #214 found that `cons_chain_int_pairs`
+/// returning a plain `Option` couldn't distinguish "user wrote a triple"
+/// from "user wrote a variable" -- both became `None`, both fell through
+/// to `Dim::Wildcard`, so malformed input silently slipped past
+/// `chelis check` and only failed at host-runtime or IR-verifier time.
+enum PairListShape {
+    /// Top-level chain closed by `Nil`, every entry was a literal
+    /// `Cons(start, Cons(end, Nil))` pair.
+    Literal(Vec<(i64, i64)>),
+    /// Top-level chain closed by `Nil` and every entry was structurally
+    /// a `Cons(_, Cons(_, Nil))`, but at least one inner element was a
+    /// non-literal (variable, call, etc.). Output shape must be
+    /// wildcarded but no infer-side error -- runtime will validate.
+    NonLiteralLiterals,
+    /// At least one inner entry has the wrong structural shape (wrong
+    /// number of elements, missing `Nil` close, etc.). The caller MUST
+    /// emit an infer-time error naming the offending axis.
+    Malformed { axis: usize, reason: String },
+    /// The top-level chain is well-typed as `List[List[Int32]]` but
+    /// isn't a literal Cons/Nil chain (e.g. it's a variable resolved by
+    /// the type system). Caller falls back to wildcard output shape.
+    Unknown,
+}
+
 /// Walk a `Cons(Cons(start_i, Cons(end_i, Nil)), ..., Nil)` chain — the
 /// desugared form of a Surf `[[start_0, end_0], [start_1, end_1], ...]`
-/// list-of-pair literal — and collect each `[start_i, end_i]` pair as an
-/// `(i64, i64)`. Returns `None` if the chain isn't well-formed
-/// (non-literal head, missing tail, etc.) so callers can fall back to a
-/// wildcard output shape.
-fn cons_chain_int_pairs(expr: &deep::Expr) -> Option<Vec<(i64, i64)>> {
-    let mut pairs = Vec::new();
+/// list-of-pair literal — and classify it via [`PairListShape`].
+fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
+    let mut pairs: Vec<(i64, i64)> = Vec::new();
+    let mut any_non_literal = false;
     let mut cursor = expr;
+    let mut axis = 0usize;
     loop {
         let deep::Expr::List(outer, _) = cursor else {
-            return None;
+            return PairListShape::Unknown;
         };
-        match get_tag(outer)? {
-            "var" => {
-                let name = children(outer).first().and_then(symbol_name)?;
+        match get_tag(outer) {
+            Some("var") => {
+                let name = match children(outer).first().and_then(symbol_name) {
+                    Some(name) => name,
+                    None => return PairListShape::Unknown,
+                };
                 if name == "Nil" {
-                    return Some(pairs);
+                    if any_non_literal {
+                        return PairListShape::NonLiteralLiterals;
+                    }
+                    return PairListShape::Literal(pairs);
                 }
-                return None;
+                return PairListShape::Unknown;
             }
-            "app" => {
+            Some("app") => {
                 let app_children = children(outer);
-                let func = app_children.first()?;
+                let func = match app_children.first() {
+                    Some(func) => func,
+                    None => return PairListShape::Unknown,
+                };
                 if !is_builtin_var(func, "Cons") {
-                    return None;
+                    return PairListShape::Unknown;
                 }
-                let pair_expr = app_children.get(1)?;
-                let tail = app_children.get(2)?;
-                let pair = cons_chain_two_ints(pair_expr)?;
-                pairs.push(pair);
+                let pair_expr = match app_children.get(1) {
+                    Some(p) => p,
+                    None => return PairListShape::Unknown,
+                };
+                let tail = match app_children.get(2) {
+                    Some(t) => t,
+                    None => return PairListShape::Unknown,
+                };
+                match cons_chain_two_ints(pair_expr, axis) {
+                    InnerPairShape::Literal(pair) => pairs.push(pair),
+                    InnerPairShape::NonLiteral => any_non_literal = true,
+                    InnerPairShape::Malformed { reason } => {
+                        return PairListShape::Malformed { axis, reason };
+                    }
+                    InnerPairShape::Unknown => return PairListShape::Unknown,
+                }
                 cursor = tail;
+                axis += 1;
             }
-            _ => return None,
+            _ => return PairListShape::Unknown,
         }
     }
 }
 
-/// Walk a `Cons(start, Cons(end, Nil))` chain and return `(start, end)`.
-/// Returns `None` if the inner chain has any other shape (extra entries,
-/// non-int head, missing `Nil`, etc.).
-fn cons_chain_two_ints(expr: &deep::Expr) -> Option<(i64, i64)> {
+/// Classification of a single inner pair expression. Distinguishes the
+/// "wrong shape" case (must be reported at infer) from the "right shape,
+/// non-literal element" case (defer to runtime).
+enum InnerPairShape {
+    Literal((i64, i64)),
+    NonLiteral,
+    Malformed { reason: String },
+    Unknown,
+}
+
+/// Walk a `Cons(start, Cons(end, Nil))` chain and classify it. Counts
+/// the actual number of elements in the inner list so the error message
+/// can name the bad arity explicitly (e.g. "got 3-element list").
+fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
     let deep::Expr::List(list, _) = expr else {
-        return None;
+        return InnerPairShape::Unknown;
     };
-    if get_tag(list)? != "app" {
-        return None;
+    if get_tag(list) != Some("app") {
+        // Inner element is not even a list. Could be a variable referring
+        // to a List[Int32]. Type-system already constrained it; runtime
+        // will validate.
+        if matches!(get_tag(list), Some("var")) {
+            return InnerPairShape::NonLiteral;
+        }
+        return InnerPairShape::Unknown;
     }
-    let app_children = children(list);
-    let func = app_children.first()?;
-    if !is_builtin_var(func, "Cons") {
-        return None;
+    // Count the elements in the inner list so we can give a precise
+    // "got N-element list" diagnostic. Walk the chain element-by-element.
+    let mut elements_seen = 0usize;
+    let mut head_values: Vec<Option<i64>> = Vec::new();
+    let mut inner_cursor: &deep::Expr = expr;
+    loop {
+        let deep::Expr::List(inner, _) = inner_cursor else {
+            return InnerPairShape::Unknown;
+        };
+        match get_tag(inner) {
+            Some("var") => {
+                let name = match children(inner).first().and_then(symbol_name) {
+                    Some(n) => n,
+                    None => return InnerPairShape::Unknown,
+                };
+                if name != "Nil" {
+                    return InnerPairShape::Unknown;
+                }
+                if elements_seen != 2 {
+                    return InnerPairShape::Malformed {
+                        reason: format!(
+                            "expects a pair [start, end] of two int literals, got {}-element list",
+                            elements_seen
+                        ),
+                    };
+                }
+                let start = match head_values[0] {
+                    Some(v) => v,
+                    None => return InnerPairShape::NonLiteral,
+                };
+                let end = match head_values[1] {
+                    Some(v) => v,
+                    None => return InnerPairShape::NonLiteral,
+                };
+                return InnerPairShape::Literal((start, end));
+            }
+            Some("app") => {
+                let app_children = children(inner);
+                let func = match app_children.first() {
+                    Some(f) => f,
+                    None => return InnerPairShape::Unknown,
+                };
+                if !is_builtin_var(func, "Cons") {
+                    return InnerPairShape::Unknown;
+                }
+                let head_expr = match app_children.get(1) {
+                    Some(h) => h,
+                    None => return InnerPairShape::Unknown,
+                };
+                let tail = match app_children.get(2) {
+                    Some(t) => t,
+                    None => return InnerPairShape::Unknown,
+                };
+                head_values.push(extract_int_literal(head_expr));
+                elements_seen += 1;
+                inner_cursor = tail;
+                // Guard against extra trailing elements: if we already
+                // saw a [start, end] pair but the chain continues past
+                // `Nil`, report malformed. The Nil arm above catches the
+                // n==2 happy path before we get here on subsequent
+                // iterations, so just keep walking and the count check
+                // at Nil-time will catch it.
+            }
+            _ => return InnerPairShape::Unknown,
+        }
     }
-    let start = extract_int_literal(app_children.get(1)?)?;
-    let tail = app_children.get(2)?;
-    let deep::Expr::List(tail_list, _) = tail else {
-        return None;
-    };
-    if get_tag(tail_list)? != "app" {
-        return None;
-    }
-    let tail_children = children(tail_list);
-    let tail_func = tail_children.first()?;
-    if !is_builtin_var(tail_func, "Cons") {
-        return None;
-    }
-    let end = extract_int_literal(tail_children.get(1)?)?;
-    // After [start, end] the tail must be `Nil`.
-    let nil_expr = tail_children.get(2)?;
-    let deep::Expr::List(nil_list, _) = nil_expr else {
-        return None;
-    };
-    if get_tag(nil_list)? != "var" {
-        return None;
-    }
-    if children(nil_list).first().and_then(symbol_name)? != "Nil" {
-        return None;
-    }
-    Some((start, end))
 }
 
 fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
