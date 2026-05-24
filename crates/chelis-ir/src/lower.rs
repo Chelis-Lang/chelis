@@ -2036,6 +2036,89 @@ fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
     }
 }
 
+/// Walk a `Cons(head_0, Cons(head_1, ..., Nil))` chain and collect the
+/// head exprs in order. Returns `None` if the chain isn't closed by
+/// `(var {} Nil)` or contains a non-Cons app. Used by
+/// [`LowerCtx::extract_dim_list`] to recognize Surf-desugared list
+/// literals (issue Chelis-Lang/chelis#220).
+fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
+    let mut out = Vec::new();
+    let mut cursor = expr;
+    loop {
+        let Expr::List(list, _) = cursor else {
+            return None;
+        };
+        match get_tag(list)? {
+            "var" => {
+                let name = match children(list).first() {
+                    Some(Expr::Atom(Atom::Symbol(s), _)) => s.as_str(),
+                    _ => return None,
+                };
+                if name == "Nil" {
+                    return Some(out);
+                }
+                return None;
+            }
+            "app" => {
+                let app_children = children(list);
+                let func = app_children.first()?;
+                if !is_app_of_builtin(func, "Cons") {
+                    return None;
+                }
+                let head = app_children.get(1)?;
+                let tail = app_children.get(2)?;
+                out.push(head);
+                cursor = tail;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Extract a positive integer dim from a Deep expression. Handles
+/// the common shapes that appear inside `reshape`'s shape list after
+/// `chelis-surf::desugar`:
+///   * `Atom::Int(n)`
+///   * `(lit {} <int>)`
+///   * `(cast {} <int|lit|cast> <prim>)` (the `cast(N, int64)` form
+///     is idiomatic since integer literals default to int32 and
+///     `reshape` expects `List[int64]`)
+///
+/// Returns the numeric value as `i64` when extractable. Used by
+/// [`LowerCtx::extract_dim_list`] to interpret reshape shape-list
+/// entries (issue Chelis-Lang/chelis#220).
+fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Atom(Atom::Int(n), _) => Some(*n),
+        Expr::List(list, _) => match get_tag(list)? {
+            "lit" => match list.elements.get(2)? {
+                Expr::Atom(Atom::Int(n), _) => Some(*n),
+                _ => None,
+            },
+            "cast" => extract_int_for_dim(list.elements.get(2)?),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// If `expr` is `(var {} <name>)`, return `<name>` as a `String`.
+/// Otherwise return `None`. Used by [`LowerCtx::extract_dim_list`] to
+/// recognize symbolic dim entries inside a reshape shape list (issue
+/// Chelis-Lang/chelis#220).
+fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    children(list)
+        .first()
+        .and_then(symbol_name)
+        .map(|name| name.to_string())
+}
+
 #[derive(Clone)]
 enum CallableExpr {
     Plain(Expr),
@@ -4981,24 +5064,39 @@ impl LowerCtx {
         result
     }
 
-    /// Extract dimension info list from an expression (e.g., for reshape).
+    /// Extract a `reshape` shape list from a Deep expression. Accepts
+    /// the Cons-chain shape Surf desugars to:
+    ///
+    /// ```text
+    ///   (app {} (var {} Cons) <head_0>
+    ///           (app {} (var {} Cons) <head_1> ... (var {} Nil)))
+    /// ```
+    ///
+    /// Each head is interpreted as either an integer dim (via
+    /// [`extract_int_for_dim`], which handles `Atom::Int`, `(lit ...)`,
+    /// and `(cast ... int64)`) or a symbolic dim variable (via
+    /// [`symbolic_dim_var_name`], which recognizes `(var {} <name>)`).
+    /// Non-recognized shapes abort the walk and return `None` so the
+    /// caller falls back to `ty.dims` — this prevents the prior
+    /// `Atom::Symbol(...)` arm from misreading a Deep structural tag
+    /// like `"app"` as a dim name and synthesizing
+    /// `DimInfo::Named("app", None)` (issue Chelis-Lang/chelis#220).
     fn extract_dim_list(&self, expr: &Expr) -> Option<Vec<DimInfo>> {
-        if let Expr::List(list, _) = expr {
-            let mut dims = Vec::new();
-            for elem in &list.elements {
-                match elem {
-                    Expr::Atom(Atom::Int(n), _) => dims.push(DimInfo::Lit(*n as usize)),
-                    Expr::Atom(Atom::Symbol(name), _) => {
-                        dims.push(DimInfo::Named(name.clone(), None));
-                    }
-                    _ => {}
+        let elements = collect_cons_chain(expr)?;
+        let mut dims = Vec::with_capacity(elements.len());
+        for elem in &elements {
+            if let Some(value) = extract_int_for_dim(elem) {
+                if value < 0 {
+                    return None;
                 }
-            }
-            if !dims.is_empty() {
-                return Some(dims);
+                dims.push(DimInfo::Lit(value as usize));
+            } else if let Some(name) = symbolic_dim_var_name(elem) {
+                dims.push(DimInfo::Named(name, None));
+            } else {
+                return None;
             }
         }
-        None
+        if dims.is_empty() { None } else { Some(dims) }
     }
 
     /// Extract a list of (usize, usize) pairs from an expression (for
