@@ -652,8 +652,8 @@ mod tests {
         // continue to surface as DimensionMismatch (this is the
         // dim-polymorphism rigidity rule from §4.4).
         let mut s = Subst::new();
-        let err = unify_dim(&Dim::Name("batch".into()), &Dim::Name("seq".into()), &mut s)
-            .unwrap_err();
+        let err =
+            unify_dim(&Dim::Name("batch".into()), &Dim::Name("seq".into()), &mut s).unwrap_err();
         assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
     }
 

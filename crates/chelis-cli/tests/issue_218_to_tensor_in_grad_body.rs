@@ -398,10 +398,7 @@ fn issue_218_r3_cons_rank_mismatch_still_rejects() {
     );
     let json = run_check(&path);
     let errs = errors(&json);
-    assert!(
-        !errs.is_empty(),
-        "R3 rank mismatch must still reject",
-    );
+    assert!(!errs.is_empty(), "R3 rank mismatch must still reject",);
 }
 
 // =================================================================
