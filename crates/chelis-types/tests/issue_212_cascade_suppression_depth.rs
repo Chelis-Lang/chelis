@@ -302,3 +302,97 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
             .collect::<Vec<_>>()
     );
 }
+
+/// EXPECT (issue #212 systemic): the cascade-suppression depth fix
+/// works for an alternating mix of bare conv2d and shape-passthrough
+/// wrappers. This pins that the structural recognition predicate
+/// does not regress between wrapped and bare segments of the same
+/// chain.
+#[test]
+fn rt205_r4_cascade_propagation_alternating_wrapped_and_bare() {
+    let src = r#"
+def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], k3: tensor[32, 16, 3, 3, f32]) -> tensor[1, 32, 2, 2, f32] = {
+  y1 = conv2d(&x, &k1, 1, 0)
+  y2 = relu(conv2d(&y1, &k2, 1, 0))
+  conv2d(&y2, &k3, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure for alternating chain");
+    let conv2d_metadata_errors: Vec<_> = rep
+        .errors
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("requires concrete tensor argument metadata")
+        })
+        .collect();
+    assert_eq!(
+        conv2d_metadata_errors.len(),
+        1,
+        "alternating wrapped/bare 3-level chain must produce exactly 1 metadata error, got {:?}",
+        conv2d_metadata_errors
+            .iter()
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// EXPECT (issue #212 negative parity, design intent lock): a let
+/// chain where the intermediate level is a user-defined function
+/// call (NOT a recognized shape-sensitive IR builtin or passthrough)
+/// must NOT cause cascade-suppression downstream of that user
+/// function. This locks the design choice that the recognition
+/// predicate stays narrow: structural recognition is limited to the
+/// closed set of shape-sensitive IR builtins and the unary/binary
+/// passthrough allowlist, not "anything in a let-RHS position".
+///
+/// Pattern: `helper(t)` is a user fn taking a non-concrete-h tensor;
+/// it consumes a let-bound y1 from a failed conv2d. The user-fn
+/// call's let-bound name (y2) must NOT be marked failed by the
+/// validator's cascade-suppression path (helper is not a recognized
+/// shape-sensitive builtin), so any downstream failure on y2 still
+/// fires its own diagnostic. We verify this by chaining a downstream
+/// conv2d(&y2, ...) and asserting the metadata error count is the
+/// validator-level error from y1's RHS plus the downstream
+/// validator-level error from conv2d(&y2, ...) -- two errors, NOT
+/// one. If the predicate had wrongly recognized helper(...) as a
+/// passthrough, only one error would fire.
+#[test]
+fn rt205_r4_cascade_does_not_suppress_user_fn_chain() {
+    // First conv2d fails (non-concrete h); helper is a user fn that
+    // returns its input; downstream conv2d uses helper's result.
+    // The validator must NOT mark y2 as failed via the cascade path,
+    // so the downstream conv2d still emits its own diagnostic.
+    let src = r#"
+def helper(t: tensor[1, 8, w1, w2, f32]) -> tensor[1, 8, w1, w2, f32] = t
+
+def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
+  y1 = conv2d(&x, &k1, 1, 0)
+  y2 = helper(y1)
+  conv2d(&y2, &k2, 1, 0)
+}
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check failure");
+    let conv2d_metadata_errors: Vec<_> = rep
+        .errors
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("requires concrete tensor argument metadata")
+        })
+        .collect();
+    assert_eq!(
+        conv2d_metadata_errors.len(),
+        2,
+        "user-fn-wrapped chain must NOT trigger cascade-suppression: \
+         expected 2 metadata errors (y1's RHS + downstream conv2d), got {:?}",
+        conv2d_metadata_errors
+            .iter()
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+}
