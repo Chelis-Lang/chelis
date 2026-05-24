@@ -6,6 +6,267 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.13] — 2026-05-24
+
+Cut to ship six downstream-blocking fixes that the Hydronnx H3.x ONNX-emitter
+spike surfaced, plus an end-to-end acceptance lock against the H3 shapes.
+Part 2 of issue #199 (to_tensor literals in differentiable function bodies)
+remains deferred to follow-up issues #218 / #219 / #220 after the PR #211
+red-team rounds signalled architectural redesign was needed; see the
+`feedback_rround_cascade_is_design_signal` discipline note.
+
+### Fixed - `conv2d` validator rejects every well-formed call (#186, PR #205)
+
+`crates/chelis-types/src/infer.rs::validate_ir_builtin_symbolic_requirements`
+rejected every well-formed `conv2d` call at `chelis check`. Two root causes:
+`app_result_type_is_concrete` read `:type` from app metadata that the
+inference annotation pass writes after the validator runs, so the
+output-dims check was structurally always-false for any Surf source; and
+`expr_tensor_type_is_concrete` did not peel `(borrow {} ...)` wrappers, so
+the idiomatic `conv2d(&x, &k, ...)` form (and the wrappers in
+`packages/chelis-std/src/nn/conv.ch`) defeated the tensor-metadata
+concreteness check.
+
+The replacement derives output concreteness from the args (`input` /
+`kernel` dims, integer-literal `stride` / `padding`) instead of from
+app-level `:type` metadata, evaluates the canonical
+`floor((in + 2p - k) / s) + 1` spatial formula to catch non-positive
+outputs at check time, and routes tensor-metadata lookups through a new
+`arg_tensor_type_expr` helper that peels `(borrow {} ...)`. The sibling
+sweep extended the same borrow peeling to the `mean` and `layer_norm` arms
+and added range checks for zero / negative / overflowing stride and padding
+values that previously panicked or silently emitted nonsense C. Symbolic
+batch dims in `conv2d` input now type-check (per spec §4.5
+`batch, in_c, h, w, p`). `validate_conv2d_symbolic_requirements` is the
+new owner of the conv2d-specific validation surface; the shared cascade
+suppression infrastructure (`failed_let_names`) prevents duplicate
+"concrete tensor argument metadata" diagnostics when a downstream
+conv2d's input depends on an earlier failed conv2d let-binding, including
+through `relu` / `tanh` / `sigmoid` / `gelu` / `add` / `max_elem`
+shape-passthrough wrappers.
+
+Locked by `crates/chelis-types/tests/issue_186_conv2d_validator.rs`,
+which exercises the issue text's exact repro plus the borrow-form variant,
+borrowed-`mean` / `layer_norm` sibling-sweep cases, the formula-evaluation
+spatial-rejection cases, symbolic-batch acceptance, and the pass-through
+cascade-dedup invariant.
+
+### Fixed - `shrink` / `stride` / `pad` not callable from Surf (#187, PR #214)
+
+The windowing builtins `shrink` and `stride` were registered as
+single-arg `tensor_unop` in `crates/chelis-types/src/builtins.rs` even
+though the RISC lowering (`crates/chelis-ir/src/lower.rs::lower_shrink`
+/ `lower_stride`) reads the window parameters from `args[1..]`. The
+bare 1-arg form type-checked but the host runtime answered
+`unsupported builtin \`shrink\` in host runtime`; the parameterized
+form that the lowering actually needed was type-rejected with
+`function arity mismatch: expected 1 args`. `pad` had the same
+antipattern. Hydronnx H3 emitter could not express MaxPool /
+AvgPool / GlobalMaxPool / GlobalAvgPool because of this gap.
+
+The fix introduces dedicated parameterized inference handlers
+(`infer_shrink_app`, `infer_stride_app`, `infer_pad_app`) that mirror
+the lowering's expected signature: `shrink(&tensor, pair-list-of-int)`,
+`stride(&tensor, int, int, ...)` (one positional step per axis), and
+`pad(&tensor, pair-list-of-int, fill)`. Host-runtime arms in
+`crates/chelis-compiler-api/src/runtime.rs::eval_builtin` delegate to
+the existing IR evaluator. The parser-side `extract_pair_list` walks
+the Cons chain instead of `list.elements` so cast-wrapped int literals
+(`cast(N, int32)`) participate in infer-time bounds and stride checks
+the same way reshape's dim list does, and malformed inner pairs
+(`[[0, 1, 2]]` triples, `[[0]]` singletons, `Nil` empty inner lists)
+are rejected at infer time with axis-tagged diagnostics. `pad`'s fill
+arg is now unified against the tensor's precision instead of being
+silently discarded.
+
+Cast-aware extraction was extended across the movement-op family
+(`shrink`, `stride`, `pad`, `permute`, `expand`) so neg-of-cast and
+arbitrarily-nested-cast bound expressions resolve at infer time.
+
+Locked by `crates/chelis-types/tests/issue_187_shrink_stride_sig.rs`,
+`crates/chelis-compiler-api/tests/issue_187_shrink_stride_host_runtime.rs`,
+and four red-team rounds of adversarial probes covering the cast,
+neg-of-cast, double-cast, empty-list, malformed-pair, and per-axis-stride
+surfaces.
+
+The broken `shrink(&qkv)` call in
+`examples/illustrative/mha_slice_combined_qkv.ch` was rewritten to use
+the parameterized form with concrete dims. Three CLI tests
+(`build_hip_rejects_pad_lowering_without_panic`,
+`target_metal_rejects_pad`, `target_metal_rejects_shrink`) that fed the
+no-longer-accepted bare 1-arg form were updated.
+
+### Fixed - `chelis lint` panics on em dash inside Python docstring (#209, PR #210)
+
+`crates/chelis-lint/src/rules/no_em_dash_in_public_strings.rs::dash_spacing`
+took a `line: &str` plus a `dash: usize` byte offset INTO THAT LINE and
+returned `DashSpacing { after_end: after_start + usize::from(after) }`
+where `after_start = dash + '—'.len_utf8()`, also line-relative. Callers
+in the same file (`fix()`, `clause_replacement`, `spaced_dash_replacement`)
+then treated `spacing.after_end` as a SOURCE-absolute byte offset and
+sliced `source[next_start..]` or built `Replacement { end: next_start + ... }`
+with it. On line 1 (`line_start == 0`) the bug was masked. For any later
+line, `after_end` indexed a byte that has nothing to do with the dash's
+source position; when that byte happened to land inside an earlier
+multi-byte char (commonly another em dash inside an excluded docstring),
+the slice panicked. Hydronnx added `chelis lint --check .` to its full
+workspace gate; the command panicked on existing docs / scripts before
+producing actionable output.
+
+The fix threads `line_start` into `dash_spacing` and returns
+source-absolute offsets, matching the source-absolute calling convention
+that `dash` already used. The `DashSpacing.after_end` field now carries
+a doc comment naming the previous bug.
+
+The sibling sweep audited `crates/chelis-lint/src/rules/redundant_linearity_call.rs`,
+the only other rule that crosses line and source byte coordinates;
+it composes `line_start_offset(...) + col - 1` correctly and required
+no change.
+
+Locked by `crates/chelis-lint/tests/issue_209_em_dash_utf8_boundary.rs`
+with 16 regression fixtures plus an end-to-end CLI assertion that
+`chelis lint --check` does not panic on any of the multi-byte / multi-line
+docstring shapes the rule walks.
+
+### Fixed - Runtime-dim `reshape` does not preserve declared symbolic shape (#206, PR #213)
+
+`crates/chelis-types/src/infer.rs::infer_reshape_app::list_literal_dims`
+recognized only concrete-int dim list elements (looking through
+`cast(N, int{32,64})`) and fell back to `vec![Dim::Wildcard; rank]` for
+anything else, including the common runtime-batch pattern
+`cast(shape(x, axis), int64)`. The neighbouring `expand` arm "works"
+only because `check_expand_signature` does not assert a precise output
+dim list when the size arg is non-literal; reshape actively emitted a
+rank-matching all-`Wildcard` dim list, collapsing the body type to
+`tensor[Wildcard, ...]` and producing a spurious `TypeMismatch` against
+the declared sig.
+
+The fix adds a strict-syntactic recognizer (`reshape_output_dims` plus
+helpers `collect_shape_list_elements`, `extract_shape_axis_of`,
+`peel_cast`, `is_target_ty`, `is_shape_app`) that recognizes
+`cast(shape(x, cast(lit_axis, int32)), int64)` as a same-tensor
+dim-reference and injects the input's resolved dim at the named axis
+into the output dim list. The recognizer rejects through-different-tensor
+references, non-literal axes, and arithmetic-wrapped shape calls. The
+earlier `list_literal_dims` / `cons_chain_int_dims` helpers are
+subsumed.
+
+Sibling sweep confirmed `view` and `broadcast_to` are not builtins; only
+`broadcast_pair` exists and takes two tensors. `expand`'s sig-driven
+result type was not affected.
+
+Locked by `crates/chelis-types/tests/issue_206_runtime_dim_reshape.rs`
+with the issue's exact reproducer (`flatten_batch`) plus axis variations,
+reorder and duplicate-axis cases, and rejection of through-different-tensor
+references.
+
+### Added - Host-runtime dispatch for 14 builtins; `BUILTIN_NAMES` invariant lock (#185, PR #217)
+
+`BUILTIN_NAMES` in `crates/chelis-types/src/builtins.rs` listed 12
+builtins that `chelis check` type-accepted but
+`crates/chelis-compiler-api/src/runtime.rs::eval_builtin` did not
+dispatch, so `chelis test` / `chelis eval` failed with
+`unsupported builtin \`X\` in host runtime`. Sibling sweep found 6
+more in the same gap. Hydronnx H3 emitter could not run Conv2D,
+MaxPool / AvgPool / GlobalMaxPool / GlobalAvgPool, reductions, or
+activations through the host runtime against an ONNX-Runtime reference.
+
+This release ships host-runtime arms for:
+
+| Group | Builtins |
+|---|---|
+| A — Unary RISC (spec §2.2) | `abs`, `cos`, `tan`, `floor`, `ceil`, `atan` |
+| B — Reductions (spec §2.2) | `max_reduce` |
+| C — Binary Tier 2 (spec §3.4) | `max_elem`, `min_elem` |
+| E — Composed Tier 2 (spec §3.4 / §4.4 / §4.5) | `mean`, `layer_norm`, `conv2d` |
+| F — Tensor-bool (spec §3.2) | `and`, `or`, `not` (tensor arms; scalar arms already existed) |
+
+`pad` (Tier 1 §2.4) shipped in PR #214 alongside the shrink / stride
+sig fix. The IR evaluator (`crates/chelis-ir/src/eval.rs`) is the
+canonical numerical oracle per the evaluator-vs-backend agreement
+discipline; each new arm delegates to it rather than re-deriving op
+semantics.
+
+`normalize` is registered as a builtin but marked unstable in
+`builtins.rs:55-56`; it is intentionally allowlisted in the new invariant
+test with reason `pending-spec-stability` and tracked separately.
+`scatter_replace` is allowlisted with reason `lowered-before-eval` (the
+Surf call always lowers to `RiscOp::Scatter`).
+
+`crates/chelis-compiler-api/tests/builtin_dispatch_invariant.rs` locks
+the schema: every name in `BUILTIN_NAMES` must have either an
+`eval_builtin` arm or a documented allowlist entry, and every allowlist
+entry must reference a name in `BUILTIN_NAMES`. The invariant catches
+missing arms, double entries, and stale allowlist entries; the policy
+header documents the closed reason vocabulary
+(`type-only`, `target=<backend>-only`, `lowered-before-eval`,
+`pending-spec-stability`).
+
+Locked by per-group test files in
+`crates/chelis-compiler-api/tests/issue_185_host_runtime_*.rs`.
+
+### Fixed - `BlasMatmul` had no gradient rule; `grad` rejected any matmul-bearing body (#199 Part 1, PR #211)
+
+`grad` (`crates/chelis-ir/src/grad.rs::compute_adjoints`) returned `None`
+for `RiscOp::BlasMatmul` because the specialise pass introduces
+`BlasMatmul` whenever a pure `matmul` lowering matches the tier2
+`Sum(Mul(Expand(A), Expand(B)))` template, and `compute_adjoints` only
+had an arm for plain `RiscOp::Matmul`. Any function body containing a
+matmul could not be differentiated, surfacing as
+`AdError::NotSupported { op: "<unknown>", reason: ... }`.
+
+The fix adds a `BlasMatmul` arm to `compute_adjoints` that emits the
+standard reverse-mode adjoint `dA = dY @ B^T`, `dB = A^T @ dY` via
+`Permute` (last-two-axis swap, rank-N safe) plus a fresh `BlasMatmul`
+using the spec §5.7.1 default accumulator. Finite-difference numerical
+agreement verified across 2x2x2, 3x4x2, 1x3x1, batched 2x2x2x2, and
+chain-rule-via-`relu` 2x3 + 3x2 configurations within `abs_tol=1e-3`
+(f64) and `abs_tol=1e-2` (f32). The sibling sweep enumerated every
+remaining `=> None` arm in `compute_adjoints`; the rest are intentional
+non-differentiability (`Floor`, `Ceil`, `Argmax`, `Argmin`,
+`Scatter`, `ScatterAdd`, `Stride`, `Drop`, `FusedElem`) and are not
+realistic-model blockers.
+
+Locked by `crates/chelis-ir/tests/issue_199_grad_blas_matmul_to_tensor.rs`
+with five tests covering analytic match for the 2x2x2 example, batched
+shapes, and the relu-composed chain rule.
+
+**Part 2 is deferred.** Allowing `to_tensor` literal weight constants
+inside differentiable function bodies (the rest of issue #199's text)
+requires either a `Dim::Wildcard`-stripping rule that survives every
+downstream consumer or a type-system change to bind `Dim::Name(_) ↔
+Dim::Lit(_)`. PR #211 went through R1 → R4 of red-team rounds, each
+finding a new consumer (reductions, elementwise, concat, named-dim
+sigs); the consumer-by-consumer pattern signalled architectural
+redesign rather than continued patching. Follow-up issues:
+[#218](https://github.com/Chelis-Lang/chelis/issues/218) (to_tensor in
+differentiable bodies, with the R-round failure modes as design
+requirements), [#219](https://github.com/Chelis-Lang/chelis/issues/219)
+(Name-vs-Var unification asymmetry),
+[#220](https://github.com/Chelis-Lang/chelis/issues/220)
+(`extract_dim_list` parser bug).
+
+### Added - End-to-end acceptance lock for Hydronnx H3.x shapes (PR #221)
+
+`crates/chelis-e2e/tests/issue_185_hydronnx_h3_shapes.rs` exercises the
+three H3.x ONNX-emitter shapes against pen-and-paper references plus
+hand-computed conv2d output pixels:
+
+- `hydronnx_h3_maxpool_2x2_stride2_no_padding_matches_ir_eval` —
+  shrink + stride + concat + max_reduce composition (the H2
+  decomposition pattern)
+- `hydronnx_h3_layer_norm_batch2_hidden4_matches_ir_eval` —
+  `layer_norm(x, gamma, beta)` against the spec §4.4 formula
+- `hydronnx_h3_conv2d_1x3x8x8_kernel_8x3x3x3_matches_ir_eval` —
+  conv2d against a pure-Rust 7-loop NCHW/OIHW reference plus an
+  explicit hand-computed lock on `out[0, 0, 0, 0]`
+
+Forward-pass only; the `grad` surface is covered by the Part 1
+fixtures and (when #218 lands) by Part 2 follow-up work. Verified
+against 15 adversarial probes (ties, all-negative, zero-variance,
+negative gamma / beta, zero / identity / negative kernel,
+batch variations, padding>0).
+
 ## [0.7.12] — 2026-05-23
 
 Cut to surface the post-`v0.7.11` `main` work — in particular two
