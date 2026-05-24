@@ -3433,13 +3433,12 @@ fn validate_ir_expr(
                     while index + 1 < bind_children.len() {
                         if let Some(name) = symbol_name(&bind_children[index]) {
                             let value_expr = &bind_children[index + 1];
-                            // Snapshot the error count so we can detect
-                            // whether the RHS validation itself pushed any
-                            // diagnostics. If it did, mark `name` as
-                            // failed-derivation so downstream uses get the
-                            // cascade-suppression treatment (RT-205 round-2
-                            // F3).
-                            let errs_before = errors.len();
+                            // Recurse into the RHS so its own validation
+                            // can push diagnostics and suppress downstream
+                            // cascade errors via `failed_let_names` (set
+                            // below when the RHS is a recognized
+                            // shape-sensitive form whose output type is
+                            // non-derivable, RT-205 round-4 / issue #212).
                             let value = validate_ir_expr(
                                 value_expr,
                                 &scoped_type_env,
@@ -3460,30 +3459,42 @@ fn validate_ir_expr(
                                 }
                                 None => {
                                     // Mark as failed-derivation when the
-                                    // RHS validation emitted at least one
-                                    // diagnostic AND its output type could
-                                    // not be derived. The derivation
-                                    // function already recurses through
-                                    // R2-F2 passthrough wrappers (relu,
-                                    // add, etc.), so a `None` from it on
-                                    // an errored RHS means some inner
-                                    // shape-sensitive part failed: the
-                                    // outer name is "failed by
-                                    // association". This broader rule
-                                    // catches `y = relu(conv2d(bad))` in
-                                    // addition to `y = conv2d(bad)`
-                                    // (RT-205 round-3 F-A).
+                                    // RHS is structurally a recognized
+                                    // shape-sensitive form (a known
+                                    // shape-sensitive builtin or a
+                                    // unary/binary passthrough wrapper
+                                    // around one, recursively) but its
+                                    // output type could not be derived.
+                                    // This catches `y = conv2d(bad)`
+                                    // and the R3 F-A passthrough cases
+                                    // like `y = relu(conv2d(bad))`.
                                     //
-                                    // The errs_before guard keeps the
-                                    // rule narrow: a clean RHS that
-                                    // simply isn't a recognized
-                                    // shape-sensitive call (e.g. a
-                                    // user-defined fn) does NOT cause
-                                    // suppression downstream, so
-                                    // legitimate "really wrong arg" cases
-                                    // still surface their own diagnostic.
-                                    if errors.len() > errs_before
-                                        && let deep::Expr::List(_, _) = value_expr
+                                    // RT-205 round-4 / issue #212: the
+                                    // previous guard checked
+                                    // `errors.len() > errs_before` to
+                                    // detect an errored RHS, which fails
+                                    // for chains of length 3+ because
+                                    // cascade suppression already
+                                    // silences the level-2 RHS's
+                                    // diagnostic, so the level-2 name is
+                                    // never marked and the level-3 RHS
+                                    // re-emits a phantom error. The
+                                    // structural check
+                                    // `let_rhs_is_recognized_shape_sensitive`
+                                    // does not depend on diagnostic
+                                    // count and propagates the failed
+                                    // marker unboundedly down the chain.
+                                    //
+                                    // The recognition is intentionally
+                                    // narrow: a clean RHS that is not
+                                    // a recognized shape-sensitive form
+                                    // (e.g. a user-defined fn call) still
+                                    // does NOT cause suppression
+                                    // downstream, so legitimate
+                                    // "really wrong arg" cases still
+                                    // surface their own diagnostic.
+                                    if let deep::Expr::List(_, _) = value_expr
+                                        && let_rhs_is_recognized_shape_sensitive(value_expr)
                                     {
                                         failed_let_names.insert(name.to_string());
                                     }
@@ -5151,6 +5162,114 @@ fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
             | "shrink"
             | "stride"
     )
+}
+
+/// Is `name` a unary shape-passthrough op for the purposes of let-RHS
+/// recognition? Must match the unary arm of
+/// `derive_ir_builtin_output_type` so the failed-marker insertion in
+/// the let arm covers the same surface as the type-derivation
+/// passthrough recognition (issue #212 / RT-205 round-4).
+fn is_ir_unary_shape_passthrough_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "relu"
+            | "tanh"
+            | "sigmoid"
+            | "gelu"
+            | "silu"
+            | "exp"
+            | "log"
+            | "neg"
+            | "recip"
+            | "sqrt"
+            | "abs"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "atan"
+            | "floor"
+            | "ceil"
+            | "not"
+            | "softmax"
+    )
+}
+
+/// Is `name` a binary shape-passthrough op? Must match the binary arm
+/// of `derive_ir_builtin_output_type` for the same reason as
+/// `is_ir_unary_shape_passthrough_builtin` (issue #212 / RT-205
+/// round-4).
+fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "add" | "sub"
+            | "mul"
+            | "div"
+            | "max_elem"
+            | "min_elem"
+            | "cmplt"
+            | "lt"
+            | "gt"
+            | "gte"
+            | "lte"
+            | "eq"
+            | "neq"
+            | "and"
+            | "or"
+    )
+}
+
+/// Recognise a let-RHS expression as a "shape-sensitive form" for the
+/// purposes of cascade-suppression marker insertion: either a direct
+/// recognised shape-sensitive IR builtin, or a unary/binary shape-
+/// passthrough wrapper around one (recursively). Peeks through
+/// borrow wrappers like the rest of the validator.
+///
+/// Returns true when, structurally, this RHS shape COULD have a
+/// derivable output type via `derive_ir_builtin_output_type`; the
+/// caller pairs this with `derived.is_none()` to detect the "should
+/// have derived but didn't" failure mode (issue #212 / RT-205
+/// round-4). The decoupled structural check means we no longer
+/// depend on whether the RHS validation pushed a diagnostic at this
+/// level: cascade-suppressed intermediate let-binders are still
+/// marked failed so the suppression propagates unboundedly down the
+/// chain.
+fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
+    let inner = peel_borrow(expr);
+    let deep::Expr::List(list, _) = inner else {
+        return false;
+    };
+    if get_tag(list) != Some("app") {
+        return false;
+    }
+    let Some(func_name) = ir_builtin_name(list) else {
+        return false;
+    };
+    if is_ir_shape_sensitive_builtin(func_name) {
+        return true;
+    }
+    if is_ir_unary_shape_passthrough_builtin(func_name)
+        && let Some(arg) = list.elements.get(3)
+    {
+        return let_rhs_is_recognized_shape_sensitive(arg);
+    }
+    if is_ir_binary_shape_passthrough_builtin(func_name) {
+        // Either operand being a recognised shape-sensitive form is
+        // sufficient: the passthrough derivation uses the first
+        // resolvable operand's type and falls through to the second,
+        // so a failed inner shape-sensitive call on either side
+        // means the whole RHS is structurally broken.
+        if let Some(lhs) = list.elements.get(3)
+            && let_rhs_is_recognized_shape_sensitive(lhs)
+        {
+            return true;
+        }
+        if let Some(rhs) = list.elements.get(4)
+            && let_rhs_is_recognized_shape_sensitive(rhs)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
