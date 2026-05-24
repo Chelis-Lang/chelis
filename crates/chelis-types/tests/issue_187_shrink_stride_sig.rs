@@ -292,3 +292,179 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 4, f32] = pad(&x, [[0, 1]], 0.0)
             .collect::<Vec<_>>()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Red team round 1 on PR #214: malformed pair literals silently fell through
+// to `Dim::Wildcard` at infer time instead of being rejected. Compensating
+// host-runtime / IR-verifier safeguards still caught these one layer
+// downstream, but the desired behavior is a clean type error at
+// `chelis check`.
+// ---------------------------------------------------------------------------
+
+/// R1-F1: `shrink(&x, [[0, 1, 2]])` -- inner pair is a triple, not a pair.
+/// Must be rejected at infer time with a message naming the offending axis.
+#[test]
+fn red_team_214_r1_f1_shrink_triple_inner_pair_is_error() {
+    let src = r#"
+def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0, 1, 2]])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on triple-element inner pair");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("shrink")
+                && (e.message.contains("pair") || e.message.contains("2-element")
+                    || e.message.contains("got 3"))),
+        "expected a shrink pair/length error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R1-F1: `shrink(&x, [[0]])` -- inner pair is a singleton missing the end.
+#[test]
+fn red_team_214_r1_f1_shrink_singleton_inner_pair_is_error() {
+    let src = r#"
+def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0]])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on singleton inner pair");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("shrink")
+                && (e.message.contains("pair") || e.message.contains("2-element")
+                    || e.message.contains("got 1"))),
+        "expected a shrink pair/length error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R1-F1: `pad(&x, [[1]], 0.0)` -- inner singleton inside pad's pair list.
+#[test]
+fn red_team_214_r1_f1_pad_singleton_inner_pair_is_error() {
+    let src = r#"
+def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1]], 0.0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on singleton inner pair in pad");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("pad")
+                && (e.message.contains("pair") || e.message.contains("2-element")
+                    || e.message.contains("got 1"))),
+        "expected a pad pair/length error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R1-F1: `pad(&x, [[1, 0, 99]], 0.0)` -- inner triple inside pad's pair
+/// list. Mirror of the shrink triple case.
+#[test]
+fn red_team_214_r1_f1_pad_triple_inner_pair_is_error() {
+    let src = r#"
+def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0, 99]], 0.0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on triple inner pair in pad");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("pad")
+                && (e.message.contains("pair") || e.message.contains("2-element")
+                    || e.message.contains("got 3"))),
+        "expected a pad pair/length error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R1-F2: pad fill type was not enforced at infer time. A list fill, a
+// bool fill, or a string fill all slipped through to host-runtime; spec
+// §2.4 says fill is a scalar of the input precision.
+// ---------------------------------------------------------------------------
+
+/// R1-F2: `pad(&x, ..., [0.0])` -- list fill rather than scalar. Must be
+/// rejected at infer.
+#[test]
+fn red_team_214_r1_f2_pad_list_fill_is_error() {
+    let src = r#"
+def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], [0.0])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on list pad fill");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("pad")
+                && (e.message.contains("fill") || e.message.contains("scalar"))),
+        "expected a pad fill/scalar error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R1-F2: `pad(&x, ..., true)` on an f32 tensor -- bool fill, wrong
+/// precision. Must be rejected at infer.
+#[test]
+fn red_team_214_r1_f2_pad_bool_fill_is_error() {
+    let src = r#"
+def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], true)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on bool pad fill");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("pad")
+                && (e.message.contains("fill") || e.message.contains("scalar")
+                    || e.message.contains("precision"))),
+        "expected a pad fill/scalar/precision error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R1-F2 positive control: `pad(&x, ..., 0.0)` on f32 tensor still passes.
+/// Locks the constraint to "fill matches input precision," not "fill is
+/// forbidden."
+#[test]
+fn red_team_214_r1_f2_pad_matching_scalar_fill_still_typechecks() {
+    let src = r#"
+def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], 0.0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for matching f32 pad fill, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
