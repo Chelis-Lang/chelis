@@ -598,3 +598,238 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[cast(0, int32), 
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Red team round 3 on PR #214. Cast-wrapped int extraction needs to reach
+// all parameterized-builtin sites in the spec/05 section 2.4 movement
+// family, not just shrink/pad's inner pair list. Plus the `neg` arm of
+// extract_int_literal and the cast arm of extract_int_for_dim must be
+// recursive so combinations like neg(cast(...)) and cast(cast(...)) also
+// reach the infer-time bounds check instead of falling back to wildcard.
+// ---------------------------------------------------------------------------
+
+/// R3-HIGH1: `stride(&x, cast(0, int32), 2)`. The stride extractor at
+/// `infer.rs:10864` uses the non-cast-aware `extract_int_literal`, so
+/// cast-wrapped zero strides bypass the positive-stride check at infer.
+/// Host runtime catches it, but the diagnostic should land at check.
+#[test]
+fn red_team_214_r3_high1_stride_cast_wrapped_zero_is_error() {
+    let src = r#"
+def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, cast(0, int32), 2)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on cast-wrapped zero stride");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("stride")
+                && (e.message.contains("zero") || e.message.contains("positive"))),
+        "expected a stride zero/positive error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R3-HIGH1 sibling: cast-wrapped negative stride.
+#[test]
+fn red_team_214_r3_high1_stride_cast_wrapped_negative_is_error() {
+    let src = r#"
+def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, cast(-1, int32), 2)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on cast-wrapped negative stride");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("stride")
+                && (e.message.contains("positive") || e.message.contains("zero")
+                    || e.message.contains("negative"))),
+        "expected a stride positive/negative error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R3-HIGH2 (current-contract lock): `cast(N, int64)` endpoints inside
+/// shrink's bounds list are rejected at the OUTER bounds-type unification
+/// step (the expected type is `List[List[Int32]]`). This documents the
+/// current behavior so a future change that loosens the bounds type to
+/// accept int64 endpoints must intentionally update this fixture.
+#[test]
+fn red_team_214_r3_high2_int64_cast_bound_rejected_at_unification() {
+    let src = r#"
+def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[cast(0, int64), cast(1, int64)], [cast(1, int64), cast(3, int64)]])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on int64 cast endpoints");
+    // The diagnostic must come from the outer List[List[Int32]] unification
+    // step, naming int32 as the expected bound type and int64 as what we
+    // got. This is the un-cast-aware contract: extract_int_for_dim could
+    // peel int64 casts, but the outer unification rejects them first.
+    assert!(
+        rep.errors.iter().any(|e| e.message.to_lowercase().contains("shrink")
+            && e.message.contains("int32")
+            && (e.message.contains("int64") || e.message.contains("List"))),
+        "expected a shrink int32/int64 unification error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R3-MED1: `neg(cast(1, int32))` resolves to -1 numerically but the
+/// `extract_int_literal` `neg` arm recurses via `extract_int_literal`
+/// (not `extract_int_for_dim`), so the inner cast hides the literal.
+/// The negative-endpoint check is skipped and the malformed program
+/// slips through.
+#[test]
+fn red_team_214_r3_med1_neg_of_cast_int_is_error() {
+    let src = r#"
+def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[neg(cast(1, int32)), cast(1, int32)], [cast(0, int32), cast(1, int32)]])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on neg(cast(...))-wrapped negative bound");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("shrink")
+                && (e.message.contains("negative") || e.message.contains("inverted")
+                    || e.message.contains("empty"))),
+        "expected a shrink negative-bound error for neg(cast(...)), got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R3-MED2: doubly-nested cast `cast(cast(-1, int32), int32)`.
+/// `extract_int_for_dim`'s cast arm peels exactly one cast layer and
+/// then calls `extract_int_literal` (which doesn't peel cast), so any
+/// depth greater than one falls back to `NonLiteral`.
+#[test]
+fn red_team_214_r3_med2_double_cast_negative_is_error() {
+    let src = r#"
+def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[cast(cast(-1, int32), int32), cast(1, int32)], [cast(0, int32), cast(1, int32)]])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on doubly-nested cast negative bound");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("shrink")
+                && (e.message.contains("negative") || e.message.contains("inverted")
+                    || e.message.contains("empty"))),
+        "expected a shrink negative-bound error for cast(cast(...)), got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sibling-sweep targets within the spec section 2.4 movement family.
+// `permute` and `expand` are the other parameterized builtins that take
+// int literals from `kids[2..]` via `extract_int_literal`; the same
+// cast-bypass surfaces there too. Reductions, conv2d, gather/scatter
+// axis extractors are flagged in the commit body as follow-up domain
+// scope -- not fixed in this PR.
+// ---------------------------------------------------------------------------
+
+/// R3-sibling-sweep: cast-wrapped permute axes type-check cleanly and
+/// produce the correctly-reordered output type (was silently falling
+/// back to original-dim order).
+#[test]
+fn red_team_214_r3_permute_cast_wrapped_axes_typechecks() {
+    let src = r#"
+def g(k: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&k, cast(1, int32), cast(0, int32))
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for cast-wrapped permute axes, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// R3-sibling-sweep: cast-wrapped out-of-bounds permute axis rejects at
+/// infer (was masked by the wrong-fallback type mismatch).
+#[test]
+fn red_team_214_r3_permute_cast_wrapped_out_of_bounds_axis_is_error() {
+    let src = r#"
+def g(k: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&k, cast(99, int32), cast(0, int32))
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on cast-wrapped OOB permute axis");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("permute")
+                && (e.message.contains("out of bounds") || e.message.contains("axis"))),
+        "expected a permute out-of-bounds axis error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R3-sibling-sweep: cast-wrapped expand axis/size type-check and
+/// produce the correct output shape.
+#[test]
+fn red_team_214_r3_expand_cast_wrapped_axis_and_size_typechecks() {
+    let src = r#"
+def f(x: tensor[2, f32]) -> tensor[3, 2, f32] = expand(&x, cast(0, int32), cast(3, int32))
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for cast-wrapped expand args, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
+
+/// R3-sibling-sweep: cast-wrapped expand size of 0 must be rejected at
+/// infer (was bypassing the positive-size check).
+#[test]
+fn red_team_214_r3_expand_cast_wrapped_zero_size_is_error() {
+    let src = r#"
+def f(x: tensor[2, f32]) -> tensor[0, 2, f32] = expand(&x, cast(0, int32), cast(0, int32))
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on cast-wrapped zero expand size");
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("expand")
+                && (e.message.contains("positive") || e.message.contains("size"))),
+        "expected an expand positive-size error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
