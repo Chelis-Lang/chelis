@@ -98,6 +98,52 @@ composed `mul` chain) and three negative-parity cases (pipe into
 `realize`, pipe into a user fn whose first parameter is owned-linear,
 pipe into a user fn with explicit extra args).
 
+### Fixed - `extract_dim_list` matched Cons-chain tag symbol as a dim name (#220, PR #224)
+
+`extract_dim_list` in `crates/chelis-ir/src/lower.rs` walked `list.elements`
+directly and matched any `Atom::Symbol` as a dim name, including the literal
+`"app"` tag symbol that Surf-source dim lists desugar through. Rewritten to
+peel the Cons chain via `collect_cons_chain` and interpret each head via
+`extract_int_for_dim` or `symbolic_dim_var_name`. Defense-in-depth against
+the `dag.rs:1108` ICE.
+
+### Fixed - cast-aware integer extraction across 15 infer-time sites (#216, PR #225)
+
+PR #214 extended cast-aware `extract_int_for_dim` to the movement-op family
+(`shrink`/`stride`/`pad`/`permute`/`expand`). The remaining 15 call sites of
+`extract_int_literal` across reductions, conv2d helpers, gather/scatter,
+softmax, shape, split, vmap, and grad-wrt now also use the cast-aware
+extractor so `cast(N, int32)` boundaries trip infer-time checks rather than
+deferring to host runtime.
+
+### Added - `to_tensor` literals work in differentiable function bodies (#218, includes #219 Option A)
+
+The architectural piece that the PR #211 R1→R4 red-team cascade signalled
+was needed before Part 2 of #199 could ship. Bundles four coordinated
+changes:
+
+- **#219 Option A**: `unify_dim` now binds `Dim::Name(_) ↔ Dim::Lit(_)` so the
+  canonical style-guide pattern `def f(x: tensor[batch, hidden, p])` accepts
+  concrete callers like `f(to_tensor([[1.0, 2.0, 3.0]]))`. Spec amendment in
+  `spec/04-type-system.md §4.1`.
+- **`to_tensor` source fix**: nested-list literals emit concrete `Dim::Lit(n)`
+  via a new `static_to_tensor_shape` walker, rather than the all-`Wildcard`
+  fallback that propagated through every downstream consumer.
+- **Per-axis Cons join**: list-of-tensor element unification at the Cons site
+  uses per-axis-joined element types (`Lit ∩ Lit = Lit` if equal, else
+  `Wildcard`) so `concat([to_tensor([[1,2,3]]), to_tensor([[4,5,6],[7,8,9]])], 0)`
+  type-checks instead of failing element-type unification.
+- **`expr_requires_host_runtime` exemption**: a `to_tensor` literal in a
+  function body destined for `grad` no longer forces host-only routing.
+  `emit_literal_tensor` lowers the static literal as a `Const`/`Pad`/`Add`
+  cascade reachable by the AD pass.
+
+Acceptance oracle: all 19 R1→R4 failure modes type-check + run + finite-diff
+agree at 1e-3 tolerance. Locked by
+`crates/chelis-cli/tests/issue_218_to_tensor_in_grad_body.rs`,
+`crates/chelis-types/tests/issue_219_name_vs_lit.rs`,
+`crates/chelis-ir/tests/issue_218_finite_difference.rs`.
+
 ## [0.7.13] — 2026-05-24
 
 Cut to ship six downstream-blocking fixes that the Hydronnx H3.x ONNX-emitter
