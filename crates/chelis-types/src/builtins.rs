@@ -645,6 +645,12 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("prod_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("argmax_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("argmin_reduce", &mut env, &mut vg);
+    // Movement primitives whose RISC lowering reads window parameters from
+    // `args[1..]`. The `tensor_unop` scheme below only declares the arity-1
+    // fallback; `reshape` and `permute` already have dedicated `infer_*_app`
+    // paths in `infer.rs` that accept the parameterized arity. `pad`,
+    // `shrink`, and `stride` do not — see issue Chelis-Lang/chelis#187 and
+    // the matching dedicated `infer_shrink_app` / `infer_stride_app` paths.
     tensor_unop("reshape", &mut env, &mut vg);
     tensor_unop("permute", &mut env, &mut vg);
     tensor_expand_to_out("expand", &mut env, &mut vg);

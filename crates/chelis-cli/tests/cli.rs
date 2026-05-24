@@ -4025,9 +4025,13 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
 fn build_hip_rejects_pad_lowering_without_panic() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pad.ch");
+    // Parameterized form `pad(&x, [[lo, hi]], fill)` per spec §2.4 and
+    // issue Chelis-Lang/chelis#187 (the bare 1-arg form is no longer
+    // accepted at type-check; previously it slipped through to the HIP
+    // backend rejection below).
     write_file(
         &path,
-        "def f(x: tensor[4, f32]): tensor[4, f32] = (pad(x) : tensor[4, f32])\n",
+        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], 0.0)\n",
     );
 
     let json = run_json_check(&path);
@@ -5015,12 +5019,11 @@ fn target_metal_unknown_target_message_lists_metal() {
 fn target_metal_rejects_pad() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pad.ch");
-    // Same form the HIP rejection test uses; pad takes its padding via a
-    // metadata channel, so the surface call is single-arg with an ascribed
-    // output shape.
+    // Parameterized pad per spec §2.4 and issue Chelis-Lang/chelis#187
+    // (the bare 1-arg form is no longer accepted at type-check).
     write_file(
         &path,
-        "def f(x: tensor[4, f32]): tensor[4, f32] = (pad(x) : tensor[4, f32])\n",
+        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], 0.0)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -5038,12 +5041,11 @@ fn target_metal_rejects_pad() {
 fn target_metal_rejects_shrink() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("shrink.ch");
-    // Same shape as the pad test — shrink is registered as a tensor_unop
-    // with bounds carried via metadata, so the surface call is single-arg
-    // with an ascribed output shape.
+    // Parameterized shrink per spec §2.4 and issue Chelis-Lang/chelis#187
+    // (the bare 1-arg form is no longer accepted at type-check).
     write_file(
         &path,
-        "def f(x: tensor[4, f32]): tensor[4, f32] = (shrink(x) : tensor[4, f32])\n",
+        "def f(x: tensor[4, f32]) -> tensor[2, f32] = shrink(&x, [[1, 3]])\n",
     );
 
     Command::cargo_bin("chelis")

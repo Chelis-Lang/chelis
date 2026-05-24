@@ -7204,6 +7204,45 @@ fn infer_app(
         );
     }
 
+    if matches!(func_name.as_deref(), Some("shrink")) {
+        return infer_shrink_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
+    if matches!(func_name.as_deref(), Some("pad")) {
+        return infer_pad_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
+    if matches!(func_name.as_deref(), Some("stride")) {
+        return infer_stride_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
     let ctor_lookup_name = func_name.as_ref().and_then(|fname| {
         adt_reg
             .lookup_variant(fname)
@@ -10342,9 +10381,14 @@ fn infer_permute_app(
         return Type::Error;
     };
 
+    // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
+    // axes reach the OOB-axis check and the unique-axis check at infer
+    // time instead of silently falling back to original-dim order (red
+    // team round 3 sibling sweep within the spec section 2.4 movement
+    // family).
     let Some(axes) = kids[2..]
         .iter()
-        .map(extract_int_literal)
+        .map(extract_int_for_dim)
         .collect::<Option<Vec<_>>>()
     else {
         return Type::Tensor(dims, prec);
@@ -10513,6 +10557,773 @@ fn infer_reshape_app(
                 vec![],
             ));
             Type::Error
+        }
+    }
+}
+
+/// `shrink(&x, [[s0, e0], [s1, e1], ...]) -> tensor[e0-s0, e1-s1, ..., p]`
+///
+/// Per spec/05-risc-primitives.md §2.4, `shrink` slices a sub-tensor whose
+/// rank matches the input and whose i-th axis dim is `end_i - start_i`.
+/// The second argument is a list-of-pair-of-int32 with one entry per input
+/// axis. Each pair is `[start, end]` with `0 <= start < end <= input_dim[i]`.
+///
+/// Closes issue Chelis-Lang/chelis#187 on the type-system side: before this
+/// path was added, `shrink` was registered as `tensor_unop` (1-arg
+/// `&tensor -> tensor`) so `shrink(&x, bounds)` failed with
+/// `function arity mismatch: expected 1 args` even though the IR lowering
+/// at `crates/chelis-ir/src/lower.rs:4635-4647` reads bounds from `args[1]`.
+#[allow(clippy::too_many_arguments)]
+fn infer_shrink_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() != 3 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            "shrink expects a tensor and a list of [start, end] bounds pairs, one pair per axis"
+                .to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let bounds_ty = infer_expr(
+        &kids[2],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+
+    if matches!(input_ty, Type::Error) || matches!(bounds_ty, Type::Error) {
+        return Type::Error;
+    }
+
+    // The bounds argument must be a `List[List[Int32]]`.
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    let expected_bounds_ty = Type::Adt("List".to_string(), vec![int_list]);
+    if let Err(_te) = unify(&bounds_ty, &expected_bounds_ty, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "shrink expects a list of [start, end] int32 bounds pairs, got {}",
+                    subst.apply(&bounds_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let input_resolved = type_for_readonly_check(&input_ty, subst);
+    let (dims, prec) = match input_resolved {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("shrink expects tensor input, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    // Classify the (already desugared) Cons/Nil chain. The three-way
+    // result distinguishes "concrete literals" (validate precisely)
+    // from "structure looks fine but elements are non-literal" (defer
+    // to runtime, output wildcards) from "structurally malformed"
+    // (reject at infer with a clear axis-tagged message). See PR #214
+    // red team round 1 finding R1-F1.
+    let bounds = match cons_chain_int_pairs(&kids[2]) {
+        PairListShape::Literal(pairs) => pairs,
+        PairListShape::NonLiteralLiterals | PairListShape::Unknown => {
+            return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+        }
+        PairListShape::Malformed { axis, reason } => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("shrink axis {axis} pair {reason}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    if bounds.len() != dims.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "shrink expects {} bounds pairs for rank {} tensor, got {}",
+                    dims.len(),
+                    dims.len(),
+                    bounds.len()
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let mut out_dims = Vec::with_capacity(dims.len());
+    for (axis, ((start, end), dim)) in bounds.iter().zip(dims.iter()).enumerate() {
+        if *start < 0 || *end < 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("shrink axis {axis} bound [{start}, {end}] has negative endpoint"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        if *start >= *end {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
+                    ),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        if let Dim::Lit(input_dim) = dim
+            && *end > *input_dim
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {input_dim}"
+                    ),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        out_dims.push(Dim::Lit(end - start));
+    }
+
+    Type::Tensor(out_dims, prec)
+}
+
+/// `stride(&x, s0, s1, ...) -> tensor[ceil_div(d0, s0), ...]`
+///
+/// Per spec/05-risc-primitives.md §2.4, `stride` takes every `s_i`-th
+/// element along axis i; the i-th output dim is `ceil(input_dim[i] /
+/// s_i)`. The strides are passed as variadic int32 args, one per input
+/// axis. Zero or negative strides are rejected.
+///
+/// Closes issue Chelis-Lang/chelis#187 on the type-system side -- before
+/// this path was added, `stride` was registered as `tensor_unop` (arity
+/// 1) so `stride(&x, 1, 2)` failed with `function arity mismatch:
+/// expected 1 args`.
+#[allow(clippy::too_many_arguments)]
+fn infer_stride_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() < 3 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            "stride expects a tensor followed by one positive int32 stride per axis".to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let stride_tys: Vec<Type> = kids[2..]
+        .iter()
+        .map(|arg| {
+            infer_expr(
+                arg,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                typed_nodes,
+                total_nodes,
+            )
+        })
+        .collect();
+
+    if matches!(input_ty, Type::Error) || stride_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Type::Error;
+    }
+
+    for stride_ty in &stride_tys {
+        let resolved = subst.apply(stride_ty);
+        match resolved {
+            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+            other => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("stride expects int32 strides, got {other}"),
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+        }
+    }
+
+    let input_resolved = type_for_readonly_check(&input_ty, subst);
+    let (dims, prec) = match input_resolved {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("stride expects tensor input, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    let Some(strides) = kids[2..]
+        .iter()
+        .map(extract_int_for_dim)
+        .collect::<Option<Vec<_>>>()
+    else {
+        // Strides are int32-typed but non-literal (e.g. parameters). Keep
+        // the rank, make dims wildcard. Uses `extract_int_for_dim` so
+        // `cast(N, int32)`-wrapped literal strides reach the positive-
+        // stride check at infer time instead of falling back to host
+        // runtime (red team round 3 finding R3-HIGH1).
+        return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+    };
+
+    if strides.len() != dims.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "stride expects {} strides for rank {} tensor, got {}",
+                    dims.len(),
+                    dims.len(),
+                    strides.len()
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let mut out_dims = Vec::with_capacity(dims.len());
+    for (axis, (step, dim)) in strides.iter().zip(dims.iter()).enumerate() {
+        if *step <= 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "stride axis {axis} step {step} must be positive (zero or negative strides are not allowed)"
+                    ),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        let step_us = *step as usize;
+        match dim {
+            Dim::Lit(input_dim) => {
+                let out = (*input_dim as usize).div_ceil(step_us);
+                out_dims.push(Dim::Lit(out as i64));
+            }
+            other => out_dims.push(other.clone()),
+        }
+    }
+
+    Type::Tensor(out_dims, prec)
+}
+
+/// `pad(&x, [[lo_0, hi_0], [lo_1, hi_1], ...], fill) -> tensor[d_0 + lo_0
+/// + hi_0, ..., p]`
+///
+/// Per spec/05-risc-primitives.md §2.4, `pad` widens each axis by the
+/// `(lo, hi)` padding amounts and fills the inserted region with `fill`.
+/// Same structural antipattern as `shrink`: the `tensor_unop` registration
+/// said 1-arg, but the IR lowering at `crates/chelis-ir/src/lower.rs:4616-4634`
+/// reads padding from `args[1]` and fill from `args[2]`. Sibling sweep
+/// finding for issue Chelis-Lang/chelis#187.
+#[allow(clippy::too_many_arguments)]
+fn infer_pad_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() != 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            "pad expects a tensor, a list of [lo, hi] padding pairs (one per axis), and a fill scalar".to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let padding_ty = infer_expr(
+        &kids[2],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let fill_ty = infer_expr(
+        &kids[3],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+
+    if matches!(input_ty, Type::Error) || matches!(padding_ty, Type::Error) {
+        return Type::Error;
+    }
+
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    let expected_padding_ty = Type::Adt("List".to_string(), vec![int_list]);
+    if let Err(_te) = unify(&padding_ty, &expected_padding_ty, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "pad expects a list of [lo, hi] int32 padding pairs, got {}",
+                    subst.apply(&padding_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let input_resolved = type_for_readonly_check(&input_ty, subst);
+    let (dims, prec) = match input_resolved {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("pad expects tensor input, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    // R1-F2: enforce the fill arg is a scalar of the input tensor
+    // precision. The previous code dropped `fill_ty` on the floor, so a
+    // list, tuple, bool, or wrong-precision scalar would slip through to
+    // host-runtime. Per spec/05-risc-primitives.md §2.4, `pad`'s fill
+    // value is a single scalar of the input precision.
+    //
+    // Use unification rather than a hard match so polymorphic-precision
+    // tensors (precision still a `TensorPrec::Var`) generate the
+    // constraint cleanly instead of being rejected. The expected scalar
+    // type is `Type::Prim(p)` where `p` is the tensor's element
+    // precision.
+    let expected_fill_ty = match prec {
+        TensorPrec::Concrete(p) => Type::Prim(p),
+        TensorPrec::Var(_) => {
+            // Precision is still polymorphic; introduce a fresh tvar and
+            // let unification tie it to whatever the tensor lands on.
+            Type::Var(vg.fresh_tvar())
+        }
+    };
+    if let Err(_te) = unify(&fill_ty, &expected_fill_ty, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "pad fill must be a scalar of the input tensor precision ({expected_fill_ty}), got {}",
+                    subst.apply(&fill_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let padding = match cons_chain_int_pairs(&kids[2]) {
+        PairListShape::Literal(pairs) => pairs,
+        PairListShape::NonLiteralLiterals | PairListShape::Unknown => {
+            return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+        }
+        PairListShape::Malformed { axis, reason } => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("pad axis {axis} pair {reason}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    if padding.len() != dims.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "pad expects {} padding pairs for rank {} tensor, got {}",
+                    dims.len(),
+                    dims.len(),
+                    padding.len()
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let mut out_dims = Vec::with_capacity(dims.len());
+    for (axis, ((lo, hi), dim)) in padding.iter().zip(dims.iter()).enumerate() {
+        if *lo < 0 || *hi < 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("pad axis {axis} padding [{lo}, {hi}] has negative entry"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        match dim {
+            Dim::Lit(input_dim) => {
+                out_dims.push(Dim::Lit(input_dim + lo + hi));
+            }
+            other => out_dims.push(other.clone()),
+        }
+    }
+
+    Type::Tensor(out_dims, prec)
+}
+
+/// Three-way result of inspecting a `[[s_0, e_0], [s_1, e_1], ...]` list
+/// literal arg: well-formed concrete literals, structurally malformed
+/// (wrong inner length, missing `Nil`, etc.), or "structure looks fine
+/// but inner entries are non-literal" (e.g. variables) so the caller
+/// should fall back to a wildcard output shape.
+///
+/// Red team round 1 on PR #214 found that `cons_chain_int_pairs`
+/// returning a plain `Option` couldn't distinguish "user wrote a triple"
+/// from "user wrote a variable" -- both became `None`, both fell through
+/// to `Dim::Wildcard`, so malformed input silently slipped past
+/// `chelis check` and only failed at host-runtime or IR-verifier time.
+enum PairListShape {
+    /// Top-level chain closed by `Nil`, every entry was a literal
+    /// `Cons(start, Cons(end, Nil))` pair.
+    Literal(Vec<(i64, i64)>),
+    /// Top-level chain closed by `Nil` and every entry was structurally
+    /// a `Cons(_, Cons(_, Nil))`, but at least one inner element was a
+    /// non-literal (variable, call, etc.). Output shape must be
+    /// wildcarded but no infer-side error -- runtime will validate.
+    NonLiteralLiterals,
+    /// At least one inner entry has the wrong structural shape (wrong
+    /// number of elements, missing `Nil` close, etc.). The caller MUST
+    /// emit an infer-time error naming the offending axis.
+    Malformed { axis: usize, reason: String },
+    /// The top-level chain is well-typed as `List[List[Int32]]` but
+    /// isn't a literal Cons/Nil chain (e.g. it's a variable resolved by
+    /// the type system). Caller falls back to wildcard output shape.
+    Unknown,
+}
+
+/// Walk a `Cons(Cons(start_i, Cons(end_i, Nil)), ..., Nil)` chain — the
+/// desugared form of a Surf `[[start_0, end_0], [start_1, end_1], ...]`
+/// list-of-pair literal — and classify it via [`PairListShape`].
+fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
+    let mut pairs: Vec<(i64, i64)> = Vec::new();
+    let mut any_non_literal = false;
+    let mut cursor = expr;
+    let mut axis = 0usize;
+    loop {
+        let deep::Expr::List(outer, _) = cursor else {
+            return PairListShape::Unknown;
+        };
+        match get_tag(outer) {
+            Some("var") => {
+                let name = match children(outer).first().and_then(symbol_name) {
+                    Some(name) => name,
+                    None => return PairListShape::Unknown,
+                };
+                if name == "Nil" {
+                    if any_non_literal {
+                        return PairListShape::NonLiteralLiterals;
+                    }
+                    return PairListShape::Literal(pairs);
+                }
+                return PairListShape::Unknown;
+            }
+            Some("app") => {
+                let app_children = children(outer);
+                let func = match app_children.first() {
+                    Some(func) => func,
+                    None => return PairListShape::Unknown,
+                };
+                if !is_builtin_var(func, "Cons") {
+                    return PairListShape::Unknown;
+                }
+                let pair_expr = match app_children.get(1) {
+                    Some(p) => p,
+                    None => return PairListShape::Unknown,
+                };
+                let tail = match app_children.get(2) {
+                    Some(t) => t,
+                    None => return PairListShape::Unknown,
+                };
+                match cons_chain_two_ints(pair_expr, axis) {
+                    InnerPairShape::Literal(pair) => pairs.push(pair),
+                    InnerPairShape::NonLiteral => any_non_literal = true,
+                    InnerPairShape::Malformed { reason } => {
+                        return PairListShape::Malformed { axis, reason };
+                    }
+                    InnerPairShape::Unknown => return PairListShape::Unknown,
+                }
+                cursor = tail;
+                axis += 1;
+            }
+            _ => return PairListShape::Unknown,
+        }
+    }
+}
+
+/// Classification of a single inner pair expression. Distinguishes the
+/// "wrong shape" case (must be reported at infer) from the "right shape,
+/// non-literal element" case (defer to runtime).
+enum InnerPairShape {
+    Literal((i64, i64)),
+    NonLiteral,
+    Malformed { reason: String },
+    Unknown,
+}
+
+/// Walk a `Cons(start, Cons(end, Nil))` chain and classify it. Counts
+/// the actual number of elements in the inner list so the error message
+/// can name the bad arity explicitly (e.g. "got 3-element list").
+///
+/// Bare `(var Nil)` at the top level is the desugared form of `[]` --
+/// a zero-element list literal. That is just as malformed as a triple
+/// or singleton (it has zero of the required two endpoints), so it
+/// must surface as `Malformed { reason: "got 0-element list" }` rather
+/// than `NonLiteral` (red team round 2 finding R2-M1). Other `var` tags
+/// represent opaque `List[Int32]` references the type system already
+/// constrained; those still defer to runtime via `NonLiteral`.
+///
+/// Inner head values are extracted via [`extract_int_for_dim`], which
+/// peels `cast(N, int32)` / `cast(N, int64)` -- so cast-wrapped int
+/// literals participate in the infer-time bounds check rather than
+/// silently falling back to `NonLiteral` (red team round 2 finding
+/// R2-L1; mirrors how reshape extracts dim literals).
+fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
+    let deep::Expr::List(list, _) = expr else {
+        return InnerPairShape::Unknown;
+    };
+    if get_tag(list) != Some("app") {
+        // Inner element is not a Cons-chain. The `Nil` case (zero-element
+        // list literal) is malformed; any other `var` is an opaque
+        // `List[Int32]` reference whose contents the runtime will check.
+        if matches!(get_tag(list), Some("var")) {
+            let is_nil = children(list)
+                .first()
+                .and_then(symbol_name)
+                .map(|name| name == "Nil")
+                .unwrap_or(false);
+            if is_nil {
+                return InnerPairShape::Malformed {
+                    reason: "expects a pair [start, end] of two int literals, got 0-element list"
+                        .to_string(),
+                };
+            }
+            return InnerPairShape::NonLiteral;
+        }
+        return InnerPairShape::Unknown;
+    }
+    // Count the elements in the inner list so we can give a precise
+    // "got N-element list" diagnostic. Walk the chain element-by-element.
+    let mut elements_seen = 0usize;
+    let mut head_values: Vec<Option<i64>> = Vec::new();
+    let mut inner_cursor: &deep::Expr = expr;
+    loop {
+        let deep::Expr::List(inner, _) = inner_cursor else {
+            return InnerPairShape::Unknown;
+        };
+        match get_tag(inner) {
+            Some("var") => {
+                let name = match children(inner).first().and_then(symbol_name) {
+                    Some(n) => n,
+                    None => return InnerPairShape::Unknown,
+                };
+                if name != "Nil" {
+                    return InnerPairShape::Unknown;
+                }
+                if elements_seen != 2 {
+                    return InnerPairShape::Malformed {
+                        reason: format!(
+                            "expects a pair [start, end] of two int literals, got {}-element list",
+                            elements_seen
+                        ),
+                    };
+                }
+                let start = match head_values[0] {
+                    Some(v) => v,
+                    None => return InnerPairShape::NonLiteral,
+                };
+                let end = match head_values[1] {
+                    Some(v) => v,
+                    None => return InnerPairShape::NonLiteral,
+                };
+                return InnerPairShape::Literal((start, end));
+            }
+            Some("app") => {
+                let app_children = children(inner);
+                let func = match app_children.first() {
+                    Some(f) => f,
+                    None => return InnerPairShape::Unknown,
+                };
+                if !is_builtin_var(func, "Cons") {
+                    return InnerPairShape::Unknown;
+                }
+                let head_expr = match app_children.get(1) {
+                    Some(h) => h,
+                    None => return InnerPairShape::Unknown,
+                };
+                let tail = match app_children.get(2) {
+                    Some(t) => t,
+                    None => return InnerPairShape::Unknown,
+                };
+                head_values.push(extract_int_for_dim(head_expr));
+                elements_seen += 1;
+                inner_cursor = tail;
+                // Guard against extra trailing elements: if we already
+                // saw a [start, end] pair but the chain continues past
+                // `Nil`, report malformed. The Nil arm above catches the
+                // n==2 happy path before we get here on subsequent
+                // iterations, so just keep walking and the count check
+                // at Nil-time will catch it.
+            }
+            _ => return InnerPairShape::Unknown,
         }
     }
 }
@@ -10740,6 +11551,19 @@ fn is_shape_app(app_list: &deep::List) -> bool {
 /// literals default to int32 and require an explicit cast for int64 contexts.
 /// `cast` may surface either as the `(cast {} ... ...)` tag or as an `app`
 /// of the `cast` var, depending on how far desugaring has progressed.
+///
+/// Note: callers in the spec section 2.4 movement family (shrink, pad,
+/// stride, permute, expand) typically unify the surrounding bounds /
+/// strides argument against an `int32`-pinned expected type before
+/// reaching this extractor, so a `cast(N, int64)` endpoint is rejected
+/// at the outer unification step rather than slipping through to here
+/// (red team round 3 HIGH-2 contract note).
+///
+/// The cast arm recurses through `extract_int_for_dim` so that
+/// `cast(cast(N, int32), int32)` and other doubly-nested forms peel to
+/// their literal at any depth (red team round 3 finding R3-MED2).
+/// Termination is bounded: each recursive call strictly reduces the
+/// expression depth (peels one wrapper layer).
 fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
     if let Some(value) = extract_int_literal(expr) {
         return Some(value);
@@ -10748,14 +11572,14 @@ fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
         return None;
     };
     match get_tag(list)? {
-        "cast" => extract_int_literal(children(list).first()?),
+        "cast" => extract_int_for_dim(children(list).first()?),
         "app" => {
             let app_children = children(list);
             let func = app_children.first()?;
             if !is_builtin_var(func, "cast") {
                 return None;
             }
-            extract_int_literal(app_children.get(1)?)
+            extract_int_for_dim(app_children.get(1)?)
         }
         _ => None,
     }
@@ -11366,7 +12190,11 @@ fn check_expand_signature(
         }
     };
 
-    let axis = match arg_exprs.get(1).and_then(extract_int_literal) {
+    // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
+    // axis/size reach the non-negative-axis and positive-size checks at
+    // infer time (red team round 3 sibling sweep within the spec
+    // section 2.4 movement family).
+    let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
             errors.push(CheckError::new(
@@ -11378,7 +12206,7 @@ fn check_expand_signature(
         }
         None => return subst.apply(result_ty),
     };
-    let size = match arg_exprs.get(2).and_then(extract_int_literal) {
+    let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
         Some(size) if size > 0 => Dim::Lit(size),
         Some(size) => {
             errors.push(CheckError::new(
@@ -11517,6 +12345,19 @@ fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
     }
 }
 
+/// Extract an int literal from a Deep expr, recognizing the canonical
+/// literal forms (`Atom::Int`, `(lit {type: ...} N)`) and the `neg` app
+/// wrapper. Float-in-cast intentionally is not recognized: the spec
+/// says integer literals default to `int32` and require explicit
+/// notation for other widths, so a float wrapped in a cast to an int
+/// dtype is a precision-narrowing operation that the runtime should
+/// validate -- not a literal int (round 3 LOW-2 design note).
+///
+/// The `neg` arm recurses through `extract_int_for_dim` so that
+/// `neg(cast(N, int32))` peels both wrappers and resolves to `-N` at
+/// infer time (red team round 3 finding R3-MED1). Mutual recursion
+/// with `extract_int_for_dim` is bounded: each call strictly reduces
+/// the expression depth (peels one wrapper layer).
 fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
     match expr {
         deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n),
@@ -11530,7 +12371,7 @@ fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
             let app_children = children(list);
             match (app_children.first(), app_children.get(1)) {
                 (Some(func), Some(arg)) if is_builtin_var(func, "neg") => {
-                    extract_int_literal(arg).map(|value| -value)
+                    extract_int_for_dim(arg).map(|value| -value)
                 }
                 _ => None,
             }

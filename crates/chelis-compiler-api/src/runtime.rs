@@ -2416,6 +2416,36 @@ impl<'a> EvalContext<'a> {
                 let axis = expect_int_arg(args, 1)?;
                 tensor_softmax_host(&tensor, axis).map(RuntimeValue::Tensor)
             }
+            // Movement primitives that take parameterized window args. Both
+            // delegate to the same arithmetic the IR evaluator at
+            // `crates/chelis-ir/src/eval.rs` uses, so eval-in-context output
+            // is byte-identical to a freshly-lowered DAG run -- per the
+            // evaluator-vs-backend agreement gate. Issue Chelis-Lang/chelis#187.
+            "shrink" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let raw = expect_list_arg(args, 1)?;
+                let bounds = extract_bounds_pair_list(&raw, "shrink")?;
+                tensor_shrink_host(&tensor, &bounds).map(RuntimeValue::Tensor)
+            }
+            "pad" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let raw = expect_list_arg(args, 1)?;
+                let padding = extract_bounds_pair_list(&raw, "pad")?;
+                let fill = expect_float_arg(args, 2)?;
+                tensor_pad_host(&tensor, &padding, fill).map(RuntimeValue::Tensor)
+            }
+            "stride" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let strides = expect_int_list(&args[1..], "stride")?;
+                for (axis, step) in strides.iter().enumerate() {
+                    if *step == 0 {
+                        return Err(format!(
+                            "stride axis {axis} step 0 is not allowed (must be positive)"
+                        ));
+                    }
+                }
+                tensor_stride_host(&tensor, &strides).map(RuntimeValue::Tensor)
+            }
             // Activation primitives (Bucket 3).
             //
             // Each activation must produce values byte-identical (to documented
@@ -3853,6 +3883,199 @@ fn tensor_expand_host(
         value: IrTensorValue::from_vec(out_shape, out),
         precision: tensor.precision,
     })
+}
+
+/// Pad each axis by `padding[i] = (lo_i, hi_i)`, filling the inserted
+/// region with `fill`. Output dim i is `input_dim[i] + lo_i + hi_i`.
+/// Mirrors the IR evaluator at `crates/chelis-ir/src/eval.rs::pad` so
+/// eval-in-context output is byte-identical to a freshly-lowered DAG run.
+///
+/// Sibling sweep of issue Chelis-Lang/chelis#187 (pad had the same
+/// 1-arg-`tensor_unop`-vs-parameterized-RISC-op antipattern as shrink
+/// and stride).
+fn tensor_pad_host(
+    tensor: &RuntimeTensorValue,
+    padding: &[(usize, usize)],
+    fill: f64,
+) -> Result<RuntimeTensorValue, String> {
+    let in_shape = &tensor.value.shape;
+    if padding.len() != in_shape.len() {
+        return Err(format!(
+            "pad expects {} padding pairs for rank-{} tensor, got {}",
+            in_shape.len(),
+            in_shape.len(),
+            padding.len()
+        ));
+    }
+    let out_shape: Vec<usize> = padding
+        .iter()
+        .zip(in_shape.iter())
+        .map(|((lo, hi), in_dim)| in_dim + lo + hi)
+        .collect();
+    let out_numel = tensor_numel(&out_shape);
+    let mut out = vec![fill; out_numel];
+    let in_numel = tensor_numel(in_shape);
+    for in_linear in 0..in_numel {
+        let in_indices = linear_to_indices(in_linear, in_shape);
+        let out_indices: Vec<usize> = in_indices
+            .iter()
+            .zip(padding.iter())
+            .map(|(idx, (lo, _))| idx + lo)
+            .collect();
+        let out_linear = indices_to_linear(&out_indices, &out_shape);
+        out[out_linear] = tensor.value.data[in_linear];
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: tensor.precision,
+    })
+}
+
+/// Sub-tensor slice along every axis. For each axis the `bounds[i] =
+/// (start_i, end_i)` carve out the half-open range `[start_i, end_i)`,
+/// producing an output of dim `end_i - start_i`. The arithmetic mirrors
+/// the IR-level evaluator at `crates/chelis-ir/src/eval.rs::shrink` so
+/// eval-in-context output is byte-identical to a freshly-lowered DAG run.
+///
+/// Validates bounds at host-runtime so a malformed `shrink` call surfaces
+/// as a loud `eval` error rather than silently returning garbage data --
+/// the surface-level counterpart to `c10_shrink_invalid_bounds_is_error`
+/// in `crates/chelis-ir/src/verify.rs`.
+fn tensor_shrink_host(
+    tensor: &RuntimeTensorValue,
+    bounds: &[(usize, usize)],
+) -> Result<RuntimeTensorValue, String> {
+    let in_shape = &tensor.value.shape;
+    if bounds.len() != in_shape.len() {
+        return Err(format!(
+            "shrink expects {} bounds pairs for rank-{} tensor, got {}",
+            in_shape.len(),
+            in_shape.len(),
+            bounds.len()
+        ));
+    }
+    let mut out_shape = Vec::with_capacity(in_shape.len());
+    for (axis, ((start, end), in_dim)) in bounds.iter().zip(in_shape.iter()).enumerate() {
+        if start >= end {
+            return Err(format!(
+                "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
+            ));
+        }
+        if *end > *in_dim {
+            return Err(format!(
+                "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {in_dim}"
+            ));
+        }
+        out_shape.push(end - start);
+    }
+    let out_numel = tensor_numel(&out_shape);
+    let mut out = vec![0.0_f64; out_numel];
+    for (out_linear, slot) in out.iter_mut().enumerate() {
+        let out_indices = linear_to_indices(out_linear, &out_shape);
+        let in_indices: Vec<usize> = out_indices
+            .iter()
+            .zip(bounds.iter())
+            .map(|(idx, (start, _))| idx + start)
+            .collect();
+        let in_linear = indices_to_linear(&in_indices, in_shape);
+        *slot = tensor.value.data[in_linear];
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: tensor.precision,
+    })
+}
+
+/// Strided view -- take every `strides[i]`-th element along axis i. Output
+/// dim i is `ceil(input_dim[i] / strides[i])`. Zero strides are rejected
+/// upstream (the eval_builtin arm validates positivity) but checked again
+/// here to keep the function self-contained and to match the IR-level
+/// `c10_stride_zero_step_is_error` invariant.
+fn tensor_stride_host(
+    tensor: &RuntimeTensorValue,
+    strides: &[usize],
+) -> Result<RuntimeTensorValue, String> {
+    let in_shape = &tensor.value.shape;
+    if strides.len() != in_shape.len() {
+        return Err(format!(
+            "stride expects {} strides for rank-{} tensor, got {}",
+            in_shape.len(),
+            in_shape.len(),
+            strides.len()
+        ));
+    }
+    let mut out_shape = Vec::with_capacity(in_shape.len());
+    for (axis, (step, in_dim)) in strides.iter().zip(in_shape.iter()).enumerate() {
+        if *step == 0 {
+            return Err(format!(
+                "stride axis {axis} step 0 is not allowed (must be positive)"
+            ));
+        }
+        out_shape.push(in_dim.div_ceil(*step));
+    }
+    let out_numel = tensor_numel(&out_shape);
+    let mut out = vec![0.0_f64; out_numel];
+    for (out_linear, slot) in out.iter_mut().enumerate() {
+        let out_indices = linear_to_indices(out_linear, &out_shape);
+        let in_indices: Vec<usize> = out_indices
+            .iter()
+            .zip(strides.iter())
+            .map(|(idx, step)| idx * step.max(&1))
+            .collect();
+        let in_linear = indices_to_linear(&in_indices, in_shape);
+        *slot = tensor.value.data[in_linear];
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: tensor.precision,
+    })
+}
+
+/// Convert a `RuntimeValue::List` of inner `List`s into a flat
+/// `Vec<(usize, usize)>` of `[start, end]` bounds pairs. Each inner list
+/// must have exactly two non-negative int entries (matching the
+/// type-checker's `List[List[Int32]]` contract). Any other shape -- wrong
+/// inner-list length, non-int entries, negative endpoints -- surfaces as
+/// a loud host-runtime error.
+fn extract_bounds_pair_list(raw: &[RuntimeValue], op: &str) -> Result<Vec<(usize, usize)>, String> {
+    raw.iter()
+        .enumerate()
+        .map(|(axis, item)| match item {
+            RuntimeValue::List(pair) => {
+                if pair.len() != 2 {
+                    return Err(format!(
+                        "{op} axis {axis} expects a [start, end] pair, got {} entries",
+                        pair.len()
+                    ));
+                }
+                let start = match &pair[0] {
+                    RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+                        payload.bits().as_i64()
+                    }
+                    other => {
+                        return Err(format!("{op} axis {axis} expects int start, got {other:?}"));
+                    }
+                };
+                let end = match &pair[1] {
+                    RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+                        payload.bits().as_i64()
+                    }
+                    other => {
+                        return Err(format!("{op} axis {axis} expects int end, got {other:?}"));
+                    }
+                };
+                if start < 0 || end < 0 {
+                    return Err(format!(
+                        "{op} axis {axis} bound [{start}, {end}] has negative endpoint"
+                    ));
+                }
+                Ok((start as usize, end as usize))
+            }
+            other => Err(format!(
+                "{op} axis {axis} expects a [start, end] pair list, got {other:?}"
+            )),
+        })
+        .collect()
 }
 
 /// Numerically stable softmax along a single axis:
@@ -5712,10 +5935,18 @@ y = expand(b, cast(0, int32), cast(4, int32))
 
     #[test]
     fn host_runtime_expand_negative_count_errors() {
+        // PR #214 / red team round 3 sibling sweep: `infer_expand_app`
+        // now extracts cast-wrapped int literals via `extract_int_for_dim`
+        // and rejects `cast(0, int32)` at infer time. To keep this test
+        // exercising the host-runtime arm (defense in depth for direct-DAG
+        // callers and any non-literal size that evaluates to 0 at runtime),
+        // the count is built from arithmetic that the infer-time literal
+        // extractor cannot resolve.
         let checked = checked_surf(
             r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-y = expand(b, cast(0, int32), cast(0, int32))
+zero_count = sub(cast(0, int32), cast(0, int32))
+y = expand(b, cast(0, int32), zero_count)
 "#,
         );
         let err = evaluate_host_program(&checked, &HashMap::new())

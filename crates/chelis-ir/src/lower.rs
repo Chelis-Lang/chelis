@@ -1926,6 +1926,116 @@ fn children(list: &List) -> &[Expr] {
     }
 }
 
+/// Helper: is `expr` an `app` of a `var` whose name equals `expected`?
+fn is_app_of_builtin(expr: &Expr, expected: &str) -> bool {
+    let Expr::List(list, _) = expr else {
+        return false;
+    };
+    if get_tag(list) != Some("var") {
+        return false;
+    }
+    matches!(
+        children(list).first(),
+        Some(Expr::Atom(Atom::Symbol(name), _)) if name == expected
+    )
+}
+
+/// Extract an `i64` from `expr` if it is a literal or `(lit {} N)` form.
+fn cons_pair_extract_int(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Atom(Atom::Int(n), _) => Some(*n),
+        Expr::List(list, _) if get_tag(list) == Some("lit") => match list.elements.get(2) {
+            Some(Expr::Atom(Atom::Int(n), _)) => Some(*n),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Walk `Cons(start, Cons(end, Nil))` and return `(start, end)` as
+/// `usize`. Returns `None` if any structural assumption fails.
+fn cons_two_int_pair(expr: &Expr) -> Option<(usize, usize)> {
+    let Expr::List(outer, _) = expr else {
+        return None;
+    };
+    if get_tag(outer) != Some("app") {
+        return None;
+    }
+    let outer_children = children(outer);
+    let func = outer_children.first()?;
+    if !is_app_of_builtin(func, "Cons") {
+        return None;
+    }
+    let start = cons_pair_extract_int(outer_children.get(1)?)?;
+    let tail = outer_children.get(2)?;
+    let Expr::List(tail_list, _) = tail else {
+        return None;
+    };
+    if get_tag(tail_list) != Some("app") {
+        return None;
+    }
+    let tail_children = children(tail_list);
+    let tail_func = tail_children.first()?;
+    if !is_app_of_builtin(tail_func, "Cons") {
+        return None;
+    }
+    let end = cons_pair_extract_int(tail_children.get(1)?)?;
+    let nil_expr = tail_children.get(2)?;
+    let Expr::List(nil_list, _) = nil_expr else {
+        return None;
+    };
+    if get_tag(nil_list) != Some("var") {
+        return None;
+    }
+    let nil_name = match children(nil_list).first() {
+        Some(Expr::Atom(Atom::Symbol(s), _)) => s.as_str(),
+        _ => return None,
+    };
+    if nil_name != "Nil" {
+        return None;
+    }
+    if start < 0 || end < 0 {
+        return None;
+    }
+    Some((start as usize, end as usize))
+}
+
+/// Walk a `Cons(pair_0, Cons(pair_1, ..., Nil))` chain and collect each
+/// `pair_i` via [`cons_two_int_pair`]. Returns `None` if the chain or any
+/// pair is malformed (so callers can fall back to a non-Cons-form parser).
+fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
+    let mut pairs = Vec::new();
+    let mut cursor = expr;
+    loop {
+        let Expr::List(outer, _) = cursor else {
+            return None;
+        };
+        match get_tag(outer)? {
+            "var" => {
+                let name = match children(outer).first() {
+                    Some(Expr::Atom(Atom::Symbol(s), _)) => s.as_str(),
+                    _ => return None,
+                };
+                if name == "Nil" {
+                    return Some(pairs);
+                }
+                return None;
+            }
+            "app" => {
+                let app_children = children(outer);
+                let func = app_children.first()?;
+                if !is_app_of_builtin(func, "Cons") {
+                    return None;
+                }
+                let pair = cons_two_int_pair(app_children.get(1)?)?;
+                pairs.push(pair);
+                cursor = app_children.get(2)?;
+            }
+            _ => return None,
+        }
+    }
+}
+
 #[derive(Clone)]
 enum CallableExpr {
     Plain(Expr),
@@ -4891,9 +5001,24 @@ impl LowerCtx {
         None
     }
 
-    /// Extract a list of (usize, usize) pairs from an expression (for pad/shrink bounds).
+    /// Extract a list of (usize, usize) pairs from an expression (for
+    /// pad/shrink bounds).
+    ///
+    /// Accepts BOTH:
+    ///   - the raw `(list ... )` form (hand-written Deep)
+    ///   - the desugared `Cons(Cons(s_0, Cons(e_0, Nil)), ..., Nil)` chain
+    ///     (Surf source like `[[0, 1], [1, 3]]` after `chelis-surf::desugar`)
+    ///
+    /// Issue Chelis-Lang/chelis#187: previously only the `(list ...)` form
+    /// was recognized, so Surf source like `shrink(&x, [[0, 1], [1, 3]])`
+    /// lowered to an empty `bounds = vec![]` and produced an invalid
+    /// `RiscOp::Shrink { bounds: [] }` -- failing later verify or returning
+    /// silently empty output.
     fn extract_pair_list(&self, expr: &Expr) -> Option<Vec<(usize, usize)>> {
-        if let Expr::List(list, _) = expr {
+        if let Expr::List(list, _) = expr
+            && get_tag(list) != Some("app")
+        {
+            // Hand-written `(list ...)` (or similar non-app) form.
             let mut pairs = Vec::new();
             for elem in &list.elements {
                 if let Expr::List(pair_list, _) = elem {
@@ -4917,7 +5042,7 @@ impl LowerCtx {
                 return Some(pairs);
             }
         }
-        None
+        cons_chain_pair_list(expr)
     }
 
     /// C4: Enforce float-only for transcendental ops (exp, log, sin, sqrt).
