@@ -29,4 +29,5 @@ tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
+chelis-compiler-api = { path = "../chelis-compiler-api" }
 predicates = "3"
