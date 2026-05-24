@@ -346,7 +346,9 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     // Pre-fix the message was "requires a literal integer stride", which
     // is the wrong layer (the cast was a literal int, just wrapped).
     assert!(
-        rep.errors.iter().any(|e| e.message.to_lowercase().contains("conv2d")
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("conv2d")
                 && e.message.contains("positive")
                 && e.message.contains("stride")),
         "expected the conv2d positive-stride diagnostic (post-fix), got {:?}",
@@ -370,7 +372,9 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative conv2d padding");
     assert!(
-        rep.errors.iter().any(|e| e.message.to_lowercase().contains("conv2d")
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("conv2d")
                 && e.message.contains("non-negative")
                 && e.message.contains("padding")),
         "expected the conv2d non-negative-padding diagnostic (post-fix), got {:?}",
@@ -480,8 +484,9 @@ fn issue216_grad_wrt_cast_wrapped_negative_index_is_error() {
     let rep = res.expect_err("expected check to fail on cast-wrapped negative grad wrt index");
     // Lock the post-fix diagnostic: "must be non-negative, got -1".
     assert!(
-        rep.errors.iter().any(|e| e.message.to_lowercase().contains("grad")
-                && e.message.contains("non-negative")),
+        rep.errors.iter().any(
+            |e| e.message.to_lowercase().contains("grad") && e.message.contains("non-negative")
+        ),
         "expected the grad wrt non-negative-index diagnostic (post-fix), got {:?}",
         rep.errors
             .iter()
