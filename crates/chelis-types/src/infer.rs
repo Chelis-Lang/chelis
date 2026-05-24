@@ -5201,7 +5201,8 @@ fn is_ir_unary_shape_passthrough_builtin(name: &str) -> bool {
 fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
     matches!(
         name,
-        "add" | "sub"
+        "add"
+            | "sub"
             | "mul"
             | "div"
             | "max_elem"
