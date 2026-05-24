@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use chelis_compiler_api::compiler::eval;
+use chelis_compiler_api::compiler::{eval, eval_selected};
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 
 fn eval_surf(source: &str) -> chelis_compiler_api::schema::EvalResult {
@@ -22,6 +22,27 @@ fn eval_surf(source: &str) -> chelis_compiler_api::schema::EvalResult {
         bindings: BTreeMap::new(),
     })
     .unwrap_or_else(|err| panic!("eval failed: {err:?}"))
+}
+
+/// Evaluate selecting only the named top-level roots. Mirrors how
+/// `chelis eval --file` invokes the compiler API
+/// (`crates/chelis-cli/src/main.rs::try_eval`) — without this filter,
+/// the eval pipeline tries to forward-evaluate EVERY top-level
+/// binding including function-body closures whose tensor inputs are
+/// formal parameters with no bound value. For `conv2d` specifically
+/// this would surface as "missing required input `x`" even though
+/// the user-visible `out` binding has the conv result.
+fn eval_surf_selected(source: &str, roots: &[&str]) -> chelis_compiler_api::schema::EvalResult {
+    let selected: Vec<String> = roots.iter().map(|s| (*s).to_string()).collect();
+    eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            bindings: BTreeMap::new(),
+        },
+        &selected,
+    )
+    .unwrap_or_else(|err| panic!("eval_selected failed: {err:?}"))
 }
 
 fn root_tensor<'a>(
@@ -98,10 +119,12 @@ fn issue185_layer_norm_runs_and_matches_ir_eval() {
     // centered = [-1.5, -0.5, 0.5, 1.5]
     // normed = [-1.34164.., -0.44721.., 0.44721.., 1.34164..]
     // With gamma = [1, 1, 1, 1] and beta = [0, 0, 0, 0]: result == normed.
+    // gamma and beta are rank-1 per `layer_norm`'s typer signature
+    // (`crates/chelis-types/src/infer.rs` rejects rank-2 gamma).
     let src = r#"
 x = pad_sequences([[1.0, 2.0, 3.0, 4.0]], 0.0)
-g = pad_sequences([[1.0, 1.0, 1.0, 1.0]], 0.0)
-b = pad_sequences([[0.0, 0.0, 0.0, 0.0]], 0.0)
+g = to_tensor([1.0, 1.0, 1.0, 1.0])
+b = to_tensor([0.0, 0.0, 0.0, 0.0])
 out = layer_norm(&x, &g, &b)
 "#;
     let result = eval_surf(src);
@@ -122,6 +145,14 @@ out = layer_norm(&x, &g, &b)
 // conv2d: 2D convolution. Pinned on a small 1x1x2x2 input with a 1x1x2x2
 // kernel (stride=1, padding=0). The output is a 1x1x1x1 scalar tensor
 // equal to the elementwise dot product.
+//
+// `conv2d`'s typer requires concrete d-lit tensor argument metadata at the
+// call site (`crates/chelis-types/src/infer.rs::
+// conv2d_input_dims_concrete_modulo_batch`), which only flows in via
+// explicitly-typed function parameters. The fixture therefore wraps the
+// call in `def run_conv2d(x: tensor[1, 1, 2, 2, f32], k: tensor[1, 1, 2,
+// 2, f32]) -> ...` so the param-type metadata propagates onto the
+// conv2d call's args.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -129,12 +160,21 @@ fn issue185_conv2d_runs_and_matches_ir_eval() {
     // input  = [[[[1.0, 2.0], [3.0, 4.0]]]]   shape [1, 1, 2, 2]
     // kernel = [[[[0.5, 1.0], [1.5, 2.0]]]]   shape [1, 1, 2, 2]
     // output = 1*0.5 + 2*1.0 + 3*1.5 + 4*2.0 = 0.5 + 2 + 4.5 + 8 = 15.0
+    //
+    // `chelis test` / `chelis eval` lower `out = run_conv2d(...)` as a
+    // tensor-result top-level binding and route it through DAG eval
+    // (since `run_conv2d` returns a tensor). The host runtime is hit
+    // only when the test wraps the value in a non-tensor surface;
+    // wrapping the assertion in a Test-effect fn forces the host
+    // runtime to invoke the lowered conv2d on the DAG-evaluated input
+    // and then call `tensor_to_scalar` to read out a single value.
     let src = r#"
-x = to_tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
-k = to_tensor([[[[0.5, 1.0], [1.5, 2.0]]]])
-out = conv2d(&x, &k, 1, 0)
+def run_conv2d(x: tensor[1, 1, 2, 2, f32], k: tensor[1, 1, 2, 2, f32]) -> tensor[1, 1, 1, 1, f32] = conv2d(&x, &k, 1, 0)
+def make_x() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]]])
+def make_k() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[[cast(0.5, f32), cast(1.0, f32)], [cast(1.5, f32), cast(2.0, f32)]]]])
+out = run_conv2d(make_x(), make_k())
 "#;
-    let result = eval_surf(src);
+    let result = eval_surf_selected(src, &["out"]);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 1, 1], "conv2d shape");
     assert_close(out.data[0], 15.0, 1e-5, "conv2d[0]");

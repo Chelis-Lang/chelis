@@ -7,12 +7,12 @@
 //! a `//` comment immediately above it stating the reason, drawn from
 //! the closed vocabulary:
 //!
-//!   - `type-only`              — exists only for typing or signature lookups
-//!   - `target=<backend>-only`  — only emitted on a specific backend target
-//!   - `lowered-before-eval`    — IR lowering converts the call to a
-//!                                  primitive RISC op before host eval runs
-//!   - `pending-spec-stability` — name reserved but semantics not yet
-//!                                  pinned; do not implement on best-guess
+//!   - `type-only` exists only for typing or signature lookups
+//!   - `target=<backend>-only` only emitted on a specific backend target
+//!   - `lowered-before-eval` IR lowering converts the call to a primitive
+//!     RISC op before host eval runs
+//!   - `pending-spec-stability` name reserved but semantics not yet
+//!     pinned; do not implement on best-guess
 //!
 //! Issue Chelis-Lang/chelis#185 closed the original 12-builtin gap plus a
 //! sibling-sweep handful; this invariant test catches future regressions
