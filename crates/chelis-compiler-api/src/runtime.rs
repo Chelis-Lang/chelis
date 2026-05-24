@@ -6504,17 +6504,32 @@ y = softmax(x, cast(0, int32))
 
     #[test]
     fn host_runtime_softmax_axis_out_of_bounds_errors() {
-        let checked = checked_surf(
-            r#"
+        // Issue #216: cast-wrapped out-of-bounds softmax axis is now
+        // caught at infer time (the checker peels the `cast(N, int32)`
+        // wrapper via `extract_int_for_dim` and applies the rank-bounds
+        // check). Pre-fix the cast hid the literal from
+        // `extract_int_literal` and the rejection only fired in the
+        // host-runtime defense-in-depth layer. The user-facing contract
+        // is unchanged (the program is still rejected); only the layer
+        // emitting the diagnostic moved upstream.
+        let src = r#"
 x = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 y = softmax(x, cast(5, int32))
-"#,
-        );
-        let err = evaluate_host_program(&checked, &HashMap::new())
-            .expect_err("softmax with out-of-bounds axis must fail");
+"#;
+        let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(src).expect("surf parse"),
+        ));
+        let infer_err =
+            res.expect_err("softmax with out-of-bounds axis must fail infer-time check");
+        let joined = infer_err
+            .errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            err.contains("softmax") && err.contains("out of bounds"),
-            "expected softmax axis-bounds diagnostic, got: {err}"
+            joined.contains("softmax") && joined.contains("out of bounds"),
+            "expected softmax axis-bounds diagnostic, got: {joined}"
         );
     }
 
