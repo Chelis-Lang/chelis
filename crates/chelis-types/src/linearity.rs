@@ -681,8 +681,22 @@ impl Checker {
         }
         let mut current = &kids[0];
         for stage in &kids[1..] {
-            let stage_builtin = var_name(stage);
-            if self.arg_is_borrowed(Some(stage), stage_builtin, 0, scope) {
+            // Pipe stages with explicit args (e.g. `x |> shape(0)`)
+            // are desugared by `chelis_surf::desugar::desugar_pipe_stage`
+            // into a synthesized one-arg lambda
+            // `(fn (params __chelis_pipe) (app callee ... (var __chelis_pipe) ...))`
+            // where the piped value lands at the `__chelis_pipe`
+            // position in the inner app's args. To classify whether the
+            // piped value is borrowed (read) or consumed by the stage,
+            // look through that lambda and ask the inner callee at its
+            // actual arg position. Without this peering, every
+            // non-bare-var stage falls through to the "stage callee
+            // unknown" branch and the piped value is treated as a
+            // structural consume — which mis-fires whenever a borrow-
+            // arg builtin (`shape`, `add`, `mul`, ...) is invoked with
+            // explicit non-piped args. Closes issue #226.
+            let (callee_expr, callee_builtin, piped_arg_index) = resolve_pipe_stage_callee(stage);
+            if self.arg_is_borrowed(callee_expr, callee_builtin, piped_arg_index, scope) {
                 if is_var_expr(current) && self.expr_is_owned_linear(current, scope) {
                     self.read_var_expr(current, scope);
                 } else {
@@ -1257,6 +1271,90 @@ fn as_list(expr: &Expr) -> Option<&List> {
 
 fn is_var_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::List(list, _) if get_tag(list) == Some("var"))
+}
+
+/// Resolve the effective callee of a pipe stage and the arg position
+/// the piped value occupies in that callee.
+///
+/// Two stage shapes are produced by `chelis_surf::desugar::desugar_pipe_stage`:
+///
+/// 1. Bare var stage (e.g. `x |> f`): `(var f)`. The piped value is the
+///    only arg, at position 0. Returns `(stage, Some("f"), 0)`.
+///
+/// 2. Synthesized lambda stage (e.g. `x |> f(y)`): a one-arg lambda
+///    `(fn (params __chelis_pipe) (app callee ... (var __chelis_pipe) ...))`
+///    where the piped value lands at whatever position the desugarer
+///    placed `__chelis_pipe` in the inner app's args. Today
+///    `desugar_pipe_stage` always inserts the pipe param at position 0,
+///    but we scan the arg list so this stays robust against future
+///    desugarer shapes (e.g. `cast(type)` post-stage forms where the
+///    piped value lands at a non-zero arg index). Returns
+///    `(inner_callee_expr, builtin_name_or_none, piped_arg_index)`.
+///
+/// Any other stage shape (parser-level oddity, macro-expanded result we
+/// have not classified) falls back to the historical contract of
+/// `var_name(stage)` so we never regress the bare-var case.
+fn resolve_pipe_stage_callee(stage: &Expr) -> (Option<&Expr>, Option<&str>, usize) {
+    if let Some(name) = var_name(stage) {
+        return (Some(stage), Some(name), 0);
+    }
+    if let Some((callee, idx)) = pipe_lambda_callee_and_pipe_arg_index(stage) {
+        return (Some(callee), var_name(callee), idx);
+    }
+    (Some(stage), None, 0)
+}
+
+/// If `stage` is `(fn (params __chelis_pipe) (app callee args...))` with
+/// exactly one of `args` being `(var __chelis_pipe)`, return the inner
+/// callee and the index of the pipe arg within `args`.
+fn pipe_lambda_callee_and_pipe_arg_index(stage: &Expr) -> Option<(&Expr, usize)> {
+    let Expr::List(list, _) = stage else {
+        return None;
+    };
+    if get_tag(list) != Some("fn") {
+        return None;
+    }
+    let kids = children(list);
+    let params = kids.first()?;
+    let body = kids.get(1)?;
+    let pipe_param = sole_pipe_param_name(params)?;
+    let Expr::List(body_list, _) = body else {
+        return None;
+    };
+    if get_tag(body_list) != Some("app") {
+        return None;
+    }
+    let app_kids = children(body_list);
+    let callee = app_kids.first()?;
+    for (offset, arg) in app_kids.iter().skip(1).enumerate() {
+        if var_name(arg) == Some(pipe_param) {
+            return Some((callee, offset));
+        }
+    }
+    None
+}
+
+/// If `params` is `(params __chelis_pipe[N])` with exactly one
+/// pipe-synthesized parameter, return its name. The desugarer prefixes
+/// every synthetic pipe parameter with `__chelis_pipe`; a user-written
+/// lambda that happens to take a single param does not match.
+fn sole_pipe_param_name(params: &Expr) -> Option<&str> {
+    let Expr::List(list, _) = params else {
+        return None;
+    };
+    if get_tag(list) != Some("params") {
+        return None;
+    }
+    let kids = children(list);
+    if kids.len() != 1 {
+        return None;
+    }
+    let name = symbol_name(&kids[0])?;
+    if name.starts_with("__chelis_pipe") {
+        Some(name)
+    } else {
+        None
+    }
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {

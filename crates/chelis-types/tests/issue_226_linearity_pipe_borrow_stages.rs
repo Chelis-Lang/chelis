@@ -36,7 +36,6 @@ fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>>
 }
 
 #[test]
-#[ignore = "issue 226 fixture: enabled by the upcoming check_pipe fix"]
 fn pipe_into_shape_with_explicit_axis_does_not_consume() {
     // Minimal repro of issue #226. `table |> shape(cast(0, int32))`
     // calls `shape(table, 0)` which is a borrow-arg builtin at arg 0.
@@ -61,7 +60,6 @@ def f[batch, seq, max_seq, hidden](
 }
 
 #[test]
-#[ignore = "issue 226 fixture: enabled by the upcoming check_pipe fix"]
 fn pipe_into_add_with_explicit_other_arg_does_not_consume() {
     // `add` borrows both args; `x |> add(y)` must not consume `x`.
     // Covers the multi-arg borrow-arg builtin shape that downstream
@@ -74,13 +72,10 @@ def f(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = {
 }
 "#,
     )
-    .expect(
-        "issue #226: pipe into a multi-arg borrow-arg builtin must read, not consume",
-    );
+    .expect("issue #226: pipe into a multi-arg borrow-arg builtin must read, not consume");
 }
 
 #[test]
-#[ignore = "issue 226 fixture: enabled by the upcoming check_pipe fix"]
 fn pipe_into_mul_chain_with_explicit_args_does_not_consume() {
     // Composed pipe chain `x |> mul(k) |> mul(k)` — both stages are
     // synthesized lambdas. The piped tensor must survive all stages
@@ -118,10 +113,10 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] = {
          is still a structural consume of the piped variable",
     );
     assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::UseAfterConsume)
-                && error.message.contains("variable `x`")),
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::UseAfterConsume)
+                && error.message.contains("variable `x`")
+        ),
         "expected UseAfterConsume on `x`, got: {errors:?}"
     );
 }
