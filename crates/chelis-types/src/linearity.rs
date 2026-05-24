@@ -648,6 +648,32 @@ impl Checker {
         self.maybe_mark_reusable_app_input(expr, kids, scope);
     }
 
+    // Issue #226 diagnosis (regression introduced indirectly by #183
+    // `fix(types): substitute ADT type params into record-pattern
+    // bindings`). Before #183 the destructured record-field bindings
+    // (`PosEmbedParams { table: table }` -> a new local `table`) carried
+    // a fresh type variable in the annotated Deep, so
+    // `expr_is_owned_linear` returned `false` and `check_pipe`
+    // accidentally accepted `table |> shape(0)` followed by a later
+    // `gather(table, ...)`. #183 stamps the resolved field type onto
+    // pattern bindings (the right fix in isolation); that exposed a
+    // pre-existing gap in `check_pipe`. The branch below classifies the
+    // piped value with `var_name(stage)`, which only matches the bare-
+    // var stage shape `(var f)`. For any non-bare-var stage
+    // `chelis_surf::desugar::desugar_pipe_stage` emits a synthesized
+    // `(fn (params __chelis_pipe) (app callee ... (var __chelis_pipe)
+    // ...))` lambda, so `var_name(stage)` returns `None` and
+    // `arg_is_borrowed(stage, None, 0, scope)` falls through to a
+    // function-type lookup on the LAMBDA itself, not on the inner
+    // `callee`. That means borrow-arg builtins called with explicit
+    // arguments (`shape(0)`, `add(y)`, `mul(k)`, `matmul(w)`, ...) get
+    // mis-tagged as structural consumes of the piped variable, tripping
+    // `UseAfterConsume` on any later read with a malformed "pipe into
+    // stage at offset 0 from offset 0" message (both offsets zero
+    // because the synthesized lambda has no source span). The upcoming
+    // fix introduces `resolve_pipe_stage_callee` and peers through the
+    // synthesized lambda to recover the inner callee and the piped
+    // value's arg position before consulting `arg_is_borrowed`.
     fn check_pipe(&mut self, list: &List, scope: &mut LinearScope) {
         let kids = children(list);
         if kids.is_empty() {
