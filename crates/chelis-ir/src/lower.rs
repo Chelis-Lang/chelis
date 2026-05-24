@@ -1201,21 +1201,40 @@ fn top_level_expr_name(expr: &Expr) -> Option<&str> {
 }
 
 fn expr_requires_host_runtime(expr: &Expr) -> bool {
+    expr_requires_host_runtime_with_ctx(expr, false)
+}
+
+/// Variant of `expr_requires_host_runtime` that takes a context flag.
+///
+/// When `exempt_to_tensor_literal` is true, a
+/// `to_tensor(<literal Cons chain>)` application does NOT force host
+/// runtime — the literal lowers directly into the IR DAG via the
+/// `to_tensor` arm in `lower_builtin_app`. This is the issue
+/// Chelis-Lang/chelis#218 exemption, scoped to **function-def
+/// bodies only** (see `def_body_requires_host_runtime`).
+///
+/// When the flag is false (the default), the legacy behavior holds:
+/// any `to_tensor` call forces host runtime. This preserves the
+/// emit-main path for top-level non-fn value bindings like
+/// `out = compute_grad(to_tensor([...]))`.
+fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bool) -> bool {
     match expr {
         Expr::Atom(Atom::Str(_), _) => true,
         Expr::Atom(_, _) => false,
         Expr::Map(map, _) => map
             .entries
             .iter()
-            .any(|(_, value)| expr_requires_host_runtime(value)),
+            .any(|(_, value)| expr_requires_host_runtime_with_ctx(value, exempt_to_tensor_literal)),
         Expr::MetaExpr(meta, _) => {
-            expr_requires_host_runtime(&meta.expr)
-                || meta
-                    .entries
-                    .iter()
-                    .any(|(_, value)| expr_requires_host_runtime(value))
+            expr_requires_host_runtime_with_ctx(&meta.expr, exempt_to_tensor_literal)
+                || meta.entries.iter().any(|(_, value)| {
+                    expr_requires_host_runtime_with_ctx(value, exempt_to_tensor_literal)
+                })
         }
         Expr::List(list, _) => {
+            if exempt_to_tensor_literal && static_to_tensor_literal(expr).is_some() {
+                return false;
+            }
             if get_tag(list) == Some("if") {
                 if !if_expr_is_dag_lowerable(list) {
                     return true;
@@ -1384,9 +1403,71 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                 .iter()
                 .enumerate()
                 .filter(|(idx, _)| Some(*idx) != meta_idx)
-                .any(|(_, child)| expr_requires_host_runtime(child))
+                .any(|(_, child)| {
+                    expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)
+                })
         }
     }
+}
+
+/// Check whether the body of a `def` requires host runtime. If the
+/// body is a function literal `(fn (params...) fn_body)` whose
+/// `fn_body` is itself shaped like a DAG-lowerable tensor expression
+/// (not a tuple-return or other multi-root construct), the issue
+/// Chelis-Lang/chelis#218 exemption applies and a literal `to_tensor`
+/// in the body does not force host routing. Otherwise (top-level
+/// non-fn value bindings like `out = compute_grad(...)`, or fn defs
+/// that return a tuple), the legacy strict classification holds so
+/// the emit-main path or the host tuple-ABI still gets a chance to
+/// materialize the runtime literal.
+fn def_body_requires_host_runtime(body: &Expr) -> bool {
+    let exempt = fn_body_qualifies_for_to_tensor_exemption(body);
+    expr_requires_host_runtime_with_ctx(body, exempt)
+}
+
+/// Return true iff `body` is a function literal `(fn ... fn_body)`
+/// whose `fn_body` is a single-tensor-return expression — i.e., not
+/// a `tuple`, `match`, `record`, or similar multi-root / host-shaped
+/// construct. This is the scoping rule for the issue
+/// Chelis-Lang/chelis#218 exemption: only differentiable
+/// tensor-returning function bodies benefit from the to_tensor-
+/// literal lowering, because the IR DAG's single-tensor-root model
+/// fits them. Tuple-returning fns (like
+/// `def eig_pair() -> (tensor[2], tensor[2]) = (to_tensor([1, 2]),
+/// to_tensor([3, 4]))`) keep the legacy host classification so the
+/// generated C ABI `chelis_tuple* eig_pair(...)` is preserved.
+fn fn_body_qualifies_for_to_tensor_exemption(body: &Expr) -> bool {
+    let Expr::List(list, _) = body else {
+        return false;
+    };
+    if get_tag(list) != Some("fn") {
+        return false;
+    }
+    // `(fn (params ...) fn_body)` — child index 1 (after the tag +
+    // optional meta map) is `(params ...)`, child index 2 is the
+    // body. `children(list)` already skips the tag + meta map, so
+    // body is at index 1.
+    let Some(fn_body) = children(list).get(1) else {
+        return false;
+    };
+    !expr_is_multi_root_construct(fn_body)
+}
+
+/// Return true iff `expr` is structurally a multi-root or host-shaped
+/// construct that the IR DAG cannot represent as a single tensor
+/// node. These are the same tags that `expr_requires_host_runtime`
+/// already classifies as host (e.g. `tuple`, `match`, `record`,
+/// `access`, `tuple-get`), but checked only at the **outer**
+/// position of a fn body — the strict-classification host check
+/// still walks children when the flag is false.
+fn expr_is_multi_root_construct(expr: &Expr) -> bool {
+    let Expr::List(list, _) = expr else {
+        return false;
+    };
+    matches!(
+        get_tag(list),
+        Some("tuple" | "match" | "record" | "access" | "tuple-get")
+    )
 }
 
 fn collect_top_level_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
@@ -1486,7 +1567,13 @@ fn def_is_lowered(
     }
 
     let lowered = top_level_defs.get(name).is_some_and(|body| {
-        !expr_requires_host_runtime(body)
+        // Issue Chelis-Lang/chelis#218: function-def bodies get the
+        // to_tensor-literal exemption (a `(fn ...)` body can hold a
+        // literal `to_tensor` that lowers into the IR DAG and stays
+        // DAG-lowerable). Top-level non-fn value bindings keep the
+        // strict classification so emit-main still materializes
+        // their runtime literals.
+        !def_body_requires_host_runtime(body)
             && !expr_depends_on_nonlowerable_name(
                 body,
                 top_level_defs,
@@ -2119,6 +2206,180 @@ fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
         .map(|name| name.to_string())
 }
 
+/// Result of attempting to recognize a `to_tensor` argument as a
+/// static numeric Cons-chain literal.
+///
+/// Per issue Chelis-Lang/chelis#218: when a function body
+/// materializes a constant tensor via `to_tensor([literal_floats])`
+/// and uses it on the data path, the routing decision in
+/// `expr_requires_host_runtime_with_ctx` must not unconditionally
+/// classify the whole body as host-required. Static literal
+/// `to_tensor` calls can lower into the IR DAG via a composition of
+/// existing primitives (no schema change), so the containing fn-def
+/// stays DAG-lowerable and the `grad` lowering can reach it. A
+/// constant tensor has zero gradient; AD treats the lowered cascade
+/// as a tree of `Const` leaves with empty input-grad lists, the
+/// correct adjoint contribution.
+///
+/// The exemption is **scoped to function-def bodies only** —
+/// top-level non-fn value bindings like
+/// `out = compute_grad(to_tensor([...]))` still need host routing
+/// so that `emit_main` produces a main that materializes the
+/// runtime tensor literal and prints the result.
+///
+/// `shape` is the rank-N dimension list (row-major). `data` is the
+/// row-major-flat float buffer of length `shape.iter().product()`.
+#[derive(Debug, Clone, PartialEq)]
+struct LiteralToTensor {
+    shape: Vec<usize>,
+    data: Vec<f64>,
+}
+
+/// If `expr` is a `to_tensor(...)` application whose single argument
+/// is a recognizable numeric Cons-chain literal, return the extracted
+/// tensor shape + flat row-major data. Otherwise return `None`.
+///
+/// Returning `None` is the conservative default: the existing
+/// host-routing classification stays in force for any to_tensor that
+/// doesn't fit the literal-Cons-chain shape (e.g. a `to_tensor(items)`
+/// where `items` is a host-side List variable).
+fn static_to_tensor_literal(expr: &Expr) -> Option<LiteralToTensor> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("app") {
+        return None;
+    }
+    let app_kids = children(list);
+    let callee = app_kids.first()?;
+    if !expr_is_var_named(callee, "to_tensor") {
+        return None;
+    }
+    let arg = app_kids.get(1)?;
+    extract_cons_chain_tensor(arg)
+}
+
+/// Return true iff `expr` is `(var {} <expected_name>)`. Helper for
+/// recognizing builtin-name references in app callee position.
+fn expr_is_var_named(expr: &Expr, expected_name: &str) -> bool {
+    let Expr::List(list, _) = expr else {
+        return false;
+    };
+    if get_tag(list) != Some("var") {
+        return false;
+    }
+    children(list).first().and_then(symbol_name) == Some(expected_name)
+}
+
+/// Walk a Cons/Nil chain. If every leaf reduces to a numeric atom,
+/// return the shape + flat row-major data. Handles arbitrary nesting:
+/// a Cons-chain of Cons-chains of ... of numerics yields a rank-N
+/// tensor. Returns `None` if the chain is malformed, not closed by
+/// Nil, or contains any non-numeric atom.
+fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
+    let elements = collect_cons_chain(expr)?;
+    if elements.is_empty() {
+        // Empty list: rank-1 zero-element tensor. Pad over a zero-
+        // size dim doesn't compose cleanly; reject and let host
+        // routing handle it.
+        return None;
+    }
+    if let Some(scalars) = elements
+        .iter()
+        .map(|e| extract_numeric_leaf(e))
+        .collect::<Option<Vec<f64>>>()
+    {
+        return Some(LiteralToTensor {
+            shape: vec![scalars.len()],
+            data: scalars,
+        });
+    }
+    let nested = elements
+        .iter()
+        .map(|e| extract_cons_chain_tensor(e))
+        .collect::<Option<Vec<LiteralToTensor>>>()?;
+    let inner_shape = nested.first()?.shape.clone();
+    if nested.iter().any(|t| t.shape != inner_shape) {
+        return None;
+    }
+    let mut shape = vec![nested.len()];
+    shape.extend(inner_shape.iter().copied());
+    let mut data = Vec::with_capacity(shape.iter().product::<usize>());
+    for t in &nested {
+        data.extend_from_slice(&t.data);
+    }
+    Some(LiteralToTensor { shape, data })
+}
+
+/// Extract a numeric scalar from a Deep expression. Recognizes:
+///   * `Atom::Int` / `Atom::Float` / `Atom::Bool`
+///   * `(lit {} <Int|Float|Bool>)`
+///   * `(cast {} <Int|Float|Bool> <prim>)` (constant after cast is
+///     still a constant; the precision distinction is carried on the
+///     enclosing `to_tensor`'s type metadata, which the emit path
+///     uses for the lowered tensor's `precision` slot).
+///   * `(app {} (var {} neg) <inner>)` (issue Chelis-Lang/chelis#218
+///     R1 HIGH-1): surface negative literals like `-1.0` desugar to
+///     `(app (var neg) (lit 1.0))`; the recognizer returns the
+///     negated inner value. Nested casts and lits are handled by the
+///     recursive call.
+fn extract_numeric_leaf(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
+        Expr::Atom(Atom::Float(f), _) => Some(*f),
+        Expr::Atom(Atom::Bool(b), _) => Some(if *b { 1.0 } else { 0.0 }),
+        Expr::List(list, _) => match get_tag(list)? {
+            "lit" => match list.elements.get(2)? {
+                Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
+                Expr::Atom(Atom::Float(f), _) => Some(*f),
+                Expr::Atom(Atom::Bool(b), _) => Some(if *b { 1.0 } else { 0.0 }),
+                _ => None,
+            },
+            "cast" => {
+                let inner = list.elements.get(2)?;
+                extract_numeric_leaf(inner)
+            }
+            "app" => {
+                // Negative literal: `-x` desugars to
+                // `(app (var neg) <inner>)`. The recognizer returns
+                // `-extract(inner)` so the literal recognizer sees
+                // through the desugared unary minus. Any other app
+                // shape is not a static literal.
+                let callee = children(list).first()?;
+                if !expr_is_var_named(callee, "neg") {
+                    return None;
+                }
+                let inner = children(list).get(1)?;
+                Some(-extract_numeric_leaf(inner)?)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Return true iff any element of `dims` is a wildcard placeholder
+/// dim (a `Named("*", _)` or `Named("", _)` entry that
+/// `crates/chelis-backend-c/src/emit.rs`'s `rename_anonymous_dims`
+/// would later rename to `_anon_dim_*`).
+///
+/// The static-literal path in `chelis-types::infer`'s `to_tensor`
+/// rule (`static_to_tensor_shape`) emits concrete dims for
+/// statically-resolvable nested-list literals, so the static-literal
+/// path no longer produces wildcards. The remaining sources are
+/// genuinely-dynamic ops at type-check time: variable-fed
+/// `to_tensor(items)`, `concat` along the concat axis, `split`
+/// per-piece sizes, and `pad_sequences` batch dim. Reduction
+/// lowering uses this predicate to prefer the input DAG node's
+/// authoritative shape when one of those wildcard-bearing meta
+/// types reaches a reduction op.
+fn any_wildcard_dim(dims: &[DimInfo]) -> bool {
+    dims.iter().any(|dim| match dim {
+        DimInfo::Named(name, _) => name.is_empty() || name == "*",
+        DimInfo::Lit(_) => false,
+    })
+}
+
 #[derive(Clone)]
 enum CallableExpr {
     Plain(Expr),
@@ -2362,6 +2623,46 @@ impl LowerCtx {
     /// Default tensor type when we don't have richer type info.
     fn default_type() -> TensorType {
         TensorType::scalar_f32()
+    }
+
+    /// Choose the output dims for a reduction op (`sum`,
+    /// `max_reduce`, `min_reduce`, `prod_reduce`, `argmax_reduce`,
+    /// `argmin_reduce`).
+    ///
+    /// The historical rule was: when meta `ty` differs from
+    /// `default_type()`, trust `ty.dims` blindly; otherwise compute
+    /// `input_dims` with `axis` removed. That rule breaks when a
+    /// wildcard placeholder dim reaches the reduction op via meta
+    /// `ty.dims`: host emit's `rename_anonymous_dims` renames it to
+    /// `_anon_dim_*`, and `crates/chelis-ir/src/dag.rs`'s
+    /// `symbolic_occurrences` panics because no Load input declares
+    /// the synthesized name (issue Chelis-Lang/chelis#218 R1 HIGH-2).
+    ///
+    /// The corrected rule mirrors `elementwise_out_ty`'s precedent
+    /// ("Prefer the input DAG node's dims ... `ty` after type
+    /// inference can hold internal fresh-var names"): when the
+    /// computed-from-input dims do not carry a wildcard placeholder,
+    /// prefer them. The meta `ty.dims` is used only when the input
+    /// can't produce a usable shape (e.g. the input DAG node was
+    /// missing — defensive path).
+    ///
+    /// Note: the static-literal path no longer produces wildcards
+    /// post the `to_tensor` source fix in `chelis-types::infer`. This
+    /// helper stays in place as defense in depth for the remaining
+    /// dynamic-shape sources (variable-fed `to_tensor(items)`,
+    /// `concat` along the concat axis, `split`, `pad_sequences`).
+    fn reduction_out_dims(input_dims: &[DimInfo], ty: &TensorType, axis: usize) -> Vec<DimInfo> {
+        let mut from_input = input_dims.to_vec();
+        if axis < from_input.len() {
+            from_input.remove(axis);
+        }
+        if !input_dims.is_empty() && !any_wildcard_dim(&from_input) {
+            return from_input;
+        }
+        if *ty != Self::default_type() && !any_wildcard_dim(&ty.dims) {
+            return ty.dims.clone();
+        }
+        from_input
     }
 
     /// Choose the output `TensorType` for an elementwise op whose shape
@@ -4627,15 +4928,11 @@ impl LowerCtx {
                     .get(x)
                     .map(|node| node.output_type.precision)
                     .unwrap_or(ty.precision);
-                let out_dims = if *ty == Self::default_type() {
-                    let mut dims = x_ty.dims.clone();
-                    if axis < dims.len() {
-                        dims.remove(axis);
-                    }
-                    dims
-                } else {
-                    ty.dims.clone()
-                };
+                // Issue Chelis-Lang/chelis#218 R1 HIGH-2 defense-in-
+                // depth: prefer input-derived dims when meta `ty`
+                // carries a wildcard placeholder. See
+                // `Self::reduction_out_dims`.
+                let out_dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
                 let sum_op = RiscOp::sum_default(axis, operand_prec).unwrap_or_else(|msg| {
                     // The type checker already rejects unsupported
                     // operand precisions before lowering; fall back to
@@ -4703,18 +5000,13 @@ impl LowerCtx {
                     .unwrap_or_else(|| ty.clone());
                 let axis_raw = self.extract_axis_raw(&args[1]);
                 let axis = self.normalize_axis(axis_raw, x_ty.dims.len(), "max_reduce", &args[1]);
-                let out_ty = if *ty == Self::default_type() {
-                    let mut dims = x_ty.dims.clone();
-                    if axis < dims.len() {
-                        dims.remove(axis);
-                    }
-                    TensorType {
-                        dims,
-                        precision: x_ty.precision,
-                    }
+                let dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
+                let precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
+                    x_ty.precision
                 } else {
-                    ty.clone()
+                    ty.precision
                 };
+                let out_ty = TensorType { dims, precision };
                 self.dag.add_node(
                     RiscOp::MaxReduce { axis },
                     vec![x],
@@ -4732,18 +5024,13 @@ impl LowerCtx {
                     .unwrap_or_else(|| ty.clone());
                 let axis_raw = self.extract_axis_raw(&args[1]);
                 let axis = self.normalize_axis(axis_raw, x_ty.dims.len(), name, &args[1]);
-                let out_ty = if *ty == Self::default_type() {
-                    let mut dims = x_ty.dims.clone();
-                    if axis < dims.len() {
-                        dims.remove(axis);
-                    }
-                    TensorType {
-                        dims,
-                        precision: x_ty.precision,
-                    }
+                let dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
+                let precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
+                    x_ty.precision
                 } else {
-                    ty.clone()
+                    ty.precision
                 };
+                let out_ty = TensorType { dims, precision };
                 let op = match name {
                     "min_reduce" => RiscOp::MinReduce { axis },
                     "prod_reduce" => RiscOp::ProdReduce { axis },
@@ -4854,6 +5141,36 @@ impl LowerCtx {
                 )
             }
 
+            // Issue Chelis-Lang/chelis#218:
+            // `to_tensor(<literal Cons chain>)` lowers into an IR DAG
+            // sub-tree (Const + Pad + Add composition) so the
+            // containing fn-def stays DAG-lowerable and `grad` can
+            // reach it. A constant tensor has zero gradient; AD
+            // treats each Const leaf with an empty input-gradient
+            // list, the correct adjoint contribution.
+            //
+            // For a non-literal argument the arm falls through to
+            // the fallback below, preserving the legacy
+            // `Load { name: "to_tensor" }` placeholder that the host
+            // helper extractor uses to reject the helper and force
+            // host-lane routing for runtime-shaped to_tensor calls.
+            "to_tensor" if args.len() == 1 => {
+                if let Some(literal) = extract_cons_chain_tensor(&args[0]) {
+                    return self.emit_literal_tensor(&literal, ty);
+                }
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                self.dag.add_node(
+                    RiscOp::Load {
+                        name: func_name.into(),
+                    },
+                    vec![],
+                    Self::default_type(),
+                    self.current_span_id.clone(),
+                )
+            }
+
             // Fallback: unknown function.
             _ => {
                 for arg in args {
@@ -4869,6 +5186,117 @@ impl LowerCtx {
                 )
             }
         }
+    }
+
+    /// Emit a literal constant tensor as an IR DAG sub-tree. Used by
+    /// the `to_tensor` arm of `lower_builtin_app` to lower a
+    /// statically-recognized numeric Cons-chain literal (issue
+    /// Chelis-Lang/chelis#218) into the DAG without a schema change.
+    ///
+    /// Strategy:
+    /// - Uniform-value fast path: if every element is the same
+    ///   value, emit a single `Const(value)` with the full shape
+    ///   (eval fills the buffer uniformly).
+    /// - Otherwise: for each non-zero element at flat index `i`,
+    ///   emit a unit-shaped `Const(value)`, `Pad` it into row-major
+    ///   position `i` with `fill = 0.0`, and accumulate via `Add`.
+    ///   Zero-valued elements skip the cascade because `+ 0` is the
+    ///   identity. If every element happens to be zero, the uniform
+    ///   fast-path catches it first.
+    ///
+    /// The precision is taken from `ty.precision` (the `to_tensor`
+    /// call's type metadata); the shape is the literal's concrete
+    /// shape (the metadata's symbolic `Named("list", None)` dim is
+    /// not usable here).
+    fn emit_literal_tensor(&mut self, literal: &LiteralToTensor, ty: &TensorType) -> NodeId {
+        let shape: Vec<DimInfo> = literal.shape.iter().map(|n| DimInfo::Lit(*n)).collect();
+        let precision = ty.precision;
+        let tensor_ty = TensorType {
+            dims: shape.clone(),
+            precision,
+        };
+
+        // Uniform-value fast path.
+        if literal
+            .data
+            .windows(2)
+            .all(|pair| pair[0].to_bits() == pair[1].to_bits())
+        {
+            return self.dag.add_node(
+                RiscOp::Const {
+                    value: literal.data.first().copied().unwrap_or(0.0),
+                },
+                vec![],
+                tensor_ty,
+                self.current_span_id.clone(),
+            );
+        }
+
+        // Non-uniform: build the Const + Pad + Add cascade.
+        let rank = shape.len();
+        let unit_dims: Vec<DimInfo> = vec![DimInfo::Lit(1); rank];
+        let unit_ty = TensorType {
+            dims: unit_dims,
+            precision,
+        };
+        let mut accumulator: Option<NodeId> = None;
+        for (flat_idx, &value) in literal.data.iter().enumerate() {
+            // Skip zero contributions — `+ 0` is the identity. The
+            // uniform fast-path catches the all-zeros case above.
+            if value == 0.0 {
+                continue;
+            }
+            let const_node = self.dag.add_node(
+                RiscOp::Const { value },
+                vec![],
+                unit_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            // Decompose flat_idx into per-axis indices (row-major).
+            let mut per_axis = vec![0usize; rank];
+            let mut residual = flat_idx;
+            for axis in (0..rank).rev() {
+                let dim = literal.shape[axis];
+                per_axis[axis] = residual % dim;
+                residual /= dim;
+            }
+            let padding: Vec<(usize, usize)> = (0..rank)
+                .map(|axis| {
+                    let dim = literal.shape[axis];
+                    let before = per_axis[axis];
+                    let after = dim - 1 - before;
+                    (before, after)
+                })
+                .collect();
+            let padded = self.dag.add_node(
+                RiscOp::Pad { padding, fill: 0.0 },
+                vec![const_node],
+                tensor_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            accumulator = Some(match accumulator {
+                None => padded,
+                Some(prev) => self.dag.add_node(
+                    RiscOp::Add,
+                    vec![prev, padded],
+                    tensor_ty.clone(),
+                    self.current_span_id.clone(),
+                ),
+            });
+        }
+
+        // Fallback: if every element was zero, the uniform fast-path
+        // returns above. This branch handles the logically-
+        // unreachable case fail-closed with an all-zero Const of the
+        // full shape.
+        accumulator.unwrap_or_else(|| {
+            self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                tensor_ty,
+                self.current_span_id.clone(),
+            )
+        })
     }
 
     /// Extract a raw axis value from an expression (for

@@ -7459,6 +7459,72 @@ fn infer_app(
         return Type::Error;
     }
 
+    // Issue Chelis-Lang/chelis#218 R3 HIGH-CONCAT: when `Cons` is
+    // called with two concrete tensor-typed args (head: tensor,
+    // tail: List<tensor>), skip the generic per-dim equality
+    // unification and produce a per-axis join (Lit(n) when both
+    // dims are Lit(n) and equal; Wildcard otherwise). The generic
+    // `unify` recursion walks dims pairwise and rejects
+    // `Lit(2) vs Lit(3)`, which breaks `concat([a, b], 0)` after
+    // the to_tensor source fix made nested-list literals emit
+    // concrete dims.
+    //
+    // Precondition guards:
+    //   * exactly two args (Cons signature)
+    //   * head is a concrete tensor type
+    //   * tail is `List<tensor[...]>` with a concrete tensor element
+    //   * head and tail-element have matching rank (no rank join;
+    //     mismatched ranks remain structural errors)
+    //   * head and tail-element have matching precision (no
+    //     precision join; mismatched precisions would mask real
+    //     type errors)
+    //
+    // When any precondition fails, fall through to the generic
+    // unify path so other Cons shapes (e.g. `Cons(scalar, list)` or
+    // `Cons(head, Nil)` where `Nil`'s tvar binds the element type)
+    // keep their existing semantics.
+    if matches!(func_name.as_deref(), Some("Cons")) && arg_tys.len() == 2 {
+        let head_resolved = subst.apply(&arg_tys[0]);
+        let tail_resolved = subst.apply(&arg_tys[1]);
+        if let (Type::Tensor(head_dims, head_prec), Type::Adt(list_name, list_args)) =
+            (&head_resolved, &tail_resolved)
+            && list_name == "List"
+            && list_args.len() == 1
+            && let Type::Tensor(tail_dims, tail_prec) = subst.apply(&list_args[0])
+        {
+            if head_dims.len() != tail_dims.len() {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "list element rank mismatch: {} dims vs {} dims",
+                            head_dims.len(),
+                            tail_dims.len(),
+                        ),
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+            if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
+                errors.push(te.into());
+                return Type::Error;
+            }
+            let joined_dims: Vec<Dim> = head_dims
+                .iter()
+                .zip(tail_dims.iter())
+                .map(|(h, t)| match (h, t) {
+                    (Dim::Lit(a), Dim::Lit(b)) if a == b => Dim::Lit(*a),
+                    _ => Dim::Wildcard,
+                })
+                .collect();
+            let joined_prec = subst.apply_tensor_prec(head_prec);
+            let elem = Type::Tensor(joined_dims, joined_prec);
+            return Type::Adt("List".to_string(), vec![elem]);
+        }
+    }
+
     let ret_tv = vg.fresh_type();
 
     // Comparison-op tensor/scalar broadcast: when a comparison op
@@ -9891,9 +9957,23 @@ fn infer_app(
                     "to_tensor" => {
                         if let Some(first_arg) = arg_tys.first() {
                             // Bucket 4b: support arbitrarily-nested numeric/bool
-                            // lists. Each enclosing `List` adds one wildcard
-                            // outer dimension, and the innermost element type
-                            // must be a numeric or bool primitive.
+                            // lists. Each enclosing `List` adds one outer
+                            // dimension, and the innermost element type must
+                            // be a numeric or bool primitive.
+                            //
+                            // Issue Chelis-Lang/chelis#218 (R2 HIGH-A from
+                            // PR #211): when the argument is a statically-
+                            // resolvable Cons-chain literal, emit concrete
+                            // `Dim::Lit(n)` per axis instead of wildcards.
+                            // The wildcard fallback only fires when the
+                            // argument is variable-fed (e.g.
+                            // `to_tensor(items)`), where the shape is
+                            // genuinely unknown at type-check time. Emitting
+                            // concrete dims at this single source point
+                            // means every downstream consumer (reductions,
+                            // elementwise activations, anything that reads
+                            // the to_tensor app's `type:` metadata) sees a
+                            // sound shape instead of `Dim::Wildcard`.
                             let resolved = subst.apply(first_arg);
                             if matches!(resolved, Type::Var(_) | Type::Error) {
                                 return result_ty;
@@ -9916,7 +9996,19 @@ fn infer_app(
                                         ));
                                         return Type::Error;
                                     }
-                                    let dims = vec![Dim::Wildcard; rank];
+                                    // R2 HIGH-A: try the static-shape walker
+                                    // on the actual argument expression
+                                    // first. `kids[0]` is the `(var
+                                    // to_tensor)` callee; `kids[1]` is the
+                                    // argument expression. If the walker
+                                    // can't resolve a uniform shape
+                                    // (variable-fed argument, ragged
+                                    // literal, or unrecognized leaf), fall
+                                    // back to the legacy wildcard rank.
+                                    let dims = kids
+                                        .get(1)
+                                        .and_then(|arg| static_to_tensor_shape(arg, rank))
+                                        .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
                                     return Type::Tensor(dims, TensorPrec::Concrete(precision));
                                 }
                                 ToTensorPeel::Pending => return result_ty,
@@ -10367,12 +10459,21 @@ fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
 /// `TypeCheck-FreeDimVarUnification-F1` (SR-LEAK-A): the Shape A
 /// relaxed-retry must not accept a body whose return dim diverges from
 /// the declared return dim.
+///
+/// Name <-> Lit (issue Chelis-Lang/chelis#219, Option A): mirrors
+/// `unify_dim`'s permissive Name <-> Lit arm. The Shape A relaxed-
+/// retry's structural check must agree with `unify_dim` so the
+/// retry path doesn't silently reject a callee-shape pairing that
+/// the call-site unification would accept.
 fn dims_identical(d1: &Dim, d2: &Dim) -> bool {
     match (d1, d2) {
         (Dim::Wildcard, _) | (_, Dim::Wildcard) => true,
         (Dim::Name(n1), Dim::Name(n2)) => n1 == n2,
         (Dim::Lit(l1), Dim::Lit(l2)) => l1 == l2,
         (Dim::Var(v1), Dim::Var(v2)) => v1 == v2,
+        // Issue #219 Option A: Name and Lit count as identical for
+        // the Shape A relaxed-retry's structural check.
+        (Dim::Name(_), Dim::Lit(_)) | (Dim::Lit(_), Dim::Name(_)) => true,
         _ => false,
     }
 }
@@ -12565,6 +12666,149 @@ fn is_builtin_var(expr: &deep::Expr, expected: &str) -> bool {
         return false;
     };
     get_tag(list) == Some("var") && children(list).first().and_then(symbol_name) == Some(expected)
+}
+
+/// Extract the static shape of a `to_tensor` argument when the
+/// argument is a nested Cons-chain literal whose every leaf is a
+/// numeric/bool atom (or a recognized `cast` / `neg` wrapper).
+///
+/// Returns `Some(dims)` with one `Dim::Lit(n)` per axis (outermost
+/// first) when the structure is statically resolvable and every
+/// axis is uniformly shaped. Returns `None` when:
+///   * the argument is not a Cons-chain (e.g. a variable like
+///     `to_tensor(items)`),
+///   * the chain is malformed or not closed by `Nil`,
+///   * a leaf is not a recognizable numeric atom,
+///   * sibling axes have different lengths (ragged literal).
+///
+/// `expected_rank` is the rank inferred from peeling List wrappers
+/// in the argument's TYPE; it is used as a sanity check, not as a
+/// hard requirement. A mismatch returns `None` so the caller falls
+/// back to the legacy wildcard-rank path.
+///
+/// This is the issue Chelis-Lang/chelis#218 R2 HIGH-A source fix:
+/// by emitting concrete dims here, every downstream consumer
+/// (reductions, elementwise activations, anything that reads the
+/// to_tensor app's `type:` metadata) sees a sound shape instead of
+/// a `Dim::Wildcard`.
+fn static_to_tensor_shape(arg: &deep::Expr, expected_rank: usize) -> Option<Vec<Dim>> {
+    let dims = walk_static_cons_chain_shape(arg)?;
+    if dims.len() != expected_rank {
+        return None;
+    }
+    Some(dims.into_iter().map(|n| Dim::Lit(n as i64)).collect())
+}
+
+/// Recursive helper for `static_to_tensor_shape`. Returns
+/// `Some(dims)` if `expr` is a Cons / Nil chain whose every leaf
+/// reduces to a numeric atom (or recursively to another Cons chain
+/// of uniform length). `dims` is the rank-N shape (outermost axis
+/// first).
+fn walk_static_cons_chain_shape(expr: &deep::Expr) -> Option<Vec<usize>> {
+    let elements = collect_cons_chain_for_shape(expr)?;
+    if elements.is_empty() {
+        // Empty list at the outermost level has rank 1, size 0.
+        // For empty inner lists we still want a concrete dim list,
+        // but ragged-but-empty cases can't be uniformly typed; the
+        // top-level case is sufficient here.
+        return Some(vec![0]);
+    }
+    // If every element is a numeric leaf, this is a rank-1 axis.
+    if elements
+        .iter()
+        .all(|element| extract_numeric_leaf_for_shape(element).is_some())
+    {
+        return Some(vec![elements.len()]);
+    }
+    // Otherwise every element should recurse to a same-shape
+    // sub-vector. The outermost axis is `elements.len()`; the inner
+    // axes must agree.
+    let nested: Vec<Vec<usize>> = elements
+        .iter()
+        .map(|element| walk_static_cons_chain_shape(element))
+        .collect::<Option<_>>()?;
+    let inner_shape = nested.first()?.clone();
+    if nested.iter().any(|shape| shape != &inner_shape) {
+        return None;
+    }
+    let mut out = vec![nested.len()];
+    out.extend(inner_shape);
+    Some(out)
+}
+
+/// Collect a `Cons(head, Cons(head, ..., Nil))` chain into a vector
+/// of head expressions. Returns `None` if the chain isn't closed by
+/// `Nil` or contains a non-Cons app. Local helper for
+/// `walk_static_cons_chain_shape`; mirrors `cons_chain_int_dims`'s
+/// chain-walking shape but returns the heads themselves so the
+/// caller can recurse.
+fn collect_cons_chain_for_shape(expr: &deep::Expr) -> Option<Vec<&deep::Expr>> {
+    let mut out = Vec::new();
+    let mut cursor = expr;
+    loop {
+        let deep::Expr::List(list, _) = cursor else {
+            return None;
+        };
+        match get_tag(list)? {
+            "var" => {
+                let name = children(list).first().and_then(symbol_name)?;
+                if name == "Nil" {
+                    return Some(out);
+                }
+                return None;
+            }
+            "app" => {
+                let app_children = children(list);
+                let func = app_children.first()?;
+                if !is_builtin_var(func, "Cons") {
+                    return None;
+                }
+                let head = app_children.get(1)?;
+                let tail = app_children.get(2)?;
+                out.push(head);
+                cursor = tail;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// True iff `expr` is a numeric leaf (Int/Float/Bool atom, `lit` of
+/// the same, `cast` of one, or `neg` of one). Mirrors the shape of
+/// `extract_numeric_leaf` in `crates/chelis-ir/src/lower.rs` so the
+/// type-check and IR-lowering passes agree on what counts as a
+/// "static to_tensor leaf." We don't need the actual value here,
+/// only the static-recognition predicate.
+fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Int(_), _) => Some(()),
+        deep::Expr::Atom(deep::Atom::Float(_), _) => Some(()),
+        deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
+        deep::Expr::List(list, _) => match get_tag(list)? {
+            "lit" => match list.elements.get(2)? {
+                deep::Expr::Atom(deep::Atom::Int(_), _)
+                | deep::Expr::Atom(deep::Atom::Float(_), _)
+                | deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
+                _ => None,
+            },
+            "cast" => extract_numeric_leaf_for_shape(list.elements.get(2)?),
+            "app" => {
+                // Issue #218 R1 HIGH-1 mirror: a surface negative
+                // literal `-x` desugars to `(app (var neg) <inner>)`.
+                // Recurse through the unary minus so the static
+                // recognizer matches the IR lowering's analogous
+                // recognizer in `crates/chelis-ir/src/lower.rs`.
+                let callee = children(list).first()?;
+                if !is_builtin_var(callee, "neg") {
+                    return None;
+                }
+                let inner = children(list).get(1)?;
+                extract_numeric_leaf_for_shape(inner)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
