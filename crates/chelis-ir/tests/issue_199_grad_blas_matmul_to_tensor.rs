@@ -19,10 +19,15 @@
 //! AdRejectionReason::Other("grad: failed to construct backward DAG
 //! (unsupported op or verification failure)") }`.
 //!
-//! Part 2 (`to_tensor` in body) is outside the scope of this fix; the
-//! `to_tensor` rejection is routing-side (host-lane classification in
-//! `crates/chelis-ir/src/lower.rs`), not AD-side. The issue tracker
-//! retains it for separate resolution.
+//! Part 2 (`to_tensor` in body) is deferred to Chelis-Lang/chelis#218.
+//! The R1 -> R2 -> R3 red-team cascade against an initial in-tree
+//! Part 2 attempt surfaced four distinct failure modes (reduction-
+//! lowering wildcards, elementwise-lowering wildcards, list-element
+//! Cons unification, and reshape Cons-chain shape extraction). Per
+//! `feedback_rround_cascade_is_design_signal`, that pattern indicates
+//! architectural redesign is needed rather than further patches.
+//! #218 captures the full failure surface as design requirements for
+//! a coordinated future implementation.
 
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
