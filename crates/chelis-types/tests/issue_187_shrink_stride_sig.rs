@@ -646,7 +646,8 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, cast(-1, int32), 2
         rep.errors
             .iter()
             .any(|e| e.message.to_lowercase().contains("stride")
-                && (e.message.contains("positive") || e.message.contains("zero")
+                && (e.message.contains("positive")
+                    || e.message.contains("zero")
                     || e.message.contains("negative"))),
         "expected a stride positive/negative error, got {:?}",
         rep.errors
@@ -674,9 +675,11 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[cast(0, int64), 
     // got. This is the un-cast-aware contract: extract_int_for_dim could
     // peel int64 casts, but the outer unification rejects them first.
     assert!(
-        rep.errors.iter().any(|e| e.message.to_lowercase().contains("shrink")
-            && e.message.contains("int32")
-            && (e.message.contains("int64") || e.message.contains("List"))),
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("shrink")
+                && e.message.contains("int32")
+                && (e.message.contains("int64") || e.message.contains("List"))),
         "expected a shrink int32/int64 unification error, got {:?}",
         rep.errors
             .iter()
@@ -702,7 +705,8 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[neg(cast(1, int3
         rep.errors
             .iter()
             .any(|e| e.message.to_lowercase().contains("shrink")
-                && (e.message.contains("negative") || e.message.contains("inverted")
+                && (e.message.contains("negative")
+                    || e.message.contains("inverted")
                     || e.message.contains("empty"))),
         "expected a shrink negative-bound error for neg(cast(...)), got {:?}",
         rep.errors
@@ -728,7 +732,8 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[cast(cast(-1, in
         rep.errors
             .iter()
             .any(|e| e.message.to_lowercase().contains("shrink")
-                && (e.message.contains("negative") || e.message.contains("inverted")
+                && (e.message.contains("negative")
+                    || e.message.contains("inverted")
                     || e.message.contains("empty"))),
         "expected a shrink negative-bound error for cast(cast(...)), got {:?}",
         rep.errors

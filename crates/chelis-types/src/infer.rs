@@ -10381,9 +10381,14 @@ fn infer_permute_app(
         return Type::Error;
     };
 
+    // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
+    // axes reach the OOB-axis check and the unique-axis check at infer
+    // time instead of silently falling back to original-dim order (red
+    // team round 3 sibling sweep within the spec section 2.4 movement
+    // family).
     let Some(axes) = kids[2..]
         .iter()
-        .map(extract_int_literal)
+        .map(extract_int_for_dim)
         .collect::<Option<Vec<_>>>()
     else {
         return Type::Tensor(dims, prec);
@@ -10861,11 +10866,14 @@ fn infer_stride_app(
 
     let Some(strides) = kids[2..]
         .iter()
-        .map(extract_int_literal)
+        .map(extract_int_for_dim)
         .collect::<Option<Vec<_>>>()
     else {
         // Strides are int32-typed but non-literal (e.g. parameters). Keep
-        // the rank, make dims wildcard.
+        // the rank, make dims wildcard. Uses `extract_int_for_dim` so
+        // `cast(N, int32)`-wrapped literal strides reach the positive-
+        // stride check at infer time instead of falling back to host
+        // runtime (red team round 3 finding R3-HIGH1).
         return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
     };
 
@@ -11399,6 +11407,19 @@ fn cons_chain_int_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
 /// literals default to int32 and require an explicit cast for int64 contexts.
 /// `cast` may surface either as the `(cast {} ... ...)` tag or as an `app`
 /// of the `cast` var, depending on how far desugaring has progressed.
+///
+/// Note: callers in the spec section 2.4 movement family (shrink, pad,
+/// stride, permute, expand) typically unify the surrounding bounds /
+/// strides argument against an `int32`-pinned expected type before
+/// reaching this extractor, so a `cast(N, int64)` endpoint is rejected
+/// at the outer unification step rather than slipping through to here
+/// (red team round 3 HIGH-2 contract note).
+///
+/// The cast arm recurses through `extract_int_for_dim` so that
+/// `cast(cast(N, int32), int32)` and other doubly-nested forms peel to
+/// their literal at any depth (red team round 3 finding R3-MED2).
+/// Termination is bounded: each recursive call strictly reduces the
+/// expression depth (peels one wrapper layer).
 fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
     if let Some(value) = extract_int_literal(expr) {
         return Some(value);
@@ -11407,14 +11428,14 @@ fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
         return None;
     };
     match get_tag(list)? {
-        "cast" => extract_int_literal(children(list).first()?),
+        "cast" => extract_int_for_dim(children(list).first()?),
         "app" => {
             let app_children = children(list);
             let func = app_children.first()?;
             if !is_builtin_var(func, "cast") {
                 return None;
             }
-            extract_int_literal(app_children.get(1)?)
+            extract_int_for_dim(app_children.get(1)?)
         }
         _ => None,
     }
@@ -12025,7 +12046,11 @@ fn check_expand_signature(
         }
     };
 
-    let axis = match arg_exprs.get(1).and_then(extract_int_literal) {
+    // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
+    // axis/size reach the non-negative-axis and positive-size checks at
+    // infer time (red team round 3 sibling sweep within the spec
+    // section 2.4 movement family).
+    let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
             errors.push(CheckError::new(
@@ -12037,7 +12062,7 @@ fn check_expand_signature(
         }
         None => return subst.apply(result_ty),
     };
-    let size = match arg_exprs.get(2).and_then(extract_int_literal) {
+    let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
         Some(size) if size > 0 => Dim::Lit(size),
         Some(size) => {
             errors.push(CheckError::new(
@@ -12176,6 +12201,19 @@ fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
     }
 }
 
+/// Extract an int literal from a Deep expr, recognizing the canonical
+/// literal forms (`Atom::Int`, `(lit {type: ...} N)`) and the `neg` app
+/// wrapper. Float-in-cast intentionally is not recognized: the spec
+/// says integer literals default to `int32` and require explicit
+/// notation for other widths, so a float wrapped in a cast to an int
+/// dtype is a precision-narrowing operation that the runtime should
+/// validate -- not a literal int (round 3 LOW-2 design note).
+///
+/// The `neg` arm recurses through `extract_int_for_dim` so that
+/// `neg(cast(N, int32))` peels both wrappers and resolves to `-N` at
+/// infer time (red team round 3 finding R3-MED1). Mutual recursion
+/// with `extract_int_for_dim` is bounded: each call strictly reduces
+/// the expression depth (peels one wrapper layer).
 fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
     match expr {
         deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n),
@@ -12189,7 +12227,7 @@ fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
             let app_children = children(list);
             match (app_children.first(), app_children.get(1)) {
                 (Some(func), Some(arg)) if is_builtin_var(func, "neg") => {
-                    extract_int_literal(arg).map(|value| -value)
+                    extract_int_for_dim(arg).map(|value| -value)
                 }
                 _ => None,
             }

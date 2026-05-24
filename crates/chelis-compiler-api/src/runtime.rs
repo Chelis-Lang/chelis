@@ -5935,10 +5935,18 @@ y = expand(b, cast(0, int32), cast(4, int32))
 
     #[test]
     fn host_runtime_expand_negative_count_errors() {
+        // PR #214 / red team round 3 sibling sweep: `infer_expand_app`
+        // now extracts cast-wrapped int literals via `extract_int_for_dim`
+        // and rejects `cast(0, int32)` at infer time. To keep this test
+        // exercising the host-runtime arm (defense in depth for direct-DAG
+        // callers and any non-literal size that evaluates to 0 at runtime),
+        // the count is built from arithmetic that the infer-time literal
+        // extractor cannot resolve.
         let checked = checked_surf(
             r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-y = expand(b, cast(0, int32), cast(0, int32))
+zero_count = sub(cast(0, int32), cast(0, int32))
+y = expand(b, cast(0, int32), zero_count)
 "#,
         );
         let err = evaluate_host_program(&checked, &HashMap::new())
