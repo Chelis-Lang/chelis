@@ -6,6 +6,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.14] — 2026-05-24
+
+Hotfix release. Closes the release-blocking linearity-pass regression
+that 0.7.13 surfaced in downstream reef shells (school, hydronnx, c-earchin,
+calcify) whose source contains a tensor-carrying record destructured in a
+function body that then uses the destructured field as the head of a pipe
+into a borrow-arg builtin call. Also bundles the four follow-up fixes
+that landed against 0.7.13's surface.
+
 ### Fixed - conv2d validator cascade-suppression is one-level-deep (#212)
 
 The cascade-suppression added in PR #205 to dedupe `conv2d` validator
@@ -52,6 +61,42 @@ broadens its assertion: the new suppression silences the validator-level
 metadata error in favour of HM's more informative rank-mismatch
 diagnostic. Pure diagnostic-quality fix; correctness (which programs
 chelis check accepts vs rejects) is unchanged.
+
+### Fixed - spurious `UseAfterConsume` on pipe-stage borrow-arg calls (#226)
+
+`crates/chelis-types/src/linearity.rs::check_pipe` only resolved the
+effective callee of a pipe stage when the stage was a bare `(var f)`
+reference. For any stage carrying explicit arguments (`x |> shape(0)`,
+`x |> add(y)`, `x |> mul(k)`, `x |> matmul(w)`, etc.) the desugarer
+emits a synthesized lambda
+`(fn (params __chelis_pipe) (app callee args... (var __chelis_pipe) args...))`,
+and the pre-fix code looked up `arg_is_borrowed` against the lambda
+itself rather than the inner callee. The result was a structural-consume
+classification of the piped value, even when the inner callee was a
+known borrow-arg builtin. Any later read of the same variable then
+tripped `UseAfterConsume` with a malformed "pipe into stage at offset 0
+from offset 0" message (zero offsets because the synthesized lambda
+carries no source span).
+
+The regression manifested only after PR #183 (in 0.7.13) stamped the
+resolved field type onto destructured record-pattern bindings, removing
+the fresh-type-variable fallback that had been accidentally suppressing
+the bug for the destructure-then-pipe shape used heavily by
+`School.Nn.PosEmbed.pos_embed_forward` and adjacent layers.
+
+`check_pipe` now invokes a new `resolve_pipe_stage_callee` helper that
+peers through the synthesized `__chelis_pipe` lambda to reach the inner
+callee and the piped value's actual arg index, then asks
+`arg_is_borrowed` about that callee. The helper falls back to the
+historical bare-var contract for any unrecognized stage shape so
+`(var f)` pipe stages continue to behave exactly as before.
+
+Locked by
+`crates/chelis-types/tests/issue_226_linearity_pipe_borrow_stages.rs`,
+which pins three positive cases (pipe into `shape`, pipe into `add`,
+composed `mul` chain) and three negative-parity cases (pipe into
+`realize`, pipe into a user fn whose first parameter is owned-linear,
+pipe into a user fn with explicit extra args).
 
 ## [0.7.13] — 2026-05-24
 
