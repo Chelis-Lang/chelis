@@ -473,3 +473,119 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[1, 0], [0, 1]], 0.0
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Red team round 2 on PR #214: round-1 missed two further infer-side gaps.
+// ---------------------------------------------------------------------------
+
+/// R2-M1: `shrink(&x, [[], [0, 1]])` -- the inner `[]` desugars to bare
+/// `(var Nil)`, which `cons_chain_two_ints` was classifying as
+/// `NonLiteral` (an "opaque List[Int32] variable"). The user's intent is
+/// a zero-element list, not a polymorphic reference; that's still a
+/// malformed pair shape and must be rejected at infer time with the same
+/// "got 0-element list" diagnostic the round-1 fix uses for non-pair
+/// arities.
+#[test]
+fn red_team_214_r2_m1_shrink_empty_inner_list_is_error() {
+    let src = r#"
+def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[], [0, 1]])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on empty inner list");
+    assert!(
+        rep.errors.iter().any(|e| e.message.to_lowercase().contains("shrink")
+            && (e.message.contains("0-element") || e.message.contains("empty"))),
+        "expected a shrink empty-inner-list error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R2-M1 (pad sibling): same empty-inner-list bug in pad's pair list.
+#[test]
+fn red_team_214_r2_m1_pad_empty_inner_list_is_error() {
+    let src = r#"
+def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[], [1, 1]], 0.0)
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on empty inner list in pad");
+    assert!(
+        rep.errors.iter().any(|e| e.message.to_lowercase().contains("pad")
+            && (e.message.contains("0-element") || e.message.contains("empty"))),
+        "expected a pad empty-inner-list error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R2-L1: cast-wrapped negative bound. `cast(-1, int32)` is concretely a
+/// negative literal at desugar time, but `extract_int_literal` doesn't
+/// peel `cast`, so the bounds checks were skipped and the program slipped
+/// through to host runtime. Use `extract_int_for_dim` (which already
+/// handles cast peeling, per reshape) to bring this check forward.
+#[test]
+fn red_team_214_r2_l1_shrink_cast_wrapped_negative_bound_is_error() {
+    let src = r#"
+def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[cast(-1, int32), cast(1, int32)], [cast(0, int32), cast(1, int32)]])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on cast-wrapped negative bound");
+    assert!(
+        rep.errors.iter().any(|e| e.message.to_lowercase().contains("shrink")
+            && (e.message.contains("negative") || e.message.contains("inverted")
+                || e.message.contains("empty"))),
+        "expected a shrink negative-bound error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R2-L1: cast-wrapped out-of-range bound. The end endpoint
+/// `cast(5, int32)` exceeds axis-0 dim 2.
+#[test]
+fn red_team_214_r2_l1_shrink_cast_wrapped_out_of_range_bound_is_error() {
+    let src = r#"
+def f(x: tensor[2, 4, f32]) -> tensor[5, 1, f32] = shrink(&x, [[cast(0, int32), cast(5, int32)], [cast(0, int32), cast(1, int32)]])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    let rep = res.expect_err("expected check to fail on cast-wrapped out-of-range bound");
+    assert!(
+        rep.errors.iter().any(|e| e.message.to_lowercase().contains("shrink")
+            && (e.message.contains("out of range") || e.message.contains("axis 0"))),
+        "expected a shrink out-of-range error, got {:?}",
+        rep.errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// R2-L1 positive control: well-formed cast-wrapped bounds must still
+/// type-check cleanly with a precise output shape.
+#[test]
+fn red_team_214_r2_l1_shrink_cast_wrapped_well_formed_typechecks() {
+    let src = r#"
+def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[cast(0, int32), cast(1, int32)], [cast(1, int32), cast(3, int32)]])
+"#;
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    if let Err(rep) = res {
+        for err in &rep.errors {
+            eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
+        }
+        panic!(
+            "expected clean check for cast-wrapped well-formed shrink bounds, got {} error(s)",
+            rep.errors.len()
+        );
+    }
+}
