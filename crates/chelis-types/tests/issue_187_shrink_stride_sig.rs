@@ -494,8 +494,10 @@ def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[], [0, 1]])
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on empty inner list");
     assert!(
-        rep.errors.iter().any(|e| e.message.to_lowercase().contains("shrink")
-            && (e.message.contains("0-element") || e.message.contains("empty"))),
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("shrink")
+                && (e.message.contains("0-element") || e.message.contains("empty"))),
         "expected a shrink empty-inner-list error, got {:?}",
         rep.errors
             .iter()
@@ -514,8 +516,10 @@ def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[], [1, 1]], 0.0)
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on empty inner list in pad");
     assert!(
-        rep.errors.iter().any(|e| e.message.to_lowercase().contains("pad")
-            && (e.message.contains("0-element") || e.message.contains("empty"))),
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("pad")
+                && (e.message.contains("0-element") || e.message.contains("empty"))),
         "expected a pad empty-inner-list error, got {:?}",
         rep.errors
             .iter()
@@ -538,9 +542,12 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[cast(-1, int32),
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative bound");
     assert!(
-        rep.errors.iter().any(|e| e.message.to_lowercase().contains("shrink")
-            && (e.message.contains("negative") || e.message.contains("inverted")
-                || e.message.contains("empty"))),
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("shrink")
+                && (e.message.contains("negative")
+                    || e.message.contains("inverted")
+                    || e.message.contains("empty"))),
         "expected a shrink negative-bound error, got {:?}",
         rep.errors
             .iter()
@@ -560,8 +567,10 @@ def f(x: tensor[2, 4, f32]) -> tensor[5, 1, f32] = shrink(&x, [[cast(0, int32), 
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped out-of-range bound");
     assert!(
-        rep.errors.iter().any(|e| e.message.to_lowercase().contains("shrink")
-            && (e.message.contains("out of range") || e.message.contains("axis 0"))),
+        rep.errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("shrink")
+                && (e.message.contains("out of range") || e.message.contains("axis 0"))),
         "expected a shrink out-of-range error, got {:?}",
         rep.errors
             .iter()

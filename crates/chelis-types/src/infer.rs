@@ -11218,15 +11218,40 @@ enum InnerPairShape {
 /// Walk a `Cons(start, Cons(end, Nil))` chain and classify it. Counts
 /// the actual number of elements in the inner list so the error message
 /// can name the bad arity explicitly (e.g. "got 3-element list").
+///
+/// Bare `(var Nil)` at the top level is the desugared form of `[]` --
+/// a zero-element list literal. That is just as malformed as a triple
+/// or singleton (it has zero of the required two endpoints), so it
+/// must surface as `Malformed { reason: "got 0-element list" }` rather
+/// than `NonLiteral` (red team round 2 finding R2-M1). Other `var` tags
+/// represent opaque `List[Int32]` references the type system already
+/// constrained; those still defer to runtime via `NonLiteral`.
+///
+/// Inner head values are extracted via [`extract_int_for_dim`], which
+/// peels `cast(N, int32)` / `cast(N, int64)` -- so cast-wrapped int
+/// literals participate in the infer-time bounds check rather than
+/// silently falling back to `NonLiteral` (red team round 2 finding
+/// R2-L1; mirrors how reshape extracts dim literals).
 fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
     let deep::Expr::List(list, _) = expr else {
         return InnerPairShape::Unknown;
     };
     if get_tag(list) != Some("app") {
-        // Inner element is not even a list. Could be a variable referring
-        // to a List[Int32]. Type-system already constrained it; runtime
-        // will validate.
+        // Inner element is not a Cons-chain. The `Nil` case (zero-element
+        // list literal) is malformed; any other `var` is an opaque
+        // `List[Int32]` reference whose contents the runtime will check.
         if matches!(get_tag(list), Some("var")) {
+            let is_nil = children(list)
+                .first()
+                .and_then(symbol_name)
+                .map(|name| name == "Nil")
+                .unwrap_or(false);
+            if is_nil {
+                return InnerPairShape::Malformed {
+                    reason: "expects a pair [start, end] of two int literals, got 0-element list"
+                        .to_string(),
+                };
+            }
             return InnerPairShape::NonLiteral;
         }
         return InnerPairShape::Unknown;
@@ -11284,7 +11309,7 @@ fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
                     Some(t) => t,
                     None => return InnerPairShape::Unknown,
                 };
-                head_values.push(extract_int_literal(head_expr));
+                head_values.push(extract_int_for_dim(head_expr));
                 elements_seen += 1;
                 inner_cursor = tail;
                 // Guard against extra trailing elements: if we already
