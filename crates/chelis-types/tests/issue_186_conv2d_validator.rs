@@ -719,9 +719,18 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// EXPECT (RT-205 round-2 F2 negative parity): a rank-changing
 /// reduction wrapper (`sum(conv2d(...), 1)`) MUST NOT be handled by
 /// the passthrough arm because sum reduces rank. Downstream
-/// `conv2d(&y, ...)` should still fail the concrete-tensor-arg
-/// check; this pins that the passthrough fix is shape-preserving
-/// only, not a blanket "trust the inner op's output" path.
+/// `conv2d(&y, ...)` must still be rejected; this pins that the
+/// passthrough fix is shape-preserving only, not a blanket "trust
+/// the inner op's output" path.
+///
+/// Issue #212 / RT-205 round-4 broadened cascade-suppression marker
+/// insertion so `y = sum(...)` now lands in `failed_let_names`
+/// (sum is a recognized shape-sensitive builtin with no derive
+/// arm); the validator-side "concrete tensor argument metadata"
+/// diagnostic is suppressed, and HM's rank-4-input check fires
+/// instead with a more informative message. Both pre- and
+/// post-#212 the program is rejected; the assertion broadens to
+/// accept either diagnostic source.
 #[test]
 fn red_team_205_round2_f2_sum_wrapped_chained_conv2d_still_rejected() {
     let src = r#"
@@ -738,7 +747,9 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
             .iter()
             .any(|e| e.message.contains("concrete tensor argument metadata")
                 || e.message.contains("dimension mismatch")
-                || e.message.contains("body doesn't match declared signature")),
+                || e.message.contains("body doesn't match declared signature")
+                || e.message.contains("rank-4 input tensor")
+                || e.message.contains("rank-4 kernel tensor")),
         "expected rejection of sum-wrapped chain, got {:?}",
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );

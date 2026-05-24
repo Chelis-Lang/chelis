@@ -6,6 +6,53 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed - conv2d validator cascade-suppression is one-level-deep (#212)
+
+The cascade-suppression added in PR #205 to dedupe `conv2d` validator
+diagnostics only propagated one level past the root failure. A let-chain
+of length 3 or more rooted on a non-concrete dim emitted a phantom
+"concrete tensor argument metadata" diagnostic for every other
+downstream let-binder, producing 2 diagnostics for a length-3 chain
+and a "skip one, fire one" pattern beyond.
+
+Root cause: the `failed_let_names` marker insertion in
+`crates/chelis-types/src/infer.rs::validate_ir_expr` (let arm) required
+`errors.len() > errs_before` to detect a failed RHS. Once cascade
+suppression activated for the level-2 RHS, its diagnostic was silenced,
+the count did not grow, and the level-2 name was never marked failed,
+so the level-3 consumer fired its own cascade error.
+
+Fix replaces the diagnostic-count guard with a structural recognition
+predicate `let_rhs_is_recognized_shape_sensitive` that returns true
+when the RHS is one of:
+
+- a recognized shape-sensitive IR builtin (`matmul`, `conv2d`,
+  `softmax`, `mean`, `layer_norm`, reductions, movement ops);
+- a unary shape-passthrough builtin wrapping such a form
+  (`relu`, `tanh`, `gelu`, etc.);
+- a binary shape-passthrough builtin (`add`, `sub`, `mul`, etc.)
+  with such a form on either operand.
+
+Paired with `derive_ir_builtin_output_type` returning `None`, this
+detects "should have derived but couldn't" without depending on the
+per-level diagnostic count, so the suppression marker propagates
+unboundedly through the chain.
+
+The predicate stays narrow: a clean user-defined fn call as a let RHS
+is not a recognized shape-sensitive form, so independent failures in
+later let-binders still produce their own diagnostics (locked by
+`rt205_r4_three_independent_failures_not_suppressed`).
+
+Locked by `crates/chelis-types/tests/issue_212_cascade_suppression_depth.rs`,
+which pins the issue body's 3-level reproducer, a 4-level chain, the
+non-concrete-spatial / non-concrete-channel root variants, a relu-wrapped
+multi-level chain, and the three-independent-failures negative parity.
+Existing `red_team_205_round2_f2_sum_wrapped_chained_conv2d_still_rejected`
+broadens its assertion: the new suppression silences the validator-level
+metadata error in favour of HM's more informative rank-mismatch
+diagnostic. Pure diagnostic-quality fix; correctness (which programs
+chelis check accepts vs rejects) is unchanged.
+
 ## [0.7.13] — 2026-05-24
 
 Cut to ship six downstream-blocking fixes that the Hydronnx H3.x ONNX-emitter
