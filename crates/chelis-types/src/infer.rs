@@ -11564,6 +11564,38 @@ fn is_shape_app(app_list: &deep::List) -> bool {
 /// their literal at any depth (red team round 3 finding R3-MED2).
 /// Termination is bounded: each recursive call strictly reduces the
 /// expression depth (peels one wrapper layer).
+///
+/// Audit catalog of issue #216 sites that use this cast-aware extractor
+/// (one row per infer-time int-literal extraction that gates a
+/// user-facing validation check). Each row also notes any host-runtime
+/// defense-in-depth so a regression here does not silently corrupt
+/// runtime behavior, only the diagnostic layer.
+///
+/// | Domain               | Site (approx)                        | User-reachable cast? | Validation                | Host-runtime defense |
+/// |----------------------|--------------------------------------|----------------------|---------------------------|----------------------|
+/// | trace/diagonal axis  | `resolve_axis_pair_member` (~4110)   | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | builtin axis         | `resolve_builtin_axis` (~4154)       | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | conv2d output type   | `derive_conv2d_output_type` (~5720)  | yes (`stride=cast`)  | positivity + spatial dim  | yes (validator arm)  |
+/// | conv2d output type   | `derive_conv2d_output_type` (~5721)  | yes (`padding=cast`) | non-neg + spatial dim     | yes (validator arm)  |
+/// | conv2d validator     | `extract_typed_scalar_literal`(~5874)| yes                  | literal-int + then >0/>=0 | yes (codegen panic)  |
+/// | conv2d axis-dim      | `ir_builtin_axis_dim` (~5907)        | yes                  | rank bounds via normalize | yes (eval)           |
+/// | softmax axis         | softmax arm (~7630)                  | yes (`axis=cast`)    | rank bounds + diagnostic  | yes (eval)           |
+/// | shape axis           | shape arm (~8238)                    | yes (issue #206)     | non-neg + rank bounds     | yes (eval)           |
+/// | split axis           | split arm (~8959)                    | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | conv2d spatial out   | `compute_concrete_conv2d_spatial`(11722)| yes                | positivity + spatial dim  | yes (validator arm)  |
+/// | conv2d spatial out   | `compute_concrete_conv2d_spatial`(11723)| yes                | non-neg + spatial dim     | yes (validator arm)  |
+/// | reduction axis       | `check_reduce_signature` (~12076)    | yes (`axis=cast`)    | rank bounds + diagnostic  | yes (eval)           |
+/// | grad wrt tuple       | `grad_wrt_indices` (~13793)          | NO (surf desugar)    | int-type + non-neg        | yes (AD pass)        |
+/// | grad wrt single      | `grad_wrt_indices` (~13814)          | NO (surf desugar)    | int-type + non-neg        | yes (AD pass)        |
+/// | vmap axis            | `infer_vmap` (~13866)                | NO (surf parser)     | non-neg + diagnostic      | yes (eval)           |
+///
+/// The three "NO" rows -- vmap axis, both grad wrt sites -- have no
+/// idiomatic Surf cast-wrapping pattern because the Surf parser /
+/// desugarer normalizes them to bare literal ints before reaching the
+/// extractor. They are reachable only through direct Deep input
+/// (decompiler output, custom tooling, macro expansion). The swap there
+/// is defense-in-depth on Deep-direct paths; the post-fix tests use
+/// `parse_deep` rather than the Surf parser.
 fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
     if let Some(value) = extract_int_literal(expr) {
         return Some(value);
