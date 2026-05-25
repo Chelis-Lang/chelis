@@ -923,7 +923,19 @@ pub fn try_lower_compiled_program(
     program: &CheckedProgram,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
     let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
-    let dag = crate::lower::try_lower_program(program).ok();
+    // Issue #197: a *fatal* diagnostic from IR lowering (e.g. the AD
+    // pass refused to differentiate a non-differentiable op) must
+    // propagate to the user. Falling through to the host path here
+    // emits a call to an undefined symbol (the unlowered grad
+    // function) which compiles cleanly via the `chelis build` step
+    // and then fails opaquely at gcc-link time. Non-fatal
+    // diagnostics (the historical un-representable cases) keep the
+    // original fallback semantics so host-only programs still build.
+    let dag = match crate::lower::try_lower_program(program) {
+        Ok(dag) => Some(dag),
+        Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
+        Err(_) => None,
+    };
     let host =
         crate::lower::catch_lowering_external(|| lower_host_program(program, &lowered_names))?;
 
@@ -1051,7 +1063,23 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     }
 
     let body_expr = kids.get(1)?;
-    crate::lower::try_lower_subexpr_program(body_expr, scope, program.type_env().clone(), defs).ok()
+    // Issue #197: a fatal lowering diagnostic (AD-rejection) must
+    // propagate as a panic so the outer `catch_lowering_external`
+    // surfaces it to the user. Silently absorbing it with `.ok()`
+    // would let the host fallback emit an undefined-symbol call to
+    // the grad function.
+    match crate::lower::try_lower_subexpr_program(
+        body_expr,
+        scope,
+        program.type_env().clone(),
+        defs,
+    ) {
+        Ok(dag) => Some(dag),
+        Err(diagnostic) if diagnostic.fatal => {
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
+        }
+        Err(_) => None,
+    }
 }
 
 fn lower_host_program(
@@ -2133,13 +2161,22 @@ fn lower_tensor_helper_dag(
     scope: &HashMap<String, HostType>,
     expected: &TensorType,
 ) -> Option<crate::Dag> {
-    let dag = crate::lower::try_lower_subexpr_program(
+    // Issue #197: surface a fatal AD rejection from the tensor-
+    // helper sub-lowering instead of swallowing it; the host
+    // fallback would otherwise emit an undefined-symbol call to
+    // the rejected grad function.
+    let dag = match crate::lower::try_lower_subexpr_program(
         expr,
         collect_tensor_scope(scope),
         program.type_env().clone(),
         collect_program_defs(program.exprs()),
-    )
-    .ok()?;
+    ) {
+        Ok(dag) => dag,
+        Err(diagnostic) if diagnostic.fatal => {
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
+        }
+        Err(_) => return None,
+    };
     Some(remap_tensor_helper_dim_symbols(&dag, scope, expected))
 }
 

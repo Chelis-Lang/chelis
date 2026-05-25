@@ -43,11 +43,20 @@ fn unrepresentable_panic_suppressed() -> bool {
 struct UnrepresentableDag;
 
 /// User-facing lowering diagnostic returned by `try_lower_*` APIs.
+///
+/// `fatal` distinguishes a hard user-facing rejection (e.g. the AD
+/// pass refused to differentiate a non-differentiable op via
+/// [`crate::grad::grad_dag_checked`]) from a "merely unrepresentable
+/// in the IR DAG" condition (which `try_lower_compiled_program`
+/// silently absorbs and recovers from by falling through to the host
+/// lowering path). A fatal diagnostic must NOT be silently swallowed
+/// by the host fallback; it must reach the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowerDiagnostic {
     pub message: String,
     pub span: Option<Span>,
     pub span_id: Option<String>,
+    pub fatal: bool,
 }
 
 impl LowerDiagnostic {
@@ -56,7 +65,18 @@ impl LowerDiagnostic {
             message: message.into(),
             span,
             span_id,
+            fatal: false,
         }
+    }
+
+    /// Mark a diagnostic as fatal — it must reach the user instead of
+    /// being absorbed into a host-fallback "soft" failure. Use this
+    /// for deliberate rejections (e.g. AD on non-differentiable ops)
+    /// where falling back to the host path would silently emit an
+    /// undefined-symbol reference.
+    fn fatal(mut self) -> Self {
+        self.fatal = true;
+        self
     }
 }
 
@@ -167,7 +187,12 @@ fn lower_diagnostic_for_expr(message: impl Into<String>, expr: &Expr) -> LowerDi
 }
 
 fn raise_lowering_diagnostic(diagnostic: LowerDiagnostic) -> ! {
-    if unrepresentable_panic_suppressed() {
+    // A fatal diagnostic must not be downgraded to the silent
+    // un-representable panic — the host-fallback boundary at
+    // `host::try_lower_compiled_program` keys off this so the user
+    // receives the AD rejection text instead of an undefined-symbol
+    // host call. Issue #197.
+    if !diagnostic.fatal && unrepresentable_panic_suppressed() {
         std::panic::panic_any(UnrepresentableDag);
     }
     std::panic::panic_any(diagnostic);
@@ -179,6 +204,42 @@ fn raise_lowering_error(
     span_id: Option<String>,
 ) -> ! {
     raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id))
+}
+
+/// Raise a *fatal* lowering diagnostic — one the host-fallback path
+/// at [`crate::host::try_lower_compiled_program`] must NOT silently
+/// absorb. Used by the AD-rejection arm at the `grad(...)` lowering
+/// site (Issue #197) so a non-differentiable op surfaces as a
+/// user-facing build error rather than as an undefined-symbol host
+/// call.
+fn raise_fatal_lowering_error(
+    message: impl Into<String>,
+    span: Option<Span>,
+    span_id: Option<String>,
+) -> ! {
+    raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
+}
+
+/// Re-raise an already-constructed fatal lowering diagnostic.
+/// Crate-internal so the host-side sub-lowering paths can resurface
+/// a fatal AD rejection caught by their inner `try_lower_*` call
+/// without losing the structured `op`/reason text.
+///
+/// The inner `catch_lowering` Guard's `Drop` impl unconditionally
+/// clears `SUPPRESS_LOWERING_PANIC_OUTPUT` on the way out, so a
+/// re-raise from a sub-lowering site (inside the outer
+/// `catch_lowering` scope) would otherwise produce a default
+/// "thread 'main' panicked at ... Box<dyn Any>" line on stderr in
+/// addition to the structured diagnostic. Re-set the suppression
+/// flag here so the outer scope sees a clean panic.
+pub(crate) fn raise_fatal_lowering_diagnostic(diagnostic: LowerDiagnostic) -> ! {
+    SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(true));
+    let fatal = if diagnostic.fatal {
+        diagnostic
+    } else {
+        diagnostic.fatal()
+    };
+    raise_lowering_diagnostic(fatal);
 }
 
 fn panic_payload_to_lower_diagnostic(payload: &(dyn Any + Send)) -> LowerDiagnostic {
@@ -255,7 +316,7 @@ use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
-use crate::grad::grad_dag;
+use crate::grad::grad_dag_checked;
 use crate::tier2;
 use crate::vmap;
 
@@ -3760,9 +3821,16 @@ impl LowerCtx {
             .lower_expr(body)
             .expect_node("grad requires a scalar floating output");
         subctx.dag.add_root(output);
-        let grad_result = grad_dag(&subctx.dag, output, &wrt).unwrap_or_else(|| {
-            raise_lowering_error(
-                "`grad(...)` lowering requires a scalar floating forward output",
+        // Issue #197: route through grad_dag_checked so a
+        // non-differentiable op in the gradient body (argmax/argmin,
+        // floor/ceil, scatter_replace) surfaces a structured
+        // `AdError::NotSupported` diagnostic that names the offending
+        // op and the reason, instead of a generic scalar-output
+        // message (or a silent zero gradient for floor/ceil under the
+        // unchecked variant).
+        let grad_result = grad_dag_checked(&subctx.dag, output, &wrt).unwrap_or_else(|ad_err| {
+            raise_fatal_lowering_error(
+                format!("`grad(...)` lowering rejected: {ad_err}"),
                 Some(body.span()),
                 body.span_id().map(ToOwned::to_owned),
             )
@@ -4203,9 +4271,13 @@ impl LowerCtx {
             .lower_expr(body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
         subctx.dag.add_root(output);
-        let grad_result = grad_dag(&subctx.dag, output, &wrt).unwrap_or_else(|| {
-            raise_lowering_error(
-                "`vmap(grad(...))` lowering requires a scalar floating forward output",
+        // Issue #197: route through grad_dag_checked so a
+        // non-differentiable op surfaces a structured
+        // `AdError::NotSupported` diagnostic rather than a generic
+        // scalar-output message or a silent zero gradient.
+        let grad_result = grad_dag_checked(&subctx.dag, output, &wrt).unwrap_or_else(|ad_err| {
+            raise_fatal_lowering_error(
+                format!("`vmap(grad(...))` lowering rejected: {ad_err}"),
                 Some(body.span()),
                 body.span_id().map(ToOwned::to_owned),
             )

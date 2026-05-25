@@ -7,7 +7,7 @@
 
 use crate::dag::{Dag, NodeId};
 use crate::fuse::fuse_with_remap;
-use crate::grad::{GradResult, grad_dag};
+use crate::grad::{AdError, GradResult, grad_dag, grad_dag_checked};
 
 /// Differentiate the unfused DAG, then fuse the combined forward+backward DAG.
 ///
@@ -20,8 +20,30 @@ use crate::grad::{GradResult, grad_dag};
 /// The more complete Phase 1 GPU path also sandwiches `grad` between
 /// optimization passes, but the ordering guarantee enforced here is that AD
 /// sees an unfused DAG and fusion runs only on the result.
+///
+/// Prefer [`grad_then_fuse_checked`] in new code: it surfaces the
+/// structured `AdError::NotSupported` rejection for non-differentiable
+/// ops (argmax/argmin/floor/ceil/scatter_replace) instead of silently
+/// returning `None`.
 pub fn grad_then_fuse(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
     let grad_result = grad_dag(forward, output, wrt)?;
+    Some(fuse_grad_result(grad_result))
+}
+
+/// Like [`grad_then_fuse`] but returns the structured `AdError` from
+/// [`grad_dag_checked`] when AD is not meaningful for the forward DAG
+/// (e.g. argmax/argmin in the gradient path, floor/ceil in the
+/// gradient path, replace-scatter in the gradient path).
+pub fn grad_then_fuse_checked(
+    forward: &Dag,
+    output: NodeId,
+    wrt: &[NodeId],
+) -> Result<GradResult, AdError> {
+    let grad_result = grad_dag_checked(forward, output, wrt)?;
+    Ok(fuse_grad_result(grad_result))
+}
+
+fn fuse_grad_result(grad_result: GradResult) -> GradResult {
     let fused = fuse_with_remap(&grad_result.dag);
     let grad_nodes = grad_result
         .grad_nodes
@@ -44,11 +66,11 @@ pub fn grad_then_fuse(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<G
             )
         });
 
-    Some(GradResult {
+    GradResult {
         dag: fused.dag,
         output_node,
         grad_nodes,
-    })
+    }
 }
 
 #[cfg(test)]
