@@ -3015,6 +3015,15 @@ impl LowerCtx {
             match tag.as_str() {
                 // Skip type-level declarations.
                 "defsig" | "deftype" | "typealias" => return,
+                // Skip module-system declarations (issue chelis#232):
+                // `export` / `import` / `import-all` are name-routing
+                // directives — they have no runtime value and must not
+                // produce DAG roots. The fallthrough `lower_expr` path
+                // (via the `_ =>` arm in `lower_list`) would otherwise
+                // emit a `Load`/`Const` node and `add_root` it, breaking
+                // the `tensor_root_names.len() == dag.roots().len()`
+                // invariant in chelis-compiler-api::compiler::compile_source.
+                "export" | "import" | "import-all" => return,
                 _ => {}
             }
         }
@@ -7104,6 +7113,97 @@ mod tests {
             Some(RiscOp::Store { name }) if name == "grads.1"
         ));
         assert!(verify::verify(&dag).is_empty());
+    }
+
+    /// Issue chelis#232: `(export {} forward)` is a module-system
+    /// directive, not a value-producing expression. `lower_top_level`
+    /// must early-return on it; otherwise `lower_list`'s catch-all
+    /// branch walks the children, emits a `Load { name: "forward" }`
+    /// for the bare symbol, and `lower_top_level` adds it as a DAG
+    /// root, inflating `dag.roots().len()` and breaking the
+    /// `tensor_root_names.len() == dag.roots().len()` invariant in
+    /// `chelis-compiler-api::compiler::compile_source`.
+    #[test]
+    fn issue232_export_directive_does_not_emit_dag_root() {
+        let src = r#"
+            (def {} forward (lit {type: (t-prim {} f32)} 1.0))
+            (export {} forward)
+        "#;
+        let dag = parse_and_lower(src);
+        // Only `forward`'s lowered value-node is a root. The
+        // `(export {} forward)` directive must contribute zero roots
+        // and zero nodes — it is not a value expression.
+        assert_eq!(
+            dag.roots().len(),
+            1,
+            "export directive must not emit any DAG root: roots={:?}",
+            dag.roots()
+        );
+        assert!(
+            !dag.nodes()
+                .iter()
+                .any(|node| matches!(&node.op, RiscOp::Load { name } if name == "forward")),
+            "export directive must not lower its symbol child to a Load: {:#?}",
+            dag.nodes()
+        );
+    }
+
+    /// Issue chelis#232: same shape, `import` instead of `export`.
+    /// `(import {} Math (...))` desugars to a list whose children are
+    /// not value expressions; `lower_top_level`'s catch-all would
+    /// emit a `Const` node and add it as a root.
+    #[test]
+    fn issue232_import_directive_does_not_emit_dag_root() {
+        let src = r#"
+            (def {} forward (lit {type: (t-prim {} f32)} 1.0))
+            (import {} Math (params {}))
+        "#;
+        // Use `parse_and_lower_unchecked` because the standalone
+        // `(import {} ...)` form isn't run through the regular
+        // type-checker path; we want a direct lowering observation.
+        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let mut ctx = LowerCtx::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            LinearityInfo::default(),
+        );
+        for expr in &exprs {
+            ctx.lower_top_level(expr);
+        }
+        // Only `forward`'s root remains. The `import` directive must
+        // contribute zero roots.
+        assert_eq!(
+            ctx.dag.roots().len(),
+            1,
+            "import directive must not emit any DAG root: roots={:?}",
+            ctx.dag.roots()
+        );
+    }
+
+    /// Issue chelis#232: `import-all` (the `import Mod` form without
+    /// an explicit name list) desugars to `(import-all {} <module>)`
+    /// — same lower-time hazard as `export` and `import`.
+    #[test]
+    fn issue232_import_all_directive_does_not_emit_dag_root() {
+        let src = r#"
+            (def {} forward (lit {type: (t-prim {} f32)} 1.0))
+            (import-all {} Math)
+        "#;
+        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let mut ctx = LowerCtx::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            LinearityInfo::default(),
+        );
+        for expr in &exprs {
+            ctx.lower_top_level(expr);
+        }
+        assert_eq!(
+            ctx.dag.roots().len(),
+            1,
+            "import-all directive must not emit any DAG root: roots={:?}",
+            ctx.dag.roots()
+        );
     }
 
     #[test]
