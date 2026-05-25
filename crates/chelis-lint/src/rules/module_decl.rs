@@ -1,8 +1,8 @@
-//! Shared `.ch` module-declaration extractor used by the §6.2 and §6.3 rules.
+//! Shared `.ch` module-declaration extractor used by the §6.2 rule.
 //!
 //! Extracts every `^module Foo.Bar.Baz` line from a Surf source file, with
-//! the line number and the component list. Both `module-compound-titlecase`
-//! and `module-pascal-components` consume this.
+//! the line number and the component list. `module-compound-titlecase`
+//! consumes this.
 
 use regex::Regex;
 use std::sync::OnceLock;

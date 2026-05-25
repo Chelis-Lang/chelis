@@ -1,8 +1,22 @@
 # module-pascal-components-flags-single-words: §6.3 flags real single English words as suspected compounds
 
-**Status:** open; immediate fix applied (rule demoted to advisory)
+**Status:** **CLOSED 2026-05-25** — rule removed entirely. The
+long-lowercase-run heuristic and the `KNOWN_SINGLE_WORDS` allowlist
+were both deleted; `crates/chelis-lint/src/rules/module_pascal_components.rs`
+no longer exists. The flattened-compound concern that motivated the
+rule (§6.3 sibling-sweep, e.g. `Linalg` → `LinAlg`) was a real but
+narrow defect class that is already covered by other mechanisms
+(`KNOWN_PASCAL_COMPOUNDS` tracking inside the closely-related
+`module-compound-titlecase` rule and reviewer attention at PR time).
+The structural critique below stands as the record of why a
+dictionary-dependent lint is the wrong shape; future false positives
+on §6.3 single-word concerns are best handled by adding the specific
+flattened compound to `KNOWN_PASCAL_COMPOUNDS` rather than by
+reintroducing a long-lowercase-run heuristic.
+
 **Filed:** 2026-05-22
-**Owning phase:** chelis-lint (`crates/chelis-lint/src/rules/module_pascal_components.rs`)
+**Closed:** 2026-05-25 (rule removed in commit replacing the demote-to-advisory hotfix)
+**Owning phase:** chelis-lint (`crates/chelis-lint/src/rules/`)
 **Discovered by:** Calcify shell `chelis lint --check .` reporting 30 blocking
 `module-pascal-components` errors
 

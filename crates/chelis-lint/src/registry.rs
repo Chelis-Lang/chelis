@@ -29,14 +29,6 @@ pub fn non_blocking_rules() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(rules::redundant_linearity_call::RedundantLinearityCall),
         Box::new(rules::prefer_pipe_operator::PreferPipeOperator),
-        // `module-pascal-components` (§6.3) is advisory, not blocking: its
-        // "long lowercase run, no internal capital is a suspected compound"
-        // heuristic false-positives on real single English words
-        // (Optimization, Comprehension, Conditional, Exception, Translation).
-        // A lint rule that needs an English dictionary to be correct cannot
-        // be a blocking gate. See
-        // `spec/upstream-bugs/module-pascal-components-flags-single-words.md`.
-        Box::new(rules::module_pascal_components::ModulePascalComponents),
     ]
 }
 

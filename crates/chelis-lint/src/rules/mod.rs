@@ -7,7 +7,6 @@ pub mod deep_user_symbol_charset;
 pub mod doc_filename_convention;
 pub mod module_compound_titlecase;
 pub mod module_decl;
-pub mod module_pascal_components;
 pub mod no_em_dash_in_public_strings;
 pub mod no_shell_scripts;
 pub mod phase_identifier_case;

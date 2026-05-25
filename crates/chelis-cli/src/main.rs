@@ -5630,10 +5630,8 @@ fn cmd_lint(
     let workspace_root = style_gate::detect_lint_workspace_root(&probe_dir).ok();
     // The exception list is sourced from `style_gate::exceptions()` so
     // the standalone `chelis lint` subcommand and the build-time style
-    // gate filter against one shared registry. Rule-internal allowlists
-    // (e.g., `module_pascal_components::KNOWN_SINGLE_WORDS`) cover the
-    // common naming carve-outs; path-glob entries with §-cross-refs go
-    // here.
+    // gate filter against one shared registry. Path-glob entries with
+    // §-cross-refs go here.
     let exceptions: Vec<chelis_lint::Exception> = style_gate::exceptions();
     // Bucket the rendered violation lines by severity instead of
     // printing them inline as targets are walked. A workspace `chelis
