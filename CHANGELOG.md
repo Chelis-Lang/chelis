@@ -6,6 +6,46 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.16] — 2026-05-25
+
+Lint cleanup. Removes the `module-pascal-components` rule and its
+`KNOWN_SINGLE_WORDS` allowlist. No language or compiler behavior
+changes; only the lint surface shrinks.
+
+### Removed - module-pascal-components rule
+
+The `module-pascal-components` (§6.3) lint rule and its supporting
+`KNOWN_SINGLE_WORDS` allowlist are deleted. The rule's correctness
+depended on the allowlist absorbing every long single English word
+any shell in the ecosystem might use as a module component
+(`Optimization`, `Comprehension`, `Conditional`, `Exception`,
+`Translation`, `Calendar`, `Calibration`, …) — a list that grows
+monotonically with the corpus and never converges. Demoting to
+advisory (the 0.7.12 hotfix) reduced the blast radius but did not
+fix the structural problem of a dictionary-dependent lint.
+
+Removed:
+
+- `crates/chelis-lint/src/rules/module_pascal_components.rs`
+  (entire file)
+- `pub mod module_pascal_components;` in
+  `crates/chelis-lint/src/rules/mod.rs`
+- Registration in `crates/chelis-lint/src/registry.rs::non_blocking_rules`
+- The `KNOWN_SINGLE_WORDS` allowlist that the rule consumed
+- Stale `KNOWN_SINGLE_WORDS` cross-reference in
+  `crates/chelis-cli/src/main.rs`
+
+Kept:
+
+- The flattened-compound concern (`Linalg` → `LinAlg`,
+  `Hellotensor` → `HelloTensor`) is still covered by reviewer
+  attention plus the `module-compound-titlecase` rule, which
+  checks a precise, narrowly-scoped list of known compounds rather
+  than guessing from a lowercase-run length.
+- The shared `module_decl` extractor stays (other rules consume it).
+
+Closes `spec/upstream-bugs/module-pascal-components-flags-single-words.md`.
+
 ## [0.7.15] — 2026-05-25
 
 Hotfix release. Closes a latent typing bug in `argmax_reduce` /
