@@ -1759,7 +1759,7 @@ fn collect_top_level_calls(
     }
 }
 
-fn param_has_consuming_use(
+pub(crate) fn param_has_consuming_use(
     expr: &deep::Expr,
     param: &str,
     available_signatures: &HashMap<String, Type>,
@@ -1944,9 +1944,23 @@ fn pipe_consumes_param(
     }
     let mut current = &kids[0];
     for stage in &kids[1..] {
-        let stage_name = var_name_expr(stage);
+        // Issue #229 (sibling sweep of chelis#226): peer through any
+        // synthesized `__chelis_pipe` lambda the desugarer emits for
+        // explicit-arg pipe stages so the borrow-arg classifier sees
+        // the inner callee and the piped value's actual arg position
+        // — not the lambda's type. Without this peering, every
+        // non-bare-var pipe stage is mis-classified as a consuming
+        // use, the wrapping function never gets auto-borrow inferred,
+        // and downstream calls spuriously consume their argument.
+        let (_callee_expr, callee_builtin, piped_arg_index) =
+            crate::pipe_stage::resolve_pipe_stage_callee(stage);
         if is_direct_unshadowed_var(current, param, bound) {
-            if !callee_arg_is_borrowed(stage_name, 0, available_signatures, type_env) {
+            if !callee_arg_is_borrowed(
+                callee_builtin,
+                piped_arg_index,
+                available_signatures,
+                type_env,
+            ) {
                 return true;
             }
         } else if param_has_consuming_use_inner(
