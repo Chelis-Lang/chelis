@@ -6,6 +6,69 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.15] — 2026-05-25
+
+Hotfix release. Closes a latent typing bug in `argmax_reduce` /
+`argmin_reduce` output dtype that hydronnx PR #2 surfaced when it
+retargeted from 0.7.13 to 0.7.14. The bug was present in every 0.7.x
+release back to 0.7.0 — not a regression introduced by any of the
+five 0.7.13 → 0.7.14 commits — but the practical impact was the
+same: any downstream Surf program declaring the canonical
+`tensor[..., int64]` return type for an argmax / argmin call hit a
+`TypeMismatch`. The full diagnosis lives in
+[`docs/investigations/issue_230_argmax_reduce_output_dtype_diagnosis.md`](docs/investigations/issue_230_argmax_reduce_output_dtype_diagnosis.md).
+
+### Fixed - argmax_reduce / argmin_reduce return int64, not input dtype (#230)
+
+`crates/chelis-types/src/infer.rs::check_reduction_signature`
+defaulted every non-`sum` reduction's result precision to the input
+precision. `argmax_reduce` and `argmin_reduce` emit element indices,
+not reduced operand values, so the std-package signatures in
+`packages/chelis-std/src/tensor/reduce.ch` already pin the canonical
+output as `tensor[b, int64]`:
+
+```text
+sig argmax: &tensor[a, b, p] -> int32 -> tensor[b, int64]
+sig argmin: &tensor[a, b, p] -> int32 -> tensor[b, int64]
+```
+
+Before the fix, `argmax_reduce(tensor[2, 3, f32], 1)` typed as
+`tensor[2, f32]` and a user-declared `tensor[2, int64]` signature
+was rejected:
+
+```
+def 'forward' body doesn't match declared signature:
+  body has type `... -> tensor[Lit(2), f32]`,
+  declared type is `... -> tensor[Lit(2), int64]`
+```
+
+After the fix, `check_reduction_signature` returns
+`TensorPrec::Concrete(Prim::Int64)` for argmax_reduce / argmin_reduce
+regardless of the input precision. The shape rule
+(`out_dims.remove(axis)`, rank `n` → `n-1`) is unchanged.
+
+The host-runtime / IR evaluator continues to store integer-valued
+floats internally per the Phase 3j-pre Batch 1 caveat documented on
+`RiscOp::Argmax`; the int64 type-system label is independent of the
+storage layout. The `TODO(phase3j): widen backend runtime to carry
+Int64 tensors natively` in `crates/chelis-ir/src/dag.rs` tracks the
+eventual storage widening.
+
+Sibling sweep: `sum`, `max_reduce`, `min_reduce`, `prod_reduce`, and
+`mean` continue to preserve input dtype per spec §5.7.1 — only the
+argmax/argmin family changes dtype.
+
+Acceptance oracle:
+`crates/chelis-types/tests/issue_230_argmax_reduce_output_dtype.rs`
+(11 tests: positive on f32 / int32 / int64 inputs, negative on wrong
+declared dtype, and a sibling-sweep regression guard) plus
+`crates/chelis-compiler-api/tests/issue_230_argmax_argmin_runtime.rs`
+(4 host-runtime parity tests pinning integer-valued index outputs
+on axis 0 and axis 1 for both ops). The existing
+`crates/chelis-ir/tests/negative_axis_normalization.rs` reduction
+loops are updated to expect `int64` for argmax / argmin while the
+other reductions stay `f32`.
+
 ## [0.7.14] — 2026-05-24
 
 Hotfix release. Closes the release-blocking linearity-pass regression

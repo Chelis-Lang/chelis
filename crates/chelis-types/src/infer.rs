@@ -12379,9 +12379,20 @@ fn check_reduction_signature(
     // precision of `reduce_sum` follows the §5.7.1 table — int8/int16
     // operand → int32 result, int32/int64/f32/f64 → operand precision,
     // bf16/f16 → operand precision (the f32 accumulator is consumed
-    // inside the op and downcast on output). For all other reductions
-    // (max_reduce, min_reduce, prod_reduce, argmax/argmin_reduce, mean)
-    // the result precision is the operand precision.
+    // inside the op and downcast on output). For `max_reduce`,
+    // `min_reduce`, `prod_reduce`, and `mean` the result precision is
+    // the operand precision.
+    //
+    // Issue #230: `argmax_reduce` and `argmin_reduce` are index-returning
+    // reductions — they produce element indices, not reduced operand
+    // values. Their result precision is canonically `int64`, regardless
+    // of the input dtype. The std-package signatures in
+    // `packages/chelis-std/src/tensor/reduce.ch` pin this (`tensor[b,
+    // int64]`); the type checker was returning the input precision and
+    // diverging from std. (The host-runtime/backend still stores
+    // integer-valued floats internally per the Phase 3j-pre Batch 1
+    // caveat documented on `RiscOp::Argmax`; the int64 label is the
+    // declarative output type.)
     //
     // WS-A5: the §5.7.1 widening rule is defined over a known operand
     // precision. If the operand precision is still polymorphic
@@ -12403,6 +12414,8 @@ fn check_reduction_signature(
             },
             TensorPrec::Var(_) => prec.clone(),
         }
+    } else if name == "argmax_reduce" || name == "argmin_reduce" {
+        TensorPrec::Concrete(Prim::Int64)
     } else {
         prec.clone()
     };
