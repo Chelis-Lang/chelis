@@ -480,8 +480,10 @@ fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f
 ///
 /// Ties are broken by the smallest index (first-seen wins), matching numpy's
 /// default argmax/argmin semantics. The output stores integer indices as f64
-/// in the same TensorValue layout other reductions use; this is deliberate
-/// (see `RiscOp::Argmax` doc comment).
+/// in the same precision-erased TensorValue layout other reductions use; the
+/// host-runtime adapter (`tensor_reduce_host`) is responsible for attaching
+/// the `Prim::Int64` precision tag on the produced `RuntimeTensorValue` per
+/// chelis#233. See `RiscOp::Argmax` for the spec-level invariants.
 fn reduce_argcmp(
     input: &TensorValue,
     axis: usize,
@@ -1607,9 +1609,10 @@ mod tests {
         assert_eq!(vals[&y], TensorValue::from_vec(vec![2], vec![2.0, 1.0]));
     }
 
-    /// Pins the argmax/argmin dtype decision: output shares the caller's
-    /// chosen precision (F32 in the IR/backend today) and stores indices
-    /// as integer-valued floats. See `RiscOp::Argmax` doc comment.
+    /// Pins the IR-level argmax/argmin storage: the precision-erased
+    /// TensorValue stores integer indices as integer-valued f64. The
+    /// host-runtime adapter widens the surrounding precision tag to
+    /// `Prim::Int64` per chelis#233. See `RiscOp::Argmax` doc comment.
     #[test]
     fn adv_argmax_output_stores_integer_valued_floats() {
         let (dag, y) = build_2x3_with(RiscOp::Argmax { axis: 1 });
