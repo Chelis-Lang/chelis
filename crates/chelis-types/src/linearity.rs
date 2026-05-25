@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
 use crate::errors::{CheckError, CheckErrorKind};
+use crate::infer::SignatureInferenceMetadata;
+use crate::pipe_stage::resolve_pipe_stage_callee;
+use crate::types::Type;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
@@ -252,6 +255,15 @@ struct Checker {
     /// exprs here. See the function-level note on
     /// [`compute_tensor_carrying_adts`].
     tensor_carrying_adts: HashSet<String>,
+    /// Snapshot of `signature_inference` from the program under check.
+    /// Used by `arg_is_borrowed` to recognize call-site borrow
+    /// classification on user-defined functions whose params were
+    /// inferred read-only (see `infer.rs:infer_signature_metadata`).
+    /// Without this, a call to `def reader(t, k: tensor[..]) = t |> add(k)`
+    /// would consume `t` at every callsite, defeating the auto-borrow
+    /// inference that the inferencer already computed. Closes the
+    /// chelis#229 sibling-sweep gap.
+    signature_inference: SignatureInferenceMetadata,
     /// Depth counter for desugarer-synthesized destructure scopes
     /// (`__chelis_tmp_N` bind chains tagged with `destructure: true`
     /// in their meta-map). Incremented by `check_let` when entering
@@ -318,6 +330,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         info: LinearityInfo::default(),
         top_level_types: program.type_env().clone(),
         tensor_carrying_adts,
+        signature_inference: program.signature_inference().clone(),
         destructure_scope_depth: 0,
     };
     let mut scope = LinearScope::default();
@@ -423,11 +436,22 @@ pub fn check_linearity_with_context(
             .iter()
             .chain(new_program.annotated_exprs().iter()),
     );
+    // Merge library + new-code signature inference. New-code wins on
+    // name clash, matching `CheckedProgram::compose`'s rule. Library
+    // function signatures are visible at new-code callsites so library
+    // user functions inferred as borrow-arg are recognized as such.
+    let mut merged_signature_inference = library_program.signature_inference().clone();
+    for (name, sig) in &new_program.signature_inference().functions {
+        merged_signature_inference
+            .functions
+            .insert(name.clone(), sig.clone());
+    }
     let mut checker = Checker {
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
         tensor_carrying_adts,
+        signature_inference: merged_signature_inference,
         destructure_scope_depth: 0,
     };
 
@@ -804,11 +828,58 @@ impl Checker {
         let params = param_names(&kids[0]);
         let captured = free_vars(&kids[1], &params);
         let mut inner_scope = outer_scope.clone();
+        let body = &kids[1];
+        // Build a temporary `HashMap<String, Type>` of currently-known
+        // user-fn display signatures so the closure-body consuming-use
+        // probe can recognize user-defined borrow-arg callees inside
+        // the body. The probe's secondary `type_env` lookup also
+        // matches direct annotations in `top_level_types`, but
+        // `available_signatures` matches by `Type` (the inferencer's
+        // own metadata) so passing the inferred display signatures
+        // covers user fns whose params were auto-borrow-inferred.
+        let available_signatures: HashMap<String, Type> = self
+            .signature_inference
+            .functions
+            .iter()
+            .map(|(name, sig)| (name.clone(), sig.display_signature.clone()))
+            .collect();
         for name in captured {
-            if outer_scope
-                .ty(&name)
-                .is_some_and(|ty| type_expr_contains_tensor(ty, &self.tensor_carrying_adts))
-            {
+            let Some(ty) = outer_scope.ty(&name) else {
+                continue;
+            };
+            if !type_expr_contains_tensor(ty, &self.tensor_carrying_adts) {
+                continue;
+            }
+            // chelis#237 closure-capture spurious-consume gap: if the
+            // closure body never uses `name` in a structurally-consuming
+            // position (only borrow-arg reads, etc.), treat the capture
+            // as a borrow of the outer binding rather than a structural
+            // consume. Mirrors the auto-borrow inference at
+            // `infer.rs:1454` (`infer_signature_metadata`) which marks
+            // a function parameter read-only when its body has no
+            // consuming use. Without this, a closure like
+            // `fn (i) -> add(c, c)` (capture only borrow-read) would
+            // consume the outer `c` at closure-creation time, so a
+            // later borrow-read of `c` outside the closure trips
+            // `UseAfterConsume` with the diagnostic "was already
+            // consumed by closure capture at offset N". The probe
+            // reuses `infer::param_has_consuming_use` so the consume
+            // classification stays aligned with what
+            // `param_has_consuming_use_inner` already enforces for
+            // top-level function-param inference.
+            //
+            // Negative parity (a closure body that *does* consume the
+            // capture — e.g. `fn (i) -> realize(c)` or returning the
+            // capture as the body's value) still goes through the
+            // structural-consume branch, so `read_or_error` plus
+            // `outer_scope.consume` keep firing.
+            let body_consumes = crate::infer::param_has_consuming_use(
+                body,
+                name.as_str(),
+                &available_signatures,
+                &self.top_level_types,
+            );
+            if body_consumes {
                 self.read_or_error(name.as_str(), expr, outer_scope);
                 outer_scope.consume(
                     &name,
@@ -817,6 +888,17 @@ impl Checker {
                         kind: ConsumeKind::Structural,
                     },
                 );
+                inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
+            } else {
+                // Borrow capture: error if the outer is already
+                // consumed (read_or_error covers that), then record a
+                // borrow site on the outer binding. The inner scope
+                // sees `name` as a fresh borrow-read binding too, so
+                // the body's borrow-reads inside the closure resolve
+                // against the captured borrow rather than re-entering
+                // the outer binding state.
+                self.read_or_error(name.as_str(), expr, outer_scope);
+                outer_scope.borrow(name.as_str(), borrow_site(expr));
                 inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
             }
         }
@@ -1193,6 +1275,22 @@ impl Checker {
             // matching the semantics already implemented in the IR.
             return true;
         }
+        // chelis#229 / chelis#237 direct-call gap: when the callee is
+        // a `(var name)` and `name` is a user-defined function whose
+        // parameter at `arg_index` was inferred read-only by
+        // `infer_signature_metadata`, treat the arg as a borrow even
+        // though the annotated `type_env` still has the owned tvar
+        // signature. The display-time `&T` rewrite the inferencer
+        // produces in `display_signature` is the contract callers
+        // see; linearity must honor it or every auto-borrow-inferred
+        // user fn spuriously consumes at its call sites.
+        if let Some(callee) = func.and_then(var_name)
+            && let Some(meta) = self.signature_inference.functions.get(callee)
+            && let Some(param) = meta.params.get(arg_index)
+            && matches!(param.display_type, Type::Ref(_))
+        {
+            return true;
+        }
         let Some(func_ty) = func.and_then(|expr| self.expr_type(expr, scope)) else {
             return false;
         };
@@ -1271,90 +1369,6 @@ fn as_list(expr: &Expr) -> Option<&List> {
 
 fn is_var_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::List(list, _) if get_tag(list) == Some("var"))
-}
-
-/// Resolve the effective callee of a pipe stage and the arg position
-/// the piped value occupies in that callee.
-///
-/// Two stage shapes are produced by `chelis_surf::desugar::desugar_pipe_stage`:
-///
-/// 1. Bare var stage (e.g. `x |> f`): `(var f)`. The piped value is the
-///    only arg, at position 0. Returns `(stage, Some("f"), 0)`.
-///
-/// 2. Synthesized lambda stage (e.g. `x |> f(y)`): a one-arg lambda
-///    `(fn (params __chelis_pipe) (app callee ... (var __chelis_pipe) ...))`
-///    where the piped value lands at whatever position the desugarer
-///    placed `__chelis_pipe` in the inner app's args. Today
-///    `desugar_pipe_stage` always inserts the pipe param at position 0,
-///    but we scan the arg list so this stays robust against future
-///    desugarer shapes (e.g. `cast(type)` post-stage forms where the
-///    piped value lands at a non-zero arg index). Returns
-///    `(inner_callee_expr, builtin_name_or_none, piped_arg_index)`.
-///
-/// Any other stage shape (parser-level oddity, macro-expanded result we
-/// have not classified) falls back to the historical contract of
-/// `var_name(stage)` so we never regress the bare-var case.
-fn resolve_pipe_stage_callee(stage: &Expr) -> (Option<&Expr>, Option<&str>, usize) {
-    if let Some(name) = var_name(stage) {
-        return (Some(stage), Some(name), 0);
-    }
-    if let Some((callee, idx)) = pipe_lambda_callee_and_pipe_arg_index(stage) {
-        return (Some(callee), var_name(callee), idx);
-    }
-    (Some(stage), None, 0)
-}
-
-/// If `stage` is `(fn (params __chelis_pipe) (app callee args...))` with
-/// exactly one of `args` being `(var __chelis_pipe)`, return the inner
-/// callee and the index of the pipe arg within `args`.
-fn pipe_lambda_callee_and_pipe_arg_index(stage: &Expr) -> Option<(&Expr, usize)> {
-    let Expr::List(list, _) = stage else {
-        return None;
-    };
-    if get_tag(list) != Some("fn") {
-        return None;
-    }
-    let kids = children(list);
-    let params = kids.first()?;
-    let body = kids.get(1)?;
-    let pipe_param = sole_pipe_param_name(params)?;
-    let Expr::List(body_list, _) = body else {
-        return None;
-    };
-    if get_tag(body_list) != Some("app") {
-        return None;
-    }
-    let app_kids = children(body_list);
-    let callee = app_kids.first()?;
-    for (offset, arg) in app_kids.iter().skip(1).enumerate() {
-        if var_name(arg) == Some(pipe_param) {
-            return Some((callee, offset));
-        }
-    }
-    None
-}
-
-/// If `params` is `(params __chelis_pipe[N])` with exactly one
-/// pipe-synthesized parameter, return its name. The desugarer prefixes
-/// every synthetic pipe parameter with `__chelis_pipe`; a user-written
-/// lambda that happens to take a single param does not match.
-fn sole_pipe_param_name(params: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = params else {
-        return None;
-    };
-    if get_tag(list) != Some("params") {
-        return None;
-    }
-    let kids = children(list);
-    if kids.len() != 1 {
-        return None;
-    }
-    let name = symbol_name(&kids[0])?;
-    if name.starts_with("__chelis_pipe") {
-        Some(name)
-    } else {
-        None
-    }
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
