@@ -1304,17 +1304,28 @@ impl CEmitter {
                 ));
             }
             Prim::F64 => {
-                self.line(&format!("chelis_fill_f64(t{id}, {value:.17});"));
+                // Issue #189: emit the source f64's exact bit pattern
+                // and bit-cast at runtime. The pre-fix `{:.17}` format
+                // string treated `.17` as decimal places after the
+                // point, not significant digits, so values below
+                // `1e-17` collapsed to zero. Bit-pattern emission
+                // round-trips the source f64 verbatim.
+                let bits = value.to_bits();
+                self.line(&format!("chelis_fill_f64_bits(t{id}, 0x{bits:016x}uLL);"));
             }
             Prim::F32 | Prim::Bool => {
-                // Truncate the f64 literal to f32 explicitly via
-                // `Self::f64_to_f32_truncate` (this is the intended
-                // precision narrowing for an F32 Const, not the
-                // silent default-arm footgun the WS-1 sibling sweep
-                // tracks; the legacy `_ => chelis_fill_f32(..., value
-                // as f32)` default arm is removed below).
+                // Issue #189: narrow to f32 (storage width is f32)
+                // then emit the resulting bit pattern. `as f32` is
+                // the intended precision narrowing (kept; explicit
+                // via `f64_to_f32_truncate` so the WS-1 sibling-sweep
+                // grep returns zero hits in production code).
+                // `f32::to_bits()` produces an exact u32 pattern so
+                // the runtime reproduces the closest-f32 to the IR
+                // source value with zero further precision loss --
+                // avoiding the pre-fix `{:.8}` format-string drift.
                 let v32 = Self::f64_to_f32_truncate(value);
-                self.line(&format!("chelis_fill_f32(t{id}, {v32:.8}f);"));
+                let bits = v32.to_bits();
+                self.line(&format!("chelis_fill_f32_bits(t{id}, 0x{bits:08x}u);"));
             }
             // WS-1: bf16 / f16 Const fill. The literal's exact 16-bit
             // pattern is computed at codegen time via the `half` crate
@@ -4096,10 +4107,16 @@ impl CEmitter {
                 ));
             }
             Prim::F64 => {
-                self.line(&format!("chelis_fill_f64(t{id}, {fill:.17});"));
+                // Issue #189 sibling sweep: same bit-pattern story as
+                // `emit_const`. The pre-fix `{:.17}` format string
+                // dropped small magnitudes to zero.
+                let bits = fill.to_bits();
+                self.line(&format!("chelis_fill_f64_bits(t{id}, 0x{bits:016x}uLL);"));
             }
             Prim::F32 | Prim::Bool => {
-                self.line(&format!("chelis_fill_f32(t{id}, {:.8}f);", fill as f32));
+                // Issue #189 sibling sweep: narrow + bit-pattern emit.
+                let bits = (fill as f32).to_bits();
+                self.line(&format!("chelis_fill_f32_bits(t{id}, 0x{bits:08x}u);"));
             }
             other => panic!(
                 "C backend Pad does not yet support `{}` fill (spec/04-type-system.md §1.1)",
@@ -4366,8 +4383,14 @@ mod tests {
         dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("chelis_alloc"));
-        assert!(c.contains("chelis_fill_f32"));
-        assert!(c.contains("3.0"));
+        // Issue #189: Const emission goes through the bit-pattern
+        // helper. The 3.0f32 bit pattern is `0x40400000`.
+        assert!(c.contains("chelis_fill_f32_bits"));
+        let want_bits = (3.0_f32).to_bits();
+        assert!(
+            c.contains(&format!("0x{want_bits:08x}")),
+            "f32 const must emit exact bit pattern; got:\n{c}"
+        );
     }
 
     #[test]

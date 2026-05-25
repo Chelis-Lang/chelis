@@ -116,6 +116,17 @@ void chelis_free(chelis_tensor *t);
 void chelis_fill_f32(chelis_tensor *t, float val);
 void chelis_fill_i64(chelis_tensor *t, int64_t val);
 void chelis_fill_f64(chelis_tensor *t, double val);
+/* Issue #189: bit-pattern fill helpers for f32 / f64 Const emission.
+ * Codegen computes the IEEE 754 bit pattern of the source value at
+ * compile time (`f32::to_bits()` / `f64::to_bits()`) and emits
+ * `chelis_fill_f32_bits(t, 0xXXXXXXXXu)` / `chelis_fill_f64_bits(t,
+ * 0xXXXXXXXXXXXXXXXXuLL)`. The runtime bit-casts the integer pattern
+ * back to the IEEE 754 value before filling, so the constant is
+ * bit-identical to the source value -- avoiding the lossy
+ * decimal-format-string round-trip that the pre-fix emitter used. The
+ * shape mirrors `chelis_fill_bf16` / `chelis_fill_f16`. */
+void chelis_fill_f32_bits(chelis_tensor *t, uint32_t bits);
+void chelis_fill_f64_bits(chelis_tensor *t, uint64_t bits);
 /* WS-1 (dtype + Metal cleanup cycle): two-byte fill helpers for bf16
  * and f16 tensors. Codegen computes the exact 16-bit pattern from the
  * IR literal at compile time (the `half` crate's `to_bits()`) and

@@ -733,6 +733,38 @@ pub unsafe extern "C" fn chelis_fill_f64(t: *mut chelis_tensor, val: f64) {
     f64::fill(t, val);
 }
 
+/// Issue #189: bit-pattern fill helper for `Prim::F32` tensors. The C
+/// backend's `emit_const` arm computes `f32::to_bits()` at codegen
+/// time and emits `chelis_fill_f32_bits(t, 0xXXXXXXXXu)`. The runtime
+/// bit-casts the u32 pattern back to the IEEE 754 f32 value before
+/// filling, so the emitted constant is bit-identical to the source
+/// value -- avoiding the lossy `{:.8}` decimal-format-string
+/// round-trip that the pre-fix emitter used.
+///
+/// # Safety
+///
+/// `t` must point to a live `chelis_tensor` whose dtype is
+/// `CHELIS_F32`. Misuse violates the storage-width contract.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_fill_f32_bits(t: *mut chelis_tensor, bits: u32) {
+    f32::fill(t, f32::from_bits(bits));
+}
+
+/// Issue #189: bit-pattern fill helper for `Prim::F64` tensors. Same
+/// contract as `chelis_fill_f32_bits` but for f64 storage; the
+/// `{:.17}` format string the pre-fix emitter used dropped values
+/// below `1e-17` to zero, breaking the eval-vs-backend agreement
+/// invariant.
+///
+/// # Safety
+///
+/// `t` must point to a live `chelis_tensor` whose dtype is
+/// `CHELIS_F64`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_fill_f64_bits(t: *mut chelis_tensor, bits: u64) {
+    f64::fill(t, f64::from_bits(bits));
+}
+
 /// WS-1: write a precomputed bf16 bit pattern into every element of a
 /// bf16-typed tensor. The C backend computes the literal's bf16
 /// representation at codegen time via the `half` crate and emits

@@ -17,7 +17,7 @@
 //! fixtures are written before the fix lands to lock the contract.
 
 use chelis_backend_c::emit::CEmitter;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_types::types::Prim;
 
 fn scalar(p: Prim) -> TensorType {
@@ -69,12 +69,7 @@ fn issue_189_f32_const_emits_exact_bit_pattern() {
 fn issue_189_f64_const_emits_exact_bit_pattern() {
     let mut dag = Dag::new();
     let v: f64 = 1.0e-300;
-    dag.add_node(
-        RiscOp::Const { value: v },
-        vec![],
-        scalar(Prim::F64),
-        None,
-    );
+    dag.add_node(RiscOp::Const { value: v }, vec![], scalar(Prim::F64), None);
     let src = CEmitter::emit_dag(&dag, "test_fn");
     let want_bits = v.to_bits();
     let needle = format!("0x{want_bits:016x}");
@@ -104,12 +99,7 @@ fn issue_189_f32_const_does_not_use_lossy_format() {
     ];
     for &v in values {
         let mut dag = Dag::new();
-        dag.add_node(
-            RiscOp::Const { value: v },
-            vec![],
-            scalar(Prim::F32),
-            None,
-        );
+        dag.add_node(RiscOp::Const { value: v }, vec![], scalar(Prim::F32), None);
         let src = CEmitter::emit_dag(&dag, "test_fn");
         let v32 = v as f32;
         let want_bits = v32.to_bits();
@@ -153,12 +143,7 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
     let v2: f64 = f64::from_bits(v1.to_bits() + 1);
     for v in [v1, v2] {
         let mut dag = Dag::new();
-        dag.add_node(
-            RiscOp::Const { value: v },
-            vec![],
-            scalar(Prim::F64),
-            None,
-        );
+        dag.add_node(RiscOp::Const { value: v }, vec![], scalar(Prim::F64), None);
         let src = CEmitter::emit_dag(&dag, "test_fn");
         let bits = v.to_bits();
         assert!(
@@ -167,4 +152,256 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
              emitted source:\n{src}"
         );
     }
+}
+
+// ---------------------------------------------------------------
+// End-to-end byte-identical compile + run tests.
+//
+// These are the strongest evidence the bit-pattern emission is
+// correct: emit C, gcc-compile, run, read the f32 / f64 value back as
+// its u32 / u64 bit pattern, and require it match the source value's
+// bit pattern exactly.
+// ---------------------------------------------------------------
+
+use chelis_backend_c::codegen;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+
+fn runtime_include_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
+}
+
+fn target_debug_dir() -> PathBuf {
+    let exe = std::env::current_exe().expect("current_exe failed");
+    exe.parent()
+        .and_then(Path::parent)
+        .map(PathBuf::from)
+        .expect("could not resolve target/debug dir from current_exe")
+}
+
+fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
+    if canonical.exists() {
+        return Ok(());
+    }
+    let deps_dir = canonical
+        .parent()
+        .expect("canonical lib path has no parent")
+        .join("deps");
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    if let Ok(entries) = fs::read_dir(&deps_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
+                let meta = entry.metadata()?;
+                let mtime = meta.modified()?;
+                if newest.as_ref().is_none_or(|(cur, _)| mtime > *cur) {
+                    newest = Some((mtime, entry.path()));
+                }
+            }
+        }
+    }
+    let hashed = match newest {
+        Some((_, p)) => p,
+        None => {
+            Command::new(env!("CARGO"))
+                .args(["build", "-p", "chelis-runtime", "--lib"])
+                .status()
+                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
+            let entries = fs::read_dir(&deps_dir)?;
+            let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy().to_string();
+                if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
+                    let meta = entry.metadata()?;
+                    let mtime = meta.modified()?;
+                    if newest.as_ref().is_none_or(|(cur, _)| mtime > *cur) {
+                        newest = Some((mtime, entry.path()));
+                    }
+                }
+            }
+            newest
+                .map(|(_, p)| p)
+                .ok_or_else(|| std::io::Error::other("no libchelis_runtime-*.a after rebuild"))?
+        }
+    };
+    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    fs::copy(&hashed, &tmp)?;
+    match fs::rename(&tmp, canonical) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+fn runtime_lib_path() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let canonical = target_debug_dir().join("libchelis_runtime.a");
+        ensure_runtime_static_lib(&canonical).unwrap_or_else(|e| {
+            panic!(
+                "failed to materialize libchelis_runtime.a at {}: {e}",
+                canonical.display()
+            )
+        });
+        canonical
+    })
+    .clone()
+}
+
+fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
+    let dir = std::env::temp_dir().join(format!("chelis_issue189_{test_name}"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("kernel.c"), c_source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+    let include_dir = runtime_include_dir();
+    for hdr in &[
+        "chelis_runtime.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
+        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
+        fs::write(dir.join(hdr), src).unwrap();
+    }
+    let bin = dir.join("test_bin");
+    let runtime_lib = runtime_lib_path();
+    let compile = Command::new("gcc")
+        .args([
+            "-O2",
+            "-std=c11",
+            "-I",
+            dir.to_str().unwrap(),
+            dir.join("kernel.c").to_str().unwrap(),
+            dir.join("main.c").to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+            runtime_lib.to_str().unwrap(),
+            "-lm",
+            "-lpthread",
+            "-ldl",
+        ])
+        .output()
+        .expect("failed to invoke gcc");
+    if !compile.status.success() {
+        eprintln!(
+            "COMPILE FAILED [{test_name}]:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        eprintln!("Kernel C:\n{c_source}");
+        return None;
+    }
+    let run = Command::new(&bin).output().expect("failed to run binary");
+    if !run.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&run.stdout).into_owned())
+}
+
+/// Acceptance oracle: emitted C, compiled by gcc, must produce an f32
+/// value whose bit pattern matches `(value as f32).to_bits()` for the
+/// issue #189 reproducer. Prior to the fix this test would print a
+/// different hex (about 3% off).
+#[test]
+fn issue_189_f32_const_byte_identical_to_eval_under_gcc() {
+    let v: f64 = 0.000000123456789;
+    let mut dag = Dag::new();
+    dag.add_node(
+        RiscOp::Const { value: v },
+        vec![],
+        TensorType {
+            dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let result = codegen(&dag, "test_const_f32");
+    let src = &result.c_source;
+    let want_bits = (v as f32).to_bits();
+    let harness = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "chelis_runtime.h"
+
+extern void test_const_f32(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main(void) {
+    chelis_tensor* outputs[1] = { NULL };
+    test_const_f32(NULL, 0, outputs, 1);
+    float v;
+    memcpy(&v, outputs[0]->data, sizeof(float));
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(uint32_t));
+    printf("0x%08x\n", bits);
+    return 0;
+}
+"#;
+    let Some(output) = compile_and_run("f32_const_byte_id", src, harness) else {
+        panic!("emitted C did not compile/run");
+    };
+    let expected = format!("0x{want_bits:08x}");
+    assert!(
+        output.trim() == expected,
+        "f32 byte-identical mismatch: expected `{expected}`, got `{}`. Source:\n{src}",
+        output.trim()
+    );
+}
+
+/// f64 sibling: same acceptance check for `f64::to_bits()`. The
+/// pre-fix emitter would format `1.0e-300` as `0.00000000000000000`,
+/// the gcc-parsed literal would be zero, and the runtime would print
+/// `0x0000000000000000`. Post-fix the runtime must print the source
+/// f64 bit pattern verbatim.
+#[test]
+fn issue_189_f64_const_byte_identical_to_eval_under_gcc() {
+    let v: f64 = 1.0e-300;
+    let mut dag = Dag::new();
+    dag.add_node(
+        RiscOp::Const { value: v },
+        vec![],
+        TensorType {
+            dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+            precision: Prim::F64,
+        },
+        None,
+    );
+    let result = codegen(&dag, "test_const_f64");
+    let src = &result.c_source;
+    let want_bits = v.to_bits();
+    let harness = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include "chelis_runtime.h"
+
+extern void test_const_f64(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main(void) {
+    chelis_tensor* outputs[1] = { NULL };
+    test_const_f64(NULL, 0, outputs, 1);
+    double v;
+    memcpy(&v, outputs[0]->data, sizeof(double));
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof(uint64_t));
+    printf("0x%016lx\n", (unsigned long)bits);
+    return 0;
+}
+"#;
+    let Some(output) = compile_and_run("f64_const_byte_id", src, harness) else {
+        panic!("emitted C did not compile/run");
+    };
+    let expected = format!("0x{want_bits:016x}");
+    assert!(
+        output.trim() == expected,
+        "f64 byte-identical mismatch: expected `{expected}`, got `{}`. Source:\n{src}",
+        output.trim()
+    );
 }
