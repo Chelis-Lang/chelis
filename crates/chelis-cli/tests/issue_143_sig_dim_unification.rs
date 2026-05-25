@@ -61,9 +61,11 @@ fn sig_dim_unification_mismatched_concrete_args_is_caught() {
     );
     fmt_inplace(&fixture);
 
-    // `chelis check` writes its diagnostic JSON to stdout and returns
-    // exit 0; the presence of a `DimensionMismatch` entry in the
-    // `errors` array is the failure signal.
+    // `chelis check` writes its diagnostic JSON to stdout; the
+    // presence of a `DimensionMismatch` entry in the `errors` array
+    // is the failure signal. Issue #207 ties the exit code to the
+    // errors array (exit 2 here), but this test asserts on the JSON
+    // content; the dedicated invariant test covers the exit code.
     check_file(&fixture)
         .stdout(predicate::str::contains("DimensionMismatch"))
         .stdout(predicate::str::contains("Lit(2)"))

@@ -36,17 +36,18 @@ fn write_file(path: &Path, contents: &str) {
 
 /// Run `chelis check <path>` and parse stdout as JSON. Parsing rather
 /// than substring-matching keeps these assertions insensitive to
-/// whitespace/key-order changes in the renderer.
+/// whitespace/key-order changes in the renderer. Issue #207 made
+/// `chelis check` exit non-zero when the JSON `errors` array is
+/// non-empty, and `record_only_ctor_still_errors_when_called_positionally`
+/// deliberately expects errors, so this helper captures stdout
+/// without asserting on the process exit code.
 fn run_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .args(["check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).expect("check output should be json")
+        .output()
+        .expect("run chelis check");
+    serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
 fn error_messages(json: &Value) -> Vec<String> {

@@ -66,17 +66,18 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+// Issue #207: `chelis check` now exits non-zero when the JSON
+// `errors` array is non-empty. The RT-4 invariant tests below mix
+// clean and error-expecting cases (e.g. integer matmul rejection)
+// through the same helper.
 fn run_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).expect("check output should be json")
+        .output()
+        .expect("run chelis check");
+    serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
 fn run_build_in(dir: &Path, source: &Path, output: Option<&Path>) -> std::process::Output {

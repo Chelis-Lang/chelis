@@ -526,6 +526,9 @@ def g() -> unit ! {} = assert_true(true, "x")
 "#,
     );
 
+    // Issue #207: `chelis check` exits non-zero (exit 2) when the JSON
+    // `errors` array is non-empty. Assert on stdout content; the
+    // dedicated invariant test covers the exit code separately.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -533,7 +536,6 @@ def g() -> unit ! {} = assert_true(true, "x")
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
         .stdout(predicate::str::contains("UnhandledEffect"))
         .stdout(predicate::str::contains("Test"));
 }
@@ -555,6 +557,7 @@ def h() -> unit ! {} = fail("msg")
 "#,
     );
 
+    // Issue #207: see note above.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -562,7 +565,6 @@ def h() -> unit ! {} = fail("msg")
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
         .stdout(predicate::str::contains("UnhandledEffect"))
         .stdout(predicate::str::contains("Test"));
 }

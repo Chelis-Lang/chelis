@@ -117,7 +117,7 @@ fn issue_207_check_exits_zero_on_clean_program() {
 /// Categories:
 /// * TypeMismatch (def body vs declared sig)
 /// * DimensionMismatch (concrete dim literal vs sig)
-/// * Validator rejection (conv2d stride 0 — same shape RT-205 F7 used,
+/// * Validator rejection (conv2d stride 0; same shape RT-205 F7 used,
 ///   but now exits non-zero per the inverted contract)
 #[test]
 fn issue_207_invariant_holds_across_error_categories() {

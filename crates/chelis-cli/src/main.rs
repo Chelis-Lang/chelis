@@ -520,7 +520,15 @@ fn main() {
             file,
             show_inferred,
             allow_style_violations,
-        }) => cmd_check(&file, show_inferred, allow_style_violations),
+        }) => match cmd_check(&file, show_inferred, allow_style_violations) {
+            // Issue #207: exit code mirrors the JSON `errors` array
+            // (0 iff empty, CHECK_ERRORS_EXIT_CODE otherwise).
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        },
         Some(Command::Cost { file, json }) => cmd_cost(&file, json),
         Some(Command::Validate {
             surf,
@@ -1096,34 +1104,38 @@ fn copy_cost_human(file: &Path, summary: &chelis_ir::analysis::CopyCostSummary) 
     out
 }
 
-/// Exit-code contract (intentional, RT-205 F7):
+/// Exit code returned by `cmd_check` (and the `main` dispatch) when
+/// the JSON `errors` array is non-empty. Matches `chelis test`'s
+/// exit `2` for "compile test context" failures, the surface that
+/// surfaces the same type errors when this gate misses them.
+const CHECK_ERRORS_EXIT_CODE: i32 = 2;
+
+/// Exit-code contract (issue #207, supersedes RT-205 F7):
 ///
-/// `chelis check` always exits 0 when it produced a parseable
-/// fitness report, EVEN WHEN the JSON `errors` array is non-empty.
-/// The report is the product; the JSON shape is the machine-facing
-/// contract that consumer tooling (editor LSP fallback, CI scorers,
-/// the in-repo `defsig_dimension_enforcement` / `check_in_reef_context`
-/// suites, downstream graders) reads via stdout. A non-zero exit on
-/// "type errors found" would force every JSON consumer to special-case
-/// the success-with-errors path, and would break the existing
-/// `assert!.success()` pattern used across the CLI test suite (see
-/// crates/chelis-cli/tests/check_in_reef_context.rs:138,
-/// crates/chelis-cli/tests/defsig_dimension_enforcement.rs:45,79).
+/// `chelis check` exits `0` iff the JSON `errors` array is empty.
+/// Any non-empty `errors` array (type errors, dimension mismatches,
+/// validator rejections, effect errors, linearity errors) produces
+/// exit code [`CHECK_ERRORS_EXIT_CODE`] (currently `2`, matching
+/// `chelis test`'s convention for "compile test context" failures
+/// raised by the same kind of error on a different surface).
 ///
-/// Non-zero exit IS used when the check could not be RUN to completion
-/// (style-gate violation, parser/reef failure, IO error). That is the
-/// orthogonal "tooling broken" failure, not "the program has type
-/// errors".
+/// Before issue #207, the original RT-205 F7 contract intentionally
+/// exited `0` even with errors in the JSON. That contract let
+/// downstream CI gates that treat exit `0` as success silently miss
+/// type errors that `chelis test` later caught as exit `2`. The
+/// machine-facing JSON shape is unchanged; only the process exit
+/// status now reflects the errors array.
 ///
-/// If a consumer wants to fail on errors, they should parse the JSON
-/// and inspect `report.errors[]`. Do not "fix" this by adding a
-/// non-zero exit gate; the directory variant below has its own
-/// `had_error` only for per-file processing failures, not type errors.
+/// Non-zero exit is ALSO produced when the check could not be RUN
+/// to completion (style-gate violation, parser/reef failure, IO
+/// error). Those propagate through `Result::Err` and pick up the
+/// default exit `1` in `main`'s error arm; only the
+/// errors-array-non-empty path uses [`CHECK_ERRORS_EXIT_CODE`].
 fn cmd_check(
     target: &Path,
     show_inferred: bool,
     allow_style_violations: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<i32, Box<dyn std::error::Error>> {
     // Bucket 6b: when given a directory, walk it and run the per-file
     // check on every `.ch` file found. We use the same dot-prefix and
     // `target/` skip rules as `discover_test_files`, so editor tempfiles
@@ -1135,13 +1147,17 @@ fn cmd_check(
             // Match `chelis test` ergonomics and report an empty corpus
             // explicitly rather than silently exiting 0 with no output.
             println!("{{\"files\":[],\"errors\":[]}}");
-            return Ok(());
+            return Ok(0);
         }
         let mut had_error = false;
+        let mut any_errors_in_report = false;
         let mut entries: Vec<String> = Vec::with_capacity(files.len());
         for file in &files {
             match cmd_check_one(file, show_inferred, allow_style_violations) {
-                Ok(json) => {
+                Ok((json, errors_in_report)) => {
+                    if errors_in_report {
+                        any_errors_in_report = true;
+                    }
                     let rel = file.strip_prefix(target).unwrap_or(file).display();
                     entries.push(format!(
                         "{{\"file\":{},\"report\":{json}}}",
@@ -1163,12 +1179,24 @@ fn cmd_check(
         if had_error {
             return Err("one or more files failed to check".into());
         }
-        return Ok(());
+        // Issue #207 invariant: any file with a non-empty errors array
+        // in its report triggers the same exit code as the single-file
+        // path. Per-file processing failures (Err arm above) keep the
+        // legacy "tooling broken" exit-1 path through `Err`.
+        return Ok(if any_errors_in_report {
+            CHECK_ERRORS_EXIT_CODE
+        } else {
+            0
+        });
     }
 
-    let json = cmd_check_one(target, show_inferred, allow_style_violations)?;
+    let (json, errors_in_report) = cmd_check_one(target, show_inferred, allow_style_violations)?;
     println!("{json}");
-    Ok(())
+    Ok(if errors_in_report {
+        CHECK_ERRORS_EXIT_CODE
+    } else {
+        0
+    })
 }
 
 /// Walk a directory and collect all `.ch` files, mirroring
@@ -1211,11 +1239,15 @@ fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
+/// Returns the JSON report plus a flag indicating whether the report's
+/// `errors` array is non-empty. The flag is the source of truth for
+/// the issue #207 exit-code invariant; callers must thread it back
+/// through to the process exit status.
 fn cmd_check_one(
     file: &Path,
     show_inferred: bool,
     allow_style_violations: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<(String, bool), Box<dyn std::error::Error>> {
     if let Ok(source) = fs::read_to_string(file) {
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
         emit_advisory_lint_warnings_for_file(file);
@@ -1375,7 +1407,11 @@ fn cmd_check_one(
         },
         errors_json.join(","),
     );
-    Ok(json)
+    // Issue #207: surface the non-empty-errors flag so the caller can
+    // map it to the process exit code. The fitness JSON shape is
+    // unchanged; this is purely an out-of-band signal.
+    let errors_in_report = !errors_json.is_empty();
+    Ok((json, errors_in_report))
 }
 
 fn emit_advisory_lint_warnings_for_file(file: &Path) {

@@ -172,7 +172,7 @@ def bad_seqlen(q: tensor[3, 4, f32], k: tensor[4, 4, f32], v: tensor[4, 4, f32],
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
+        // Issue #207: type errors produce exit 2; assert on stdout content only.
         .stdout(predicate::str::contains("\"score\": 1").not())
         .stdout(predicate::str::contains("DimensionMismatch"));
 }
@@ -198,7 +198,7 @@ def bad_headdim(q: tensor[4, 8, f32], k: tensor[4, 4, f32], v: tensor[4, 4, f32]
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
+        // Issue #207: type errors produce exit 2; assert on stdout content only.
         .stdout(predicate::str::contains("\"score\": 1").not())
         .stdout(predicate::str::contains("DimensionMismatch"));
 }
@@ -224,7 +224,7 @@ def bad_group_map(pool: tensor[1, 4, 4, f32], gm: tensor[2, 3, int64]) -> tensor
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
+        // Issue #207: type errors produce exit 2; assert on stdout content only.
         .stdout(predicate::str::contains("\"score\": 1").not())
         .stdout(predicate::str::contains("DimensionMismatch"));
 }
@@ -250,7 +250,7 @@ def bad_channels(x: tensor[1, 4, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tens
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
+        // Issue #207: type errors produce exit 2; assert on stdout content only.
         .stdout(predicate::str::contains("\"score\": 1").not())
         .stdout(predicate::str::contains("DimensionMismatch"));
 }
@@ -276,7 +276,7 @@ def bad_kernel_len(x: tensor[1, 4, 1, 16, f32], k: tensor[8, 4, 1, 5, f32]) -> t
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
+        // Issue #207: type errors produce exit 2; assert on stdout content only.
         .stdout(predicate::str::contains("\"score\": 1").not())
         .stdout(predicate::str::contains("DimensionMismatch"));
 }
