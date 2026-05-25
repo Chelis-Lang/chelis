@@ -20,7 +20,7 @@ jobs:
     name: Lint and Unit Tests (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
@@ -71,7 +71,7 @@ jobs:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
@@ -127,7 +127,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [lint-and-unit, integration]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Pinned to v8.1.0 — see lint-and-unit job for rationale.
       - name: Install uv
@@ -153,7 +153,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -217,7 +217,7 @@ jobs:
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
@@ -238,7 +238,7 @@ jobs:
     name: No AI authorship markers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -291,7 +291,7 @@ jobs:
     name: Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

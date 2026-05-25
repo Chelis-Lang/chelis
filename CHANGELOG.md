@@ -22,6 +22,18 @@ only the recognized syntactic forms instead of reverse-engineering
 behavior from stdlib examples. Pure docs / fixture change; no
 compiler or language behavior changed.
 
+### Changed - CI: bump GitHub Actions to Node-24-compatible versions (#188)
+
+Bumps the four pinned JavaScript actions in `.github/workflows/` to releases
+that target Node 24, ahead of GitHub's 2026-06-02 default-runtime cutover:
+
+- `actions/checkout@v4` -> `@v6` (ci.yml, release.yml, heavy-e2e.yml)
+- `softprops/action-gh-release@v2` -> `@v3` (release.yml)
+
+`docs/maintenance_schedule.md` updated to reflect the migration completing
+and to record the verified-Node-24 adjacent pins (`Swatinem/rust-cache@v2`,
+`astral-sh/setup-uv@v8.1.0`).
+
 ## [0.7.18] — 2026-05-25
 
 Hotfix release. Closes a zero-offset spurious-consume linearity bug class
