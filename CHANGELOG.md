@@ -6,11 +6,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.7.16] — 2026-05-25
+## [0.7.17] — 2026-05-25
 
 Lint cleanup. Removes the `module-pascal-components` rule and its
 `KNOWN_SINGLE_WORDS` allowlist. No language or compiler behavior
 changes; only the lint surface shrinks.
+
+This is the second cut on 2026-05-25; v0.7.16 (commit `9ec2e55`,
+"Add std wrappers for scan index and sort") was tagged in parallel
+with PR #234 and consumed the 0.7.16 version slot.
 
 ### Removed - module-pascal-components rule
 
