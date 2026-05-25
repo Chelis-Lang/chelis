@@ -3921,15 +3921,28 @@ fn tensor_reduce_host(
                 }
             }
             ReduceOp::Min | ReduceOp::Max | ReduceOp::Prod => best_value,
-            // Argmax/Argmin: store integer indices as integer-valued F32 per
-            // the Phase 3j-pre Batch 1 caveat (documented on RiscOp::Argmax
-            // and adv_argmax_output_stores_integer_valued_floats).
+            // Argmax/Argmin: write the integer index into the f64 storage
+            // slot. The surrounding `precision` tag is `Prim::Int64`
+            // (set below per chelis#233), so downstream consumers read
+            // these slots back as int64 scalars.
             ReduceOp::Argmax | ReduceOp::Argmin => best_index as f64,
         };
     }
+    // chelis#233: argmax_reduce / argmin_reduce return integer indices,
+    // not reduced operand values, so the storage precision must be
+    // `Prim::Int64` regardless of the input precision. This matches the
+    // type-system label widened in #230 and prevents downstream
+    // primitives that branch on `RuntimeTensorValue::precision` (`eq`,
+    // `to_list`, `tensor_to_scalar`) from misclassifying the result as
+    // the input's float dtype. The other reductions return values at
+    // the input dtype and preserve `tensor.precision`.
+    let out_precision = match op {
+        ReduceOp::Argmax | ReduceOp::Argmin => Prim::Int64,
+        ReduceOp::Sum | ReduceOp::Min | ReduceOp::Max | ReduceOp::Prod => tensor.precision,
+    };
     Ok(RuntimeTensorValue {
         value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
+        precision: out_precision,
     })
 }
 

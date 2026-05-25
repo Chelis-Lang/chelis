@@ -531,12 +531,23 @@ pub enum RiscOp {
     },
     /// Index of maximum element along `axis`.
     ///
-    /// Note: per Phase 3j-pre, argmax/argmin logically return integer indices.
-    /// The evaluator stores them as f64 integer-valued floats and the type
-    /// system carries whatever precision the caller assigns (typically F32,
-    /// since the C backend only supports F32/Bool tensors). The Std wrapper
-    /// layer (Batch 2) is responsible for casting/annotating as needed.
-    /// TODO(phase3j): widen backend runtime to carry Int64 tensors natively.
+    /// argmax / argmin logically return integer indices, and per chelis#230
+    /// the type-system result is canonically `tensor[..., int64]`
+    /// regardless of input precision. Per chelis#233 the host-runtime
+    /// adapter (`chelis_compiler_api::runtime::tensor_reduce_host`) tags
+    /// the produced `RuntimeTensorValue` with `Prim::Int64` storage, so
+    /// `eq` / `to_list` / `tensor_to_scalar` see a matching precision
+    /// label.
+    ///
+    /// The IR-level evaluator (`chelis_ir::eval::reduce_argcmp`) keeps
+    /// the precision-erased f64 representation other reductions use; the
+    /// storage widening lives in the host-runtime adapter that attaches
+    /// the precision tag.
+    ///
+    /// The C/HIP backend lanes do not yet carry Int64 tensors natively,
+    /// so the backend-runtime continues to store integer-valued floats.
+    /// The Std wrapper layer is responsible for any casts the backend
+    /// needs (see `packages/chelis-std/src/tensor/reduce.ch`).
     Argmax {
         axis: usize,
     },
