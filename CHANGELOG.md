@@ -34,6 +34,21 @@ that target Node 24, ahead of GitHub's 2026-06-02 default-runtime cutover:
 and to record the verified-Node-24 adjacent pins (`Swatinem/rust-cache@v2`,
 `astral-sh/setup-uv@v8.1.0`).
 
+### Fixed - `doc-filename-convention` retroactive flip (#190)
+
+`crates/chelis-lint/src/rules/doc_filename_convention.rs` previously
+classified every `.md` under `docs/` by walking ancestors for a
+`book.toml` marker, which made the §8.3-vs-§8.5 verdict depend on
+unrelated filesystem state. Dropping a `book.toml` into `docs/`
+flipped every narrative `docs/foo_bar.md` from accepted to rejected
+(and removing the file flipped them back). The discriminator is now
+path-based: §8.5 applies only to paths whose components include a
+directory literally named `book` (most commonly `docs/book/` in the
+chelis layout). `book.toml` is no longer read by the lint.
+
+Spec §8.5 in `spec/01-nomenclature.md` updated to match. Invariant
+coverage in `crates/chelis-lint/tests/issue_190_doc_filename_path_based.rs`.
+
 ## [0.7.18] — 2026-05-25
 
 Hotfix release. Closes a zero-offset spurious-consume linearity bug class
