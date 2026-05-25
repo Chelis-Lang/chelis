@@ -6,6 +6,36 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.18] — 2026-05-25
+
+Hotfix release. Closes a zero-offset spurious-consume linearity bug class
+across multiple consumer paths (closure capture + pipe-stage auto-borrow
+inference) that 0.7.17 still surfaced on downstream shells (coral, hydronnx).
+The sibling-sweep also folds in chelis#229.
+
+### Fixed - zero-offset spurious-consume linearity bug across closure capture + pipe-stage paths (#237, #229, PR #239)
+
+`crates/chelis-types/src/linearity.rs::check_fn` unconditionally structurally
+consumed every captured tensor-carrying name in a closure body regardless of
+how the body actually used it, producing zero-offset `was already consumed by
+closure capture` diagnostics on any reuse of the captured variable. Same root
+shape as #226: the consumer pass was mis-classifying without consulting the
+inner callee's borrow signature.
+
+`crates/chelis-types/src/infer.rs::pipe_consumes_param` had the parallel bug
+that #229 documented: it only recognized the bare-var pipe-stage shape, so
+explicit-arg pipe stages (`x |> add(k)`) became synthesized `__chelis_pipe`
+lambdas it mis-classified as consuming uses.
+
+The fix factors a shared `crates/chelis-types/src/pipe_stage.rs` helper for
+callee resolution and wires both consumer passes through it. `check_fn` now
+calls `param_has_consuming_use` instead of blanket-consuming captures;
+`check_app` (direct call) and `arg_is_borrowed` consult `signature_inference`
+for inferred-readonly callees.
+
+Locked by `crates/chelis-types/tests/issue_237_linearity_sweep.rs` with 9
+tests (6 closure-capture + 3 pipe-stage).
+
 ## [0.7.17] — 2026-05-25
 
 Lint cleanup. Removes the `module-pascal-components` rule and its
