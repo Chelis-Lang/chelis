@@ -576,6 +576,156 @@ ordinary `def` carrying the property metadata specified in
 nor the property annotation; it checks the resulting Deep function against the
 signature like any other definition.
 
+### 4.7 Runtime Shape Semantics
+
+Some Chelis programs need to pass a runtime axis size as an argument to a
+movement primitive, typically when the input tensor has a symbolic batch
+dimension that is only known at run time. The relevant built-ins are:
+
+- `shape(x, axis)`: returns the size of `x`'s `axis`-th dimension as an
+  `int32` value. `axis` must be a concrete non-negative integer literal
+  (either a bare `int32` literal or a `cast(N, int32)` form; both reach
+  the axis-bounds check). The result is a runtime scalar, not a symbolic
+  dim reference.
+- `expand(x, axis, size)`: insert or set a dimension at position `axis`
+  with width `size`.
+- `reshape(x, shape_list)`: reinterpret the memory of `x` against
+  `shape_list`, a `List<Int64>`.
+
+This section pins which call shapes preserve symbolic dims in the type
+checker's output and which fall back to `(d-name {} *)` (see §4.5). The
+canonical examples live in
+[`examples/illustrative/runtime_shape_semantics.ch`](../examples/illustrative/runtime_shape_semantics.ch).
+
+#### 4.7.1 `shape` axis form
+
+Both forms below produce an `int32` value and both pass the infer-time
+axis-bounds check (`cast(N, int32)` is unwrapped by the cast-aware
+extractor described in `crates/chelis-types/src/infer.rs`):
+
+```text
+shape(x, 0)
+shape(x, cast(0, int32))
+```
+
+Internal callers (stdlib) use the `cast(0, int32)` form for stability
+against future literal-default changes. User code MAY use either.
+
+A negative axis or an axis greater than or equal to the input rank is a
+type error (`DimensionMismatch`).
+
+#### 4.7.2 `expand` with a runtime size
+
+`expand(x, axis, size)` accepts three forms for its `size` argument:
+
+1. an integer literal (or `cast(N, int32)` form): produces an output
+   dim of `(d-lit {} N)`.
+2. a symbolic dim name in scope (a bare `var` reference such as a
+   declared `[batch]` dim parameter): produces an output dim of
+   `(d-name {} batch)`.
+3. any other `int32` expression, including a runtime `shape(...)`
+   call: the typer defers the output rank slot to whatever the
+   declared signature's return-type or the surrounding call context
+   imposes via standard unification.
+
+Form (3) is how the `bias_broadcast` pattern from
+`examples/illustrative/runtime_shape_semantics.ch` preserves the
+symbolic batch dim `n`:
+
+```chelis
+sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
+def bias_broadcast(x, b) -> tensor[n, 4, f32] = expand(b, 0, shape(x, cast(0, int32)))
+```
+
+The declared return type `tensor[n, 4, f32]` is unified with the
+fresh result tvar produced for the `expand` call; the typer does not
+need to derive the symbolic dim from the runtime `shape(...)`
+expression itself. If the call site does not impose a known dim at
+the expanded axis (for example, an unannotated `let` binding), the
+output dim at that axis falls back to `(d-name {} *)`.
+
+#### 4.7.3 `reshape` with runtime sizes from `shape(x, ...)`
+
+`reshape` recognizes one specific syntactic source for each element
+of its shape list and propagates the corresponding input axis into
+the result type. The recognized form for a shape-list element is:
+
+```text
+cast(shape(<reshape-input-var>, <literal-axis>), int64)
+```
+
+All four conditions are required:
+
+1. The outer `cast`'s target type is `int64` (matching the
+   `List<Int64>` element type that `reshape` expects).
+2. The cast's inner expression is a `shape(...)` call.
+3. The `shape` call's first argument is a bare `var` whose bound name
+   is the same as the reshape's input tensor argument.
+4. The `shape` call's axis argument extracts to a concrete
+   non-negative integer (literal or `cast(N, int32)` form).
+
+When all four conditions hold, the typer propagates the input's dim
+at the named axis into the corresponding output dim. The
+`flatten_batch` and `flatten_two` patterns from
+`examples/illustrative/runtime_shape_semantics.ch` are the canonical
+examples:
+
+```chelis
+sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+def flatten_batch(x) -> tensor[n, 4, f32] = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+```
+
+A plain integer literal element (`cast(4, int64)`) still produces
+`(d-lit {} 4)`. Any element shape that is not literal and does not
+match the four conditions above falls back to `(d-name {} *)`.
+
+#### 4.7.4 Patterns that fall back to wildcard
+
+The following shape-list forms in `reshape` fall back to
+`(d-name {} *)` for that element. The typer does NOT manufacture a
+symbolic dim for them; the contract is "recognize the exact
+syntactic pattern from §4.7.3 or fall back."
+
+- **Cross-tensor shape source**: `cast(shape(y, axis), int64)` where
+  `y` is a different tensor than the one being reshaped. The
+  recognizer's same-input-var check requires bound-name equality.
+  Inventing a propagated dim here would silently unify two distinct
+  declared dim parameters and trip the rigidity check in §4.4.
+- **Arithmetic or other expression wrappers**: `cast(add(shape(x,
+  0), 1), int64)`, `cast(mul(shape(x, 0), 2), int64)`, etc. The
+  outer cast peel does not find a direct `shape(input, lit_axis)`
+  call, so the recognizer falls back. Propagating `x`'s dim through
+  an arithmetic wrapper would be unsound.
+- **Non-`var` reshape input**: `reshape(reshape(x, ...), [...])`
+  where the inner reshape is the input. The reshape input is not a
+  bare `var` Deep node, so there is no input-var name to match
+  against the inner `shape(...)`'s tensor arg. Inner reshape's body
+  still type-checks via the polymorphic fresh result tvar unifying
+  with the declared signature.
+
+#### 4.7.5 Precision rule for `reshape`'s shape list
+
+`reshape`'s shape list is `List<Int64>`. The bare `shape(x, k)`
+returns `int32`, so a runtime axis size MUST be cast to `int64`
+before it can appear in the shape list:
+
+```text
+reshape(x, [shape(x, 0), 4])                          ;; TYPE ERROR: int32 vs int64
+reshape(x, [cast(shape(x, 0), int64), cast(4, int64)]) ;; OK
+```
+
+#### 4.7.6 Out-of-scope: arbitrary runtime shape expressions
+
+Chelis does NOT currently propagate symbolic dims through arbitrary
+runtime shape expressions. If a downstream tool needs to emit code
+that derives a reshape dim from an arithmetic combination of input
+axes (`shape(x, 0) * 2`, `add(shape(x, 0), shape(y, 0))`, etc.), the
+result dim is `(d-name {} *)` and the surrounding code must accept
+that wildcard. The recommended downstream pattern is to emit only
+the recognized forms in §4.7.3 and reject other shapes at the tool
+boundary with a clear diagnostic, so the user is not surprised by a
+silent `Wildcard` cascade.
+
 ---
 
 ## 5. Precision Type Rules

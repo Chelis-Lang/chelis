@@ -6,6 +6,22 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documentation - canonical runtime shape semantics in spec §4.7 (#208)
+
+`spec/04-type-system.md` gains a new §4.7 "Runtime Shape Semantics"
+that pins which `shape` / `expand` / `reshape` call shapes preserve
+symbolic dims and which fall back to `(d-name {} *)`. The canonical
+patterns from chelis#208 (`bias_broadcast` via runtime-sized
+`expand`, `flatten_batch` via `cast(shape(x, axis), int64)` in
+`reshape`) live as a fully-checked illustrative fixture at
+`examples/illustrative/runtime_shape_semantics.ch`, and §4.7 cites
+that file. Fall-back cases (cross-tensor shape source, arithmetic
+wrappers, non-`var` reshape input) are documented so downstream
+tools (Hydronnx, Calcify, other shells emitting Chelis) can emit
+only the recognized syntactic forms instead of reverse-engineering
+behavior from stdlib examples. Pure docs / fixture change; no
+compiler or language behavior changed.
+
 ## [0.7.18] — 2026-05-25
 
 Hotfix release. Closes a zero-offset spurious-consume linearity bug class
