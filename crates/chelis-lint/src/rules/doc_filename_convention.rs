@@ -99,11 +99,8 @@ fn classify_doc(path: &Path) -> Slot {
 /// `book.toml` is not read here; it is documented for mdBook users in
 /// the spec but is not used as a lint discriminator.
 fn is_inside_mdbook_tree(path: &Path) -> bool {
-    path.components().any(|c| {
-        c.as_os_str()
-            .to_str()
-            .is_some_and(|name| name == "book")
-    })
+    path.components()
+        .any(|c| c.as_os_str().to_str().is_some_and(|name| name == "book"))
 }
 
 /// True if the filename stem of `path` (without the `.md` extension)
