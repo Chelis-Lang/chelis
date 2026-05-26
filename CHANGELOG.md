@@ -49,6 +49,26 @@ chelis layout). `book.toml` is no longer read by the lint.
 Spec §8.5 in `spec/01-nomenclature.md` updated to match. Invariant
 coverage in `crates/chelis-lint/tests/issue_190_doc_filename_path_based.rs`.
 
+### Fixed - C backend f32/f64 Const emission no longer drifts vs evaluator (#189)
+
+The `emit_const` arms for F32 and F64 in `crates/chelis-backend-c/src/emit.rs`
+previously rendered the IR's f64 source value through a decimal format
+string (`{:.8}f` for F32, `{:.17}` for F64). Both format specifiers
+print decimal-places-after-the-point rather than significant digits,
+so values like `0.000000123456789` (issue #189 reproducer) parsed back
+to a different f32 bit pattern -- about 3% off -- and `f64` values
+below `1e-17` collapsed to zero. The same lossy pattern lived on the
+Pad-fill arm.
+
+The C backend now emits the source value's exact bit pattern
+(`f32::to_bits()` / `f64::to_bits()`) and dispatches through new
+`chelis_fill_f32_bits` / `chelis_fill_f64_bits` runtime helpers. The
+helpers bit-cast the integer pattern back to the IEEE 754 value before
+filling, so the emitted constant is bit-identical to the eval-path
+representation (for f64) or the closest-f32 narrowing (for f32). The
+same architectural shape as the existing bf16 / f16 bit-pattern fill
+helpers.
+
 ## [0.7.18] — 2026-05-25
 
 Hotfix release. Closes a zero-offset spurious-consume linearity bug class
