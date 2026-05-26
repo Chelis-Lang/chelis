@@ -6,6 +6,17 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.19] — 2026-05-26
+
+Wave-1 follow-up release. Closes six issues filed during the 0.7.13–0.7.18
+cycle (#185–#208 sprint plus targeted follow-ups #218/#219/#229/#232/#233/#237)
+that the released-binary downstream tooling surfaced: lossy C-backend f32
+constant emission, doc-filename lint retroactive flip, AD-CLI silent
+zero-grad, `chelis check` exit-code contract gap, runtime-shape docs gap,
+and the GitHub Actions Node-20 → Node-24 deadline. Wave-1 red-team pass
+found 4 findings (2 MEDIUM, 2 LOW) which were folded into PR #247 ahead
+of this tag.
+
 ### Fixed - Wave-1 red-team follow-ups: #207 parse-error JSON + empty-file rejection, §4.7.5 spec direction, #188 artifact actions
 
 Four findings from the Wave-1 red-team pass on PRs #188 / #189 / #190 /
