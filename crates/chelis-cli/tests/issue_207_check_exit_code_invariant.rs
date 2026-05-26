@@ -195,3 +195,71 @@ fn issue_207_invariant_holds_for_clean_program() {
         "issue #207 invariant: clean program must exit 0; stdout={stdout}"
     );
 }
+
+/// Wave-1 red-team finding M2: an empty (or whitespace-only) `.ch` file
+/// previously reported `{score: 1, errors: []}` and exited 0, while
+/// `chelis build` accepted it and produced a no-op C function. Both
+/// surfaces now reject a zero-declaration program with the same message
+/// (`empty program: no declarations found`). The `check` surface raises
+/// it via the JSON errors array (kind `Other`) and exits with
+/// `CHECK_ERRORS_EXIT_CODE`. The `build` surface raises it via the
+/// process error arm.
+#[test]
+fn rt_wave1_207_empty_file_check_rejects_with_error() {
+    let src = "";
+    let tmp = write_tempfile("rt207-empty-", src);
+    let (code, stdout) = run_check_capture(tmp.path());
+    let errors = parse_errors_array(&stdout);
+    assert!(
+        !errors.is_empty(),
+        "empty .ch must produce a non-empty errors array; stdout={stdout}"
+    );
+    let has_empty_program = errors.iter().any(|e| {
+        e.get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.contains("empty program"))
+    });
+    assert!(
+        has_empty_program,
+        "empty file must produce an 'empty program' error; stdout={stdout}"
+    );
+    assert_eq!(
+        code,
+        Some(CHECK_ERRORS_EXIT_CODE),
+        "empty file must exit {CHECK_ERRORS_EXIT_CODE}; stdout={stdout}"
+    );
+}
+
+/// Wave-1 red-team finding M2: `chelis build` on a zero-declaration
+/// file must reject with the same canonical message that `chelis check`
+/// surfaces. Previously build emitted a no-op C function; the check
+/// vs. build disagreement was the footgun.
+#[test]
+fn rt_wave1_207_empty_file_build_rejects_with_same_message() {
+    let src = "";
+    let tmp = write_tempfile("rt207-empty-build-", src);
+    // Build emits header / object / runtime artifacts into the working
+    // directory by default; sandbox them in a tempdir so the test does
+    // not pollute the crate directory when run via cargo.
+    let outdir = tempfile::tempdir().expect("create build outdir");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(outdir.path())
+        .args(["build", tmp.path().to_str().expect("path utf8")])
+        .output()
+        .expect("run chelis build");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "build on empty file must fail; combined output={combined}"
+    );
+    assert!(
+        combined.contains("empty program"),
+        "build on empty file must mention 'empty program'; combined output={combined}"
+    );
+}
