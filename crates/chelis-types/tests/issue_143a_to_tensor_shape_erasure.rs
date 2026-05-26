@@ -23,17 +23,18 @@
 //!
 //! What this test asserts
 //! ----------------------
-//! The probe (`#[ignore]`) documents the desired post-fix behavior:
+//! Regression lock for the post-fix behavior delivered by PR #227:
 //! passing two `to_tensor` results with different statically-derivable
-//! shapes into a sig with a shared dim var must trip `DimensionMismatch`.
-//! Today this test fails (no DimensionMismatch is reported) — which is
-//! exactly the bug. The `#[ignore]` is the regression-in-waiting; remove
-//! it once the fix lands.
+//! shapes into a sig with a shared dim var trips `DimensionMismatch`.
+//! The `static_to_tensor_shape` walker in `chelis-types::infer`
+//! emits per-axis `Dim::Lit(n)` from the list-literal Cons chain so
+//! the sig var `n` binds to `Lit(3)` on the first arg and rejects
+//! `Lit(5)` on the second.
 //!
-//! The counter-probe (passes today) demonstrates that the sig-dim
-//! unification path itself works correctly when the args carry concrete
-//! `Lit` dims — isolating the bug to tensor-builder shape erasure, not
-//! `unify_dim`.
+//! The counter-probe demonstrates that the sig-dim unification path
+//! itself works correctly when the args carry concrete `Lit` dims —
+//! complementary coverage isolating the original bug surface to
+//! tensor-builder shape erasure, not `unify_dim`.
 //!
 //! Tracking: chelis#158 (sub-issue (A) of chelis#143)
 //! Diagnosis: docs/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md
@@ -71,8 +72,6 @@ fn errors_summary(errors: &[CheckError]) -> String {
 }
 
 #[test]
-#[ignore = "tracking: chelis#158 - to_tensor erases list-literal shape; \
-            see docs/investigations/issue_143a_to_tensor_shape_erasure_diagnosis.md"]
 fn to_tensor_mismatched_list_lengths_should_trip_dim_mismatch() {
     // Desired post-fix behavior:
     //   - `to_tensor([f32; 3])` infers `tensor[Lit(3), f32]`
