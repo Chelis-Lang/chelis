@@ -108,6 +108,28 @@ Locked by `crates/chelis-cli/tests/grad_errors.rs` (5 tests:
 argmax, argmin, floor, ceil negatives + matmul-grad positive
 parity).
 
+### Fixed - `chelis check` exit code mirrors JSON `errors` array (#207)
+
+`chelis check` previously exited `0` even when its JSON report
+contained `TypeMismatch`, `DimensionMismatch`, validator, effect, or
+linearity errors. Downstream CI gates that treat exit `0` as success
+silently accepted programs that `chelis test` later rejected with
+exit `2`. Issue #207 inverts the RT-205 F7 contract: the exit code
+now mirrors the errors array — exit `0` iff `errors[]` is empty,
+exit `2` otherwise (matching `chelis test`'s convention for
+"compile test context" failures). The machine-facing JSON shape is
+unchanged.
+
+This is a user-visible behavior change. Shell-script consumers that
+relied on the previous "always exit 0" contract should either parse
+the JSON `errors[]` array (the recommended path for tools that need
+finer detail) or accept the new exit code. Test helpers and
+fixtures in the in-repo CLI corpus were updated alongside the fix.
+
+The exit-code invariant is locked by
+`crates/chelis-cli/tests/issue_207_check_exit_code_invariant.rs`,
+which sweeps four error categories plus the clean-program control.
+
 ## [0.7.18] — 2026-05-25
 
 Hotfix release. Closes a zero-offset spurious-consume linearity bug class

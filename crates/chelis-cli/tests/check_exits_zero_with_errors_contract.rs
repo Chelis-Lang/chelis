@@ -1,32 +1,38 @@
-//! Red Team #205 finding F7: `chelis check` exit-code contract.
+//! Issue #207 inversion of the original RT-205 F7 contract.
 //!
-//! `chelis check` intentionally exits 0 when it produced a parseable
-//! fitness report, regardless of whether the JSON `errors` array is
-//! empty or full. The JSON shape is the machine-facing contract;
-//! consumer tooling reads stdout and inspects `report.errors[]`. A
-//! non-zero exit on "type errors found" would break that contract.
+//! The original RT-205 F7 contract pinned `chelis check` to exit `0`
+//! even when the JSON `errors` array was non-empty. Issue #207
+//! inverted that decision: the exit code now mirrors the errors
+//! array (0 iff empty, non-zero otherwise) so shell-script
+//! consumers no longer have to parse the JSON to detect type errors.
 //!
-//! This file pins the contract directly so future refactors do not
-//! silently flip the behavior. Two existing tests in
-//! `check_in_reef_context.rs` cover the same surface but are gated
-//! behind a reef-context setup; this one runs in the default inner
-//! loop and uses only a tempfile.
+//! This file's pre-#207 name is preserved so the git history of the
+//! contract flip is searchable. The validator-rejection fixture is
+//! the same shape RT-205 F7 used; the assertion is now `exit 2 +
+//! non-empty errors` instead of `exit 0 + non-empty errors`.
 //!
-//! The owning code comment lives at the head of `cmd_check` in
+//! See `crates/chelis-cli/tests/issue_207_check_exit_code_invariant.rs`
+//! for the full iff sweep across multiple error categories. The owning
+//! code comment lives at the head of `cmd_check` in
 //! `crates/chelis-cli/src/main.rs`.
 
 use assert_cmd::Command;
 use serde_json::Value;
 use std::io::Write;
 
+/// `chelis check` exit code on a non-empty errors array. Matches
+/// `chelis test`'s exit `2` for "compile test context" failures.
+const CHECK_ERRORS_EXIT_CODE: i32 = 2;
+
 #[test]
-fn red_team_205_f7_check_exits_zero_when_validator_rejects_conv2d() {
+fn issue_207_check_exits_nonzero_when_validator_rejects_conv2d() {
     // Concrete-shape conv2d with stride 0; the RT-205 F1 fix rejects
-    // this at validator time. Without the F7 contract this would
-    // exit non-zero, but the JSON-tooling contract requires exit 0
-    // with a non-empty errors array.
+    // this at validator time. Pre-#207 this exited 0 with a non-empty
+    // errors array. Post-#207 the exit code matches the errors array
+    // so downstream CI shell scripts can detect the rejection without
+    // parsing JSON.
     let mut tmp = tempfile::Builder::new()
-        .prefix("rt205-f7-")
+        .prefix("issue207-validator-")
         .suffix(".ch")
         .tempfile()
         .expect("create tempfile");
@@ -39,12 +45,14 @@ fn red_team_205_f7_check_exits_zero_when_validator_rejects_conv2d() {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", tmp.path().to_str().expect("path utf8")])
-        .assert()
-        .success() // F7 contract: exit 0 even when validator rejects
-        .get_output()
-        .stdout
-        .clone();
-    let stdout = String::from_utf8(output).expect("utf8");
+        .output()
+        .expect("run chelis check");
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    assert_eq!(
+        output.status.code(),
+        Some(CHECK_ERRORS_EXIT_CODE),
+        "issue #207: validator rejection must exit {CHECK_ERRORS_EXIT_CODE}; stdout={stdout}"
+    );
     let json: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|err| panic!("chelis check stdout must be valid JSON: {err}\n{stdout}"));
     let errors = json

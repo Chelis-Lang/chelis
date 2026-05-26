@@ -28,17 +28,19 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+// Issue #207: `chelis check` now exits non-zero when the JSON
+// `errors` array is non-empty. The negative cases below
+// (`def_precision_name_not_in_quantifier_list_errors`,
+// `def_with_no_quantifier_list_unbound_precision_errors`) expect
+// errors, so this helper captures stdout regardless of exit code.
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).expect("check output should be json")
+        .output()
+        .expect("run chelis check");
+    serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
 /// The WS-C v2 reproducer. Before WS-A6, the def's parameter annotation

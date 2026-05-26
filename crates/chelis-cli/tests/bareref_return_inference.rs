@@ -42,17 +42,19 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+// Issue #207 changed `chelis check` to exit non-zero when the JSON
+// `errors` array is non-empty. This helper is shared between the
+// clean-program tests and the negative bare-ref return-inference
+// tests, so it captures stdout via `.output()` without asserting on
+// exit status.
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).expect("check output should be json")
+        .output()
+        .expect("run chelis check");
+    serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
 fn assert_clean(json: &Value, label: &str) {

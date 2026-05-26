@@ -1,0 +1,197 @@
+//! Issue #207: `chelis check` exit-code invariant.
+//!
+//! Invariant: `exit_code != 0` iff `json.errors.len() > 0`.
+//!
+//! Empty errors array implies exit 0; any non-empty errors array implies
+//! exit non-zero. The previous (RT-205 F7) contract intentionally
+//! exited 0 even with type errors in the JSON, which let downstream CI
+//! gates accept programs that `chelis test` later rejected with exit 2.
+//! Issue #207 reversed that decision: machine-facing JSON stays the
+//! same, but the exit code now matches the contents of `errors[]` so
+//! shell-script consumers do not have to parse the JSON to detect a
+//! type error.
+//!
+//! Exit code on errors: `2`, matching the `chelis test` convention for
+//! "compile test context" failures (the same kind of error surfaced by
+//! the same input on a different surface).
+//!
+//! Owning code: `cmd_check` and `cmd_check_one` in
+//! `crates/chelis-cli/src/main.rs`.
+
+use assert_cmd::Command;
+use serde_json::Value;
+use std::io::Write;
+
+/// Exit code for `chelis check` when the JSON `errors` array is
+/// non-empty. Matches `chelis test`'s exit 2 for "compile test context"
+/// failures (the surface that previously caught what `chelis check`
+/// missed).
+const CHECK_ERRORS_EXIT_CODE: i32 = 2;
+
+fn write_tempfile(prefix: &str, src: &str) -> tempfile::NamedTempFile {
+    let mut tmp = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".ch")
+        .tempfile()
+        .expect("create tempfile");
+    tmp.write_all(src.as_bytes()).expect("write tempfile");
+    tmp.flush().expect("flush tempfile");
+    tmp
+}
+
+fn run_check_capture(path: &std::path::Path) -> (Option<i32>, String) {
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().expect("path utf8")])
+        .output()
+        .expect("run chelis check");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    (output.status.code(), stdout)
+}
+
+fn parse_errors_array(stdout: &str) -> Vec<Value> {
+    let json: Value = serde_json::from_str(stdout)
+        .unwrap_or_else(|err| panic!("chelis check stdout must be valid JSON: {err}\n{stdout}"));
+    json.get("errors")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| panic!("missing errors array; stdout={stdout}"))
+}
+
+/// Issue #207 reproducer: a def body that does not match its declared
+/// signature must trip a TypeMismatch and the process must exit
+/// non-zero. Pre-fix this exited 0.
+#[test]
+fn issue_207_check_exits_nonzero_on_type_mismatch() {
+    let src = "module Probe.Mismatch\n\
+               export (mismatch)\n\
+               \n\
+               sig mismatch: &tensor[n, 4, f32] -> tensor[n, 4, f32]\n\
+               def mismatch(x) = cast(0, f32)\n";
+    let tmp = write_tempfile("issue207-tm-", src);
+    let (code, stdout) = run_check_capture(tmp.path());
+    let errors = parse_errors_array(&stdout);
+    assert!(
+        !errors.is_empty(),
+        "TypeMismatch fixture must produce a non-empty errors array; stdout={stdout}"
+    );
+    let has_type_mismatch = errors.iter().any(|e| {
+        e.get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|k| k == "TypeMismatch")
+    });
+    assert!(
+        has_type_mismatch,
+        "expected a TypeMismatch entry; stdout={stdout}"
+    );
+    assert_eq!(
+        code,
+        Some(CHECK_ERRORS_EXIT_CODE),
+        "issue #207 invariant: errors non-empty implies exit {CHECK_ERRORS_EXIT_CODE}; stdout={stdout}"
+    );
+}
+
+/// Positive control: a clean program must keep exit 0 and an empty
+/// errors array. Pins the other side of the iff invariant.
+#[test]
+fn issue_207_check_exits_zero_on_clean_program() {
+    let src = "def answer -> int32 = cast(7, int32)\n";
+    let tmp = write_tempfile("issue207-clean-", src);
+    let (code, stdout) = run_check_capture(tmp.path());
+    let errors = parse_errors_array(&stdout);
+    assert!(
+        errors.is_empty(),
+        "clean fixture must produce empty errors array; stdout={stdout}"
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "issue #207 invariant: errors empty implies exit 0; stdout={stdout}"
+    );
+}
+
+/// Invariant sweep across three distinct error categories. For each
+/// fixture the helper asserts `errors_non_empty <=> exit != 0`.
+///
+/// Categories:
+/// * TypeMismatch (def body vs declared sig)
+/// * DimensionMismatch (concrete dim literal vs sig)
+/// * Validator rejection (conv2d stride 0; same shape RT-205 F7 used,
+///   but now exits non-zero per the inverted contract)
+#[test]
+fn issue_207_invariant_holds_across_error_categories() {
+    let fixtures: &[(&str, &str, &str)] = &[
+        (
+            "tm",
+            "module Probe.Mismatch\n\
+             sig mismatch: &tensor[n, 4, f32] -> tensor[n, 4, f32]\n\
+             def mismatch(x) = cast(0, f32)\n",
+            "TypeMismatch",
+        ),
+        (
+            "dm",
+            "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
+             def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+            "DimensionMismatch",
+        ),
+        (
+            "validator",
+            "module Probe.Validator\n\
+             def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv2d(&x, &k, 0, 0)\n",
+            "",
+        ),
+    ];
+    for (tag, src, expected_kind) in fixtures {
+        let tmp = write_tempfile(&format!("issue207-inv-{tag}-"), src);
+        let (code, stdout) = run_check_capture(tmp.path());
+        let errors = parse_errors_array(&stdout);
+        let exit_nonzero = code != Some(0);
+        let errors_nonempty = !errors.is_empty();
+        assert_eq!(
+            exit_nonzero, errors_nonempty,
+            "issue #207 invariant violated for category {tag}: exit_nonzero={exit_nonzero}, errors_nonempty={errors_nonempty}; stdout={stdout}"
+        );
+        assert!(
+            errors_nonempty,
+            "category {tag} fixture must produce errors; stdout={stdout}"
+        );
+        if !expected_kind.is_empty() {
+            let has_kind = errors.iter().any(|e| {
+                e.get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|k| k == *expected_kind)
+            });
+            assert!(
+                has_kind,
+                "category {tag} expected kind {expected_kind}; stdout={stdout}"
+            );
+        }
+        assert_eq!(
+            code,
+            Some(CHECK_ERRORS_EXIT_CODE),
+            "category {tag} exit code mismatch; stdout={stdout}"
+        );
+    }
+}
+
+/// Clean-program parity for the invariant sweep: a fixture with no
+/// errors must satisfy the empty-errors-implies-exit-0 half of the
+/// iff. Without this companion test the invariant collapses to a
+/// one-sided implication.
+#[test]
+fn issue_207_invariant_holds_for_clean_program() {
+    let src = "def answer -> int32 = cast(7, int32)\n";
+    let tmp = write_tempfile("issue207-inv-clean-", src);
+    let (code, stdout) = run_check_capture(tmp.path());
+    let errors = parse_errors_array(&stdout);
+    assert!(
+        errors.is_empty(),
+        "clean fixture must have empty errors; stdout={stdout}"
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "issue #207 invariant: clean program must exit 0; stdout={stdout}"
+    );
+}
