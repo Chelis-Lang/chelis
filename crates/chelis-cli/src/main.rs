@@ -1110,6 +1110,45 @@ fn copy_cost_human(file: &Path, summary: &chelis_ir::analysis::CopyCostSummary) 
 /// surfaces the same type errors when this gate misses them.
 const CHECK_ERRORS_EXIT_CODE: i32 = 2;
 
+/// Canonical message used by both `chelis check` and `chelis build`
+/// when the input file parses to zero declarations (empty or
+/// whitespace-only `.ch`). Surfaced as a `CheckErrorKind::Other`
+/// entry in `cmd_check_one`'s JSON `errors[]` and as the boxed
+/// error string from `cmd_build`. Wave-1 red-team finding M2 pins
+/// the two surfaces to this same message so `check` and `build`
+/// agree on the verdict.
+const EMPTY_PROGRAM_MESSAGE: &str = "empty program: no declarations found";
+
+/// Build a synthetic `cmd_check_one` JSON report for an error that
+/// short-circuits parsing or program preparation, so the
+/// `chelis check` exit-code invariant (issue #207) holds even when
+/// the per-file pipeline never reaches the fitness checker. The
+/// `errors[]` array carries a single `Other`-kind entry with the
+/// supplied message; the rest of the report shape mirrors a zero-
+/// node program with score 0.
+fn synthetic_check_report_with_error(message: &str) -> String {
+    let message_json = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        concat!(
+            "{{\n",
+            "  \"score\": 0,\n",
+            "  \"components\": {{\n",
+            "    \"parse\": 0,\n",
+            "    \"structure\": 0,\n",
+            "    \"names\": 0,\n",
+            "    \"types\": 0\n",
+            "  }},\n",
+            "  \"typed_nodes\": 0,\n",
+            "  \"untyped_nodes\": 0,\n",
+            "  \"total_nodes\": 0,\n",
+            "  \"unresolved_names\": [],\n",
+            "  \"errors\": [{{\"kind\":\"Other\",\"message\":{},\"severity\":0.5}}]\n",
+            "}}"
+        ),
+        message_json,
+    )
+}
+
 /// Exit-code contract (issue #207, supersedes RT-205 F7):
 ///
 /// `chelis check` exits `0` iff the JSON `errors` array is empty.
@@ -1252,7 +1291,30 @@ fn cmd_check_one(
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
         emit_advisory_lint_warnings_for_file(file);
     }
-    let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
+    // Wave-1 red-team M1 (#207 follow-up): parse failures used to
+    // short-circuit through `?` into the `Err(err)` arm in `main`,
+    // emitting no JSON and exiting 1. Catch the parse error here,
+    // route it through `synthetic_check_report_with_error`, and let
+    // the caller map "errors non-empty" to exit 2 as documented.
+    let prepared = match chelis_reef::prepare_program_for_file(file) {
+        Ok(prepared) => prepared,
+        Err(message) => {
+            let json = synthetic_check_report_with_error(&message);
+            return Ok((json, true));
+        }
+    };
+    // Wave-1 red-team M2 (#207 follow-up): inside a reef package the
+    // file's own contribution lives in `entry_decls` (chelis-std files
+    // partition into `stdlib_decls`, but `entry_decls` always reflects
+    // the source file the user pointed `check` at). Reject only when
+    // the file itself yields zero declarations, not when the rest of
+    // the reef graph is empty.
+    if let Some(prepared_ref) = &prepared
+        && prepared_ref.entry_decls.is_empty()
+    {
+        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+        return Ok((json, true));
+    }
 
     // Layered fast path: when the input resolves inside a reef package
     // (so the chelis-std / non-chelis-std partition is available) and the
@@ -1294,9 +1356,28 @@ fn cmd_check_one(
                 Some(prepared) => prepared.decls.clone(),
                 None => {
                     let source = fs::read_to_string(file)?;
-                    chelis_surf::parser::parse_str(&source)?
+                    // Wave-1 red-team M1 (#207 follow-up): same handling
+                    // as the prepared-path parse error above, for the
+                    // raw `parse_str` branch used when no reef context
+                    // resolves.
+                    match chelis_surf::parser::parse_str(&source) {
+                        Ok(decls) => decls,
+                        Err(err) => {
+                            let json = synthetic_check_report_with_error(&err.to_string());
+                            return Ok((json, true));
+                        }
+                    }
                 }
             };
+            // Wave-1 red-team M2 (#207 follow-up): a parse-clean file
+            // with zero declarations (empty or whitespace-only `.ch`)
+            // used to report `score=1, errors=[]` and exit 0; both
+            // `chelis check` and `chelis build` now reject it with the
+            // same canonical message so the two surfaces agree.
+            if decls.is_empty() {
+                let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+                return Ok((json, true));
+            }
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
             let report = chelis_types::check_ir_fitness(&deep_exprs);
             let typed_program = chelis_types::check_typed_program(&deep_exprs);
@@ -1627,6 +1708,18 @@ fn cmd_build(
             (decls.clone(), decls)
         }
     };
+    // Wave-1 red-team M2 (#207 follow-up): align with `chelis check`
+    // and reject a zero-declaration program rather than emitting a
+    // degenerate no-op C function. For reef-prepared programs the
+    // user's contribution lives in `entry_decls`; outside a reef the
+    // raw `decls` carry it directly.
+    let user_decls_empty = match &prepared {
+        Some(_) => entry_decls.is_empty(),
+        None => decls.is_empty(),
+    };
+    if user_decls_empty {
+        return Err(boxed_string_error(EMPTY_PROGRAM_MESSAGE.to_string()));
+    }
     reject_with_seed_for_build_target(&decls, target)?;
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;

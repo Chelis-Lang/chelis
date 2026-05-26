@@ -705,14 +705,25 @@ syntactic pattern from §4.7.3 or fall back."
 
 #### 4.7.5 Precision rule for `reshape`'s shape list
 
-`reshape`'s shape list is `List<Int64>`. The bare `shape(x, k)`
-returns `int32`, so a runtime axis size MUST be cast to `int64`
-before it can appear in the shape list:
+`reshape`'s shape list must be homogeneous. The bare `shape(x, k)`
+returns `int32` and integer literals default to `int32`, but
+`reshape`'s shape list is conventionally `List<Int64>`, so every
+element must be cast to `int64` before it can appear in the list:
 
 ```text
-reshape(x, [shape(x, 0), 4])                          ;; TYPE ERROR: int32 vs int64
+reshape(x, [shape(x, 0), 4])                          ;; TYPE ERROR: precision mismatch: expected int32, got int64
 reshape(x, [cast(shape(x, 0), int64), cast(4, int64)]) ;; OK
 ```
+
+The diagnostic direction reflects the unification order in the
+type-checker: the first list element fixes the "expected"
+precision, and later entries that disagree trip the mismatch on the
+"got" side. The bare `shape(x, 0)` pins `int32` as the expected
+precision; the integer literal `4` (also `int32`) is fine, but the
+moment any `int64` enters the list the mismatch fires. In practice
+the fix is the same in both directions — cast every element to
+`int64` — so the unification-order artifact does not affect
+remediation guidance.
 
 #### 4.7.6 Out-of-scope: arbitrary runtime shape expressions
 
