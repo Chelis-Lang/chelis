@@ -118,19 +118,28 @@ fn issue_248_uniform_like_does_not_use_lossy_format() {
 // End-to-end gcc-compile-and-run byte-identity test. Mirrors the
 // issue_189_*_byte_identical_to_eval_under_gcc oracles: emit C,
 // gcc-compile, run, and verify the sampler saw the byte-identical
-// f32 narrowing of the source `low` / `high`.
+// f32 narrowing of the source `low` / `high`. Linux-only because the
+// emitted uniform_like kernel uses `-fopenmp`; macOS clang
+// (masquerading as gcc) rejects that flag.
 // ---------------------------------------------------------------
 
+#[cfg(target_os = "linux")]
 use chelis_backend_c::codegen;
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
+#[cfg(target_os = "linux")]
 use std::sync::OnceLock;
 
+#[cfg(target_os = "linux")]
 fn runtime_include_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
 }
 
+#[cfg(target_os = "linux")]
 fn target_debug_dir() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe failed");
     exe.parent()
@@ -139,6 +148,7 @@ fn target_debug_dir() -> PathBuf {
         .expect("could not resolve target/debug dir from current_exe")
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     if canonical.exists() {
         return Ok(());
@@ -198,6 +208,7 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn runtime_lib_path() -> PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
@@ -213,6 +224,7 @@ fn runtime_lib_path() -> PathBuf {
     .clone()
 }
 
+#[cfg(target_os = "linux")]
 fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
     let dir = std::env::temp_dir().join(format!("chelis_issue248_{test_name}"));
     fs::create_dir_all(&dir).unwrap();
@@ -269,6 +281,7 @@ fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<Str
 /// `0x00000000` (the `%.8` literal collapsed to zero). Post-fix it
 /// must print the f32 bit pattern of `(1.0e-40_f64 as f32)`
 /// (`0x000116c2`, a denormal).
+#[cfg(target_os = "linux")]
 #[test]
 fn issue_248_uniform_like_byte_identical_low_under_gcc() {
     let low: f64 = 1.0e-40;
