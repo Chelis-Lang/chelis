@@ -69,6 +69,45 @@ representation (for f64) or the closest-f32 narrowing (for f32). The
 same architectural shape as the existing bf16 / f16 bit-pattern fill
 helpers.
 
+### Fixed - CLI grad path now surfaces `AdError::NotSupported` for non-differentiable ops (#197)
+
+The CLI `chelis build` / `chelis check` / `chelis eval` grad path routed
+through `chelis_ir::grad::grad_dag` (the unchecked variant), so:
+
+- `argmax_reduce` / `argmin_reduce` in a gradient path surfaced as a
+  generic "grad requires a scalar floating output" message instead of
+  the structured `AdError::NotSupported { op: "argmax",
+  reason: IntegerIndexOutput }` rejection that
+  `grad_dag_checked` already implements at the IR layer.
+- `floor` / `ceil` in a gradient path silently zero-graded with no
+  diagnostic — a wrong-result mode. The grad rule arms returned
+  `Const { value: 0.0 }` and the build succeeded, emitting a kernel
+  that filled the gradient tensor with zeros.
+
+The fix is in two parts:
+
+1. **Route through `grad_dag_checked`.** `compile_source::grad`
+   (`crates/chelis-compiler-api/src/compiler.rs`), the `grad(...)`
+   lowering arm in `crates/chelis-ir/src/lower.rs`, and the
+   `vmap(grad(...))` lowering arm in the same file all switch to
+   `grad_dag_checked`; the legacy `grad_then_fuse` carrier gains a
+   sibling `grad_then_fuse_checked` so the fused path stays
+   parallel.
+2. **Mark AD-rejection diagnostics as fatal.** `LowerDiagnostic`
+   grows a `fatal: bool` field. The host-fallback boundary at
+   `host::try_lower_compiled_program`, the sub-lowering call sites
+   in `host::lower_host_function` and
+   `host::lower_tensor_helper_dag`, and the build CLI's
+   `lower_checked_for_cli` (`crates/chelis-cli/src/main.rs`) all
+   propagate fatal diagnostics instead of silently falling through
+   to the host path. Without this the host fallback emitted an
+   undefined-symbol call to the unlowered grad function — a
+   compile-clean build that failed opaquely at gcc-link time.
+
+Locked by `crates/chelis-cli/tests/grad_errors.rs` (5 tests:
+argmax, argmin, floor, ceil negatives + matmul-grad positive
+parity).
+
 ## [0.7.18] — 2026-05-25
 
 Hotfix release. Closes a zero-offset spurious-consume linearity bug class

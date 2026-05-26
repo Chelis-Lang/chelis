@@ -40,4 +40,4 @@ pub use lower::{
     lower_subexpr_program, tensor_type_from_deep, try_lower_program, try_lower_program_to_library,
     try_lower_program_with_context, try_lower_subexpr_program,
 };
-pub use pipeline::grad_then_fuse;
+pub use pipeline::{grad_then_fuse, grad_then_fuse_checked};

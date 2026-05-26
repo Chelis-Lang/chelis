@@ -809,18 +809,19 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // Issue #197: route through the *checked* AD entry points so a
+    // non-differentiable op (argmax/argmin, floor/ceil,
+    // scatter_replace) surfaces as a structured
+    // `AdError::NotSupported` diagnostic with the offending op name
+    // and a reason, instead of a generic "grad requires a scalar
+    // floating output" message (or, worse, a silent zero gradient
+    // for floor/ceil under the unchecked variant).
     let grad_result = if request.fuse {
-        chelis_ir::grad_then_fuse(&compiled.dag, output, &wrt_nodes)
+        chelis_ir::grad_then_fuse_checked(&compiled.dag, output, &wrt_nodes)
     } else {
-        chelis_ir::grad::grad_dag(&compiled.dag, output, &wrt_nodes)
+        chelis_ir::grad::grad_dag_checked(&compiled.dag, output, &wrt_nodes)
     }
-    .ok_or_else(|| {
-        stage_error(
-            "grad",
-            "grad requires a scalar floating output and a valid unfused forward DAG",
-            "grad_error",
-        )
-    })?;
+    .map_err(|ad_err| stage_error("grad", ad_err.to_string(), "grad_error"))?;
 
     let grad_nodes_by_name = request
         .wrt_names

@@ -5049,10 +5049,19 @@ fn lower_checked_for_cli(
 ) -> Result<chelis_ir::Dag, Box<dyn std::error::Error>> {
     match chelis_ir::lower::try_lower_program(checked) {
         Ok(dag) => Ok(dag),
-        Err(_diagnostic)
-            if host_program
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false) =>
+        // Issue #197: a *fatal* lowering diagnostic (the AD-rejection
+        // path for `grad` over a non-differentiable op) must propagate
+        // even when the host program would otherwise be able to take
+        // over. The host fallback emits an unresolved call to the
+        // grad-function symbol; we must surface the AD-rejection text
+        // instead so the user sees `floor is non-differentiable
+        // (piecewise constant)` rather than a compile-clean build
+        // that fails at gcc-link time.
+        Err(diagnostic)
+            if !diagnostic.fatal
+                && host_program
+                    .map(chelis_ir::host::host_program_requires_host_backend)
+                    .unwrap_or(false) =>
         {
             Ok(chelis_ir::Dag::new())
         }
