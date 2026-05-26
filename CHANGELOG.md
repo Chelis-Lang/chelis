@@ -6,6 +6,23 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **#248 (#189 follow-up)**: the C backend's `emit_uniform_like` was
+  the third lossy `%.8`-format-string site in the same class as the
+  F32/F64 `emit_const` arms that PR #243 closed. `low` / `high` were
+  narrowed to f32 and then baked into the emitted
+  `chelis_uniform_sample_f32(..., {:.8}f, {:.8}f)` call, drifting up
+  to one ULP for ordinary values and collapsing sub-normal-range
+  inputs (e.g. `1e-40`) to `0.0f`. The fix computes
+  `f64_to_f32_truncate(...).to_bits()` at codegen time and emits
+  `chelis_f32_from_bits(0x...u)` for each argument, where
+  `chelis_f32_from_bits` / `chelis_f64_from_bits` are new
+  `static inline` helpers in `chelis_runtime.h` that bit-cast a
+  `uint32_t` / `uint64_t` back to `float` / `double`. Symmetric with
+  PR #243's `chelis_fill_f32_bits` mechanism but for per-call scalar
+  args rather than buffer fills.
+
 ## [0.7.19] — 2026-05-26
 
 Wave-1 follow-up release. Closes six issues filed during the 0.7.13–0.7.18

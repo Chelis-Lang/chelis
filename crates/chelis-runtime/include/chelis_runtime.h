@@ -127,6 +127,23 @@ void chelis_fill_f64(chelis_tensor *t, double val);
  * shape mirrors `chelis_fill_bf16` / `chelis_fill_f16`. */
 void chelis_fill_f32_bits(chelis_tensor *t, uint32_t bits);
 void chelis_fill_f64_bits(chelis_tensor *t, uint64_t bits);
+/* Issue #248: scalar bit-pattern reconstruction helpers. The C backend
+ * emits `chelis_uniform_sample_f32(..., chelis_f32_from_bits(0xXXXXXXXXu),
+ * chelis_f32_from_bits(0xYYYYYYYYu))` so the runtime sees the byte-identical
+ * f32 narrowing of the source `low` / `high` instead of a `%.8` decimal
+ * round-trip. Symmetric with `chelis_fill_f32_bits` / `chelis_fill_f64_bits`
+ * but for per-call scalar args rather than buffer fills, so a `static inline`
+ * bit-cast suffices; no Rust-side `extern "C"` symbol is needed. */
+static inline float chelis_f32_from_bits(uint32_t bits) {
+    float v;
+    memcpy(&v, &bits, sizeof(float));
+    return v;
+}
+static inline double chelis_f64_from_bits(uint64_t bits) {
+    double v;
+    memcpy(&v, &bits, sizeof(double));
+    return v;
+}
 /* WS-1 (dtype + Metal cleanup cycle): two-byte fill helpers for bf16
  * and f16 tensors. Codegen computes the exact 16-bit pattern from the
  * IR literal at compile time (the `half` crate's `to_bits()`) and

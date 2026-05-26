@@ -2028,9 +2028,17 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
+        // Issue #248 (#189 follow-up): the sampler takes f32 args, so
+        // narrow the IR's f64 `low`/`high` to f32 explicitly via
+        // `f64_to_f32_truncate` and reconstruct each argument from its
+        // exact bit pattern through the `chelis_f32_from_bits` static
+        // inline helper. The pre-fix `{:.8}f` format string drifted up
+        // to one ULP for ordinary values and collapsed sub-normal-range
+        // values like `1e-40` to `0.0f` outright.
+        let low_bits = Self::f64_to_f32_truncate(low).to_bits();
+        let high_bits = Self::f64_to_f32_truncate(high).to_bits();
         self.line(&format!(
-            "t{id}->data[i] = chelis_uniform_sample_f32(t{id}_seed, (uint64_t)i, {:.8}f, {:.8}f);",
-            low as f32, high as f32
+            "t{id}->data[i] = chelis_uniform_sample_f32(t{id}_seed, (uint64_t)i, chelis_f32_from_bits(0x{low_bits:08x}u), chelis_f32_from_bits(0x{high_bits:08x}u));"
         ));
         self.indent -= 1;
         self.line("}");
