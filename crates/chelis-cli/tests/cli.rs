@@ -3780,6 +3780,12 @@ def main(x: f32) -> f32 = hidden(x)
 "#,
     );
 
+    // Wave-1 red-team M1 (#207 follow-up): `chelis check` now routes
+    // `prepare_program_for_file` failures (including reef checksum and
+    // missing-export errors) through the JSON `errors[]` array on
+    // stdout, so the iff invariant (`exit != 0 iff errors[] non-empty`)
+    // holds for every per-file failure mode rather than only the Ok-arm
+    // type errors. Look on stdout for the diagnostic string.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -3787,7 +3793,7 @@ def main(x: f32) -> f32 = hidden(x)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(
+        .stdout(
             predicate::str::contains("checksum")
                 .or(predicate::str::contains("does not export `hidden`")),
         );

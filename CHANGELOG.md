@@ -6,6 +6,42 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed - Wave-1 red-team follow-ups: #207 parse-error JSON + empty-file rejection, §4.7.5 spec direction, #188 artifact actions
+
+Four findings from the Wave-1 red-team pass on PRs #188 / #189 / #190 /
+#197 / #207 / #208:
+
+- **M1 (#207 follow-up)**: parse errors in `chelis check` used to
+  short-circuit through the generic error arm in `main`, exiting 1
+  with empty stdout. The documented invariant (`exit != 0 iff
+  json.errors.len() > 0`) requires that any failure mode emit a JSON
+  report with a populated `errors[]`. `cmd_check_one` now catches
+  errors from both `chelis_reef::prepare_program_for_file` and the
+  raw `chelis_surf::parser::parse_str` branch, synthesizes a minimal
+  JSON report with a single `Other`-kind entry carrying the error
+  message, and lets the caller map that to exit 2. Reef checksum and
+  missing-export errors now surface on stdout (JSON) rather than
+  stderr; `reef_check_rejects_tampered_registry_shell_exports` was
+  updated accordingly.
+- **M2 (#207 follow-up)**: an empty or whitespace-only `.ch` used to
+  report `score=1, errors=[]` and exit 0 in `chelis check`, while
+  `chelis build` accepted it and emitted a no-op C function. Both
+  surfaces now reject a zero-declaration program with the same
+  canonical message `empty program: no declarations found` (kind
+  `Other` in `check`'s JSON, boxed error in `build`).
+- **L1 (#208 §4.7.5)**: the spec narrative previously described
+  `reshape(x, [shape(x, 0), 4])` as "TYPE ERROR: int32 vs int64" and
+  implied a diagnostic of "expected int64, got int32". The actual
+  type-checker emits `precision mismatch: expected int32, got int64`
+  (the unification-order artifact of the shape-list elementwise check
+  against `List<Int64>`). The spec text now matches the diagnostic
+  exactly, with a short note explaining the unification direction so
+  the contract is unambiguous in either reading.
+- **L2 (#188)**: bumps `actions/upload-artifact@v4` (twice) and
+  `actions/download-artifact@v4` in `.github/workflows/release.yml` to
+  `@v7` (the current node-24-bundled release). Sweep over all other
+  workflow files confirmed no remaining `actions/*@v4` pins.
+
 ### Documentation - canonical runtime shape semantics in spec §4.7 (#208)
 
 `spec/04-type-system.md` gains a new §4.7 "Runtime Shape Semantics"
