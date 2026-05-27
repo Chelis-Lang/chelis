@@ -7091,6 +7091,24 @@ fn infer_expr(
                             Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error => {
                                 Type::Ref(Box::new(resolved))
                             }
+                            // Issue #256: when the borrow inner is still an
+                            // unresolved type variable (e.g. the output of a
+                            // polymorphic-return call whose dim variables
+                            // have not yet been pinned at this point in
+                            // left-to-right inference), defer the
+                            // tensor-or-carrier classification to subsequent
+                            // unification. Wrapping as `Type::Ref(Type::Var)`
+                            // lets the surrounding flow's expected argument
+                            // type (e.g. a sig parameter `&tensor[..]`) pin
+                            // the variable through unification. If the
+                            // variable never gets pinned to a tensor or
+                            // tensor-carrying type, the later unification
+                            // failure surfaces the same diagnostic via the
+                            // mismatched call site -- there is no silent
+                            // accept. The linearity checker's
+                            // `expr_is_owned_or_borrow_linear` still rejects
+                            // a stamped `(t-var ...)` if no pinning happens.
+                            Type::Var(_) => Type::Ref(Box::new(resolved)),
                             _ => {
                                 errors.push(CheckError::new(
                                     CheckErrorKind::TypeMismatch,
