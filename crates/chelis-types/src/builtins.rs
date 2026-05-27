@@ -107,6 +107,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "filter",
     "fold",
     "scan",
+    "tensor_scan",
     "partition",
     "flat_map",
     "flatten",
@@ -865,6 +866,32 @@ pub fn builtin_env() -> (Env, VarGen) {
                     Type::Var(scan_ret),
                 ],
                 Box::new(Type::Var(scan_ret)),
+            ),
+        },
+    );
+    // `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
+    // The actual constraint shape (scalar `T`, callback signature, int64 `n`,
+    // tensor return) is enforced by the special-case arm in
+    // `crates/chelis-types/src/infer.rs` so error reporting can pinpoint each
+    // role independently. This loose generic scheme is the type-env entry
+    // point; it lets the inference engine see three argument slots and a
+    // return slot it will overwrite. Same shape as `fold`/`scan` above.
+    let tensor_scan_a = vg.fresh_tvar();
+    let tensor_scan_b = vg.fresh_tvar();
+    let tensor_scan_c = vg.fresh_tvar();
+    let tensor_scan_ret = vg.fresh_tvar();
+    env.bind(
+        "tensor_scan".to_string(),
+        Scheme {
+            tvars: vec![tensor_scan_a, tensor_scan_b, tensor_scan_c, tensor_scan_ret],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Var(tensor_scan_a),
+                    Type::Var(tensor_scan_b),
+                    Type::Var(tensor_scan_c),
+                ],
+                Box::new(Type::Var(tensor_scan_ret)),
             ),
         },
     );

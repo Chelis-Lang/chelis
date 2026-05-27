@@ -1356,6 +1356,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "filter"
                         | "fold"
                         | "scan"
+                        | "tensor_scan"
                         | "partition"
                         | "flat_map"
                         | "flatten"

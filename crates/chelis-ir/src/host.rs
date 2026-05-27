@@ -4479,6 +4479,7 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
                 | "filter"
                 | "fold"
                 | "scan"
+                | "tensor_scan"
                 | "partition"
                 | "flat_map"
                 | "sort"
@@ -6882,6 +6883,25 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         "scan" => match arg_tys.get(1) {
             Some(init_ty) => Some(HostType::List(Box::new(init_ty.clone()))),
             None => Some(HostType::Unknown),
+        },
+        // Issue #257: `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
+        // The output is a rank-1 tensor whose precision is determined by the
+        // initial scalar's dtype. The dimension is wildcard at type-check
+        // time because `n` is a runtime value.
+        "tensor_scan" => match arg_tys.first() {
+            Some(HostType::Int64) => Some(HostType::Tensor(TensorType {
+                dims: vec![DimInfo::Named("*".into(), None)],
+                precision: chelis_types::types::Prim::Int64,
+            })),
+            Some(HostType::Float64) => Some(HostType::Tensor(TensorType {
+                dims: vec![DimInfo::Named("*".into(), None)],
+                precision: chelis_types::types::Prim::F32,
+            })),
+            Some(HostType::Bool) => Some(HostType::Tensor(TensorType {
+                dims: vec![DimInfo::Named("*".into(), None)],
+                precision: chelis_types::types::Prim::Bool,
+            })),
+            _ => Some(HostType::Unknown),
         },
         "partition" => match arg_tys.get(1) {
             Some(list_ty) => Some(HostType::Tuple(vec![list_ty.clone(), list_ty.clone()])),

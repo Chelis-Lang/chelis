@@ -375,6 +375,53 @@ that need a differentiable variant must use `ScatterAdd` (whose
 adjoint is well-defined as `Gather`) or wrap `Scatter` in a
 stop-gradient.
 
+### 3.6 Host-Runtime Builders
+
+The following helper is **host-runtime only**. It runs inside the
+`chelis test` / `chelis eval` interpreter and produces a tensor without
+going through a Surf `List` intermediate. It is not in the RISC DAG
+and has no AD adjoint; differentiable code must build its accumulator
+state through the tensor-lane primitives in §2.
+
+| Name | Signature | Semantics |
+|---|---|---|
+| `tensor_scan` | `(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]` | Iteratively apply `fn(prev, i)` for `i in 0..n` and collect the `n` resulting values into a rank-1 tensor whose precision matches `T`. |
+
+`T` must be a scalar primitive (`int8`..`int64`, `f16`..`f64`,
+`bool`). The output is owned, contiguous, rank-1, and its
+precision equals the dtype of `initial`. The iteration order is the
+positional integer sequence `0, 1, ..., n - 1`.
+
+`tensor_scan` exists because the host-runtime interpreter has no
+tail-call optimization: right-recursive Surf list builds of more than
+~10000 elements overflow the worker stack (Chelis-Lang/chelis#257),
+and the chunked / fold workaround patterns hit an O(n²) `concat`
+wall well below the 30k–40k-element regime that init-style use cases
+(LCG-driven Glorot weights, positional embedding precompute, learned
+schedule precompute) need. `tensor_scan` runs the loop on the host
+in Rust, so the worker stack is constant in `n`.
+
+The builtin is **not** wired into `chelis build` for the `c` or `hip`
+backend target. A program that calls `tensor_scan` at top-level is a
+host-runtime-only program; `chelis build` will route it through the
+host lane and either emit a host-runtime helper (for the C-host
+emitter) or refuse the call when the backend cannot represent
+host-side iteration. Programs that need a compiled scan over a tensor
+must compose `expand` + the tensor-lane primitives directly.
+
+A future Tier 1 primitive can replace this host-only helper once the
+RISC DAG admits higher-order tensor primitives. Until that lands,
+`tensor_scan` is the recommended path for building per-index tensor
+data at `chelis test` / `chelis eval` time without paying the
+right-recursive list cost.
+
+**Negative parity for `tensor_scan`**: a non-callable second argument,
+a wrong-arity call, a negative `n`, or a callback that returns a
+different dtype than the initial value's dtype are runtime errors
+with `tensor_scan`-tagged diagnostics. The acceptance tests in
+`crates/chelis-compiler-api/tests/issue_257_tensor_scan_host_runtime.rs`
+pin each of these alongside the positive 8/20000/40000-element cases.
+
 ---
 
 ## 4. Standard Lowerings (Tier 2 → Tier 1)

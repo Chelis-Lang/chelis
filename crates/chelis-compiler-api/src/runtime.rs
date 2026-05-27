@@ -1817,6 +1817,93 @@ impl<'a> EvalContext<'a> {
                 }
                 Ok(RuntimeValue::List(out))
             }
+            // Issue #257: iterative scan that produces a rank-1 tensor
+            // directly, bypassing the right-recursive Surf list build that
+            // overflows the host worker stack at ~10k elements. The arg
+            // shape is `(initial: T, fn: (T, int64) -> T, n: int64)` and
+            // the loop runs `n` times on the host with no Surf-level
+            // recursion. The output precision is taken from the initial
+            // value's scalar dtype.
+            "tensor_scan" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "tensor_scan expects 3 arguments (initial, fn, n), got {}",
+                        args.len()
+                    ));
+                }
+                let initial = args[0].clone();
+                let callback = args[1].clone();
+                let n = expect_int_arg(args, 2)?;
+                if n < 0 {
+                    return Err(format!(
+                        "tensor_scan requires a non-negative length, got {n}"
+                    ));
+                }
+                let precision = match &initial {
+                    RuntimeValue::Scalar(payload) => payload.dtype(),
+                    RuntimeValue::Bool(_) => Prim::Bool,
+                    other => {
+                        return Err(format!(
+                            "tensor_scan expects a scalar initial value (numeric or bool), got {other:?}"
+                        ));
+                    }
+                };
+                // Reject non-callable callback up front so the error message
+                // points at the second argument instead of failing inside the
+                // first apply.
+                if !matches!(
+                    &callback,
+                    RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }
+                ) {
+                    return Err(format!(
+                        "tensor_scan expects a callable second argument, got {callback:?}"
+                    ));
+                }
+                let n = n as usize;
+                let mut data = Vec::with_capacity(n);
+                let mut acc = initial;
+                for i in 0..n {
+                    let index = RuntimeValue::int64(i as i64);
+                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, index])?;
+                    // Validate per-step that the accumulator stayed the same
+                    // scalar precision; this catches a misbehaving callback
+                    // that returns a different dtype before it corrupts the
+                    // output tensor buffer.
+                    let value = match &acc {
+                        RuntimeValue::Scalar(payload) => {
+                            if payload.dtype() != precision {
+                                return Err(format!(
+                                    "tensor_scan callback returned a {} scalar but the initial \
+                                     value's dtype is {}",
+                                    payload.dtype().name(),
+                                    precision.name()
+                                ));
+                            }
+                            payload.bits().as_f64()
+                        }
+                        RuntimeValue::Bool(b) => {
+                            if precision != Prim::Bool {
+                                return Err(format!(
+                                    "tensor_scan callback returned a bool but the initial \
+                                     value's dtype is {}",
+                                    precision.name()
+                                ));
+                            }
+                            if *b { 1.0 } else { 0.0 }
+                        }
+                        other => {
+                            return Err(format!(
+                                "tensor_scan callback must return a scalar, got {other:?}"
+                            ));
+                        }
+                    };
+                    data.push(value);
+                }
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                    value: IrTensorValue::from_vec(vec![n], data),
+                    precision,
+                }))
+            }
             "partition" => {
                 let callback = args
                     .first()

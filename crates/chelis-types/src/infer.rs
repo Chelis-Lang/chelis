@@ -9504,6 +9504,93 @@ fn infer_app(
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&acc_ty)]);
                     }
+                    "tensor_scan" => {
+                        // `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
+                        //
+                        // Issue #257: host-runtime scan that produces a tensor
+                        // directly, sidestepping the right-recursive list build
+                        // that overflows the worker stack at ~10k elements.
+                        // Element type `T` must resolve to a concrete scalar
+                        // Prim before tensor lowering; the runtime arm enforces
+                        // that at execution time. At type-check time we accept
+                        // any Type::Prim and let unification do the rest.
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let elem_ty = vg.fresh_type();
+                        let int64 = Type::Prim(Prim::Int64);
+                        let list_expr = deep::Expr::List(list.clone(), zero_span());
+                        // arg 0: initial accumulator of type T.
+                        if let Err(te) = unify(&subst.apply(&arg_tys[0]), &elem_ty.clone(), subst) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "tensor_scan",
+                                "expects an initial value whose type matches the callback element type",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        // arg 1: callback `(T, int64) -> T`.
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[1]),
+                            &Type::Fn(
+                                vec![elem_ty.clone(), int64.clone()],
+                                Box::new(elem_ty.clone()),
+                            ),
+                            subst,
+                        ) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "tensor_scan",
+                                "expects a callback (T, int64) -> T",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        // arg 2: length `n: int64`.
+                        if let Err(te) = unify(&subst.apply(&arg_tys[2]), &int64, subst) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "tensor_scan",
+                                "expects a length `n: int64`",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        // Element type must be a concrete scalar Prim once
+                        // unified. If it's still a Var the call site is
+                        // under-constrained; if it's a Tensor/Adt/Fn the call
+                        // is invalid. We only allow primitive scalars so the
+                        // host-runtime arm can determine precision.
+                        let resolved_elem = subst.apply(&elem_ty);
+                        let precision = match &resolved_elem {
+                            Type::Prim(p) => *p,
+                            Type::Var(_) => {
+                                // Defer: leave as wildcard precision until
+                                // outer inference pins T. Use F32 as a
+                                // placeholder; downstream consumers can
+                                // re-resolve.
+                                return Type::Tensor(
+                                    vec![Dim::Wildcard],
+                                    TensorPrec::Concrete(Prim::F32),
+                                );
+                            }
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &list_expr,
+                                        format!(
+                                            "tensor_scan element type must be a scalar primitive, got {other}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        };
+                        return Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision));
+                    }
                     "partition" => {
                         if arg_tys.len() != 2 {
                             return Type::Error;
