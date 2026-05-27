@@ -64,6 +64,13 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "prod_reduce",
     "argmax_reduce",
     "argmin_reduce",
+    // §2.3.1 strided windowed reduction (Valid padding). One Surf
+    // builtin per reducer; the IR collapses them to a single
+    // `RiscOp::ReduceWindow` with a `ReduceWindowKind` discriminator.
+    "reduce_window_max",
+    "reduce_window_min",
+    "reduce_window_sum",
+    "reduce_window_mean",
     "reshape",
     "permute",
     "expand",
@@ -300,6 +307,26 @@ pub fn builtin_env() -> (Env, VarGen) {
             dvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(input)), Type::Prim(Prim::Int32)],
+                Box::new(Type::Var(out)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    /// Fallback HM scheme for the `reduce_window_*` family. The dedicated
+    /// `infer_reduce_window_app` arm in `infer.rs` overrides the result
+    /// type with the spec §2.3.1 shape contract; this scheme exists so
+    /// the function name is in scope at lookup time and the canonical
+    /// arg-arity / list-of-int32 constraints are visible during unification.
+    fn tensor_reduce_window(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let out = vg.fresh_tvar();
+        let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+        let scheme = Scheme {
+            tvars: vec![input, out],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![borrowed(Type::Var(input)), int_list.clone(), int_list],
                 Box::new(Type::Var(out)),
             ),
         };
@@ -647,6 +674,16 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("prod_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("argmax_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("argmin_reduce", &mut env, &mut vg);
+    // §2.3.1 reduce_window family. Fallback HM scheme is
+    // `&tensor[D, p] -> List[int32] -> List[int32] -> tensor[D', p]`;
+    // the actual shape contract (output rank = input rank, trailing
+    // axis extents derived from the window/stride formula) is enforced
+    // by the dedicated `infer_reduce_window_app` arm in `infer.rs`,
+    // which also rejects non-positive window/stride literals.
+    tensor_reduce_window("reduce_window_max", &mut env, &mut vg);
+    tensor_reduce_window("reduce_window_min", &mut env, &mut vg);
+    tensor_reduce_window("reduce_window_sum", &mut env, &mut vg);
+    tensor_reduce_window("reduce_window_mean", &mut env, &mut vg);
     // Movement primitives whose RISC lowering reads window parameters from
     // `args[1..]`. The `tensor_unop` scheme below only declares the arity-1
     // fallback; `reshape` and `permute` already have dedicated `infer_*_app`

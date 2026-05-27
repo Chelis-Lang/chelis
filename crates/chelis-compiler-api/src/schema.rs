@@ -995,6 +995,13 @@ pub enum WireRiscOp {
     ProdReduce {
         axis: usize,
     },
+    ReduceWindow {
+        /// One of "max" / "min" / "sum" / "mean", matching the Surf
+        /// builtin name suffix and `chelis_ir::dag::ReduceWindowKind`.
+        reducer: String,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
+    },
     Argmax {
         axis: usize,
     },

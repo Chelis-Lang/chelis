@@ -201,6 +201,22 @@ pub fn grad_dag_checked(
                     reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
                 });
             }
+            RiscOp::ReduceWindow { reducer, .. } => {
+                // `reduce_window_*` AD is deferred — see
+                // `spec/05-risc-primitives.md` §2.3.1. Until argmax-style
+                // fan-in (Max/Min) and windowed-expand (Sum/Mean) adjoints
+                // are designed, we fail closed at AD time so callers know
+                // the gradient path is missing rather than silently
+                // skipping the op.
+                return Err(AdError::NotSupported {
+                    op: reducer.surf_name(),
+                    reason: AdRejectionReason::Other(format!(
+                        "grad: {} adjoint is deferred - wrap in a stop-gradient \
+                         or recompose using pad+reshape+max_reduce",
+                        reducer.surf_name()
+                    )),
+                });
+            }
             _ => {}
         }
     }
@@ -242,6 +258,7 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::MaxReduce { .. } => "max_reduce",
         RiscOp::MinReduce { .. } => "min_reduce",
         RiscOp::ProdReduce { .. } => "prod_reduce",
+        RiscOp::ReduceWindow { reducer, .. } => reducer.surf_name(),
         RiscOp::Argmax { .. } => "argmax",
         RiscOp::Argmin { .. } => "argmin",
         RiscOp::Reshape { .. } => "reshape",
@@ -1103,6 +1120,14 @@ fn compute_adjoints(
             Some(vec![(values, dvalues)])
         }
         RiscOp::ScatterAdd { .. } => None,
+        RiscOp::ReduceWindow { .. } => {
+            // `reduce_window_*` adjoints are deferred per
+            // `spec/05-risc-primitives.md` §2.3.1. `grad_dag_checked`
+            // rejects this op upfront with an `AdError::NotSupported`
+            // variant; returning `None` here keeps the legacy
+            // `grad_dag` entry point fail-closed.
+            None
+        }
         RiscOp::Scatter { .. } => {
             // Replace-scatter (last-write-wins) is non-differentiable.
             // `grad_dag_checked` rejects this case before reaching here

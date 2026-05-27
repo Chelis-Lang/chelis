@@ -276,6 +276,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::MaxReduce { .. }
             | RiscOp::MinReduce { .. }
             | RiscOp::ProdReduce { .. }
+            | RiscOp::ReduceWindow { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
             | RiscOp::Reshape { .. }

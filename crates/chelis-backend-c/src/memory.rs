@@ -137,6 +137,7 @@ fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
                 | RiscOp::MaxReduce { .. }
                 | RiscOp::MinReduce { .. }
                 | RiscOp::ProdReduce { .. }
+                | RiscOp::ReduceWindow { .. }
                 | RiscOp::Argmax { .. }
                 | RiscOp::Argmin { .. }
                 | RiscOp::Realize

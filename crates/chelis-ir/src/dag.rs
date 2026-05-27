@@ -451,6 +451,36 @@ pub enum FusedStepOp {
     Ceil,
 }
 
+/// Reducer selector for [`RiscOp::ReduceWindow`].
+///
+/// See `spec/05-risc-primitives.md` §2.3.1 for the full surface
+/// contract. The shipped Surf builtins map to the four variants:
+/// `reduce_window_max` → [`ReduceWindowKind::Max`],
+/// `reduce_window_min` → [`ReduceWindowKind::Min`],
+/// `reduce_window_sum` → [`ReduceWindowKind::Sum`],
+/// `reduce_window_mean` → [`ReduceWindowKind::Mean`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReduceWindowKind {
+    Max,
+    Min,
+    Sum,
+    Mean,
+}
+
+impl ReduceWindowKind {
+    /// Canonical Surf builtin name. Used by [`crate::grad::risc_op_name`]
+    /// and by the AD rejection error so error messages reference the
+    /// user-visible builtin rather than an internal variant.
+    pub fn surf_name(self) -> &'static str {
+        match self {
+            ReduceWindowKind::Max => "reduce_window_max",
+            ReduceWindowKind::Min => "reduce_window_min",
+            ReduceWindowKind::Sum => "reduce_window_sum",
+            ReduceWindowKind::Mean => "reduce_window_mean",
+        }
+    }
+}
+
 /// Input reference within a fused chain.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FusedInput {
@@ -528,6 +558,26 @@ pub enum RiscOp {
     },
     ProdReduce {
         axis: usize,
+    },
+    /// Strided windowed reduction over the trailing `window_shape.len()`
+    /// axes. Per `spec/05-risc-primitives.md` §2.3.1, the leading
+    /// `rank - window_shape.len()` axes pass through unchanged, and each
+    /// windowed output axis has extent
+    /// `floor((input_dim - window_shape[i]) / strides[i]) + 1` under
+    /// `Valid` padding (the only padding mode currently shipped).
+    ///
+    /// The `reducer` field selects which scalar reduction is applied
+    /// inside each window; `Max`, `Min`, `Sum`, and `Mean` are the four
+    /// shipped variants. `Mean` is implemented as windowed `Sum` divided
+    /// by the window volume, inlined into the same loop nest.
+    ///
+    /// AD policy: `no_grad`. Reverse-mode AD over `ReduceWindow` is
+    /// deferred — see `chelis_ir::grad::AdRejectionReason::PiecewiseConstant`
+    /// for the rejection variant used at runtime.
+    ReduceWindow {
+        reducer: ReduceWindowKind,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
     },
     /// Index of maximum element along `axis`.
     ///

@@ -2051,6 +2051,10 @@ fn is_shape_sensitive_builtin_app(list: &List) -> bool {
                 | "prod_reduce"
                 | "argmax_reduce"
                 | "argmin_reduce"
+                | "reduce_window_max"
+                | "reduce_window_min"
+                | "reduce_window_sum"
+                | "reduce_window_mean"
                 | "reshape"
                 | "permute"
                 | "expand"
@@ -2441,6 +2445,44 @@ fn any_wildcard_dim(dims: &[DimInfo]) -> bool {
         DimInfo::Named(name, _) => name.is_empty() || name == "*",
         DimInfo::Lit(_) => false,
     })
+}
+
+/// Compute output dims for `reduce_window_*` under `Valid` padding.
+///
+/// Leading `rank - n` axes pass through; each windowed axis has extent
+/// `floor((input_dim - window_shape[i]) / strides[i]) + 1`.
+///
+/// When `input_dims` is empty (the caller could not extract a concrete
+/// input shape — e.g. a load from a symbolic def) or when the windowed
+/// input dims are not concrete `DimInfo::Lit` values, this falls back
+/// to the caller-supplied `ty.dims`. The type checker is responsible
+/// for the static shape contract; this is a best-effort recomputation
+/// to keep the IR self-contained.
+fn compute_reduce_window_out_dims(
+    input_dims: &[DimInfo],
+    window_shape: &[usize],
+    strides: &[usize],
+    fallback_ty: &TensorType,
+) -> Vec<DimInfo> {
+    let n = window_shape.len();
+    if input_dims.len() < n || n == 0 || window_shape.len() != strides.len() {
+        return fallback_ty.dims.clone();
+    }
+    let leading = input_dims.len() - n;
+    let mut out_dims: Vec<DimInfo> = input_dims[..leading].to_vec();
+    for i in 0..n {
+        match &input_dims[leading + i] {
+            DimInfo::Lit(in_dim) => {
+                if window_shape[i] == 0 || strides[i] == 0 || *in_dim < window_shape[i] {
+                    return fallback_ty.dims.clone();
+                }
+                let out = (in_dim - window_shape[i]) / strides[i] + 1;
+                out_dims.push(DimInfo::Lit(out));
+            }
+            other => out_dims.push(other.clone()),
+        }
+    }
+    out_dims
 }
 
 #[derive(Clone)]
@@ -5092,6 +5134,67 @@ impl LowerCtx {
                 let out_ty = TensorType { dims, precision };
                 self.dag.add_node(
                     RiscOp::MaxReduce { axis },
+                    vec![x],
+                    out_ty,
+                    self.current_span_id.clone(),
+                )
+            }
+            // Strided windowed reduction over the trailing
+            // `window_shape.len()` axes (Valid padding only). See
+            // `spec/05-risc-primitives.md` §2.3.1. The four Surf
+            // names map to the four `ReduceWindowKind` variants on the
+            // shared IR op.
+            name @ ("reduce_window_max" | "reduce_window_min" | "reduce_window_sum"
+            | "reduce_window_mean")
+                if args.len() == 3 =>
+            {
+                let x = self.lower_expr_node(&args[0], "reduce_window input");
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let window_shape = collect_cons_chain(&args[1])
+                    .and_then(|elems| {
+                        elems
+                            .iter()
+                            .map(|e| extract_int_for_dim(e).and_then(|n| usize::try_from(n).ok()))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .unwrap_or_default();
+                let strides = collect_cons_chain(&args[2])
+                    .and_then(|elems| {
+                        elems
+                            .iter()
+                            .map(|e| extract_int_for_dim(e).and_then(|n| usize::try_from(n).ok()))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .unwrap_or_default();
+                let reducer = match name {
+                    "reduce_window_max" => crate::dag::ReduceWindowKind::Max,
+                    "reduce_window_min" => crate::dag::ReduceWindowKind::Min,
+                    "reduce_window_sum" => crate::dag::ReduceWindowKind::Sum,
+                    "reduce_window_mean" => crate::dag::ReduceWindowKind::Mean,
+                    _ => unreachable!(),
+                };
+                // Compute output dims directly from the input + window
+                // + stride triple. The type checker has already
+                // validated the shape, but recomputing here keeps the
+                // IR self-contained and avoids reliance on the
+                // (sometimes wildcard) caller-provided `ty.dims`.
+                let dims = compute_reduce_window_out_dims(&x_ty.dims, &window_shape, &strides, ty);
+                let precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
+                    x_ty.precision
+                } else {
+                    ty.precision
+                };
+                let out_ty = TensorType { dims, precision };
+                self.dag.add_node(
+                    RiscOp::ReduceWindow {
+                        reducer,
+                        window_shape,
+                        strides,
+                    },
                     vec![x],
                     out_ty,
                     self.current_span_id.clone(),

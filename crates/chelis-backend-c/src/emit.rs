@@ -1,8 +1,8 @@
 //! RISC DAG to C source code emission.
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp, TensorType,
-    symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, ReduceWindowKind,
+    RiscOp, TensorType, symbolic_bindings,
 };
 use chelis_types::types::Prim;
 
@@ -403,6 +403,21 @@ impl CEmitter {
                     "1.0f",
                     "acc *= t{a}->data[src_idx];",
                     None,
+                );
+            }
+            RiscOp::ReduceWindow {
+                reducer,
+                window_shape,
+                strides,
+            } => {
+                self.emit_reduce_window(
+                    id,
+                    *reducer,
+                    window_shape,
+                    strides,
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
                 );
             }
             RiscOp::Argmax { axis } => {
@@ -3675,6 +3690,103 @@ impl CEmitter {
             self.indent -= 1;
             self.line("}");
         }
+    }
+
+    /// Strided windowed reduction emit. Per
+    /// `spec/05-risc-primitives.md` §2.3.1, the trailing
+    /// `window_shape.len()` axes are reduced; the leading axes pass
+    /// through. Output rank equals input rank.
+    ///
+    /// f32-only for now (matches the rest of the reduction emit
+    /// surface). bf16/f16 widening is follow-on work; we panic on
+    /// non-f32 precision so silent truncation cannot recur.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_reduce_window(
+        &mut self,
+        id: usize,
+        reducer: ReduceWindowKind,
+        window_shape: &[usize],
+        strides: &[usize],
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let a = inputs[0].0;
+        let input_node = dag.get(inputs[0]).unwrap();
+        if !matches!(ty.precision, Prim::F32)
+            || !matches!(input_node.output_type.precision, Prim::F32)
+        {
+            panic!(
+                "emit_reduce_window: f32-only; node {id} has input precision `{}` \
+                 and output precision `{}`. bf16/f16 widening is follow-on work.",
+                input_node.output_type.precision.name(),
+                ty.precision.name(),
+            );
+        }
+        assert_eq!(
+            window_shape.len(),
+            strides.len(),
+            "reduce_window: window_shape and strides must have equal length"
+        );
+        let n = window_shape.len();
+        let in_rank = input_node.output_type.dims.len();
+        assert!(
+            in_rank >= n,
+            "reduce_window: input rank {in_rank} smaller than window arity {n}"
+        );
+        let leading = in_rank - n;
+        let window_volume: usize = window_shape.iter().product();
+        self.emit_slot_wrapper(id, ty);
+        let (init_literal, combine_template) = match reducer {
+            ReduceWindowKind::Max => ("-INFINITY", "acc = fmaxf(acc, t{a}->data[src_idx]);"),
+            ReduceWindowKind::Min => ("INFINITY", "acc = fminf(acc, t{a}->data[src_idx]);"),
+            ReduceWindowKind::Sum | ReduceWindowKind::Mean => {
+                ("0.0f", "acc += t{a}->data[src_idx];")
+            }
+        };
+
+        self.line("#pragma omp parallel for");
+        self.line(&format!(
+            "for (int outer = 0; outer < t{id}->size; outer++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("float acc = {init_literal};"));
+        self.line("int out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+        ));
+        // Generate nested window loops. Each windowed axis gets its
+        // own loop variable __w{i}; the leading axes are passed
+        // through from `out_indices[..leading]`.
+        for (i, w) in window_shape.iter().enumerate() {
+            self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
+            self.indent += 1;
+        }
+        self.line("int full_indices[CHELIS_MAX_DIM];");
+        for d in 0..leading {
+            self.line(&format!("full_indices[{d}] = out_indices[{d}];"));
+        }
+        for (i, s) in strides.iter().enumerate() {
+            let axis = leading + i;
+            self.line(&format!(
+                "full_indices[{axis}] = out_indices[{axis}] * {s} + __w{i};"
+            ));
+        }
+        self.line(&format!(
+            "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+        ));
+        let combine = combine_template.replace("{a}", &a.to_string());
+        self.line(&combine);
+        for _ in 0..n {
+            self.indent -= 1;
+            self.line("}");
+        }
+        if matches!(reducer, ReduceWindowKind::Mean) {
+            self.line(&format!("acc /= {}.0f;", window_volume));
+        }
+        self.line(&format!("t{id}->data[outer] = acc;"));
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Argmax / Argmin ----

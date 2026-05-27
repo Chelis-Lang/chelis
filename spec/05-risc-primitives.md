@@ -151,6 +151,69 @@ explicitly request a narrower-than-default accumulator are a type error per
 and does not lose precision the way a long sum does, so the result element
 type matches the operand element type.
 
+### 2.3.1 Windowed Reduction
+
+| Name | Signature | Semantics | AD adjoint |
+|---|---|---|---|
+| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Subgradient: `g` flows to the argmax position inside each window (deferred — not part of the initial primitive admission) |
+| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Subgradient: `g` flows to the argmin position (deferred) |
+| `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives `g` of the owning window (deferred) |
+| `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | `g / window_volume` to each source position (deferred) |
+
+**Design rationale: four primitives, not one with a Reducer enum.** The
+issue text (Chelis-Lang/chelis#254) proposed a `Reducer` enum argument
+(`Sum | Max | Min | Mean`). The shipped surface follows the same pattern as
+the existing reductions — `max_reduce`, `min_reduce`, `prod_reduce`,
+`argmax_reduce`, `argmin_reduce` are already four siblings, not one
+parameterized op — so adding four siblings keeps the builtin set
+consistent and avoids introducing a string-keyed or ADT-keyed argument that
+would have to be resolved at check time. The IR carries a single
+`RiscOp::ReduceWindow { reducer, window_shape, strides }` node whose
+`reducer` field selects `Max` / `Min` / `Sum` / `Mean`; the four Surf
+builtins differ only in which `ReduceWindowKind` they emit.
+
+**Padding mode: Valid only.** The shipped surface implements
+`Valid`-padding only. Output spatial extent per windowed axis is
+`floor((input_dim - window) / stride) + 1`. `Same`-padding (with
+`ceil(input_dim / stride)` output and zero / `-inf` fill at the
+boundary) is **deferred** to a follow-up; users who need that
+behavior should pad explicitly with `pad(x, ..., fill)` before
+calling `reduce_window_*`. The four-arg signature in the original
+issue text proposed `(x, window_shape, strides, reducer)` with no
+explicit mode; this matches `Valid` as the implicit default.
+
+**Shape contract.**
+
+- `window_shape` and `strides` are int32 lists of equal length
+  `n >= 1`.
+- The trailing `n` axes of the input are the windowed axes. The
+  leading `rank(input) - n` axes pass through unchanged.
+- Each windowed entry must be a positive int32. `window_shape[i] >= 1`
+  and `strides[i] >= 1`.
+- The output rank equals the input rank. Leading dims match the
+  input; trailing dim `i` is
+  `floor((input_dims[rank - n + i] - window_shape[i]) / strides[i]) + 1`.
+  When that formula yields a non-positive value the call is a type
+  error (an empty window output is structurally meaningless under
+  `Valid` padding).
+
+**Lowering.** The IR `RiscOp::ReduceWindow` carries the full
+`{reducer, window_shape, strides}` triple. The evaluator and C
+backend both implement it as a direct windowed loop nest — `Mean` is
+implemented as windowed `Sum` divided by the window volume, computed
+inline rather than as a separate `Div` op. There is no Tier-2 to
+Tier-1 decomposition: `reduce_window_*` is a Tier-1 primitive in its
+own right. The Surf `reduce_window_*` names are the public surface;
+the IR node and backends share the single `ReduceWindow` lowering
+path.
+
+**AD policy.** Adjoint rules for `reduce_window_*` are **deferred**
+pending an explicit Phase-3 design decision: `Max`/`Min` need an
+argmax-style fan-in, `Sum` is a windowed `expand`, and `Mean` is a
+windowed `expand` with a `1 / window_volume` scaling. Until those
+land the AD layer rejects `grad` over `reduce_window_*` with an
+`AdError::NotSupported` variant (see `chelis_ir::grad`).
+
 **Reduction order (`sum` only).** `sum` evaluates the reduction with a
 **stride-4 ILP cascade** — four independent accumulator lanes loaded
 in round-robin (`acc[i & 3] += value[i]`), combined at the end as

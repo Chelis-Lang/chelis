@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use crate::dag::{
-    Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType, bind_symbolic_dims,
-    symbolic_bindings,
+    Dag, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, TensorType,
+    bind_symbolic_dims, symbolic_bindings,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -457,6 +457,117 @@ fn scatter_replace(
     out
 }
 
+/// Strided windowed reduction over the trailing `window_shape.len()` axes.
+///
+/// Per `spec/05-risc-primitives.md` §2.3.1 (Valid padding):
+/// - Leading `rank - n` axes pass through unchanged.
+/// - Each windowed output axis has extent
+///   `floor((input_dim - window_shape[i]) / strides[i]) + 1`.
+/// - `Mean` is windowed `Sum` divided by the window volume.
+///
+/// Panics if the input rank is smaller than `window_shape.len()`, if any
+/// window/stride entry is zero, or if any windowed dim has `window > input_dim`.
+/// The IR verifier and type checker reject those statically before the
+/// evaluator runs.
+fn reduce_window(
+    input: &TensorValue,
+    reducer: ReduceWindowKind,
+    window_shape: &[usize],
+    strides: &[usize],
+) -> TensorValue {
+    assert_eq!(
+        window_shape.len(),
+        strides.len(),
+        "window_shape and strides must have equal length"
+    );
+    let rank = input.shape.len();
+    let n = window_shape.len();
+    assert!(
+        rank >= n,
+        "reduce_window: input rank {rank} smaller than window arity {n}"
+    );
+    let leading = rank - n;
+
+    let mut out_shape = input.shape[..leading].to_vec();
+    for i in 0..n {
+        let in_dim = input.shape[leading + i];
+        let w = window_shape[i];
+        let s = strides[i];
+        assert!(w >= 1, "reduce_window: window axis {i} must be >= 1");
+        assert!(s >= 1, "reduce_window: stride axis {i} must be >= 1");
+        assert!(
+            in_dim >= w,
+            "reduce_window: axis {i} input dim {in_dim} < window {w}"
+        );
+        out_shape.push((in_dim - w) / s + 1);
+    }
+
+    let window_volume: usize = window_shape.iter().product();
+    let out_len = numel(&out_shape);
+    let mut out = vec![0.0_f64; out_len];
+
+    let init_acc = |r: ReduceWindowKind| -> f64 {
+        match r {
+            ReduceWindowKind::Max => f64::NEG_INFINITY,
+            ReduceWindowKind::Min => f64::INFINITY,
+            ReduceWindowKind::Sum | ReduceWindowKind::Mean => 0.0,
+        }
+    };
+    let combine = |r: ReduceWindowKind, acc: f64, x: f64| -> f64 {
+        match r {
+            ReduceWindowKind::Max => acc.max(x),
+            ReduceWindowKind::Min => acc.min(x),
+            ReduceWindowKind::Sum | ReduceWindowKind::Mean => acc + x,
+        }
+    };
+
+    for (out_flat, slot) in out.iter_mut().enumerate() {
+        let out_idx = linear_to_index(out_flat, &out_shape);
+
+        // Walk the window: iterate over all positions inside the
+        // window_shape multi-index. The source index per dimension is
+        // `out_idx[axis] * stride + window_pos` for windowed axes,
+        // matching the leading-axis passthrough rule above.
+        let mut acc = init_acc(reducer);
+        let mut window_pos = vec![0usize; n];
+        loop {
+            let mut src_idx = vec![0usize; rank];
+            src_idx[..leading].copy_from_slice(&out_idx[..leading]);
+            for i in 0..n {
+                src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
+            }
+            let src_flat = index_to_linear(&src_idx, &input.shape);
+            acc = combine(reducer, acc, input.data[src_flat]);
+
+            // Increment window_pos (mixed-radix carry).
+            if n == 0 {
+                break;
+            }
+            let mut carry = n;
+            for i in (0..n).rev() {
+                window_pos[i] += 1;
+                if window_pos[i] < window_shape[i] {
+                    carry = i;
+                    break;
+                }
+                window_pos[i] = 0;
+            }
+            if carry == n {
+                break;
+            }
+        }
+        if matches!(reducer, ReduceWindowKind::Mean) {
+            acc /= window_volume as f64;
+        }
+        *slot = acc;
+    }
+
+    TensorValue {
+        data: out,
+        shape: out_shape,
+    }
+}
+
 fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f64) -> TensorValue {
     assert!(axis < input.shape.len());
     let mut out_shape = input.shape.clone();
@@ -789,6 +900,11 @@ where
             RiscOp::ProdReduce { axis } => {
                 reduce(&values[&node.inputs[0]], *axis, 1.0, |acc, x| acc * x)
             }
+            RiscOp::ReduceWindow {
+                reducer,
+                window_shape,
+                strides,
+            } => reduce_window(&values[&node.inputs[0]], *reducer, window_shape, strides),
             RiscOp::Argmax { axis } => reduce_argcmp(
                 &values[&node.inputs[0]],
                 *axis,

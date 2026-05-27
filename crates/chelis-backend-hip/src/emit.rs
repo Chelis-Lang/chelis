@@ -962,6 +962,11 @@ impl HipEmitter {
                     Self::elem_kind(input_ty),
                 ))
             }
+            // `reduce_window_*` HIP codegen is deferred per the
+            // initial-admission scope (issue #254 / spec §2.3.1). The
+            // C backend is canonical; HIP raises a deferred error when
+            // a kernel name is requested.
+            RiscOp::ReduceWindow { .. } => None,
             RiscOp::OneHot { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)),
@@ -1426,6 +1431,16 @@ impl HipEmitter {
                 // kernel source comes from `extra_reduction_kernel_sources`
                 // collected by the first pass.
                 self.emit_extra_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
+            }
+            // `reduce_window_*` HIP codegen is deferred per the
+            // initial-admission scope (issue #254 / spec §2.3.1).
+            // C is the canonical backend; HIP raises a clear deferred
+            // error so users know they need the C target.
+            RiscOp::ReduceWindow { .. } => {
+                todo!(
+                    "reduce_window_* HIP codegen is deferred (issue #254 / spec/05-risc-primitives.md §2.3.1). \
+                     Use the C backend, or open a follow-up issue if you need GPU windowed reductions."
+                )
             }
             RiscOp::OneHot { .. } => {
                 panic!(
@@ -2843,6 +2858,7 @@ impl HipEmitter {
             | RiscOp::MaxReduce { .. }
             | RiscOp::MinReduce { .. }
             | RiscOp::ProdReduce { .. }
+            | RiscOp::ReduceWindow { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
             | RiscOp::OneHot { .. }
