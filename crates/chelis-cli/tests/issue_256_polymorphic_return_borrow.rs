@@ -16,17 +16,26 @@
 //! left their output type as a free variable until the surrounding
 //! call's `&tensor[..]` parameter pinned it via unification.
 //!
-//! Fix in two parts:
+//! Fix in three parts:
 //!
 //! 1. `crates/chelis-types/src/infer.rs::borrow` arm: when the borrow
 //!    inner resolves to `Type::Var(_)`, wrap as `Type::Ref(Type::Var(_))`
-//!    instead of erroring. The surrounding call's expected parameter
+//!    instead of erroring AND record the variable in the substitution's
+//!    deferred-borrow ledger. The surrounding call's expected parameter
 //!    type then unifies the variable through `infer_app`.
 //! 2. `crates/chelis-types/src/linearity.rs::expr_is_owned_or_borrow_linear`:
 //!    accept a stamped `(t-var ...)` (and `(t-ref (t-var ...))`) as a
 //!    borrow target. The inference layer (which sees the post-pinning
 //!    subst) is the ultimate gate; a borrow of a genuinely non-tensor
 //!    value still fails there.
+//! 3. `crates/chelis-types/src/infer.rs::validate_deferred_borrow_vars`
+//!    (round 2): after a def body's inference completes, re-check each
+//!    recorded deferred-borrow variable against the *final* substitution.
+//!    The deferral in part 1 is sound only when the variable is
+//!    eventually pinned to a tensor or tensor carrier. A fully-polymorphic
+//!    consumer (`consume_any[a](t: a)`) never pins it; this pass rejects
+//!    the never-pinned and pinned-to-scalar cases that parts 1 and 2 would
+//!    otherwise let through. See the round-2 soundness-lock tests below.
 //!
 //! See also:
 //!   - chelis#154 — closed in 0.7.11. Different bug: ADT FIELD tensor
@@ -370,5 +379,120 @@ fn borrow_of_unit_is_rejected_at_inference() {
             .iter()
             .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
         "borrow of `()` must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
+    );
+}
+
+/// Round-2 soundness lock (issue #256): a genuinely *free* type variable
+/// borrowed against a fully-polymorphic consumer must be REJECTED. This
+/// is the exploit the first review pass argued was "only reachable via
+/// non-terminating programs"; it is not. `use_it[a](seed: a)` is a
+/// terminating, non-recursive def, yet `seed` is a genuinely-unconstrained
+/// `Type::Var` at the `&v` borrow site. The consumer `consume_any[a](t: a)`
+/// unifies its own parameter to `&a` WITHOUT ever pinning `a` to a tensor,
+/// so the deferral the borrow arm relies on never resolves to a tensor.
+///
+/// Pre-round-2 this passed with a perfect score (a non-tensor value
+/// reaching the linearity-erased borrow surface). The
+/// `validate_deferred_borrow_vars` pass drains the borrow arm's deferral
+/// ledger after the def body's inference completes and rejects any
+/// recorded variable that did not become a tensor or tensor carrier.
+///
+/// The diagnostic is the same `borrow requires tensor or tensor-carrying
+/// input, got ?N` the borrow arm emits for a concretely-non-tensor inner;
+/// here `?N` is the unresolved variable.
+#[test]
+fn borrow_of_free_var_against_polymorphic_consumer_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("free_var_poly_consumer_rejected.ch");
+    write_file(
+        &fixture,
+        "module Issue256FreeVarPolyConsumer\n\
+         def consume_any[a](t: a) -> bool = true\n\
+         def use_it[a](seed: a) -> bool = {\n\
+           v = seed\n\
+           consume_any(&v)\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        !kinds.is_empty(),
+        "borrow of a genuinely-free type variable against a polymorphic \
+         consumer must be rejected; got clean score {json}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
+        "free-var borrow must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
+    );
+}
+
+/// Round-2 soundness lock, end-to-end variant: the same free-var borrow
+/// reached through a CONCRETE caller that instantiates the polymorphic
+/// parameter at a non-tensor type (`int32`). This is the fully-terminating
+/// program a user could actually write: no recursion, a concrete `main`,
+/// and a non-tensor value flowing into a `&` borrow. It must be rejected
+/// so a non-tensor never reaches the (borrow-type-erased) backend.
+#[test]
+fn borrow_of_free_var_instantiated_at_int32_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("free_var_int32_instantiation_rejected.ch");
+    write_file(
+        &fixture,
+        "module Issue256FreeVarInt32\n\
+         def consume_any[a](t: a) -> bool = true\n\
+         def use_it[a](seed: a) -> bool = {\n\
+           v = seed\n\
+           consume_any(&v)\n\
+         }\n\
+         def main() -> bool = use_it(cast(42, int32))\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        !kinds.is_empty(),
+        "a terminating program borrowing a non-tensor via a polymorphic \
+         consumer must be rejected; got clean score {json}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
+        "free-var-at-int32 borrow must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
+    );
+}
+
+/// Round-2 positive lock: the sound deferral must STILL be accepted. A
+/// polymorphic parameter borrowed against a `&tensor[..]` consumer pins
+/// the variable to a tensor through unification, so the deferral resolves
+/// soundly. This is the counterpart to the rejection tests above and
+/// guards `validate_deferred_borrow_vars` against over-rejecting the
+/// legitimate issue #256 pattern (the variable DOES become a tensor).
+#[test]
+fn borrow_of_poly_param_pinned_to_tensor_is_accepted() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("poly_param_pinned_tensor_accepted.ch");
+    write_file(
+        &fixture,
+        "module Issue256PolyParamPinned\n\
+         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def use_it[a, c, h, w](seed: tensor[a, c, h, w, f32]) -> bool = {\n\
+           v = relu(seed)\n\
+           consume_t(&v)\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "a deferred borrow that resolves to a tensor must be accepted; got {kinds:?}"
     );
 }

@@ -294,6 +294,9 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
             &mut typed_nodes,
             &mut total_nodes,
         );
+        // Issue #256 round 2: re-check each deferred borrow against the
+        // now-complete substitution (see `validate_deferred_borrow_vars`).
+        validate_deferred_borrow_vars(&subst, &mut errors);
     }
 
     // Third pass: reject tensor types whose element precision isn't supported
@@ -959,6 +962,11 @@ fn infer_ir_program_with_state(
             let name = top_level_decl_name(expr).unwrap_or("<anon>");
             eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
         }
+        // Issue #256 round 2: drain the deferred-borrow ledger for this
+        // def and re-check each recorded variable against the now-complete
+        // substitution. Draining per-def keeps error attribution local and
+        // prevents one def's deferrals from leaking into the next.
+        validate_deferred_borrow_vars(&state.subst, &mut errors);
     }
 
     for warning in chelis_deep::validate::validate(exprs) {
@@ -2052,6 +2060,59 @@ fn type_contains_tensor(ty: &Type) -> bool {
         Type::Ref(inner) => type_contains_tensor(inner),
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(type_contains_tensor),
         Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+    }
+}
+
+/// Issue #256 round 2 soundness gate. The `borrow` inference arm accepts a
+/// borrow whose inner type is still an unresolved `Type::Var`, recording
+/// the variable in the substitution's deferred-borrow ledger. That
+/// deferral is sound only when the variable is *eventually* pinned to a
+/// tensor or tensor-carrying type by a later unification (the surrounding
+/// `&tensor[..]` / `&Carrier[..]` parameter). This pass drains the ledger
+/// after a def body's inference completes and re-checks each recorded
+/// variable against the now-complete substitution:
+///
+///   - `Tensor` / `Ref(Tensor)`: pinned to a tensor — sound, accept.
+///   - `Adt` / `Tuple` / `Ref(Adt|Tuple)`: an aggregate that may carry a
+///     tensor; the linearity layer holds the authoritative carrier set
+///     (it resolves variant fields, which the bare `Type` here cannot),
+///     so defer the carry decision there rather than risk a false reject.
+///   - still `Var`: never pinned. A fully-polymorphic consumer (e.g.
+///     `consume_any[a](t: a)`) unifies the parameter to `&a` without ever
+///     forcing a tensor, so a genuinely-non-tensor value would slip past
+///     every other gate. Reject.
+///   - `Prim` / `Unit` / `Fn`: pinned to a concretely-non-tensor scalar
+///     only after the borrow arm ran (so the arm's own `_ => TypeMismatch`
+///     could not fire). Reject.
+fn validate_deferred_borrow_vars(subst: &Subst, errors: &mut Vec<CheckError>) {
+    for tv in subst.take_deferred_borrow_vars() {
+        let resolved = subst.apply(&Type::Var(tv));
+        // Peel every `Ref` layer: the recorded variable is the borrow
+        // inner, but a later unification may have wrapped it in one or
+        // more `&` layers (e.g. the parameter type was itself `&T`).
+        let mut peeled = &resolved;
+        while let Type::Ref(inner) = peeled {
+            peeled = inner.as_ref();
+        }
+        match peeled {
+            // Pinned to a tensor or an aggregate that linearity will
+            // classify against the full carrier set: sound deferral.
+            Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error => {}
+            // Never pinned, or pinned to a concretely-non-tensor value:
+            // the deferral was unsound. Reject with the same diagnostic
+            // shape the borrow arm uses for a concretely-non-tensor inner.
+            Type::Var(_) | Type::Prim(_) | Type::Unit | Type::Fn(_, _) => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("borrow requires tensor or tensor-carrying input, got {peeled}"),
+                    vec!["Use `&x` only with tensor values".to_string()],
+                ));
+            }
+            // `Ref` is fully peeled above; this arm is unreachable but
+            // keeps the match exhaustive without a catch-all that could
+            // silently swallow a future `Type` variant.
+            Type::Ref(_) => {}
+        }
     }
 }
 
@@ -7108,7 +7169,22 @@ fn infer_expr(
                             // accept. The linearity checker's
                             // `expr_is_owned_or_borrow_linear` still rejects
                             // a stamped `(t-var ...)` if no pinning happens.
-                            Type::Var(_) => Type::Ref(Box::new(resolved)),
+                            //
+                            // Soundness ledger (issue #256 round 2): record
+                            // the inner type variable so the inference driver
+                            // can re-check it against the *final*
+                            // substitution after the def body completes. The
+                            // deferral is sound only when the variable is
+                            // eventually pinned to a tensor or tensor carrier;
+                            // a fully-polymorphic consumer (e.g.
+                            // `consume_any[a](t: a)`) never pins it, and a
+                            // genuinely-non-tensor value would otherwise slip
+                            // past every gate. See
+                            // `validate_deferred_borrow_vars`.
+                            Type::Var(tv) => {
+                                subst.record_deferred_borrow_var(tv);
+                                Type::Ref(Box::new(Type::Var(tv)))
+                            }
                             _ => {
                                 errors.push(CheckError::new(
                                     CheckErrorKind::TypeMismatch,
