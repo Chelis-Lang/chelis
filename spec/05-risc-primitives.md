@@ -198,11 +198,12 @@ explicit mode; this matches `Valid` as the implicit default.
   `Valid` padding).
 
 **Lowering.** The IR `RiscOp::ReduceWindow` carries the full
-`{reducer, window_shape, strides}` triple. The evaluator and C
-backend both implement it as a direct windowed loop nest — `Mean` is
-implemented as windowed `Sum` divided by the window volume, computed
-inline rather than as a separate `Div` op. There is no Tier-2 to
-Tier-1 decomposition: `reduce_window_*` is a Tier-1 primitive in its
+`{reducer, window_shape, strides}` triple. The IR evaluator, the host
+runtime, and the C backend each implement it as a direct windowed loop
+nest — `Mean` is implemented as windowed `Sum` divided by the window
+volume, computed inline rather than as a separate `Div` op. (HIP
+codegen is deferred; see **Backend status** below.) There is no Tier-2
+to Tier-1 decomposition: `reduce_window_*` is a Tier-1 primitive in its
 own right. The Surf `reduce_window_*` names are the public surface;
 the IR node and backends share the single `ReduceWindow` lowering
 path.
@@ -213,6 +214,56 @@ argmax-style fan-in, `Sum` is a windowed `expand`, and `Mean` is a
 windowed `expand` with a `1 / window_volume` scaling. Until those
 land the AD layer rejects `grad` over `reduce_window_*` with an
 `AdError::NotSupported` variant (see `chelis_ir::grad`).
+
+**Output-dim formula vs. issue #254.** The admitting issue text
+sketched the `Valid` output extent as `(input_dim - window + 1) /
+stride`. That informal form only agrees with the standard pooling
+formula at `stride == 1`; for `stride > 1` it under-counts (e.g.
+`input=8, window=2, stride=2` gives `3` instead of the correct `4`
+non-overlapping windows at positions `0, 2, 4, 6`). The shipped
+formula `floor((input_dim - window) / stride) + 1` matches
+`jax.lax.reduce_window` / PyTorch pool kernels and is the normative
+contract above.
+
+**Backend status (initial admission).** The C backend is the
+canonical lowering and is exercised by a gcc compile-and-run
+evaluator-parity gate. The HIP backend codegen for `ReduceWindow` is
+**deferred**: a `ReduceWindow` node reaching HIP codegen panics with a
+deferred-feature `todo!`, matching the house style already used for the
+`Pad` / `Shrink` HIP stubs. `chelis build --target hip` on a program
+containing `reduce_window_*` therefore aborts rather than emitting a
+GPU kernel; use the default C target until GPU windowed reductions
+land.
+
+**Statically-known windowed extents required on the build path.** The
+build/backend path needs each *windowed* axis extent to be known at
+compile time (a literal `tensor[..., 8, 8, p]` dim, or a named dim with
+a bound size). A windowed axis whose extent is only known at runtime
+(e.g. a `pad_sequences` result, whose dims are bound from input
+metadata) cannot be lowered to a correct static output shape under the
+current `DimInfo` model — the windowed output axis is strictly smaller
+than its input, so reusing the input dim variable mis-allocates the
+output tensor. The lowering refuses to emit such a passthrough and
+defers to the (shape-erased) checker result instead. The leading
+pass-through axes may remain symbolic. The IR evaluator and host
+runtime always recompute from the concrete runtime shape and so handle
+runtime-only extents correctly; only the ahead-of-time C/HIP build path
+carries this restriction.
+
+**Acceptance oracle.** The authoritative completion oracle for this
+primitive is the standard per-PR gate, `python3 scripts/gate.py`, which
+runs (among the broader suite): the type-checker shape-contract tests
+(`chelis-types::issue_254_reduce_window_signatures`), the IR
+evaluator + AD-rejection tests (`chelis-ir::issue_254_reduce_window`),
+the host-runtime evaluator tests
+(`chelis-compiler-api::issue_254_reduce_window_host_runtime`), the C
+emit structural tests (`chelis-backend-c::issue_254_reduce_window_emit`)
+plus the gcc compile-and-run evaluator-parity tests
+(`chelis-backend-c::exec_compile::exec_reduce_window_*`), and the
+end-to-end build-vs-eval parity over the executable example
+(`chelis-cli::cli::build_c_runs_tensor_structural_ops_and_matches_eval_output`).
+No `#[ignore]`d or HIP manual gate is required for this primitive,
+because HIP codegen is deferred.
 
 **Reduction order (`sum` only).** `sum` evaluates the reduction with a
 **stride-4 ILP cascade** — four independent accumulator lanes loaded
