@@ -964,8 +964,10 @@ impl HipEmitter {
             }
             // `reduce_window_*` HIP codegen is deferred per the
             // initial-admission scope (issue #254 / spec §2.3.1). The
-            // C backend is canonical; HIP raises a deferred error when
-            // a kernel name is requested.
+            // C backend is canonical; returning `None` here means no
+            // kernel name is registered, and the launch-emit arm below
+            // panics via `todo!` if a `ReduceWindow` node ever reaches
+            // codegen on the HIP target.
             RiscOp::ReduceWindow { .. } => None,
             RiscOp::OneHot { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
@@ -1433,9 +1435,10 @@ impl HipEmitter {
                 self.emit_extra_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
             }
             // `reduce_window_*` HIP codegen is deferred per the
-            // initial-admission scope (issue #254 / spec §2.3.1).
-            // C is the canonical backend; HIP raises a clear deferred
-            // error so users know they need the C target.
+            // initial-admission scope (issue #254 / spec §2.3.1). C is
+            // the canonical backend; HIP panics with a deferred-feature
+            // message via `todo!`, matching the house style used for
+            // Pad / Shrink HIP stubs above.
             RiscOp::ReduceWindow { .. } => {
                 todo!(
                     "reduce_window_* HIP codegen is deferred (issue #254 / spec/05-risc-primitives.md §2.3.1). \

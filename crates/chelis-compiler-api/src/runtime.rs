@@ -4309,14 +4309,6 @@ fn tensor_expand_host(
     })
 }
 
-/// Pad each axis by `padding[i] = (lo_i, hi_i)`, filling the inserted
-/// region with `fill`. Output dim i is `input_dim[i] + lo_i + hi_i`.
-/// Mirrors the IR evaluator at `crates/chelis-ir/src/eval.rs::pad` so
-/// eval-in-context output is byte-identical to a freshly-lowered DAG run.
-///
-/// Sibling sweep of issue Chelis-Lang/chelis#187 (pad had the same
-/// 1-arg-`tensor_unop`-vs-parameterized-RISC-op antipattern as shrink
-/// and stride).
 /// Strided windowed reduction host evaluator. Mirrors
 /// `chelis_ir::eval::reduce_window` so host-runtime evaluation and
 /// IR-evaluator runs produce byte-identical output for the four
@@ -4379,7 +4371,6 @@ fn tensor_reduce_window_host(
         ReduceWindowOp::Sum | ReduceWindowOp::Mean => 0.0,
     };
 
-    let _ = out_numel; // length implicit in `out`
     for (out_flat, slot) in out.iter_mut().enumerate() {
         let out_indices = linear_to_indices(out_flat, &out_shape);
         let mut acc = init_acc;
@@ -4425,6 +4416,14 @@ fn tensor_reduce_window_host(
     })
 }
 
+/// Pad each axis by `padding[i] = (lo_i, hi_i)`, filling the inserted
+/// region with `fill`. Output dim i is `input_dim[i] + lo_i + hi_i`.
+/// Mirrors the IR evaluator at `crates/chelis-ir/src/eval.rs::pad` so
+/// eval-in-context output is byte-identical to a freshly-lowered DAG run.
+///
+/// Sibling sweep of issue Chelis-Lang/chelis#187 (pad had the same
+/// 1-arg-`tensor_unop`-vs-parameterized-RISC-op antipattern as shrink
+/// and stride).
 fn tensor_pad_host(
     tensor: &RuntimeTensorValue,
     padding: &[(usize, usize)],
