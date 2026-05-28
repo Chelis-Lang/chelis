@@ -576,8 +576,13 @@ list literal expression with a message of the form:
 list element rank mismatch: 1 dims vs 2 dims;
 List[tensor[...]] requires rank-uniform elements (the dim slot is a
 dimension variable, not a shape-vector variable). Reshape or flatten
-elements to a common rank before listing.
+elements to a common rank before listing (spec/04-type-system.md §4.5.1).
 ```
+
+The message is emitted on a single line; the wrapping above is for
+readability only. The trailing `(spec/04-type-system.md §4.5.1)`
+back-reference is part of the diagnostic so a reader or agent can
+locate this rule from the error text alone.
 
 Rationale: Chelis dimension variables (§4.4) range over individual
 dimensions, not over shape vectors. Permitting `[rank-1, rank-2]` to
