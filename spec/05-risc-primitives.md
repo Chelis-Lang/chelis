@@ -392,6 +392,16 @@ state through the tensor-lane primitives in §2.
 precision equals the dtype of `initial`. The iteration order is the
 positional integer sequence `0, 1, ..., n - 1`.
 
+Precision caveat: the host-runtime interpreter stores every tensor
+element as an `f64` (`crates/chelis-compiler-api/src/runtime.rs`
+`ScalarBits::as_f64`), so a `T = int64` accumulator is exact only up to
+2^53; integer magnitudes beyond that lose their low bits, matching
+IEEE-754 double semantics and the behavior of every other host-runtime
+tensor builder. This is not specific to `tensor_scan`. The init-style
+use cases that motivate the helper (LCG-driven Glorot weights bounded by
+the modulus, positional/index sequences, learned-schedule precompute)
+all stay within 2^53, so the caveat is documented rather than guarded.
+
 `tensor_scan` exists because the host-runtime interpreter has no
 tail-call optimization: right-recursive Surf list builds of more than
 ~10000 elements overflow the worker stack (Chelis-Lang/chelis#257),
@@ -402,17 +412,20 @@ schedule precompute) need. `tensor_scan` runs the loop on the host
 in Rust, so the worker stack is constant in `n`.
 
 The builtin is **not** wired into `chelis build` for the `c` or `hip`
-backend target. A program that calls `tensor_scan` at top-level (or
-transitively through any function that `chelis build` would emit)
-is rejected at compile time with a `tensor_scan`-tagged
+backend target. A program that calls `tensor_scan` at top-level, inside
+a higher-order callback body (`map`/`fold`/`filter`/`scan`/`partition`/
+`flat_map`), or transitively through any function that `chelis build`
+would emit is rejected at compile time with a `tensor_scan`-tagged
 `unsupported_feature` diagnostic that points back to this section.
 The rejection is enforced in
-`crates/chelis-compiler-api/src/compiler.rs::reject_host_only_builtins`
-so the C/HIP emitters never see a `tensor_scan` call; previously the
-C host emitter silently produced `__binding_0_value = /* unsupported
-builtin tensor_scan */ 0` and the compiled program returned garbage.
-Programs that need a compiled scan over a tensor must compose
-`expand` + the tensor-lane primitives directly.
+`crates/chelis-compiler-api/src/compiler.rs::reject_host_only_builtins`,
+which walks every top-level binding value, every emitted function body,
+and every inline callback body, so the C/HIP emitters never see a
+`tensor_scan` call; previously the C host emitter silently produced
+`__binding_0_value = /* unsupported builtin tensor_scan */ 0` and the
+compiled program returned garbage. Programs that need a compiled scan
+over a tensor must compose `expand` + the tensor-lane primitives
+directly.
 
 A future Tier 1 primitive can replace this host-only helper once the
 RISC DAG admits higher-order tensor primitives. Until that lands,
@@ -429,9 +442,16 @@ A `chelis build --target c` or `--target hip` of a program that
 calls `tensor_scan` is rejected at compile time, and `grad(...)`
 / `vmap(...)` over a function whose body reaches `tensor_scan` is
 rejected at the host-runtime transform boundary with a tagged error
-referencing this section. The acceptance tests in
+referencing this section. The AD-boundary rejection is
+*reachability*-scoped: it fires only when `tensor_scan` is reachable
+from the transform target (the applied function and the def bodies it
+calls), so an unrelated top-level binding that happens to call
+`tensor_scan` does not falsely block a differentiable transform. The
+acceptance tests in
 `crates/chelis-compiler-api/tests/issue_257_tensor_scan_host_runtime.rs`
-pin each of these alongside the positive 8/20000/40000-element cases.
+pin each of these — including the reachability-scoping case and the
+higher-order-callback build rejection — alongside the positive
+8/20000/40000-element cases.
 
 ---
 
