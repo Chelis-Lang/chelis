@@ -1444,7 +1444,19 @@ fn reject_host_only_builtins(
     program: &chelis_ir::host::HostProgram,
     target: CompileTarget,
 ) -> Result<()> {
-    use chelis_ir::host::{HostExpr, HostExprKind};
+    use chelis_ir::host::{HostCallback, HostCallbackKind, HostExpr, HostExprKind};
+
+    // A higher-order helper's callback can itself reach a host-only
+    // builtin (e.g. `map(fn (x) -> tensor_scan(...), xs)`). An *inline*
+    // callback carries its body inline, so we descend into it. A *named*
+    // callback refers to a top-level function by name; that function's
+    // body is scanned separately when we walk `program.functions`, so we
+    // do not need to chase the reference here.
+    fn scan_callback(callback: &HostCallback, found: &mut Option<String>) {
+        if let HostCallbackKind::Inline { body, .. } = &callback.kind {
+            scan_expr(body, found);
+        }
+    }
 
     fn scan_expr(expr: &HostExpr, found: &mut Option<String>) {
         if found.is_some() {
@@ -1521,11 +1533,26 @@ fn reject_host_only_builtins(
                     scan_expr(d, found);
                 }
             }
-            HostExprKind::Map { list, .. }
-            | HostExprKind::Filter { list, .. }
-            | HostExprKind::Partition { list, .. }
-            | HostExprKind::FlatMap { list, .. } => scan_expr(list, found),
-            HostExprKind::Fold { init, list, .. } | HostExprKind::Scan { init, list, .. } => {
+            HostExprKind::Map { callback, list, .. }
+            | HostExprKind::Filter { callback, list, .. }
+            | HostExprKind::Partition { callback, list, .. }
+            | HostExprKind::FlatMap { callback, list, .. } => {
+                scan_callback(callback, found);
+                scan_expr(list, found);
+            }
+            HostExprKind::Fold {
+                callback,
+                init,
+                list,
+                ..
+            }
+            | HostExprKind::Scan {
+                callback,
+                init,
+                list,
+                ..
+            } => {
+                scan_callback(callback, found);
                 scan_expr(init, found);
                 scan_expr(list, found);
             }

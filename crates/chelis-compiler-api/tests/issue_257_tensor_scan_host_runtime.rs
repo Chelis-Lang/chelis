@@ -373,3 +373,121 @@ out = grad(target)(cast(1.0, f32))
         "grad rejection must explain the AD contract, got: {message}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// AD-guard scoping (round-2 review). The host-only AD guard must be
+// *reachability*-scoped: it rejects a transform only when `tensor_scan`
+// is reached *from the transform target*, not when an unrelated
+// top-level binding happens to call `tensor_scan`. The earlier
+// implementation scanned every top-level def, so a perfectly
+// differentiable `grad`/`vmap` was falsely blocked by an unrelated
+// `tensor_scan` elsewhere in the program.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue257_grad_unrelated_tensor_scan_def_does_not_block() {
+    // `unrelated` calls tensor_scan but is never reached from `target`.
+    // `grad(target)` is a pure tensor-lane function and must succeed.
+    let src = r#"
+unrelated = tensor_scan(
+  cast(0, int64),
+  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
+  cast(4, int64)
+)
+target = fn (x: f32) -> mul(x, cast(2.0, f32))
+out = grad(target)(cast(1.0, f32))
+"#;
+    let result = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: src.to_string(),
+        bindings: BTreeMap::new(),
+    });
+    // The grad must NOT be rejected by the host-only guard. Either it
+    // succeeds outright, or any error must be something OTHER than the
+    // tensor_scan AD-guard false positive.
+    if let Err(err) = &result {
+        let message = format!("{err:?}");
+        assert!(
+            !message.contains("cannot differentiate through host-runtime-only"),
+            "grad over a pure target must not be blocked by an unrelated \
+             tensor_scan def (false-positive AD guard), got: {message}"
+        );
+    }
+    let result = result.expect("grad over a pure target should evaluate");
+    let root = result
+        .roots
+        .iter()
+        .find(|r| r.name.as_deref() == Some("out"))
+        .expect("missing out root");
+    // d/dx (2x) = 2.
+    match &root.value {
+        ExecutionValue::Tensor { value } => assert_eq!(value.data, vec![2.0]),
+        other => panic!("expected scalar gradient tensor, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compiled-backend rejection through higher-order callbacks (round-2
+// review). `reject_host_only_builtins` must descend into inline
+// map/fold/etc. callback bodies and into named helper functions, not
+// just top-level binding values. Without the callback-body descent a
+// `chelis build` of `map(fn (x) -> tensor_scan(...), xs)` slipped past
+// the guard and the C emitter produced the silent `/* unsupported
+// builtin tensor_scan */ 0` stub.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue257_tensor_scan_build_c_rejected_inside_map_callback() {
+    let src = r#"
+out = map(
+  fn (x: int64) -> tensor_scan(
+    x,
+    fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
+    cast(3, int64)
+  ),
+  [cast(1, int64), cast(2, int64)]
+)
+"#;
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: src.to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    });
+    let err =
+        result.expect_err("chelis build --target c must reject tensor_scan in a map callback");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("tensor_scan"),
+        "rejection must name the builtin, got: {message}"
+    );
+    assert!(
+        !message.contains("/* unsupported builtin"),
+        "rejection must not be paired with a silent C stub, got: {message}"
+    );
+}
+
+#[test]
+fn issue257_tensor_scan_build_c_rejected_inside_named_helper() {
+    let src = r#"
+def builder(x: int64) -> tensor[*, int64] = tensor_scan(
+  x,
+  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
+  cast(3, int64)
+)
+out = map(builder, [cast(1, int64), cast(2, int64)])
+"#;
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: src.to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    });
+    let err =
+        result.expect_err("chelis build --target c must reject tensor_scan in a named helper");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("tensor_scan"),
+        "rejection must name the builtin, got: {message}"
+    );
+}

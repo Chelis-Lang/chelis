@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use chelis_deep::Span;
@@ -1383,20 +1383,15 @@ impl<'a> EvalContext<'a> {
         // adjoint), so passing it through `try_lower_subexpr_program`
         // results in confusing downstream errors like an out-of-range
         // axis on a rank-0 operand. Catch it here and emit a tensor_scan-
-        // tagged error instead. The walk has to look at both `app_expr`
-        // itself (for inline `grad(fn (x) -> tensor_scan(...))`-style
-        // calls) and at every def body in `program_defs` (for the
-        // captured-closure case `target = fn ... tensor_scan ...;
-        // grad(target)(x)`).
-        let mut host_only_hit: Option<String> = find_host_only_builtin_call(&app_expr);
-        if host_only_hit.is_none() {
-            for def_expr in program_defs.values() {
-                if let Some(name) = find_host_only_builtin_call(def_expr) {
-                    host_only_hit = Some(name);
-                    break;
-                }
-            }
-        }
+        // tagged error instead. The search starts at `app_expr` (for the
+        // inline `grad(fn (x) -> tensor_scan(...))` case) and follows
+        // every `(var ...)` reference transitively into `program_defs`
+        // (for the captured-closure case `target = fn ... tensor_scan
+        // ...; grad(target)(x)`). It is *reachability*-scoped: an
+        // unrelated top-level def that calls `tensor_scan` but is not
+        // reached from the transform target does NOT trigger a rejection,
+        // so a genuinely differentiable program is not falsely blocked.
+        let host_only_hit = find_reachable_host_only_builtin_call(&app_expr, &program_defs);
         if let Some(name) = host_only_hit {
             let kind_label = match kind {
                 TransformKind::Grad => "grad",
@@ -5637,35 +5632,68 @@ fn as_list(expr: &Expr) -> Option<&List> {
 /// spec/05-risc-primitives.md §3.6.
 const HOST_ONLY_BUILTIN_NAMES: &[&str] = &["tensor_scan"];
 
-/// Walk a Deep `Expr` looking for any application of a host-only
-/// builtin (`(app {} (var <name>) ...)`). Returns the first match.
-fn find_host_only_builtin_call(expr: &Expr) -> Option<String> {
-    fn walk(expr: &Expr, out: &mut Option<String>) {
-        if out.is_some() {
-            return;
+/// Walk a Deep `Expr` collecting (a) the first directly-applied
+/// host-only builtin (`(app {} (var <name>) ...)`) and (b) the names
+/// of every `(var <name>)` it references, so a reachability walk can
+/// follow those names into def bodies. The `vars` set lets the caller
+/// resolve the captured-closure case (`target = fn ... tensor_scan ...;
+/// grad(target)(x)`) without flagging *unrelated* top-level defs that
+/// happen to call `tensor_scan` but are not reachable from the
+/// transform target (which would be a false-positive rejection of a
+/// perfectly differentiable program — see issue #257 review round 2).
+fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec<String>) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    if tag(list) == Some("app")
+        && let Some(Expr::List(callee, _)) = children(list).first()
+        && tag(callee) == Some("var")
+        && let Some(name) = children(callee).first().and_then(symbol_name)
+        && HOST_ONLY_BUILTIN_NAMES.contains(&name)
+    {
+        if hit.is_none() {
+            *hit = Some(name.to_string());
         }
-        let Expr::List(list, _) = expr else {
-            return;
-        };
-        if tag(list) == Some("app")
-            && let Some(Expr::List(callee, _)) = children(list).first()
-            && tag(callee) == Some("var")
-            && let Some(name) = children(callee).first().and_then(symbol_name)
-            && HOST_ONLY_BUILTIN_NAMES.contains(&name)
-        {
-            *out = Some(name.to_string());
-            return;
+        return;
+    }
+    if tag(list) == Some("var")
+        && let Some(name) = children(list).first().and_then(symbol_name)
+    {
+        vars.push(name.to_string());
+    }
+    for child in &list.elements {
+        scan_expr_for_host_only(child, hit, vars);
+    }
+}
+
+/// Reachability-scoped search for a host-only builtin call. Starts at
+/// `root` (the synthesized `(app {} <transform> <args>...)`), then
+/// follows every `(var <name>)` reference transitively into the bodies
+/// of `defs` so the transform target's own def — and any helper it
+/// calls — is searched, but unrelated top-level defs are not. Returns
+/// the name of the first host-only builtin reached, or `None`.
+fn find_reachable_host_only_builtin_call(
+    root: &Expr,
+    defs: &HashMap<String, Expr>,
+) -> Option<String> {
+    let mut hit: Option<String> = None;
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut worklist: Vec<&Expr> = vec![root];
+    while let Some(expr) = worklist.pop() {
+        let mut vars: Vec<String> = Vec::new();
+        scan_expr_for_host_only(expr, &mut hit, &mut vars);
+        if hit.is_some() {
+            return hit;
         }
-        for child in &list.elements {
-            walk(child, out);
-            if out.is_some() {
-                return;
+        for name in vars {
+            if visited.insert(name.clone())
+                && let Some(def_body) = defs.get(&name)
+            {
+                worklist.push(def_body);
             }
         }
     }
-    let mut out = None;
-    walk(expr, &mut out);
-    out
+    hit
 }
 
 fn tag(list: &List) -> Option<&str> {
