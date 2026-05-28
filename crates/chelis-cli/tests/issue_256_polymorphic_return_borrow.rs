@@ -262,3 +262,113 @@ fn issue_154_tensor_carrying_record_adt_still_borrows() {
         "chelis#154 tensor-carrying record ADT borrow must keep working; got {kinds:?}"
     );
 }
+
+/// Extended negative parity: a non-tensor-carrying record ADT bound
+/// against a fully polymorphic consumer must still be rejected. The
+/// inference-layer `borrow` arm accepts `Type::Adt(_, _)` unconditionally
+/// (the tensor-carry check lives at linearity), and a `consume_any[a](t: a)`
+/// consumer instantiates `a` to `&Record`, so neither the inference
+/// `borrow` arm nor the consumer's call site catches this — the
+/// linearity layer's `expr_is_owned_or_borrow_linear` is the gate.
+/// This test pins that the loosened linearity classifier (which now
+/// also accepts a `(t-var ...)` to support issue #256) did not break
+/// the `(t-adt ...)` rejection path for non-tensor records.
+#[test]
+fn borrow_of_non_tensor_record_with_polymorphic_consumer_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("non_tensor_record_poly_consumer.ch");
+    write_file(
+        &fixture,
+        "module Issue256NonTensorRecordPolyConsumer\n\
+         type Config = | Config { lr: f32, bs: int32 }\n\
+         def consume_any[a](t: a) -> bool = true\n\
+         def forward() -> bool = {\n\
+           c = Config { lr: 0.1, bs: cast(32, int32) }\n\
+           consume_any(&c)\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        !kinds.is_empty(),
+        "borrow of non-tensor record against a polymorphic consumer must be rejected; got clean score {json}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k == "InvalidBorrow" || k == "TypeMismatch"),
+        "borrow of non-tensor record must surface an InvalidBorrow or TypeMismatch; got {kinds:?}"
+    );
+}
+
+/// Extended negative parity: a tuple of scalars borrowed against a
+/// `&tensor[..]` parameter must still be rejected. The inference
+/// borrow arm accepts `Type::Tuple(_)` unconditionally; the rejection
+/// surfaces from the call-site type mismatch (`(int32, int32)` vs
+/// `tensor[..]`). This locks the adjacent path the linearity loosening
+/// does not affect, so a future refactor that moves the tuple-of-scalars
+/// classification to linearity does not silently regress.
+#[test]
+fn borrow_of_scalar_tuple_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("scalar_tuple_borrow_rejected.ch");
+    write_file(
+        &fixture,
+        "module Issue256ScalarTupleBorrowRejected\n\
+         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def forward() -> bool = {\n\
+           pair = (cast(1, int32), cast(2, int32))\n\
+           consume_t(&pair)\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        !kinds.is_empty(),
+        "borrow of (int32, int32) against a &tensor parameter must be rejected; got clean score {json}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
+        "borrow of scalar tuple must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
+    );
+}
+
+/// Negative parity for the inference-layer catch-all: a `&unit` borrow
+/// (or any `Type::Unit` inner) must still hit the inference `borrow` arm
+/// `_ => TypeMismatch` and never reach linearity. This locks the
+/// boundary between "deferred classification" (accepted Type::Var) and
+/// "concretely-non-tensor" (Type::Prim, Type::Unit, Type::Fn).
+#[test]
+fn borrow_of_unit_is_rejected_at_inference() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("unit_borrow_rejected.ch");
+    write_file(
+        &fixture,
+        "module Issue256UnitBorrowRejected\n\
+         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def forward() -> bool = {\n\
+           u = ()\n\
+           consume_t(&u)\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        !kinds.is_empty(),
+        "borrow of `()` against a &tensor parameter must be rejected; got clean score {json}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
+        "borrow of `()` must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
+    );
+}
