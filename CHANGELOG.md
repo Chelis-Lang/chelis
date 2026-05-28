@@ -23,6 +23,24 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   PR #243's `chelis_fill_f32_bits` mechanism but for per-call scalar
   args rather than buffer fills.
 
+### Docs — harmonize Hull / trust-stack / project-plan with shipped reality
+
+Corrected stale status framing across the design docs to match what the repo
+now ships:
+
+- `chelis prove` is described as shipped (V1, v0.7.1) rather than "planned" in
+  `chelis_trust_stack.md`, `chelis_project_plan.md`, and the Hull prerequisite
+  table — with the V1 scope (scalar binders + fixed-shape tensors) and the
+  pending items (symbolic-dim binders, counterexample minimization) stated.
+- The Hull spec's string-operations prerequisite reflects the shipped scalar/
+  string foundation (`String` primitive + `string_*` builtins, `to_int`/
+  `to_float`).
+- The Hull spec's `Effect` ADT now mirrors the shipped enum
+  (`Random`/`Accum`/`Io`/`Test`/`Resource(String)`) instead of listing a
+  non-existent `Fail` and omitting `Test`.
+- The Hull LaCaDiLE/timing notes drop the stale "POPL Jul 9" milestone in
+  favor of the OOPSLA-targeted, stabilizing status.
+
 ## [0.7.19] — 2026-05-26
 
 Wave-1 follow-up release. Closes six issues filed during the 0.7.13–0.7.18

@@ -43,7 +43,7 @@ Subprocess tracking is intentionally deferred until FFI lands (no current Chelis
 
 These guarantee that a program is internally consistent. They do NOT guarantee it computes the right answer. A program can be dimension-safe, effect-correct, linear, and differentiable while implementing the wrong formula entirely.
 
-### Level 2 -- Executable Properties as Spec (planned, core future value prop)
+### Level 2 -- Executable Properties as Spec (V1 shipped, core value prop)
 
 The user writes executable Chelis functions that define what "correct" means in their domain. These properties ARE the spec. The toolchain verifies the generated code against them empirically on random inputs.
 
@@ -96,6 +96,16 @@ The last pattern -- `matches_textbook` -- is the highest-value property type. Th
 3. **Behavioral constraints.** Monotonicity (price increases with spot), continuity (small input change produces small output change), symmetry (put-call symmetry), convergence (Monte Carlo converges as path count increases). These encode domain knowledge that test suites can't express.
 
 **Implementation: evolution of `chelis prove`**
+
+Status: V1 shipped in v0.7.1. The `chelis prove` subcommand and the
+first-class `@property NAME forall(...) where ...:` Surf syntax are
+implemented (`crates/chelis-cli/src/prove.rs`), with deterministic
+type-directed sampling, `--samples`/`--seed`/`--only`/`--json` flags, a
+four-state exit-code contract (pass 0, fail 1, unsupported 2, error 3),
+and Deep-bridge provenance. V1 covers scalar binders and fixed-shape
+numeric tensors. Still to land: symbolic-dimension tensor binders and
+counterexample minimization. The bullets below describe the full design;
+items beyond the V1 scope above are still forthcoming.
 
 `chelis prove` runs first-class property declarations:
 
@@ -209,7 +219,7 @@ For the strongest guarantee, the customer writes the properties themselves. They
 
 ## Relationship to Existing Plans
 
-**`chelis prove` (planned, Phase 3 / pre-Phase 4).** Currently scoped as a CLI tool with simple property flags. This document expands the scope: properties become first-class Chelis functions with `@property` annotations, living in the source tree, CI-enforced, with type-directed random input generation and minimal-counterexample reporting.
+**`chelis prove` (V1 shipped, v0.7.1).** Originally scoped as a CLI tool with simple property flags; now shipped as the expanded design — properties are first-class Chelis functions with `@property NAME forall(...) where ...:` annotations, living in the source tree, CI-enforced, with deterministic type-directed input generation and a stable exit-code/NDJSON contract. V1 covers scalar binders and fixed-shape numeric tensors; symbolic-dimension tensor binders and minimal-counterexample reporting remain to land.
 
 **Hull (future shell).** Hull validates the compiler against the language spec via differential testing. The same pattern (reference implementation + production implementation + agreement checking) is what `@property matches_reference forall(...)` does for user code. Hull proves the pattern works on the highest-stakes code in the system (the compiler itself).
 
@@ -259,7 +269,7 @@ These limits are stable: each will move from "limit" to "shipped" only when a co
 
 | Shell/Tool | Change | Status |
 |---|---|---|
-| `chelis prove` | Evolve from CLI flags to first-class Chelis property functions with `@property`, type-directed input generation, counterexample minimization | Planned, scope expanded by this document |
+| `chelis prove` | Evolve from CLI flags to first-class Chelis property functions with `@property`, type-directed input generation, counterexample minimization | V1 shipped (v0.7.1); symbolic-dim tensor binders + counterexample minimization pending |
 | Beacon (abstract interpretation) | New future shell: automated static analysis on the tensor DAG, input range specification, overflow/div-zero/NaN detection | Future, not designed |
 | `Std.Test` | No change -- `chelis test` remains for deterministic assertion-based tests. `chelis prove` is the companion for property-based verification. | Shipped |
 | Hull | No change to Hull itself. Hull validates the pattern (differential testing against a reference) that user-facing `@property matches_reference` uses. | Future (stub) |

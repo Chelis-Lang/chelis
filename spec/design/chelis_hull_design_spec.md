@@ -3,7 +3,7 @@
 **Shell name:** Hull (`chelis-lang/hull`)
 **Marine rationale:** The hull defines the shape of the vessel. The spec defines the shape of the language.
 **Depends on:** `chelis-std` (required). No other shells.
-**Status:** Stub. Phase 4/5 item. Prerequisites: LaCaDiLE typing rules finalized, Deep parser in Chelis, `chelis prove` infrastructure.
+**Status:** Stub (Hull itself is not yet built). Phase 4/5 item. Prerequisite state as of v0.7.19: the Deep parser is shipped (Phase 0b), the `chelis prove` / property-runner infrastructure Hull's generator reuses is shipped (v0.7.1), and the scalar/string foundation the Deep parser needs is shipped. The LaCaDiLE typing rules are stabilizing (the in-repo `proof/lean/LaCaDiLE` mechanization is partial; the full effort is OOPSLA-targeted). The remaining hard gate is freezing the final typing-rule set so Hull's reference checker has a stable target.
 
 ---
 
@@ -98,8 +98,17 @@ type Dim =
   | DLit(int64)             -- literal dimension: 3, 784, etc.
   | DVar(String)            -- dimension variable (for polymorphism)
 
--- Effects
-type Effect = Random | IO | Resource | Fail | Accum
+-- Effects -- mirror the shipped `Effect` enum at
+-- crates/chelis-types/src/types.rs (Random, Accum, Io, Test, Resource(String)).
+-- The stub must track the real taxonomy, not an invented one.
+type Effect =
+  | Random
+  | Accum
+  | Io
+  | Test
+  | Resource(String)
+-- `Network` and `Filesystem` are planned additions
+-- (see effect_taxonomy_expansion.md), not yet shipped.
 
 -- Effect rows
 type EffectRow = List[Effect]
@@ -732,14 +741,14 @@ chelis-lang/hull/
 
 | Prerequisite | Status | Why Hull needs it |
 |---|---|---|
-| LaCaDiLE typing rules finalized | In progress (POPL Jul 9) | Hull implements these rules - they must be stable |
+| LaCaDiLE typing rules finalized | Stabilizing (in-repo `proof/lean/LaCaDiLE` partial, OOPSLA-targeted) | Hull implements these rules - they must be stable |
 | Deep syntax stable | Stable since v0.1.0 | Hull parses Deep - the grammar must not change |
 | ADTs + pattern matching in Chelis | Working (v0.1.7) | Hull's entire data model is ADTs |
 | Option type + `?` operator | Working | Hull returns `Option` from every check |
-| String operations in Chelis | Working (3c) | Hull parses source strings |
-| `chelis prove` design | Planned | Hull's generator is the language-level version |
+| String operations in Chelis | Foundation shipped (`String` primitive + `string_*` builtins, `to_int`/`to_float`; see `examples/scalar_string_foundation.ch`) | Hull parses source strings |
+| `chelis prove` infrastructure | Shipped (v0.7.1: `@property`, type-directed sampling) | Hull's generator is the language-level version |
 
-**Timing:** Phase 4 or Phase 5. Not before the POPL paper finalizes the typing rules and the ICLR pipeline establishes the AI training loop. Hull's value increases as the language stabilizes - building it while the typing rules are still changing means constant maintenance. Build it when the rules are final and use it to prevent regression.
+**Timing:** Phase 4 or Phase 5. Not before the language-spec paper (OOPSLA-targeted) finalizes the typing rules and the ICLR pipeline establishes the AI training loop. Most mechanical prerequisites are now met (Deep parser, `chelis prove`, string foundation); the gating dependency is the typing rules freezing. Hull's value increases as the language stabilizes - building it while the typing rules are still changing means constant maintenance. Build it when the rules are final and use it to prevent regression.
 
 ---
 
