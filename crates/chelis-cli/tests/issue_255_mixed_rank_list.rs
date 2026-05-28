@@ -47,7 +47,29 @@ fn errors(json: &Value) -> Vec<&Value> {
 fn error_messages(json: &Value) -> Vec<String> {
     errors(json)
         .iter()
-        .map(|e| e["message"].as_str().unwrap_or("").to_string())
+        .map(|e| {
+            // Tighten the silent-fallback: a missing/non-string `message`
+            // is a JSON-shape regression, not an empty diagnostic, and an
+            // `unwrap_or("")` here would let the substring assertions fail
+            // with a confusing "" rather than naming the real breakage
+            // (CLAUDE.md "Do Not Trust Green").
+            e["message"]
+                .as_str()
+                .expect("each error must carry a string `message` field")
+                .to_string()
+        })
+        .collect()
+}
+
+fn error_kinds(json: &Value) -> Vec<String> {
+    errors(json)
+        .iter()
+        .map(|e| {
+            e["kind"]
+                .as_str()
+                .expect("each error must carry a string `kind` field")
+                .to_string()
+        })
         .collect()
 }
 
@@ -100,10 +122,7 @@ fn issue_255_mixed_rank_list_of_tensor_rejects_with_actionable_hint() {
         !errs.is_empty(),
         "mixed-rank List[tensor[k, f32]] must still reject",
     );
-    let kinds: Vec<String> = errs
-        .iter()
-        .map(|e| e["kind"].as_str().unwrap_or("").to_string())
-        .collect();
+    let kinds = error_kinds(&json);
     assert!(
         kinds.iter().any(|k| k == "DimensionMismatch"),
         "mixed-rank list should surface a DimensionMismatch; got kinds={kinds:?}",
@@ -172,10 +191,7 @@ fn issue_255_mixed_rank_list_four_element_real_consumer_shape_rejects() {
         !errs.is_empty(),
         "mixed-rank 4-element List[tensor[k, f32]] must still reject",
     );
-    let kinds: Vec<String> = errs
-        .iter()
-        .map(|e| e["kind"].as_str().unwrap_or("").to_string())
-        .collect();
+    let kinds = error_kinds(&json);
     assert!(
         kinds.iter().any(|k| k == "DimensionMismatch"),
         "real-consumer mixed-rank list should surface a DimensionMismatch; got kinds={kinds:?}",
