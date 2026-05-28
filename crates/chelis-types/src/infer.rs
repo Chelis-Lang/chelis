@@ -12051,36 +12051,15 @@ fn infer_reduce_window_app(
 /// integer entries (cast-aware via `extract_int_for_dim`). Returns
 /// `None` when any element is non-literal or when the structure does
 /// not terminate cleanly in `Nil`.
+///
+/// Shares the cons-chain walk with `collect_cons_chain_for_shape`
+/// (the structural recognizer) and only adds the per-element
+/// integer-literal extraction on top.
 fn cons_chain_int_list(expr: &deep::Expr) -> Option<Vec<i64>> {
-    let mut out = Vec::new();
-    let mut cursor = expr;
-    loop {
-        let deep::Expr::List(list, _) = cursor else {
-            return None;
-        };
-        match get_tag(list)? {
-            "var" => {
-                let name = children(list).first().and_then(symbol_name)?;
-                if name == "Nil" {
-                    return Some(out);
-                }
-                return None;
-            }
-            "app" => {
-                let app_children = children(list);
-                let func = app_children.first()?;
-                if !is_builtin_var(func, "Cons") {
-                    return None;
-                }
-                let head = app_children.get(1)?;
-                let tail = app_children.get(2)?;
-                let value = extract_int_for_dim(head)?;
-                out.push(value);
-                cursor = tail;
-            }
-            _ => return None,
-        }
-    }
+    collect_cons_chain_for_shape(expr)?
+        .iter()
+        .map(|e| extract_int_for_dim(e))
+        .collect()
 }
 
 /// Three-way result of inspecting a `[[s_0, e_0], [s_1, e_1], ...]` list

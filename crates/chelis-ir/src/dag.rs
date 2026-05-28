@@ -572,8 +572,9 @@ pub enum RiscOp {
     /// by the window volume, inlined into the same loop nest.
     ///
     /// AD policy: `no_grad`. Reverse-mode AD over `ReduceWindow` is
-    /// deferred — see `chelis_ir::grad::AdRejectionReason::PiecewiseConstant`
-    /// for the rejection variant used at runtime.
+    /// deferred — `chelis_ir::grad::grad_dag_checked` rejects it with
+    /// `AdError::NotSupported { reason: AdRejectionReason::Other(..), .. }`
+    /// until the windowed adjoints (§2.3.1) are designed.
     ReduceWindow {
         reducer: ReduceWindowKind,
         window_shape: Vec<usize>,

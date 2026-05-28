@@ -1177,4 +1177,44 @@ mod tests {
             "unknown effect kind must not deserialize, got {result:?}"
         );
     }
+
+    /// Issue #254: the `reduce_window_*` family wires to a single
+    /// `ReduceWindow` variant carrying a stringly-typed `reducer`
+    /// discriminator plus the window/stride vectors. Pin the JSON
+    /// shape and the serialize → deserialize round-trip so a downstream
+    /// consumer of the machine-facing DAG sees a stable contract.
+    #[test]
+    fn reduce_window_wire_op_round_trips_with_reducer_string() {
+        for (reducer, kind) in [
+            ("max", "max"),
+            ("min", "min"),
+            ("sum", "sum"),
+            ("mean", "mean"),
+        ] {
+            let op = WireRiscOp::ReduceWindow {
+                reducer: reducer.to_string(),
+                window_shape: vec![2, 3],
+                strides: vec![1, 2],
+            };
+            let json = serde_json::to_string(&op).unwrap();
+            assert_eq!(
+                json,
+                format!(
+                    r#"{{"kind":"reduce_window","reducer":"{kind}","window_shape":[2,3],"strides":[1,2]}}"#
+                ),
+            );
+            match serde_json::from_str::<WireRiscOp>(&json).unwrap() {
+                WireRiscOp::ReduceWindow {
+                    reducer,
+                    window_shape,
+                    strides,
+                } => {
+                    assert_eq!(reducer, kind);
+                    assert_eq!(window_shape, vec![2, 3]);
+                    assert_eq!(strides, vec![1, 2]);
+                }
+                other => panic!("expected reduce_window wire op, got {other:?}"),
+            }
+        }
+    }
 }

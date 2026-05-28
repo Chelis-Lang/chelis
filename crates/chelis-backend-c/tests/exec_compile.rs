@@ -7,7 +7,7 @@
 //! We link against the chelis_runtime .a to resolve those symbols.
 
 use chelis_backend_c::{CodegenOptions, MathLib, codegen_with_options};
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::fs;
@@ -442,6 +442,134 @@ int main() {{
         panic!("ReduceSum kernel failed to compile/run");
     };
     assert!(output.contains("PASS"), "ReduceSum wrong output:\n{output}");
+}
+
+// ---- Issue #254: reduce_window_* C-backend numerical parity ----
+//
+// The `issue_254_reduce_window_emit` tests pin only the *structural*
+// shape of the emitted C (which intrinsic, which init literal). Per
+// the backend-numerics policy, evaluator-vs-backend agreement needs an
+// actual compile-and-run. These two tests close that gap: the emitted
+// C is compiled with gcc, run, and checked against the exact values
+// the IR evaluator (`chelis_ir::eval::reduce_window`) produces for the
+// same 1x1x3x3 input — the canonical oracle per spec §6. Max exercises
+// the `fmaxf` / `-INFINITY` path; Mean exercises the windowed-sum +
+// `acc /= window_volume` division path.
+
+fn reduce_window_3x3_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
+    let in_ty = TensorType {
+        dims: [1, 1, 3, 3].into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    };
+    let out_ty = TensorType {
+        dims: [1, 1, 2, 2].into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    dag.add_node(
+        RiscOp::ReduceWindow {
+            reducer,
+            window_shape: vec![2, 2],
+            strides: vec![1, 1],
+        },
+        vec![x],
+        out_ty,
+        None,
+    );
+    chelis_backend_c::codegen(&dag, kernel).c_source
+}
+
+// Build a contiguous 1x1x3x3 input view holding [[1..9]] row-major.
+const RW_HARNESS_4D_HEADER: &str = r#"
+static chelis_tensor make_view_1x1x3x3(float* data) {
+    chelis_tensor t;
+    memset(&t, 0, sizeof(t));
+    t.data = data;
+    t.shape[0] = 1; t.shape[1] = 1; t.shape[2] = 3; t.shape[3] = 3;
+    t.strides[0] = 9; t.strides[1] = 9; t.strides[2] = 3; t.strides[3] = 1;
+    t.ndim = 4;
+    t.dtype = CHELIS_F32;
+    t.size = 9;
+    t.owns_data = 0;
+    return t;
+}
+"#;
+
+#[test]
+fn exec_reduce_window_max_matches_evaluator_oracle() {
+    let src = reduce_window_3x3_dag(ReduceWindowKind::Max, "test_rw_max");
+    let harness = format!(
+        r#"{HARNESS_HEADER}{RW_HARNESS_4D_HEADER}
+extern void test_rw_max(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float in_data[9] = {{1,2,3,4,5,6,7,8,9}};
+    chelis_tensor in_t = make_view_1x1x3x3(in_data);
+    chelis_tensor* inputs[1] = {{&in_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+
+    test_rw_max(inputs, 1, outputs, 1);
+
+    // 2x2 maxes of [[1,2,3],[4,5,6],[7,8,9]]: [5,6,8,9].
+    float expected[4] = {{5.0f, 6.0f, 8.0f, 9.0f}};
+    int ok = (outputs[0]->size == 4);
+    for (int i = 0; i < 4; i++) {{
+        if (fabsf(outputs[0]->data[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, outputs[0]->data[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let Some(output) = compile_and_run_kernel("rw_max_3x3", &src, &harness) else {
+        panic!("reduce_window_max kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "reduce_window_max C backend diverged from evaluator oracle:\n{output}"
+    );
+}
+
+#[test]
+fn exec_reduce_window_mean_matches_evaluator_oracle() {
+    let src = reduce_window_3x3_dag(ReduceWindowKind::Mean, "test_rw_mean");
+    let harness = format!(
+        r#"{HARNESS_HEADER}{RW_HARNESS_4D_HEADER}
+extern void test_rw_mean(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float in_data[9] = {{1,2,3,4,5,6,7,8,9}};
+    chelis_tensor in_t = make_view_1x1x3x3(in_data);
+    chelis_tensor* inputs[1] = {{&in_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+
+    test_rw_mean(inputs, 1, outputs, 1);
+
+    // 2x2 means: sums [12,16,24,28] / 4 = [3,4,6,7].
+    float expected[4] = {{3.0f, 4.0f, 6.0f, 7.0f}};
+    int ok = (outputs[0]->size == 4);
+    for (int i = 0; i < 4; i++) {{
+        if (fabsf(outputs[0]->data[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, outputs[0]->data[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let Some(output) = compile_and_run_kernel("rw_mean_3x3", &src, &harness) else {
+        panic!("reduce_window_mean kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "reduce_window_mean C backend diverged from evaluator oracle:\n{output}"
+    );
 }
 
 // ---- IEEE-754 corner cases for Div and Recip ----

@@ -2452,12 +2452,24 @@ fn any_wildcard_dim(dims: &[DimInfo]) -> bool {
 /// Leading `rank - n` axes pass through; each windowed axis has extent
 /// `floor((input_dim - window_shape[i]) / strides[i]) + 1`.
 ///
-/// When `input_dims` is empty (the caller could not extract a concrete
-/// input shape — e.g. a load from a symbolic def) or when the windowed
-/// input dims are not concrete `DimInfo::Lit` values, this falls back
-/// to the caller-supplied `ty.dims`. The type checker is responsible
-/// for the static shape contract; this is a best-effort recomputation
-/// to keep the IR self-contained.
+/// The windowed output axis is strictly a *function* of the input
+/// extent, so it must be recomputed — a windowed axis is never the same
+/// size as its input unless `window == 1, stride == 1`. We therefore
+/// compute concretely for any windowed axis whose size is statically
+/// known (`DimInfo::Lit` or `DimInfo::Named(_, Some(_))`).
+///
+/// A windowed axis whose input extent is unknown at compile time
+/// (`DimInfo::Named(_, None)`, e.g. a `pad_sequences` result whose dims
+/// are bound from runtime metadata) is **not** representable as a static
+/// `DimInfo`: passing the input symbol through would falsely assert
+/// `output_size == input_size`, which mis-allocates the output tensor in
+/// the backends (the input symbol is bound to the larger input extent).
+/// Per `spec/05-risc-primitives.md` §2.3.1 the build/backend path
+/// requires statically-known windowed-axis extents; when a windowed axis
+/// is unknown we fall back to the caller-supplied `ty.dims` so the
+/// type-checker's (wildcard / shape-erased) result governs rather than a
+/// silently-wrong passthrough. The IR evaluator and host runtime always
+/// recompute from the concrete runtime shape and are unaffected.
 fn compute_reduce_window_out_dims(
     input_dims: &[DimInfo],
     window_shape: &[usize],
@@ -2471,15 +2483,23 @@ fn compute_reduce_window_out_dims(
     let leading = input_dims.len() - n;
     let mut out_dims: Vec<DimInfo> = input_dims[..leading].to_vec();
     for i in 0..n {
-        match &input_dims[leading + i] {
-            DimInfo::Lit(in_dim) => {
-                if window_shape[i] == 0 || strides[i] == 0 || *in_dim < window_shape[i] {
+        let known = match &input_dims[leading + i] {
+            DimInfo::Lit(in_dim) => Some(*in_dim),
+            DimInfo::Named(_, Some(in_dim)) => Some(*in_dim),
+            DimInfo::Named(_, None) => None,
+        };
+        match known {
+            Some(in_dim) => {
+                if window_shape[i] == 0 || strides[i] == 0 || in_dim < window_shape[i] {
                     return fallback_ty.dims.clone();
                 }
                 let out = (in_dim - window_shape[i]) / strides[i] + 1;
                 out_dims.push(DimInfo::Lit(out));
             }
-            other => out_dims.push(other.clone()),
+            // Windowed axis with a compile-time-unknown extent: defer to
+            // the checker-derived fallback rather than emit a wrong
+            // passthrough. See the doc comment above.
+            None => return fallback_ty.dims.clone(),
         }
     }
     out_dims
