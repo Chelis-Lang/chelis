@@ -24,8 +24,10 @@
 
 use std::collections::BTreeMap;
 
-use chelis_compiler_api::compiler::eval;
-use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
+use chelis_compiler_api::compiler::{compile, eval};
+use chelis_compiler_api::schema::{
+    CompileRequest, CompileTarget, EvalRequest, ExecutionValue, SourceKind,
+};
 
 fn eval_surf(source: &str) -> chelis_compiler_api::schema::EvalResult {
     eval(EvalRequest {
@@ -213,11 +215,161 @@ out = tensor_scan(cast(0, int64), cast(5, int64))
         bindings: BTreeMap::new(),
     });
     let message = result.err().map(|e| format!("{e:?}")).unwrap_or_default();
-    // Arity mismatch must be caught somewhere along the pipeline
-    // (type-check or runtime). Match the spec: tensor_scan takes 3
-    // args.
+    // Arity mismatch is caught by the type checker. The diagnostic
+    // must reference "3 args" so the user sees the actual mismatch
+    // and not just a generic "ArityMismatch" tag.
     assert!(
-        !message.is_empty(),
-        "expected an error for 2-arg tensor_scan call"
+        message.contains("ArityMismatch"),
+        "expected ArityMismatch kind, got: {message}"
+    );
+    assert!(
+        message.contains("3 args") || message.contains("expected 3"),
+        "expected 3-arg arity callout, got: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Precision pinning: the output tensor's dtype must follow the initial
+// value's dtype, end-to-end. Two positive cases that pin precision
+// without going through a generic int64 path, plus a runtime-level
+// dtype-mismatch guard (the type checker normally catches this; the
+// runtime arm is the belt-and-suspenders for value-level shenanigans).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue257_tensor_scan_f32_initial_value_produces_correct_values() {
+    // Initial value is f32; runtime arm pins precision = F32 and the
+    // values must be the spec-defined fn(prev, i) sequence.
+    let src = r#"
+out = tensor_scan(
+  cast(1.0, f32),
+  fn (prev: f32, _i: int64) -> mul(prev, cast(2.0, f32)),
+  cast(4, int64)
+)
+"#;
+    let result = eval_surf(src);
+    let out = root_tensor(&result, "out");
+    // Element zero is fn(initial=1.0, 0) = 2.0; 4, 8, 16 follow.
+    assert_eq!(out.shape, vec![4]);
+    assert_eq!(out.data, vec![2.0, 4.0, 8.0, 16.0]);
+}
+
+#[test]
+fn issue257_tensor_scan_bool_initial_value_produces_correct_values() {
+    // Initial value is bool; runtime arm pins precision = Bool.
+    let src = r#"
+out = tensor_scan(
+  true,
+  fn (prev: bool, _i: int64) -> not(prev),
+  cast(4, int64)
+)
+"#;
+    let result = eval_surf(src);
+    let out = root_tensor(&result, "out");
+    assert_eq!(out.shape, vec![4]);
+    // not(true) = false (0); then not(false) = true (1); alternating.
+    assert_eq!(out.data, vec![0.0, 1.0, 0.0, 1.0]);
+}
+
+// ---------------------------------------------------------------------------
+// Compiled-backend rejection: `chelis build --target c` must refuse a
+// program that calls `tensor_scan`. Without this guard the C emitter
+// silently produces `__binding_0_value = /* unsupported builtin
+// tensor_scan */ 0` and the compiled binary returns garbage at run
+// time. Spec §3.6 marks the builtin host-only by design.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue257_tensor_scan_build_target_c_rejected() {
+    let src = r#"
+out = tensor_scan(
+  cast(0, int64),
+  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
+  cast(8, int64)
+)
+"#;
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: src.to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    });
+    let err = result.expect_err("chelis build --target c must reject tensor_scan");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("tensor_scan"),
+        "rejection must name the builtin, got: {message}"
+    );
+    assert!(
+        message.contains("host-only") || message.contains("Host-Runtime"),
+        "rejection must explain the host-only contract, got: {message}"
+    );
+    // Belt-and-suspenders: confirm no C source containing the silent
+    // stub was emitted via the err path. The previous regression
+    // surfaced as compile-Ok with `/* unsupported builtin tensor_scan */`
+    // in the C source.
+    assert!(
+        !message.contains("/* unsupported builtin"),
+        "rejection must not be paired with a silent C stub, got: {message}"
+    );
+}
+
+#[test]
+fn issue257_tensor_scan_build_target_hip_rejected() {
+    let src = r#"
+out = tensor_scan(
+  cast(0, int64),
+  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
+  cast(8, int64)
+)
+"#;
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: src.to_string(),
+        target: CompileTarget::Hip,
+        entry_name: None,
+    });
+    let err = result.expect_err("chelis build --target hip must reject tensor_scan");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("tensor_scan"),
+        "rejection must name the builtin, got: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AD path: `grad(...)` over a function whose body calls `tensor_scan`
+// must fail with a tensor_scan-tagged error, not a confusing
+// downstream "axis 0 out of range for rank-0 operand" trace.
+// Spec §3.6: "[tensor_scan] is not in the RISC DAG and has no AD
+// adjoint".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue257_tensor_scan_grad_rejected_with_tagged_error() {
+    let src = r#"
+target = fn (x: f32) -> sum(tensor_scan(
+  x,
+  fn (prev: f32, _i: int64) -> mul(prev, cast(2.0, f32)),
+  cast(4, int64)
+), cast(0, int32))
+out = grad(target)(cast(1.0, f32))
+"#;
+    let result = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: src.to_string(),
+        bindings: BTreeMap::new(),
+    });
+    let err = result.expect_err("grad over tensor_scan must fail closed");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("tensor_scan"),
+        "grad rejection must name the unsupported builtin, got: {message}"
+    );
+    assert!(
+        message.to_lowercase().contains("differentiate")
+            || message.contains("AD adjoint")
+            || message.contains("§3.6"),
+        "grad rejection must explain the AD contract, got: {message}"
     );
 }

@@ -402,12 +402,17 @@ schedule precompute) need. `tensor_scan` runs the loop on the host
 in Rust, so the worker stack is constant in `n`.
 
 The builtin is **not** wired into `chelis build` for the `c` or `hip`
-backend target. A program that calls `tensor_scan` at top-level is a
-host-runtime-only program; `chelis build` will route it through the
-host lane and either emit a host-runtime helper (for the C-host
-emitter) or refuse the call when the backend cannot represent
-host-side iteration. Programs that need a compiled scan over a tensor
-must compose `expand` + the tensor-lane primitives directly.
+backend target. A program that calls `tensor_scan` at top-level (or
+transitively through any function that `chelis build` would emit)
+is rejected at compile time with a `tensor_scan`-tagged
+`unsupported_feature` diagnostic that points back to this section.
+The rejection is enforced in
+`crates/chelis-compiler-api/src/compiler.rs::reject_host_only_builtins`
+so the C/HIP emitters never see a `tensor_scan` call; previously the
+C host emitter silently produced `__binding_0_value = /* unsupported
+builtin tensor_scan */ 0` and the compiled program returned garbage.
+Programs that need a compiled scan over a tensor must compose
+`expand` + the tensor-lane primitives directly.
 
 A future Tier 1 primitive can replace this host-only helper once the
 RISC DAG admits higher-order tensor primitives. Until that lands,
@@ -417,8 +422,14 @@ right-recursive list cost.
 
 **Negative parity for `tensor_scan`**: a non-callable second argument,
 a wrong-arity call, a negative `n`, or a callback that returns a
-different dtype than the initial value's dtype are runtime errors
-with `tensor_scan`-tagged diagnostics. The acceptance tests in
+different dtype than the initial value's dtype are rejected with
+`tensor_scan`-tagged diagnostics (the first three at type-check
+time, the dtype-mismatch as a belt-and-suspenders runtime guard).
+A `chelis build --target c` or `--target hip` of a program that
+calls `tensor_scan` is rejected at compile time, and `grad(...)`
+/ `vmap(...)` over a function whose body reaches `tensor_scan` is
+rejected at the host-runtime transform boundary with a tagged error
+referencing this section. The acceptance tests in
 `crates/chelis-compiler-api/tests/issue_257_tensor_scan_host_runtime.rs`
 pin each of these alongside the positive 8/20000/40000-element cases.
 

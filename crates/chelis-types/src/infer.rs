@@ -9564,16 +9564,15 @@ fn infer_app(
                         // host-runtime arm can determine precision.
                         let resolved_elem = subst.apply(&elem_ty);
                         let precision = match &resolved_elem {
-                            Type::Prim(p) => *p,
-                            Type::Var(_) => {
-                                // Defer: leave as wildcard precision until
-                                // outer inference pins T. Use F32 as a
-                                // placeholder; downstream consumers can
-                                // re-resolve.
-                                return Type::Tensor(
-                                    vec![Dim::Wildcard],
-                                    TensorPrec::Concrete(Prim::F32),
-                                );
+                            Type::Prim(p) => TensorPrec::Concrete(*p),
+                            Type::Var(tv) => {
+                                // Defer: leave the precision as the same type
+                                // variable as the element. `Subst::apply` will
+                                // resolve it once outer inference pins T.
+                                // Using F32 as a placeholder (the previous
+                                // behavior) silently lies about the dtype
+                                // when T is later pinned to int64 or bool.
+                                TensorPrec::Var(*tv)
                             }
                             other => {
                                 errors.push(CheckError::new(
@@ -9589,7 +9588,7 @@ fn infer_app(
                                 return Type::Error;
                             }
                         };
-                        return Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision));
+                        return Type::Tensor(vec![Dim::Wildcard], precision);
                     }
                     "partition" => {
                         if arg_tys.len() != 2 {

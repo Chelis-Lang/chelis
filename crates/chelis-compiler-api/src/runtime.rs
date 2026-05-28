@@ -1377,6 +1377,40 @@ impl<'a> EvalContext<'a> {
             }
         }
 
+        // Fail-closed for host-runtime-only builtins reached through
+        // grad/vmap. The IR lowerer doesn't recognize `tensor_scan`
+        // (spec/05-risc-primitives.md §3.6 marks it host-only with no
+        // adjoint), so passing it through `try_lower_subexpr_program`
+        // results in confusing downstream errors like an out-of-range
+        // axis on a rank-0 operand. Catch it here and emit a tensor_scan-
+        // tagged error instead. The walk has to look at both `app_expr`
+        // itself (for inline `grad(fn (x) -> tensor_scan(...))`-style
+        // calls) and at every def body in `program_defs` (for the
+        // captured-closure case `target = fn ... tensor_scan ...;
+        // grad(target)(x)`).
+        let mut host_only_hit: Option<String> = find_host_only_builtin_call(&app_expr);
+        if host_only_hit.is_none() {
+            for def_expr in program_defs.values() {
+                if let Some(name) = find_host_only_builtin_call(def_expr) {
+                    host_only_hit = Some(name);
+                    break;
+                }
+            }
+        }
+        if let Some(name) = host_only_hit {
+            let kind_label = match kind {
+                TransformKind::Grad => "grad",
+                TransformKind::Vmap => "vmap",
+            };
+            return Err(format!(
+                "host runtime: `{kind_label}(...)` cannot differentiate through host-runtime-only \
+                 builtin `{name}`; it has no RISC DAG lowering and no AD adjoint (see \
+                 spec/05-risc-primitives.md §3.6 Host-Runtime Builders). Build the per-index \
+                 accumulator with tensor-lane primitives (e.g. `range`/`map`/`expand`) before \
+                 applying `{kind_label}`."
+            ));
+        }
+
         let lower_result =
             try_lower_subexpr_program(&app_expr, scoped_types, self.type_env.clone(), program_defs);
         let dag = match lower_result {
@@ -5593,6 +5627,45 @@ fn as_list(expr: &Expr) -> Option<&List> {
         Expr::List(list, _) => Some(list),
         _ => None,
     }
+}
+
+/// Host-only builtins that have no RISC DAG lowering. A `grad(...)`
+/// or `vmap(...)` over a function that calls one of these must fail
+/// with a clear, tagged error rather than be passed through to
+/// `try_lower_subexpr_program` and produce a confusing downstream
+/// error like an out-of-range axis on a phantom rank-0 operand. See
+/// spec/05-risc-primitives.md §3.6.
+const HOST_ONLY_BUILTIN_NAMES: &[&str] = &["tensor_scan"];
+
+/// Walk a Deep `Expr` looking for any application of a host-only
+/// builtin (`(app {} (var <name>) ...)`). Returns the first match.
+fn find_host_only_builtin_call(expr: &Expr) -> Option<String> {
+    fn walk(expr: &Expr, out: &mut Option<String>) {
+        if out.is_some() {
+            return;
+        }
+        let Expr::List(list, _) = expr else {
+            return;
+        };
+        if tag(list) == Some("app")
+            && let Some(Expr::List(callee, _)) = children(list).first()
+            && tag(callee) == Some("var")
+            && let Some(name) = children(callee).first().and_then(symbol_name)
+            && HOST_ONLY_BUILTIN_NAMES.contains(&name)
+        {
+            *out = Some(name.to_string());
+            return;
+        }
+        for child in &list.elements {
+            walk(child, out);
+            if out.is_some() {
+                return;
+            }
+        }
+    }
+    let mut out = None;
+    walk(expr, &mut out);
+    out
 }
 
 fn tag(list: &List) -> Option<&str> {
