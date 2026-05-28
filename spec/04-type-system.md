@@ -586,7 +586,12 @@ reshape bugs that named dimensions exist to catch (§4.2 rationale). A
 rank-erased element type is not provided in the shipped surface; users
 who genuinely need to carry mixed-rank tensors through a list must
 reshape elements to a common rank before listing, or use a sum type
-that names each rank as a separate variant.
+that names each rank as a separate variant. A rank-polymorphic
+`List[tensor[k, f32]]` (letting `k` range over shape vectors per call
+site) was considered and deferred: the named-dim safety guarantee in
+§4.2 is preferred over the additional flexibility, and the
+reshape-at-the-boundary idiom is cheap enough that current consumers
+absorb it without losing per-tensor named dimensions.
 
 ```chelis
 ;; WRONG: rank-1 and rank-2 elements in the same List[tensor[k, f32]]

@@ -139,3 +139,74 @@ fn issue_255_mixed_rank_list_of_tensor_rejects_with_actionable_hint() {
         "rank-mismatch message should cite the owning spec section (§4.5.1); got {rank_msg:?}",
     );
 }
+
+#[test]
+fn issue_255_mixed_rank_list_four_element_real_consumer_shape_rejects() {
+    // Real-downstream-consumer shape from the issue body:
+    // `Chelis-Lang/school/src/models/mlp.ch::mlp_params_to_list` builds
+    // a four-tensor optimizer-boundary list `[fc1_w, fc1_b, fc2_w,
+    // fc2_b]` — rank-2 weight, rank-1 bias, rank-2 weight, rank-1
+    // bias — and currently has to flatten each weight via `reshape`
+    // to satisfy the rank-uniform constraint. The pairwise `Cons`
+    // reduction means the rank flips multiple times along the cons
+    // spine; this test verifies the diagnostic stays readable on that
+    // real consumer shape (every rank-mismatch message that surfaces
+    // still carries the actionable hint, not a degraded form for the
+    // n-ary case).
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("mlp_shape_mixed.ch");
+    write_file(
+        &path,
+        "module Repro.MlpShapeMixed\n\
+         def make_params() -> List[tensor[k, f32]] = {\n  \
+           fc1_w = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])\n  \
+           fc1_b = to_tensor([cast(5.0, f32), cast(6.0, f32)])\n  \
+           fc2_w = to_tensor([[cast(7.0, f32), cast(8.0, f32)], [cast(9.0, f32), cast(10.0, f32)]])\n  \
+           fc2_b = to_tensor([cast(11.0, f32), cast(12.0, f32)])\n  \
+           [fc1_w, fc1_b, fc2_w, fc2_b]\n\
+         }\n",
+    );
+    let json = run_check(&path);
+    let errs = errors(&json);
+    assert!(
+        !errs.is_empty(),
+        "mixed-rank 4-element List[tensor[k, f32]] must still reject",
+    );
+    let kinds: Vec<String> = errs
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        kinds.iter().any(|k| k == "DimensionMismatch"),
+        "real-consumer mixed-rank list should surface a DimensionMismatch; got kinds={kinds:?}",
+    );
+
+    let msgs = error_messages(&json);
+    let rank_msgs: Vec<&String> = msgs
+        .iter()
+        .filter(|m| m.contains("list element rank mismatch"))
+        .collect();
+    assert!(
+        !rank_msgs.is_empty(),
+        "expected at least one 'list element rank mismatch' diagnostic on the real-consumer shape; got messages={msgs:?}",
+    );
+    // The diagnostic must stay readable on the real consumer shape:
+    // every rank-mismatch message that fires carries the full
+    // actionable hint (rank-uniform vocabulary + reshape remediation
+    // + spec §4.5.1 citation), not a truncated form for the n-ary
+    // case.
+    for rank_msg in &rank_msgs {
+        assert!(
+            rank_msg.contains("rank-uniform"),
+            "every rank-mismatch message must include the 'rank-uniform' hint; got {rank_msg:?}",
+        );
+        assert!(
+            rank_msg.to_lowercase().contains("reshape"),
+            "every rank-mismatch message must point at reshape/flatten; got {rank_msg:?}",
+        );
+        assert!(
+            rank_msg.contains("§4.5.1") || rank_msg.contains("4.5.1"),
+            "every rank-mismatch message must cite §4.5.1; got {rank_msg:?}",
+        );
+    }
+}
