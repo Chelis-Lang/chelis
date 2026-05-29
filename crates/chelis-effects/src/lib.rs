@@ -347,6 +347,7 @@ fn infer_app_effects(
                 | "file_exists"
                 | "list_dir"
                 | "mmap_file"
+                | "process_run"
         )
     ) {
         effects.insert(Effect::Io);
@@ -1218,6 +1219,34 @@ contents = read_file("dataset.txt")
                 .is_some_and(|effects| effects.contains(&Effect::Io)),
             "expected IO effect on read_file root, got {:?}",
             inferred.get("contents")
+        );
+    }
+
+    #[test]
+    fn process_run_infers_io_but_pure_binding_stays_pure() {
+        // Hull subprocess exec: a binding whose value applies process_run
+        // acquires Effect::Io (mirroring read_file), while an adjacent pure
+        // arithmetic binding stays effect-free.
+        let program = surf_checked(
+            r#"
+result = process_run("echo", ["hi"])
+pure_value = add(cast(1, int64), cast(2, int64))
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("result")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on process_run root, got {:?}",
+            inferred.get("result")
+        );
+        assert!(
+            inferred
+                .get("pure_value")
+                .is_none_or(|effects| effects.is_empty()),
+            "expected pure arithmetic binding to stay effect-free, got {:?}",
+            inferred.get("pure_value")
         );
     }
 

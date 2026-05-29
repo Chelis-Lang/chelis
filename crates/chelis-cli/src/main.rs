@@ -1871,6 +1871,7 @@ fn cmd_build(
                     )
                     .into());
                 }
+                reject_eval_only_builtins_host(host_program)?;
                 reject_unsupported_c_precisions_host(host_program)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
@@ -1883,6 +1884,9 @@ fn cmd_build(
             }
         }
         "hip" => {
+            if let Some(host_program) = compiled_program.host.as_ref() {
+                reject_eval_only_builtins_host(host_program)?;
+            }
             let host_requires_host_backend = compiled_program
                 .host
                 .as_ref()
@@ -1922,6 +1926,9 @@ fn cmd_build(
             }
         }
         "metal" => {
+            if let Some(host_program) = compiled_program.host.as_ref() {
+                reject_eval_only_builtins_host(host_program)?;
+            }
             let host_requires_host_backend = compiled_program
                 .host
                 .as_ref()
@@ -2105,6 +2112,7 @@ fn cmd_build_deep(
                     )
                     .into());
                 }
+                reject_eval_only_builtins_host(host_program)?;
                 reject_unsupported_c_precisions_host(host_program)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
@@ -2117,6 +2125,9 @@ fn cmd_build_deep(
             }
         }
         "hip" => {
+            if let Some(host_program) = compiled_program.host.as_ref() {
+                reject_eval_only_builtins_host(host_program)?;
+            }
             let host_requires_host_backend = compiled_program
                 .host
                 .as_ref()
@@ -2151,6 +2162,9 @@ fn cmd_build_deep(
             }
         }
         "metal" => {
+            if let Some(host_program) = compiled_program.host.as_ref() {
+                reject_eval_only_builtins_host(host_program)?;
+            }
             let host_requires_host_backend = compiled_program
                 .host
                 .as_ref()
@@ -4419,6 +4433,28 @@ fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
 /// panic with `reject_unsupported_c_precisions`; this function does the
 /// same for the host-program lane (RT-4 F4: `def f(x: tensor[3, bf16]) ...`
 /// previously panicked with a Rust stack trace).
+/// Reject eval/test-only builtins that have no compiled-target lowering.
+///
+/// Hull Phase 0a: `process_run` runs a subprocess from the IR evaluator
+/// (under `chelis eval` / `chelis test`) but is deliberately unsupported by
+/// the C/HIP/Metal build backends -- a compiled artifact cannot reach the
+/// host interpreter's `Command` exec path, and emitting C for it would
+/// silently fall through to `/* unsupported builtin */ 0` (a wrong value,
+/// not a diagnostic). This guard turns that into a clean build error.
+fn reject_eval_only_builtins_host(
+    program: &chelis_ir::host::HostProgram,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if chelis_ir::host::host_program_uses_builtin(program, "process_run") {
+        return Err(
+            "process_run is an eval/test-only builtin; not available in compiled \
+                    targets. Run the program with `chelis eval` or `chelis test` instead, \
+                    or remove the process_run call before building."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn reject_unsupported_c_precisions_host(
     program: &chelis_ir::host::HostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {

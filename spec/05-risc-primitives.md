@@ -226,9 +226,18 @@ from computation on existing tensors.
 |---|---|---|---|
 | `dropout` | `(&tensor[D, f32], f32) -> tensor[D, f32]` | Zero elements according to a pseudorandom mask determined by the active `with seed(...)` handler and the dropout rate | Introduces `Random`. In the shipped evaluator/AD path, the mask is treated as fixed with respect to the handled seed so the backward pass reuses the same seeded dropout pattern. |
 | `uniform_like` | `(&tensor[D, f32], f32, f32) -> tensor[D, f32]` | Create a tensor matching the input shape, filled from a deterministic uniform distribution under the active `with seed(...)` handler | Introduces `Random`. C backend codegen supports direct DAG lowering and generated host functions that call random stdlib/user helpers. |
+| `process_run` | `(String, List[String]) -> (Int64, String, String)` | Run an external program with the given argv and capture `(exit_code, stdout, stderr)`. Arguments are passed straight to the OS as argv (no shell, no interpolation), so a value in the args list cannot inject extra shell commands. A process killed by a signal reports exit code `-1`. | Introduces `Io`. Eval/test-only: implemented by the IR evaluator (`chelis eval` / `chelis test`); rejected by the C/HIP/Metal build backends with a clean diagnostic rather than a silent fallthrough. |
 
 Operational note: the evaluator and lowering path implement seeded `dropout`, but
 `chelis build` does not yet codegen it for the `c` or `hip` backend targets.
+
+Operational note: `process_run` is an eval/test-only subprocess-exec primitive
+(Hull subprocess support). It carries the `Io` effect and runs under the IR
+evaluator. The compiled backends (`c`, `hip`, `metal`) deliberately reject any
+program that applies `process_run` because a compiled artifact has no host
+interpreter to reach the subprocess-exec path; the rejection is a build error,
+not a silent zero. Full backend support (host-side `host_emit` lowering plus a
+sandboxed runtime exec helper) is tracked in Chelis-Lang/chelis#267.
 
 ---
 

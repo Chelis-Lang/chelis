@@ -2050,6 +2050,43 @@ impl<'a> EvalContext<'a> {
                     .map_err(|err| format!("read_file failed for `{path}`: {err}"))?;
                 Ok(RuntimeValue::String(text))
             }
+            // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
+            //
+            // Eval/test-only subprocess exec. Arguments are passed straight to
+            // the OS as argv via `Command::args` -- there is no shell, no glob
+            // expansion, and no `$VAR`/backtick interpolation, so a hostile
+            // `cmd` or `args` value cannot inject extra shell commands. The C
+            // and HIP build backends deliberately reject this builtin (see
+            // `reject_eval_only_builtins_host`) rather than emit a silent `0`.
+            "process_run" => {
+                let cmd = expect_string_arg(args, 0)?;
+                let raw_args = expect_list_arg(args, 1)?;
+                let mut argv = Vec::with_capacity(raw_args.len());
+                for (index, value) in raw_args.iter().enumerate() {
+                    match value {
+                        RuntimeValue::String(text) => argv.push(text.clone()),
+                        other => {
+                            return Err(format!(
+                                "process_run expects List[String] args, got {other:?} at index {index}"
+                            ));
+                        }
+                    }
+                }
+                let output = std::process::Command::new(&cmd)
+                    .args(&argv)
+                    .output()
+                    .map_err(|err| format!("process_run failed to spawn `{cmd}`: {err}"))?;
+                // A process killed by a signal has no exit code; report -1 so
+                // callers can distinguish it from a clean exit 0.
+                let exit_code = output.status.code().map_or(-1_i64, i64::from);
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                Ok(RuntimeValue::Tuple(vec![
+                    RuntimeValue::int64(exit_code),
+                    RuntimeValue::String(stdout),
+                    RuntimeValue::String(stderr),
+                ]))
+            }
             "write_file" => {
                 let path = expect_string_arg(args, 0)?;
                 let contents = expect_string_arg(args, 1)?;

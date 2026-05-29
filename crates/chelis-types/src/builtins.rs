@@ -134,6 +134,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mmap_file",
     "mmap_read",
     "mmap_len",
+    "process_run",
     "einsum",
     "split",
     "gather",
@@ -892,6 +893,12 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop("file_exists", &mut env, &mut vg);
     generic_unop("list_dir", &mut env, &mut vg);
     generic_unop("mmap_file", &mut env, &mut vg);
+    // `process_run(cmd, args)` is an eval/test-only subprocess exec builtin
+    // (Hull Phase 0a). The 2-arg `generic_binop` scheme declares the arity;
+    // the concrete return tuple `(Int64, String, String)` is pinned in
+    // `infer.rs` and the IO effect is assigned in `chelis-effects`, mirroring
+    // how `read_file` acquires IO. Rejected by the C/HIP build backends.
+    generic_binop("process_run", &mut env, &mut vg);
     generic_triop("mmap_read", &mut env, &mut vg);
     generic_unop("mmap_len", &mut env, &mut vg);
     generic_triop_second_third_borrow("einsum", &mut env, &mut vg);
@@ -1066,6 +1073,37 @@ mod tests {
         assert!(env.lookup("bitxor").is_some());
         assert!(env.lookup("shl").is_some());
         assert!(env.lookup("shr").is_some());
+    }
+
+    #[test]
+    fn builtin_env_has_process_run_and_it_is_a_known_name() {
+        // Hull subprocess exec: process_run is a registered 2-arg builtin and
+        // appears in the closed BUILTIN_NAMES vocabulary (so the lint naming
+        // gate and host-lane resolver recognize it).
+        let (env, _) = builtin_env();
+        let scheme = env.lookup("process_run").expect("process_run registered");
+        match &scheme.body {
+            Type::Fn(params, _) => assert_eq!(
+                params.len(),
+                2,
+                "process_run takes (cmd, args), got arity {}",
+                params.len()
+            ),
+            other => panic!("process_run should be a function type, got {other:?}"),
+        }
+        assert!(
+            BUILTIN_NAMES.contains(&"process_run"),
+            "process_run must be in the closed BUILTIN_NAMES vocabulary"
+        );
+    }
+
+    #[test]
+    fn builtin_env_does_not_register_unknown_name() {
+        // Negative parity: a name we never register stays absent, so the
+        // process_run presence assertion above is not vacuously true.
+        let (env, _) = builtin_env();
+        assert!(env.lookup("process_run_definitely_unregistered").is_none());
+        assert!(!BUILTIN_NAMES.contains(&"process_run_definitely_unregistered"));
     }
 
     #[test]

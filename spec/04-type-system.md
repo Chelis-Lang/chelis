@@ -1145,7 +1145,11 @@ Built-in effect vocabulary in the type layer:
 
 - `Random` -- stochasticity introduced by compiler-known operations such as `dropout`
 - `Accum` -- internal-only hook for associative gradient accumulation
-- `IO` -- host-side debugging/logging effects such as `print` and `debug`
+- `IO` -- host-side effects such as `print` and `debug` (debugging/logging),
+  the file builtins (`read_file`, `write_file`, ...), and subprocess exec via
+  `process_run`. The effect enum itself is unchanged; `IO` is the single
+  effect that covers all host-side observable interaction, now including
+  spawning external processes.
 - `Resource(Device)` -- allocation / placement region on a concrete device
 
 Settled Phase 2a design decisions:
@@ -1165,7 +1169,11 @@ Current shipped inference/checking behavior:
   concrete shipped `Random` sources; stdlib random helpers such as
   `normal_like` and Kaiming/Xavier initializers inherit that effect through
   calls
-- `print(x)` and `debug(x)` are the concrete shipped `IO` sources
+- `print(x)` and `debug(x)` are the concrete shipped `IO` sources, alongside
+  the file builtins (`read_file`, `write_file`, `read_lines`, `read_bytes`,
+  `file_exists`, `list_dir`, `mmap_file`) and `process_run` (subprocess exec;
+  eval/test-only, rejected by the build backends per spec/05-risc-primitives.md
+  §2.6)
 - `with seed(seed) { ... }` handles `Random` across direct operations and calls made
   inside the handled region; the C host backend preserves this with generated
   handler-scoped RNG state for nested stdlib/user functions
