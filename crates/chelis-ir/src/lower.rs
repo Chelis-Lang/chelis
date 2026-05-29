@@ -1379,6 +1379,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "mmap_file"
                         | "mmap_read"
                         | "mmap_len"
+                        | "process_run"
                         | "to_tensor"
                         | "to_list"
                         | "pad_sequences"

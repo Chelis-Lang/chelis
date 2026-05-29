@@ -10299,6 +10299,16 @@ fn infer_app(
                         return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                     }
                     "mmap_len" => return Type::Prim(Prim::Int64),
+                    // Hull Phase 0a: `process_run(cmd, args)` returns
+                    // `(exit_code, stdout, stderr)`. Eval/test-only; the build
+                    // backends reject it (see `reject_eval_only_builtins_host`).
+                    "process_run" => {
+                        return Type::Tuple(vec![
+                            Type::Prim(Prim::Int64),
+                            Type::Prim(Prim::String),
+                            Type::Prim(Prim::String),
+                        ]);
+                    }
                     _ => {}
                 }
             }
