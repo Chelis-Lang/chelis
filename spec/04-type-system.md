@@ -563,7 +563,7 @@ dim variable is genuinely bound to a concrete dimension.
 
 A wildcard dimension unifies with any other dimension (like a variable) but is NOT generalized — it's a permanent "I don't know." To restore named-dimension checking after a wildcard, use an explicit annotation.
 
-### 4.5.1 Rank-Uniform `List[tensor[...]]` Elements
+#### 4.5.1 Rank-Uniform `List[tensor[...]]` Elements
 
 A `List[T]` is statically homogeneous in `T`, and a tensor's rank is part
 of its type. An annotation like `List[tensor[k, f32]]` therefore fixes a
@@ -617,6 +617,84 @@ absorb it without losing per-tensor named dimensions.
 ;;   [a, b_flat]
 ;; }
 ```
+
+#### 4.5.2 List-literal dimension joining
+
+This rule governs the per-axis dimensions of a list literal *once its
+elements are rank-uniform* (§4.5.1): rank uniformity is checked first,
+and only matching-rank elements reach the per-axis join below.
+
+A list literal of tensors, `[a, b, ...]`, desugars to a `Cons`/`Nil`
+chain. Each `Cons` step computes a **per-axis join** of the new element
+against the running list-element type. The join is intentionally
+permissive about *concrete* shape so that the common
+`concat([a, b], axis)` pattern accepts elements whose concrete axes
+differ (chelis#218):
+
+- equal concrete dims (two equal literals, or two equal names) are
+  preserved;
+- two **genuinely-mismatched concrete** axes (e.g. `(d-lit {} 2)` vs
+  `(d-lit {} 3)`, or two distinct names) widen to `(d-name {} *)`
+  along that axis. The resulting `List[tensor[..., *, ...]]` is the
+  defensible "the lengths differ along this axis" type that lets
+  `concat` consume a ragged list;
+- a pair where at least one side is a **dimension variable** (a declared
+  rigid dim parameter such as `k`) is **unified**, not widened. Two
+  distinct rigid dims unify with each other; a `(rigid, concrete)` pair
+  pins the rigid dim to the concrete value.
+
+This is the chelis#272 tightening. The earlier behavior widened *every*
+non-equal pair — including pairs naming rigid dim parameters — to a
+wildcard, which then satisfied an explicit `List[tensor[k, f32]]`
+return annotation and silently defeated the §4.4 rigid-distinct-dim
+guarantee. Two consequences of the tightened rule:
+
+1. A body whose list mixes two **distinct rigid dims** (e.g.
+   `def make[k, m](a: tensor[k, f32], b: tensor[m, f32])
+   -> List[tensor[k, f32]] = [a, b]`) is rejected: the join unifies
+   `k` and `m`, and the §4.4 rigid-dim guard reports the collapse — the
+   same diagnostic class as the non-list `def f[n, m](...) = y` case.
+
+2. A body whose list has **heterogeneous concrete** element lengths
+   (e.g. `def make[k](a: tensor[2, f32], b: tensor[3, f32])
+   -> List[tensor[k, f32]] = [a, b]`) is rejected: the `2`/`3` join
+   widens to `(d-name {} *)`, and a join-origin wildcard list element
+   may **not** satisfy a declared element type that names a rigid or
+   named dimension. `List[tensor[k, f32]]` promises every element shares
+   the length `k`; a heterogeneous list does not.
+
+The wildcard list element remains acceptable when the surrounding
+binding makes **no** uniformity promise — a bare
+`out = concat([...], axis)` with no return annotation and no declared
+dim parameters, or an explicit `List[tensor[*, f32]]` annotation, both
+type-check.
+
+Two boundary properties of the current rule are intentional but narrow,
+and are locked by dedicated tests so a future change is a conscious one:
+
+- **The `(concrete, wildcard)` join is head-biased.** A `Cons` step
+  resolves the joined axis to whatever the *head* (the element being
+  prepended, i.e. the earlier list position) resolves to. So
+  `[tensor[2, f32], tensor[*, f32]]` joins to element `tensor[2, f32]`
+  (the concrete head absorbs the wildcard tail) and type-checks against
+  `List[tensor[k, f32]]`, whereas the reordered
+  `[tensor[*, f32], tensor[2, f32]]` joins to `tensor[*, f32]` (the
+  wildcard head erases the concrete tail) and is **rejected**. Element
+  ordering therefore changes the verdict. Genuinely-mismatched *concrete*
+  heads/tails still widen to `*` regardless of order (the ragged-axis
+  arm).
+- **The uniformity check is single-level.** It compares the declared and
+  body element axes of one `List[tensor[..]]`; it does **not** recurse
+  into a nested element. A wildcard tensor under
+  `List[List[tensor[k, f32]]]` is *not* checked against the inner `k` and
+  currently type-checks.
+
+The enforcement is in `crates/chelis-types/src/infer.rs`
+(`infer_app`'s `Cons` join and `check_list_elem_rigid_dim_vs_wildcard`,
+alongside `check_declared_dvars_rigid`); the acceptance oracle is
+`crates/chelis-cli/tests/issue_272_list_dim_rigidity.rs` with the
+chelis#218 ergonomics locked by
+`crates/chelis-cli/tests/issue_218_to_tensor_in_grad_body.rs`.
 
 ### 4.6 Property Definitions
 
