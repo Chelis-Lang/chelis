@@ -255,6 +255,49 @@ fn cmd_eval_reef_package_simple_def_matches_baseline() {
     );
 }
 
+/// Hull Phase 0a Packet B, commit 2: `chelis eval --json --file` routed
+/// through the reef-context fast path emits the raw EvalResult JSON on
+/// stdout. This covers the `run_eval_in_context` JSON branch, distinct
+/// from the legacy `try_eval_result` branch the non-reef `--file` test
+/// in `cli.rs` exercises.
+#[test]
+fn cmd_eval_json_reef_package_simple_def_emits_json() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("src/evaljson.ch");
+    let snippet = "module App.EvalJson\n\ndef simple_value -> int32 = 42\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", entry_path.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval --json");
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("reef-context eval --json stdout is JSON");
+    let roots = json["roots"].as_array().expect("roots array");
+    let simple = roots
+        .iter()
+        .find(|r| r["name"] == "simple_value")
+        .expect("simple_value root present");
+    // `42` is an int literal lowered through the IR evaluator, so it
+    // surfaces as a scalar tensor (shape []), matching the human path.
+    assert_eq!(simple["value"]["type"], "tensor");
+    assert_eq!(
+        simple["value"]["value"]["shape"]
+            .as_array()
+            .expect("shape")
+            .len(),
+        0
+    );
+}
+
 /// Fixture #2: reef package with a path-dep import. Covers the
 /// "library state actually feeds the eval" leg — if `eval_in_context`
 /// did not see `Mylib.Math.add`, the eval would fail with an unresolved

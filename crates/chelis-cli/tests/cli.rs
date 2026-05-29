@@ -771,6 +771,176 @@ fn eval_surfaces_debug_transcript() {
         .stdout(predicate::str::contains("trace\ntrace"));
 }
 
+/// Run `chelis eval --json EXPR` and parse stdout as JSON. Asserts the
+/// command succeeded and stdout is a single JSON document.
+fn run_eval_json_expr(expr: &str) -> Value {
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", expr])
+        .output()
+        .expect("run chelis eval --json");
+    assert!(
+        output.status.success(),
+        "eval --json should succeed for `{expr}`: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|err| panic!("eval --json stdout should be JSON for `{expr}`: {err}"))
+}
+
+// Hull Phase 0a Packet B, commit 2: `chelis eval --json` emits the raw
+// EvalResult as JSON on stdout. A host scalar integer expression yields
+// a single root whose value is internally tagged `int64`.
+#[test]
+fn eval_json_emits_int64_scalar() {
+    let json = run_eval_json_expr("mod(cast(17, int64), cast(5, int64))");
+    let roots = json["roots"].as_array().expect("roots array");
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0]["value"]["type"], "int64");
+    assert_eq!(roots[0]["value"]["value"], 2);
+}
+
+// A tensor expression yields a `tensor` value carrying shape + data.
+#[test]
+fn eval_json_emits_tensor_shape_and_data() {
+    let json = run_eval_json_expr("to_tensor([1.0, 2.0, 3.0])");
+    let roots = json["roots"].as_array().expect("roots array");
+    assert_eq!(roots.len(), 1);
+    let value = &roots[0]["value"];
+    assert_eq!(value["type"], "tensor");
+    assert_eq!(
+        value["value"]["shape"].as_array().expect("shape"),
+        &vec![Value::from(3)]
+    );
+    assert_eq!(
+        value["value"]["data"].as_array().expect("data"),
+        &vec![Value::from(1.0), Value::from(2.0), Value::from(3.0)]
+    );
+}
+
+// A tuple value (internally tagged `tuple`) with two int64 elements. A
+// top-level `(a, b)` binding is split by the evaluator into per-element
+// roots, so a genuine `tuple` ExecutionValue is exercised by nesting the
+// tuple inside a host list, where it survives as a single value.
+#[test]
+fn eval_json_emits_tuple_of_int64() {
+    let json = run_eval_json_expr("[(cast(7, int64), cast(8, int64))]");
+    let roots = json["roots"].as_array().expect("roots array");
+    assert_eq!(roots.len(), 1);
+    let list = &roots[0]["value"];
+    assert_eq!(list["type"], "list");
+    let tuple = &list["value"][0];
+    assert_eq!(tuple["type"], "tuple");
+    let elems = tuple["value"].as_array().expect("tuple elements");
+    assert_eq!(elems.len(), 2);
+    assert_eq!(elems[0]["type"], "int64");
+    assert_eq!(elems[0]["value"], 7);
+    assert_eq!(elems[1]["type"], "int64");
+    assert_eq!(elems[1]["value"], 8);
+}
+
+// A top-level tuple binding splits into per-component roots. This pins
+// the actual `chelis eval` behavior so the JSON contract is honest: a
+// bare `(a, b)` does NOT produce a single `tuple` root.
+#[test]
+fn eval_json_top_level_tuple_splits_into_roots() {
+    let json = run_eval_json_expr("(cast(7, int64), cast(8, int64))");
+    let roots = json["roots"].as_array().expect("roots array");
+    assert_eq!(roots.len(), 2);
+    // Both components are scalar tensors through the IR evaluator path.
+    assert_eq!(roots[0]["value"]["type"], "tensor");
+    assert_eq!(roots[1]["value"]["type"], "tensor");
+}
+
+// `--file` form (non-reef legacy path) emits JSON for an evaluable
+// top-level binding.
+#[test]
+fn eval_json_file_form_emits_json() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scalar.ch");
+    write_file(&path, "answer = mod(cast(43, int64), cast(41, int64))\n");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval --json --file");
+    assert!(output.status.success(), "eval --json --file should succeed");
+    let json: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
+    let roots = json["roots"].as_array().expect("roots array");
+    let answer = roots
+        .iter()
+        .find(|r| r["name"] == "answer")
+        .expect("answer root");
+    assert_eq!(answer["value"]["type"], "int64");
+    assert_eq!(answer["value"]["value"], 2);
+}
+
+// Empty-roots input (only `def` declarations) emits valid JSON
+// `{"roots":[]}` on stdout with exit 0, instead of the human-mode
+// stderr-only breadcrumb. Negative parity for the non-empty cases.
+#[test]
+fn eval_json_def_only_emits_empty_roots_json() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("defonly.ch");
+    write_file(
+        &path,
+        "def helper(x: int64) -> int64 = add(x, cast(1, int64))\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval --json --file");
+    assert!(output.status.success(), "def-only eval --json exits 0");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(stdout.trim(), r#"{"roots":[]}"#);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["roots"].as_array().expect("roots").len(), 0);
+}
+
+// Negative: a failing eval in `--json` mode still errors. Stdout carries
+// no partial JSON; the error surfaces on stderr with a nonzero exit.
+#[test]
+fn eval_json_unbound_name_errors_with_empty_stdout() {
+    let json_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "add(input, 1.0)"])
+        .output()
+        .expect("run chelis eval --json");
+    assert!(
+        !json_output.status.success(),
+        "unbound name must fail in --json mode"
+    );
+    assert!(
+        json_output.stdout.is_empty(),
+        "stdout must stay empty on error, got {:?}",
+        String::from_utf8_lossy(&json_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&json_output.stderr).contains("unbound variable: input"),
+        "error must name the unbound variable on stderr"
+    );
+}
+
+// Parity: text-mode (non-JSON) output is unchanged by the `--json`
+// addition. The same scalar expression renders the human form on stdout.
+#[test]
+fn eval_text_mode_output_unchanged_alongside_json_flag() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "mod(cast(17, int64), cast(5, int64))"])
+        .assert()
+        .success()
+        .stdout("2\n");
+}
+
 #[test]
 fn check_collection_callback_errors_name_the_helper_contract() {
     let dir = tempdir().expect("tempdir");

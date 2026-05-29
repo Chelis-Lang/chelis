@@ -185,6 +185,12 @@ enum Command {
         file: Option<PathBuf>,
         /// Inline expression
         expr: Option<String>,
+        /// Emit the raw `EvalResult` as JSON on stdout instead of the
+        /// human-readable rendering. Stdout carries JSON only; warnings
+        /// and errors stay on stderr. Empty-roots inputs emit
+        /// `{"roots":[]}`.
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
         /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
@@ -517,8 +523,14 @@ fn main() {
         Some(Command::Eval {
             file,
             expr,
+            json,
             allow_style_violations,
-        }) => cmd_eval(file.as_deref(), expr.as_deref(), allow_style_violations),
+        }) => cmd_eval(
+            file.as_deref(),
+            expr.as_deref(),
+            json,
+            allow_style_violations,
+        ),
         Some(Command::Check {
             file,
             show_inferred,
@@ -727,6 +739,7 @@ fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::e
 fn cmd_eval(
     file: Option<&std::path::Path>,
     expr: Option<&str>,
+    json: bool,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The style gate runs only on the `--file` form (a real on-disk
@@ -758,7 +771,7 @@ fn cmd_eval(
         (Some(path), _) => {
             if let Some(package_root) = detect_eval_package_root(path)? {
                 let source = fs::read_to_string(path)?;
-                match run_eval_in_context(&package_root, &source) {
+                match run_eval_in_context(&package_root, &source, json) {
                     Ok(()) => return Ok(()),
                     Err(EvalInContextError::HashUnsupported) => {
                         // The Phase G hash step does not yet cover
@@ -784,13 +797,25 @@ fn cmd_eval(
             let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             let source = chelis_surf::format::format_program(&decls);
             let selected_roots = root_names_from_decls(&entry_decls, checked.type_env());
-            run_eval_emit(try_eval(SourceKind::Surf, &source, Some(&selected_roots)))
+            if json {
+                run_eval_json_emit(try_eval_result(
+                    SourceKind::Surf,
+                    &source,
+                    Some(&selected_roots),
+                ))
+            } else {
+                run_eval_emit(try_eval(SourceKind::Surf, &source, Some(&selected_roots)))
+            }
         }
         (None, Some(e)) => {
             // `--expr` is by construction a one-line snippet with no reef
             // resolution — keep the legacy path.
             let source = format!("__eval_result = {e}");
-            run_eval_emit(try_eval(SourceKind::Surf, &source, None))
+            if json {
+                run_eval_json_emit(try_eval_result(SourceKind::Surf, &source, None))
+            } else {
+                run_eval_emit(try_eval(SourceKind::Surf, &source, None))
+            }
         }
         (None, None) => Err("provide --file or an expression".into()),
     }
@@ -845,7 +870,11 @@ enum EvalInContextError {
 /// if present (matching how `chelis test` plumbs it to workers); Phase K
 /// uses it to key the disk cache so a warm `chelis eval --file` re-run
 /// against unchanged sources skips the ~67s library compile entirely.
-fn run_eval_in_context(package_root: &Path, source: &str) -> Result<(), EvalInContextError> {
+fn run_eval_in_context(
+    package_root: &Path,
+    source: &str,
+    json: bool,
+) -> Result<(), EvalInContextError> {
     let reef_home = env::var_os("CHELIS_REEF_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(""));
@@ -890,6 +919,16 @@ fn run_eval_in_context(package_root: &Path, source: &str) -> Result<(), EvalInCo
                 .join("; "),
         )
     })?;
+    if json {
+        // JSON mode: stdout carries the raw `EvalResult` serde JSON
+        // only. Empty-roots inputs serialize to `{"roots":[]}` (valid
+        // JSON); the stderr breadcrumb is suppressed so scripted
+        // consumers get a single parseable document on stdout.
+        let rendered = serde_json::to_string(&result)
+            .map_err(|err| EvalInContextError::Compile(format!("eval JSON serialize: {err}")))?;
+        println!("{rendered}");
+        return Ok(());
+    }
     let formatted = format_eval_result(&result);
     if formatted.is_empty() {
         warn_eval_no_roots();
@@ -907,6 +946,25 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
                 return Ok(());
             }
             println!("{result}");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// JSON counterpart to [`run_eval_emit`]. Stdout carries the raw
+/// `EvalResult` serde JSON only; nothing else is written there. An
+/// empty-roots program serializes to `{"roots":[]}` (valid JSON) rather
+/// than emitting the human stderr breadcrumb, so a scripted consumer
+/// always receives a single parseable document. Errors propagate as a
+/// boxed error (stderr + nonzero exit), unchanged from the text path.
+fn run_eval_json_emit(
+    outcome: Result<chelis_compiler_api::schema::EvalResult, String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match outcome {
+        Ok(result) => {
+            let rendered = serde_json::to_string(&result)?;
+            println!("{rendered}");
             Ok(())
         }
         Err(e) => Err(e.into()),
@@ -5122,17 +5180,23 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn try_eval(
+/// Compile and evaluate `source`, returning the raw `EvalResult`. This
+/// is the structured counterpart to [`try_eval`]: the latter formats
+/// the same result into the human stdout rendering, while this returns
+/// the result unchanged so the `--json` path can serialize it directly.
+/// Error joining matches [`try_eval`] exactly, so JSON and text mode
+/// surface identical error text on failure.
+fn try_eval_result(
     source_kind: SourceKind,
     source: &str,
     selected_roots: Option<&[String]>,
-) -> Result<String, String> {
+) -> Result<chelis_compiler_api::schema::EvalResult, String> {
     let request = EvalRequest {
         source_kind,
         source: source.to_string(),
         bindings: BTreeMap::new(),
     };
-    let result = if let Some(roots) = selected_roots {
+    if let Some(roots) = selected_roots {
         chelis_compiler_api::compiler::eval_selected(request, roots)
     } else {
         chelis_compiler_api::compiler::eval(request)
@@ -5143,8 +5207,15 @@ fn try_eval(
             .map(|diag| diag.message.clone())
             .collect::<Vec<_>>()
             .join("; ")
-    })?;
+    })
+}
 
+fn try_eval(
+    source_kind: SourceKind,
+    source: &str,
+    selected_roots: Option<&[String]>,
+) -> Result<String, String> {
+    let result = try_eval_result(source_kind, source, selected_roots)?;
     Ok(format_eval_result(&result))
 }
 
