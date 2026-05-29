@@ -328,6 +328,12 @@ enum Command {
         /// Override bridge span manifest for a single `.dp` input
         #[clap(long)]
         spans: Option<PathBuf>,
+        /// Verification tier: auto (A→B→C), fuzz-only, smt-only, type-only
+        #[clap(long, default_value = "auto")]
+        tier: String,
+        /// SMT solver timeout in milliseconds (default 5000)
+        #[clap(long, default_value = "5000")]
+        smt_timeout: u64,
     },
     /// Lint naming conventions per `spec/01-nomenclature.md`
     Lint {
@@ -637,6 +643,8 @@ fn main() {
             max_attempts,
             json,
             spans,
+            tier: _tier,
+            smt_timeout: _smt_timeout,
         }) => match prove::cmd_prove(prove::ProveOptions {
             path: path.as_deref(),
             only: only.as_deref(),
@@ -645,6 +653,8 @@ fn main() {
             max_attempts,
             json,
             spans: spans.as_deref(),
+            tier: &_tier,
+            smt_timeout_ms: _smt_timeout,
         }) {
             Ok(code) => std::process::exit(code),
             Err(err) => {

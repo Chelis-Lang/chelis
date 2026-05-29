@@ -1,0 +1,22 @@
+[package]
+name = "chelis-prove"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Three-tier property verification: type check → SMT (cvc5) → fuzz"
+
+[features]
+smt = ["cvc5-rs"]
+
+[dependencies]
+cvc5-rs = { version = "0.3", optional = true }
+chelis-surf = { path = "../chelis-surf" }
+chelis-deep = { path = "../chelis-deep" }
+chelis-types = { path = "../chelis-types" }
+chelis-compiler-api = { path = "../chelis-compiler-api" }
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }
+
+[dev-dependencies]

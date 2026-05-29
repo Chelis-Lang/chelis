@@ -77,6 +77,7 @@ fn handle_tool_call(id: Option<Value>, params: Option<&Value>) -> Value {
         "chelis_validate" => {
             deserialize_and_run::<ValidateRequest, _, _>(&args, compiler::validate)
         }
+        "chelis_prove" => handle_prove_tool(&args),
         other => {
             return error(id, -32601, format!("unknown tool `{other}`"));
         }
@@ -143,6 +144,7 @@ fn tool_list() -> Vec<Value> {
             "chelis_validate",
             "Validate Surf, Deep, or desugared Chelis source",
         ),
+        prove_tool_schema(),
     ]
 }
 
@@ -221,4 +223,91 @@ fn write_message(writer: &mut impl Write, value: &Value) -> io::Result<()> {
 
 fn serialize_payload<T: serde::Serialize>(value: T) -> Value {
     serde_json::to_value(value).expect("payload should serialize")
+}
+
+fn prove_tool_schema() -> Value {
+    json!({
+        "name": "chelis_prove",
+        "description": "Verify Chelis properties via three-tier dispatch (type check → SMT → fuzz)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_kind": { "type": "string", "enum": ["surf", "deep"] },
+                "source": { "type": "string", "description": "Chelis source containing @property declarations" },
+                "tier": { "type": "string", "enum": ["auto", "fuzz-only", "smt-only", "type-only"], "default": "auto" },
+                "amenability": { "type": "string", "enum": ["linear", "polynomial", "transcendental", "opaque"], "description": "SMT amenability classification" },
+                "smt_timeout": { "type": "integer", "description": "SMT timeout in ms (default 5000)", "default": 5000 },
+                "samples": { "type": "integer", "description": "Fuzz samples per property (default 100)", "default": 100 },
+                "seed": { "type": "integer", "description": "Fuzz seed (default 0)", "default": 0 }
+            },
+            "required": ["source_kind", "source"]
+        }
+    })
+}
+
+fn handle_prove_tool(args: &Value) -> Value {
+    let source = match args.get("source").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => return json!({
+            "ok": false,
+            "stage": "mcp",
+            "errors": [{"kind": "invalid_arguments", "message": "missing `source`", "severity": 1.0, "suggestions": []}]
+        }),
+    };
+
+    let tier = args.get("tier").and_then(Value::as_str).unwrap_or("auto");
+    let smt_timeout = args.get("smt_timeout").and_then(Value::as_u64).unwrap_or(5000);
+    let samples = args.get("samples").and_then(Value::as_u64).unwrap_or(100) as usize;
+    let seed = args.get("seed").and_then(Value::as_u64).unwrap_or(0);
+
+    let amenability = match args.get("amenability").and_then(Value::as_str).unwrap_or("polynomial") {
+        "linear" => chelis_prove::dispatch::SmtAmenability::Linear,
+        "polynomial" => chelis_prove::dispatch::SmtAmenability::Polynomial,
+        "transcendental" => chelis_prove::dispatch::SmtAmenability::Transcendental,
+        "opaque" => chelis_prove::dispatch::SmtAmenability::Opaque,
+        other => return json!({
+            "ok": false,
+            "stage": "mcp",
+            "errors": [{"kind": "invalid_arguments", "message": format!("invalid amenability `{other}`; must be linear|polynomial|transcendental|opaque"), "severity": 1.0, "suggestions": []}]
+        }),
+    };
+
+    let tier_mode = match tier {
+        "auto" => chelis_prove::dispatch::TierMode::Auto,
+        "fuzz-only" => chelis_prove::dispatch::TierMode::FuzzOnly,
+        "smt-only" => chelis_prove::dispatch::TierMode::SmtOnly,
+        "type-only" => chelis_prove::dispatch::TierMode::TypeOnly,
+        other => return json!({
+            "ok": false,
+            "stage": "mcp",
+            "errors": [{"kind": "invalid_arguments", "message": format!("invalid tier `{other}`"), "severity": 1.0, "suggestions": []}]
+        }),
+    };
+
+    let options = chelis_prove::dispatch::DispatchOptions {
+        tier_mode,
+        smt_timeout_ms: smt_timeout,
+        fuzz_samples: samples,
+        fuzz_seed: seed,
+    };
+
+    // Dispatch the property through the three-tier pipeline.
+    // For now, dispatch a single property from the source.
+    let result = chelis_prove::dispatch::dispatch_property(
+        &source,
+        "property",
+        amenability,
+        &options,
+    );
+
+    json!({
+        "ok": true,
+        "stage": "prove",
+        "properties": [serde_json::to_value(&result).unwrap_or(json!(null))],
+        "summary": {
+            "total": 1,
+            "proved": if result.status == chelis_prove::ProofStatus::Proved { 1 } else { 0 },
+            "failed": match &result.status { chelis_prove::ProofStatus::Disproved { .. } => 1, _ => 0 },
+        }
+    })
 }

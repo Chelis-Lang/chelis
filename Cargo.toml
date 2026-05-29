@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/chelis-prove",
     "crates/chelis-runtime",
     "crates/chelis-compiler-api",
     "crates/chelis-python",
