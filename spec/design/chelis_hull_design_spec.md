@@ -52,9 +52,9 @@ type Expr =
   | EMatmul(Expr, Expr)
   | EWhere(Expr, Expr, Expr)
   | EConcat(List[Expr], int64)
-  | EReshape(Expr, List[Dim])
-  | EPermute(Expr, List[int64])
-  | EExpand(Expr, List[Dim])
+  | EReshape(Expr, List[Dim])      -- Deep `(app {} (var {} reshape) tensor shape-list)`
+  | EPermute(Expr, List[int64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation
+  | EExpand(Expr, int64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (int64); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
   | ECumsum(Expr, int64)
   | ESort(Expr, int64)
   | EGrad(Expr)
@@ -279,6 +279,72 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
       }
     }
 
+    -- T-Reshape
+    -- Mirrors the shipped checker's `infer_reshape_app`
+    -- (`crates/chelis-types/src/infer.rs`, dispatched from the `reshape` builtin).
+    -- reshape(e, new_dims): e must be a tensor; new_dims is a value-level shape list.
+    -- The shape list elements are int64 (the shipped path unifies the list against
+    -- List[Int64]; an int32 shape element is a PrecisionMismatch there). The output
+    -- element type is INVARIANT (precision is copied unchanged from the input). The
+    -- output dims are rebuilt element-by-element from new_dims (lit/cast -> DLit, a
+    -- shape(input, k) reference -> the input's dim at axis k, otherwise DVar/wildcard).
+    -- NO element-count or product-of-dims guard at the type level: a rank/size change
+    -- that does not preserve element count still type-checks here (it is a runtime/IR
+    -- concern, not a type-level one). Effects pass through unchanged.
+    EReshape(e, new_dims) -> {
+      (t, effs) = type_check(ctx, e)?
+      match t {
+        TTensor(_, elem) ->
+          Some((TTensor(map(new_dims, dim_of_shape_elem), elem), effs))
+        _ -> None
+      }
+    }
+
+    -- T-Permute
+    -- Mirrors the shipped checker's `infer_permute_app`
+    -- (`crates/chelis-types/src/infer.rs`, dispatched from the `permute` builtin).
+    -- permute(e, perm): e must be a tensor; perm must be a FULL permutation of the
+    -- tensor's axes -- length(perm) == rank, every axis in 0..rank (negative rejected),
+    -- and every axis unique. A wrong length is an ArityMismatch, out-of-bounds or
+    -- duplicate axes are DimensionMismatch. The output dims are gathered in perm order
+    -- (out[i] = dims[perm[i]]); element type is INVARIANT. Effects pass through.
+    EPermute(e, perm) -> {
+      (t, effs) = type_check(ctx, e)?
+      match t {
+        TTensor(dims, elem) ->
+          if length(perm) == length(dims)
+             and all(perm, fn(a) -> a >= 0 and a < length(dims))
+             and all_unique(perm)
+            then Some((TTensor(map(perm, fn(a) -> get_at(dims, a)), elem), effs))
+            else None
+        _ -> None
+      }
+    }
+
+    -- T-Expand -- expand(e, axis, size)
+    -- Mirrors the shipped checker's `check_expand_signature`
+    -- (`crates/chelis-types/src/infer.rs`, dispatched from the `expand` builtin).
+    -- e must be a tensor. axis must be non-negative (else the shipped DimensionMismatch
+    -- "expand requires non-negative axis"); a literal size must be > 0 (else the shipped
+    -- DimensionMismatch "expand requires positive size"); a symbolic-dim-name size
+    -- becomes DName. The shipped checker selects SAME-rank broadcast (replace dims[axis]
+    -- with size, requires axis < rank) vs INSERT-rank (insert size at axis, output rank =
+    -- input rank + 1) using the *expected* result type. Hull synthesizes bottom-up with no
+    -- expected type, so it canonically produces the SAME-rank replace form (requires
+    -- axis < rank); the INSERT-rank reading is a documented v0.1.0 narrowing (not
+    -- bottom-up disambiguable). Element type is INVARIANT (precision must equal the
+    -- input). Effects pass through. (The from-1 broadcast restriction is not a type-level
+    -- guard.)
+    EExpand(e, axis, size) -> {
+      (t, effs) = type_check(ctx, e)?
+      match t {
+        TTensor(dims, elem) ->
+          if axis < 0 or (is_literal(size) and dim_lit(size) <= 0) then None
+          else Some((TTensor(replace_at(dims, axis, size), elem), effs))
+        _ -> None
+      }
+    }
+
     -- T-Grad (LaCaDiLE Section 3, Figure 4)
     -- grad(f) where f : tensor[dims, T] -> tensor[[], T] ! {}
     -- result : tensor[dims, T] -> tensor[dims, T] ! {}
@@ -370,10 +436,44 @@ Hull v0.1.0 does not implement the entire LaCaDiLE calculus. It pins a concrete
 > The v0.1.0 supported fragment = the `AdjointSupported` boundary (the set of RISC
 > primitives that have an adjoint rule in `crates/chelis-ir/src/grad.rs`) **plus** the
 > non-AD constructs needed to build, bind, and reduce programs that exercise it: `EVar`,
-> `ELit`, `ELam`/`EApp`, `ELet`, `EIf`, the elementwise/reduction/shape tensor ops with
+> `ELit`, `ELam`/`EApp`, `ELet`, `EIf`, the elementwise/reduction tensor ops with
 > adjoints (`EAdd`, `EMul`, `ESub`, `EDiv`, `ENeg`, `EExp`, `ELog`, `ESqrt`, `ESin`,
-> `ESum`, `EMatmul`, `EGather`, `EReshape`, `EPermute`, `EExpand`, etc.), `ECast` (scalar
-> precision only, see below), `ETuple`/`ETupleGet`, `EConstruct`, `EMatch`, and `EGrad`.
+> `ESum`, `EMatmul`, `EGather`), the **shape/movement ops with adjoints — exactly
+> `EReshape`, `EPermute`, and `EExpand`** (these three are the movement primitives that
+> carry adjoint rules and so fall inside the `AdjointSupported` boundary), `ECast` (scalar
+> precision only, see below), `ETuple`/`ETupleGet`, `EMatch`, and `EGrad`.
+> (`EConstruct` is **not** in the v0.1.0 fragment — see the scope-out below.)
+
+The shape/movement set is closed at those three; the "etc." in earlier drafts is narrowed
+here. The other movement-shaped `Expr` constructors are **explicitly scoped out of
+v0.1.0**, each for a concrete reason that follows the same `AdjointSupported` boundary the
+fragment is defined by:
+
+- **`EConstruct` / `PConstruct` (the ADT constructor forms)** are deferred to **v0.2.0**.
+  The v0.1.0 grammar is `Expr`-only: there is no declaration layer in Hull from which to
+  source the user constructor signatures (`type Foo = Ctor(...)`) that `EConstruct` /
+  `PConstruct` checking would need. Until a declaration layer lands there is no signature
+  to check a constructor application against, so these forms are out of the v0.1.0
+  fragment. (They appear in the §2 ADT and the evaluator's `is_value`, but `type_check`
+  returns `None` for them in v0.1.0.)
+- **`EConcat`, `EWhere`, `ECumsum`, `ESort`, `EScatter`, and `EVmap`** are out of the
+  fragment because they sit **outside the `AdjointSupported` boundary** — none of them has
+  an adjoint rule, and the AD path fails closed on every one of them:
+  - `EConcat` / `EWhere` / `ECumsum` / `ESort` lower as host / non-DAG builtins (no
+    `RiscOp::Concat` / `Where` / `Cumsum` / `Sort` exists in `crates/chelis-ir/src/dag.rs`),
+    so they never become differentiable IR nodes and `grad_dag` returns `None` for them.
+  - `EScatter` lowers to `RiscOp::Scatter`, which *does* exist, but is **explicitly
+    fail-closed for AD**: `crates/chelis-ir/src/grad.rs` rejects `scatter_replace` with
+    `NotSupported { reason: NonDeterministicAtDuplicateIndices }` because the forward
+    result depends on iteration order at duplicate target indices (no well-defined
+    adjoint; `spec/05-risc-primitives.md` §3.5).
+  - `EVmap` is a vectorization **transform** over a function, not a tensor primitive with
+    an adjoint; it has no `RiscOp` and no `grad.rs` arm (it is `lower_unsupported` /
+    `lower_unrepresentable("vmap")` in `crates/chelis-ir/src/lower.rs`).
+
+  Because `§3.1` defines the fragment *by* the `AdjointSupported` boundary, these
+  zero-adjoint / fail-closed ops are out of the v0.1.0 fragment by construction:
+  `type_check` returns `None` for each.
 
 `AdjointSupported` is **not** a named symbol in the repo; it is the operational boundary
 established by `crates/chelis-ir/src/grad.rs`, which carries one adjoint arm per
@@ -385,9 +485,11 @@ duplicate indices). Hull v0.1.0 tracks exactly this differentiable set as the AD
 core.
 
 Out of the v0.1.0 fragment (parsed by the Deep parser, but `type_check` returns `None`):
-`EWithSeed` and `EHandleEffect` (effect handling is a later phase), `EVmap` under `EGrad`
-nesting beyond the scalar-output case, and any construct whose checking depends on the
-LaCaDiLE linearity / Δ-capability judgment (deferred to v0.2.0, see §3.3).
+`EWithSeed` and `EHandleEffect` (effect handling is a later phase); the zero-adjoint /
+fail-closed ops `EConcat`, `EWhere`, `ECumsum`, `ESort`, `EScatter`, and `EVmap`
+(enumerated with their structural reasons above); `EConstruct` / `PConstruct` (no
+declaration layer, deferred to v0.2.0, above); and any construct whose checking depends on
+the LaCaDiLE linearity / Δ-capability judgment (deferred to v0.2.0, see §3.3).
 
 ### 3.2 `ECast` is scalar-precision-only in v0.1.0
 
@@ -658,9 +760,40 @@ Deep's syntax is still regular (head symbol + fixed-position children, no operat
 precedence, no ambiguity, no context-sensitivity), so the parser remains a direct
 structural mapping — just one with three more moving parts than the sketch admitted.
 
-**Round-trip property.** `parse ∘ unparse = id` (modulo alpha-renaming) on the v0.1.0
-supported fragment is a checked invariant, and `unparse` is what the generator (§7) uses
-to emit `.dp` corpus files for differential testing.
+**Round-trip property.** `parse ∘ unparse = id` (modulo alpha-renaming) is a checked
+invariant **on the well-typed in-fragment domain** — i.e. on the *parser image* of the
+v0.1.0 supported fragment (§3.1), the `Expr` values that `parse` actually produces from
+in-fragment Deep and that `type_check` accepts. It is not claimed over arbitrary `Expr`
+values: out-of-fragment forms (`EWithSeed`, `EHandleEffect`, `EConcat`, `EWhere`,
+`ECumsum`, `ESort`, `EScatter`, `EVmap`, `EConstruct`) are not in the round-trip domain
+because the generator does not emit them and `type_check` rejects them. `unparse` is what
+the generator (§7) uses to emit `.dp` corpus files for differential testing.
+
+**Reserved builtin op names make desugaring unambiguous.** The round-trip property
+depends on the desugaring being a *function* of the s-expression — for it to hold, an
+`(app {} (var {} add) e1 e2)` must mean `EAdd(e1, e2)` and nothing else. That holds
+because the recognized builtin op names are **reserved**: they are not user-bindable
+identifiers, so a `(var {} add)` head can only ever be the `add` builtin, never a
+user-bound local named `add` shadowing it. There are **19 reserved op names** in the
+v0.1.0 fragment, each the head of a dedicated-constructor desugaring:
+
+- arithmetic binops (4): `add`, `mul`, `sub`, `div` → `EAdd` / `EMul` / `ESub` / `EDiv`;
+- unary elementwise (5): `neg`, `exp`, `log`, `sqrt`, `sin` → `ENeg` / `EExp` / `ELog` /
+  `ESqrt` / `ESin`;
+- comparison (1): `cmplt` → `EApp(EVar("cmplt"), …)` (kept as an `EApp` head, not a
+  dedicated tag; reserved so the head is unambiguous — see the §2 calculus-names note);
+- reduction / contraction / index (3): `sum`, `matmul`, `gather` → `ESum` / `EMatmul` /
+  `EGather`;
+- shape / movement (3): `reshape`, `permute`, `expand` → `EReshape` / `EPermute` /
+  `EExpand`;
+- grad / cast transform heads (3): `grad`, `cast`, `vmap` — `grad` and `cast` are Deep
+  *transform tags* (`(grad …)`, `(cast …)`) rather than `app` heads, but their names are
+  reserved on the same footing so they cannot be rebound; `vmap` is reserved even though
+  it is out of the v0.1.0 fragment (§3.1), so its name is never available to shadow.
+
+Because none of these 19 names can be rebound, `desugar_app` (and the inverse re-sugar in
+`unparse`) is deterministic, and the `parse ∘ unparse = id` invariant is well-defined on
+the in-fragment parser image.
 
 ---
 
