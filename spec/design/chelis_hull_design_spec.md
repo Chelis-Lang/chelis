@@ -54,7 +54,7 @@ type Expr =
   | EConcat(List[Expr], int64)
   | EReshape(Expr, List[Dim])      -- Deep `(app {} (var {} reshape) tensor shape-list)`
   | EPermute(Expr, List[int64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation
-  | EExpand(Expr, int64, int64)    -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op
+  | EExpand(Expr, int64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (int64); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
   | ECumsum(Expr, int64)
   | ESort(Expr, int64)
   | EGrad(Expr)
@@ -327,11 +327,14 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
     -- e must be a tensor. axis must be non-negative (else the shipped DimensionMismatch
     -- "expand requires non-negative axis"); a literal size must be > 0 (else the shipped
     -- DimensionMismatch "expand requires positive size"); a symbolic-dim-name size
-    -- becomes DName. Two shapes are produced bottom-up: SAME-rank broadcast (replace
-    -- dims[axis] with size, requires axis < rank) and INSERT-rank (insert size at axis,
-    -- requires axis <= rank, output rank = input rank + 1), selected by the requested
-    -- output rank. Element type is INVARIANT (precision must equal the input). Effects
-    -- pass through. (The from-1 broadcast restriction is not a type-level guard.)
+    -- becomes DName. The shipped checker selects SAME-rank broadcast (replace dims[axis]
+    -- with size, requires axis < rank) vs INSERT-rank (insert size at axis, output rank =
+    -- input rank + 1) using the *expected* result type. Hull synthesizes bottom-up with no
+    -- expected type, so it canonically produces the SAME-rank replace form (requires
+    -- axis < rank); the INSERT-rank reading is a documented v0.1.0 narrowing (not
+    -- bottom-up disambiguable). Element type is INVARIANT (precision must equal the
+    -- input). Effects pass through. (The from-1 broadcast restriction is not a type-level
+    -- guard.)
     EExpand(e, axis, size) -> {
       (t, effs) = type_check(ctx, e)?
       match t {
