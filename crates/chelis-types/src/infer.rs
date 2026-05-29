@@ -6734,6 +6734,26 @@ fn infer_top_level(
                 }
             }
             check_declared_dvars_rigid(&declared_dvars, subst, errors);
+            // chelis#272 list-uniformity check. A list literal of
+            // tensors with *mismatched concrete* element axes joins to a
+            // `Wildcard` along the differing axis (the deliberate #218
+            // bare-`concat` ergonomic). That wildcard is a defensible
+            // "I don't know the shape" result for an unannotated bare
+            // list, but it must NOT silently satisfy a declared element
+            // type that names a rigid/named dimension — `List[tensor[k]]`
+            // promises every element has the *same* length `k`. A body
+            // like `def make[k](a: tensor[2], b: tensor[3])
+            //   -> List[tensor[k]] = [a, b]` produces
+            // `List<tensor[Wildcard]>`; the wildcard unifies permissively
+            // with the rigid `k` and leaves it unbound, so neither the
+            // pin-to-literal nor the distinct-collapse arm of
+            // `check_declared_dvars_rigid` fires. Flag that mismatch here
+            // by comparing the declared return's list-element dims
+            // against the resolved body's. (The `[k, m]` variant is
+            // already caught above: the tightened Cons-join now unifies
+            // the two rigid dims, and `check_declared_dvars_rigid`
+            // reports the collapse.)
+            check_list_elem_rigid_dim_vs_wildcard(&decl_ty, &resolved_body, errors);
             // Implicit-copy fan-out v3 Shape A relaxed retry: if the
             // initial unify fails and the body's tail position resolves
             // to a `(var x)` reference whose declared return is owned
@@ -7576,14 +7596,63 @@ fn infer_app(
                 errors.push(te.into());
                 return Type::Error;
             }
-            let joined_dims: Vec<Dim> = head_dims
-                .iter()
-                .zip(tail_dims.iter())
-                .map(|(h, t)| match (h, t) {
+            // Per-axis join (chelis#218 concat ergonomics, tightened
+            // by chelis#272). Resolve each dim through the current
+            // substitution first so already-bound dim variables compare
+            // as their concrete value.
+            //
+            //   * equal concrete literals or equal names  -> keep them;
+            //   * genuinely-mismatched concrete literals
+            //     (e.g. `Lit(2)` vs `Lit(3)`) or mismatched concrete
+            //     names                                    -> widen to
+            //     `Wildcard`. This is the deliberate #218 behavior that
+            //     lets bare `concat([a, b], axis)` accept ragged
+            //     concrete axes; and
+            //   * any pair that involves a dimension *variable*
+            //     (a declared rigid dim parameter such as `k`/`m`)
+            //     -> `unify_dim` the two dims instead of widening.
+            //
+            // The last arm is the #272 fix: the old `_ => Wildcard`
+            // erased named dim variables, so a list body that violated
+            // the §4.4 rigid-distinct-dim guarantee
+            // (`def make[k, m](a: tensor[k], b: tensor[m])
+            //   -> List[tensor[k]] = [a, b]`) collapsed `k`/`m` to a
+            // wildcard before `check_declared_dvars_rigid` ran. Unifying
+            // them instead keeps the surviving evidence: distinct rigid
+            // dims unify with each other (the guard then reports the
+            // collapse) and a `(rigid, concrete)` pair pins the rigid
+            // dim to a literal (the guard reports the pin). A
+            // `unify_dim` failure here (which the permissive
+            // Name/Lit/Wildcard arms make rare) surfaces as a structural
+            // dimension mismatch rather than being silently widened.
+            let mut joined_dims: Vec<Dim> = Vec::with_capacity(head_dims.len());
+            for (h, t) in head_dims.iter().zip(tail_dims.iter()) {
+                let hr = subst.apply_dim(h);
+                let tr = subst.apply_dim(t);
+                let joined = match (&hr, &tr) {
                     (Dim::Lit(a), Dim::Lit(b)) if a == b => Dim::Lit(*a),
-                    _ => Dim::Wildcard,
-                })
-                .collect();
+                    (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Dim::Name(n1.clone()),
+                    // Mismatched concrete dims (literal/literal or
+                    // name/name): the deliberate #218 ragged-axis
+                    // widening. Neither side is a dim variable, so there
+                    // is no rigid-dim promise to preserve here.
+                    (Dim::Lit(_), Dim::Lit(_))
+                    | (Dim::Name(_), Dim::Name(_))
+                    | (Dim::Lit(_), Dim::Name(_))
+                    | (Dim::Name(_), Dim::Lit(_)) => Dim::Wildcard,
+                    // At least one side is a dim variable (or a
+                    // wildcard). Unify so rigid dim parameters keep their
+                    // identity and `check_declared_dvars_rigid` can fire.
+                    _ => {
+                        if let Err(te) = unify_dim(&hr, &tr, subst) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        subst.apply_dim(&hr)
+                    }
+                };
+                joined_dims.push(joined);
+            }
             let joined_prec = subst.apply_tensor_prec(head_prec);
             let elem = Type::Tensor(joined_dims, joined_prec);
             return Type::Adt("List".to_string(), vec![elem]);
@@ -12984,6 +13053,77 @@ fn check_declared_dvars_rigid(
         } else {
             seen.insert(resolved, *dv);
         }
+    }
+}
+
+/// chelis#272 list-uniformity guard.
+///
+/// A declared return type of the form `List[tensor[..., d, ...]]` whose
+/// element dim `d` is a *rigid/named* dimension (`Dim::Var` for a
+/// declared dim parameter, or `Dim::Name` for a named symbolic dim)
+/// promises that every list element has the *same* length at that axis.
+/// The #218 Cons-join widens a *mismatched-concrete* list-element axis
+/// to `Dim::Wildcard`, and `unify_dim` lets that wildcard satisfy a
+/// rigid `Var`/`Name` permissively *without binding it* — so neither the
+/// pin-to-literal nor the distinct-collapse arm of
+/// `check_declared_dvars_rigid` observes the violation.
+///
+/// This check closes that gap structurally: it walks the declared type
+/// and the resolved body type in parallel and flags any list-element
+/// tensor axis where the declaration names a rigid/named dim but the
+/// body produced a `Wildcard`. It is deliberately scoped to *list
+/// element* tensors (`List[tensor[...]]`), the surface where the #272
+/// soundness gap lives; it does not touch bare `tensor[...]` returns
+/// whose wildcard axes legitimately flow from `expand`/`reshape`/`shape`
+/// (§4.7), where the declared return's named dim binds the result tvar
+/// directly rather than being absorbed by a heterogeneous-list wildcard.
+fn check_list_elem_rigid_dim_vs_wildcard(
+    decl_ty: &Type,
+    body_ty: &Type,
+    errors: &mut Vec<CheckError>,
+) {
+    match (decl_ty, body_ty) {
+        // Descend through the function type to its return position.
+        (Type::Fn(_, decl_ret), Type::Fn(_, body_ret)) => {
+            check_list_elem_rigid_dim_vs_wildcard(decl_ret, body_ret, errors);
+        }
+        // `List[T]`: check the element type. The list element is where
+        // the uniformity promise lives.
+        (Type::Adt(dn, dargs), Type::Adt(bn, bargs))
+            if dn == "List" && bn == "List" && dargs.len() == 1 && bargs.len() == 1 =>
+        {
+            if let (Type::Tensor(ddims, _), Type::Tensor(bdims, _)) = (&dargs[0], &bargs[0])
+                && ddims.len() == bdims.len()
+            {
+                for (dd, bd) in ddims.iter().zip(bdims.iter()) {
+                    let rigid = matches!(dd, Dim::Var(_) | Dim::Name(_));
+                    if rigid && matches!(bd, Dim::Wildcard) {
+                        let promised = match dd {
+                            Dim::Var(v) => format!("dim parameter d{}", v.0),
+                            Dim::Name(n) => format!("named dimension `{n}`"),
+                            _ => unreachable!(),
+                        };
+                        errors.push(CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "list element dimension is unknown (wildcard) in the function \
+                                 body but the declared element type promises a uniform {promised}: \
+                                 a heterogeneous list literal cannot satisfy a declared \
+                                 List[tensor[..]] whose element dimension names a rigid/named axis"
+                            ),
+                            vec![
+                                "Every element of a `List[tensor[k, ..]]` must share the same \
+                                 length `k`. Either give the elements a uniform dimension, or \
+                                 declare the element axis as a concrete literal / wildcard \
+                                 (`tensor[*, ..]`) if the lengths genuinely differ"
+                                    .to_string(),
+                            ],
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
