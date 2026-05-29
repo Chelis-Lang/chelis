@@ -28,3 +28,6 @@
 # interpreter.
 [env]
 PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
+# Required for cvc5-sys bindgen on Fedora where the ROCm clang doesn't
+# include standard system headers in its search path.
+BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/include"

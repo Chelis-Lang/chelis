@@ -17,6 +17,10 @@ pub struct ProveOptions<'a> {
     pub max_attempts: Option<usize>,
     pub json: bool,
     pub spans: Option<&'a Path>,
+    #[allow(dead_code)]
+    pub tier: &'a str,
+    #[allow(dead_code)]
+    pub smt_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
