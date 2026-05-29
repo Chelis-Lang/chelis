@@ -36,6 +36,16 @@
 //!    consumer (`consume_any[a](t: a)`) never pins it; this pass rejects
 //!    the never-pinned and pinned-to-scalar cases that parts 1 and 2 would
 //!    otherwise let through. See the round-2 soundness-lock tests below.
+//! 4. `validate_deferred_borrow_vars` (round 3): the round-2 pass
+//!    blanket-accepted any `Type::Adt`/`Type::Tuple` and deferred the
+//!    tensor-carry decision to linearity. But part 2 had loosened
+//!    linearity to accept a stale `(t-var ..)` stamp, and a deferred
+//!    borrow that resolved to a *non*-carrying ADT/tuple kept that stamp
+//!    — so both gates waved it through (a non-tensor `Config` record
+//!    reached the borrow-erased backend). Round 3 classifies the
+//!    aggregate against a registry-backed carrier set inside the gate
+//!    itself: a tensor-carrying ADT/tuple is accepted, a non-carrying one
+//!    rejected. See the round-3 deferred-aggregate tests below.
 //!
 //! See also:
 //!   - chelis#154 — closed in 0.7.11. Different bug: ADT FIELD tensor
@@ -494,5 +504,126 @@ fn borrow_of_poly_param_pinned_to_tensor_is_accepted() {
     assert!(
         kinds.is_empty(),
         "a deferred borrow that resolves to a tensor must be accepted; got {kinds:?}"
+    );
+}
+
+/// Round-3 soundness lock (issue #256): a borrow whose inner is a free
+/// `Type::Var` at the borrow site (so it takes the *deferred* path) but
+/// that later resolves to a *non-tensor-carrying* record ADT must be
+/// REJECTED. This is the gap round 2 left open: the gate accepted any
+/// `Type::Adt` and delegated the carry decision to linearity, but part 2
+/// had loosened linearity to accept the stale `(t-var ..)` stamp this
+/// shape carries — so both gates waved a non-tensor `Config` through to
+/// the borrow-erased backend.
+///
+/// Distinct from `borrow_of_non_tensor_record_with_polymorphic_consumer_is_rejected`:
+/// there the record is *concrete* at the borrow site (`c = Config {..}`),
+/// so the borrow arm sees `Type::Adt` directly and linearity rejects the
+/// `(t-adt ..)` stamp. Here the borrow inner is a genuine `Type::Var`
+/// (`v = seed`), recorded in the deferred-borrow ledger; only the
+/// consumer's `&Config` parameter pins it — after the borrow check ran.
+/// The fix classifies the resolved aggregate against the registry carrier
+/// set inside `validate_deferred_borrow_vars` itself.
+#[test]
+fn borrow_of_deferred_var_resolving_to_non_carrying_adt_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("deferred_non_carrying_adt_rejected.ch");
+    write_file(
+        &fixture,
+        "module Issue256DeferredNonCarryingAdt\n\
+         type Config = | Config { lr: f32, bs: int32 }\n\
+         sig consume_config: &Config -> bool\n\
+         def consume_config(c) = true\n\
+         def use_it[a](seed: a) -> bool = {\n\
+           v = seed\n\
+           consume_config(&v)\n\
+         }\n\
+         def main() -> bool = use_it(Config { lr: 0.1, bs: cast(32, int32) })\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        !kinds.is_empty(),
+        "a deferred borrow that resolves to a non-tensor-carrying ADT must \
+         be rejected; got clean score {json}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
+        "deferred non-carrying ADT borrow must surface a TypeMismatch or \
+         InvalidBorrow; got {kinds:?}"
+    );
+}
+
+/// Round-3 positive lock (issue #256): the counterpart to the rejection
+/// test above. A deferred borrow that resolves to a *tensor-carrying*
+/// record ADT (`BatchNormParams { gamma: tensor[..], beta: tensor[..] }`,
+/// the chelis#154 carrier shape) must STILL be accepted — the round-3
+/// carrier-set classification must not over-reject a legitimate carrier
+/// reached through the deferred path. Guards against the fix degrading
+/// into "reject every deferred aggregate."
+#[test]
+fn borrow_of_deferred_var_resolving_to_carrier_adt_is_accepted() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("deferred_carrier_adt_accepted.ch");
+    write_file(
+        &fixture,
+        "module Issue256DeferredCarrierAdt\n\
+         type BatchNormParams[n] =\n\
+           | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
+         sig consume_bnp: &BatchNormParams[n] -> bool\n\
+         def consume_bnp(p) = true\n\
+         def use_it[a](seed: a) -> bool = {\n\
+           v = seed\n\
+           consume_bnp(&v)\n\
+         }\n\
+         def main[n](p: BatchNormParams[n]) -> bool = use_it(p)\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "a deferred borrow that resolves to a tensor-carrying ADT must be \
+         accepted; got {kinds:?}"
+    );
+}
+
+/// Round-3 transitive-carrier lock: the carrier-set classification must
+/// follow ADT field chains. `Outer { inner: Inner }` where `Inner { w:
+/// tensor[..] }` carries a tensor only transitively. A deferred borrow
+/// resolving to `Outer` must be accepted, proving the gate runs the same
+/// fixed-point closure linearity does rather than a one-level field check.
+#[test]
+fn borrow_of_deferred_var_resolving_to_transitive_carrier_is_accepted() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("deferred_transitive_carrier_accepted.ch");
+    write_file(
+        &fixture,
+        "module Issue256DeferredTransitiveCarrier\n\
+         type Inner[n] = | Inner { w: tensor[n, f32] }\n\
+         type Outer[n] = | Outer { inner: Inner[n] }\n\
+         sig consume_outer: &Outer[n] -> bool\n\
+         def consume_outer(o) = true\n\
+         def use_it[a](seed: a) -> bool = {\n\
+           v = seed\n\
+           consume_outer(&v)\n\
+         }\n\
+         def main[n](o: Outer[n]) -> bool = use_it(o)\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "a deferred borrow that resolves to a transitively-tensor-carrying \
+         ADT must be accepted; got {kinds:?}"
     );
 }
