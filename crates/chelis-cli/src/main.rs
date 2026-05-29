@@ -3,10 +3,13 @@
 mod prove;
 mod style_gate;
 
-use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
+use chelis_compiler_api::schema::{
+    EvalRequest, ExecutionValue, SourceKind, WireInferredDim, WireInferredEffect,
+    WireInferredPrecision, WireInferredType,
+};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
-use chelis_types::types::{Dim, Type};
+use chelis_types::types::{Dim, Effect, EffectSet, TensorPrec, Type};
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
@@ -1550,6 +1553,12 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
 }
 
 fn format_inferred_signatures_json(checked: &chelis_types::CheckedProgram) -> String {
+    // Per-def inferred effect rows, keyed by def name. Computed from the
+    // same `CheckedProgram` so the structured effect-row a consumer
+    // (Hull) reads is the exact row `chelis check` infers. Functions
+    // with no effects map to an empty row (`[]`), which is distinct from
+    // "effects unknown".
+    let effect_rows = chelis_effects::def_effect_rows(checked);
     let entries: Vec<serde_json::Value> = checked
         .signature_inference()
         .functions
@@ -1564,21 +1573,124 @@ fn format_inferred_signatures_json(checked: &chelis_types::CheckedProgram) -> St
                         "name": param.name,
                         "written": param.written,
                         "inferred_read_only": param.inferred_read_only,
+                        // Human-facing display strings (unchanged).
                         "checked_type": format_cli_type(&param.checked_type),
                         "display_type": format_cli_type(&param.display_type),
+                        // Structured, lossless type trees (new).
+                        "checked_type_structured": wire_inferred_type(&param.checked_type),
+                        "display_type_structured": wire_inferred_type(&param.display_type),
                     })
                 })
                 .collect();
+            let effect_row = effect_rows.get(&func.name);
             serde_json::json!({
                 "function": func.name,
                 "recursive_cycle": func.recursive_cycle,
+                // Human-facing display strings (unchanged).
                 "checked_signature": format_cli_type(&func.checked_signature),
                 "display_signature": format_cli_type(&func.display_signature),
+                // Structured, lossless signature type trees (new).
+                "checked_signature_structured": wire_inferred_type(&func.checked_signature),
+                "display_signature_structured": wire_inferred_type(&func.display_signature),
+                // Structured effect row (new). Always present; empty for
+                // a pure function. Also expose the human Display spelling
+                // (`Random`/`Accum`/`IO`/`Test`/`Resource("dev")`) for
+                // parity with stderr diagnostics.
+                "effect_row": wire_effect_row(effect_row),
+                "effect_row_display": effect_row_display(effect_row),
                 "params": params,
             })
         })
         .collect();
     serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Convert a checker [`Type`] into the lossless, serde-friendly
+/// [`WireInferredType`] tree emitted by `chelis check --show-inferred
+/// --json`. This is the structured counterpart to [`format_cli_type`];
+/// the two must stay in lockstep on every `Type` variant.
+fn wire_inferred_type(ty: &Type) -> WireInferredType {
+    match ty {
+        Type::Prim(prim) => WireInferredType::Prim {
+            name: prim.name().to_string(),
+        },
+        Type::Fn(args, ret) => WireInferredType::Fn {
+            args: args.iter().map(wire_inferred_type).collect(),
+            ret: Box::new(wire_inferred_type(ret)),
+        },
+        Type::Ref(inner) => WireInferredType::Ref {
+            inner: Box::new(wire_inferred_type(inner)),
+        },
+        Type::Tensor(dims, prec) => WireInferredType::Tensor {
+            dims: dims.iter().map(wire_inferred_dim).collect(),
+            precision: wire_inferred_precision(prec),
+        },
+        Type::Adt(name, args) => WireInferredType::Adt {
+            name: name.clone(),
+            args: args.iter().map(wire_inferred_type).collect(),
+        },
+        Type::Var(var) => WireInferredType::Var { id: var.0 },
+        Type::Tuple(types) => WireInferredType::Tuple {
+            items: types.iter().map(wire_inferred_type).collect(),
+        },
+        Type::Unit => WireInferredType::Unit,
+        Type::Error => WireInferredType::Error,
+    }
+}
+
+/// Convert a checker [`Dim`] into a [`WireInferredDim`]. Structured
+/// counterpart to [`format_cli_dim`].
+fn wire_inferred_dim(dim: &Dim) -> WireInferredDim {
+    match dim {
+        Dim::Name(name) => WireInferredDim::Name { name: name.clone() },
+        Dim::Var(var) => WireInferredDim::Var { id: var.0 },
+        Dim::Lit(value) => WireInferredDim::Lit { size: *value },
+        Dim::Wildcard => WireInferredDim::Wildcard,
+    }
+}
+
+/// Convert a checker [`TensorPrec`] into a [`WireInferredPrecision`].
+fn wire_inferred_precision(prec: &TensorPrec) -> WireInferredPrecision {
+    match prec {
+        TensorPrec::Concrete(prim) => WireInferredPrecision::Concrete {
+            name: prim.name().to_string(),
+        },
+        TensorPrec::Var(var) => WireInferredPrecision::Var { id: var.0 },
+    }
+}
+
+/// Convert a single checker [`Effect`] into a [`WireInferredEffect`].
+fn wire_inferred_effect(effect: &Effect) -> WireInferredEffect {
+    match effect {
+        Effect::Random => WireInferredEffect::Random,
+        Effect::Accum => WireInferredEffect::Accum,
+        Effect::Io => WireInferredEffect::Io,
+        Effect::Test => WireInferredEffect::Test,
+        Effect::Resource(device) => WireInferredEffect::Resource {
+            device: device.clone(),
+        },
+    }
+}
+
+/// Render an effect row as the structured wire list. A `None` row
+/// (function name absent from the effect map) and an empty row both
+/// serialize to `[]`: a pure function has no effects either way.
+fn wire_effect_row(row: Option<&EffectSet>) -> Vec<WireInferredEffect> {
+    match row {
+        Some(set) => set.iter().map(wire_inferred_effect).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Render an effect row as the human Display spellings
+/// (`Random`/`Accum`/`IO`/`Test`/`Resource("dev")`), matching the
+/// `chelis_types::types::Effect` Display impl used in stderr
+/// diagnostics. Stable ordering follows `EffectSet`'s `BTreeSet`.
+fn effect_row_display(row: Option<&EffectSet>) -> Vec<String> {
+    match row {
+        Some(set) => set.iter().map(ToString::to_string).collect(),
+        None => Vec::new(),
+    }
 }
 
 fn format_cli_type(ty: &Type) -> String {

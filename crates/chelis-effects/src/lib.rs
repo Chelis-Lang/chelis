@@ -19,6 +19,24 @@ pub struct EffectError {
     pub suggestions: Vec<String>,
 }
 
+/// Compute the inferred effect row for every top-level `def` in a
+/// checked program, keyed by def name.
+///
+/// This runs the same iterative-fixed-point inference that
+/// [`check_program`] uses internally, but exposes the per-def effect
+/// rows directly instead of folding them into validation. It performs
+/// NO validation — callers that need handler-arity / unhandled-random /
+/// declared-vs-inferred checks must still call [`check_program`].
+///
+/// The intended consumer is `chelis check --show-inferred --json`,
+/// which joins these effect rows with the type-level signature
+/// inference so a machine consumer (Hull) can reconstruct each
+/// function's `(Type, EffectRow)` without re-parsing a printer.
+pub fn def_effect_rows(program: &CheckedProgram) -> std::collections::BTreeMap<String, EffectSet> {
+    let (effects_by_def, _top_level_callables) = infer_program_effects(program.annotated_exprs());
+    effects_by_def.into_iter().collect()
+}
+
 pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<EffectError>> {
     let (effects_by_def, top_level_callables) = infer_program_effects(program.annotated_exprs());
     let annotated_exprs: Vec<Expr> = program
@@ -1002,6 +1020,31 @@ mod tests {
             inferred
                 .get("y")
                 .is_some_and(|effects| effects.contains(&Effect::Random))
+        );
+    }
+
+    // `def_effect_rows` is the public seam `chelis check --show-inferred
+    // --json` reads to attach a structured effect row to each function.
+    // Positive: a function calling `debug` carries IO. Negative parity:
+    // a pure function carries an EMPTY row (present and empty, not
+    // missing), so a consumer can tell "pure" from "unknown".
+    #[test]
+    fn def_effect_rows_reports_io_and_empty_rows() {
+        let program = surf_checked(
+            r#"
+def logged(msg: string) -> string = debug(msg)
+def pure_add(x: int64, y: int64) -> int64 = add(x, y)
+"#,
+        );
+        let rows = def_effect_rows(&program);
+        let logged = rows.get("logged").expect("logged effect row present");
+        assert!(logged.contains(&Effect::Io));
+        assert_eq!(logged.iter().count(), 1);
+
+        let pure_add = rows.get("pure_add").expect("pure_add effect row present");
+        assert!(
+            pure_add.is_empty(),
+            "pure function must have an empty effect row, got {pure_add}"
         );
     }
 

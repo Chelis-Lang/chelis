@@ -473,6 +473,118 @@ fn check_show_inferred_prints_signature_inference_metadata() {
     assert_eq!(readonly["params"][0]["written"], false);
 }
 
+// Hull Phase 0a Packet B, commit 1: `chelis check --show-inferred
+// --json` must emit a STRUCTURED, lossless type tree and effect row
+// alongside the human display strings, so a consumer (Hull) does not
+// have to re-parse a type printer. This pins the structured shape for a
+// function carrying the IO effect.
+#[test]
+fn check_show_inferred_emits_structured_type_and_effect_row() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("io_fn.ch");
+    // `debug` carries the IO effect and returns its argument unchanged,
+    // so `logged` infers `(string) -> string` with an IO effect row.
+    write_file(&path, "def logged(msg: string) -> string = debug(msg)\n");
+
+    let json = run_json_check_show_inferred(&path);
+    let signatures = json["inferred_signatures"]
+        .as_array()
+        .expect("inferred_signatures array");
+    let logged = signatures
+        .iter()
+        .find(|entry| entry["function"] == "logged")
+        .expect("logged signature metadata");
+
+    // Human display strings remain present and unchanged.
+    assert_eq!(logged["display_signature"], "(string) -> string");
+
+    // Structured signature: a function from one string to a string.
+    let sig = &logged["display_signature_structured"];
+    assert_eq!(sig["kind"], "fn");
+    assert_eq!(sig["args"].as_array().expect("args").len(), 1);
+    assert_eq!(sig["args"][0]["kind"], "prim");
+    assert_eq!(sig["args"][0]["name"], "string");
+    assert_eq!(sig["ret"]["kind"], "prim");
+    assert_eq!(sig["ret"]["name"], "string");
+
+    // The checked signature tree is also present and equals the display
+    // tree for this monomorphic function.
+    assert_eq!(logged["checked_signature_structured"], *sig);
+
+    // Structured per-parameter type tree.
+    let param = &logged["params"][0];
+    assert_eq!(param["name"], "msg");
+    assert_eq!(param["display_type_structured"]["kind"], "prim");
+    assert_eq!(param["display_type_structured"]["name"], "string");
+    assert_eq!(param["checked_type_structured"]["kind"], "prim");
+    assert_eq!(param["checked_type_structured"]["name"], "string");
+
+    // Structured effect row: exactly one IO effect, internally tagged.
+    let effect_row = logged["effect_row"].as_array().expect("effect_row array");
+    assert_eq!(effect_row.len(), 1);
+    assert_eq!(effect_row[0]["kind"], "io");
+    // Human Display spelling matches `Effect::Display` (IO, not io).
+    assert_eq!(
+        logged["effect_row_display"]
+            .as_array()
+            .expect("effect_row_display array"),
+        &vec![Value::from("IO")]
+    );
+}
+
+// Hull Phase 0a Packet B, commit 1, structured tensor + negative
+// parity: a PURE function over tensors must carry an EMPTY effect row
+// (distinct from "effects unknown"), and the structured tensor type
+// must reconstruct dims and the concrete precision losslessly. The
+// borrowed parameter must serialize as a `ref` wrapping a `tensor`.
+#[test]
+fn check_show_inferred_pure_tensor_fn_has_empty_effect_row_and_structured_tensor() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("readonly.ch");
+    write_file(&path, "def readonly(x, y: tensor[4, f32]) = add(x, y)\n");
+
+    let json = run_json_check_show_inferred(&path);
+    let signatures = json["inferred_signatures"]
+        .as_array()
+        .expect("inferred_signatures array");
+    let readonly = signatures
+        .iter()
+        .find(|entry| entry["function"] == "readonly")
+        .expect("readonly signature metadata");
+
+    // Negative parity: a pure function emits an empty effect row, not a
+    // missing field and not an unknown sentinel.
+    assert_eq!(
+        readonly["effect_row"].as_array().expect("effect_row").len(),
+        0
+    );
+    assert_eq!(
+        readonly["effect_row_display"]
+            .as_array()
+            .expect("effect_row_display")
+            .len(),
+        0
+    );
+
+    // Structured tensor: the borrowed first arg is `ref(tensor[lit 4, f32])`.
+    let sig = &readonly["display_signature_structured"];
+    assert_eq!(sig["kind"], "fn");
+    let arg0 = &sig["args"][0];
+    assert_eq!(arg0["kind"], "ref");
+    let inner = &arg0["inner"];
+    assert_eq!(inner["kind"], "tensor");
+    assert_eq!(inner["dims"][0]["kind"], "lit");
+    assert_eq!(inner["dims"][0]["size"], 4);
+    assert_eq!(inner["precision"]["kind"], "concrete");
+    assert_eq!(inner["precision"]["name"], "f32");
+
+    // The owned second arg is a bare `tensor[lit 4, f32]` (no ref).
+    let arg1 = &sig["args"][1];
+    assert_eq!(arg1["kind"], "tensor");
+    assert_eq!(arg1["dims"][0]["size"], 4);
+    assert_eq!(arg1["precision"]["name"], "f32");
+}
+
 fn runtime_library_path() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for dir in [
