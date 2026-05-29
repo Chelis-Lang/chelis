@@ -15,12 +15,27 @@ use assert_cmd::Command;
 use std::fs;
 use tempfile::tempdir;
 
+/// PATH with the just-built `chelis` binary's directory prepended, so an inner
+/// `process_run("chelis", ...)` resolves the build under test. CI runners have
+/// no `chelis` on PATH (the binary lives under `target/`), and a developer box
+/// may have a stale `chelis` installed; both cases would otherwise make these
+/// tests non-hermetic.
+fn path_with_built_chelis() -> String {
+    let bin = assert_cmd::cargo::cargo_bin("chelis");
+    let dir = bin.parent().expect("chelis binary has a parent directory");
+    match std::env::var("PATH") {
+        Ok(existing) => format!("{}:{}", dir.display(), existing),
+        Err(_) => dir.display().to_string(),
+    }
+}
+
 /// `process_run("chelis", ["--version"])` exits 0; the tuple renders with
 /// `eval_result.0 = 0` and the stdout slot carries the version banner.
 #[test]
 fn eval_process_run_chelis_version_yields_exit_zero_tuple() {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("PATH", path_with_built_chelis())
         .arg("eval")
         .arg(r#"process_run("chelis", ["--version"])"#)
         .assert()
@@ -123,6 +138,7 @@ fn eval_process_run_rejects_non_list_args() {
 fn eval_process_run_captures_nonzero_exit_code() {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("PATH", path_with_built_chelis())
         .arg("eval")
         .arg(r#"process_run("chelis", ["check", "no_such_file_zzz.ch"])"#)
         .assert()
