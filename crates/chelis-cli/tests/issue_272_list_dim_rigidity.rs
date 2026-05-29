@@ -228,3 +228,173 @@ fn issue_272_bare_heterogeneous_list_without_annotation_still_type_checks() {
          still type-check; got {errs:?}",
     );
 }
+
+// =================================================================
+// Join side-effect: the tightened Cons-join resolves a `(concrete,
+// wildcard)` pair to whatever the HEAD (first list element) dim
+// resolves to, rather than the old unconditional `Wildcard`. The join
+// returns `subst.apply_dim(head)`, so the result is head-biased:
+//
+//   * a concrete/named head ABSORBS a wildcard tail
+//     (`[tensor[2], tensor[*]]` -> element `tensor[2]`); but
+//   * a wildcard head ERASES a concrete tail
+//     (`[tensor[*], tensor[2]]` -> element `tensor[*]`).
+//
+// This asymmetry is a deliberate-but-narrow consequence of pinning the
+// fix to the head slot; these two tests lock it so a future change to
+// the join orientation is a conscious decision, not a silent drift.
+// (Mismatched *concrete* heads/tails still widen to Wildcard via the
+// dedicated arm — see scenario B and the #218 ragged-axis lock.)
+// =================================================================
+
+#[test]
+fn issue_272_join_concrete_head_absorbs_wildcard_tail_type_checks() {
+    // `[tensor[2], tensor[*]]` under a rigid-`k` return.
+    //   BEFORE: join -> Wildcard (old `_ => Wildcard`); no list-uniformity
+    //           check existed, so the wildcard element was accepted. ACCEPT.
+    //   AFTER:  join -> Lit(2) (head wins); element is concrete, not a
+    //           wildcard, so the #272 check does not fire. Still ACCEPT.
+    // Same verdict, but the inferred element dim tightened from `*` to `2`.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("concrete_head_wildcard_tail.ch");
+    write_file(
+        &path,
+        "def f[k](a: tensor[2, f32], b: tensor[*, f32]) -> List[tensor[k, f32]] = [a, b]\n",
+    );
+    let json = run_check(&path);
+    let errs = error_messages(&json);
+    assert!(
+        errs.is_empty(),
+        "a concrete head dim must absorb a wildcard tail and keep the list \
+         element concrete (so it satisfies rigid `k`); got {errs:?}",
+    );
+}
+
+#[test]
+fn issue_272_join_wildcard_head_erases_concrete_tail_rejects() {
+    // `[tensor[*], tensor[2]]` under a rigid-`k` return: the SAME element
+    // multiset as the test above, only reordered.
+    //   BEFORE: join -> Wildcard; no check existed. ACCEPT.
+    //   AFTER:  join -> Wildcard (head is the wildcard, so the concrete tail
+    //           is erased); the wildcard element cannot satisfy a declared
+    //           rigid `k`. REJECT (DimensionMismatch).
+    // Locks the head-position asymmetry: ordering flips the verdict.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("wildcard_head_concrete_tail.ch");
+    write_file(
+        &path,
+        "def f[k](a: tensor[*, f32], b: tensor[2, f32]) -> List[tensor[k, f32]] = [a, b]\n",
+    );
+    let json = run_check(&path);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.iter().any(|k| k == "DimensionMismatch"),
+        "a wildcard head dim erases a concrete tail, so the list element is a \
+         wildcard that cannot satisfy rigid `k`; must reject with \
+         DimensionMismatch; got {:?}",
+        error_messages(&json),
+    );
+}
+
+// =================================================================
+// Conservative false-positive surface of
+// `check_list_elem_rigid_dim_vs_wildcard`: it treats ANY declared
+// `Dim::Var` (rigid param) or `Dim::Name` (named symbolic dim) list
+// element axis as a uniformity promise, and rejects a wildcard-element
+// body against it -- even a single-element list, which is trivially
+// "uniform". The escape hatch is an explicit `tensor[*, ..]` element
+// annotation. The check is also scoped to a single `List[tensor[..]]`
+// level; it does NOT recurse into nested `List[List[tensor[..]]]`.
+// =================================================================
+
+#[test]
+fn issue_272_single_wildcard_elem_under_rigid_dim_rejects() {
+    // `[b]` where `b: tensor[*, f32]`, under a rigid-`k` return.
+    //   BEFORE: ACCEPT (wildcard satisfied `k` permissively; no check).
+    //   AFTER:  REJECT (DimensionMismatch) -- a wildcard element may not
+    //           satisfy a declared rigid `k`, even for a one-element list.
+    // This is the conservative narrowing: a genuinely-uniform single
+    // wildcard element is now rejected; the author must annotate `tensor[*]`.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("single_wildcard_rigid.ch");
+    write_file(
+        &path,
+        "def f[k](b: tensor[*, f32]) -> List[tensor[k, f32]] = [b]\n",
+    );
+    let json = run_check(&path);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.iter().any(|k| k == "DimensionMismatch"),
+        "a single wildcard-typed list element must not satisfy a declared \
+         rigid `k`; must reject with DimensionMismatch; got {:?}",
+        error_messages(&json),
+    );
+}
+
+#[test]
+fn issue_272_single_wildcard_elem_under_named_dim_rejects() {
+    // Same body, but the declared element names a symbolic dim `batch`
+    // (`Dim::Name`) rather than a rigid param. The check treats a named
+    // dim as a uniformity promise too.
+    //   BEFORE: ACCEPT.   AFTER: REJECT (DimensionMismatch).
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("single_wildcard_named.ch");
+    write_file(
+        &path,
+        "def f(b: tensor[*, f32]) -> List[tensor[batch, f32]] = [b]\n",
+    );
+    let json = run_check(&path);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.iter().any(|k| k == "DimensionMismatch"),
+        "a wildcard list element must not satisfy a declared named dim \
+         `batch`; must reject with DimensionMismatch; got {:?}",
+        error_messages(&json),
+    );
+}
+
+#[test]
+fn issue_272_wildcard_elem_satisfies_explicit_wildcard_annotation() {
+    // The escape hatch. Declaring the element axis as an explicit wildcard
+    // makes NO uniformity promise, so a wildcard element is accepted.
+    //   BEFORE: ACCEPT.   AFTER: ACCEPT (unchanged -- the check only fires
+    //   when the declared element names a rigid/named dim).
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("single_wildcard_wildcard_annot.ch");
+    write_file(
+        &path,
+        "def f(b: tensor[*, f32]) -> List[tensor[*, f32]] = [b]\n",
+    );
+    let json = run_check(&path);
+    let errs = error_messages(&json);
+    assert!(
+        errs.is_empty(),
+        "an explicit `List[tensor[*, f32]]` annotation makes no uniformity \
+         promise, so a wildcard element must type-check; got {errs:?}",
+    );
+}
+
+#[test]
+fn issue_272_nested_list_wildcard_under_rigid_dim_not_checked() {
+    // Documented boundary: `check_list_elem_rigid_dim_vs_wildcard` matches
+    // a single `List[tensor[..]]` level and does NOT recurse into the
+    // element when it is itself a `List`. A wildcard tensor nested under
+    // `List[List[tensor[k, f32]]]` is therefore NOT protected.
+    //   BEFORE: ACCEPT.   AFTER: ACCEPT (the check does not reach the inner
+    //   rigid dim).
+    // If nested-list rigidity ever needs enforcing, this test is the
+    // canary: it should flip to REJECT and be moved to the rejecting group.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nested_list_wildcard.ch");
+    write_file(
+        &path,
+        "def f[k](b: tensor[*, f32]) -> List[List[tensor[k, f32]]] = [[b]]\n",
+    );
+    let json = run_check(&path);
+    let errs = error_messages(&json);
+    assert!(
+        errs.is_empty(),
+        "documented gap: nested-list element rigidity is not checked, so \
+         this currently type-checks; got {errs:?}",
+    );
+}

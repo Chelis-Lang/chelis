@@ -667,7 +667,29 @@ The wildcard list element remains acceptable when the surrounding
 binding makes **no** uniformity promise — a bare
 `out = concat([...], axis)` with no return annotation and no declared
 dim parameters, or an explicit `List[tensor[*, f32]]` annotation, both
-type-check. The enforcement is in `crates/chelis-types/src/infer.rs`
+type-check.
+
+Two boundary properties of the current rule are intentional but narrow,
+and are locked by dedicated tests so a future change is a conscious one:
+
+- **The `(concrete, wildcard)` join is head-biased.** A `Cons` step
+  resolves the joined axis to whatever the *head* (the element being
+  prepended, i.e. the earlier list position) resolves to. So
+  `[tensor[2, f32], tensor[*, f32]]` joins to element `tensor[2, f32]`
+  (the concrete head absorbs the wildcard tail) and type-checks against
+  `List[tensor[k, f32]]`, whereas the reordered
+  `[tensor[*, f32], tensor[2, f32]]` joins to `tensor[*, f32]` (the
+  wildcard head erases the concrete tail) and is **rejected**. Element
+  ordering therefore changes the verdict. Genuinely-mismatched *concrete*
+  heads/tails still widen to `*` regardless of order (the ragged-axis
+  arm).
+- **The uniformity check is single-level.** It compares the declared and
+  body element axes of one `List[tensor[..]]`; it does **not** recurse
+  into a nested element. A wildcard tensor under
+  `List[List[tensor[k, f32]]]` is *not* checked against the inner `k` and
+  currently type-checks.
+
+The enforcement is in `crates/chelis-types/src/infer.rs`
 (`infer_app`'s `Cons` join and `check_list_elem_rigid_dim_vs_wildcard`,
 alongside `check_declared_dvars_rigid`); the acceptance oracle is
 `crates/chelis-cli/tests/issue_272_list_dim_rigidity.rs` with the
