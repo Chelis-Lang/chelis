@@ -800,6 +800,29 @@ fn cmd_eval(
     // for the underlying API parity guarantee.
     match (file, expr) {
         (Some(path), _) => {
+            // Deep (`.dp`) ingestion: a standalone `.dp` is already-lowered
+            // IR, not a Surf package, so the reef fast path and the legacy
+            // `load_eval_decls` fallback (both of which run the Surf parser)
+            // would mis-parse it. Route `.dp` straight through the eval
+            // engine's `SourceKind::Deep` path before either is reached.
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext.eq_ignore_ascii_case("dp") {
+                let source = fs::read_to_string(path)?;
+                let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
+                // Strict-parse first so an unknown tag is a clean
+                // strict-vocabulary error here, matching the `.dp`
+                // surfaces of `chelis check`, `build`, `fmt`, and `cost`.
+                // The engine's own `parse_deep` is non-strict; surfacing
+                // the strict error in the CLI keeps every `.dp` CLI
+                // surface on the same closed-vocabulary gate.
+                chelis_deep::parser::parse_str_strict(&deep_source)
+                    .map_err(|err| boxed_string_error(err.to_string()))?;
+                return if json {
+                    run_eval_json_emit(try_eval_result(SourceKind::Deep, &deep_source, None))
+                } else {
+                    run_eval_emit(try_eval(SourceKind::Deep, &deep_source, None))
+                };
+            }
             if let Some(package_root) = detect_eval_package_root(path)? {
                 let source = fs::read_to_string(path)?;
                 match run_eval_in_context(&package_root, &source, json) {
@@ -1362,7 +1385,15 @@ fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
             continue;
         }
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("ch") {
+        // Collect both Surf (`.ch`) and Deep (`.dp`) sources so a mixed
+        // directory checks both surfaces. The per-file `cmd_check_one`
+        // routes `.dp` through the Deep ingestion helper; both surfaces
+        // emit the same CheckResult JSON shape.
+        let is_checkable = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("ch") | Some("dp")
+        );
+        if !is_checkable {
             continue;
         }
         files.push(path.to_path_buf());
@@ -1379,9 +1410,31 @@ fn cmd_check_one(
     show_inferred: bool,
     allow_style_violations: bool,
 ) -> Result<(String, bool), Box<dyn std::error::Error>> {
-    if let Ok(source) = fs::read_to_string(file) {
-        style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
+    let source = fs::read_to_string(file).ok();
+    if let Some(source) = &source {
+        style_gate::enforce_style_gate(file, source, allow_style_violations)?;
         emit_advisory_lint_warnings_for_file(file);
+    }
+    // Deep (`.dp`) ingestion: a standalone `.dp` is already-lowered IR,
+    // not a Surf package, so the reef loader below returns `Ok(None)`
+    // for it and the monolithic else-arm would feed Deep s-expressions
+    // to the Surf parser (which fails with a bogus parse error). Route
+    // `.dp` through the dedicated Deep helper before the reef load,
+    // mirroring the established `.dp` branches in `cmd_build_dispatch`,
+    // `cmd_surf`, `cmd_fmt`, and `copy_cost_for_file`.
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext.eq_ignore_ascii_case("dp") {
+        let source = match &source {
+            Some(source) => source,
+            None => {
+                let json = synthetic_check_report_with_error(&format!(
+                    "failed to read {}",
+                    file.display()
+                ));
+                return Ok((json, true));
+            }
+        };
+        return cmd_check_one_deep(source, show_inferred);
     }
     // Wave-1 red-team M1 (#207 follow-up): parse failures used to
     // short-circuit through `?` into the `Err(err)` arm in `main`,
@@ -1426,7 +1479,7 @@ fn cmd_check_one(
         None
     };
 
-    let (mut report, effect_errors, linearity_errors, inferred_signatures_json) =
+    let (report, effect_errors, linearity_errors, inferred_signatures_json) =
         if let Some(layered) = layered {
             let inferred = if show_inferred {
                 format_inferred_signatures_json(&layered.typed_program)
@@ -1501,6 +1554,35 @@ fn cmd_check_one(
             };
             (report, effect_errors, linearity_errors, inferred)
         };
+    assemble_check_json(
+        report,
+        &effect_errors,
+        &linearity_errors,
+        &inferred_signatures_json,
+        show_inferred,
+    )
+}
+
+/// Assemble the hand-built `chelis check` JSON report and the issue
+/// #207 non-empty-errors flag from the post-pipeline analysis outputs.
+///
+/// Shared verbatim between the `.ch` monolithic / layered arm of
+/// [`cmd_check_one`] and the `.dp` helper [`cmd_check_one_deep`] so the
+/// two surfaces emit byte-identical [`chelis_compiler_api::schema::CheckResult`]
+/// shapes. The only thing that differs between surfaces is how the
+/// `deep_exprs` feeding the fitness / type / effect / linearity checks
+/// are produced; the score-adjust and JSON emission MUST NOT drift, so
+/// both surfaces call exactly this function.
+///
+/// Returns `(json, errors_in_report)`; the caller maps a non-empty
+/// errors array to [`CHECK_ERRORS_EXIT_CODE`].
+fn assemble_check_json(
+    mut report: chelis_types::FitnessReport,
+    effect_errors: &[chelis_effects::EffectError],
+    linearity_errors: &[chelis_types::errors::CheckError],
+    inferred_signatures_json: &str,
+    show_inferred: bool,
+) -> Result<(String, bool), Box<dyn std::error::Error>> {
     if !effect_errors.is_empty() {
         report.score = (report.score - 0.2 * effect_errors.len() as f64).max(0.0);
     }
@@ -1585,6 +1667,74 @@ fn cmd_check_one(
     // unchanged; this is purely an out-of-band signal.
     let errors_in_report = !errors_json.is_empty();
     Ok((json, errors_in_report))
+}
+
+/// `chelis check` ingestion for a standalone Deep (`.dp`) file.
+///
+/// A `.dp` is already-lowered IR by construction, so this skips the
+/// Surf desugar + macro-expand stage (`expanded_desugared_program`)
+/// that the `.ch` arm of [`cmd_check_one`] runs and parses the file
+/// directly through the strict Deep parser. Everything downstream of
+/// the parse is byte-for-byte the same pipeline the `.ch` arm uses:
+/// `check_ir_fitness` -> `check_typed_program` -> `check_program`
+/// (effects) -> `check_linearity`, then [`assemble_check_json`].
+///
+/// `parse_str_strict` (not the non-strict `parse_str`) keeps the `.dp`
+/// check surface on the same closed-vocabulary tag gate as
+/// `chelis build`, `chelis fmt`, and `chelis cost`: an unknown tag is a
+/// hard error rather than a silently-accepted node. Parse failures are
+/// caught and routed through `synthetic_check_report_with_error` so a
+/// malformed `.dp` produces the same JSON-report-plus-exit-2 shape the
+/// `.ch` parse-error path produces, never a propagated boxed `Err`.
+fn cmd_check_one_deep(
+    source: &str,
+    show_inferred: bool,
+) -> Result<(String, bool), Box<dyn std::error::Error>> {
+    let deep_source = style_gate::strip_deep_lint_directive_lines(source);
+    let deep_exprs = match chelis_deep::parser::parse_str_strict(&deep_source) {
+        Ok(deep_exprs) => deep_exprs,
+        Err(err) => {
+            let json = synthetic_check_report_with_error(&err.to_string());
+            return Ok((json, true));
+        }
+    };
+    // Parity with the `.ch` empty-file path (a parse-clean file with
+    // zero top-level exprs): reject with the same canonical message so
+    // the `.dp` and `.ch` surfaces agree.
+    if deep_exprs.is_empty() {
+        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+        return Ok((json, true));
+    }
+    let report = chelis_types::check_ir_fitness(&deep_exprs);
+    let typed_program = chelis_types::check_typed_program(&deep_exprs);
+    let inferred = if show_inferred {
+        typed_program
+            .as_ref()
+            .ok()
+            .map(format_inferred_signatures_json)
+            .unwrap_or_else(|| "[]".to_string())
+    } else {
+        String::new()
+    };
+    let (effect_errors, linearity_errors) = match &typed_program {
+        Ok(checked) => match chelis_effects::check_program(checked) {
+            Ok(checked) => (
+                Vec::new(),
+                chelis_types::check_linearity(&checked)
+                    .err()
+                    .unwrap_or_default(),
+            ),
+            Err(errors) => (errors, Vec::new()),
+        },
+        Err(_) => (Vec::new(), Vec::new()),
+    };
+    assemble_check_json(
+        report,
+        &effect_errors,
+        &linearity_errors,
+        &inferred,
+        show_inferred,
+    )
 }
 
 fn emit_advisory_lint_warnings_for_file(file: &Path) {

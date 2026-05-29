@@ -6,7 +6,22 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.7.20] — 2026-05-29
+### Added
+
+- `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
+  standalone Deep (`.dp`) IR directly. Previously both fed Deep
+  s-expressions to the Surf parser, which reported a bogus
+  `expected declaration (def, sig, ...), found LParen at byte 0` parse
+  error (check) or propagated it as a process error (eval). `check`
+  parses `.dp` through `chelis_deep::parser::parse_str_strict` (the same
+  closed-vocabulary tag gate `build`, `fmt`, and `cost` use) and runs
+  the identical fitness / type / effect / linearity pipeline the `.ch`
+  path uses, emitting the same `CheckResult` JSON. `eval --file .dp`
+  routes the source through the engine's `SourceKind::Deep` path
+  (strict-parsed first for vocabulary parity), emitting the same
+  `EvalResult` shape. A `.dp` and its byte-equivalent-meaning `.ch`
+  produce field-for-field identical check reports. `chelis check <dir>`
+  now also discovers `.dp` files in a mixed directory.
 
 Default `chelis test` now amortizes shell/module graph compilation
 across a suite. The CLI batches eligible test files into one internal
