@@ -3,10 +3,13 @@
 mod prove;
 mod style_gate;
 
-use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
+use chelis_compiler_api::schema::{
+    EvalRequest, ExecutionValue, SourceKind, WireInferredDim, WireInferredEffect,
+    WireInferredPrecision, WireInferredType,
+};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
-use chelis_types::types::{Dim, Type};
+use chelis_types::types::{Dim, Effect, EffectSet, TensorPrec, Type};
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
@@ -182,6 +185,12 @@ enum Command {
         file: Option<PathBuf>,
         /// Inline expression
         expr: Option<String>,
+        /// Emit the raw `EvalResult` as JSON on stdout instead of the
+        /// human-readable rendering. Stdout carries JSON only; warnings
+        /// and errors stay on stderr. Empty-roots inputs emit
+        /// `{"roots":[]}`.
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
         /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
@@ -514,8 +523,14 @@ fn main() {
         Some(Command::Eval {
             file,
             expr,
+            json,
             allow_style_violations,
-        }) => cmd_eval(file.as_deref(), expr.as_deref(), allow_style_violations),
+        }) => cmd_eval(
+            file.as_deref(),
+            expr.as_deref(),
+            json,
+            allow_style_violations,
+        ),
         Some(Command::Check {
             file,
             show_inferred,
@@ -724,6 +739,7 @@ fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::e
 fn cmd_eval(
     file: Option<&std::path::Path>,
     expr: Option<&str>,
+    json: bool,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The style gate runs only on the `--file` form (a real on-disk
@@ -755,7 +771,7 @@ fn cmd_eval(
         (Some(path), _) => {
             if let Some(package_root) = detect_eval_package_root(path)? {
                 let source = fs::read_to_string(path)?;
-                match run_eval_in_context(&package_root, &source) {
+                match run_eval_in_context(&package_root, &source, json) {
                     Ok(()) => return Ok(()),
                     Err(EvalInContextError::HashUnsupported) => {
                         // The Phase G hash step does not yet cover
@@ -781,13 +797,25 @@ fn cmd_eval(
             let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             let source = chelis_surf::format::format_program(&decls);
             let selected_roots = root_names_from_decls(&entry_decls, checked.type_env());
-            run_eval_emit(try_eval(SourceKind::Surf, &source, Some(&selected_roots)))
+            if json {
+                run_eval_json_emit(try_eval_result(
+                    SourceKind::Surf,
+                    &source,
+                    Some(&selected_roots),
+                ))
+            } else {
+                run_eval_emit(try_eval(SourceKind::Surf, &source, Some(&selected_roots)))
+            }
         }
         (None, Some(e)) => {
             // `--expr` is by construction a one-line snippet with no reef
             // resolution — keep the legacy path.
             let source = format!("__eval_result = {e}");
-            run_eval_emit(try_eval(SourceKind::Surf, &source, None))
+            if json {
+                run_eval_json_emit(try_eval_result(SourceKind::Surf, &source, None))
+            } else {
+                run_eval_emit(try_eval(SourceKind::Surf, &source, None))
+            }
         }
         (None, None) => Err("provide --file or an expression".into()),
     }
@@ -842,7 +870,11 @@ enum EvalInContextError {
 /// if present (matching how `chelis test` plumbs it to workers); Phase K
 /// uses it to key the disk cache so a warm `chelis eval --file` re-run
 /// against unchanged sources skips the ~67s library compile entirely.
-fn run_eval_in_context(package_root: &Path, source: &str) -> Result<(), EvalInContextError> {
+fn run_eval_in_context(
+    package_root: &Path,
+    source: &str,
+    json: bool,
+) -> Result<(), EvalInContextError> {
     let reef_home = env::var_os("CHELIS_REEF_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(""));
@@ -887,6 +919,16 @@ fn run_eval_in_context(package_root: &Path, source: &str) -> Result<(), EvalInCo
                 .join("; "),
         )
     })?;
+    if json {
+        // JSON mode: stdout carries the raw `EvalResult` serde JSON
+        // only. Empty-roots inputs serialize to `{"roots":[]}` (valid
+        // JSON); the stderr breadcrumb is suppressed so scripted
+        // consumers get a single parseable document on stdout.
+        let rendered = serde_json::to_string(&result)
+            .map_err(|err| EvalInContextError::Compile(format!("eval JSON serialize: {err}")))?;
+        println!("{rendered}");
+        return Ok(());
+    }
     let formatted = format_eval_result(&result);
     if formatted.is_empty() {
         warn_eval_no_roots();
@@ -904,6 +946,25 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
                 return Ok(());
             }
             println!("{result}");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// JSON counterpart to [`run_eval_emit`]. Stdout carries the raw
+/// `EvalResult` serde JSON only; nothing else is written there. An
+/// empty-roots program serializes to `{"roots":[]}` (valid JSON) rather
+/// than emitting the human stderr breadcrumb, so a scripted consumer
+/// always receives a single parseable document. Errors propagate as a
+/// boxed error (stderr + nonzero exit), unchanged from the text path.
+fn run_eval_json_emit(
+    outcome: Result<chelis_compiler_api::schema::EvalResult, String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match outcome {
+        Ok(result) => {
+            let rendered = serde_json::to_string(&result)?;
+            println!("{rendered}");
             Ok(())
         }
         Err(e) => Err(e.into()),
@@ -1550,6 +1611,12 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
 }
 
 fn format_inferred_signatures_json(checked: &chelis_types::CheckedProgram) -> String {
+    // Per-def inferred effect rows, keyed by def name. Computed from the
+    // same `CheckedProgram` so the structured effect-row a consumer
+    // (Hull) reads is the exact row `chelis check` infers. Functions
+    // with no effects map to an empty row (`[]`), which is distinct from
+    // "effects unknown".
+    let effect_rows = chelis_effects::def_effect_rows(checked);
     let entries: Vec<serde_json::Value> = checked
         .signature_inference()
         .functions
@@ -1564,21 +1631,124 @@ fn format_inferred_signatures_json(checked: &chelis_types::CheckedProgram) -> St
                         "name": param.name,
                         "written": param.written,
                         "inferred_read_only": param.inferred_read_only,
+                        // Human-facing display strings (unchanged).
                         "checked_type": format_cli_type(&param.checked_type),
                         "display_type": format_cli_type(&param.display_type),
+                        // Structured, lossless type trees (new).
+                        "checked_type_structured": wire_inferred_type(&param.checked_type),
+                        "display_type_structured": wire_inferred_type(&param.display_type),
                     })
                 })
                 .collect();
+            let effect_row = effect_rows.get(&func.name);
             serde_json::json!({
                 "function": func.name,
                 "recursive_cycle": func.recursive_cycle,
+                // Human-facing display strings (unchanged).
                 "checked_signature": format_cli_type(&func.checked_signature),
                 "display_signature": format_cli_type(&func.display_signature),
+                // Structured, lossless signature type trees (new).
+                "checked_signature_structured": wire_inferred_type(&func.checked_signature),
+                "display_signature_structured": wire_inferred_type(&func.display_signature),
+                // Structured effect row (new). Always present; empty for
+                // a pure function. Also expose the human Display spelling
+                // (`Random`/`Accum`/`IO`/`Test`/`Resource("dev")`) for
+                // parity with stderr diagnostics.
+                "effect_row": wire_effect_row(effect_row),
+                "effect_row_display": effect_row_display(effect_row),
                 "params": params,
             })
         })
         .collect();
     serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Convert a checker [`Type`] into the lossless, serde-friendly
+/// [`WireInferredType`] tree emitted by `chelis check --show-inferred
+/// --json`. This is the structured counterpart to [`format_cli_type`];
+/// the two must stay in lockstep on every `Type` variant.
+fn wire_inferred_type(ty: &Type) -> WireInferredType {
+    match ty {
+        Type::Prim(prim) => WireInferredType::Prim {
+            name: prim.name().to_string(),
+        },
+        Type::Fn(args, ret) => WireInferredType::Fn {
+            args: args.iter().map(wire_inferred_type).collect(),
+            ret: Box::new(wire_inferred_type(ret)),
+        },
+        Type::Ref(inner) => WireInferredType::Ref {
+            inner: Box::new(wire_inferred_type(inner)),
+        },
+        Type::Tensor(dims, prec) => WireInferredType::Tensor {
+            dims: dims.iter().map(wire_inferred_dim).collect(),
+            precision: wire_inferred_precision(prec),
+        },
+        Type::Adt(name, args) => WireInferredType::Adt {
+            name: name.clone(),
+            args: args.iter().map(wire_inferred_type).collect(),
+        },
+        Type::Var(var) => WireInferredType::Var { id: var.0 },
+        Type::Tuple(types) => WireInferredType::Tuple {
+            items: types.iter().map(wire_inferred_type).collect(),
+        },
+        Type::Unit => WireInferredType::Unit,
+        Type::Error => WireInferredType::Error,
+    }
+}
+
+/// Convert a checker [`Dim`] into a [`WireInferredDim`]. Structured
+/// counterpart to [`format_cli_dim`].
+fn wire_inferred_dim(dim: &Dim) -> WireInferredDim {
+    match dim {
+        Dim::Name(name) => WireInferredDim::Name { name: name.clone() },
+        Dim::Var(var) => WireInferredDim::Var { id: var.0 },
+        Dim::Lit(value) => WireInferredDim::Lit { size: *value },
+        Dim::Wildcard => WireInferredDim::Wildcard,
+    }
+}
+
+/// Convert a checker [`TensorPrec`] into a [`WireInferredPrecision`].
+fn wire_inferred_precision(prec: &TensorPrec) -> WireInferredPrecision {
+    match prec {
+        TensorPrec::Concrete(prim) => WireInferredPrecision::Concrete {
+            name: prim.name().to_string(),
+        },
+        TensorPrec::Var(var) => WireInferredPrecision::Var { id: var.0 },
+    }
+}
+
+/// Convert a single checker [`Effect`] into a [`WireInferredEffect`].
+fn wire_inferred_effect(effect: &Effect) -> WireInferredEffect {
+    match effect {
+        Effect::Random => WireInferredEffect::Random,
+        Effect::Accum => WireInferredEffect::Accum,
+        Effect::Io => WireInferredEffect::Io,
+        Effect::Test => WireInferredEffect::Test,
+        Effect::Resource(device) => WireInferredEffect::Resource {
+            device: device.clone(),
+        },
+    }
+}
+
+/// Render an effect row as the structured wire list. A `None` row
+/// (function name absent from the effect map) and an empty row both
+/// serialize to `[]`: a pure function has no effects either way.
+fn wire_effect_row(row: Option<&EffectSet>) -> Vec<WireInferredEffect> {
+    match row {
+        Some(set) => set.iter().map(wire_inferred_effect).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Render an effect row as the human Display spellings
+/// (`Random`/`Accum`/`IO`/`Test`/`Resource("dev")`), matching the
+/// `chelis_types::types::Effect` Display impl used in stderr
+/// diagnostics. Stable ordering follows `EffectSet`'s `BTreeSet`.
+fn effect_row_display(row: Option<&EffectSet>) -> Vec<String> {
+    match row {
+        Some(set) => set.iter().map(ToString::to_string).collect(),
+        None => Vec::new(),
+    }
 }
 
 fn format_cli_type(ty: &Type) -> String {
@@ -5046,17 +5216,23 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn try_eval(
+/// Compile and evaluate `source`, returning the raw `EvalResult`. This
+/// is the structured counterpart to [`try_eval`]: the latter formats
+/// the same result into the human stdout rendering, while this returns
+/// the result unchanged so the `--json` path can serialize it directly.
+/// Error joining matches [`try_eval`] exactly, so JSON and text mode
+/// surface identical error text on failure.
+fn try_eval_result(
     source_kind: SourceKind,
     source: &str,
     selected_roots: Option<&[String]>,
-) -> Result<String, String> {
+) -> Result<chelis_compiler_api::schema::EvalResult, String> {
     let request = EvalRequest {
         source_kind,
         source: source.to_string(),
         bindings: BTreeMap::new(),
     };
-    let result = if let Some(roots) = selected_roots {
+    if let Some(roots) = selected_roots {
         chelis_compiler_api::compiler::eval_selected(request, roots)
     } else {
         chelis_compiler_api::compiler::eval(request)
@@ -5067,8 +5243,15 @@ fn try_eval(
             .map(|diag| diag.message.clone())
             .collect::<Vec<_>>()
             .join("; ")
-    })?;
+    })
+}
 
+fn try_eval(
+    source_kind: SourceKind,
+    source: &str,
+    selected_roots: Option<&[String]>,
+) -> Result<String, String> {
+    let result = try_eval_result(source_kind, source, selected_roots)?;
     Ok(format_eval_result(&result))
 }
 

@@ -175,6 +175,109 @@ pub struct CheckResult {
     pub errors: Vec<Diagnostic>,
 }
 
+/// Structured, machine-readable inferred-type tree for one inferred
+/// function signature, emitted by `chelis check --show-inferred --json`.
+///
+/// This is the lossless counterpart to the human-facing `display_*`
+/// strings already produced by the CLI's `format_cli_type`. A consumer
+/// (e.g. Hull) can reconstruct a `chelis_types::Type` from this tree
+/// directly instead of re-parsing a type printer. The shape mirrors
+/// `chelis_types::types::Type` one variant at a time and is internally
+/// tagged on `kind` so the JSON is self-describing.
+///
+/// Stability contract: every variant name here is pinned to its
+/// `chelis_types::types::Type` source variant. Adding a new `Type`
+/// variant is a breaking change to this wire shape and must add the
+/// matching variant here in the same change set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireInferredType {
+    /// `Type::Prim` — a scalar primitive (`f32`, `int64`, `bool`, ...).
+    /// `name` is the canonical `Prim::name()` spelling.
+    Prim { name: String },
+    /// `Type::Fn` — function type. `args` are the parameter types in
+    /// order; `ret` is the return type.
+    Fn {
+        args: Vec<WireInferredType>,
+        ret: Box<WireInferredType>,
+    },
+    /// `Type::Ref` — a read-only non-owning borrow of `inner`.
+    Ref { inner: Box<WireInferredType> },
+    /// `Type::Tensor` — `dims` in order plus a `precision` slot.
+    Tensor {
+        dims: Vec<WireInferredDim>,
+        precision: WireInferredPrecision,
+    },
+    /// `Type::Adt` — a named algebraic data type with optional type
+    /// arguments (empty `args` for a nullary ADT).
+    Adt {
+        name: String,
+        args: Vec<WireInferredType>,
+    },
+    /// `Type::Var` — an unresolved inference type variable. `id` is the
+    /// raw `TypeVar` index, matching the `?N` display rendering.
+    Var { id: u32 },
+    /// `Type::Tuple` — an ordered tuple of element types.
+    Tuple { items: Vec<WireInferredType> },
+    /// `Type::Unit` — the unit type.
+    Unit,
+    /// `Type::Error` — the partial-inference error sentinel. Present so
+    /// the structured tree never silently drops a node; a consumer
+    /// should treat this as "type unknown due to an upstream error".
+    Error,
+}
+
+/// Structured tensor dimension, mirroring `chelis_types::types::Dim`.
+/// Internally tagged on `kind`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireInferredDim {
+    /// `Dim::Name` — a concrete named dimension (e.g. `batch`).
+    Name { name: String },
+    /// `Dim::Var` — a polymorphic dimension variable. `id` is the raw
+    /// `DimVar` index, matching the `dN` display rendering.
+    Var { id: u32 },
+    /// `Dim::Lit` — a fixed numeric size.
+    Lit { size: i64 },
+    /// `Dim::Wildcard` — an unknown / dynamic dimension (the `*`
+    /// display rendering).
+    Wildcard,
+}
+
+/// Structured tensor precision slot, mirroring
+/// `chelis_types::types::TensorPrec`. Internally tagged on `kind`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireInferredPrecision {
+    /// `TensorPrec::Concrete` — a resolved numeric primitive. `name`
+    /// is the canonical `Prim::name()` spelling.
+    Concrete { name: String },
+    /// `TensorPrec::Var` — a still-polymorphic precision variable.
+    /// `id` is the raw `TypeVar` index, matching the `?N` rendering.
+    Var { id: u32 },
+}
+
+/// One inferred effect, mirroring `chelis_types::types::Effect`.
+/// Internally tagged on `kind`. The `kind` discriminant is the
+/// lowercase spelling; `Resource` additionally carries its `device`
+/// string. Consumers that want the human Display spelling
+/// (`Random`/`Accum`/`IO`/`Test`/`Resource("dev")`) can reconstruct it
+/// from `kind` + `device`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireInferredEffect {
+    /// `Effect::Random`.
+    Random,
+    /// `Effect::Accum`.
+    Accum,
+    /// `Effect::Io`.
+    Io,
+    /// `Effect::Test`.
+    Test,
+    /// `Effect::Resource(device)`.
+    Resource { device: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LowerRequest {
     pub source_kind: SourceKind,
@@ -1013,5 +1116,58 @@ mod tests {
             WireRiscOp::OneHot { vocab } => assert_eq!(vocab, 7),
             other => panic!("expected one_hot wire op, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn wire_inferred_type_serializes_internally_tagged_and_round_trips() {
+        // `ref(tensor[lit 4, concrete f32])` — pins the tag shape Hull
+        // reads back.
+        let ty = WireInferredType::Ref {
+            inner: Box::new(WireInferredType::Tensor {
+                dims: vec![WireInferredDim::Lit { size: 4 }],
+                precision: WireInferredPrecision::Concrete {
+                    name: "f32".to_string(),
+                },
+            }),
+        };
+        let json = serde_json::to_string(&ty).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"ref","inner":{"kind":"tensor","dims":[{"kind":"lit","size":4}],"precision":{"kind":"concrete","name":"f32"}}}"#
+        );
+        let back: WireInferredType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ty);
+    }
+
+    #[test]
+    fn wire_inferred_effect_serializes_internally_tagged_and_round_trips() {
+        let io = serde_json::to_string(&WireInferredEffect::Io).unwrap();
+        assert_eq!(io, r#"{"kind":"io"}"#);
+        assert_eq!(
+            serde_json::from_str::<WireInferredEffect>(&io).unwrap(),
+            WireInferredEffect::Io
+        );
+
+        let resource = serde_json::to_string(&WireInferredEffect::Resource {
+            device: "gpu:0".to_string(),
+        })
+        .unwrap();
+        assert_eq!(resource, r#"{"kind":"resource","device":"gpu:0"}"#);
+        match serde_json::from_str::<WireInferredEffect>(&resource).unwrap() {
+            WireInferredEffect::Resource { device } => assert_eq!(device, "gpu:0"),
+            other => panic!("expected resource effect, got {other:?}"),
+        }
+    }
+
+    // Negative parity: an unknown effect `kind` must be REJECTED, not
+    // silently coerced. A consumer that mints a tag we don't define
+    // should get a hard deserialize error, never a default variant.
+    #[test]
+    fn wire_inferred_effect_rejects_unknown_kind() {
+        let result = serde_json::from_str::<WireInferredEffect>(r#"{"kind":"telepathy"}"#);
+        assert!(
+            result.is_err(),
+            "unknown effect kind must not deserialize, got {result:?}"
+        );
     }
 }
