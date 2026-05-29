@@ -1,10 +1,10 @@
 # Lines of Code Report
 
-Generated: 2026-05-29 14:29 UTC
+Generated: 2026-05-29 15:11 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 351 | 136,232 | 16,812 | 50,785 | 203,829 | Compiler, CLI, runtime, backends, type checker |
+| Rust | 352 | 136,587 | 16,880 | 50,913 | 204,380 | Compiler, CLI, runtime, backends, type checker |
 | C | 13 | 33,482 | 325 | 755 | 34,562 | Generated runtime, headers |
 | JSON | 23 | 7,092 | 0 | 2,736 | 9,828 | Package metadata, test fixtures |
 | Python | 34 | 4,071 | 978 | 1,296 | 6,345 | PyO3 bindings, tools, benchmarks |
@@ -17,6 +17,6 @@ Generated: 2026-05-29 14:29 UTC
 | **Chelis Deep** (.dp) | **7** | **203** | **0** | **3** | **206** | **Deep test fixtures** |
 | JavaScript | 2 | 202 | 0 | 29 | 231 | Tree-sitter grammar definitions |
 | Tree-sitter Queries (.scm) | 2 | 102 | 0 | 6 | 108 | Syntax highlighting for Surf and Deep |
-| Markdown | 200 | 0 | 19,213 | 9,447 | 28,660 | Specs, design docs, plans |
+| Markdown | 200 | 0 | 19,215 | 9,448 | 28,663 | Specs, design docs, plans |
 | __generated__ | 1 | 0 | 0 | 0 | 0 |  |
-| **Total** | **785** | **186,104** | **37,744** | **65,356** | **289,204** | |
+| **Total** | **786** | **186,459** | **37,814** | **65,485** | **289,758** | |
