@@ -577,15 +577,15 @@ that the sketch got wrong:
    head is not a recognized builtin stays `EApp`.
 3. **Every Deep node carries a metadata slot `{}` as element 1.** A node is
    `(tag {…} children…)`; element 1 is always the metadata map (possibly `{key: val …}`,
-   e.g. `(lit {type: f32} 1.0)`, `(handle-effect {effect: name} …)`, `(grad {wrt: …}
+   e.g. `(lit {type: (t-prim {} f32)} 1.0)`, `(handle-effect {effect: name} …)`, `(grad {wrt: …}
    …)`). The tokenizer/parser must lex and skip/parse `{…}`; the original sketch ignored
    it entirely.
 
 Deep source looks like:
 
 ```text
-(fn {} (params (param {} x (t-tensor {} (d-name {} batch) (d-name {} hidden) f32)))
-  (app {} (var {} add) (var {} x) (lit {type: f32} 1.0)))
+(fn {} (params {} (x {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))}))
+  (app {} (var {} add) (var {} x) (lit {type: (t-prim {} f32)} 1.0)))
 ```
 
 The parser needs:
