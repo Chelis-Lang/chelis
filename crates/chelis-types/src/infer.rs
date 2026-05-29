@@ -271,16 +271,14 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // First pass: collect deftype and defsig declarations. Descend through
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
-    for expr in top_level_decl_items(exprs) {
-        collect_declarations(
-            expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &mut adt_reg,
-            &mut errors,
-        );
-    }
+    collect_all_declarations(
+        &top_level_decl_items(exprs),
+        &mut env,
+        &mut vg,
+        &mut subst,
+        &mut adt_reg,
+        &mut errors,
+    );
 
     // Second pass: infer def bodies. Same module-descent rationale as the
     // declaration pass — without it, the entire HM checker is a no-op on
@@ -914,16 +912,14 @@ fn infer_ir_program_with_state(
     // Descend through `(module {} name ...)` wrappers: every idiomatic
     // Surf source wraps its declarations in `module X`, and without
     // flattening none of the walkers below see any def/defsig/deftype.
-    for expr in top_level_decl_items(exprs) {
-        collect_declarations(
-            expr,
-            &mut state.env,
-            &mut state.var_gen,
-            &mut state.subst,
-            &mut state.adt_reg,
-            &mut errors,
-        );
-    }
+    collect_all_declarations(
+        &top_level_decl_items(exprs),
+        &mut state.env,
+        &mut state.var_gen,
+        &mut state.subst,
+        &mut state.adt_reg,
+        &mut errors,
+    );
 
     for (name, ty_expr) in new_ir_types {
         let ty = deep_type_to_resolved_type(
@@ -4273,18 +4269,16 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     // wrapped user ADTs and defsigs never reach `env` / `adt_reg`
     // during annotation, so `pat-record`'s constructor lookup (#181)
     // and every other annotation-time env query for a user-declared
-    // name silently misses. See `infer_program` line 274 for the
-    // parallel iteration.
-    for expr in top_level_decl_items(exprs) {
-        collect_declarations(
-            expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &mut adt_reg,
-            &mut declaration_errors,
-        );
-    }
+    // name silently misses. See `infer_program` for the parallel
+    // iteration.
+    collect_all_declarations(
+        &top_level_decl_items(exprs),
+        &mut env,
+        &mut vg,
+        &mut subst,
+        &mut adt_reg,
+        &mut declaration_errors,
+    );
 
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
@@ -4361,16 +4355,14 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
     // Descend through `(module {} name ...)` wrappers when collecting
     // declarations; mirrors the `infer_program` shape and the parallel
     // fix in `annotate_ir_program`. (closes #181)
-    for expr in top_level_decl_items(exprs) {
-        collect_declarations(
-            expr,
-            &mut state.env,
-            &mut state.var_gen,
-            &mut state.subst,
-            &mut state.adt_reg,
-            &mut declaration_errors,
-        );
-    }
+    collect_all_declarations(
+        &top_level_decl_items(exprs),
+        &mut state.env,
+        &mut state.var_gen,
+        &mut state.subst,
+        &mut state.adt_reg,
+        &mut declaration_errors,
+    );
 
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
@@ -6449,6 +6441,41 @@ fn deep_type_to_resolved_type(
 
 // ── Declaration collection (first pass) ──────────────────────────
 
+/// Which declaration kinds a `collect_declarations` sub-pass should process.
+///
+/// `deftype` constructor schemes expand transparent type aliases in their
+/// field types at registration (see `AdtRegistry::expand_aliases`), so every
+/// `typealias` must be in the registry first. Running `Aliases` over all
+/// top-level items before `Rest` guarantees that even for a forward reference
+/// — an alias declared textually after the `deftype` that uses it, as in
+/// `Hull.Ast` where `type EffectRow = List[Effect]` follows `type Type = ...
+/// | TArrow(Type, Type, EffectRow) | ...`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclPhase {
+    /// Process only `typealias` declarations.
+    Aliases,
+    /// Process everything except `typealias` (`deftype`, `defsig`, ...).
+    Rest,
+}
+
+/// Run the two-phase declaration collection over `items` (already flattened
+/// past `module` wrappers): register all type aliases, then everything else.
+fn collect_all_declarations(
+    items: &[&deep::Expr],
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &mut AdtRegistry,
+    errors: &mut Vec<CheckError>,
+) {
+    for expr in items {
+        collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Aliases);
+    }
+    for expr in items {
+        collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Rest);
+    }
+}
+
 fn collect_declarations(
     expr: &deep::Expr,
     env: &mut Env,
@@ -6456,6 +6483,7 @@ fn collect_declarations(
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
     errors: &mut Vec<CheckError>,
+    phase: DeclPhase,
 ) {
     let list = match expr {
         deep::Expr::List(list, _) => list,
@@ -6466,6 +6494,17 @@ fn collect_declarations(
         Some(t) => t,
         None => return,
     };
+
+    // Aliases register first so `deftype` field-type alias expansion sees a
+    // fully-populated alias table; every other decl kind runs in the second
+    // sub-pass.
+    let in_phase = match phase {
+        DeclPhase::Aliases => tag == "typealias",
+        DeclPhase::Rest => tag != "typealias",
+    };
+    if !in_phase {
+        return;
+    }
 
     let kids = children(list);
 
@@ -15694,6 +15733,173 @@ mod tests {
         check_ok(
             "(typealias {} Scalar () (t-prim {} f32))
              (def {} x (lit {type: (t-adt {} Scalar)} 1.0))",
+        );
+    }
+
+    // ── Transparent-alias-in-constructor-field tests ──────────────
+    //
+    // Per spec/02-surf-syntax.md ("Aliases are transparent — expanded
+    // during desugaring"), a `deftype` field declared with a transparent
+    // alias must unify against the alias expansion. The Hull.Ast scenario
+    // that motivated this is `type EffectRow = List[Effect]` used in
+    // `type Type = ... | TArrow(Type, Type, EffectRow) | ...`; constructing
+    // `TArrow(a, b, [])` must not report `EffectRow vs List`.
+
+    /// Surf source -> desugar -> IR check. Returns the collected check
+    /// errors (empty on success). Parse failures panic — the source is
+    /// the test's own fixture, not user input under test.
+    fn surf_check_errors(src: &str) -> Vec<CheckError> {
+        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        match check_ir_program(&exprs) {
+            Ok(_) => Vec::new(),
+            Err(result) => result.errors,
+        }
+    }
+
+    fn assert_surf_ok(src: &str) {
+        let errors = surf_check_errors(src);
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn alias_typed_ctor_field_constructs_with_list_value() {
+        // EffectRow = List[Effect] declared AFTER the deftype that uses it
+        // (forward reference). Constructing TArrow(a, b, e) where the third
+        // field is the alias must type-check: the field expands to
+        // List[Effect] and unifies with the EffectRow-typed argument.
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty, e: EffectRow) -> Ty = TArrow(a, b, e)\n",
+        );
+    }
+
+    #[test]
+    fn alias_typed_ctor_field_constructs_with_empty_list_literal() {
+        // Constructing TArrow(a, b, []) where the third field is the alias
+        // must type-check: [] is List[Effect], the field expands to
+        // List[Effect].
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty) -> Ty = TArrow(a, b, [])\n",
+        );
+    }
+
+    #[test]
+    fn def_returning_option_tuple_with_alias_field_type_checks() {
+        // The spec §3 pattern `Some((Ctor(...), []))` returning
+        // Option[(Ty, EffectRow)].
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty) -> Option[(Ty, EffectRow)] = Some((TArrow(a, b, []), []))\n",
+        );
+    }
+
+    #[test]
+    fn two_level_alias_in_ctor_field_resolves() {
+        // Alias of an alias: Effects = EffectRow = List[Effect].
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, Effects)\n\
+             type EffectRow = List[Effect]\n\
+             type Effects = EffectRow\n\
+             def mk(a: Ty, b: Ty) -> Ty = TArrow(a, b, [])\n",
+        );
+    }
+
+    #[test]
+    fn ctx_list_of_tuple_alias_used_in_value_position() {
+        // Ctx = List[(String, Ty)] -- a tuple-bearing alias used as a
+        // constructor field; constructing with an empty list must work.
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty)\n\
+             type Ctx = List[(String, Ty)]\n\
+             type Judgement =\n\
+               | Judge(Ctx, Ty)\n\
+             def mk(t: Ty) -> Judgement = Judge([], t)\n",
+        );
+    }
+
+    #[test]
+    fn genuine_mismatch_against_expanded_alias_still_rejected() {
+        // NEGATIVE PARITY: passing an Int where the expanded alias is
+        // List[Effect] must STILL be a TypeMismatch. Alias transparency
+        // must not weaken genuine error detection.
+        let errors = surf_check_errors(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty) -> Ty = TArrow(a, b, 5)\n",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::TypeMismatch)),
+            "expected a TypeMismatch for Int passed to a List[Effect] field, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn alias_field_rejects_wrong_list_element_type() {
+        // NEGATIVE PARITY: List[Ty] where the field expands to
+        // List[Effect] must still mismatch on the element type.
+        let errors = surf_check_errors(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty, ts: List[Ty]) -> Ty = TArrow(a, b, ts)\n",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::TypeMismatch)),
+            "expected a TypeMismatch for List[Ty] passed to a List[Effect] field, got: {errors:?}"
         );
     }
 

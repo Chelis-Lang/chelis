@@ -157,7 +157,13 @@ impl AdtRegistry {
                     _ => continue,
                 };
 
-                // Remaining children are either field definitions or positional type args
+                // Remaining children are either field definitions or positional type args.
+                // Field types are expanded through the alias registry so a field declared
+                // with a transparent alias (`type EffectRow = List[Effect]`) is stored and
+                // unified as its expansion. Any alias the field references must already be
+                // registered; `collect_declarations` registers all `typealias` decls before
+                // any `deftype` so forward references (alias declared after the deftype that
+                // uses it) resolve too.
                 let mut fields: Vec<(Option<String>, Type)> = Vec::new();
                 for field_expr in &vchildren[1..] {
                     match field_expr {
@@ -168,14 +174,18 @@ impl AdtRegistry {
                                     deep::Expr::Atom(deep::Atom::Symbol(s), _) => s.clone(),
                                     _ => continue,
                                 };
-                                let ftype =
-                                    deep_type_to_type_with_params(&fchildren[1], &param_map);
+                                let ftype = self.expand_aliases(&deep_type_to_type_with_params(
+                                    &fchildren[1],
+                                    &param_map,
+                                ));
                                 fields.push((Some(fname), ftype));
                             }
                         }
                         _ => {
                             // Positional type argument
-                            let ftype = deep_type_to_type_with_params(field_expr, &param_map);
+                            let ftype = self.expand_aliases(&deep_type_to_type_with_params(
+                                field_expr, &param_map,
+                            ));
                             fields.push((None, ftype));
                         }
                     }
@@ -365,6 +375,69 @@ impl AdtRegistry {
             .collect();
 
         Some(substitute_alias_type(&alias.body, &subst))
+    }
+
+    /// Recursively expand every registered type alias inside `ty`, leaving
+    /// non-alias `Adt`, tuple, and function structure intact. This is the
+    /// transparency rule from `spec/02-surf-syntax.md` ("Aliases are
+    /// transparent — expanded during desugaring") applied to a stored type.
+    ///
+    /// Used at `deftype` registration so the constructor schemes bound into
+    /// the type environment carry the expanded field type (e.g. a field
+    /// declared `EffectRow` where `type EffectRow = List[Effect]` is stored
+    /// as `List[Effect]`), not the opaque alias `Adt` node. Without this,
+    /// constructor application unifies the supplied `List[Effect]` argument
+    /// against the unexpanded `EffectRow` alias and reports a spurious
+    /// `EffectRow vs List` mismatch.
+    ///
+    /// Mirrors the logic of `resolve_type_aliases` in `infer.rs` but lives
+    /// here as a method so it can read `self.aliases` immutably from within
+    /// `register_deftype`'s `&mut self` borrow. The `seen` set guards against
+    /// infinite recursion on a (mutually) recursive alias chain, matching the
+    /// `infer.rs` guard.
+    pub fn expand_aliases(&self, ty: &Type) -> Type {
+        let mut seen = std::collections::HashSet::new();
+        self.expand_aliases_inner(ty, &mut seen)
+    }
+
+    fn expand_aliases_inner(
+        &self,
+        ty: &Type,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Type {
+        match ty {
+            Type::Adt(name, args) => {
+                let resolved_args: Vec<Type> = args
+                    .iter()
+                    .map(|arg| self.expand_aliases_inner(arg, seen))
+                    .collect();
+
+                if seen.contains(name) {
+                    return Type::Adt(name.clone(), resolved_args);
+                }
+
+                if let Some(expanded) = self.instantiate_alias(name, &resolved_args) {
+                    seen.insert(name.clone());
+                    let resolved = self.expand_aliases_inner(&expanded, seen);
+                    seen.remove(name);
+                    resolved
+                } else {
+                    Type::Adt(name.clone(), resolved_args)
+                }
+            }
+            Type::Fn(args, ret) => Type::Fn(
+                args.iter()
+                    .map(|a| self.expand_aliases_inner(a, seen))
+                    .collect(),
+                Box::new(self.expand_aliases_inner(ret, seen)),
+            ),
+            Type::Tuple(ts) => Type::Tuple(
+                ts.iter()
+                    .map(|t| self.expand_aliases_inner(t, seen))
+                    .collect(),
+            ),
+            _ => ty.clone(),
+        }
     }
 }
 
