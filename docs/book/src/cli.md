@@ -7,9 +7,13 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis fmt` canonicalizes Surf or Deep source.
 - `chelis lint` enforces naming and style conventions from `spec/01-nomenclature.md`.
 - `chelis check` parses, desugars, type-checks, and reports fitness/errors.
+  Accepts both Surf (`.ch`) and already-lowered Deep (`.dp`) inputs; a
+  `.dp` skips desugaring and is type/effect/linearity-checked directly,
+  emitting the same JSON report shape as the `.ch` path.
 - `chelis deep` prints canonical Deep for a Surf program.
 - `chelis surf` decompiles Deep back to Surf.
-- `chelis eval` runs the host/runtime evaluator.
+- `chelis eval` runs the host/runtime evaluator. `chelis eval --file`
+  accepts both `.ch` and `.dp` inputs.
 - `chelis test` discovers and runs Chelis-native Reef package tests.
 - `chelis prove` discovers and runs Level 2 executable properties.
 - `chelis validate` runs the executable-grammar validator on the input.
