@@ -1388,6 +1388,37 @@ The shipped Phase 2b user surface is type- and expression-based:
 - borrow types are erased before IR and backend lowering; implicit linearity then
   inserts explicit `RiscOp::Copy` and `RiscOp::Drop` nodes
 
+#### Borrow target classification (the `&x` inner type)
+
+The inner of a `&x` borrow expression must be — or must ultimately resolve
+to — a tensor or a tensor-carrying value (a tensor-carrying ADT per §8.4 or
+a tuple containing one). Borrowing a concretely non-tensor value (a scalar
+`t-prim`, `()`, a function, a non-tensor-carrying ADT, or a tuple of
+scalars) is a type error.
+
+The borrow inner's type is not always concrete at the borrow site. When the
+inner is the result of a polymorphic-return expression — for example
+`relu(prev_out)` or `mean(...)` whose dimension variables are pinned only
+by a later `&tensor[..]` parameter in the surrounding call — the inner is
+still an unresolved type variable when the borrow is first checked. In that
+case classification is **deferred**: the borrow is provisionally accepted
+and the surrounding flow's expected argument type pins the variable through
+unification. A previously-required workaround was to round-trip the value
+through a monomorphic identity (`def id4[a,c,h,w](x: tensor[a,c,h,w,f32]) ->
+tensor[a,c,h,w,f32] = x`) to re-bind the dimension variables before the
+borrow; that workaround is no longer necessary.
+
+The deferral is sound only when the variable is *eventually* pinned to a
+tensor or tensor carrier. If the consumer is itself fully polymorphic
+(e.g. `def consume_any[a](t: a) -> bool`), the variable is never pinned to a
+tensor, and a genuinely non-tensor value — including one a caller
+instantiates at a scalar type — would otherwise be borrowed. After a
+function body's inference completes, every deferred borrow is re-checked
+against the final substitution; a variable that did not resolve to a tensor
+or tensor carrier is rejected with the same diagnostic as a concretely
+non-tensor borrow inner. There is no terminating program that can borrow a
+non-tensor value through the deferred path.
+
 Linearity is checked after effect inference, before lowering:
 
 `parse -> desugar -> type infer/check -> effect infer/check -> linearity check -> lower`

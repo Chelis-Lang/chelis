@@ -1303,8 +1303,10 @@ impl Checker {
     }
 
     fn expr_is_owned_or_borrow_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
-        self.expr_type(expr, scope)
-            .is_some_and(|ty| type_expr_contains_tensor(ty, &self.tensor_carrying_adts))
+        self.expr_type(expr, scope).is_some_and(|ty| {
+            type_expr_contains_tensor(ty, &self.tensor_carrying_adts)
+                || type_expr_is_unresolved_tvar(ty)
+        })
     }
 }
 
@@ -1796,6 +1798,41 @@ fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &HashSet<String>
 
 fn type_expr_is_ref(expr: &Expr) -> bool {
     matches!(get_tag_expr(expr), Some("t-ref"))
+}
+
+/// Issue #256: detect a stamped `(t-var ...)` (or `(t-ref (t-var ...))`)
+/// whose underlying type variable was left unresolved by the
+/// annotation pass. This shape arises when a let-bound name receives
+/// its type from a polymorphic-return call (e.g. `relu(prev_out)`)
+/// whose dim variables are pinned only after the borrow site by a
+/// later unification (typically the receiving function's `&tensor[..]`
+/// parameter). The inference-layer borrow arm at
+/// `infer.rs::borrow` accepts a `Type::Var` borrow precisely so that
+/// later unification can pin it; the linearity classification must
+/// not reject the same shape and re-introduce the bug. If the
+/// underlying variable is genuinely free (not a tensor in any
+/// instantiation), the inference layer's downstream unification --
+/// not linearity -- surfaces the type mismatch.
+///
+/// Negative parity: a borrow whose inner is genuinely not a tensor
+/// or carrier (e.g. `&int32` against a non-borrow consumer) is
+/// rejected by the inference-layer `borrow` arm before reaching
+/// linearity (the `_ => TypeMismatch` arm fires for `Type::Prim`,
+/// `Type::Unit`, `Type::Fn`, etc.), so this leniency cannot leak.
+fn type_expr_is_unresolved_tvar(expr: &Expr) -> bool {
+    match get_tag_expr(expr) {
+        Some("t-var") => true,
+        Some("t-ref") => {
+            if let Expr::List(list, _) = expr {
+                children(list)
+                    .first()
+                    .is_some_and(type_expr_is_unresolved_tvar)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
 }
 
 fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>) -> bool {

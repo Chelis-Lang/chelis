@@ -58,6 +58,22 @@ pub enum TypeErrorKind {
 pub struct Subst {
     types: Mutex<HashMap<TypeVar, Type>>,
     dims: Mutex<HashMap<DimVar, Dim>>,
+    /// Issue #256 soundness ledger. The `borrow` inference arm accepts a
+    /// borrow whose inner type is still an unresolved `Type::Var`,
+    /// deferring the tensor-or-carrier classification to subsequent
+    /// unification (the surrounding `&tensor[..]` parameter pins it).
+    /// That deferral is only sound when the variable is *eventually*
+    /// pinned to a tensor or tensor-carrying type. When the consumer is
+    /// itself fully polymorphic (e.g. `consume_any[a](t: a)`), the
+    /// variable is never pinned and a genuinely-non-tensor value would
+    /// slip past every gate. Each deferred borrow records the inner
+    /// `TypeVar` here; after a def body's inference completes, the
+    /// driver resolves each one against the now-complete substitution
+    /// and rejects any that did not become a tensor or tensor carrier.
+    /// Not serialized: this is transient per-pass bookkeeping, drained
+    /// by the inference driver, and never part of a persisted context.
+    #[serde(skip)]
+    deferred_borrow_vars: Mutex<Vec<TypeVar>>,
 }
 
 impl Clone for Subst {
@@ -65,6 +81,12 @@ impl Clone for Subst {
         Subst {
             types: Mutex::new(self.types.lock().expect("subst.types poisoned").clone()),
             dims: Mutex::new(self.dims.lock().expect("subst.dims poisoned").clone()),
+            deferred_borrow_vars: Mutex::new(
+                self.deferred_borrow_vars
+                    .lock()
+                    .expect("subst.deferred_borrow_vars poisoned")
+                    .clone(),
+            ),
         }
     }
 }
@@ -109,6 +131,30 @@ impl Subst {
             .lock()
             .expect("subst.dims poisoned")
             .insert(v, dim);
+    }
+
+    /// Issue #256: record a borrow site whose inner type was still an
+    /// unresolved `Type::Var` when the `borrow` inference arm ran. The
+    /// driver drains these after a def body's inference completes and
+    /// re-checks each against the final substitution. See the
+    /// `deferred_borrow_vars` field doc for the soundness rationale.
+    pub fn record_deferred_borrow_var(&self, v: TypeVar) {
+        self.deferred_borrow_vars
+            .lock()
+            .expect("subst.deferred_borrow_vars poisoned")
+            .push(v);
+    }
+
+    /// Drain the deferred-borrow ledger, returning every recorded
+    /// `TypeVar`. Called once per def body's inference by the driver so
+    /// the ledger does not leak deferred sites across defs.
+    pub fn take_deferred_borrow_vars(&self) -> Vec<TypeVar> {
+        std::mem::take(
+            &mut *self
+                .deferred_borrow_vars
+                .lock()
+                .expect("subst.deferred_borrow_vars poisoned"),
+        )
     }
 
     /// Resolve a type variable to its terminal binding (a non-Var, or
