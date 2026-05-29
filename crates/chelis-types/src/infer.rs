@@ -7546,12 +7546,24 @@ fn infer_app(
             && let Type::Tensor(tail_dims, tail_prec) = subst.apply(&list_args[0])
         {
             if head_dims.len() != tail_dims.len() {
+                // chelis#255: surface the rank-uniform rule and the
+                // reshape/flatten remediation in the diagnostic itself,
+                // so users (and agents reading JSON output) are not
+                // left guessing why a `List[tensor[k, f32]]` rejected
+                // a rank-mixed literal. The dim slot `k` is a
+                // dimension variable, not a shape-vector variable;
+                // see spec/04-type-system.md §4.5.1.
                 errors.push(CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
                         format!(
-                            "list element rank mismatch: {} dims vs {} dims",
+                            "list element rank mismatch: {} dims vs {} dims; \
+                             List[tensor[...]] requires rank-uniform elements \
+                             (the dim slot is a dimension variable, not a \
+                             shape-vector variable). Reshape or flatten \
+                             elements to a common rank before listing \
+                             (spec/04-type-system.md §4.5.1).",
                             head_dims.len(),
                             tail_dims.len(),
                         ),

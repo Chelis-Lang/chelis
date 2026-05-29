@@ -563,6 +563,61 @@ dim variable is genuinely bound to a concrete dimension.
 
 A wildcard dimension unifies with any other dimension (like a variable) but is NOT generalized — it's a permanent "I don't know." To restore named-dimension checking after a wildcard, use an explicit annotation.
 
+### 4.5.1 Rank-Uniform `List[tensor[...]]` Elements
+
+A `List[T]` is statically homogeneous in `T`, and a tensor's rank is part
+of its type. An annotation like `List[tensor[k, f32]]` therefore fixes a
+single rank for every element — the dim slot `k` is a dimension variable,
+not a shape-vector variable. A list literal `[a, b]` whose elements have
+different ranks is a type error, surfaced as `DimensionMismatch` at the
+list literal expression with a message of the form:
+
+```
+list element rank mismatch: 1 dims vs 2 dims;
+List[tensor[...]] requires rank-uniform elements (the dim slot is a
+dimension variable, not a shape-vector variable). Reshape or flatten
+elements to a common rank before listing (spec/04-type-system.md §4.5.1).
+```
+
+The message is emitted on a single line; the wrapping above is for
+readability only. The trailing `(spec/04-type-system.md §4.5.1)`
+back-reference is part of the diagnostic so a reader or agent can
+locate this rule from the error text alone.
+
+Rationale: Chelis dimension variables (§4.4) range over individual
+dimensions, not over shape vectors. Permitting `[rank-1, rank-2]` to
+unify by erasing the rank would mask the kinds of transposition and
+reshape bugs that named dimensions exist to catch (§4.2 rationale). A
+rank-erased element type is not provided in the shipped surface; users
+who genuinely need to carry mixed-rank tensors through a list must
+reshape elements to a common rank before listing, or use a sum type
+that names each rank as a separate variant. A rank-polymorphic
+`List[tensor[k, f32]]` (letting `k` range over shape vectors per call
+site) was considered and deferred: the named-dim safety guarantee in
+§4.2 is preferred over the additional flexibility, and the
+reshape-at-the-boundary idiom is cheap enough that current consumers
+absorb it without losing per-tensor named dimensions.
+
+```chelis
+;; WRONG: rank-1 and rank-2 elements in the same List[tensor[k, f32]]
+;; def make_mixed() -> List[tensor[k, f32]] = {
+;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+;;   b = to_tensor([[cast(1.0, f32), cast(2.0, f32)],
+;;                  [cast(3.0, f32), cast(4.0, f32)]])
+;;   [a, b]  ;; DimensionMismatch: list element rank mismatch
+;; }
+
+;; CORRECT: flatten the rank-2 element to rank-1 first
+;; def make_uniform() -> List[tensor[k, f32]] = {
+;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+;;   b_flat = reshape(
+;;     to_tensor([[cast(1.0, f32), cast(2.0, f32)],
+;;                [cast(3.0, f32), cast(4.0, f32)]]),
+;;     [cast(4, int64)])
+;;   [a, b_flat]
+;; }
+```
+
 ### 4.6 Property Definitions
 
 Surf `@property` declarations type-check as ordinary functions whose result
