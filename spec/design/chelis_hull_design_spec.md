@@ -32,7 +32,7 @@ The grammar of Chelis's Deep syntax, expressed as Chelis ADTs. Each constructor 
 type Expr =
   | EVar(String)
   | ELit(Literal)
-  | ELam(String, Type, Expr)
+  | ELam(String, Type, Expr)        -- Deep `(fn {} (params ...) body)`; named ELam for the calculus
   | EApp(Expr, Expr)
   | ELet(String, Expr, Expr)
   | EIf(Expr, Expr, Expr)
@@ -45,7 +45,7 @@ type Expr =
   | ELog(Expr)
   | ESqrt(Expr)
   | ESin(Expr)
-  | ECast(Expr, ElemType)
+  | ECast(Expr, Type)               -- Deep `(cast {} expr target-type)`; target is a full type
   | ESum(Expr, Dim)
   | EGather(Expr, Expr, int64)
   | EScatter(Expr, Expr, Expr, ScatterMode)
@@ -59,13 +59,19 @@ type Expr =
   | ESort(Expr, int64)
   | EGrad(Expr)
   | EVmap(Expr, int64)
-  | EWithSeed(int64, Expr)
-  | EWithHandler(Effect, Expr)
+  -- Effect-handling forms. The shipped Deep grammar has NO `with-seed` /
+  -- `with-handler` tags; the real form is `(handle-effect {effect: name} arg body)`
+  -- (spec/03-deep-syntax.md §2.3, "Phase 2a effect handler block"). EWithSeed is
+  -- retained as the calculus name for the Random-discharging special case.
+  -- BOTH are OUTSIDE the v0.1.0 supported fragment: the parser may build them, but
+  -- `type_check` returns `None` for them in v0.1.0 (effect handling lands in a later
+  -- phase). See §3 "v0.1.0 supported fragment".
+  | EWithSeed(int64, Expr)              -- discharges Random; v0.1.0: parsed, not checked
+  | EHandleEffect(Effect, Expr, Expr)   -- `(handle-effect {effect: name} arg body)`; v0.1.0: parsed, not checked
   | EMatch(Expr, List[MatchArm])
   | ETuple(List[Expr])
   | ETupleGet(Expr, int64)
   | EConstruct(String, List[Expr])
-  | EImport(String, List[String])
 
 -- Literals
 type Literal =
@@ -130,6 +136,19 @@ type Ctx = List[(String, Type)]
 ```
 
 This ADT set is the grammar. Every valid Deep program parses into a value of type `Expr`. The ADT is the spec's definition of "what programs exist."
+
+**Calculus names vs. Deep tags.** The LaCaDiLE proof calculus uses names like `tlt`
+(typed less-than), `btrue`/`bfalse` (boolean literals), and `ite` (if-then-else). Those
+are *proof-calculus* names; they are **not** Deep tags and they do **not** add new `Expr`
+constructors here. In shipped Deep:
+
+- comparisons are builtin *applications* — `tlt` is `EApp(EVar("cmplt"), ...)` (the
+  `cmplt` / `CmpLt` builtin, see `crates/chelis-ir/src/grad.rs`), not a dedicated tag;
+- boolean literals are `ELit(LBool(true))` / `ELit(LBool(false))`, not `btrue`/`bfalse`;
+- conditionals are `EIf` (Deep `(if {} cond then else)`), not `ite`.
+
+So no comparison or boolean `Expr` constructor is introduced: the calculus-level names map
+onto existing `EApp` / `ELit` / `EIf` forms.
 
 ---
 
@@ -281,8 +300,10 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
       }
     }
 
-    -- T-WithSeed (LaCaDiLE Section 3)
-    -- with-seed n e : removes Random from e's effects
+    -- T-WithSeed (LaCaDiLE Section 3) -- discharges Random from e's effects.
+    -- OUT of the v0.1.0 supported fragment (§3.1): in v0.1.0 this arm is `EWithSeed(_, _)
+    -- -> None`. The rule below is the calculus-level semantics that lands once effect
+    -- handling is frozen (a later version). Same for the EHandleEffect arm.
     EWithSeed(seed, body) -> {
       (t_body, effs) = type_check(ctx, body)?
       Some((t_body, remove_effect(effs, Random)))
@@ -341,6 +362,76 @@ def check_unary_tensor_op(ctx: Ctx, e1: Expr) -> Option[(Type, EffectRow)] = {
 
 Each pattern-match arm in `type_check` implements exactly one typing rule. A reviewer can read the function and check it against the paper's Figure 4 line by line. The code IS the specification.
 
+### 3.1 v0.1.0 supported fragment
+
+Hull v0.1.0 does not implement the entire LaCaDiLE calculus. It pins a concrete
+**supported fragment** so differential testing has a stable, honest target:
+
+> The v0.1.0 supported fragment = the `AdjointSupported` boundary (the set of RISC
+> primitives that have an adjoint rule in `crates/chelis-ir/src/grad.rs`) **plus** the
+> non-AD constructs needed to build, bind, and reduce programs that exercise it: `EVar`,
+> `ELit`, `ELam`/`EApp`, `ELet`, `EIf`, the elementwise/reduction/shape tensor ops with
+> adjoints (`EAdd`, `EMul`, `ESub`, `EDiv`, `ENeg`, `EExp`, `ELog`, `ESqrt`, `ESin`,
+> `ESum`, `EMatmul`, `EGather`, `EReshape`, `EPermute`, `EExpand`, etc.), `ECast` (scalar
+> precision only, see below), `ETuple`/`ETupleGet`, `EConstruct`, `EMatch`, and `EGrad`.
+
+`AdjointSupported` is **not** a named symbol in the repo; it is the operational boundary
+established by `crates/chelis-ir/src/grad.rs`, which carries one adjoint arm per
+differentiable `RiscOp` (`Add`, `Mul`, `Div`, `Neg`, `Recip`, `Exp`, `Log`, `Sin`, `Cos`,
+`Sqrt`, `Tan`, `Atan`, `Abs`, `MaxElem`, `CmpLt`, …) and explicitly *rejects*
+non-differentiable ops with structural reasons — `Argmax`/`Argmin` (integer-index
+output), `Floor`/`Ceil` (piecewise constant), and `Scatter` (non-deterministic at
+duplicate indices). Hull v0.1.0 tracks exactly this differentiable set as the AD-reachable
+core.
+
+Out of the v0.1.0 fragment (parsed by the Deep parser, but `type_check` returns `None`):
+`EWithSeed` and `EHandleEffect` (effect handling is a later phase), `EVmap` under `EGrad`
+nesting beyond the scalar-output case, and any construct whose checking depends on the
+LaCaDiLE linearity / Δ-capability judgment (deferred to v0.2.0, see §3.3).
+
+### 3.2 `ECast` is scalar-precision-only in v0.1.0
+
+Although `ECast(Expr, Type)` carries a full target `Type` (matching shipped Deep
+`(cast {} expr target-type)`), the v0.1.0 reference checker admits **only scalar precision
+casts** — float-to-float / int-to-int precision changes on a scalar or rank-0 operand,
+mirroring the shipped checker's `cast` validation
+(`crates/chelis-types/src/infer.rs`, which rejects unsupported target precisions and
+restricts the cast surface). Tensor-shape or structural casts are out of the v0.1.0
+fragment.
+
+### 3.3 EGrad is a surface check only in v0.1.0 (dominant CompilerTooConservative source)
+
+The v0.1.0 `EGrad` rule is deliberately a **surface check**. It accepts `grad(f)` when:
+
+1. `f` is a function (`TArrow(...)`) whose effect row is empty (pure), **and**
+2. `f`'s return type is a scalar floating value — `TF32`, or a rank-0 float tensor
+   `TTensor([], EF32)`.
+
+This mirrors the shipped checker's `infer_grad` / `grad_output_supported`
+(`crates/chelis-types/src/infer.rs`): `grad_output_supported` accepts exactly
+`Prim` float or `Tensor(dims, prim)` with `dims.is_empty() && prim.is_float()`, and
+otherwise emits `grad requires a scalar floating output`.
+
+What v0.1.0 EGrad does **not** do: it does not run the LaCaDiLE **linearity /
+Δ-capability** judgment over the body to confirm every primitive on the
+differentiation path is adjoint-supported. That deeper check is **deferred to v0.2.0**.
+The consequence is explicit and expected: **EGrad is the dominant known
+`CompilerTooConservative` source.** The shipped compiler performs the full AD-reachability
+analysis at lowering (`grad.rs` rejects `grad` over a body that touches `Argmax`,
+`Floor`, `Scatter`, etc.), so for programs whose grad body contains a non-differentiable
+op the *compiler* rejects while Hull's surface-only rule *accepts* — i.e. Hull
+under-rejects relative to the compiler. These cases are catalogued via the
+`corpus/known_conservative.json` whitelist (§11) rather than being treated as soundness
+findings.
+
+Note on effect representation: the shipped `Type::Fn(Vec<Type>, Box<Type>)`
+(`crates/chelis-types/src/types.rs`) does **not** carry an effect row in the type itself;
+effects are tracked as `effects` metadata on `fn` nodes. Hull's `TArrow(Type, Type,
+EffectRow)` is a richer model. The v0.1.0 purity component of the EGrad rule is therefore
+part of Hull's reference model and is itself a potential `CompilerTooConservative` source
+where the compiler's effect tracking and Hull's diverge; such divergences are whitelisted,
+not flagged unsound.
+
 ---
 
 ## 4. Reference Evaluator - `Hull.Eval`
@@ -362,7 +453,7 @@ def is_value(e: Expr) -> bool =
 -- One step of reduction
 def step(e: Expr) -> Option[Expr] =
   match e {
-    -- Beta reduction: (lam x body) applied to a value
+    -- Beta reduction: an ELam (Deep `fn`) applied to a value
     EApp(ELam(x, _, body), v) ->
       if is_value(v) then Some(substitute(body, x, v))
       else None
@@ -439,62 +530,137 @@ def eval_to_value(e: Expr, max_steps: int64) -> (Expr, int64) = {
 
 The evaluator is intentionally simple and slow. Tensors are nested lists of scalars. Operations are element-by-element loops. This is the reference semantics - what programs MEAN - not a practical execution engine. The real compiler's evaluator and code generators must agree with this reference on every well-typed program.
 
+### 4.1 Pinned evaluator decisions for v0.1.0
+
+- **Tensor representation: nested-lists-of-scalars.** A `TTensor(dims, elem)` value is a
+  nested `List` of scalars whose nesting depth equals the rank and whose shape equals
+  `dims`. Every tensor op (`EAdd`, `EMatmul`, `ESum`, …) is implemented as scalar loops
+  over this representation. Performance is an explicit **non-goal**; this is the
+  reference semantics, not an execution engine.
+
+- **Capture-avoiding substitution is required.** `substitute(body, x, v)` in `step` must
+  be capture-avoiding: substituting `v` for `x` must never let a free variable of `v` be
+  captured by a binder inside `body`. Naive textual substitution is a correctness bug
+  here. This reuses the substitution work mechanized in LaCaDiLE
+  (`proof/lean/LaCaDiLE`); Hull's `substitute` is the executable counterpart of that
+  proof-level definition and must agree with it.
+
+- **Recommended internal representation: locally-nameless / de Bruijn.** To get
+  capture-avoidance for free, the recommended internal `Expr` representation for the
+  evaluator is **locally nameless** (free variables by name, bound variables by de Bruijn
+  index) or fully de-Bruijn-indexed. The parser still produces the named surface `Expr`;
+  the evaluator converts to the internal representation before reduction.
+
+- **AD evaluation is OUT of v0.1.0.** Hull v0.1.0 **type-checks** `grad(f)` (§3.3) but
+  does **not** evaluate it. `step` leaves `EGrad(_)` stuck (returns `None`); the
+  differential eval harness (§6) does not submit grad-containing programs to
+  `eval`-agreement. Evaluating AD is scoped to a later version once the linearity /
+  Δ-capability judgment lands.
+
 ---
 
 ## 5. Deep Parser - `Hull.Parse`
 
-Parse a Deep s-expression string into the `Expr` ADT. Deep's syntax is minimal enough that the parser is small.
+Parse a Deep s-expression string into the `Expr` ADT, and (for round-trip / generation)
+`unparse` an `Expr` back to canonical Deep. The parser must match the *shipped* Deep
+grammar (`spec/03-deep-syntax.md`), which differs from the original sketch in three ways
+that the sketch got wrong:
+
+1. **Lambdas are `fn`, not `lam`.** The shipped form is `(fn {} (params ...) body)` — a
+   `fn` head, a metadata slot, a `(params ...)` child, then the body. There is no `lam`
+   tag.
+2. **Arithmetic/tensor ops are builtin applications, not dedicated tags.** There are no
+   `add` / `mul` / `sub` / `div` Deep tags. `x + y` is `(app {} (var {} add) x y)`;
+   `sexpr_to_expr` **desugars** the recognized builtin heads (`add`, `mul`, `sub`, `div`,
+   `neg`, `exp`, `log`, `sqrt`, `sin`, `sum`, `matmul`, `gather`, …) into the
+   corresponding `EAdd` / `EMul` / `ESum` / `EMatmul` / … constructors. An `app` whose
+   head is not a recognized builtin stays `EApp`.
+3. **Every Deep node carries a metadata slot `{}` as element 1.** A node is
+   `(tag {…} children…)`; element 1 is always the metadata map (possibly `{key: val …}`,
+   e.g. `(lit {type: f32} 1.0)`, `(handle-effect {effect: name} …)`, `(grad {wrt: …}
+   …)`). The tokenizer/parser must lex and skip/parse `{…}`; the original sketch ignored
+   it entirely.
 
 Deep source looks like:
 
 ```text
-(def f (lam (x : (tensor [batch hidden] f32))
-  (add x (const 1.0 [batch hidden]))))
+(fn {} (params (param {} x (t-tensor {} (d-name {} batch) (d-name {} hidden) f32)))
+  (app {} (var {} add) (var {} x) (lit {type: f32} 1.0)))
 ```
 
 The parser needs:
-- Tokenize: split on whitespace and parens, handling string literals
+- Tokenize: split on whitespace and parens, **lex `{` … `}` metadata maps**, handle
+  string literals
 - Parse atoms: integers, floats, booleans, strings, identifiers
-- Parse lists: `(` atoms-and-lists `)` recursively
-- Map s-expression structure to `Expr` constructors by the head symbol
+- Parse lists: `(` `tag` `{meta}` atoms-and-lists `)` recursively
+- Map s-expression structure to `Expr` constructors by head symbol, **desugaring builtin
+  applications** into the dedicated tensor-op constructors
 
 ```chelis
--- Tokenize a Deep source string
+-- Tokenize a Deep source string. Note the `{` / `}` metadata tokens.
 def tokenize(src: String) -> List[Token]
 
-type Token = LParen | RParen | Atom(String)
+type Token = LParen | RParen | LBrace | RBrace | Atom(String)
 
--- Parse a token stream into an s-expression tree
-type SExpr = SAtom(String) | SList(List[SExpr])
+-- Parse a token stream into an s-expression tree. SMeta carries the `{}` slot.
+type SExpr = SAtom(String) | SList(List[SExpr]) | SMeta(List[(String, SExpr)])
 
 def parse_sexpr(tokens: List[Token]) -> Option[(SExpr, List[Token])]
 
--- Convert an s-expression to a typed Expr
+-- Convert an s-expression to a typed Expr. Element 1 is always the metadata map,
+-- so children start at index 2.
 def sexpr_to_expr(s: SExpr) -> Option[Expr] =
   match s {
-    SAtom(name) -> Some(EVar(name))  -- or parse as literal
+    -- (var {} name)
+    SList([SAtom("var"), _meta, SAtom(name)]) -> Some(EVar(name))
 
-    SList([SAtom("lam"), SList([SAtom(x), SAtom(":"), type_sexpr]), body]) ->
-      sexpr_to_type(type_sexpr) |> flat_map(fn(t) ->
-        sexpr_to_expr(body) |> map(fn(b) -> ELam(x, t, b)))
+    -- (lit {type: ...} value)
+    SList([SAtom("lit"), meta, value]) -> parse_lit(meta, value)
 
-    SList([SAtom("app"), e1_sexpr, e2_sexpr]) ->
-      sexpr_to_expr(e1_sexpr) |> flat_map(fn(e1) ->
-        sexpr_to_expr(e2_sexpr) |> map(fn(e2) -> EApp(e1, e2)))
+    -- (fn {} (params ...) body) -- NOT `lam`
+    SList([SAtom("fn"), _meta, params_sexpr, body]) ->
+      parse_params(params_sexpr) |> flat_map(fn(ps) ->
+        sexpr_to_expr(body) |> map(fn(b) -> build_lambda(ps, b)))
 
-    SList([SAtom("add"), e1_sexpr, e2_sexpr]) ->
-      sexpr_to_expr(e1_sexpr) |> flat_map(fn(e1) ->
-        sexpr_to_expr(e2_sexpr) |> map(fn(e2) -> EAdd(e1, e2)))
+    -- (app {} func arg...) -- desugar recognized builtin heads
+    SList([SAtom("app"), _meta, ...rest]) ->
+      desugar_app(rest)   -- (var {} add) e1 e2 -> EAdd(e1, e2); else EApp chain
 
-    SList([SAtom("grad"), e_sexpr]) ->
-      sexpr_to_expr(e_sexpr) |> map(fn(e) -> EGrad(e))
+    -- (grad {} expr) | (grad {wrt: ...} expr idx)
+    SList([SAtom("grad"), _meta, ...rest]) ->
+      sexpr_to_expr(head(rest)) |> map(fn(e) -> EGrad(e))
 
-    -- ... one arm per Deep form
+    -- (cast {} expr target-type)
+    SList([SAtom("cast"), _meta, e_sexpr, ty_sexpr]) ->
+      sexpr_to_expr(e_sexpr) |> flat_map(fn(e) ->
+        sexpr_to_type(ty_sexpr) |> map(fn(t) -> ECast(e, t)))
+
+    -- ... one arm per Deep form (§2.3-§2.7); builtin-app heads desugar in desugar_app
     _ -> None
   }
+
+-- Desugar an application's children: when the head is `(var {} <builtin>)` for a
+-- recognized arithmetic/tensor builtin, build the dedicated Expr constructor; otherwise
+-- fold into a left-nested EApp chain.
+def desugar_app(children: List[SExpr]) -> Option[Expr]
+
+-- Canonical Deep printer: inverse of sexpr_to_expr, for round-trip and the generator.
+-- unparse(e) must re-parse to an Expr equal to e (modulo alpha-renaming), and the
+-- emitted text must include the `{}` metadata slot on every node and re-sugar the
+-- dedicated tensor-op constructors back into `(app {} (var {} <builtin>) ...)`.
+def unparse(e: Expr) -> String
 ```
 
-This is 100-150 lines of pure Chelis. Deep's syntax is regular (head symbol determines the form, fixed positional arguments). No operator precedence, no ambiguity, no context-sensitivity. The parser is a direct mapping from s-expression structure to ADT constructors.
+This is **larger than the original 100-150 line sketch**: the `{…}` metadata tokenizer,
+the builtin-app desugaring/re-sugaring (`unparse` must re-emit `EAdd` as
+`(app {} (var {} add) …)`), and the canonical printer for round-trip all add surface.
+Deep's syntax is still regular (head symbol + fixed-position children, no operator
+precedence, no ambiguity, no context-sensitivity), so the parser remains a direct
+structural mapping — just one with three more moving parts than the sketch admitted.
+
+**Round-trip property.** `parse ∘ unparse = id` (modulo alpha-renaming) on the v0.1.0
+supported fragment is a checked invariant, and `unparse` is what the generator (§7) uses
+to emit `.dp` corpus files for differential testing.
 
 ---
 
@@ -505,23 +671,25 @@ The core use case. Given a Deep source file, type-check it with both Hull's refe
 ```chelis
 import Hull.Parse (parse_deep_file)
 import Hull.Typing (type_check)
-import Std.Io (read_file, exec_command)
+import Std.Io (read_file, process_run)
 
--- Parse a Deep file and type-check with the reference checker
-def reference_check(path: String) -> Option[(Type, EffectRow)] ! { IO } = {
+-- Parse a Deep file and type-check with the reference checker. The Io effect uses the
+-- shipped `Effect::Io` (lowercase casing in the enum; §2).
+def reference_check(path: String) -> Option[(Type, EffectRow)] ! { Io } = {
   src = read_file(path)
   expr = parse_deep_file(src)?
   type_check([], expr)
 }
 
--- Run the real compiler's check and parse the fitness JSON
-def compiler_check(path: String) -> Option[(Type, EffectRow)] ! { IO } = {
-  result = exec_command("chelis check " ++ path ++ " --json")
+-- Run the real compiler's structured check and parse the JSON result. `process_run` is
+-- the new subprocess builtin (under Io) that the next-phase monorepo work adds (§8.1).
+def compiler_check(path: String) -> Option[(Type, EffectRow)] ! { Io } = {
+  result = process_run("chelis", ["check", path, "--json"])
   parse_check_result(result)
 }
 
 -- Compare both results
-def differential_check(path: String) -> CheckResult ! { IO } = {
+def differential_check(path: String) -> CheckResult ! { Io } = {
   ref_result = reference_check(path)
   comp_result = compiler_check(path)
   match (ref_result, comp_result) {
@@ -676,6 +844,33 @@ def gen_type(rng: RngState, depth: int64) -> (Type, RngState) = {
 
 The generator produces programs that are well-typed by construction (each generation step picks a strategy that produces the target type). The reference type checker then verifies the generated program - if the generator has a bug, the checker catches it. The verified program is then run through `chelis check` for differential testing.
 
+### 7.1 Pinned coverage target
+
+> **Coverage target:** every typing rule the reference checker implements — i.e. every
+> match arm of `type_check` (and the helpers `check_binary_tensor_op` /
+> `check_unary_tensor_op`) — is exercised by **at least one** generation strategy, and
+> this is **verified by a coverage report**, not asserted.
+
+`scripts/coverage_report.py` (pure tabulation, §8) maps generated programs to the
+`type_check` arms they exercise and fails if any arm in the v0.1.0 supported fragment
+(§3.1) has zero generated coverage. Adding a new `type_check` arm without a generation
+strategy that reaches it is a coverage-report failure, which keeps the generator and the
+checker in lockstep.
+
+### 7.2 Pinned generation budget
+
+Generation is bounded so the suite is deterministic and CI-affordable:
+
+- **Depth bound:** `gen_expr` is called with an initial `depth` bound (e.g. `depth = 6`);
+  every recursive strategy decrements `depth`, and `depth <= 0` falls back to
+  `gen_leaf`. This bounds AST size and guarantees termination.
+- **Per-program step budget:** each generated program carries a reduction `max_steps`
+  budget for the §4 evaluator (`eval_to_value(e, max_steps)`); programs that do not reach
+  a value within budget are recorded as `eval`-timeouts, not failures, and excluded from
+  the eval-agreement count.
+- **Suite-level seed:** generation is seeded so the conformance suite is reproducible
+  byte-for-byte from a recorded seed (see §11 generation-time budget).
+
 ---
 
 ## 8. Module Structure
@@ -699,14 +894,45 @@ chelis-lang/hull/
 │   │   ├── typing/*.json             -- expected types for test programs
 │   │   ├── eval/*.json               -- expected values for test programs
 │   │   └── differential/*.json       -- programs with known compiler results
-│   ├── run_hull_tests.py             -- golden-file assertions
-│   └── run_differential.py           -- batch differential testing
+│   └── *.ch                          -- native Chelis golden assertions (Test effect)
+├── drivers/
+│   ├── gen_conformance_suite.ch      -- Chelis driver: generate, ref-check, export
+│   └── run_differential_suite.ch     -- Chelis driver: batch differential testing
 ├── scripts/
-│   ├── gen_conformance_suite.py      -- generate random programs, check, export
-│   └── coverage_report.py            -- which typing rules are exercised
+│   └── coverage_report.py            -- pure tabulation: which typing rules are exercised
 └── corpus/
-    └── generated/                    -- generated well-typed programs (output of gen)
+    ├── generated/                    -- generated well-typed programs (output of gen)
+    └── known_conservative.json       -- whitelist of documented CompilerTooConservative families (§11)
 ```
+
+### 8.1 No-Python framing reconciled
+
+The Hull stub describes Hull as "depends on `chelis-std` only / no Python," but the
+original sketch listed `gen_conformance_suite.py` and `run_differential.py`. These are
+reconciled as follows, and this is the pinned decision:
+
+- **`gen_conformance_suite` and `run_differential_suite` are Chelis drivers, not Python.**
+  They are `.ch` programs with `def main() -> unit ! { Io }` that read Deep files, run the
+  reference checker/evaluator, shell out to the compiler, and write the corpus. They are
+  pure Chelis because Hull gains a new `process_run` exec builtin (under `Io`) to invoke
+  the compiler.
+- **Golden assertions are native `tests/*.ch`** carrying the `Test` effect (named
+  `test_*` / `example_*` per §10.1), not Python golden runners.
+- **Only `coverage_report.py` stays Python** — it is pure tabulation over the generated
+  corpus and the `type_check` arm list (§7.1), with no language semantics in it.
+
+**Enabling dependencies (monorepo, next phase).** Making the drivers pure Chelis requires
+three additions that do **not** exist yet (verified: no `process_run`, `eval --json`, or
+`check --json` in `crates/chelis-cli/src/` as of v0.7.19):
+
+1. a `process_run` subprocess builtin under the `Io` effect, so a Chelis driver can invoke
+   `chelis check` / `chelis eval`;
+2. `chelis eval --json` (machine-readable values) for eval-agreement;
+3. structured `chelis check --json` (machine-readable type + effect row) for
+   check-agreement.
+
+These are added in the next phase in the monorepo; the `chelis-std`-only dependency story
+holds once they ship.
 
 ---
 
@@ -741,29 +967,56 @@ chelis-lang/hull/
 
 | Prerequisite | Status | Why Hull needs it |
 |---|---|---|
-| LaCaDiLE typing rules finalized | Stabilizing (in-repo `proof/lean/LaCaDiLE` partial, OOPSLA-targeted) | Hull implements these rules - they must be stable |
-| Deep syntax stable | Stable since v0.1.0 | Hull parses Deep - the grammar must not change |
-| ADTs + pattern matching in Chelis | Working (v0.1.7) | Hull's entire data model is ADTs |
-| Option type + `?` operator | Working | Hull returns `Option` from every check |
+| LaCaDiLE typing rules finalized | Stabilizing (in-repo `proof/lean/LaCaDiLE` partial, OOPSLA-targeted). **Honest scope:** the rules for the v0.1.0 *supported fragment* (§3.1) — the `AdjointSupported` boundary plus the non-AD core — are stable enough to target; the linearity / Δ-capability and effect-handling rules are **not yet frozen**, which is why those constructs are out of the v0.1.0 fragment. | Hull implements these rules - they must be stable |
+| Deep syntax stable | Shipped/stable (Deep parser shipped Phase 0b; tag vocabulary in `spec/03-deep-syntax.md`) | Hull parses Deep - the grammar must not change |
+| ADTs + pattern matching in Chelis | Shipped | Hull's entire data model is ADTs |
+| Option type + `?` operator | Shipped | Hull returns `Option` from every check |
 | String operations in Chelis | Foundation shipped (`String` primitive + `string_*` builtins, `to_int`/`to_float`; see `examples/scalar_string_foundation.ch`) | Hull parses source strings |
 | `chelis prove` infrastructure | Shipped (v0.7.1: `@property`, type-directed sampling) | Hull's generator is the language-level version |
+| `process_run` subprocess builtin (under `Io`) | **In-flight** (not present in `crates/chelis-cli/src/` as of v0.7.19) | Chelis drivers invoke `chelis check` / `chelis eval` (§8.1) |
+| `chelis eval --json` | **In-flight** (no `--json` on `eval` as of v0.7.19) | Machine-readable values for eval-agreement (§6) |
+| Structured `chelis check --json` | **In-flight** (no `--json` on `check` as of v0.7.19) | Machine-readable type + effect row for check-agreement (§6) |
 
-**Timing:** Phase 4 or Phase 5. Not before the language-spec paper (OOPSLA-targeted) finalizes the typing rules and the ICLR pipeline establishes the AI training loop. Most mechanical prerequisites are now met (Deep parser, `chelis prove`, string foundation); the gating dependency is the typing rules freezing. Hull's value increases as the language stabilizes - building it while the typing rules are still changing means constant maintenance. Build it when the rules are final and use it to prevent regression.
+**Timing:** Phase 4 or Phase 5. Not before the language-spec paper (OOPSLA-targeted) finalizes the linearity / Δ-capability rules and the ICLR pipeline establishes the AI training loop. The mechanical prerequisites for the v0.1.0 *supported fragment* are met (Deep parser, ADTs + pattern matching, `Option`/`?`, string foundation, `chelis prove`); the remaining work is the three in-flight monorepo enablement deps above (`process_run`, `eval --json`, structured `check --json`) and freezing the linearity / effect-handling rules that the out-of-fragment constructs need. Hull's value increases as the language stabilizes - building the full checker while those rules are still changing means constant maintenance, so v0.1.0 deliberately scopes to the already-stable fragment and prevents regression there.
 
 ---
 
 ## 11. What Success Looks Like
 
-Hull is complete when:
+Hull v0.1.0 is complete when the following concrete numbers and mechanisms hold:
 
-1. Every typing rule from the LaCaDiLE paper has a corresponding match arm in `Hull.Typing.type_check`, annotated with the rule name and paper reference.
+1. Every typing rule in the v0.1.0 supported fragment (§3.1) has a corresponding match
+   arm in `Hull.Typing.type_check`, annotated with the rule name and paper reference, and
+   `scripts/coverage_report.py` shows every such arm is exercised by ≥ 1 generation
+   strategy (§7.1).
 
-2. The reference type checker and the Rust compiler agree on 10,000+ randomly generated programs (zero `CompilerUnsound` findings, near-zero `CompilerTooConservative` findings).
+2. **Check agreement:** the reference type checker and the Rust compiler agree on
+   **≥ 10,000** generated well-typed programs, with **zero `CompilerUnsound`** findings
+   (the compiler never accepts what the reference rejects) and **near-zero, fully
+   whitelisted `CompilerTooConservative`** findings. Every non-whitelisted
+   `CompilerTooConservative` is a release blocker.
 
-3. The reference evaluator and `chelis eval` agree on 1,000+ well-typed programs (values match within f32 tolerance).
+3. **Eval agreement:** the reference evaluator and `chelis eval` agree on **≥ 1,000**
+   well-typed programs, with float values matching within an explicit **f32 tolerance**.
+   AD-containing programs are excluded (§4.1: grad is type-checked, not evaluated, in
+   v0.1.0).
 
-4. The generated conformance test suite is checked into the main Chelis repo and runs in CI against every compiler change.
+4. **Conformance suite in CI:** the generated conformance suite is checked into the main
+   Chelis monorepo and runs in CI against every compiler change.
 
-5. A new typing rule added to the compiler requires a corresponding addition to Hull - the differential testing catches any rule that exists in one but not the other.
+5. **Generation-time budget:** the suite regenerates from a recorded seed within a pinned
+   wall-clock budget (CI-affordable) under the depth/step bounds of §7.2, so CI does not
+   regenerate unbounded work per run.
+
+6. **`corpus/known_conservative.json` whitelist mechanism:** documented families where the
+   compiler is intentionally or known-to-be stricter than the v0.1.0 reference checker —
+   chiefly the EGrad surface-vs-deep-AD divergence (§3.3) and effect-representation
+   divergences — are recorded in `corpus/known_conservative.json` with a per-family
+   justification. A `CompilerTooConservative` finding matching a whitelisted family does
+   not fail the suite; one that does not match any family does. The whitelist shrinks as
+   v0.2.0 adds the linearity / Δ-capability check.
+
+7. A new typing rule added to the compiler requires a corresponding addition to Hull - the
+   differential testing catches any rule that exists in one but not the other.
 
 This is the self-referential loop in operation: the compiler checks Hull, Hull checks the compiler, and disagreements are found automatically.
