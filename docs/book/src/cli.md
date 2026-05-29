@@ -106,14 +106,20 @@ itself lives outside `src/` and does not declare a top-level `module`.
 chelis test
 chelis test tests/
 chelis test tests/core.ch
-chelis test tests/ --filter pricing --timeout 10 --jobs auto
-chelis test tests/ --json --jobs 1
+chelis test tests/ --filter pricing --timeout 10 --batch-mode auto
+chelis test tests/ --json --batch-mode file --jobs 1
 ```
 
-Directory runs execute files concurrently by default. `--jobs auto` uses the
-available CPU count capped by the number of selected files; pass `--jobs 1`
-to preserve serial file execution while debugging. Output remains stable in
-discovery order for both plain text and NDJSON.
+Directory runs use `--batch-mode auto` by default: eligible files are compiled
+as one suite batch so the fixed Reef context and test-source compile costs are
+paid once. Files with top-level module-init bindings or top-level name
+collisions use the per-file worker path. If a batch worker crashes, times out,
+or emits incomplete rows, the parent falls back to per-file workers.
+
+Use `--batch-mode file` to force per-file subprocess isolation while debugging.
+`--jobs auto` caps worker concurrency on file-worker paths; pass `--jobs 1` for
+serial file execution. Output remains stable in discovery order for both plain
+text and NDJSON.
 
 ## Property Proof Loop
 

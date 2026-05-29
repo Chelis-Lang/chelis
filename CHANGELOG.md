@@ -6,6 +6,24 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.20] — 2026-05-29
+
+Default `chelis test` now amortizes shell/module graph compilation
+across a suite. The CLI batches eligible test files into one internal
+worker in `--batch-mode auto` (the default), preserves per-file
+subprocess isolation for files that need it, and falls back to the
+previous one-worker-per-file path on batch compile/runtime failures.
+Use `--batch-mode file` to force the old execution strategy.
+
+### Added
+
+- `chelis test --batch-mode auto|file`, with `auto` as the default.
+  Auto mode compiles one shared context and one combined batch probe
+  for eligible files, then reports the same NDJSON/per-test rows as
+  the file-worker path.
+- Internal `__test_batch` worker support and crash/timeout fallback
+  coverage so batch execution cannot hide a file-level failure.
+
 ### Fixed
 
 - **#248 (#189 follow-up)**: the C backend's `emit_uniform_like` was

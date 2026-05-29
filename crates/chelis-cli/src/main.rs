@@ -11,6 +11,7 @@ use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
 use chelis_types::types::{Dim, Effect, EffectSet, TensorPrec, Type};
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -301,6 +302,9 @@ enum Command {
         /// Test-file workers to run concurrently (`auto` uses available CPUs)
         #[clap(long, default_value = "auto", value_name = "N|auto")]
         jobs: TestJobs,
+        /// Suite batching mode: `auto` batches eligible files, `file` keeps per-file workers
+        #[clap(long, default_value = "auto", value_name = "auto|file")]
+        batch_mode: TestBatchMode,
     },
     /// Run L2 property checks discovered in Surf or Deep inputs
     Prove {
@@ -358,6 +362,16 @@ enum Command {
         /// Optional substring filter on `<file>::<test_fn>`.
         #[clap(long)]
         filter: Option<String>,
+        /// Per-test timeout in seconds.
+        #[clap(long, default_value = "30")]
+        timeout: u64,
+    },
+    /// Internal: run a manifest of test files in a single batch worker.
+    #[command(hide = true, name = "__test_batch")]
+    InternalTestBatch {
+        /// JSON manifest describing the files and tests in the batch.
+        #[clap(long)]
+        manifest: PathBuf,
         /// Per-test timeout in seconds.
         #[clap(long, default_value = "30")]
         timeout: u64,
@@ -585,13 +599,30 @@ fn main() {
                 std::process::exit(2);
             }
         },
+        Some(Command::InternalTestBatch { manifest, timeout }) => {
+            match cmd_internal_test_batch(&manifest, Duration::from_secs(timeout.max(1))) {
+                Ok(code) => std::process::exit(code),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(2);
+                }
+            }
+        }
         Some(Command::Test {
             path,
             filter,
             json,
             timeout,
             jobs,
-        }) => match cmd_test(path.as_deref(), filter.as_deref(), json, timeout, jobs) {
+            batch_mode,
+        }) => match cmd_test(
+            path.as_deref(),
+            filter.as_deref(),
+            json,
+            timeout,
+            jobs,
+            batch_mode,
+        ) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 eprintln!("error: {err}");
@@ -2697,6 +2728,26 @@ impl FromStr for TestJobs {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestBatchMode {
+    Auto,
+    File,
+}
+
+impl FromStr for TestBatchMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("auto") {
+            return Ok(TestBatchMode::Auto);
+        }
+        if value.eq_ignore_ascii_case("file") {
+            return Ok(TestBatchMode::File);
+        }
+        Err("`--batch-mode` must be `auto` or `file`".to_string())
+    }
+}
+
 #[derive(Clone)]
 struct TestFileJob {
     index: usize,
@@ -2725,6 +2776,7 @@ fn cmd_test(
     json: bool,
     timeout_secs: u64,
     jobs: TestJobs,
+    batch_mode: TestBatchMode,
 ) -> Result<i32, String> {
     let raw_cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
     let target = match path {
@@ -2893,20 +2945,39 @@ fn cmd_test(
                 .to_string(),
         })
         .collect::<Vec<_>>();
-    let worker_count = jobs.resolve(test_jobs.len());
-    run_test_file_jobs(
-        &self_path,
-        &cwd,
-        &test_jobs,
-        worker_count,
-        filter,
-        timeout_secs,
-        context_tempfile.path(),
-        json,
-        &mut out,
-        &mut passed,
-        &mut failed,
-    )?;
+    match batch_mode {
+        TestBatchMode::File => {
+            let worker_count = jobs.resolve(test_jobs.len());
+            run_test_file_jobs(
+                &self_path,
+                &cwd,
+                &test_jobs,
+                worker_count,
+                filter,
+                timeout_secs,
+                context_tempfile.path(),
+                json,
+                &mut out,
+                &mut passed,
+                &mut failed,
+            )?;
+        }
+        TestBatchMode::Auto => {
+            run_test_jobs_auto(
+                &self_path,
+                &cwd,
+                &test_jobs,
+                jobs,
+                filter,
+                timeout_secs,
+                context_tempfile.path(),
+                json,
+                &mut out,
+                &mut passed,
+                &mut failed,
+            )?;
+        }
+    }
 
     if json {
         writeln!(
@@ -2919,6 +2990,50 @@ fn cmd_test(
     }
 
     Ok(if failed == 0 { 0 } else { 1 })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestBatchManifest {
+    files: Vec<TestBatchManifestFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestBatchManifestFile {
+    index: usize,
+    file: PathBuf,
+    rel_display: String,
+    tests: Vec<String>,
+}
+
+struct ClassifiedTestJobs {
+    batch_jobs: Vec<TestBatchManifestFile>,
+    file_jobs: Vec<TestFileJob>,
+}
+
+struct TestBatchManifestTempfile {
+    #[allow(dead_code)]
+    file: tempfile::NamedTempFile,
+}
+
+impl TestBatchManifestTempfile {
+    fn write(manifest: &TestBatchManifest) -> Result<Self, String> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("chelis-test-batch-").suffix(".json");
+        let mut file = builder
+            .tempfile()
+            .map_err(|e| format!("create test-batch manifest tempfile: {e}"))?;
+        let bytes = serde_json::to_vec(manifest)
+            .map_err(|e| format!("serialize test-batch manifest: {e}"))?;
+        std::io::Write::write_all(file.as_file_mut(), &bytes)
+            .map_err(|e| format!("write test-batch manifest tempfile: {e}"))?;
+        std::io::Write::flush(file.as_file_mut())
+            .map_err(|e| format!("flush test-batch manifest tempfile: {e}"))?;
+        Ok(Self { file })
+    }
+
+    fn path(&self) -> &Path {
+        self.file.path()
+    }
 }
 
 fn compiler_error_messages(err: &chelis_compiler_api::compiler::CompilerError) -> String {
@@ -2939,6 +3054,357 @@ fn is_local_registry_hash_unsupported(err: &chelis_compiler_api::compiler::Compi
     err.errors.iter().any(|diagnostic| {
         diagnostic.kind == "hash_error" && diagnostic.message.contains("LocalRegistry")
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_test_jobs_auto(
+    self_path: &Path,
+    cwd: &Path,
+    test_jobs: &[TestFileJob],
+    jobs: TestJobs,
+    filter: Option<&str>,
+    timeout_secs: u64,
+    compiled_context_path: &Path,
+    json: bool,
+    out: &mut impl Write,
+    passed: &mut usize,
+    failed: &mut usize,
+) -> Result<(), String> {
+    let classified = classify_test_jobs_for_batch(test_jobs, filter);
+    let mut rows_by_index = BTreeMap::<usize, Vec<TestRow>>::new();
+    let mut file_fallback_jobs = classified.file_jobs;
+
+    if !classified.batch_jobs.is_empty() {
+        match run_test_batch_subprocess(
+            self_path,
+            cwd,
+            &classified.batch_jobs,
+            timeout_secs,
+            compiled_context_path,
+        )? {
+            BatchSubprocessOutcome::Rows(rows) => {
+                if !group_batch_rows_by_file(&classified.batch_jobs, rows, &mut rows_by_index) {
+                    file_fallback_jobs.extend(batch_jobs_as_file_jobs(&classified.batch_jobs));
+                }
+            }
+            BatchSubprocessOutcome::Fallback => {
+                file_fallback_jobs.extend(batch_jobs_as_file_jobs(&classified.batch_jobs));
+            }
+        }
+    }
+
+    if !file_fallback_jobs.is_empty() {
+        let worker_count = jobs.resolve(file_fallback_jobs.len());
+        rows_by_index.extend(collect_test_file_jobs(
+            self_path,
+            cwd,
+            &file_fallback_jobs,
+            worker_count,
+            filter,
+            timeout_secs,
+            compiled_context_path,
+        )?);
+    }
+
+    for job in test_jobs {
+        if let Some(rows) = rows_by_index.remove(&job.index) {
+            emit_test_file_rows(out, json, &job.rel_display, &rows, passed, failed)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn batch_jobs_as_file_jobs(batch_jobs: &[TestBatchManifestFile]) -> Vec<TestFileJob> {
+    batch_jobs
+        .iter()
+        .map(|job| TestFileJob {
+            index: job.index,
+            file: job.file.clone(),
+            rel_display: job.rel_display.clone(),
+        })
+        .collect()
+}
+
+fn group_batch_rows_by_file(
+    batch_jobs: &[TestBatchManifestFile],
+    rows: Vec<TestRow>,
+    rows_by_index: &mut BTreeMap<usize, Vec<TestRow>>,
+) -> bool {
+    let expected_rows: usize = batch_jobs.iter().map(|job| job.tests.len()).sum();
+    if rows.len() != expected_rows {
+        return false;
+    }
+    let index_by_file = batch_jobs
+        .iter()
+        .map(|job| (job.rel_display.clone(), job.index))
+        .collect::<HashMap<_, _>>();
+    for row in rows {
+        let Some(index) = index_by_file.get(&row.file).copied() else {
+            return false;
+        };
+        rows_by_index.entry(index).or_default().push(row);
+    }
+    true
+}
+
+fn classify_test_jobs_for_batch(
+    test_jobs: &[TestFileJob],
+    filter: Option<&str>,
+) -> ClassifiedTestJobs {
+    let mut batch_jobs = Vec::new();
+    let mut file_jobs = Vec::new();
+    let mut seen_top_level_names = HashSet::<String>::new();
+
+    for job in test_jobs {
+        let Ok(source) = fs::read_to_string(&job.file) else {
+            file_jobs.push(job.clone());
+            continue;
+        };
+        let Ok(parsed) = chelis_surf::parser::parse_str(&source) else {
+            file_jobs.push(job.clone());
+            continue;
+        };
+        let flat = flatten_module_decls(&parsed);
+        let tests = match enumerate_test_fns(&flat, filter, &job.rel_display) {
+            EnumerationOutcome::Tests(tests) => tests,
+            EnumerationOutcome::Error(_) => {
+                file_jobs.push(job.clone());
+                continue;
+            }
+        };
+        if tests.is_empty() {
+            continue;
+        }
+        if flat.iter().any(|decl| matches!(decl, Decl::LetDef { .. })) {
+            file_jobs.push(job.clone());
+            continue;
+        }
+        let names = top_level_decl_names(&flat);
+        if names.iter().any(|name| seen_top_level_names.contains(name)) {
+            file_jobs.push(job.clone());
+            continue;
+        }
+        seen_top_level_names.extend(names);
+        batch_jobs.push(TestBatchManifestFile {
+            index: job.index,
+            file: job.file.clone(),
+            rel_display: job.rel_display.clone(),
+            tests: tests.into_iter().map(|test| test.name).collect(),
+        });
+    }
+
+    ClassifiedTestJobs {
+        batch_jobs,
+        file_jobs,
+    }
+}
+
+fn top_level_decl_names(decls: &[Decl]) -> Vec<String> {
+    let mut out = Vec::new();
+    for decl in decls {
+        match decl {
+            Decl::FunDef { name, .. }
+            | Decl::Sig { name, .. }
+            | Decl::TypeDef { name, .. }
+            | Decl::TypeAlias { name, .. }
+            | Decl::MacroDef { name, .. } => out.push(name.clone()),
+            Decl::Dim { names, .. } => out.extend(names.iter().cloned()),
+            _ => {}
+        }
+    }
+    out
+}
+
+enum BatchSubprocessOutcome {
+    Rows(Vec<TestRow>),
+    Fallback,
+}
+
+fn run_test_batch_subprocess(
+    self_path: &Path,
+    cwd: &Path,
+    batch_jobs: &[TestBatchManifestFile],
+    timeout_secs: u64,
+    compiled_context_path: &Path,
+) -> Result<BatchSubprocessOutcome, String> {
+    let manifest = TestBatchManifest {
+        files: batch_jobs.to_vec(),
+    };
+    let manifest_tempfile = TestBatchManifestTempfile::write(&manifest)?;
+
+    let mut cmd = std::process::Command::new(self_path);
+    cmd.arg("__test_batch")
+        .arg("--manifest")
+        .arg(manifest_tempfile.path())
+        .arg("--timeout")
+        .arg(timeout_secs.to_string())
+        .current_dir(cwd)
+        .env("CHELIS_TEST_COMPILED_CONTEXT", compiled_context_path);
+
+    let output = match run_worker_command_with_timeout(
+        cmd,
+        batch_worker_timeout(batch_jobs, timeout_secs),
+    ) {
+        Ok(output) => output,
+        Err(_) => return Ok(BatchSubprocessOutcome::Fallback),
+    };
+    if output.timed_out {
+        return Ok(BatchSubprocessOutcome::Fallback);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.output.stdout);
+    let mut rows = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return Ok(BatchSubprocessOutcome::Fallback);
+        };
+        let Some(file) = value.get("file").and_then(|v| v.as_str()) else {
+            return Ok(BatchSubprocessOutcome::Fallback);
+        };
+        let Some(test) = value.get("test").and_then(|v| v.as_str()) else {
+            return Ok(BatchSubprocessOutcome::Fallback);
+        };
+        let Some(status_s) = value.get("status").and_then(|v| v.as_str()) else {
+            return Ok(BatchSubprocessOutcome::Fallback);
+        };
+        let status = match status_s {
+            "pass" => TestStatus::Pass,
+            "fail" => TestStatus::Fail,
+            _ => return Ok(BatchSubprocessOutcome::Fallback),
+        };
+        let message = value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        rows.push(TestRow {
+            file: file.to_string(),
+            test: test.to_string(),
+            status,
+            message,
+        });
+    }
+
+    let should_fallback = match output.output.status.code() {
+        None => true,
+        Some(0) => false,
+        Some(1) => rows.is_empty(),
+        Some(_) => true,
+    };
+    if should_fallback {
+        return Ok(BatchSubprocessOutcome::Fallback);
+    }
+
+    Ok(BatchSubprocessOutcome::Rows(rows))
+}
+
+fn batch_worker_timeout(batch_jobs: &[TestBatchManifestFile], timeout_secs: u64) -> Duration {
+    let selected_count: usize = batch_jobs.iter().map(|job| job.tests.len()).sum();
+    let per_test = timeout_secs.max(1);
+    let test_budget = per_test
+        .saturating_mul(selected_count.saturating_add(1) as u64)
+        .saturating_add(10);
+    Duration::from_secs(test_budget.max(60))
+}
+
+fn collect_test_file_jobs(
+    self_path: &Path,
+    cwd: &Path,
+    test_jobs: &[TestFileJob],
+    worker_count: usize,
+    filter: Option<&str>,
+    timeout_secs: u64,
+    compiled_context_path: &Path,
+) -> Result<BTreeMap<usize, Vec<TestRow>>, String> {
+    if worker_count <= 1 {
+        let mut out = BTreeMap::new();
+        for job in test_jobs {
+            let rows = run_test_file_subprocess(
+                self_path,
+                cwd,
+                &job.file,
+                &job.rel_display,
+                filter,
+                timeout_secs,
+                Some(compiled_context_path),
+            );
+            out.insert(job.index, rows);
+        }
+        return Ok(out);
+    }
+
+    let jobs = Arc::new(test_jobs.to_vec());
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<TestFileResult>();
+    let self_path = self_path.to_path_buf();
+    let cwd = cwd.to_path_buf();
+    let filter = filter.map(str::to_string);
+    let compiled_context_path = compiled_context_path.to_path_buf();
+    let mut handles = Vec::new();
+
+    for _ in 0..worker_count {
+        let jobs = Arc::clone(&jobs);
+        let next_index = Arc::clone(&next_index);
+        let result_tx = result_tx.clone();
+        let self_path = self_path.clone();
+        let cwd = cwd.clone();
+        let filter = filter.clone();
+        let compiled_context_path = compiled_context_path.clone();
+        handles.push(thread::spawn(move || {
+            loop {
+                let index = next_index.fetch_add(1, Ordering::SeqCst);
+                let Some(job) = jobs.get(index).cloned() else {
+                    break;
+                };
+                let rows = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_test_file_subprocess(
+                        &self_path,
+                        &cwd,
+                        &job.file,
+                        &job.rel_display,
+                        filter.as_deref(),
+                        timeout_secs,
+                        Some(&compiled_context_path),
+                    )
+                })) {
+                    Ok(rows) => rows,
+                    Err(_) => vec![TestRow {
+                        file: job.rel_display.clone(),
+                        test: "<file>".to_string(),
+                        status: TestStatus::Fail,
+                        message: Some("parent worker thread panicked".to_string()),
+                    }],
+                };
+                let _ = result_tx.send(TestFileResult {
+                    index: job.index,
+                    rel_display: job.rel_display,
+                    rows,
+                });
+            }
+        }));
+    }
+    drop(result_tx);
+
+    let mut out = BTreeMap::new();
+    let mut received = 0usize;
+    while received < test_jobs.len() {
+        let result = result_rx
+            .recv()
+            .map_err(|_| "test worker pool terminated before every file completed".to_string())?;
+        received += 1;
+        out.insert(result.index, result.rows);
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| "test worker pool thread panicked".to_string())?;
+    }
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3536,51 +4002,7 @@ fn cmd_internal_test_file(
         std::process::abort();
     }
 
-    // Phase H: when the parent populates `CHELIS_TEST_COMPILED_CONTEXT`,
-    // load the bincode-encoded `CompiledContext` from the path it points
-    // at. Workers used to run `prepare_reef_graph` per file, paying the
-    // chelis-std re-check + re-lower cost N times per `chelis test`
-    // invocation; now the parent runs that pipeline ONCE and hands the
-    // result through. If the env var is missing (e.g., the worker is
-    // invoked directly without going through `chelis test`), we fall
-    // back to the reef-graph path so the worker still works standalone.
-    let compiled_context_env = env::var("CHELIS_TEST_COMPILED_CONTEXT").ok();
-    let exec_context = match compiled_context_env.as_deref() {
-        Some(path) if !path.is_empty() => {
-            let bytes = fs::read(path)
-                .map_err(|e| format!("read CHELIS_TEST_COMPILED_CONTEXT tempfile `{path}`: {e}"))?;
-            let ctx = chelis_compiler_api::CompiledContext::decode(&bytes)
-                .map_err(|e| format!("decode CHELIS_TEST_COMPILED_CONTEXT: {e}"))?;
-            // RT-H H3a fix: verify the decoded context belongs to this
-            // worker's cwd. Without this, a stale tempfile, racy
-            // pre-set env var, or a malicious actor could substitute a
-            // context for an unrelated package and the worker would
-            // silently run tests against the wrong library state.
-            // Cheap path-equality check: the parent set both cwd and
-            // the env var, so a genuine pairing has matching roots.
-            let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
-            let ctx_root = ctx
-                .reef_state()
-                .package_root
-                .canonicalize()
-                .unwrap_or_else(|_| ctx.reef_state().package_root.clone());
-            let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
-            if ctx_root != cwd_canon {
-                return Err(format!(
-                    "CHELIS_TEST_COMPILED_CONTEXT package_root `{}` does not match worker cwd `{}`; \
-                     refusing to run tests with a mismatched library context",
-                    ctx_root.display(),
-                    cwd_canon.display()
-                ));
-            }
-            TestExecutionContext::Context(Box::new(ctx))
-        }
-        _ => {
-            let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
-            let graph = chelis_reef::prepare_reef_graph(&cwd)?;
-            TestExecutionContext::ReefGraph(Box::new(graph))
-        }
-    };
+    let exec_context = load_test_execution_context()?;
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -3641,6 +4063,215 @@ fn cmd_internal_test_file(
         failed += 1;
     }
     Ok(if failed == 0 { 0 } else { 1 })
+}
+
+fn load_test_execution_context() -> Result<TestExecutionContext, String> {
+    // Phase H: when the parent populates `CHELIS_TEST_COMPILED_CONTEXT`,
+    // load the bincode-encoded `CompiledContext` from the path it points
+    // at. Workers used to run `prepare_reef_graph` per file, paying the
+    // chelis-std re-check + re-lower cost N times per `chelis test`
+    // invocation; now the parent runs that pipeline ONCE and hands the
+    // result through. If the env var is missing (e.g., the worker is
+    // invoked directly without going through `chelis test`), we fall
+    // back to the reef-graph path so the worker still works standalone.
+    let compiled_context_env = env::var("CHELIS_TEST_COMPILED_CONTEXT").ok();
+    match compiled_context_env.as_deref() {
+        Some(path) if !path.is_empty() => {
+            let bytes = fs::read(path)
+                .map_err(|e| format!("read CHELIS_TEST_COMPILED_CONTEXT tempfile `{path}`: {e}"))?;
+            let ctx = chelis_compiler_api::CompiledContext::decode(&bytes)
+                .map_err(|e| format!("decode CHELIS_TEST_COMPILED_CONTEXT: {e}"))?;
+            let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
+            let ctx_root = ctx
+                .reef_state()
+                .package_root
+                .canonicalize()
+                .unwrap_or_else(|_| ctx.reef_state().package_root.clone());
+            let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+            if ctx_root != cwd_canon {
+                return Err(format!(
+                    "CHELIS_TEST_COMPILED_CONTEXT package_root `{}` does not match worker cwd `{}`; \
+                     refusing to run tests with a mismatched library context",
+                    ctx_root.display(),
+                    cwd_canon.display()
+                ));
+            }
+            Ok(TestExecutionContext::Context(Box::new(ctx)))
+        }
+        _ => {
+            let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
+            let graph = chelis_reef::prepare_reef_graph(&cwd)?;
+            Ok(TestExecutionContext::ReefGraph(Box::new(graph)))
+        }
+    }
+}
+
+fn cmd_internal_test_batch(manifest_path: &Path, timeout: Duration) -> Result<i32, String> {
+    if env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() == Ok("1")
+        && env::var("CHELIS_TEST_FORCE_BATCH_ABORT").as_deref() == Ok("1")
+    {
+        std::process::abort();
+    }
+
+    let manifest_text = fs::read_to_string(manifest_path).map_err(|e| {
+        format!(
+            "read test-batch manifest `{}`: {e}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: TestBatchManifest = serde_json::from_str(&manifest_text).map_err(|e| {
+        format!(
+            "parse test-batch manifest `{}`: {e}",
+            manifest_path.display()
+        )
+    })?;
+    if env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() == Ok("1")
+        && let Ok(needle) = env::var("CHELIS_TEST_FORCE_ABORT")
+        && !needle.is_empty()
+        && manifest
+            .files
+            .iter()
+            .any(|file| file.rel_display.contains(&needle))
+    {
+        std::process::abort();
+    }
+    let exec_context = load_test_execution_context()?;
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut failed = 0usize;
+    let mut io_err: Option<String> = None;
+    let abort_after_test_substring =
+        if env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() == Ok("1") {
+            env::var("CHELIS_TEST_ABORT_AFTER_TEST").ok()
+        } else {
+            None
+        };
+    run_test_batch(&exec_context, &manifest.files, timeout, |row| {
+        if io_err.is_some() {
+            return;
+        }
+        if let Err(e) = writeln!(out, "{}", row.to_json()) {
+            io_err = Some(e.to_string());
+            return;
+        }
+        if let Err(e) = out.flush() {
+            io_err = Some(e.to_string());
+            return;
+        }
+        if row.status == TestStatus::Fail {
+            failed += 1;
+        }
+        if let Some(needle) = abort_after_test_substring.as_deref()
+            && !needle.is_empty()
+            && row.test.contains(needle)
+        {
+            std::process::abort();
+        }
+    })?;
+    if let Some(e) = io_err {
+        return Err(e);
+    }
+    Ok(if failed == 0 { 0 } else { 1 })
+}
+
+fn run_test_batch<F>(
+    exec_context: &TestExecutionContext,
+    files: &[TestBatchManifestFile],
+    timeout: Duration,
+    mut on_row: F,
+) -> Result<(), String>
+where
+    F: FnMut(&TestRow),
+{
+    let mut combined_decls = Vec::new();
+    let mut selected = Vec::<(String, String, chelis_deep::Span, String)>::new();
+    let mut seen_names = HashSet::<String>::new();
+
+    for file in files {
+        let source = fs::read_to_string(&file.file)
+            .map_err(|e| format!("read {}: {e}", file.file.display()))?;
+        let parsed = chelis_surf::parser::parse_str(&source)
+            .map_err(|e| format!("parse {}: {e}", file.file.display()))?;
+        let flat = flatten_module_decls(&parsed);
+        for name in top_level_decl_names(&flat) {
+            if !seen_names.insert(name.clone()) {
+                return Err(format!("duplicate top-level name `{name}` in test batch"));
+            }
+        }
+
+        let tests = match enumerate_test_fns(&flat, None, &file.rel_display) {
+            EnumerationOutcome::Tests(tests) => tests,
+            EnumerationOutcome::Error(msg) => return Err(msg),
+        };
+        for test_name in &file.tests {
+            let Some(test) = tests.iter().find(|candidate| candidate.name == *test_name) else {
+                return Err(format!(
+                    "selected test `{test_name}` was not found in {}",
+                    file.rel_display
+                ));
+            };
+            let synth_name = format!("__chelis_test_f{}_t{}", file.index, selected.len());
+            selected.push((
+                file.rel_display.clone(),
+                test.name.clone(),
+                test.span,
+                synth_name,
+            ));
+        }
+        combined_decls.extend(flat);
+    }
+
+    for (_, test_name, span, synth_name) in &selected {
+        let call = chelis_surf::ast::Expr::Apply(
+            Box::new(chelis_surf::ast::Expr::Var(test_name.clone(), *span)),
+            Vec::new(),
+            *span,
+        );
+        combined_decls.push(Decl::LetDef {
+            name: synth_name.clone(),
+            ty: None,
+            value: call,
+            span: *span,
+        });
+    }
+
+    let prepared_eval = prepare_eval_in_exec_context(exec_context, &combined_decls)?;
+
+    for (rel_display, test_name, _, synth_name) in selected {
+        let root = synth_name.clone();
+        let handle = prepared_eval.clone();
+        let outcome = run_test_with_timeout(
+            move || Ok(handle.eval_root(BTreeMap::new(), &root)),
+            timeout,
+            &format!("timeout after {}s", timeout.as_secs()),
+        );
+
+        let (status, message) = match outcome {
+            Err(msg) => (TestStatus::Fail, Some(msg)),
+            Ok(result) => match result {
+                Ok(_) => (TestStatus::Pass, None),
+                Err(err) => {
+                    let message = err
+                        .errors
+                        .iter()
+                        .map(|d| d.message.clone())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    (TestStatus::Fail, Some(message))
+                }
+            },
+        };
+
+        on_row(&TestRow {
+            file: rel_display,
+            test: test_name,
+            status,
+            message,
+        });
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
