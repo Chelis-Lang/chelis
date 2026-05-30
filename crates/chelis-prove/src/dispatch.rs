@@ -125,11 +125,8 @@ pub fn dispatch_property(
                 };
             }
         } else {
-            let tier_b_result = crate::tier_b::solve(
-                _property_source,
-                _property_name,
-                options.smt_timeout_ms,
-            );
+            let tier_b_result =
+                crate::tier_b::solve(_property_source, _property_name, options.smt_timeout_ms);
             match tier_b_result {
                 TierBResult::Proved => {
                     return ProofArtifact {
