@@ -79,7 +79,14 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     let tm = TermManager::new();
     let mut solver = Solver::new(&tm);
 
-    solver.set_logic("QF_NRA");
+    // Choose logic based on expression content
+    let has_transcendentals = contains_transcendental(&property.postcondition)
+        || property.preconditions.iter().any(|p| contains_transcendental(p));
+    if has_transcendentals {
+        solver.set_logic("QF_NRAT");
+    } else {
+        solver.set_logic("QF_NRA");
+    }
     solver.set_option("produce-models", "true");
     solver.set_option("tlimit-per", &timeout_ms.to_string());
 
@@ -247,6 +254,24 @@ pub fn lower_to_cvc5(
             let e = lower_to_cvc5(tm, else_expr, vars);
             tm.mk_term(Kind::CVC5_KIND_ITE, &[c, t, e])
         }
+    }
+}
+
+/// Check if an SmtExpr contains transcendental function calls (exp, sin, cos, sqrt, abs).
+#[cfg(feature = "smt")]
+fn contains_transcendental(expr: &SmtExpr) -> bool {
+    match expr {
+        SmtExpr::Apply(name, args) => {
+            matches!(name.as_str(), "exp" | "sin" | "cos" | "sqrt" | "abs")
+                || args.iter().any(contains_transcendental)
+        }
+        SmtExpr::Arith(_, l, r) => contains_transcendental(l) || contains_transcendental(r),
+        SmtExpr::Cmp(_, l, r) => contains_transcendental(l) || contains_transcendental(r),
+        SmtExpr::Bool(_, children) => children.iter().any(contains_transcendental),
+        SmtExpr::Not(inner) => contains_transcendental(inner),
+        SmtExpr::Ite(c, t, e) => contains_transcendental(c) || contains_transcendental(t) || contains_transcendental(e),
+        SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => contains_transcendental(body),
+        _ => false,
     }
 }
 
