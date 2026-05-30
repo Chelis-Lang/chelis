@@ -1393,13 +1393,21 @@ impl<'a> EvalContext<'a> {
         // so a genuinely differentiable program is not falsely blocked.
         let host_only_hit = find_reachable_host_only_builtin_call(&app_expr, &program_defs);
         if let Some(name) = host_only_hit {
-            let kind_label = match kind {
-                TransformKind::Grad => "grad",
-                TransformKind::Vmap => "vmap",
+            // Keep the verb honest per transform: `grad` differentiates,
+            // `vmap` vectorizes. Both fail for the same root cause (no
+            // RISC DAG lowering), but only `grad` additionally needs an
+            // adjoint, so only its message mentions the missing adjoint.
+            let (kind_label, verb, reason) = match kind {
+                TransformKind::Grad => (
+                    "grad",
+                    "differentiate through",
+                    "it has no RISC DAG lowering and no AD adjoint",
+                ),
+                TransformKind::Vmap => ("vmap", "vectorize over", "it has no RISC DAG lowering"),
             };
             return Err(format!(
-                "host runtime: `{kind_label}(...)` cannot differentiate through host-runtime-only \
-                 builtin `{name}`; it has no RISC DAG lowering and no AD adjoint (see \
+                "host runtime: `{kind_label}(...)` cannot {verb} host-runtime-only \
+                 builtin `{name}`; {reason} (see \
                  spec/05-risc-primitives.md §3.6 Host-Runtime Builders). Build the per-index \
                  accumulator with tensor-lane primitives (e.g. `range`/`map`/`expand`) before \
                  applying `{kind_label}`."
@@ -5672,6 +5680,21 @@ fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec
 /// of `defs` so the transform target's own def — and any helper it
 /// calls — is searched, but unrelated top-level defs are not. Returns
 /// the name of the first host-only builtin reached, or `None`.
+///
+/// Known, accepted limitation (issue #257 review item 6): detection
+/// matches only a *direct application by name*, `(app (var tensor_scan)
+/// ...)`, and only follows references that resolve to a top-level `defs`
+/// entry. Two exotic aliasing forms therefore slip past — a `let`-bound
+/// alias (`let f = tensor_scan in f(acc, cb, n)`, where `f` is a local
+/// binding rather than a `defs` key and the call site `(app (var f)
+/// ...)` does not name a host-only builtin), and `tensor_scan` passed as
+/// an un-applied value into a higher-order helper whose own body applies
+/// it. Both fail *soft*: the transform then reaches
+/// `try_lower_subexpr_program`, which rejects the un-lowerable builtin
+/// anyway, so the user still gets an error — just the older, less
+/// specific one rather than the §3.6-tagged message. The failure mode
+/// is message quality in an aliasing corner, never a wrong gradient or
+/// a silently-lowered host-only op, so it is left as-is.
 fn find_reachable_host_only_builtin_call(
     root: &Expr,
     defs: &HashMap<String, Expr>,

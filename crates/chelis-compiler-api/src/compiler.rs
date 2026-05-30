@@ -1569,6 +1569,21 @@ fn reject_host_only_builtins(
         CompileTarget::Hip => "hip",
     };
 
+    // This walk is deliberately whole-program (every global value AND
+    // every function body), NOT scoped to the build entry's reachable
+    // call graph. That asymmetry with the reachability-scoped AD guard
+    // in `runtime.rs::find_reachable_host_only_builtin_call` is
+    // intentional: `chelis_backend_c::host_emit` emits *every*
+    // `program.functions` entry unconditionally (no dead-code pruning),
+    // so a `tensor_scan` call inside an otherwise-unreferenced helper
+    // still reaches the C emitter and produces the silent
+    // `/* unsupported builtin tensor_scan */ 0` stub. Rejecting only the
+    // entry-reachable subset would let that broken stub ship in a build
+    // the user believes succeeded. The AD guard can scope to the
+    // transform target because AD lowers only that target's subgraph;
+    // `chelis build` has no such pruning, so the guard must match the
+    // emitter's whole-program scope. (If backend dead-function pruning
+    // lands later, this can be narrowed to the emitted set in lockstep.)
     let mut found: Option<String> = None;
     for global in &program.globals {
         scan_expr(&global.value, &mut found);

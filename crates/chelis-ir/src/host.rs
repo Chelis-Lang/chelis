@@ -6885,24 +6885,29 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             None => Some(HostType::Unknown),
         },
         // Issue #257: `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
-        // The output is a rank-1 tensor whose precision is determined by the
-        // initial scalar's dtype. The dimension is wildcard at type-check
-        // time because `n` is a runtime value.
-        "tensor_scan" => match arg_tys.first() {
-            Some(HostType::Int64) => Some(HostType::Tensor(TensorType {
-                dims: vec![DimInfo::Named("*".into(), None)],
-                precision: chelis_types::types::Prim::Int64,
-            })),
-            Some(HostType::Float64) => Some(HostType::Tensor(TensorType {
-                dims: vec![DimInfo::Named("*".into(), None)],
-                precision: chelis_types::types::Prim::F32,
-            })),
-            Some(HostType::Bool) => Some(HostType::Tensor(TensorType {
-                dims: vec![DimInfo::Named("*".into(), None)],
-                precision: chelis_types::types::Prim::Bool,
-            })),
-            _ => Some(HostType::Unknown),
-        },
+        //
+        // We deliberately do NOT synthesize a concrete `HostType::Tensor`
+        // precision here. `HostType` is a *coarse* host-IR class: every
+        // integer width collapses to `Int64` and every float width to
+        // `Float64` (see `host_type_from_tensor_input`), so by the time
+        // the initial value's type reaches this arm its real dtype
+        // (`int8`..`int64`, `f16`..`f64`) is already gone. Any concrete
+        // precision we picked would be a guess — e.g. an earlier version
+        // mapped `Float64 -> F32`, which is wrong for an `f64` initial,
+        // and `Int64` for an `int32` initial. The authoritative element
+        // type lives in the real type checker (`chelis-types`
+        // `infer.rs::infer_app` "tensor_scan" arm) and in the runtime,
+        // which reads the precision straight off the initial value.
+        //
+        // Returning `Unknown` is sound because this host type is *never
+        // consumed*: `tensor_scan` is host-only, so any compiled-backend
+        // program that reaches it is rejected up front by
+        // `compiler.rs::reject_host_only_builtins` (which keys off the
+        // `Builtin` node, not its inferred type) before the C/HIP emitter
+        // runs, and the `chelis eval`/`chelis test` interpreter never
+        // consults host-IR types at all. Emitting `Unknown` keeps this
+        // arm from advertising a precision it cannot actually know.
+        "tensor_scan" => Some(HostType::Unknown),
         "partition" => match arg_tys.get(1) {
             Some(list_ty) => Some(HostType::Tuple(vec![list_ty.clone(), list_ty.clone()])),
             None => Some(HostType::Unknown),

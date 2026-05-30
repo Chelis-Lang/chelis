@@ -491,3 +491,95 @@ out = map(builder, [cast(1, int64), cast(2, int64)])
         "rejection must name the builtin, got: {message}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// vmap path (review item 4 — negative parity for the §3.6 claim that BOTH
+// `grad` and `vmap` are rejected). `vmap(...)` over a function whose body
+// reaches `tensor_scan` must fail with a tensor_scan-tagged, vmap-specific
+// error. The guard is shared with `grad` but the diagnostic verb differs:
+// `vmap` "cannot vectorize over" (no AD adjoint clause), `grad` "cannot
+// differentiate through". This pins that the message stays honest per
+// transform and that the vmap branch actually reaches the guard.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue257_tensor_scan_vmap_rejected_with_tagged_error() {
+    // `target` maps a rank-1 slice and calls tensor_scan in its body;
+    // vmap over axis 0 of a [2, 1] input applies it per row.
+    let src = r#"
+target = fn (row: tensor[1, f32]) -> tensor_scan(
+  cast(0.0, f32),
+  fn (prev: f32, _i: int64) -> mul(prev, cast(2.0, f32)),
+  cast(4, int64)
+)
+out = vmap(target, axis=0)(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))
+"#;
+    let result = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: src.to_string(),
+        bindings: BTreeMap::new(),
+    });
+    let err = result.expect_err("vmap over tensor_scan must fail closed");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("tensor_scan"),
+        "vmap rejection must name the unsupported builtin, got: {message}"
+    );
+    assert!(
+        message.contains("vmap"),
+        "vmap rejection must name the vmap transform, got: {message}"
+    );
+    // The verb must be vmap-honest: vmap vectorizes, it does not
+    // differentiate. Guards against the shared-message regression where
+    // both transforms read "cannot differentiate through".
+    assert!(
+        message.to_lowercase().contains("vectorize"),
+        "vmap rejection must say it cannot vectorize (not differentiate), got: {message}"
+    );
+    assert!(
+        !message.to_lowercase().contains("differentiate") && !message.contains("AD adjoint"),
+        "vmap rejection must not borrow grad's differentiate/adjoint wording, got: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Whole-program build rejection (review item 2). The `chelis build` guard
+// is intentionally whole-program, NOT scoped to the entry's reachable call
+// graph, because `chelis_backend_c::host_emit` emits every top-level
+// function unconditionally (no dead-code pruning). A `tensor_scan` call in
+// an entry-unreachable helper would therefore still reach the C emitter and
+// produce the silent `/* unsupported builtin tensor_scan */ 0` stub. This
+// pins that such a helper is rejected even though `main` never calls it —
+// the deliberate asymmetry with the reachability-scoped AD guard. If
+// backend dead-function pruning ever lands, this expectation flips and the
+// build guard can be narrowed in lockstep.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue257_tensor_scan_build_c_rejected_in_unreachable_helper() {
+    let src = r#"
+def helper(x: int64) -> tensor[*, int64] = tensor_scan(
+  x,
+  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
+  cast(3, int64)
+)
+def main(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)
+"#;
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: src.to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    });
+    let err = result
+        .expect_err("chelis build --target c must reject an entry-unreachable tensor_scan helper");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("tensor_scan"),
+        "rejection must name the builtin, got: {message}"
+    );
+    assert!(
+        !message.contains("/* unsupported builtin"),
+        "rejection must not be paired with a silent C stub, got: {message}"
+    );
+}
