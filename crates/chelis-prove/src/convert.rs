@@ -148,9 +148,9 @@ pub fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<SmtExpr> {
 }
 
 /// Convert an arithmetic Surf expression to SMT with variable substitution.
-pub fn surf_arith_subst<'a>(
+pub fn surf_arith_subst(
     expr: &Expr,
-    subst: &HashMap<String, &'a Expr>,
+    subst: &HashMap<String, &Expr>,
     ctx: &InlineCtx,
 ) -> Option<SmtExpr> {
     match expr {
@@ -288,9 +288,9 @@ pub fn surf_arith_subst<'a>(
 }
 
 /// Convert a boolean Surf expression to SMT with variable substitution.
-pub fn surf_expr_to_smt_subst<'a>(
+pub fn surf_expr_to_smt_subst(
     expr: &Expr,
-    subst: &HashMap<String, &'a Expr>,
+    subst: &HashMap<String, &Expr>,
     ctx: &InlineCtx,
 ) -> Option<SmtExpr> {
     match expr {
