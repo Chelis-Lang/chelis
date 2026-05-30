@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (cast {} (lit {type: (t-prim {} f32)} 8.0) (t-prim {} f32))))

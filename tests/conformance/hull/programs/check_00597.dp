@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} log) (if {} (if {} (lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} bool)} false)) (app {} (var {} sin) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 2.0)) (var {} xa))) (lit {type: (t-prim {} f32)} 4.0)))))

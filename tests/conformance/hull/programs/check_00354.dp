@@ -1,0 +1,1 @@
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} sin) (if {} (let {} (bind {} xb (var {} xa)) (lit {type: (t-prim {} bool)} false)) (app {} (var {} neg) (var {} xa)) (app {} (var {} neg) (var {} xa)))))))

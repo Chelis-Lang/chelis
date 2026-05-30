@@ -1,0 +1,1 @@
+(def {} g (app {} (var {} sqrt) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} f32)} 2.0)))

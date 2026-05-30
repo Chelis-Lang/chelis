@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 2) (t-prim {} int64))})) (app {} (var {} permute) (var {} ta) (lit {type: (t-prim {} int32)} 0))))

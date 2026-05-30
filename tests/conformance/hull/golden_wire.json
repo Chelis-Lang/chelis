@@ -1,0 +1,1009 @@
+[
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-tuple {} (t-prim {} f32) (t-prim {} f32)))",
+    "id": "check_00019",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "items": [
+            {
+              "kind": "prim",
+              "name": "f32"
+            },
+            {
+              "kind": "prim",
+              "name": "f32"
+            }
+          ],
+          "kind": "tuple"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00039",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00059",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00079",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00119",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00139",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-tuple {} (t-prim {} f32) (t-prim {} f32)))",
+    "id": "check_00159",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "items": [
+            {
+              "kind": "prim",
+              "name": "f32"
+            },
+            {
+              "kind": "prim",
+              "name": "f32"
+            }
+          ],
+          "kind": "tuple"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00179",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00199",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00219",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00259",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00279",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-tuple {} (t-prim {} f32) (t-prim {} f32)))",
+    "id": "check_00299",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "items": [
+            {
+              "kind": "prim",
+              "name": "f32"
+            },
+            {
+              "kind": "prim",
+              "name": "f32"
+            }
+          ],
+          "kind": "tuple"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00319",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00339",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00359",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00399",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00419",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00439",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00459",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00479",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-tensor {} (d-name {} batch) (d-name {} batch) (t-prim {} int64)) (t-tensor {} (d-name {} batch) (d-name {} batch) (t-prim {} int64)))",
+    "id": "check_00499",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "dims": [
+              {
+                "kind": "name",
+                "name": "batch"
+              },
+              {
+                "kind": "name",
+                "name": "batch"
+              }
+            ],
+            "kind": "tensor",
+            "precision": {
+              "kind": "concrete",
+              "name": "int64"
+            }
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "dims": [
+            {
+              "kind": "name",
+              "name": "batch"
+            },
+            {
+              "kind": "name",
+              "name": "batch"
+            }
+          ],
+          "kind": "tensor",
+          "precision": {
+            "kind": "concrete",
+            "name": "int64"
+          }
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-tensor {} (d-name {} hidden) (d-lit {} 2) (t-prim {} f32)) (t-fn {} (t-tensor {} (d-lit {} 4) (d-name {} hidden) (t-prim {} f32)) (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))))",
+    "id": "check_00519",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "dims": [
+              {
+                "kind": "name",
+                "name": "hidden"
+              },
+              {
+                "kind": "lit",
+                "size": 2
+              }
+            ],
+            "kind": "tensor",
+            "precision": {
+              "kind": "concrete",
+              "name": "f32"
+            }
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "args": [
+            {
+              "dims": [
+                {
+                  "kind": "lit",
+                  "size": 4
+                },
+                {
+                  "kind": "name",
+                  "name": "hidden"
+                }
+              ],
+              "kind": "tensor",
+              "precision": {
+                "kind": "concrete",
+                "name": "f32"
+              }
+            }
+          ],
+          "kind": "fn",
+          "ret": {
+            "dims": [
+              {
+                "kind": "lit",
+                "size": 4
+              },
+              {
+                "kind": "lit",
+                "size": 2
+              }
+            ],
+            "kind": "tensor",
+            "precision": {
+              "kind": "concrete",
+              "name": "f32"
+            }
+          }
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00539",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00559",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00579",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00599",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00619",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-tensor {} (d-name {} batch) (t-prim {} bool)) (t-tensor {} (d-name {} batch) (t-prim {} bool)))",
+    "id": "check_00639",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "dims": [
+              {
+                "kind": "name",
+                "name": "batch"
+              }
+            ],
+            "kind": "tensor",
+            "precision": {
+              "kind": "concrete",
+              "name": "bool"
+            }
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "dims": [
+            {
+              "kind": "name",
+              "name": "batch"
+            }
+          ],
+          "kind": "tensor",
+          "precision": {
+            "kind": "concrete",
+            "name": "bool"
+          }
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-tensor {} (d-name {} seq) (d-lit {} 4) (t-prim {} f32)) (t-fn {} (t-tensor {} (d-name {} hidden) (d-name {} seq) (t-prim {} f32)) (t-tensor {} (d-name {} hidden) (d-lit {} 4) (t-prim {} f32))))",
+    "id": "check_00659",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "dims": [
+              {
+                "kind": "name",
+                "name": "seq"
+              },
+              {
+                "kind": "lit",
+                "size": 4
+              }
+            ],
+            "kind": "tensor",
+            "precision": {
+              "kind": "concrete",
+              "name": "f32"
+            }
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "args": [
+            {
+              "dims": [
+                {
+                  "kind": "name",
+                  "name": "hidden"
+                },
+                {
+                  "kind": "name",
+                  "name": "seq"
+                }
+              ],
+              "kind": "tensor",
+              "precision": {
+                "kind": "concrete",
+                "name": "f32"
+              }
+            }
+          ],
+          "kind": "fn",
+          "ret": {
+            "dims": [
+              {
+                "kind": "name",
+                "name": "hidden"
+              },
+              {
+                "kind": "lit",
+                "size": 4
+              }
+            ],
+            "kind": "tensor",
+            "precision": {
+              "kind": "concrete",
+              "name": "f32"
+            }
+          }
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00679",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00699",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00719",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00739",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00759",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00819",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00839",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00859",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00879",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00899",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00959",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  },
+  {
+    "expected_canonical": "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "id": "check_00979",
+    "wire": {
+      "display_signature_structured": {
+        "args": [
+          {
+            "kind": "prim",
+            "name": "f32"
+          }
+        ],
+        "kind": "fn",
+        "ret": {
+          "kind": "prim",
+          "name": "f32"
+        }
+      },
+      "effect_row": []
+    }
+  }
+]

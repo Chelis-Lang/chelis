@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple {} (app {} (var {} neg) (lit {type: (t-prim {} f32)} 6.0)) (lit {type: (t-prim {} f32)} 6.0))))

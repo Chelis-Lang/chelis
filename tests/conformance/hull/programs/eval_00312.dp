@@ -1,0 +1,1 @@
+(def {} answer (app {} (var {} div) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 8.0)) (if {} (lit {type: (t-prim {} bool)} false) (let {} (bind {} xb (var {} xa)) (var {} xb)) (var {} xa))) (app {} (var {} sin) (lit {type: (t-prim {} f32)} 4.0))))

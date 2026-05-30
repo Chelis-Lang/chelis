@@ -1,0 +1,1 @@
+(def {} answer (app {} (var {} neg) (let {} (bind {} xa (app {} (var {} sin) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 0.0)) (var {} xa)))) (var {} xa))))

@@ -1,0 +1,1 @@
+(def {} answer (app {} (var {} div) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 4.0)) (app {} (var {} sin) (lit {type: (t-prim {} f32)} 8.0))))

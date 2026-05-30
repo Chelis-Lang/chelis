@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} sqrt) (app {} (var {} neg) (app {} (var {} sin) (app {} (var {} add) (lit {type: (t-prim {} f32)} 0.0) (lit {type: (t-prim {} f32)} 7.0)))))))
