@@ -375,6 +375,111 @@ that need a differentiable variant must use `ScatterAdd` (whose
 adjoint is well-defined as `Gather`) or wrap `Scatter` in a
 stop-gradient.
 
+### 3.6 Host-Runtime Builders
+
+The following helper is **host-runtime only**. It runs inside the
+`chelis test` / `chelis eval` interpreter and produces a tensor without
+going through a Surf `List` intermediate. It is not in the RISC DAG
+and has no AD adjoint; differentiable code must build its accumulator
+state through the tensor-lane primitives in §2.
+
+| Name | Signature | Semantics |
+|---|---|---|
+| `tensor_scan` | `(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]` | Iteratively apply `fn(prev, i)` for `i in 0..n` and collect the `n` resulting values into a rank-1 tensor whose precision matches `T`. |
+
+`T` must be a scalar primitive (`int8`..`int64`, `f16`..`f64`,
+`bool`). The output is owned, contiguous, rank-1, and its
+precision equals the dtype of `initial`. The iteration order is the
+positional integer sequence `0, 1, ..., n - 1`.
+
+Precision caveat: the host-runtime interpreter stores every scalar — the
+running accumulator included, not only the emitted tensor elements — as
+an `f64` (`crates/chelis-compiler-api/src/runtime.rs`
+`ScalarBits::as_f64`), so a `T = int64` accumulator is exact only up to
+2^53; integer magnitudes beyond that lose their low bits, matching
+IEEE-754 double semantics and the behavior of every other host-runtime
+tensor builder. This is not specific to `tensor_scan`. Because the
+*accumulator itself* is f64-backed, the loss is not confined to the
+final stored elements: if `fn` drives the accumulator above 2^53 at any
+step, that step rounds and every subsequent step folds the rounded value
+forward, so a scan whose values transiently exceed 2^53 is wrong even
+where the final element lands back inside the exact range. Concretely,
+three `+1` steps from 2^53 yield `[2^53, 2^53, 2^53]` rather than
+`[2^53+1, 2^53+2, 2^53+3]`, because 2^53+1 is unrepresentable and the
+rounded accumulator carries forward. The init-style use cases that
+motivate the helper (LCG-driven Glorot weights bounded by the modulus,
+positional/index sequences, learned-schedule precompute) all stay within
+2^53 at every step, so the caveat is documented rather than guarded.
+
+`tensor_scan` exists because the host-runtime interpreter has no
+tail-call optimization: right-recursive Surf list builds of more than
+~10000 elements overflow the worker stack (Chelis-Lang/chelis#257),
+and the chunked / fold workaround patterns hit an O(n²) `concat`
+wall well below the 30k–40k-element regime that init-style use cases
+(LCG-driven Glorot weights, positional embedding precompute, learned
+schedule precompute) need. `tensor_scan` runs the loop on the host
+in Rust, so the worker stack is constant in `n`.
+
+The builtin is **not** wired into `chelis build` for the `c` or `hip`
+backend target. A program that calls `tensor_scan` at top-level, inside
+a higher-order callback body (`map`/`fold`/`filter`/`scan`/`partition`/
+`flat_map`), or inside any top-level function — *whether or not that
+function is reachable from the build entry* — is rejected at compile
+time with a `tensor_scan`-tagged `unsupported_feature` diagnostic that
+points back to this section. The rejection is enforced in
+`crates/chelis-compiler-api/src/compiler.rs::reject_host_only_builtins`,
+which walks every top-level binding value, every function body, and
+every inline callback body, so the C/HIP emitters never see a
+`tensor_scan` call; previously the C host emitter silently produced
+`__binding_0_value = /* unsupported builtin tensor_scan */ 0` and the
+compiled program returned garbage. Programs that need a compiled scan
+over a tensor must compose `expand` + the tensor-lane primitives
+directly.
+
+This build-time walk is intentionally **whole-program**, in contrast to
+the *reachability-scoped* AD/`vmap` rejection below. The asymmetry is
+deliberate and tracks each backend's emission scope: the C/HIP host
+emitter (`chelis_backend_c::host_emit`) emits *every* top-level function
+unconditionally with no dead-code pruning, so a `tensor_scan` call inside
+an otherwise-unreferenced helper still reaches the emitter and would
+produce the silent stub above. Narrowing the build guard to the entry's
+reachable call graph while the emitter still emits the whole program
+would let that broken stub ship in a build the user believes succeeded.
+The AD/`vmap` guard can scope to the transform target because the AD
+lowering only ever touches that target's subgraph. If backend
+dead-function pruning is added later, the build guard can be narrowed to
+the emitted set in lockstep.
+
+A future Tier 1 primitive can replace this host-only helper once the
+RISC DAG admits higher-order tensor primitives. Until that lands,
+`tensor_scan` is the recommended path for building per-index tensor
+data at `chelis test` / `chelis eval` time without paying the
+right-recursive list cost.
+
+**Negative parity for `tensor_scan`**: a non-callable second argument,
+a wrong-arity call, a negative `n`, or a callback that returns a
+different dtype than the initial value's dtype are rejected with
+`tensor_scan`-tagged diagnostics (the first three at type-check
+time, the dtype-mismatch as a belt-and-suspenders runtime guard).
+A `chelis build --target c` or `--target hip` of a program that
+calls `tensor_scan` is rejected at compile time, and `grad(...)`
+/ `vmap(...)` over a function whose body reaches `tensor_scan` is
+rejected at the host-runtime transform boundary with a tagged error
+referencing this section (the diagnostic verb is transform-specific:
+`grad` reports it cannot *differentiate through* the builtin, `vmap`
+that it cannot *vectorize over* it). The AD-boundary rejection is
+*reachability*-scoped: it fires only when `tensor_scan` is reachable
+from the transform target (the applied function and the def bodies it
+calls), so an unrelated top-level binding that happens to call
+`tensor_scan` does not falsely block a differentiable transform. The
+acceptance tests in
+`crates/chelis-compiler-api/tests/issue_257_tensor_scan_host_runtime.rs`
+pin each of these — the reachability-scoping case, separate `grad` and
+`vmap` rejections, the higher-order-callback build rejection, and the
+whole-program build rejection of a `tensor_scan` call in an
+entry-unreachable helper — alongside the positive 8/20000/40000-element
+cases.
+
 ---
 
 ## 4. Standard Lowerings (Tier 2 → Tier 1)

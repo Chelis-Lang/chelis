@@ -148,6 +148,15 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
         .entry_name
         .unwrap_or_else(|| "chelis_main".to_string());
 
+    // Reject host-runtime-only builtins early for any compiled-backend
+    // target. Without this guard `chelis build` silently emits a C stub
+    // like `__binding_0_value = /* unsupported builtin tensor_scan */ 0`
+    // and the compiled program returns garbage at runtime. See
+    // spec/05-risc-primitives.md §3.6 for the host-only contract.
+    if let Some(host_program) = host_compiled.host.as_ref() {
+        reject_host_only_builtins(host_program, request.target)?;
+    }
+
     match request.target {
         CompileTarget::C => {
             if let Some(host_program) = host_compiled.host.as_ref()
@@ -1422,6 +1431,189 @@ fn reject_unsized_named_dims(dag: &Dag, target: &str) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Host-only builtins that have no compiled-backend lowering. Calls
+/// to these from a `chelis build` program must fail at compile time
+/// with a clear error rather than silently emit a `/* unsupported
+/// builtin */ 0` C stub. Spec: `spec/05-risc-primitives.md` §3.6.
+const HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
+
+fn reject_host_only_builtins(
+    program: &chelis_ir::host::HostProgram,
+    target: CompileTarget,
+) -> Result<()> {
+    use chelis_ir::host::{HostCallback, HostCallbackKind, HostExpr, HostExprKind};
+
+    // A higher-order helper's callback can itself reach a host-only
+    // builtin (e.g. `map(fn (x) -> tensor_scan(...), xs)`). An *inline*
+    // callback carries its body inline, so we descend into it. A *named*
+    // callback refers to a top-level function by name; that function's
+    // body is scanned separately when we walk `program.functions`, so we
+    // do not need to chase the reference here.
+    fn scan_callback(callback: &HostCallback, found: &mut Option<String>) {
+        if let HostCallbackKind::Inline { body, .. } = &callback.kind {
+            scan_expr(body, found);
+        }
+    }
+
+    fn scan_expr(expr: &HostExpr, found: &mut Option<String>) {
+        if found.is_some() {
+            return;
+        }
+        match &expr.kind {
+            HostExprKind::Builtin { name, args, .. } => {
+                if HOST_ONLY_BUILTINS.contains(&name.as_str()) {
+                    *found = Some(name.clone());
+                    return;
+                }
+                for arg in args {
+                    scan_expr(arg, found);
+                }
+            }
+            HostExprKind::Call { args, .. } => {
+                for arg in args {
+                    scan_expr(arg, found);
+                }
+            }
+            HostExprKind::TensorCall { args, .. } => {
+                for arg in args {
+                    scan_expr(arg, found);
+                }
+            }
+            HostExprKind::If {
+                cond,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                scan_expr(cond, found);
+                scan_expr(then_expr, found);
+                scan_expr(else_expr, found);
+            }
+            HostExprKind::Let { bindings, body, .. } => {
+                for binding in bindings {
+                    scan_expr(&binding.value, found);
+                }
+                scan_expr(body, found);
+            }
+            HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
+                for item in items {
+                    scan_expr(item, found);
+                }
+            }
+            HostExprKind::AdtConstruct { fields, .. } => {
+                for field in fields {
+                    scan_expr(field, found);
+                }
+            }
+            HostExprKind::AdtFieldAccess { base, .. } => scan_expr(base, found),
+            HostExprKind::MatchOption {
+                scrutinee,
+                some_expr,
+                none_expr,
+                ..
+            } => {
+                scan_expr(scrutinee, found);
+                scan_expr(some_expr, found);
+                scan_expr(none_expr, found);
+            }
+            HostExprKind::MatchAdt {
+                scrutinee,
+                arms,
+                default_expr,
+                ..
+            } => {
+                scan_expr(scrutinee, found);
+                for arm in arms {
+                    scan_expr(&arm.expr, found);
+                }
+                if let Some(d) = default_expr {
+                    scan_expr(d, found);
+                }
+            }
+            HostExprKind::Map { callback, list, .. }
+            | HostExprKind::Filter { callback, list, .. }
+            | HostExprKind::Partition { callback, list, .. }
+            | HostExprKind::FlatMap { callback, list, .. } => {
+                scan_callback(callback, found);
+                scan_expr(list, found);
+            }
+            HostExprKind::Fold {
+                callback,
+                init,
+                list,
+                ..
+            }
+            | HostExprKind::Scan {
+                callback,
+                init,
+                list,
+                ..
+            } => {
+                scan_callback(callback, found);
+                scan_expr(init, found);
+                scan_expr(list, found);
+            }
+            HostExprKind::WithSeed { seed, body, .. } => {
+                scan_expr(seed, found);
+                scan_expr(body, found);
+            }
+            _ => {}
+        }
+    }
+
+    let target_label = match target {
+        CompileTarget::C => "c",
+        CompileTarget::Hip => "hip",
+    };
+
+    // This walk is deliberately whole-program (every global value AND
+    // every function body), NOT scoped to the build entry's reachable
+    // call graph. That asymmetry with the reachability-scoped AD guard
+    // in `runtime.rs::find_reachable_host_only_builtin_call` is
+    // intentional: `chelis_backend_c::host_emit` emits *every*
+    // `program.functions` entry unconditionally (no dead-code pruning),
+    // so a `tensor_scan` call inside an otherwise-unreferenced helper
+    // still reaches the C emitter and produces the silent
+    // `/* unsupported builtin tensor_scan */ 0` stub. Rejecting only the
+    // entry-reachable subset would let that broken stub ship in a build
+    // the user believes succeeded. The AD guard can scope to the
+    // transform target because AD lowers only that target's subgraph;
+    // `chelis build` has no such pruning, so the guard must match the
+    // emitter's whole-program scope. (If backend dead-function pruning
+    // lands later, this can be narrowed to the emitted set in lockstep.)
+    let mut found: Option<String> = None;
+    for global in &program.globals {
+        scan_expr(&global.value, &mut found);
+        if found.is_some() {
+            break;
+        }
+    }
+    if found.is_none() {
+        for function in &program.functions {
+            scan_expr(&function.body, &mut found);
+            if found.is_some() {
+                break;
+            }
+        }
+    }
+
+    if let Some(name) = found {
+        return Err(stage_error(
+            "compile",
+            format!(
+                "`chelis build --target {target_label}` cannot lower host-runtime-only \
+                 builtin `{name}`; this helper is host-only by design (see \
+                 spec/05-risc-primitives.md §3.6 Host-Runtime Builders). Use `chelis eval` \
+                 / `chelis test` to run programs that call `{name}`, or rewrite the \
+                 caller to use tensor-lane primitives that lower to the RISC DAG."
+            ),
+            "unsupported_feature",
+        ));
+    }
+
     Ok(())
 }
 

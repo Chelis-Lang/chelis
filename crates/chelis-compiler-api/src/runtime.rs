@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use chelis_deep::Span;
@@ -1377,6 +1377,43 @@ impl<'a> EvalContext<'a> {
             }
         }
 
+        // Fail-closed for host-runtime-only builtins reached through
+        // grad/vmap. The IR lowerer doesn't recognize `tensor_scan`
+        // (spec/05-risc-primitives.md §3.6 marks it host-only with no
+        // adjoint), so passing it through `try_lower_subexpr_program`
+        // results in confusing downstream errors like an out-of-range
+        // axis on a rank-0 operand. Catch it here and emit a tensor_scan-
+        // tagged error instead. The search starts at `app_expr` (for the
+        // inline `grad(fn (x) -> tensor_scan(...))` case) and follows
+        // every `(var ...)` reference transitively into `program_defs`
+        // (for the captured-closure case `target = fn ... tensor_scan
+        // ...; grad(target)(x)`). It is *reachability*-scoped: an
+        // unrelated top-level def that calls `tensor_scan` but is not
+        // reached from the transform target does NOT trigger a rejection,
+        // so a genuinely differentiable program is not falsely blocked.
+        let host_only_hit = find_reachable_host_only_builtin_call(&app_expr, &program_defs);
+        if let Some(name) = host_only_hit {
+            // Keep the verb honest per transform: `grad` differentiates,
+            // `vmap` vectorizes. Both fail for the same root cause (no
+            // RISC DAG lowering), but only `grad` additionally needs an
+            // adjoint, so only its message mentions the missing adjoint.
+            let (kind_label, verb, reason) = match kind {
+                TransformKind::Grad => (
+                    "grad",
+                    "differentiate through",
+                    "it has no RISC DAG lowering and no AD adjoint",
+                ),
+                TransformKind::Vmap => ("vmap", "vectorize over", "it has no RISC DAG lowering"),
+            };
+            return Err(format!(
+                "host runtime: `{kind_label}(...)` cannot {verb} host-runtime-only \
+                 builtin `{name}`; {reason} (see \
+                 spec/05-risc-primitives.md §3.6 Host-Runtime Builders). Build the per-index \
+                 accumulator with tensor-lane primitives (e.g. `range`/`map`/`expand`) before \
+                 applying `{kind_label}`."
+            ));
+        }
+
         let lower_result =
             try_lower_subexpr_program(&app_expr, scoped_types, self.type_env.clone(), program_defs);
         let dag = match lower_result {
@@ -1816,6 +1853,93 @@ impl<'a> EvalContext<'a> {
                     out.push(acc.clone());
                 }
                 Ok(RuntimeValue::List(out))
+            }
+            // Issue #257: iterative scan that produces a rank-1 tensor
+            // directly, bypassing the right-recursive Surf list build that
+            // overflows the host worker stack at ~10k elements. The arg
+            // shape is `(initial: T, fn: (T, int64) -> T, n: int64)` and
+            // the loop runs `n` times on the host with no Surf-level
+            // recursion. The output precision is taken from the initial
+            // value's scalar dtype.
+            "tensor_scan" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "tensor_scan expects 3 arguments (initial, fn, n), got {}",
+                        args.len()
+                    ));
+                }
+                let initial = args[0].clone();
+                let callback = args[1].clone();
+                let n = expect_int_arg(args, 2)?;
+                if n < 0 {
+                    return Err(format!(
+                        "tensor_scan requires a non-negative length, got {n}"
+                    ));
+                }
+                let precision = match &initial {
+                    RuntimeValue::Scalar(payload) => payload.dtype(),
+                    RuntimeValue::Bool(_) => Prim::Bool,
+                    other => {
+                        return Err(format!(
+                            "tensor_scan expects a scalar initial value (numeric or bool), got {other:?}"
+                        ));
+                    }
+                };
+                // Reject non-callable callback up front so the error message
+                // points at the second argument instead of failing inside the
+                // first apply.
+                if !matches!(
+                    &callback,
+                    RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }
+                ) {
+                    return Err(format!(
+                        "tensor_scan expects a callable second argument, got {callback:?}"
+                    ));
+                }
+                let n = n as usize;
+                let mut data = Vec::with_capacity(n);
+                let mut acc = initial;
+                for i in 0..n {
+                    let index = RuntimeValue::int64(i as i64);
+                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, index])?;
+                    // Validate per-step that the accumulator stayed the same
+                    // scalar precision; this catches a misbehaving callback
+                    // that returns a different dtype before it corrupts the
+                    // output tensor buffer.
+                    let value = match &acc {
+                        RuntimeValue::Scalar(payload) => {
+                            if payload.dtype() != precision {
+                                return Err(format!(
+                                    "tensor_scan callback returned a {} scalar but the initial \
+                                     value's dtype is {}",
+                                    payload.dtype().name(),
+                                    precision.name()
+                                ));
+                            }
+                            payload.bits().as_f64()
+                        }
+                        RuntimeValue::Bool(b) => {
+                            if precision != Prim::Bool {
+                                return Err(format!(
+                                    "tensor_scan callback returned a bool but the initial \
+                                     value's dtype is {}",
+                                    precision.name()
+                                ));
+                            }
+                            if *b { 1.0 } else { 0.0 }
+                        }
+                        other => {
+                            return Err(format!(
+                                "tensor_scan callback must return a scalar, got {other:?}"
+                            ));
+                        }
+                    };
+                    data.push(value);
+                }
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                    value: IrTensorValue::from_vec(vec![n], data),
+                    precision,
+                }))
             }
             "partition" => {
                 let callback = args
@@ -5506,6 +5630,93 @@ fn as_list(expr: &Expr) -> Option<&List> {
         Expr::List(list, _) => Some(list),
         _ => None,
     }
+}
+
+/// Host-only builtins that have no RISC DAG lowering. A `grad(...)`
+/// or `vmap(...)` over a function that calls one of these must fail
+/// with a clear, tagged error rather than be passed through to
+/// `try_lower_subexpr_program` and produce a confusing downstream
+/// error like an out-of-range axis on a phantom rank-0 operand. See
+/// spec/05-risc-primitives.md §3.6.
+const HOST_ONLY_BUILTIN_NAMES: &[&str] = &["tensor_scan"];
+
+/// Walk a Deep `Expr` collecting (a) the first directly-applied
+/// host-only builtin (`(app {} (var <name>) ...)`) and (b) the names
+/// of every `(var <name>)` it references, so a reachability walk can
+/// follow those names into def bodies. The `vars` set lets the caller
+/// resolve the captured-closure case (`target = fn ... tensor_scan ...;
+/// grad(target)(x)`) without flagging *unrelated* top-level defs that
+/// happen to call `tensor_scan` but are not reachable from the
+/// transform target (which would be a false-positive rejection of a
+/// perfectly differentiable program — see issue #257 review round 2).
+fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec<String>) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    if tag(list) == Some("app")
+        && let Some(Expr::List(callee, _)) = children(list).first()
+        && tag(callee) == Some("var")
+        && let Some(name) = children(callee).first().and_then(symbol_name)
+        && HOST_ONLY_BUILTIN_NAMES.contains(&name)
+    {
+        if hit.is_none() {
+            *hit = Some(name.to_string());
+        }
+        return;
+    }
+    if tag(list) == Some("var")
+        && let Some(name) = children(list).first().and_then(symbol_name)
+    {
+        vars.push(name.to_string());
+    }
+    for child in &list.elements {
+        scan_expr_for_host_only(child, hit, vars);
+    }
+}
+
+/// Reachability-scoped search for a host-only builtin call. Starts at
+/// `root` (the synthesized `(app {} <transform> <args>...)`), then
+/// follows every `(var <name>)` reference transitively into the bodies
+/// of `defs` so the transform target's own def — and any helper it
+/// calls — is searched, but unrelated top-level defs are not. Returns
+/// the name of the first host-only builtin reached, or `None`.
+///
+/// Known, accepted limitation (issue #257 review item 6): detection
+/// matches only a *direct application by name*, `(app (var tensor_scan)
+/// ...)`, and only follows references that resolve to a top-level `defs`
+/// entry. Two exotic aliasing forms therefore slip past — a `let`-bound
+/// alias (`let f = tensor_scan in f(acc, cb, n)`, where `f` is a local
+/// binding rather than a `defs` key and the call site `(app (var f)
+/// ...)` does not name a host-only builtin), and `tensor_scan` passed as
+/// an un-applied value into a higher-order helper whose own body applies
+/// it. Both fail *soft*: the transform then reaches
+/// `try_lower_subexpr_program`, which rejects the un-lowerable builtin
+/// anyway, so the user still gets an error — just the older, less
+/// specific one rather than the §3.6-tagged message. The failure mode
+/// is message quality in an aliasing corner, never a wrong gradient or
+/// a silently-lowered host-only op, so it is left as-is.
+fn find_reachable_host_only_builtin_call(
+    root: &Expr,
+    defs: &HashMap<String, Expr>,
+) -> Option<String> {
+    let mut hit: Option<String> = None;
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut worklist: Vec<&Expr> = vec![root];
+    while let Some(expr) = worklist.pop() {
+        let mut vars: Vec<String> = Vec::new();
+        scan_expr_for_host_only(expr, &mut hit, &mut vars);
+        if hit.is_some() {
+            return hit;
+        }
+        for name in vars {
+            if visited.insert(name.clone())
+                && let Some(def_body) = defs.get(&name)
+            {
+                worklist.push(def_body);
+            }
+        }
+    }
+    hit
 }
 
 fn tag(list: &List) -> Option<&str> {
