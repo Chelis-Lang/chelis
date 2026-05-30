@@ -55,6 +55,7 @@ pub struct VerificationRequest {
     pub fuzz_samples: u32,
     pub fuzz_seed: u64,
     pub inlining_depth_limit: u32,
+    pub spans_json: Option<String>,
 }
 
 impl Default for VerificationRequest {
@@ -67,6 +68,7 @@ impl Default for VerificationRequest {
             fuzz_samples: 100,
             fuzz_seed: 0,
             inlining_depth_limit: 3,
+            spans_json: None,
         }
     }
 }
@@ -213,6 +215,39 @@ pub fn verify_source(req: VerificationRequest) -> Result<VerificationResult, Ver
             }
         };
         results.push(pr);
+    }
+
+    // Enrich provenance from spans manifest if provided
+    if let Some(spans_str) = &req.spans_json
+        && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(spans_str)
+        && let Some(spans) = manifest.get("spans").and_then(|s| s.as_array())
+    {
+        for result in &mut results {
+            if let Some(entry) = spans
+                .iter()
+                .find(|e| e.get("deep_node_id").and_then(|v| v.as_str()) == Some(&result.name))
+            {
+                result.provenance = Some(Provenance {
+                    requirement_id: entry
+                        .get("ears_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    file: entry
+                        .get("ears_file")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    line: entry
+                        .get("ears")
+                        .and_then(|e| e.get("start_line"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize),
+                    text: entry
+                        .get("ears_text")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                });
+            }
+        }
     }
 
     let summary = build_summary(&results);

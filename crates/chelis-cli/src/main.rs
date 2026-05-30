@@ -356,6 +356,9 @@ enum Command {
         /// Output format
         #[clap(long, default_value = "human")]
         format: String,
+        /// Source dialect (auto|kiro|traditional)
+        #[clap(long, default_value = "auto")]
+        dialect: String,
     },
     /// Lint naming conventions per `spec/01-nomenclature.md`
     Lint {
@@ -691,9 +694,15 @@ fn main() {
             smt_timeout,
             samples,
             format,
+            dialect,
         }) => {
             #[cfg(feature = "chelis-prove")]
             {
+                let dialect_val = match dialect.as_str() {
+                    "kiro" => verify_spec::Dialect::Kiro,
+                    "traditional" => verify_spec::Dialect::Traditional,
+                    _ => verify_spec::Dialect::Auto,
+                };
                 match verify_spec::cmd_verify_spec(
                     path,
                     r#impl,
@@ -701,6 +710,7 @@ fn main() {
                     smt_timeout,
                     samples,
                     &format,
+                    dialect_val,
                 ) {
                     Ok(code) => std::process::exit(code),
                     Err(err) => {
@@ -711,7 +721,7 @@ fn main() {
             }
             #[cfg(not(feature = "chelis-prove"))]
             {
-                let _ = (path, r#impl, tier, smt_timeout, samples, format);
+                let _ = (path, r#impl, tier, smt_timeout, samples, format, dialect);
                 eprintln!("error: verify-spec requires the `smt` feature");
                 std::process::exit(3);
             }

@@ -295,8 +295,14 @@ fn handle_prove_tool(args: &Value) -> Value {
         "type-only" => chelis_prove::TierSelection::TypeOnly,
         other => return mcp_error(&format!("invalid tier `{other}`")),
     };
-    let smt_timeout = args.get("smt_timeout_ms").and_then(Value::as_u64).unwrap_or(5000);
-    let samples = args.get("fuzz_samples").and_then(Value::as_u64).unwrap_or(100) as u32;
+    let smt_timeout = args
+        .get("smt_timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(5000);
+    let samples = args
+        .get("fuzz_samples")
+        .and_then(Value::as_u64)
+        .unwrap_or(100) as u32;
     let seed = args.get("fuzz_seed").and_then(Value::as_u64).unwrap_or(0);
 
     let req = chelis_prove::VerificationRequest {
@@ -307,6 +313,7 @@ fn handle_prove_tool(args: &Value) -> Value {
         fuzz_samples: samples,
         fuzz_seed: seed,
         inlining_depth_limit: 3,
+        spans_json: None,
     };
 
     match chelis_prove::verify_source(req) {
@@ -331,18 +338,21 @@ fn handle_verify_spec_tool(args: &Value) -> Value {
     let mut source = String::new();
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
-            if entry.path().extension().map(|e| e == "ch").unwrap_or(false) {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    source.push_str(&content);
-                    source.push('\n');
-                }
+            if entry.path().extension().map(|e| e == "ch").unwrap_or(false)
+                && let Ok(content) = std::fs::read_to_string(entry.path())
+            {
+                source.push_str(&content);
+                source.push('\n');
             }
         }
     }
     if source.is_empty() {
         return mcp_error("no .ch files found in directory");
     }
-    let req = chelis_prove::VerificationRequest { source, ..Default::default() };
+    let req = chelis_prove::VerificationRequest {
+        source,
+        ..Default::default()
+    };
     match chelis_prove::verify_source(req) {
         Ok(result) => serde_json::to_value(&result).unwrap_or(json!({"ok": false})),
         Err(e) => json!({ "ok": false, "stage": "prove", "errors": [{"message": e.to_string()}] }),
@@ -362,15 +372,18 @@ fn handle_explain_failure_tool(args: &Value) -> Value {
     let mut source = String::new();
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
-            if entry.path().extension().map(|e| e == "ch").unwrap_or(false) {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    source.push_str(&content);
-                    source.push('\n');
-                }
+            if entry.path().extension().map(|e| e == "ch").unwrap_or(false)
+                && let Ok(content) = std::fs::read_to_string(entry.path())
+            {
+                source.push_str(&content);
+                source.push('\n');
             }
         }
     }
-    let req = chelis_prove::VerificationRequest { source, ..Default::default() };
+    let req = chelis_prove::VerificationRequest {
+        source,
+        ..Default::default()
+    };
     match chelis_prove::verify_source(req) {
         Ok(result) => {
             if let Some(prop) = result.properties.iter().find(|p| p.name == property_id) {

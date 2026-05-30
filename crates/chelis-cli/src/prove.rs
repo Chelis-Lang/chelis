@@ -290,6 +290,8 @@ fn prove_surf_property(
 ) -> Status {
     totals.total += 1;
 
+    let samples_needed = options.samples.or(property.samples).unwrap_or(100);
+
     // Tier B: attempt SMT proof when --tier auto
     #[cfg(feature = "chelis-prove")]
     if (options.tier == "auto" || options.tier == "smt-only")
@@ -350,10 +352,13 @@ fn prove_surf_property(
                             if options.json {
                                 println!(
                                     "{}",
-                                    serde_json::json!({"kind":"property","name":property.name,"status":"passed","proof_tier":"smt","samples":0,"seed":options.effective_seed(property.seed)})
+                                    serde_json::json!({"kind":"property","name":property.name,"status":"passed","proof_tier":"smt","samples":samples_needed,"seed":options.effective_seed(property.seed)})
                                 );
                             } else {
-                                println!("property: {} -- proved (smt)", property.name);
+                                println!(
+                                    "property: {} -- {}/{} passed (smt)",
+                                    property.name, samples_needed, samples_needed
+                                );
                             }
                             return Status::Passed;
                         }

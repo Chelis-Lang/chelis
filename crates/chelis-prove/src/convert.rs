@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param};
+use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param, UnaryOp};
 
 use crate::solver::{ArithOp as SA, BoolOp as SB, CmpOp as SC, SmtExpr};
 
@@ -138,6 +138,11 @@ pub fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<SmtExpr> {
             }
             Some(SmtExpr::Apply(name, smt_args))
         }
+        Expr::Unary(UnaryOp::Neg, operand, _) => Some(SmtExpr::Arith(
+            SA::Sub,
+            Box::new(SmtExpr::RealLit(0.0)),
+            Box::new(surf_arith(operand, ctx)?),
+        )),
         Expr::If(cond, then_e, else_e, _) => Some(SmtExpr::Ite(
             Box::new(surf_expr_to_smt(cond, ctx)?),
             Box::new(surf_arith(then_e, ctx)?),
@@ -226,6 +231,11 @@ pub fn surf_arith_subst(
                 surf_expr_to_smt_subst(l, subst, ctx)?,
                 surf_expr_to_smt_subst(r, subst, ctx)?,
             ],
+        )),
+        Expr::Unary(UnaryOp::Neg, operand, _) => Some(SmtExpr::Arith(
+            SA::Sub,
+            Box::new(SmtExpr::RealLit(0.0)),
+            Box::new(surf_arith_subst(operand, subst, ctx)?),
         )),
         Expr::If(cond, then_e, else_e, _) => {
             let c = surf_expr_to_smt_subst(cond, subst, ctx)?;
@@ -339,6 +349,11 @@ pub fn surf_expr_to_smt_subst(
             ],
         )),
         Expr::Lit(Literal::Bool(v), _) => Some(SmtExpr::BoolLit(*v)),
+        Expr::If(cond, then_e, else_e, _) => Some(SmtExpr::Ite(
+            Box::new(surf_expr_to_smt_subst(cond, subst, ctx)?),
+            Box::new(surf_expr_to_smt_subst(then_e, subst, ctx)?),
+            Box::new(surf_expr_to_smt_subst(else_e, subst, ctx)?),
+        )),
         _ => None,
     }
 }
