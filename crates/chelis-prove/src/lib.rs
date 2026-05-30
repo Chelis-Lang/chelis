@@ -7,7 +7,7 @@
 //! - **Tier B:** SMT solving via cvc5 (nonlinear real arithmetic)
 //! - **Tier C:** Randomized fuzz testing (existing `chelis prove` logic)
 //!
-//! See `docs/trust-stack-verification.md` for architectural framing.
+//! See `docs/trust_stack_verification.md` for architectural framing.
 
 pub mod artifact;
 pub mod dispatch;
