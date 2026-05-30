@@ -294,6 +294,9 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
             &mut typed_nodes,
             &mut total_nodes,
         );
+        // Issue #256 round 2: re-check each deferred borrow against the
+        // now-complete substitution (see `validate_deferred_borrow_vars`).
+        validate_deferred_borrow_vars(&subst, &adt_reg, &mut errors);
     }
 
     // Third pass: reject tensor types whose element precision isn't supported
@@ -959,6 +962,11 @@ fn infer_ir_program_with_state(
             let name = top_level_decl_name(expr).unwrap_or("<anon>");
             eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
         }
+        // Issue #256 round 2: drain the deferred-borrow ledger for this
+        // def and re-check each recorded variable against the now-complete
+        // substitution. Draining per-def keeps error attribution local and
+        // prevents one def's deferrals from leaking into the next.
+        validate_deferred_borrow_vars(&state.subst, &state.adt_reg, &mut errors);
     }
 
     for warning in chelis_deep::validate::validate(exprs) {
@@ -2052,6 +2060,145 @@ fn type_contains_tensor(ty: &Type) -> bool {
         Type::Ref(inner) => type_contains_tensor(inner),
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(type_contains_tensor),
         Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+    }
+}
+
+/// Issue #256 round 3: does `ty` carry a tensor, consulting `carriers`
+/// for the by-name ADT carry decision? This is the `Type`-level mirror
+/// of linearity's `type_expr_contains_tensor`: an ADT carries iff its
+/// name is in the precomputed carrier set (its definition has a
+/// tensor-carrying field) OR one of its type arguments carries (e.g.
+/// `Wrapper[tensor[..]]`). Bare `type_contains_tensor` cannot make the
+/// by-name decision — it only sees the `Type::Adt` shell, not the
+/// variant fields — which is exactly why the deferred-borrow gate must
+/// be handed the carrier set rather than trust an args-only check.
+fn type_carries_tensor_with_carriers(ty: &Type, carriers: &HashSet<String>) -> bool {
+    match ty {
+        Type::Tensor(_, _) => true,
+        Type::Ref(inner) => type_carries_tensor_with_carriers(inner, carriers),
+        Type::Tuple(args) => args
+            .iter()
+            .any(|a| type_carries_tensor_with_carriers(a, carriers)),
+        Type::Adt(name, args) => {
+            carriers.contains(name)
+                || args
+                    .iter()
+                    .any(|a| type_carries_tensor_with_carriers(a, carriers))
+        }
+        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+    }
+}
+
+/// Issue #256 round 3: compute the set of tensor-carrying ADT names from
+/// the registry. This is the registry-backed mirror of linearity's
+/// `compute_tensor_carrying_adts` (which works off stamped Deep exprs):
+/// fixed-point iteration where an ADT joins the carrier set once any of
+/// its variant fields carries a tensor against the in-progress set, so a
+/// chain `A { f: B }, B { g: tensor }` resolves transitively. Bounded by
+/// the ADT count. The two classifiers must agree: the gate uses this set
+/// to reject a deferred borrow that resolved to a non-carrying ADT, and
+/// linearity uses its own set to reject the concrete (non-deferred) form.
+fn adt_carrier_set(adt_reg: &AdtRegistry) -> HashSet<String> {
+    let mut carriers: HashSet<String> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for (name, def) in &adt_reg.defs {
+            if carriers.contains(name) {
+                continue;
+            }
+            let carries = def.variants.iter().any(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .any(|(_, field_ty)| type_carries_tensor_with_carriers(field_ty, &carriers))
+            });
+            if carries {
+                carriers.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    carriers
+}
+
+/// Issue #256 round 2 soundness gate. The `borrow` inference arm accepts a
+/// borrow whose inner type is still an unresolved `Type::Var`, recording
+/// the variable in the substitution's deferred-borrow ledger. That
+/// deferral is sound only when the variable is *eventually* pinned to a
+/// tensor or tensor-carrying type by a later unification (the surrounding
+/// `&tensor[..]` / `&Carrier[..]` parameter). This pass drains the ledger
+/// after a def body's inference completes and re-checks each recorded
+/// variable against the now-complete substitution:
+///
+///   - `Tensor` / `Ref(Tensor)`: pinned to a tensor — sound, accept.
+///   - `Adt` / `Tuple` / `Ref(Adt|Tuple)`: an aggregate that *may* carry a
+///     tensor. Round 3 (#256 soundness): classify it here against the
+///     registry-backed carrier set rather than blanket-accepting and
+///     deferring to linearity. Deferring was unsound — round 1 loosened
+///     linearity's `expr_is_owned_or_borrow_linear` to accept a stale
+///     `(t-var ..)` stamp (so a tensor that resolved late is not
+///     rejected), and a deferred borrow that resolves to a *non*-carrying
+///     ADT/tuple keeps that same `(t-var ..)` stamp at the linearity
+///     layer. Both gates would then wave it through. So the gate, which
+///     already holds the final `Type`, must make the carry decision: a
+///     tensor-carrying aggregate is accepted, a non-carrying one rejected.
+///   - still `Var`: never pinned. A fully-polymorphic consumer (e.g.
+///     `consume_any[a](t: a)`) unifies the parameter to `&a` without ever
+///     forcing a tensor, so a genuinely-non-tensor value would slip past
+///     every other gate. Reject.
+///   - `Prim` / `Unit` / `Fn`: pinned to a concretely-non-tensor scalar
+///     only after the borrow arm ran (so the arm's own `_ => TypeMismatch`
+///     could not fire). Reject.
+fn validate_deferred_borrow_vars(
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+) {
+    let deferred = subst.take_deferred_borrow_vars();
+    if deferred.is_empty() {
+        return;
+    }
+    // Computed lazily: only programs that actually deferred a borrow pay
+    // the fixed-point pass, and only once per drain.
+    let carriers = adt_carrier_set(adt_reg);
+    for tv in deferred {
+        let resolved = subst.apply(&Type::Var(tv));
+        // Peel every `Ref` layer: the recorded variable is the borrow
+        // inner, but a later unification may have wrapped it in one or
+        // more `&` layers (e.g. the parameter type was itself `&T`).
+        let mut peeled = &resolved;
+        while let Type::Ref(inner) = peeled {
+            peeled = inner.as_ref();
+        }
+        let sound = match peeled {
+            // Pinned to a tensor: always sound.
+            Type::Tensor(_, _) => true,
+            // Pinned to an aggregate: sound iff it actually carries a
+            // tensor against the registry carrier set (round 3). A
+            // non-carrying record/tuple resolved through the deferred
+            // path is rejected here — linearity's loosened classifier
+            // can no longer be relied on to catch it.
+            Type::Adt(_, _) | Type::Tuple(_) => {
+                type_carries_tensor_with_carriers(peeled, &carriers)
+            }
+            // Don't double-report an inner that already failed inference.
+            Type::Error => true,
+            // Never pinned, or pinned to a concretely-non-tensor value.
+            Type::Var(_) | Type::Prim(_) | Type::Unit | Type::Fn(_, _) => false,
+            // `Ref` is fully peeled above; treat as sound to avoid a
+            // spurious reject if a future shape reaches here.
+            Type::Ref(_) => true,
+        };
+        if !sound {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("borrow requires tensor or tensor-carrying input, got {peeled}"),
+                vec!["Use `&x` only with tensor values".to_string()],
+            ));
+        }
     }
 }
 
@@ -6734,6 +6881,26 @@ fn infer_top_level(
                 }
             }
             check_declared_dvars_rigid(&declared_dvars, subst, errors);
+            // chelis#272 list-uniformity check. A list literal of
+            // tensors with *mismatched concrete* element axes joins to a
+            // `Wildcard` along the differing axis (the deliberate #218
+            // bare-`concat` ergonomic). That wildcard is a defensible
+            // "I don't know the shape" result for an unannotated bare
+            // list, but it must NOT silently satisfy a declared element
+            // type that names a rigid/named dimension — `List[tensor[k]]`
+            // promises every element has the *same* length `k`. A body
+            // like `def make[k](a: tensor[2], b: tensor[3])
+            //   -> List[tensor[k]] = [a, b]` produces
+            // `List<tensor[Wildcard]>`; the wildcard unifies permissively
+            // with the rigid `k` and leaves it unbound, so neither the
+            // pin-to-literal nor the distinct-collapse arm of
+            // `check_declared_dvars_rigid` fires. Flag that mismatch here
+            // by comparing the declared return's list-element dims
+            // against the resolved body's. (The `[k, m]` variant is
+            // already caught above: the tightened Cons-join now unifies
+            // the two rigid dims, and `check_declared_dvars_rigid`
+            // reports the collapse.)
+            check_list_elem_rigid_dim_vs_wildcard(&decl_ty, &resolved_body, errors);
             // Implicit-copy fan-out v3 Shape A relaxed retry: if the
             // initial unify fails and the body's tail position resolves
             // to a `(var x)` reference whose declared return is owned
@@ -7090,6 +7257,39 @@ fn infer_expr(
                             Type::Ref(_) => resolved,
                             Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error => {
                                 Type::Ref(Box::new(resolved))
+                            }
+                            // Issue #256: when the borrow inner is still an
+                            // unresolved type variable (e.g. the output of a
+                            // polymorphic-return call whose dim variables
+                            // have not yet been pinned at this point in
+                            // left-to-right inference), defer the
+                            // tensor-or-carrier classification to subsequent
+                            // unification. Wrapping as `Type::Ref(Type::Var)`
+                            // lets the surrounding flow's expected argument
+                            // type (e.g. a sig parameter `&tensor[..]`) pin
+                            // the variable through unification. If the
+                            // variable never gets pinned to a tensor or
+                            // tensor-carrying type, the later unification
+                            // failure surfaces the same diagnostic via the
+                            // mismatched call site -- there is no silent
+                            // accept. The linearity checker's
+                            // `expr_is_owned_or_borrow_linear` still rejects
+                            // a stamped `(t-var ...)` if no pinning happens.
+                            //
+                            // Soundness ledger (issue #256 round 2): record
+                            // the inner type variable so the inference driver
+                            // can re-check it against the *final*
+                            // substitution after the def body completes. The
+                            // deferral is sound only when the variable is
+                            // eventually pinned to a tensor or tensor carrier;
+                            // a fully-polymorphic consumer (e.g.
+                            // `consume_any[a](t: a)`) never pins it, and a
+                            // genuinely-non-tensor value would otherwise slip
+                            // past every gate. See
+                            // `validate_deferred_borrow_vars`.
+                            Type::Var(tv) => {
+                                subst.record_deferred_borrow_var(tv);
+                                Type::Ref(Box::new(Type::Var(tv)))
                             }
                             _ => {
                                 errors.push(CheckError::new(
@@ -7546,12 +7746,24 @@ fn infer_app(
             && let Type::Tensor(tail_dims, tail_prec) = subst.apply(&list_args[0])
         {
             if head_dims.len() != tail_dims.len() {
+                // chelis#255: surface the rank-uniform rule and the
+                // reshape/flatten remediation in the diagnostic itself,
+                // so users (and agents reading JSON output) are not
+                // left guessing why a `List[tensor[k, f32]]` rejected
+                // a rank-mixed literal. The dim slot `k` is a
+                // dimension variable, not a shape-vector variable;
+                // see spec/04-type-system.md §4.5.1.
                 errors.push(CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
                         format!(
-                            "list element rank mismatch: {} dims vs {} dims",
+                            "list element rank mismatch: {} dims vs {} dims; \
+                             List[tensor[...]] requires rank-uniform elements \
+                             (the dim slot is a dimension variable, not a \
+                             shape-vector variable). Reshape or flatten \
+                             elements to a common rank before listing \
+                             (spec/04-type-system.md §4.5.1).",
                             head_dims.len(),
                             tail_dims.len(),
                         ),
@@ -7564,14 +7776,63 @@ fn infer_app(
                 errors.push(te.into());
                 return Type::Error;
             }
-            let joined_dims: Vec<Dim> = head_dims
-                .iter()
-                .zip(tail_dims.iter())
-                .map(|(h, t)| match (h, t) {
+            // Per-axis join (chelis#218 concat ergonomics, tightened
+            // by chelis#272). Resolve each dim through the current
+            // substitution first so already-bound dim variables compare
+            // as their concrete value.
+            //
+            //   * equal concrete literals or equal names  -> keep them;
+            //   * genuinely-mismatched concrete literals
+            //     (e.g. `Lit(2)` vs `Lit(3)`) or mismatched concrete
+            //     names                                    -> widen to
+            //     `Wildcard`. This is the deliberate #218 behavior that
+            //     lets bare `concat([a, b], axis)` accept ragged
+            //     concrete axes; and
+            //   * any pair that involves a dimension *variable*
+            //     (a declared rigid dim parameter such as `k`/`m`)
+            //     -> `unify_dim` the two dims instead of widening.
+            //
+            // The last arm is the #272 fix: the old `_ => Wildcard`
+            // erased named dim variables, so a list body that violated
+            // the §4.4 rigid-distinct-dim guarantee
+            // (`def make[k, m](a: tensor[k], b: tensor[m])
+            //   -> List[tensor[k]] = [a, b]`) collapsed `k`/`m` to a
+            // wildcard before `check_declared_dvars_rigid` ran. Unifying
+            // them instead keeps the surviving evidence: distinct rigid
+            // dims unify with each other (the guard then reports the
+            // collapse) and a `(rigid, concrete)` pair pins the rigid
+            // dim to a literal (the guard reports the pin). A
+            // `unify_dim` failure here (which the permissive
+            // Name/Lit/Wildcard arms make rare) surfaces as a structural
+            // dimension mismatch rather than being silently widened.
+            let mut joined_dims: Vec<Dim> = Vec::with_capacity(head_dims.len());
+            for (h, t) in head_dims.iter().zip(tail_dims.iter()) {
+                let hr = subst.apply_dim(h);
+                let tr = subst.apply_dim(t);
+                let joined = match (&hr, &tr) {
                     (Dim::Lit(a), Dim::Lit(b)) if a == b => Dim::Lit(*a),
-                    _ => Dim::Wildcard,
-                })
-                .collect();
+                    (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Dim::Name(n1.clone()),
+                    // Mismatched concrete dims (literal/literal or
+                    // name/name): the deliberate #218 ragged-axis
+                    // widening. Neither side is a dim variable, so there
+                    // is no rigid-dim promise to preserve here.
+                    (Dim::Lit(_), Dim::Lit(_))
+                    | (Dim::Name(_), Dim::Name(_))
+                    | (Dim::Lit(_), Dim::Name(_))
+                    | (Dim::Name(_), Dim::Lit(_)) => Dim::Wildcard,
+                    // At least one side is a dim variable (or a
+                    // wildcard). Unify so rigid dim parameters keep their
+                    // identity and `check_declared_dvars_rigid` can fire.
+                    _ => {
+                        if let Err(te) = unify_dim(&hr, &tr, subst) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        subst.apply_dim(&hr)
+                    }
+                };
+                joined_dims.push(joined);
+            }
             let joined_prec = subst.apply_tensor_prec(head_prec);
             let elem = Type::Tensor(joined_dims, joined_prec);
             return Type::Adt("List".to_string(), vec![elem]);
@@ -13058,6 +13319,77 @@ fn check_declared_dvars_rigid(
         } else {
             seen.insert(resolved, *dv);
         }
+    }
+}
+
+/// chelis#272 list-uniformity guard.
+///
+/// A declared return type of the form `List[tensor[..., d, ...]]` whose
+/// element dim `d` is a *rigid/named* dimension (`Dim::Var` for a
+/// declared dim parameter, or `Dim::Name` for a named symbolic dim)
+/// promises that every list element has the *same* length at that axis.
+/// The #218 Cons-join widens a *mismatched-concrete* list-element axis
+/// to `Dim::Wildcard`, and `unify_dim` lets that wildcard satisfy a
+/// rigid `Var`/`Name` permissively *without binding it* — so neither the
+/// pin-to-literal nor the distinct-collapse arm of
+/// `check_declared_dvars_rigid` observes the violation.
+///
+/// This check closes that gap structurally: it walks the declared type
+/// and the resolved body type in parallel and flags any list-element
+/// tensor axis where the declaration names a rigid/named dim but the
+/// body produced a `Wildcard`. It is deliberately scoped to *list
+/// element* tensors (`List[tensor[...]]`), the surface where the #272
+/// soundness gap lives; it does not touch bare `tensor[...]` returns
+/// whose wildcard axes legitimately flow from `expand`/`reshape`/`shape`
+/// (§4.7), where the declared return's named dim binds the result tvar
+/// directly rather than being absorbed by a heterogeneous-list wildcard.
+fn check_list_elem_rigid_dim_vs_wildcard(
+    decl_ty: &Type,
+    body_ty: &Type,
+    errors: &mut Vec<CheckError>,
+) {
+    match (decl_ty, body_ty) {
+        // Descend through the function type to its return position.
+        (Type::Fn(_, decl_ret), Type::Fn(_, body_ret)) => {
+            check_list_elem_rigid_dim_vs_wildcard(decl_ret, body_ret, errors);
+        }
+        // `List[T]`: check the element type. The list element is where
+        // the uniformity promise lives.
+        (Type::Adt(dn, dargs), Type::Adt(bn, bargs))
+            if dn == "List" && bn == "List" && dargs.len() == 1 && bargs.len() == 1 =>
+        {
+            if let (Type::Tensor(ddims, _), Type::Tensor(bdims, _)) = (&dargs[0], &bargs[0])
+                && ddims.len() == bdims.len()
+            {
+                for (dd, bd) in ddims.iter().zip(bdims.iter()) {
+                    let rigid = matches!(dd, Dim::Var(_) | Dim::Name(_));
+                    if rigid && matches!(bd, Dim::Wildcard) {
+                        let promised = match dd {
+                            Dim::Var(v) => format!("dim parameter d{}", v.0),
+                            Dim::Name(n) => format!("named dimension `{n}`"),
+                            _ => unreachable!(),
+                        };
+                        errors.push(CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "list element dimension is unknown (wildcard) in the function \
+                                 body but the declared element type promises a uniform {promised}: \
+                                 a heterogeneous list literal cannot satisfy a declared \
+                                 List[tensor[..]] whose element dimension names a rigid/named axis"
+                            ),
+                            vec![
+                                "Every element of a `List[tensor[k, ..]]` must share the same \
+                                 length `k`. Either give the elements a uniform dimension, or \
+                                 declare the element axis as a concrete literal / wildcard \
+                                 (`tensor[*, ..]`) if the lengths genuinely differ"
+                                    .to_string(),
+                            ],
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 

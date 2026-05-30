@@ -563,6 +563,139 @@ dim variable is genuinely bound to a concrete dimension.
 
 A wildcard dimension unifies with any other dimension (like a variable) but is NOT generalized — it's a permanent "I don't know." To restore named-dimension checking after a wildcard, use an explicit annotation.
 
+#### 4.5.1 Rank-Uniform `List[tensor[...]]` Elements
+
+A `List[T]` is statically homogeneous in `T`, and a tensor's rank is part
+of its type. An annotation like `List[tensor[k, f32]]` therefore fixes a
+single rank for every element — the dim slot `k` is a dimension variable,
+not a shape-vector variable. A list literal `[a, b]` whose elements have
+different ranks is a type error, surfaced as `DimensionMismatch` at the
+list literal expression with a message of the form:
+
+```
+list element rank mismatch: 1 dims vs 2 dims;
+List[tensor[...]] requires rank-uniform elements (the dim slot is a
+dimension variable, not a shape-vector variable). Reshape or flatten
+elements to a common rank before listing (spec/04-type-system.md §4.5.1).
+```
+
+The message is emitted on a single line; the wrapping above is for
+readability only. The trailing `(spec/04-type-system.md §4.5.1)`
+back-reference is part of the diagnostic so a reader or agent can
+locate this rule from the error text alone.
+
+Rationale: Chelis dimension variables (§4.4) range over individual
+dimensions, not over shape vectors. Permitting `[rank-1, rank-2]` to
+unify by erasing the rank would mask the kinds of transposition and
+reshape bugs that named dimensions exist to catch (§4.2 rationale). A
+rank-erased element type is not provided in the shipped surface; users
+who genuinely need to carry mixed-rank tensors through a list must
+reshape elements to a common rank before listing, or use a sum type
+that names each rank as a separate variant. A rank-polymorphic
+`List[tensor[k, f32]]` (letting `k` range over shape vectors per call
+site) was considered and deferred: the named-dim safety guarantee in
+§4.2 is preferred over the additional flexibility, and the
+reshape-at-the-boundary idiom is cheap enough that current consumers
+absorb it without losing per-tensor named dimensions.
+
+```chelis
+;; WRONG: rank-1 and rank-2 elements in the same List[tensor[k, f32]]
+;; def make_mixed() -> List[tensor[k, f32]] = {
+;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+;;   b = to_tensor([[cast(1.0, f32), cast(2.0, f32)],
+;;                  [cast(3.0, f32), cast(4.0, f32)]])
+;;   [a, b]  ;; DimensionMismatch: list element rank mismatch
+;; }
+
+;; CORRECT: flatten the rank-2 element to rank-1 first
+;; def make_uniform() -> List[tensor[k, f32]] = {
+;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+;;   b_flat = reshape(
+;;     to_tensor([[cast(1.0, f32), cast(2.0, f32)],
+;;                [cast(3.0, f32), cast(4.0, f32)]]),
+;;     [cast(4, int64)])
+;;   [a, b_flat]
+;; }
+```
+
+#### 4.5.2 List-literal dimension joining
+
+This rule governs the per-axis dimensions of a list literal *once its
+elements are rank-uniform* (§4.5.1): rank uniformity is checked first,
+and only matching-rank elements reach the per-axis join below.
+
+A list literal of tensors, `[a, b, ...]`, desugars to a `Cons`/`Nil`
+chain. Each `Cons` step computes a **per-axis join** of the new element
+against the running list-element type. The join is intentionally
+permissive about *concrete* shape so that the common
+`concat([a, b], axis)` pattern accepts elements whose concrete axes
+differ (chelis#218):
+
+- equal concrete dims (two equal literals, or two equal names) are
+  preserved;
+- two **genuinely-mismatched concrete** axes (e.g. `(d-lit {} 2)` vs
+  `(d-lit {} 3)`, or two distinct names) widen to `(d-name {} *)`
+  along that axis. The resulting `List[tensor[..., *, ...]]` is the
+  defensible "the lengths differ along this axis" type that lets
+  `concat` consume a ragged list;
+- a pair where at least one side is a **dimension variable** (a declared
+  rigid dim parameter such as `k`) is **unified**, not widened. Two
+  distinct rigid dims unify with each other; a `(rigid, concrete)` pair
+  pins the rigid dim to the concrete value.
+
+This is the chelis#272 tightening. The earlier behavior widened *every*
+non-equal pair — including pairs naming rigid dim parameters — to a
+wildcard, which then satisfied an explicit `List[tensor[k, f32]]`
+return annotation and silently defeated the §4.4 rigid-distinct-dim
+guarantee. Two consequences of the tightened rule:
+
+1. A body whose list mixes two **distinct rigid dims** (e.g.
+   `def make[k, m](a: tensor[k, f32], b: tensor[m, f32])
+   -> List[tensor[k, f32]] = [a, b]`) is rejected: the join unifies
+   `k` and `m`, and the §4.4 rigid-dim guard reports the collapse — the
+   same diagnostic class as the non-list `def f[n, m](...) = y` case.
+
+2. A body whose list has **heterogeneous concrete** element lengths
+   (e.g. `def make[k](a: tensor[2, f32], b: tensor[3, f32])
+   -> List[tensor[k, f32]] = [a, b]`) is rejected: the `2`/`3` join
+   widens to `(d-name {} *)`, and a join-origin wildcard list element
+   may **not** satisfy a declared element type that names a rigid or
+   named dimension. `List[tensor[k, f32]]` promises every element shares
+   the length `k`; a heterogeneous list does not.
+
+The wildcard list element remains acceptable when the surrounding
+binding makes **no** uniformity promise — a bare
+`out = concat([...], axis)` with no return annotation and no declared
+dim parameters, or an explicit `List[tensor[*, f32]]` annotation, both
+type-check.
+
+Two boundary properties of the current rule are intentional but narrow,
+and are locked by dedicated tests so a future change is a conscious one:
+
+- **The `(concrete, wildcard)` join is head-biased.** A `Cons` step
+  resolves the joined axis to whatever the *head* (the element being
+  prepended, i.e. the earlier list position) resolves to. So
+  `[tensor[2, f32], tensor[*, f32]]` joins to element `tensor[2, f32]`
+  (the concrete head absorbs the wildcard tail) and type-checks against
+  `List[tensor[k, f32]]`, whereas the reordered
+  `[tensor[*, f32], tensor[2, f32]]` joins to `tensor[*, f32]` (the
+  wildcard head erases the concrete tail) and is **rejected**. Element
+  ordering therefore changes the verdict. Genuinely-mismatched *concrete*
+  heads/tails still widen to `*` regardless of order (the ragged-axis
+  arm).
+- **The uniformity check is single-level.** It compares the declared and
+  body element axes of one `List[tensor[..]]`; it does **not** recurse
+  into a nested element. A wildcard tensor under
+  `List[List[tensor[k, f32]]]` is *not* checked against the inner `k` and
+  currently type-checks.
+
+The enforcement is in `crates/chelis-types/src/infer.rs`
+(`infer_app`'s `Cons` join and `check_list_elem_rigid_dim_vs_wildcard`,
+alongside `check_declared_dvars_rigid`); the acceptance oracle is
+`crates/chelis-cli/tests/issue_272_list_dim_rigidity.rs` with the
+chelis#218 ergonomics locked by
+`crates/chelis-cli/tests/issue_218_to_tensor_in_grad_body.rs`.
+
 ### 4.6 Property Definitions
 
 Surf `@property` declarations type-check as ordinary functions whose result
@@ -1254,6 +1387,37 @@ The shipped Phase 2b user surface is type- and expression-based:
 - borrows cannot be stored in aggregates, returned, or captured by closures
 - borrow types are erased before IR and backend lowering; implicit linearity then
   inserts explicit `RiscOp::Copy` and `RiscOp::Drop` nodes
+
+#### Borrow target classification (the `&x` inner type)
+
+The inner of a `&x` borrow expression must be — or must ultimately resolve
+to — a tensor or a tensor-carrying value (a tensor-carrying ADT per §8.4 or
+a tuple containing one). Borrowing a concretely non-tensor value (a scalar
+`t-prim`, `()`, a function, a non-tensor-carrying ADT, or a tuple of
+scalars) is a type error.
+
+The borrow inner's type is not always concrete at the borrow site. When the
+inner is the result of a polymorphic-return expression — for example
+`relu(prev_out)` or `mean(...)` whose dimension variables are pinned only
+by a later `&tensor[..]` parameter in the surrounding call — the inner is
+still an unresolved type variable when the borrow is first checked. In that
+case classification is **deferred**: the borrow is provisionally accepted
+and the surrounding flow's expected argument type pins the variable through
+unification. A previously-required workaround was to round-trip the value
+through a monomorphic identity (`def id4[a,c,h,w](x: tensor[a,c,h,w,f32]) ->
+tensor[a,c,h,w,f32] = x`) to re-bind the dimension variables before the
+borrow; that workaround is no longer necessary.
+
+The deferral is sound only when the variable is *eventually* pinned to a
+tensor or tensor carrier. If the consumer is itself fully polymorphic
+(e.g. `def consume_any[a](t: a) -> bool`), the variable is never pinned to a
+tensor, and a genuinely non-tensor value — including one a caller
+instantiates at a scalar type — would otherwise be borrowed. After a
+function body's inference completes, every deferred borrow is re-checked
+against the final substitution; a variable that did not resolve to a tensor
+or tensor carrier is rejected with the same diagnostic as a concretely
+non-tensor borrow inner. There is no terminating program that can borrow a
+non-tensor value through the deferred path.
 
 Linearity is checked after effect inference, before lowering:
 

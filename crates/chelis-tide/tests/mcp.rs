@@ -48,7 +48,8 @@ fn initialize_and_tool_discovery_work() {
             "chelis_decompile",
             "chelis_eval",
             "chelis_grad",
-            "chelis_validate"
+            "chelis_validate",
+            "chelis_prove",
         ]
     );
 
