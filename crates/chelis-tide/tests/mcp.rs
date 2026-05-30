@@ -50,6 +50,9 @@ fn initialize_and_tool_discovery_work() {
             "chelis_grad",
             "chelis_validate",
             "chelis_prove",
+            "chelis_verify_spec",
+            "chelis_explain_failure",
+            "chelis_proof_artifact",
         ]
     );
 

@@ -203,7 +203,12 @@ pub fn verify_source(req: VerificationRequest) -> Result<VerificationResult, Ver
                     samples: req.fuzz_samples as usize,
                 },
                 counterexample: None,
-                provenance: None,
+                provenance: Some(Provenance {
+                    requirement_id: Some(prop.name.clone()),
+                    file: None,
+                    line: None,
+                    text: None,
+                }),
                 duration_ms: start.elapsed().as_millis() as u64,
             }
         };
@@ -245,7 +250,12 @@ fn dispatch_property_tiers(
                     proof_tier: artifact::ProofTier::Smt,
                     status: artifact::ProofStatus::Proved,
                     counterexample: None,
-                    provenance: None,
+                    provenance: Some(Provenance {
+                        requirement_id: Some(name.to_string()),
+                        file: None,
+                        line: None,
+                        text: None,
+                    }),
                     duration_ms: start.elapsed().as_millis() as u64,
                 };
             }
@@ -258,7 +268,12 @@ fn dispatch_property_tiers(
                         counterexample: serde_json::Value::Object(Default::default()),
                     },
                     counterexample: Some(cx),
-                    provenance: None,
+                    provenance: Some(Provenance {
+                        requirement_id: Some(name.to_string()),
+                        file: None,
+                        line: None,
+                        text: None,
+                    }),
                     duration_ms: start.elapsed().as_millis() as u64,
                 };
             }
@@ -298,7 +313,12 @@ fn fuzz_property(
             proof_tier: artifact::ProofTier::Fuzz,
             status: artifact::ProofStatus::StatisticallyValidated { samples: n },
             counterexample: None,
-            provenance: None,
+            provenance: Some(Provenance {
+                requirement_id: Some(name.to_string()),
+                file: None,
+                line: None,
+                text: None,
+            }),
             duration_ms: start.elapsed().as_millis() as u64,
         },
         tier_c::TierCResult::Failed(cx) => PropertyResult {
@@ -306,7 +326,12 @@ fn fuzz_property(
             proof_tier: artifact::ProofTier::Fuzz,
             status: artifact::ProofStatus::Disproved { counterexample: cx },
             counterexample: None,
-            provenance: None,
+            provenance: Some(Provenance {
+                requirement_id: Some(name.to_string()),
+                file: None,
+                line: None,
+                text: None,
+            }),
             duration_ms: start.elapsed().as_millis() as u64,
         },
         tier_c::TierCResult::Error(msg) => PropertyResult {
@@ -314,7 +339,12 @@ fn fuzz_property(
             proof_tier: artifact::ProofTier::Fuzz,
             status: artifact::ProofStatus::Rejected { reason: msg },
             counterexample: None,
-            provenance: None,
+            provenance: Some(Provenance {
+                requirement_id: Some(name.to_string()),
+                file: None,
+                line: None,
+                text: None,
+            }),
             duration_ms: start.elapsed().as_millis() as u64,
         },
     }

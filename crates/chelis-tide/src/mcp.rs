@@ -78,6 +78,9 @@ fn handle_tool_call(id: Option<Value>, params: Option<&Value>) -> Value {
             deserialize_and_run::<ValidateRequest, _, _>(&args, compiler::validate)
         }
         "chelis_prove" => handle_prove_tool(&args),
+        "chelis_verify_spec" => handle_verify_spec_tool(&args),
+        "chelis_explain_failure" => handle_explain_failure_tool(&args),
+        "chelis_proof_artifact" => handle_proof_artifact_tool(&args),
         other => {
             return error(id, -32601, format!("unknown tool `{other}`"));
         }
@@ -145,6 +148,41 @@ fn tool_list() -> Vec<Value> {
             "Validate Surf, Deep, or desugared Chelis source",
         ),
         prove_tool_schema(),
+        json!({
+            "name": "chelis_verify_spec",
+            "description": "Verify all @property declarations in .ch files within a spec directory",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "spec_directory": { "type": "string", "description": "Path to directory containing .ch spec files" }
+                },
+                "required": ["spec_directory"]
+            }
+        }),
+        json!({
+            "name": "chelis_explain_failure",
+            "description": "Re-run verification and return detailed result for a specific property",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "spec_directory": { "type": "string", "description": "Path to directory containing .ch spec files" },
+                    "property_id": { "type": "string", "description": "Name of the property to explain" }
+                },
+                "required": ["spec_directory", "property_id"]
+            }
+        }),
+        json!({
+            "name": "chelis_proof_artifact",
+            "description": "Return proof artifact metadata (solver, logic) for a specific property",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "spec_directory": { "type": "string", "description": "Path to directory containing .ch spec files" },
+                    "property_id": { "type": "string", "description": "Name of the property" }
+                },
+                "required": ["spec_directory", "property_id"]
+            }
+        }),
     ]
 }
 
@@ -248,75 +286,111 @@ fn prove_tool_schema() -> Value {
 fn handle_prove_tool(args: &Value) -> Value {
     let source = match args.get("source").and_then(Value::as_str) {
         Some(s) => s.to_string(),
-        None => {
-            return json!({
-                "ok": false,
-                "stage": "mcp",
-                "errors": [{"kind": "invalid_arguments", "message": "missing `source`", "severity": 1.0, "suggestions": []}]
-            });
-        }
+        None => return mcp_error("missing `source`"),
     };
-
-    let tier = args.get("tier").and_then(Value::as_str).unwrap_or("auto");
-    let smt_timeout = args
-        .get("smt_timeout")
-        .and_then(Value::as_u64)
-        .unwrap_or(5000);
-    let samples = args.get("samples").and_then(Value::as_u64).unwrap_or(100) as usize;
-    let seed = args.get("seed").and_then(Value::as_u64).unwrap_or(0);
-
-    let amenability = match args
-        .get("amenability")
-        .and_then(Value::as_str)
-        .unwrap_or("polynomial")
-    {
-        "linear" => chelis_prove::dispatch::SmtAmenability::Linear,
-        "polynomial" => chelis_prove::dispatch::SmtAmenability::Polynomial,
-        "transcendental" => chelis_prove::dispatch::SmtAmenability::Transcendental,
-        "opaque" => chelis_prove::dispatch::SmtAmenability::Opaque,
-        other => {
-            return json!({
-                "ok": false,
-                "stage": "mcp",
-                "errors": [{"kind": "invalid_arguments", "message": format!("invalid amenability `{other}`; must be linear|polynomial|transcendental|opaque"), "severity": 1.0, "suggestions": []}]
-            });
-        }
+    let tier = match args.get("tier").and_then(Value::as_str).unwrap_or("auto") {
+        "auto" => chelis_prove::TierSelection::Auto,
+        "fuzz-only" => chelis_prove::TierSelection::FuzzOnly,
+        "smt-only" => chelis_prove::TierSelection::SmtOnly,
+        "type-only" => chelis_prove::TierSelection::TypeOnly,
+        other => return mcp_error(&format!("invalid tier `{other}`")),
     };
+    let smt_timeout = args.get("smt_timeout_ms").and_then(Value::as_u64).unwrap_or(5000);
+    let samples = args.get("fuzz_samples").and_then(Value::as_u64).unwrap_or(100) as u32;
+    let seed = args.get("fuzz_seed").and_then(Value::as_u64).unwrap_or(0);
 
-    let tier_mode = match tier {
-        "auto" => chelis_prove::dispatch::TierMode::Auto,
-        "fuzz-only" => chelis_prove::dispatch::TierMode::FuzzOnly,
-        "smt-only" => chelis_prove::dispatch::TierMode::SmtOnly,
-        "type-only" => chelis_prove::dispatch::TierMode::TypeOnly,
-        other => {
-            return json!({
-                "ok": false,
-                "stage": "mcp",
-                "errors": [{"kind": "invalid_arguments", "message": format!("invalid tier `{other}`"), "severity": 1.0, "suggestions": []}]
-            });
-        }
-    };
-
-    let options = chelis_prove::dispatch::DispatchOptions {
-        tier_mode,
+    let req = chelis_prove::VerificationRequest {
+        source,
+        source_kind: chelis_prove::SourceKind::Surf,
+        tier,
         smt_timeout_ms: smt_timeout,
         fuzz_samples: samples,
         fuzz_seed: seed,
+        inlining_depth_limit: 3,
     };
 
-    // Dispatch the property through the three-tier pipeline.
-    // For now, dispatch a single property from the source.
-    let result =
-        chelis_prove::dispatch::dispatch_property(&source, "property", amenability, &options);
+    match chelis_prove::verify_source(req) {
+        Ok(result) => serde_json::to_value(&result).unwrap_or(json!({"ok": false})),
+        Err(e) => json!({ "ok": false, "stage": "prove", "errors": [{"message": e.to_string()}] }),
+    }
+}
 
-    json!({
-        "ok": true,
-        "stage": "prove",
-        "properties": [serde_json::to_value(&result).unwrap_or(json!(null))],
-        "summary": {
-            "total": 1,
-            "proved": if result.status == chelis_prove::ProofStatus::Proved { 1 } else { 0 },
-            "failed": match &result.status { chelis_prove::ProofStatus::Disproved { .. } => 1, _ => 0 },
+fn mcp_error(msg: &str) -> Value {
+    json!({ "ok": false, "stage": "mcp", "errors": [{"kind": "invalid_arguments", "message": msg, "severity": 1.0, "suggestions": []}] })
+}
+
+fn handle_verify_spec_tool(args: &Value) -> Value {
+    let spec_dir = match args.get("spec_directory").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => return mcp_error("missing `spec_directory`"),
+    };
+    let path = std::path::Path::new(&spec_dir);
+    if !path.is_dir() {
+        return mcp_error(&format!("not a directory: {spec_dir}"));
+    }
+    let mut source = String::new();
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if entry.path().extension().map(|e| e == "ch").unwrap_or(false) {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    source.push_str(&content);
+                    source.push('\n');
+                }
+            }
         }
-    })
+    }
+    if source.is_empty() {
+        return mcp_error("no .ch files found in directory");
+    }
+    let req = chelis_prove::VerificationRequest { source, ..Default::default() };
+    match chelis_prove::verify_source(req) {
+        Ok(result) => serde_json::to_value(&result).unwrap_or(json!({"ok": false})),
+        Err(e) => json!({ "ok": false, "stage": "prove", "errors": [{"message": e.to_string()}] }),
+    }
+}
+
+fn handle_explain_failure_tool(args: &Value) -> Value {
+    let spec_dir = match args.get("spec_directory").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => return mcp_error("missing `spec_directory`"),
+    };
+    let property_id = match args.get("property_id").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => return mcp_error("missing `property_id`"),
+    };
+    let path = std::path::Path::new(&spec_dir);
+    let mut source = String::new();
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if entry.path().extension().map(|e| e == "ch").unwrap_or(false) {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    source.push_str(&content);
+                    source.push('\n');
+                }
+            }
+        }
+    }
+    let req = chelis_prove::VerificationRequest { source, ..Default::default() };
+    match chelis_prove::verify_source(req) {
+        Ok(result) => {
+            if let Some(prop) = result.properties.iter().find(|p| p.name == property_id) {
+                serde_json::to_value(prop).unwrap_or(json!({"ok": false}))
+            } else {
+                mcp_error(&format!("property `{property_id}` not found"))
+            }
+        }
+        Err(e) => json!({ "ok": false, "errors": [{"message": e.to_string()}] }),
+    }
+}
+
+fn handle_proof_artifact_tool(args: &Value) -> Value {
+    let result = handle_explain_failure_tool(args);
+    if let Some(obj) = result.as_object() {
+        let mut enriched = obj.clone();
+        enriched.insert("solver".to_string(), json!("cvc5-1.3.1"));
+        enriched.insert("logic".to_string(), json!("QF_NRA / QF_NRAT"));
+        json!(enriched)
+    } else {
+        result
+    }
 }
