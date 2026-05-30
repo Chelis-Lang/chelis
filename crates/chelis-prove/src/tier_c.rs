@@ -30,18 +30,11 @@ pub enum TierCResult {
 /// c-earchin output), this evaluates once. For parameterized properties,
 /// the existing `chelis prove` fuzz logic handles sample generation — this
 /// tier delegates to it.
-pub fn fuzz(
-    property_source: &str,
-    property_name: &str,
-    samples: usize,
-    _seed: u64,
-) -> TierCResult {
+pub fn fuzz(property_source: &str, property_name: &str, samples: usize, _seed: u64) -> TierCResult {
     // For the dispatcher integration, we call eval_selected on a probe root
     // that wraps the property. This mirrors what chelis prove does internally.
     let probe_name = format!("__chelis_prove_probe_{property_name}");
-    let source_with_probe = format!(
-        "{property_source}\n{probe_name} = {property_name}()\n",
-    );
+    let source_with_probe = format!("{property_source}\n{probe_name} = {property_name}()\n",);
 
     let result = compiler::eval_selected(
         EvalRequest {
@@ -53,29 +46,28 @@ pub fn fuzz(
     );
 
     match result {
-        Ok(eval_result) => {
-            match eval_result.roots.as_slice() {
-                [root] => match &root.value {
-                    ExecutionValue::Bool { value } => {
-                        if *value {
-                            TierCResult::AllPassed(samples)
-                        } else {
-                            TierCResult::Failed(Value::String(
-                                "property evaluated to false".to_string(),
-                            ))
-                        }
+        Ok(eval_result) => match eval_result.roots.as_slice() {
+            [root] => match &root.value {
+                ExecutionValue::Bool { value } => {
+                    if *value {
+                        TierCResult::AllPassed(samples)
+                    } else {
+                        TierCResult::Failed(Value::String(
+                            "property evaluated to false".to_string(),
+                        ))
                     }
-                    _ => TierCResult::Error(
-                        "property did not evaluate to bool".to_string(),
-                    ),
-                },
-                _ => TierCResult::Error(
-                    "unexpected number of evaluation roots".to_string(),
-                ),
-            }
-        }
+                }
+                _ => TierCResult::Error("property did not evaluate to bool".to_string()),
+            },
+            _ => TierCResult::Error("unexpected number of evaluation roots".to_string()),
+        },
         Err(err) => {
-            let msg = err.errors.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ");
+            let msg = err
+                .errors
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
             TierCResult::Error(msg)
         }
     }
@@ -83,7 +75,7 @@ pub fn fuzz(
 
 // --- SmtProperty-based fuzzer (used by --tier auto) ---
 
-use crate::solver::{SmtExpr, ArithOp, CmpOp, BoolOp};
+use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
 use crate::tier_b::SmtProperty;
 use std::collections::HashMap;
 
@@ -118,7 +110,11 @@ pub fn fuzz_smt_property(property: &SmtProperty, samples: usize, seed: u64) -> T
             .collect();
 
         // Check preconditions
-        if !property.preconditions.iter().all(|pre| eval_bool(pre, &env)) {
+        if !property
+            .preconditions
+            .iter()
+            .all(|pre| eval_bool(pre, &env))
+        {
             continue;
         }
 
@@ -162,7 +158,11 @@ fn eval_bool(expr: &SmtExpr, env: &HashMap<String, f64>) -> bool {
         }
         SmtExpr::Not(inner) => !eval_bool(inner, env),
         SmtExpr::Ite(cond, then_e, else_e) => {
-            if eval_bool(cond, env) { eval_bool(then_e, env) } else { eval_bool(else_e, env) }
+            if eval_bool(cond, env) {
+                eval_bool(then_e, env)
+            } else {
+                eval_bool(else_e, env)
+            }
         }
         // Arithmetic expressions used in boolean context: nonzero = true
         _ => eval_arith(expr, env) != 0.0,
@@ -174,7 +174,13 @@ fn eval_arith(expr: &SmtExpr, env: &HashMap<String, f64>) -> f64 {
         SmtExpr::Var(name) => env.get(name).copied().unwrap_or(0.0),
         SmtExpr::RealLit(v) => *v,
         SmtExpr::IntLit(v) => *v as f64,
-        SmtExpr::BoolLit(v) => if *v { 1.0 } else { 0.0 },
+        SmtExpr::BoolLit(v) => {
+            if *v {
+                1.0
+            } else {
+                0.0
+            }
+        }
         SmtExpr::Arith(op, left, right) => {
             let l = eval_arith(left, env);
             let r = eval_arith(right, env);
@@ -182,7 +188,13 @@ fn eval_arith(expr: &SmtExpr, env: &HashMap<String, f64>) -> f64 {
                 ArithOp::Add => l + r,
                 ArithOp::Sub => l - r,
                 ArithOp::Mul => l * r,
-                ArithOp::Div => if r != 0.0 { l / r } else { f64::NAN },
+                ArithOp::Div => {
+                    if r != 0.0 {
+                        l / r
+                    } else {
+                        f64::NAN
+                    }
+                }
                 ArithOp::Neg => -l,
             }
         }
@@ -201,27 +213,50 @@ fn eval_arith(expr: &SmtExpr, env: &HashMap<String, f64>) -> f64 {
             }
         }
         SmtExpr::Ite(cond, then_e, else_e) => {
-            if eval_bool(cond, env) { eval_arith(then_e, env) } else { eval_arith(else_e, env) }
+            if eval_bool(cond, env) {
+                eval_arith(then_e, env)
+            } else {
+                eval_arith(else_e, env)
+            }
         }
         SmtExpr::Cmp(op, left, right) => {
             let l = eval_arith(left, env);
             let r = eval_arith(right, env);
             let result = match op {
-                CmpOp::Lt => l < r, CmpOp::Le => l <= r, CmpOp::Gt => l > r,
-                CmpOp::Ge => l >= r, CmpOp::Eq => (l - r).abs() < 1e-10, CmpOp::Ne => (l - r).abs() >= 1e-10,
+                CmpOp::Lt => l < r,
+                CmpOp::Le => l <= r,
+                CmpOp::Gt => l > r,
+                CmpOp::Ge => l >= r,
+                CmpOp::Eq => (l - r).abs() < 1e-10,
+                CmpOp::Ne => (l - r).abs() >= 1e-10,
             };
             if result { 1.0 } else { 0.0 }
         }
-        SmtExpr::Bool(_, _) | SmtExpr::Not(_) => if eval_bool(expr, env) { 1.0 } else { 0.0 },
+        SmtExpr::Bool(_, _) | SmtExpr::Not(_) => {
+            if eval_bool(expr, env) {
+                1.0
+            } else {
+                0.0
+            }
+        }
         SmtExpr::Forall(_, _) | SmtExpr::Exists(_, _) => f64::NAN, // unreachable after fuzzability check
     }
 }
 
-struct Lcg { state: u64 }
+struct Lcg {
+    state: u64,
+}
 impl Lcg {
-    fn new(seed: u64) -> Self { Self { state: seed ^ 0x9E37_79B9_7F4A_7C15 } }
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed ^ 0x9E37_79B9_7F4A_7C15,
+        }
+    }
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.state
     }
     fn next_f64(&mut self, min: f64, max: f64) -> f64 {
@@ -242,7 +277,11 @@ mod tests {
             preconditions: vec![],
             postcondition: SmtExpr::Cmp(
                 CmpOp::Ge,
-                Box::new(SmtExpr::Arith(ArithOp::Mul, Box::new(SmtExpr::Var("x".into())), Box::new(SmtExpr::Var("x".into())))),
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Mul,
+                    Box::new(SmtExpr::Var("x".into())),
+                    Box::new(SmtExpr::Var("x".into())),
+                )),
                 Box::new(SmtExpr::RealLit(0.0)),
             ),
         };
@@ -276,7 +315,11 @@ mod tests {
             preconditions: vec![],
             postcondition: SmtExpr::Forall(
                 vec![("y".into(), SmtSort::Real)],
-                Box::new(SmtExpr::Cmp(CmpOp::Ge, Box::new(SmtExpr::Var("y".into())), Box::new(SmtExpr::RealLit(0.0)))),
+                Box::new(SmtExpr::Cmp(
+                    CmpOp::Ge,
+                    Box::new(SmtExpr::Var("y".into())),
+                    Box::new(SmtExpr::RealLit(0.0)),
+                )),
             ),
         };
         match fuzz_smt_property(&prop, 100, 0) {

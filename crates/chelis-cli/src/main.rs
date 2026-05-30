@@ -2,6 +2,8 @@
 
 mod prove;
 mod style_gate;
+#[cfg(feature = "chelis-prove")]
+mod verify_spec;
 
 use chelis_compiler_api::schema::{
     EvalRequest, ExecutionValue, SourceKind, WireInferredDim, WireInferredEffect,
@@ -335,6 +337,26 @@ enum Command {
         #[clap(long, default_value = "5000")]
         smt_timeout: u64,
     },
+    /// Verify EARS spec against implementation (three-tier: type → SMT → fuzz)
+    VerifySpec {
+        /// Path to .ears file, .ch file, or spec directory
+        path: PathBuf,
+        /// Implementation file (if not auto-discovered)
+        #[clap(long)]
+        r#impl: Option<PathBuf>,
+        /// Verification tier
+        #[clap(long, default_value = "auto")]
+        tier: String,
+        /// SMT timeout in ms
+        #[clap(long, default_value = "5000")]
+        smt_timeout: u64,
+        /// Fuzz samples
+        #[clap(long, default_value = "100")]
+        samples: u32,
+        /// Output format
+        #[clap(long, default_value = "human")]
+        format: String,
+    },
     /// Lint naming conventions per `spec/01-nomenclature.md`
     Lint {
         /// Paths to lint. Defaults to the current directory.
@@ -662,6 +684,38 @@ fn main() {
                 std::process::exit(3);
             }
         },
+        Some(Command::VerifySpec {
+            path,
+            r#impl,
+            tier,
+            smt_timeout,
+            samples,
+            format,
+        }) => {
+            #[cfg(feature = "chelis-prove")]
+            {
+                match verify_spec::cmd_verify_spec(
+                    path,
+                    r#impl,
+                    &tier,
+                    smt_timeout,
+                    samples,
+                    &format,
+                ) {
+                    Ok(code) => std::process::exit(code),
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        std::process::exit(3);
+                    }
+                }
+            }
+            #[cfg(not(feature = "chelis-prove"))]
+            {
+                let _ = (path, r#impl, tier, smt_timeout, samples, format);
+                eprintln!("error: verify-spec requires the `smt` feature");
+                std::process::exit(3);
+            }
+        }
         Some(Command::Lint {
             paths,
             check,

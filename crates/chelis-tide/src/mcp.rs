@@ -248,28 +248,39 @@ fn prove_tool_schema() -> Value {
 fn handle_prove_tool(args: &Value) -> Value {
     let source = match args.get("source").and_then(Value::as_str) {
         Some(s) => s.to_string(),
-        None => return json!({
-            "ok": false,
-            "stage": "mcp",
-            "errors": [{"kind": "invalid_arguments", "message": "missing `source`", "severity": 1.0, "suggestions": []}]
-        }),
+        None => {
+            return json!({
+                "ok": false,
+                "stage": "mcp",
+                "errors": [{"kind": "invalid_arguments", "message": "missing `source`", "severity": 1.0, "suggestions": []}]
+            });
+        }
     };
 
     let tier = args.get("tier").and_then(Value::as_str).unwrap_or("auto");
-    let smt_timeout = args.get("smt_timeout").and_then(Value::as_u64).unwrap_or(5000);
+    let smt_timeout = args
+        .get("smt_timeout")
+        .and_then(Value::as_u64)
+        .unwrap_or(5000);
     let samples = args.get("samples").and_then(Value::as_u64).unwrap_or(100) as usize;
     let seed = args.get("seed").and_then(Value::as_u64).unwrap_or(0);
 
-    let amenability = match args.get("amenability").and_then(Value::as_str).unwrap_or("polynomial") {
+    let amenability = match args
+        .get("amenability")
+        .and_then(Value::as_str)
+        .unwrap_or("polynomial")
+    {
         "linear" => chelis_prove::dispatch::SmtAmenability::Linear,
         "polynomial" => chelis_prove::dispatch::SmtAmenability::Polynomial,
         "transcendental" => chelis_prove::dispatch::SmtAmenability::Transcendental,
         "opaque" => chelis_prove::dispatch::SmtAmenability::Opaque,
-        other => return json!({
-            "ok": false,
-            "stage": "mcp",
-            "errors": [{"kind": "invalid_arguments", "message": format!("invalid amenability `{other}`; must be linear|polynomial|transcendental|opaque"), "severity": 1.0, "suggestions": []}]
-        }),
+        other => {
+            return json!({
+                "ok": false,
+                "stage": "mcp",
+                "errors": [{"kind": "invalid_arguments", "message": format!("invalid amenability `{other}`; must be linear|polynomial|transcendental|opaque"), "severity": 1.0, "suggestions": []}]
+            });
+        }
     };
 
     let tier_mode = match tier {
@@ -277,11 +288,13 @@ fn handle_prove_tool(args: &Value) -> Value {
         "fuzz-only" => chelis_prove::dispatch::TierMode::FuzzOnly,
         "smt-only" => chelis_prove::dispatch::TierMode::SmtOnly,
         "type-only" => chelis_prove::dispatch::TierMode::TypeOnly,
-        other => return json!({
-            "ok": false,
-            "stage": "mcp",
-            "errors": [{"kind": "invalid_arguments", "message": format!("invalid tier `{other}`"), "severity": 1.0, "suggestions": []}]
-        }),
+        other => {
+            return json!({
+                "ok": false,
+                "stage": "mcp",
+                "errors": [{"kind": "invalid_arguments", "message": format!("invalid tier `{other}`"), "severity": 1.0, "suggestions": []}]
+            });
+        }
     };
 
     let options = chelis_prove::dispatch::DispatchOptions {
@@ -293,12 +306,8 @@ fn handle_prove_tool(args: &Value) -> Value {
 
     // Dispatch the property through the three-tier pipeline.
     // For now, dispatch a single property from the source.
-    let result = chelis_prove::dispatch::dispatch_property(
-        &source,
-        "property",
-        amenability,
-        &options,
-    );
+    let result =
+        chelis_prove::dispatch::dispatch_property(&source, "property", amenability, &options);
 
     json!({
         "ok": true,

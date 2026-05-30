@@ -23,7 +23,7 @@ pub mod tier_c;
 
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
 pub use dispatch::{DispatchOptions, dispatch_property};
-pub use from_property_spec::{PropertySpecInput, to_smt_property, to_dispatch_amenability};
+pub use from_property_spec::{PropertySpecInput, to_dispatch_amenability, to_smt_property};
 pub use inlineability::{Fuzzability, Inlineability, classify_fuzzability, classify_inlineability};
 pub use tier_b::{SmtProperty, solve_property};
 
@@ -31,11 +31,19 @@ pub use tier_b::{SmtProperty, solve_property};
 
 /// Source language for verification input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SourceKind { Surf, Deep }
+pub enum SourceKind {
+    Surf,
+    Deep,
+}
 
 /// Tier selection for verification dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum TierSelection { Auto, FuzzOnly, SmtOnly, TypeOnly }
+pub enum TierSelection {
+    Auto,
+    FuzzOnly,
+    SmtOnly,
+    TypeOnly,
+}
 
 /// Request to verify source containing @property declarations.
 #[derive(Debug, Clone)]
@@ -51,7 +59,15 @@ pub struct VerificationRequest {
 
 impl Default for VerificationRequest {
     fn default() -> Self {
-        Self { source: String::new(), source_kind: SourceKind::Surf, tier: TierSelection::Auto, smt_timeout_ms: 5000, fuzz_samples: 100, fuzz_seed: 0, inlining_depth_limit: 3 }
+        Self {
+            source: String::new(),
+            source_kind: SourceKind::Surf,
+            tier: TierSelection::Auto,
+            smt_timeout_ms: 5000,
+            fuzz_samples: 100,
+            fuzz_seed: 0,
+            inlining_depth_limit: 3,
+        }
     }
 }
 
@@ -116,7 +132,9 @@ pub fn verify_source(req: VerificationRequest) -> Result<VerificationResult, Ver
     use std::time::Instant;
 
     if matches!(req.source_kind, SourceKind::Deep) {
-        return Err(VerifyError::Internal("Deep source not yet supported in verify_source".into()));
+        return Err(VerifyError::Internal(
+            "Deep source not yet supported in verify_source".into(),
+        ));
     }
 
     let decls = chelis_surf::parser::parse_str(&req.source)
@@ -140,13 +158,17 @@ pub fn verify_source(req: VerificationRequest) -> Result<VerificationResult, Ver
 
         // Convert property body and preconditions to SmtExpr
         let postcondition = convert::surf_expr_to_smt(&prop.body, &ctx);
-        let preconditions: Vec<solver::SmtExpr> = prop.preconditions.iter()
+        let preconditions: Vec<solver::SmtExpr> = prop
+            .preconditions
+            .iter()
             .filter_map(|e| convert::surf_expr_to_smt(e, &ctx))
             .collect();
 
         let pr = if let Some(post) = postcondition {
             // Build SmtProperty
-            let variables: Vec<(String, solver::SmtSort)> = prop.params.iter()
+            let variables: Vec<(String, solver::SmtSort)> = prop
+                .params
+                .iter()
                 .filter_map(|p| {
                     let sort = match p.ty.as_ref()? {
                         chelis_surf::ast::TypeExpr::Named(n, _) => match n.as_str() {
@@ -165,7 +187,11 @@ pub fn verify_source(req: VerificationRequest) -> Result<VerificationResult, Ver
                 // Unsupported param types — fall to fuzz
                 fuzz_property(&prop.name, &variables, &preconditions, &post, &req, start)
             } else {
-                let smt_prop = tier_b::SmtProperty { variables, preconditions, postcondition: post.clone() };
+                let smt_prop = tier_b::SmtProperty {
+                    variables,
+                    preconditions,
+                    postcondition: post.clone(),
+                };
                 dispatch_property_tiers(&prop.name, smt_prop, &post, &req, start)
             }
         } else {
@@ -173,7 +199,9 @@ pub fn verify_source(req: VerificationRequest) -> Result<VerificationResult, Ver
             PropertyResult {
                 name: prop.name.clone(),
                 proof_tier: artifact::ProofTier::Fuzz,
-                status: artifact::ProofStatus::StatisticallyValidated { samples: req.fuzz_samples as usize },
+                status: artifact::ProofStatus::StatisticallyValidated {
+                    samples: req.fuzz_samples as usize,
+                },
                 counterexample: None,
                 provenance: None,
                 duration_ms: start.elapsed().as_millis() as u64,
@@ -183,7 +211,10 @@ pub fn verify_source(req: VerificationRequest) -> Result<VerificationResult, Ver
     }
 
     let summary = build_summary(&results);
-    Ok(VerificationResult { properties: results, summary })
+    Ok(VerificationResult {
+        properties: results,
+        summary,
+    })
 }
 
 fn flatten_decls(decls: &[chelis_surf::ast::Decl]) -> Vec<chelis_surf::ast::Decl> {
@@ -223,7 +254,9 @@ fn dispatch_property_tiers(
                 return PropertyResult {
                     name: name.to_string(),
                     proof_tier: artifact::ProofTier::Smt,
-                    status: artifact::ProofStatus::Disproved { counterexample: serde_json::Value::Object(Default::default()) },
+                    status: artifact::ProofStatus::Disproved {
+                        counterexample: serde_json::Value::Object(Default::default()),
+                    },
                     counterexample: Some(cx),
                     provenance: None,
                     duration_ms: start.elapsed().as_millis() as u64,
@@ -236,7 +269,14 @@ fn dispatch_property_tiers(
     }
 
     // Tier C: Fuzz
-    fuzz_property(name, &smt_prop.variables, &smt_prop.preconditions, post, req, start)
+    fuzz_property(
+        name,
+        &smt_prop.variables,
+        &smt_prop.preconditions,
+        post,
+        req,
+        start,
+    )
 }
 
 fn fuzz_property(
@@ -281,16 +321,30 @@ fn fuzz_property(
 }
 
 fn parse_counterexample(model: &serde_json::Value) -> Counterexample {
-    let bindings = model.as_object().map(|m| {
-        m.iter().filter_map(|(k, v)| {
-            v.as_str().and_then(|s| s.parse::<f64>().ok()).map(|f| (k.clone(), f))
-        }).collect()
-    }).unwrap_or_default();
+    let bindings = model
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| {
+                    v.as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .map(|f| (k.clone(), f))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Counterexample { bindings }
 }
 
 fn build_summary(results: &[PropertyResult]) -> VerificationSummary {
-    let mut s = VerificationSummary { total: results.len(), proved: 0, statistically_validated: 0, failed: 0, rejected: 0, inconclusive: 0 };
+    let mut s = VerificationSummary {
+        total: results.len(),
+        proved: 0,
+        statistically_validated: 0,
+        failed: 0,
+        rejected: 0,
+        inconclusive: 0,
+    };
     for r in results {
         match &r.status {
             artifact::ProofStatus::Proved => s.proved += 1,
@@ -309,8 +363,12 @@ mod integration_tests {
 
     #[test]
     fn verify_source_discovers_and_verifies_property() {
-        let source = "def f(x: f32) -> f32 = x * x\n\n@property sq forall(x: f32):\n  f(x) >= 0.0\n";
-        let req = VerificationRequest { source: source.to_string(), ..Default::default() };
+        let source =
+            "def f(x: f32) -> f32 = x * x\n\n@property sq forall(x: f32):\n  f(x) >= 0.0\n";
+        let req = VerificationRequest {
+            source: source.to_string(),
+            ..Default::default()
+        };
         let result = verify_source(req).unwrap();
         assert_eq!(result.properties.len(), 1);
         assert_eq!(result.properties[0].name, "sq");
@@ -325,7 +383,10 @@ mod integration_tests {
     #[test]
     fn verify_source_detects_failure() {
         let source = "def bad(x: f32) -> f32 = x - 1.0\n\n@property fails forall(x: f32) where x > 0.0:\n  bad(x) > 0.0\n";
-        let req = VerificationRequest { source: source.to_string(), ..Default::default() };
+        let req = VerificationRequest {
+            source: source.to_string(),
+            ..Default::default()
+        };
         let result = verify_source(req).unwrap();
         assert_eq!(result.summary.total, 1);
         assert!(result.summary.failed > 0 || result.summary.proved == 0);
@@ -334,7 +395,10 @@ mod integration_tests {
     #[test]
     fn verify_source_no_properties_is_error() {
         let source = "def f(x: f32) -> f32 = x\n";
-        let req = VerificationRequest { source: source.to_string(), ..Default::default() };
+        let req = VerificationRequest {
+            source: source.to_string(),
+            ..Default::default()
+        };
         assert!(matches!(verify_source(req), Err(VerifyError::NoProperties)));
     }
 }

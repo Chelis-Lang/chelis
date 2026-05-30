@@ -38,11 +38,7 @@ pub struct SmtProperty {
 /// Run Tier B SMT check on a property source string.
 ///
 /// Without the `smt` feature, returns Timeout (forces Tier C fallback).
-pub fn solve(
-    _property_source: &str,
-    _property_name: &str,
-    _timeout_ms: u64,
-) -> TierBResult {
+pub fn solve(_property_source: &str, _property_name: &str, _timeout_ms: u64) -> TierBResult {
     #[cfg(feature = "smt")]
     {
         // Without a structured SmtProperty, we can't solve from raw source.
@@ -149,7 +145,11 @@ pub fn lower_to_cvc5(
         }
         SmtExpr::IntLit(value) => tm.mk_integer(*value),
         SmtExpr::BoolLit(value) => {
-            if *value { tm.mk_true() } else { tm.mk_false() }
+            if *value {
+                tm.mk_true()
+            } else {
+                tm.mk_false()
+            }
         }
         SmtExpr::Arith(op, left, right) => {
             let l = lower_to_cvc5(tm, left, vars);
@@ -178,7 +178,10 @@ pub fn lower_to_cvc5(
             }
         }
         SmtExpr::Bool(op, children) => {
-            let terms: Vec<_> = children.iter().map(|c| lower_to_cvc5(tm, c, vars)).collect();
+            let terms: Vec<_> = children
+                .iter()
+                .map(|c| lower_to_cvc5(tm, c, vars))
+                .collect();
             match op {
                 BoolOp::And => tm.mk_term(Kind::CVC5_KIND_AND, &terms),
                 BoolOp::Or => tm.mk_term(Kind::CVC5_KIND_OR, &terms),
@@ -238,14 +241,28 @@ pub fn lower_to_cvc5(
                 "cos" => tm.mk_term(Kind::CVC5_KIND_COSINE, &lowered_args),
                 "abs" => tm.mk_term(Kind::CVC5_KIND_ABS, &lowered_args),
                 "min" if lowered_args.len() == 2 => {
-                    let cond = tm.mk_term(Kind::CVC5_KIND_LT, &[lowered_args[0].clone(), lowered_args[1].clone()]);
-                    tm.mk_term(Kind::CVC5_KIND_ITE, &[cond, lowered_args[0].clone(), lowered_args[1].clone()])
+                    let cond = tm.mk_term(
+                        Kind::CVC5_KIND_LT,
+                        &[lowered_args[0].clone(), lowered_args[1].clone()],
+                    );
+                    tm.mk_term(
+                        Kind::CVC5_KIND_ITE,
+                        &[cond, lowered_args[0].clone(), lowered_args[1].clone()],
+                    )
                 }
                 "max" if lowered_args.len() == 2 => {
-                    let cond = tm.mk_term(Kind::CVC5_KIND_GT, &[lowered_args[0].clone(), lowered_args[1].clone()]);
-                    tm.mk_term(Kind::CVC5_KIND_ITE, &[cond, lowered_args[0].clone(), lowered_args[1].clone()])
+                    let cond = tm.mk_term(
+                        Kind::CVC5_KIND_GT,
+                        &[lowered_args[0].clone(), lowered_args[1].clone()],
+                    );
+                    tm.mk_term(
+                        Kind::CVC5_KIND_ITE,
+                        &[cond, lowered_args[0].clone(), lowered_args[1].clone()],
+                    )
                 }
-                other => panic!("unsupported function `{other}` in v0.1; only inlineable functions and supported transcendentals (exp, sqrt, sin, cos, abs, min, max) are allowed")
+                other => panic!(
+                    "unsupported function `{other}` in v0.1; only inlineable functions and supported transcendentals (exp, sqrt, sin, cos, abs, min, max) are allowed"
+                ),
             }
         }
         SmtExpr::Ite(cond, then_expr, else_expr) => {
@@ -266,7 +283,7 @@ fn contains_transcendental(expr: &SmtExpr) -> bool {
 #[cfg(all(test, feature = "smt"))]
 mod tests {
     use super::*;
-    use crate::solver::{SmtExpr, SmtSort, CmpOp, ArithOp};
+    use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
 
     #[test]
     fn proves_x_squared_non_negative() {
