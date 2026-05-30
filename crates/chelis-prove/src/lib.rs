@@ -10,6 +10,7 @@
 //! See `docs/trust-stack-verification.md` for architectural framing.
 
 pub mod artifact;
+pub mod convert;
 pub mod dispatch;
 pub mod from_property_spec;
 pub mod inlineability;
