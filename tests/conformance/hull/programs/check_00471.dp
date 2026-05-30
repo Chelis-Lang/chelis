@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-name {} seq) (d-lit {} 4) (t-prim {} bool))})) (app {} (var {} reshape) (var {} ta) (app {} (var {} Cons) (cast {} (lit {type: (t-prim {} int32)} 1) (t-prim {} int64)) (var {} Nil)))))

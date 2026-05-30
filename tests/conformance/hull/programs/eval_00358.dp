@@ -1,0 +1,1 @@
+(def {} answer (cast {} (app {} (var {} sin) (lit {type: (t-prim {} f32)} 6.0)) (t-prim {} f32)))

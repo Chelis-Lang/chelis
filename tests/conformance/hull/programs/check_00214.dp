@@ -1,0 +1,1 @@
+(def {} answer (grad {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (app {} (var {} add) (app {} (var {} sin) (app {} (var {} add) (var {} xa) (var {} xa))) (var {} xa)))))

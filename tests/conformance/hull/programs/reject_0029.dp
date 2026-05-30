@@ -1,0 +1,1 @@
+(def {} g (app {} (var {} add) (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} bool)} false)))

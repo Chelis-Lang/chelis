@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (app {} (var {} add) (lit {type: (t-prim {} f32)} 3.0) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 3.0)) (app {} (var {} neg) (let {} (bind {} xb (var {} xa)) (var {} xb)))))))

@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} f32)} 2.0) (arm {} (pat-var {} xa) () (var {} xa)))))

@@ -1,0 +1,1 @@
+(def {} answer (app {} (var {} sqrt) (if {} (lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} f32)} 8.0) (app {} (var {} exp) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 1.0)) (var {} xa))))))

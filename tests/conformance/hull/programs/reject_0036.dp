@@ -1,0 +1,1 @@
+(def {} g (app {} (var {} neg) (lit {type: (t-prim {} string)} hello)))

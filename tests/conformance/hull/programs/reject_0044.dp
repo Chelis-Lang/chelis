@@ -1,0 +1,1 @@
+(def {} g (app {} (var {} sin) (lit {type: (t-prim {} bool)} true)))

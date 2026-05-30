@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-name {} rdim) (t-prim {} int64))})) (app {} (var {} expand) (var {} ta) (lit {type: (t-prim {} int32)} 0) (var {} hidden))))

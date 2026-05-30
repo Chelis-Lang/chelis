@@ -1,0 +1,2 @@
+(deftype {} Maybe () (variant {} Just (t-prim {} int32)) (variant {} Nothing))
+(def {} n (var {} Nothing))

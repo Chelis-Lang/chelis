@@ -1,0 +1,1 @@
+(def {} g (app {} (var {} sqrt) (lit {type: (t-prim {} bool)} false)))

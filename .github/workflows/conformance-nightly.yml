@@ -1,0 +1,123 @@
+name: Hull Conformance Nightly
+
+# The FULL >=10k FRESH Hull conformance campaign. The per-PR gate
+# (conformance.yml) runs a frozen, fixed 1,500-program slice; this nightly runs
+# the full fresh campaign so a regression the frozen slice cannot hide is still
+# caught, and re-validates the freeze against the live Hull reference.
+#
+# Unlike the per-PR gate (no Hull process, frozen-Hull-verdict comparison), the
+# nightly is the ONE place a Hull process runs: it checks out Hull at its pinned
+# commit, builds the live chelis binary, runs Hull's OWN authoritative live
+# `differential_check` campaign (scripts/run_differential_suite.py) against the
+# fresh binary with a FRESH date-derived seed, AND re-exports + diffs the frozen
+# per-PR corpus so an unexpected drift on an unchanged compiler surfaces as a
+# failing diff (a nondeterminism bug) while a deliberate compiler semantics
+# change is a reviewable corpus refresh.
+#
+# Modeled on heavy-e2e.yml: nightly cron + manual dispatch ONLY, never per-PR,
+# never on push.
+
+on:
+  schedule:
+    # 07:00 UTC daily. Off-peak; no per-PR latency impact.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The Hull commit the frozen corpus was produced from. Bump this in lockstep
+  # with a corpus refresh so the nightly fresh campaign uses the same Hull
+  # reference logic the frozen corpus was pinned against.
+  HULL_REPO: Chelis-Lang/hull
+
+jobs:
+  conformance-nightly:
+    name: Hull Conformance Nightly (Linux)
+    runs-on: ubuntu-latest
+    # The sharded ~15-20 min campaign wall plus build + checkout head room.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout chelis
+        uses: actions/checkout@v6
+        with:
+          path: chelis
+
+      # Hull at the commit the frozen corpus was pinned against (manifest
+      # hull_commit). The nightly reads that field and checks Hull out at it so
+      # the fresh campaign and the frozen corpus share one Hull reference.
+      - name: Read pinned Hull commit
+        id: hull
+        # Single-field JSON read with the runner's system python3 (the uv venv
+        # is not created until a later step). The frozen corpus manifest records
+        # the exact Hull commit it was produced from.
+        run: |
+          commit=$(python3 -c 'import json;print(json.load(open("chelis/tests/conformance/hull/manifest.json"))["hull_commit"])')
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Hull at pinned commit
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.HULL_REPO }}
+          ref: ${{ steps.hull.outputs.commit }}
+          path: hull
+
+      - name: Install C dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        working-directory: chelis
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: chelis
+
+      - name: Build chelis (release)
+        working-directory: chelis
+        run: cargo build --release -p chelis-cli --bin chelis
+
+      # FRESH FULL CAMPAIGN. Run Hull's OWN authoritative live differential
+      # campaign against the freshly-built binary with a FRESH date-derived seed,
+      # exercising NEW programs the frozen slice never sees. This is the live
+      # Hull `differential_check`, not the frozen strings. --check-n 10000
+      # --eval-n 1000 per the design; the seed is the run date so each night
+      # draws a distinct program sequence.
+      - name: Fresh full campaign (live Hull reference)
+        working-directory: hull
+        run: |
+          SEED=$(date -u +%Y%m%d)
+          mkdir -p corpus/scratch
+          ../chelis/.venv/bin/python scripts/run_differential_suite.py \
+            --check-n 10000 --eval-n 1000 --shards 16 \
+            --seed "$SEED" \
+            --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis"
+
+      # RE-VALIDATE THE FREEZE: run the frozen per-PR corpus against the same
+      # fresh binary (the full slice, no caps). An unexpected drift on an
+      # unchanged compiler surfaces here as a failing gate; a deliberate
+      # semantics change must refresh the corpus (a reviewable diff).
+      - name: Re-validate the frozen corpus
+        working-directory: chelis
+        run: |
+          .venv/bin/python tests/conformance/hull/run_conformance.py \
+            --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis"
+
+      - name: Conformance teeth (injected-unsound must fail the gate)
+        working-directory: chelis
+        run: |
+          if .venv/bin/python tests/conformance/hull/run_conformance.py \
+            --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis" \
+            --simulate-unsound reject_0000; then
+            echo "TEETH BROKEN: --simulate-unsound exited 0" >&2
+            exit 1
+          fi

@@ -40,6 +40,7 @@ def _load_module():
 gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
 # `gate.py` only owns the `lint-and-unit` and `integration` jobs; these
@@ -50,6 +51,22 @@ NON_GATE_JOBS = {
     "backend-sanitizers",
     "no-ai-authorship",
     "docs",
+}
+
+# Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
+# `gate.py` quartet (like the backend-sanitizers / macos-smoke jobs in ci.yml,
+# but in their own files). They run their own commands the gate does not
+# produce, by design. Listed here so the exclusion is explicit and reviewable.
+# Rule-id: GATE-SCOPE-CONFORMANCE -- the Hull conformance gate runs a Python
+# corpus runner against the built binary; it is a CI job, NOT part of the cargo
+# quartet + lint developer gate (see tests/conformance/hull/run_conformance.py
+# and .github/workflows/conformance.yml).
+NON_GATE_WORKFLOWS = {
+    "ci.yml",
+    "heavy-e2e.yml",
+    "release.yml",
+    "conformance.yml",
+    "conformance-nightly.yml",
 }
 
 
@@ -246,6 +263,33 @@ class CiParityTests(unittest.TestCase):
                     f"renamed or removed, update NON_GATE_JOBS"
                 ),
             )
+
+    def test_all_workflow_files_are_scope_classified(self):
+        # Every workflow file under .github/workflows/ must be explicitly
+        # classified as out-of-scope-by-design (NON_GATE_WORKFLOWS) so adding a
+        # new workflow forces a deliberate scope decision rather than silently
+        # introducing commands the per-PR gate does not own.
+        on_disk = {p.name for p in WORKFLOWS_DIR.glob("*.yml")}
+        on_disk |= {p.name for p in WORKFLOWS_DIR.glob("*.yaml")}
+        unclassified = on_disk - NON_GATE_WORKFLOWS
+        self.assertEqual(
+            unclassified,
+            set(),
+            (
+                f"workflow file(s) {unclassified} are not classified in "
+                f"NON_GATE_WORKFLOWS; decide explicitly whether each is part of "
+                f"the per-PR gate scope"
+            ),
+        )
+
+    def test_conformance_workflows_present_and_out_of_scope(self):
+        # The Hull conformance gate lives in its own workflow files, out of the
+        # gate.py quartet scope by design (rule-id GATE-SCOPE-CONFORMANCE).
+        for name in ("conformance.yml", "conformance-nightly.yml"):
+            self.assertTrue(
+                (WORKFLOWS_DIR / name).is_file(), f"missing workflow {name}"
+            )
+            self.assertIn(name, NON_GATE_WORKFLOWS)
 
     def test_no_multiline_run_in_gate_jobs(self):
         # A `run: |` block in a gate job would hide its commands from
