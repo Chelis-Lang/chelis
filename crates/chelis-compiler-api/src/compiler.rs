@@ -2570,6 +2570,20 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             window_shape: window_shape.clone(),
             strides: strides.clone(),
         },
+        RiscOp::ReduceWindowGrad {
+            reducer,
+            window_shape,
+            strides,
+        } => WireRiscOp::ReduceWindowGrad {
+            reducer: match reducer {
+                chelis_ir::dag::ReduceWindowKind::Max => "max".to_string(),
+                chelis_ir::dag::ReduceWindowKind::Min => "min".to_string(),
+                chelis_ir::dag::ReduceWindowKind::Sum => "sum".to_string(),
+                chelis_ir::dag::ReduceWindowKind::Mean => "mean".to_string(),
+            },
+            window_shape: window_shape.clone(),
+            strides: strides.clone(),
+        },
         RiscOp::Argmax { axis } => WireRiscOp::Argmax { axis: *axis },
         RiscOp::Argmin { axis } => WireRiscOp::Argmin { axis: *axis },
         RiscOp::Reshape { new_shape } => WireRiscOp::Reshape {

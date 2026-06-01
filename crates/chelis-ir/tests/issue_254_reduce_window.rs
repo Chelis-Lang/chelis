@@ -279,57 +279,36 @@ fn reduce_window_panics_when_window_arity_exceeds_rank() {
     let _ = eval_with_input(&dag, &name, vec![3, 3], vec![1.0; 9]);
 }
 
-/// AD is structurally rejected per spec §2.3.1: the four reducers
-/// share an `AdError::NotSupported` rejection until adjoint rules
-/// land.
+/// AD is supported per spec §2.3.1: `grad` over `reduce_window_*` lowers
+/// to a `ReduceWindowGrad` adjoint rather than being rejected. End-to-end
+/// check: the gradient of `sum(reduce_window_sum(x))` w.r.t. `x` is the
+/// per-position window-cover count (each input position contributes to
+/// every window that covers it).
 #[test]
-fn reduce_window_grad_rejection_is_structural() {
-    use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
+fn reduce_window_grad_lowers_to_adjoint_and_evaluates() {
+    use chelis_ir::grad::grad_dag_checked;
 
-    // Build a scalar-producing DAG: load -> reduce_window_sum -> sum
-    // over the remaining axis so the output is a scalar (required by
-    // grad_dag_checked).
+    // x[4] -> reduce_window_sum(window=[2], stride=[1]) -> out[3] -> sum -> scalar
     let mut dag = Dag::default();
     let load = dag.add_node(
         RiscOp::Load { name: "x".into() },
         vec![],
-        tensor_type(&[1, 1, 3, 3]),
+        tensor_type(&[4]),
         None,
     );
     let rw = dag.add_node(
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Sum,
-            window_shape: vec![2, 2],
-            strides: vec![1, 1],
+            window_shape: vec![2],
+            strides: vec![1],
         },
         vec![load],
-        tensor_type(&[1, 1, 2, 2]),
-        None,
-    );
-    // Reshape down to scalar via repeated reductions; we don't care
-    // about the path, just that grad_dag_checked walks the live
-    // subgraph and hits our ReduceWindow rejection.
-    let sum0 = dag.add_node(
-        RiscOp::sum_default(0, Prim::F32).unwrap(),
-        vec![rw],
-        tensor_type(&[1, 2, 2]),
-        None,
-    );
-    let sum1 = dag.add_node(
-        RiscOp::sum_default(0, Prim::F32).unwrap(),
-        vec![sum0],
-        tensor_type(&[2, 2]),
-        None,
-    );
-    let sum2 = dag.add_node(
-        RiscOp::sum_default(0, Prim::F32).unwrap(),
-        vec![sum1],
-        tensor_type(&[2]),
+        tensor_type(&[3]),
         None,
     );
     let scalar = dag.add_node(
         RiscOp::sum_default(0, Prim::F32).unwrap(),
-        vec![sum2],
+        vec![rw],
         TensorType {
             dims: vec![],
             precision: Prim::F32,
@@ -337,17 +316,32 @@ fn reduce_window_grad_rejection_is_structural() {
         None,
     );
 
-    let err = match grad_dag_checked(&dag, scalar, &[load]) {
-        Ok(_) => panic!("reduce_window must be rejected by grad_dag_checked"),
-        Err(e) => e,
-    };
-    match err {
-        AdError::NotSupported { op, reason } => {
-            assert_eq!(op, "reduce_window_sum");
-            assert!(
-                matches!(reason, AdRejectionReason::Other(_)),
-                "reducer should fail with `Other` until adjoints land, got {reason:?}"
-            );
-        }
-    }
+    let grad_result = grad_dag_checked(&dag, scalar, &[load])
+        .expect("reduce_window_* now has a reverse-mode adjoint (no longer rejected)");
+
+    // The combined DAG must carry the windowed adjoint node.
+    assert!(
+        grad_result.dag.nodes().iter().any(|n| matches!(
+            n.op,
+            RiscOp::ReduceWindowGrad {
+                reducer: ReduceWindowKind::Sum,
+                ..
+            }
+        )),
+        "grad of reduce_window_sum must lower to a ReduceWindowGrad adjoint"
+    );
+
+    let mut inputs = HashMap::new();
+    inputs.insert(
+        "x".to_string(),
+        TensorValue {
+            data: vec![10.0, 20.0, 30.0, 40.0],
+            shape: vec![4],
+        },
+    );
+    let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+    let grad = &vals[&grad_result.grad_nodes[&load]];
+    assert_eq!(grad.shape, vec![4]);
+    // Windows [0,1], [1,2], [2,3]: ends covered once, interior twice.
+    assert_eq!(grad.data, vec![1.0, 2.0, 2.0, 1.0]);
 }

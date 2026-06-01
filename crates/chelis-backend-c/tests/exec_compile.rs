@@ -572,6 +572,138 @@ int main() {{
     );
 }
 
+// ---- reduce_window adjoint (ReduceWindowGrad) C-backend parity ----
+
+// din = ReduceWindowGrad(x[1,1,3,3], g[1,1,2,2]) with window=[2,2]
+// stride=[1,1]. Load "x" is created first (input slot 0), "g" second
+// (slot 1), matching the harness `inputs[]` order.
+fn reduce_window_grad_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
+    let x_ty = TensorType {
+        dims: [1, 1, 3, 3].into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    };
+    let g_ty = TensorType {
+        dims: [1, 1, 2, 2].into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        x_ty.clone(),
+        None,
+    );
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], g_ty, None);
+    dag.add_node(
+        RiscOp::ReduceWindowGrad {
+            reducer,
+            window_shape: vec![2, 2],
+            strides: vec![1, 1],
+        },
+        vec![x, g],
+        x_ty,
+        None,
+    );
+    chelis_backend_c::codegen(&dag, kernel).c_source
+}
+
+const RW_GRAD_HARNESS_HEADER: &str = r#"
+static chelis_tensor make_view_1x1x2x2(float* data) {
+    chelis_tensor t;
+    memset(&t, 0, sizeof(t));
+    t.data = data;
+    t.shape[0] = 1; t.shape[1] = 1; t.shape[2] = 2; t.shape[3] = 2;
+    t.strides[0] = 4; t.strides[1] = 4; t.strides[2] = 2; t.strides[3] = 1;
+    t.ndim = 4;
+    t.dtype = CHELIS_F32;
+    t.size = 4;
+    t.owns_data = 0;
+    return t;
+}
+"#;
+
+#[test]
+fn exec_reduce_window_grad_sum_matches_evaluator_oracle() {
+    let src = reduce_window_grad_dag(ReduceWindowKind::Sum, "test_rwg_sum");
+    let harness = format!(
+        r#"{HARNESS_HEADER}{RW_HARNESS_4D_HEADER}{RW_GRAD_HARNESS_HEADER}
+extern void test_rwg_sum(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float x_data[9] = {{1,2,3,4,5,6,7,8,9}};
+    float g_data[4] = {{1,1,1,1}};
+    chelis_tensor x_t = make_view_1x1x3x3(x_data);
+    chelis_tensor g_t = make_view_1x1x2x2(g_data);
+    chelis_tensor* inputs[2] = {{&x_t, &g_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+
+    test_rwg_sum(inputs, 2, outputs, 1);
+
+    // Sum adjoint with g=ones is the per-position window-cover count for
+    // 2x2 windows / stride 1 over a 3x3 grid: corners 1, edges 2, center 4.
+    float expected[9] = {{1,2,1, 2,4,2, 1,2,1}};
+    int ok = (outputs[0]->size == 9);
+    for (int i = 0; i < 9; i++) {{
+        if (fabsf(outputs[0]->data[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, outputs[0]->data[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let Some(output) = compile_and_run_kernel("rwg_sum_3x3", &src, &harness) else {
+        panic!("reduce_window_grad sum kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "reduce_window_grad(sum) C backend diverged from evaluator oracle:\n{output}"
+    );
+}
+
+#[test]
+fn exec_reduce_window_grad_max_matches_evaluator_oracle() {
+    let src = reduce_window_grad_dag(ReduceWindowKind::Max, "test_rwg_max");
+    let harness = format!(
+        r#"{HARNESS_HEADER}{RW_HARNESS_4D_HEADER}{RW_GRAD_HARNESS_HEADER}
+extern void test_rwg_max(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float x_data[9] = {{1,2,3,4,5,6,7,8,9}};
+    float g_data[4] = {{1,1,1,1}};
+    chelis_tensor x_t = make_view_1x1x3x3(x_data);
+    chelis_tensor g_t = make_view_1x1x2x2(g_data);
+    chelis_tensor* inputs[2] = {{&x_t, &g_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+
+    test_rwg_max(inputs, 2, outputs, 1);
+
+    // Each 2x2 window's max (distinct values) routes its g to the argmax:
+    // windows pick (1,1),(1,2),(2,1),(2,2) of the 3x3 grid.
+    float expected[9] = {{0,0,0, 0,1,1, 0,1,1}};
+    int ok = (outputs[0]->size == 9);
+    for (int i = 0; i < 9; i++) {{
+        if (fabsf(outputs[0]->data[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, outputs[0]->data[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let Some(output) = compile_and_run_kernel("rwg_max_3x3", &src, &harness) else {
+        panic!("reduce_window_grad max kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "reduce_window_grad(max) C backend diverged from evaluator oracle:\n{output}"
+    );
+}
+
 // ---- IEEE-754 corner cases for Div and Recip ----
 // Exercise the C-backend codegen (`emit_binary` for Div, `emit_recip`
 // for Recip) end-to-end on the four corner cases an

@@ -969,6 +969,9 @@ impl HipEmitter {
             // panics via `todo!` if a `ReduceWindow` node ever reaches
             // codegen on the HIP target.
             RiscOp::ReduceWindow { .. } => None,
+            // `reduce_window_*` adjoint: HIP codegen deferred alongside the
+            // forward op (see above); launch-emit panics via `todo!`.
+            RiscOp::ReduceWindowGrad { .. } => None,
             RiscOp::OneHot { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)),
@@ -1443,6 +1446,12 @@ impl HipEmitter {
                 todo!(
                     "reduce_window_* HIP codegen is deferred (issue #254 / spec/05-risc-primitives.md §2.3.1). \
                      Use the C backend, or open a follow-up issue if you need GPU windowed reductions."
+                )
+            }
+            RiscOp::ReduceWindowGrad { .. } => {
+                todo!(
+                    "reduce_window_* adjoint (ReduceWindowGrad) HIP codegen is deferred alongside the forward op \
+                     (spec/05-risc-primitives.md §2.3.1). Use the C backend for windowed-reduction gradients."
                 )
             }
             RiscOp::OneHot { .. } => {
@@ -2862,6 +2871,7 @@ impl HipEmitter {
             | RiscOp::MinReduce { .. }
             | RiscOp::ProdReduce { .. }
             | RiscOp::ReduceWindow { .. }
+            | RiscOp::ReduceWindowGrad { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
             | RiscOp::OneHot { .. }

@@ -568,6 +568,146 @@ fn reduce_window(
     }
 }
 
+/// Reverse-mode adjoint of [`reduce_window`] (see `RiscOp::ReduceWindowGrad`).
+///
+/// `x` is the original windowed input (shape `S_in`); `g` is the upstream
+/// cotangent (shape `S_out`, the forward output). Returns `din` with shape
+/// `S_in`, accumulating contributions over every (overlapping) window:
+/// - `Sum`:  each window-source position receives the owning window's `g`.
+/// - `Mean`: as `Sum`, scaled by `1 / window_volume`.
+/// - `Max` / `Min`: the window's `g` is routed to every position equal to
+///   that window's max / min (ties distribute, matching the `max_reduce` /
+///   `min_reduce` subgradient convention).
+///
+/// Panics on the same structural violations as [`reduce_window`]; the IR
+/// verifier and type checker reject those before the evaluator runs.
+fn reduce_window_grad(
+    x: &TensorValue,
+    g: &TensorValue,
+    reducer: ReduceWindowKind,
+    window_shape: &[usize],
+    strides: &[usize],
+) -> TensorValue {
+    assert_eq!(
+        window_shape.len(),
+        strides.len(),
+        "window_shape and strides must have equal length"
+    );
+    let rank = x.shape.len();
+    let n = window_shape.len();
+    assert!(
+        rank >= n,
+        "reduce_window_grad: input rank {rank} smaller than window arity {n}"
+    );
+    let leading = rank - n;
+    let window_volume: f64 = window_shape.iter().product::<usize>() as f64;
+
+    // Output dim per windowed axis: floor((in - w) / s) + 1 (Valid padding),
+    // matching the forward. The cotangent `g` is indexed by this shape.
+    let mut out_shape = x.shape[..leading].to_vec();
+    for i in 0..n {
+        let in_dim = x.shape[leading + i];
+        let w = window_shape[i];
+        let s = strides[i];
+        assert!(w >= 1, "reduce_window_grad: window axis {i} must be >= 1");
+        assert!(s >= 1, "reduce_window_grad: stride axis {i} must be >= 1");
+        assert!(
+            in_dim >= w,
+            "reduce_window_grad: axis {i} input dim {in_dim} < window {w}"
+        );
+        out_shape.push((in_dim - w) / s + 1);
+    }
+    assert_eq!(
+        g.shape, out_shape,
+        "reduce_window_grad: cotangent shape {:?} != forward output shape {out_shape:?}",
+        g.shape
+    );
+
+    let mut din = vec![0.0_f64; x.data.len()];
+
+    // Walk each output position `o` (one upstream gradient value `g[o]`),
+    // then walk that window's source positions. `Max`/`Min` need the
+    // window extreme first; `Sum`/`Mean` scatter unconditionally.
+    for (out_flat, &g_val) in g.data.iter().enumerate() {
+        let out_idx = linear_to_index(out_flat, &out_shape);
+
+        let src_flat_at = |window_pos: &[usize]| -> usize {
+            let mut src_idx = vec![0usize; rank];
+            src_idx[..leading].copy_from_slice(&out_idx[..leading]);
+            for i in 0..n {
+                src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
+            }
+            index_to_linear(&src_idx, &x.shape)
+        };
+
+        // First pass (Max/Min only): find the window extreme.
+        let extreme = match reducer {
+            ReduceWindowKind::Max | ReduceWindowKind::Min => {
+                let mut acc = match reducer {
+                    ReduceWindowKind::Max => f64::NEG_INFINITY,
+                    _ => f64::INFINITY,
+                };
+                for_each_window_pos(window_shape, n, |window_pos| {
+                    let v = x.data[src_flat_at(window_pos)];
+                    acc = match reducer {
+                        ReduceWindowKind::Max => acc.max(v),
+                        _ => acc.min(v),
+                    };
+                });
+                Some(acc)
+            }
+            ReduceWindowKind::Sum | ReduceWindowKind::Mean => None,
+        };
+
+        // Second pass: scatter the contribution into `din`.
+        for_each_window_pos(window_shape, n, |window_pos| {
+            let src = src_flat_at(window_pos);
+            match reducer {
+                ReduceWindowKind::Sum => din[src] += g_val,
+                ReduceWindowKind::Mean => din[src] += g_val / window_volume,
+                ReduceWindowKind::Max | ReduceWindowKind::Min => {
+                    // Distribute to every position equal to the window
+                    // extreme (ties get the full gradient, mirroring the
+                    // `max_reduce` `eq`-mask adjoint).
+                    if x.data[src] == extreme.expect("extreme computed for Max/Min") {
+                        din[src] += g_val;
+                    }
+                }
+            }
+        });
+    }
+
+    TensorValue {
+        data: din,
+        shape: x.shape.clone(),
+    }
+}
+
+/// Invoke `f` once per multi-index inside an `n`-dimensional window of
+/// extent `window_shape` (row-major / mixed-radix order). For `n == 0`
+/// (no windowed axes) `f` is invoked once with an empty index.
+fn for_each_window_pos(window_shape: &[usize], n: usize, mut f: impl FnMut(&[usize])) {
+    let mut window_pos = vec![0usize; n];
+    loop {
+        f(&window_pos);
+        if n == 0 {
+            break;
+        }
+        let mut carry = n;
+        for i in (0..n).rev() {
+            window_pos[i] += 1;
+            if window_pos[i] < window_shape[i] {
+                carry = i;
+                break;
+            }
+            window_pos[i] = 0;
+        }
+        if carry == n {
+            break;
+        }
+    }
+}
+
 fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f64) -> TensorValue {
     assert!(axis < input.shape.len());
     let mut out_shape = input.shape.clone();
@@ -905,6 +1045,17 @@ where
                 window_shape,
                 strides,
             } => reduce_window(&values[&node.inputs[0]], *reducer, window_shape, strides),
+            RiscOp::ReduceWindowGrad {
+                reducer,
+                window_shape,
+                strides,
+            } => reduce_window_grad(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                *reducer,
+                window_shape,
+                strides,
+            ),
             RiscOp::Argmax { axis } => reduce_argcmp(
                 &values[&node.inputs[0]],
                 *axis,
@@ -1147,6 +1298,145 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    // ---- reduce_window reverse-mode adjoint (RiscOp::ReduceWindowGrad) ----
+
+    /// Scalar loss `sum(reduce_window(x))` used as the finite-difference
+    /// oracle: its cotangent w.r.t. every forward output is exactly 1, so
+    /// the analytic input gradient is `reduce_window_grad(x, ones)`.
+    fn rw_loss(x: &TensorValue, r: ReduceWindowKind, w: &[usize], s: &[usize]) -> f64 {
+        reduce_window(x, r, w, s).data.iter().sum()
+    }
+
+    /// Central finite-difference gradient of `rw_loss` w.r.t. each element.
+    fn rw_fd_grad(x: &TensorValue, r: ReduceWindowKind, w: &[usize], s: &[usize]) -> Vec<f64> {
+        let eps = 1e-4;
+        (0..x.data.len())
+            .map(|i| {
+                let mut xp = x.clone();
+                let mut xm = x.clone();
+                xp.data[i] += eps;
+                xm.data[i] -= eps;
+                (rw_loss(&xp, r, w, s) - rw_loss(&xm, r, w, s)) / (2.0 * eps)
+            })
+            .collect()
+    }
+
+    fn assert_close(a: &[f64], b: &[f64], tol: f64, ctx: &str) {
+        assert_eq!(a.len(), b.len(), "{ctx}: length mismatch");
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            assert!(
+                (x - y).abs() <= tol,
+                "{ctx}: element {i} differs: {x} vs {y} (tol {tol})"
+            );
+        }
+    }
+
+    #[test]
+    fn reduce_window_grad_matches_finite_difference_all_reducers() {
+        // Distinct values (no ties) so Max/Min gradients are unique and
+        // both the analytic adjoint and the central difference agree.
+        let x = TensorValue {
+            data: vec![
+                3.0, 1.0, 4.0, 1.5, 5.0, 9.0, 2.0, 6.0, 5.0, 3.5, 8.0, 9.5, 7.0, 0.5, 2.5, 6.5,
+            ],
+            shape: vec![4, 4],
+        };
+        // Overlapping (stride < window) and a non-unit stride exercise the
+        // overlap-add / select-and-scatter accumulation across windows.
+        for (w, s) in [
+            (vec![2, 2], vec![1, 1]),
+            (vec![2, 2], vec![2, 2]),
+            (vec![3, 3], vec![1, 1]),
+            (vec![2, 3], vec![2, 1]),
+        ] {
+            for r in [
+                ReduceWindowKind::Sum,
+                ReduceWindowKind::Mean,
+                ReduceWindowKind::Max,
+                ReduceWindowKind::Min,
+            ] {
+                let out = reduce_window(&x, r, &w, &s);
+                let ones = TensorValue {
+                    data: vec![1.0; out.data.len()],
+                    shape: out.shape.clone(),
+                };
+                let analytic = reduce_window_grad(&x, &ones, r, &w, &s);
+                assert_eq!(analytic.shape, x.shape);
+                let fd = rw_fd_grad(&x, r, &w, &s);
+                assert_close(
+                    &analytic.data,
+                    &fd,
+                    1e-3,
+                    &format!("reducer={r:?} window={w:?} stride={s:?}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reduce_window_grad_sum_is_window_cover_count() {
+        // With g = ones, Sum's adjoint at position i is exactly the number
+        // of windows covering i. For a [4] input, window=2, stride=1 the
+        // windows are [0,1],[1,2],[2,3]; interior positions are covered
+        // twice, the two ends once.
+        let x = TensorValue {
+            data: vec![10.0, 20.0, 30.0, 40.0],
+            shape: vec![4],
+        };
+        let out = reduce_window(&x, ReduceWindowKind::Sum, &[2], &[1]);
+        let ones = TensorValue {
+            data: vec![1.0; out.data.len()],
+            shape: out.shape.clone(),
+        };
+        let din = reduce_window_grad(&x, &ones, ReduceWindowKind::Sum, &[2], &[1]);
+        assert_eq!(din.data, vec![1.0, 2.0, 2.0, 1.0]);
+
+        // Mean is Sum scaled by 1 / window_volume (= 2 here).
+        let din_mean = reduce_window_grad(&x, &ones, ReduceWindowKind::Mean, &[2], &[1]);
+        assert_eq!(din_mean.data, vec![0.5, 1.0, 1.0, 0.5]);
+    }
+
+    #[test]
+    fn reduce_window_grad_max_routes_to_argmax_and_accumulates_overlap() {
+        // Strictly increasing input over a [4] window=2 stride=1: windows
+        // [0,1]->max@1, [1,2]->max@2, [2,3]->max@3. With distinct upstream
+        // gradients, position 0 gets nothing, 1 gets g[0], 2 gets g[1],
+        // 3 gets g[2].
+        let x = TensorValue {
+            data: vec![1.0, 2.0, 3.0, 4.0],
+            shape: vec![4],
+        };
+        let g = TensorValue {
+            data: vec![5.0, 7.0, 11.0],
+            shape: vec![3],
+        };
+        let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1]);
+        assert_eq!(din.data, vec![0.0, 5.0, 7.0, 11.0]);
+
+        // Min over the same increasing input routes to the window minimum:
+        // windows pick positions 0,1,2; position 3 gets nothing.
+        let din_min = reduce_window_grad(&x, &g, ReduceWindowKind::Min, &[2], &[1]);
+        assert_eq!(din_min.data, vec![5.0, 7.0, 11.0, 0.0]);
+    }
+
+    #[test]
+    fn reduce_window_grad_max_distributes_to_ties() {
+        // A flat window: every position equals the max, so each tied
+        // position receives the full upstream gradient (the max_reduce
+        // mask convention), not a 1/k share.
+        let x = TensorValue {
+            data: vec![2.0, 2.0, 2.0],
+            shape: vec![3],
+        };
+        let g = TensorValue {
+            data: vec![4.0, 4.0],
+            shape: vec![2],
+        };
+        let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1]);
+        // windows [0,1] and [1,2]: pos0 += 4 (win0), pos1 += 4+4, pos2 += 4.
+        assert_eq!(din.data, vec![4.0, 8.0, 4.0]);
     }
 
     #[test]

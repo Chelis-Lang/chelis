@@ -1002,6 +1002,15 @@ pub enum WireRiscOp {
         window_shape: Vec<usize>,
         strides: Vec<usize>,
     },
+    /// Reverse-mode adjoint of `ReduceWindow` (`RiscOp::ReduceWindowGrad`).
+    /// Carries the same `reducer` / window / stride contract; appears only
+    /// in `grad`-lowered DAGs.
+    ReduceWindowGrad {
+        /// One of "max" / "min" / "sum" / "mean", as for `ReduceWindow`.
+        reducer: String,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
+    },
     Argmax {
         axis: usize,
     },
@@ -1214,6 +1223,40 @@ mod tests {
                     assert_eq!(strides, vec![1, 2]);
                 }
                 other => panic!("expected reduce_window wire op, got {other:?}"),
+            }
+        }
+    }
+
+    /// The `reduce_window_*` adjoint wires to a sibling `ReduceWindowGrad`
+    /// variant carrying the same `reducer` / window / stride contract.
+    /// Pin its JSON shape and round-trip so grad-lowered machine-facing
+    /// DAGs have a stable wire form.
+    #[test]
+    fn reduce_window_grad_wire_op_round_trips_with_reducer_string() {
+        for kind in ["max", "min", "sum", "mean"] {
+            let op = WireRiscOp::ReduceWindowGrad {
+                reducer: kind.to_string(),
+                window_shape: vec![2, 3],
+                strides: vec![1, 2],
+            };
+            let json = serde_json::to_string(&op).unwrap();
+            assert_eq!(
+                json,
+                format!(
+                    r#"{{"kind":"reduce_window_grad","reducer":"{kind}","window_shape":[2,3],"strides":[1,2]}}"#
+                ),
+            );
+            match serde_json::from_str::<WireRiscOp>(&json).unwrap() {
+                WireRiscOp::ReduceWindowGrad {
+                    reducer,
+                    window_shape,
+                    strides,
+                } => {
+                    assert_eq!(reducer, kind);
+                    assert_eq!(window_shape, vec![2, 3]);
+                    assert_eq!(strides, vec![1, 2]);
+                }
+                other => panic!("expected reduce_window_grad wire op, got {other:?}"),
             }
         }
     }

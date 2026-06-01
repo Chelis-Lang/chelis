@@ -571,11 +571,39 @@ pub enum RiscOp {
     /// shipped variants. `Mean` is implemented as windowed `Sum` divided
     /// by the window volume, inlined into the same loop nest.
     ///
-    /// AD policy: `no_grad`. Reverse-mode AD over `ReduceWindow` is
-    /// deferred — `chelis_ir::grad::grad_dag_checked` rejects it with
-    /// `AdError::NotSupported { reason: AdRejectionReason::Other(..), .. }`
-    /// until the windowed adjoints (§2.3.1) are designed.
+    /// AD policy: the reverse-mode adjoint lowers to a single
+    /// [`RiscOp::ReduceWindowGrad`] node carrying the same
+    /// `{reducer, window_shape, strides}` triple (see
+    /// `chelis_ir::grad`). Adjoints follow `spec/05-risc-primitives.md`
+    /// §2.3.1: `Sum`/`Mean` scatter (overlap-add) the upstream gradient
+    /// back over each window, and `Max`/`Min` route it to the window
+    /// extreme (distributing to all tied positions, matching the
+    /// `max_reduce` / `min_reduce` subgradient convention).
     ReduceWindow {
+        reducer: ReduceWindowKind,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
+    },
+    /// Reverse-mode adjoint (vector-Jacobian product) of
+    /// [`RiscOp::ReduceWindow`]. Inputs are `[x, g]` where `x` is the
+    /// original windowed input (shape `S_in`) and `g` is the upstream
+    /// cotangent (shape `S_out`, the forward output shape). The output
+    /// is the input cotangent `din` with shape `S_in` (equal to `x`).
+    ///
+    /// Semantics per `spec/05-risc-primitives.md` §2.3.1, accumulating
+    /// over the (overlapping) windows that cover each input position:
+    /// - `Sum`:  `din[i] += g[o]` for every `(o, w)` with `o*stride+w = i`.
+    /// - `Mean`: as `Sum` with each contribution scaled by `1 /
+    ///   window_volume`.
+    /// - `Max` / `Min`: for each window `o`, route `g[o]` to every
+    ///   position equal to that window's max / min (ties distribute, so
+    ///   the rule is the windowed generalization of the `max_reduce` /
+    ///   `min_reduce` mask adjoint). `x`'s values are read for `Max` /
+    ///   `Min`; for `Sum` / `Mean` only `x`'s shape is used.
+    ///
+    /// Like the forward op, the IR evaluator, host runtime, and C backend
+    /// implement this directly; HIP codegen is deferred (`todo!`).
+    ReduceWindowGrad {
         reducer: ReduceWindowKind,
         window_shape: Vec<usize>,
         strides: Vec<usize>,

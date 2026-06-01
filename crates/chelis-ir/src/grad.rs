@@ -201,22 +201,10 @@ pub fn grad_dag_checked(
                     reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
                 });
             }
-            RiscOp::ReduceWindow { reducer, .. } => {
-                // `reduce_window_*` AD is deferred — see
-                // `spec/05-risc-primitives.md` §2.3.1. Until argmax-style
-                // fan-in (Max/Min) and windowed-expand (Sum/Mean) adjoints
-                // are designed, we fail closed at AD time so callers know
-                // the gradient path is missing rather than silently
-                // skipping the op.
-                return Err(AdError::NotSupported {
-                    op: reducer.surf_name(),
-                    reason: AdRejectionReason::Other(format!(
-                        "grad: {} adjoint is deferred - wrap in a stop-gradient \
-                         or recompose using pad+reshape+max_reduce",
-                        reducer.surf_name()
-                    )),
-                });
-            }
+            // `reduce_window_*` now has a reverse-mode adjoint
+            // (`RiscOp::ReduceWindowGrad`, lowered in `grad_dag` below) per
+            // spec/05-risc-primitives.md §2.3.1, so it is no longer rejected
+            // here.
             _ => {}
         }
     }
@@ -259,6 +247,7 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::MinReduce { .. } => "min_reduce",
         RiscOp::ProdReduce { .. } => "prod_reduce",
         RiscOp::ReduceWindow { reducer, .. } => reducer.surf_name(),
+        RiscOp::ReduceWindowGrad { .. } => "reduce_window_grad",
         RiscOp::Argmax { .. } => "argmax",
         RiscOp::Argmin { .. } => "argmin",
         RiscOp::Reshape { .. } => "reshape",
@@ -1120,12 +1109,38 @@ fn compute_adjoints(
             Some(vec![(values, dvalues)])
         }
         RiscOp::ScatterAdd { .. } => None,
-        RiscOp::ReduceWindow { .. } => {
-            // `reduce_window_*` adjoints are deferred per
-            // `spec/05-risc-primitives.md` §2.3.1. `grad_dag_checked`
-            // rejects this op upfront with an `AdError::NotSupported`
-            // variant; returning `None` here keeps the legacy
-            // `grad_dag` entry point fail-closed.
+        RiscOp::ReduceWindow {
+            reducer,
+            window_shape,
+            strides,
+        } => {
+            // Reverse-mode adjoint of `reduce_window_*`
+            // (spec/05-risc-primitives.md §2.3.1): lower to a single
+            // `ReduceWindowGrad` node carrying the same window contract.
+            // It scatters/overlap-adds (Sum/Mean) or routes-to-extreme
+            // (Max/Min) the upstream cotangent `g` back to the input shape.
+            //
+            // No `Cast` is needed (unlike `Sum`): `reduce_window` does not
+            // widen its accumulator — the forward output precision equals
+            // the input precision — so `g` and `x` share a precision and
+            // the adjoint carries the operand precision directly.
+            let x = node.inputs[0];
+            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let din = dag.add_node(
+                RiscOp::ReduceWindowGrad {
+                    reducer: *reducer,
+                    window_shape: window_shape.clone(),
+                    strides: strides.clone(),
+                },
+                vec![x, g],
+                input_ty,
+                None,
+            );
+            Some(vec![(x, din)])
+        }
+        RiscOp::ReduceWindowGrad { .. } => {
+            // Second-order AD through the windowed adjoint itself is not
+            // defined; fail closed rather than synthesize a wrong adjoint.
             None
         }
         RiscOp::Scatter { .. } => {

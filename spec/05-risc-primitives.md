@@ -155,10 +155,10 @@ type matches the operand element type.
 
 | Name | Signature | Semantics | AD adjoint |
 |---|---|---|---|
-| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Subgradient: `g` flows to the argmax position inside each window (deferred — not part of the initial primitive admission) |
-| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Subgradient: `g` flows to the argmin position (deferred) |
-| `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives `g` of the owning window (deferred) |
-| `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | `g / window_volume` to each source position (deferred) |
+| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's max (ties distribute, as `max_reduce`); accumulated over overlapping windows |
+| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's min (ties distribute, as `min_reduce`); accumulated over overlapping windows |
+| `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives the owning window's `g` (overlap-add over windows covering it) |
+| `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | As `sum`, with each contribution scaled by `1 / window_volume` |
 
 **Design rationale: four primitives, not one with a Reducer enum.** The
 issue text (Chelis-Lang/chelis#254) proposed a `Reducer` enum argument
@@ -208,12 +208,29 @@ own right. The Surf `reduce_window_*` names are the public surface;
 the IR node and backends share the single `ReduceWindow` lowering
 path.
 
-**AD policy.** Adjoint rules for `reduce_window_*` are **deferred**
-pending an explicit Phase-3 design decision: `Max`/`Min` need an
-argmax-style fan-in, `Sum` is a windowed `expand`, and `Mean` is a
-windowed `expand` with a `1 / window_volume` scaling. Until those
-land the AD layer rejects `grad` over `reduce_window_*` with an
-`AdError::NotSupported` variant (see `chelis_ir::grad`).
+**AD policy.** `reduce_window_*` is differentiable. `chelis_ir::grad`
+lowers the reverse-mode adjoint to a single `RiscOp::ReduceWindowGrad`
+node carrying the same `{reducer, window_shape, strides}` triple, taking
+`(x, g)` (the forward input and the upstream cotangent) and returning the
+input cotangent `din` (shape `S_in`). The adjoints, accumulated over the
+(overlapping) windows that cover each input position, are:
+
+- `Sum`: scatter (overlap-add) the owning window's `g` to each
+  window-source position — the transpose of the windowed sum.
+- `Mean`: as `Sum`, scaling each contribution by `1 / window_volume`.
+- `Max` / `Min`: route each window's `g` to every position equal to that
+  window's extreme — the windowed generalization of the `max_reduce` /
+  `min_reduce` `eq`-mask subgradient, so ties distribute the full `g`
+  (not a `1/k` share). `x` is read to locate the extreme.
+
+Like the forward op, `ReduceWindowGrad` is implemented directly by the IR
+evaluator, the host runtime, and the C backend (the C adjoint is emitted
+serially, since overlapping windows scatter-add into shared `din`
+positions); HIP codegen is deferred (`todo!`). Second-order AD through the
+adjoint itself is not defined. The adjoints are validated against central
+finite differences for all four reducers over overlapping and strided
+windows (`chelis-ir::eval` unit tests), and the C backend is checked for
+evaluator parity (`chelis-backend-c::exec_compile::exec_reduce_window_grad_*`).
 
 **Output-dim formula vs. issue #254.** The admitting issue text
 sketched the `Valid` output extent as `(input_dim - window + 1) /
@@ -264,16 +281,22 @@ carries this restriction.
 primitive is the standard per-PR gate, `python3 scripts/gate.py`, which
 runs (among the broader suite): the type-checker shape-contract tests
 (`chelis-types::issue_254_reduce_window_signatures`), the IR
-evaluator + AD-rejection tests (`chelis-ir::issue_254_reduce_window`),
-the host-runtime evaluator tests
+evaluator + adjoint-lowering tests (`chelis-ir::issue_254_reduce_window`)
+plus the finite-difference adjoint checks
+(`chelis-ir::eval::tests::reduce_window_grad_*`), the host-runtime
+evaluator tests
 (`chelis-compiler-api::issue_254_reduce_window_host_runtime`), the C
 emit structural tests (`chelis-backend-c::issue_254_reduce_window_emit`)
-plus the gcc compile-and-run evaluator-parity tests
-(`chelis-backend-c::exec_compile::exec_reduce_window_*`), and the
-end-to-end build-vs-eval parity over the executable example
+plus the gcc compile-and-run evaluator-parity tests for both the forward
+op and its adjoint
+(`chelis-backend-c::exec_compile::exec_reduce_window_*`), the
+build-path rejection of runtime-symbolic windowed axes
+(`chelis-compiler-api::compiler::tests::*reduce_window*` and
+`chelis-cli::cli::build_c_rejects_reduce_window_over_runtime_symbolic_axis`),
+and the end-to-end build-vs-eval parity over the executable example
 (`chelis-cli::cli::build_c_runs_tensor_structural_ops_and_matches_eval_output`).
 No `#[ignore]`d or HIP manual gate is required for this primitive,
-because HIP codegen is deferred.
+because HIP codegen (forward and adjoint) is deferred.
 
 **Reduction order (`sum` only).** `sum` evaluates the reduction with a
 **stride-4 ILP cascade** — four independent accumulator lanes loaded
