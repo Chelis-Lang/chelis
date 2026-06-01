@@ -780,8 +780,8 @@ but no Phase 3 sub-phase implements them.
   closes the spec-implementation gap without requiring an external tool or a full
   extraction from the Lean mechanization.
 
-  Status: **shipped (v0.1.0)** in the `Chelis-Lang/hull` repo (pins `compiler =
-  "=0.7.20"`, `chelis-std = "0.3.0"`). All three capabilities are built: the reference
+  Status: **shipped (v0.1.1)** in the `Chelis-Lang/hull` repo (pins `compiler =
+  "=0.7.21"`, `chelis-std = "0.3.0"`). All three capabilities are built: the reference
   type checker, the reference evaluator (locally-nameless small-step engine), and the
   type-directed program generator. The differential harness proves the Hull reference
   checker + evaluator AGREE with the shipped compiler on 10,000 generated programs, with

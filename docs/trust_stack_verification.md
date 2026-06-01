@@ -59,7 +59,7 @@ made here constrain everything that follows:
 
 ## Relationship to Hull
 
-Hull is BUILT and proven (v0.1.0), not aspirational. It is the
+Hull is BUILT and proven (v0.1.1), not aspirational. It is the
 compiler-vs-spec differential layer: a self-hosted executable specification
 shell (pure Chelis, `chelis-std` only) whose reference type checker and
 reference evaluator implement the LaCaDiLE typing rules and small-step
