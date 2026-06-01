@@ -59,10 +59,43 @@ made here constrain everything that follows:
 
 ## Relationship to Hull
 
-Hull proves the `@property + matches_reference` pattern at compiler scale
-(numerical parity between Chelis IR evaluator and C backend). This workstream
-extends `@property` from runtime sampling to SMT-discharged static verification
-for predicates that admit it. They are complementary trust-stack expansions.
+Hull is BUILT and proven (v0.1.2), not aspirational. It is the
+compiler-vs-spec differential layer: a self-hosted executable specification
+shell (pure Chelis, `chelis-std` only) whose reference type checker and
+reference evaluator implement the LaCaDiLE typing rules and small-step
+semantics directly, then differentially test the real `chelis` compiler
+against them.
+
+What Hull proves, precisely:
+
+- The Hull reference checker and evaluator AGREE with the shipped compiler on
+  10,000 generated programs, with ZERO `CompilerUnsound` and zero unexplained
+  `Disagree`; the eval lane agrees within f32 tolerance on 1,000 eval-eligible
+  programs. Two independent fresh-seed campaigns reproduced this.
+- The generated 10k lane is Hull-accepted-by-construction, so it proves
+  AGREEMENT. The DETECTION capability (the harness *would* flag a real
+  `CompilerUnsound`) is proven separately by an injected-unsound self-test and a
+  hand-curated reference-gap corpus exercising the reject direction.
+- It is CI-enforced in this repo: the frozen corpus under
+  `tests/conformance/hull/` runs against the just-built binary via
+  `.github/workflows/conformance.yml` per PR and on push-to-main, failing on any
+  `CompilerUnsound` / unexplained `Disagree` / `EvalDisagree`; an injected-unsound
+  step verifies the gate has teeth. The full fresh 10k campaign runs nightly.
+
+Scope: the PURE in-fragment surface (tensor/scalar/lambda/let/if/match/grad
+surface). Grad conservatism is a build-time differential (v0.2.0); effects,
+ADTs, builtin-name shadowing, and division-by-zero are documented v0.2.0
+deferrals.
+
+This layer is distinct from, and complementary to, the three layers above.
+Hull covers the compiler/spec layer: does the compiler implement the language
+spec. c-earchin and chelis-prove cover the user-code/spec layer: does the
+user's generated code satisfy the user's `@property` requirements. The same
+`@property + matches_reference` agreement pattern Hull proves at compiler scale
+is what user-facing `@property matches_reference` does for user code; this
+workstream extends `@property` from runtime sampling to SMT-discharged static
+verification for predicates that admit it. They are complementary trust-stack
+layers, not duplicates.
 
 ## Relationship to LaCaDiLE
 
