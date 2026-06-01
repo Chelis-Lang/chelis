@@ -3735,6 +3735,25 @@ impl CEmitter {
             "reduce_window: input rank {in_rank} smaller than window arity {n}"
         );
         let leading = in_rank - n;
+        // Defensive backstop: a windowed output axis whose extent is not
+        // statically known cannot be allocated correctly here — the
+        // backend would bind it to the input extent and emit an
+        // out-of-bounds window read (build output diverges from the
+        // evaluator). `chelis_compiler_api::compiler::reject_symbolic_windowed_reduce`
+        // rejects this before codegen with a clean diagnostic; if some
+        // path reaches here unguarded, abort loudly rather than emit a
+        // mis-allocated kernel. See spec/05-risc-primitives.md §2.3.1.
+        for (offset, dim) in ty.dims.iter().enumerate().skip(leading) {
+            if Self::known_dim_size(dim).is_none() {
+                panic!(
+                    "emit_reduce_window: node {id} windowed axis {offset} has a \
+                     runtime-only symbolic extent ({dim:?}); the windowed output \
+                     extent floor((d - window) / stride) + 1 is not statically \
+                     representable. This must be rejected before C codegen \
+                     (reject_symbolic_windowed_reduce); reaching emit is a bug."
+                );
+            }
+        }
         let window_volume: usize = window_shape.iter().product();
         self.emit_slot_wrapper(id, ty);
         let (init_literal, combine_template) = match reducer {

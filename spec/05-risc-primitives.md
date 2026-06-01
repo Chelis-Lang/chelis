@@ -241,12 +241,22 @@ compile time (a literal `tensor[..., 8, 8, p]` dim, or a named dim with
 a bound size). A windowed axis whose extent is only known at runtime
 (e.g. a `pad_sequences` result, whose dims are bound from input
 metadata) cannot be lowered to a correct static output shape under the
-current `DimInfo` model — the windowed output axis is strictly smaller
-than its input, so reusing the input dim variable mis-allocates the
-output tensor. The lowering refuses to emit such a passthrough and
-defers to the (shape-erased) checker result instead. The leading
-pass-through axes may remain symbolic. The IR evaluator and host
-runtime always recompute from the concrete runtime shape and so handle
+current `DimInfo` model: the windowed output extent
+`floor((d - window) / stride) + 1` is strictly smaller than the input
+extent `d` and is not representable as a `DimExpr` (no subtraction /
+floor), so the backend's symbolic-dim binding would tie the windowed
+output axis to the *input* extent — silently mis-allocating the output
+tensor and emitting an out-of-bounds window read. To prevent that, the C
+build **rejects** such a program at compile time with an
+`unsupported_feature` error
+(`chelis_compiler_api::compiler::reject_symbolic_windowed_reduce` and the
+CLI's mirror, with a defensive backstop in the C emitter); it does not
+emit a kernel. Window over a statically-sized axis, or pad the input to a
+concrete extent first. (The HIP target is unaffected by this specific
+check: it defers `reduce_window_*` codegen entirely — see **Backend
+status** above — so it never reaches the mis-allocation.) The leading
+pass-through axes may remain symbolic. The IR evaluator and host runtime
+always recompute from the concrete runtime shape and so handle
 runtime-only extents correctly; only the ahead-of-time C/HIP build path
 carries this restriction.
 
