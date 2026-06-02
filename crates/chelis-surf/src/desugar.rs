@@ -54,6 +54,18 @@ struct DesugarCtx {
     /// (chelis#285). When an explicit sig exists, the synthesized one is
     /// strictly redundant and weaker, so we suppress it here.
     explicit_sig_names: HashSet<String>,
+    /// Explicit effect clauses (`! { ... }`) declared on each `def`, keyed by
+    /// name. The effect upper-bound check reads the declared effect set only
+    /// from a `defsig`'s `t-fn` `eff` metadata
+    /// (`chelis-effects::declared_effects_from_defsig`). A `def`'s clause
+    /// reaches that check solely via the synthesized `defsig` — but
+    /// `explicit_sig_names` now suppresses that synthesized `defsig`. So when
+    /// an explicit `sig` declares no effects of its own, `Decl::Sig`
+    /// desugaring inherits the same-named `def`'s clause from this map;
+    /// otherwise suppression would silently drop the def's effect contract
+    /// (chelis#285). Stored even for an empty `! {}` (which declares "no
+    /// effects" and is distinct from no annotation at all).
+    def_effects: HashMap<String, Vec<EffectExpr>>,
 }
 
 impl DesugarCtx {
@@ -61,15 +73,20 @@ impl DesugarCtx {
         let mut top_level_fn_params = HashMap::new();
         let mut top_level_fn_tensor_param_prec = HashMap::new();
         let mut explicit_sig_names = HashSet::new();
+        let mut def_effects = HashMap::new();
         for decl in decls {
-            collect_top_level_fn_params(decl, &mut top_level_fn_params);
-            collect_top_level_fn_tensor_param_prec(decl, &mut top_level_fn_tensor_param_prec);
-            collect_explicit_sig_names(decl, &mut explicit_sig_names);
+            for_each_decl(decl, &mut |d| {
+                collect_top_level_fn_params(d, &mut top_level_fn_params);
+                collect_top_level_fn_tensor_param_prec(d, &mut top_level_fn_tensor_param_prec);
+                collect_explicit_sig_names(d, &mut explicit_sig_names);
+                collect_def_effects(d, &mut def_effects);
+            });
         }
         Self {
             top_level_fn_params,
             top_level_fn_tensor_param_prec,
             explicit_sig_names,
+            def_effects,
         }
     }
 }
@@ -558,40 +575,52 @@ const UNSIGNED_DTYPE_NAMES: &[&str] = &[
 // Declarations
 // ---------------------------------------------------------------------------
 
+/// Visit `decl` and every declaration nested inside a `Decl::Module`,
+/// calling `visit` on each. Centralizes the module descent shared by the
+/// `DesugarCtx::new` pre-pass collectors so a future nesting variant only
+/// needs handling in one place. Every idiomatic Surf source wraps its
+/// declarations in a single `module`, so without this descent the collectors
+/// would see only the wrapper and miss everything inside.
+fn for_each_decl(decl: &Decl, visit: &mut impl FnMut(&Decl)) {
+    visit(decl);
+    if let Decl::Module { decls, .. } = decl {
+        for d in decls {
+            for_each_decl(d, visit);
+        }
+    }
+}
+
 fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String>>) {
-    match decl {
-        Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } => {
-            out.insert(
-                name.clone(),
-                params.iter().map(|param| param.name.clone()).collect(),
-            );
-        }
-        Decl::Module { decls, .. } => {
-            for decl in decls {
-                collect_top_level_fn_params(decl, out);
-            }
-        }
-        _ => {}
+    if let Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } = decl {
+        out.insert(
+            name.clone(),
+            params.iter().map(|param| param.name.clone()).collect(),
+        );
     }
 }
 
 /// Collect names that carry an explicit standalone `sig` declaration, so
 /// `desugar_fun_def` can suppress the redundant wildcard-filled `defsig` it
 /// would otherwise synthesize for a same-name annotated `def` (chelis#285).
-/// Descends into `Decl::Module` for the same reason as
-/// `collect_top_level_fn_params`: every idiomatic Surf source wraps its
-/// declarations in a `module`.
 fn collect_explicit_sig_names(decl: &Decl, out: &mut HashSet<String>) {
-    match decl {
-        Decl::Sig { name, .. } => {
-            out.insert(name.clone());
-        }
-        Decl::Module { decls, .. } => {
-            for decl in decls {
-                collect_explicit_sig_names(decl, out);
-            }
-        }
-        _ => {}
+    if let Decl::Sig { name, .. } = decl {
+        out.insert(name.clone());
+    }
+}
+
+/// Collect the explicit effect clause (`! { ... }`) declared on each `def`,
+/// keyed by name, so `Decl::Sig` desugaring can inherit it when the explicit
+/// sig declares no effects of its own (chelis#285 — see the `def_effects`
+/// field doc). An empty `! {}` is stored too: it declares "no effects" and
+/// must be distinguished from no annotation at all.
+fn collect_def_effects(decl: &Decl, out: &mut HashMap<String, Vec<EffectExpr>>) {
+    if let Decl::FunDef {
+        name,
+        effects: Some(effects),
+        ..
+    } = decl
+    {
+        out.insert(name.clone(), effects.clone());
     }
 }
 
@@ -630,11 +659,6 @@ fn collect_top_level_fn_tensor_param_prec(
             let entry: Vec<Option<String>> = args.iter().map(tensor_element_prim_name).collect();
             if entry.iter().any(Option::is_some) {
                 out.insert(name.clone(), entry);
-            }
-        }
-        Decl::Module { decls, .. } => {
-            for decl in decls {
-                collect_top_level_fn_tensor_param_prec(decl, out);
             }
         }
         _ => {}
@@ -754,17 +778,30 @@ impl DesugarCtx {
 
             Decl::Sig {
                 name, ty, effects, ..
-            } => vec![node(
-                "defsig",
-                vec![
-                    sym(name),
-                    // WS-A5: standalone sigs use the contextual rule so a
-                    // lowercase non-primitive name in the precision slot
-                    // becomes a quantified type variable per
-                    // spec/04-type-system.md §5.8.
-                    apply_effect_metadata(desugar_sig_type(ty, &HashSet::new()), effects),
-                ],
-            )],
+            } => {
+                // chelis#285: the synthesized `defsig` that used to carry a
+                // same-named `def`'s `! { ... }` clause is suppressed when this
+                // explicit sig exists (see `desugar_fun_def`). The effect
+                // upper-bound check reads the declared effect set only from a
+                // `defsig`'s `t-fn` `eff` metadata, so if this sig declares no
+                // effects of its own, inherit the def's clause here. Otherwise
+                // suppressing the synthesized `defsig` would silently drop the
+                // def's effect contract and let its body leak effects unchecked.
+                let effects = effects
+                    .clone()
+                    .or_else(|| self.def_effects.get(name).cloned());
+                vec![node(
+                    "defsig",
+                    vec![
+                        sym(name),
+                        // WS-A5: standalone sigs use the contextual rule so a
+                        // lowercase non-primitive name in the precision slot
+                        // becomes a quantified type variable per
+                        // spec/04-type-system.md §5.8.
+                        apply_effect_metadata(desugar_sig_type(ty, &HashSet::new()), &effects),
+                    ],
+                )]
+            }
 
             Decl::Dim { names, .. } => names
                 .iter()
@@ -2394,6 +2431,7 @@ mod tests {
             )]),
             top_level_fn_tensor_param_prec: HashMap::new(),
             explicit_sig_names: HashSet::new(),
+            def_effects: HashMap::new(),
         };
         let actual = print_expr(&ctx.desugar_expr(&expr))
             .split_whitespace()

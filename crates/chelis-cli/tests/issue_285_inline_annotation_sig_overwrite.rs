@@ -91,6 +91,30 @@ fn assert_clean(json: &Value, label: &str) {
     );
 }
 
+fn assert_effect_rejected(json: &Value, label: &str) {
+    let errors = json["errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: errors should be a json array, got {json}"));
+    assert!(
+        !errors.is_empty(),
+        "{label}: expected an undeclared-effect error, got a clean check ({json})"
+    );
+    let has_effect_err = errors.iter().any(|e| {
+        e["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("its body performs effects") && m.contains("not declared"))
+    });
+    assert!(
+        has_effect_err,
+        "{label}: expected an \"its body performs effects ... that were not declared\" error, got {errors:?}"
+    );
+    let score = json["score"].as_f64().unwrap_or(1.0);
+    assert!(
+        score < 1.0,
+        "{label}: a rejected body must score < 1.0, got {score} ({json})"
+    );
+}
+
 // ── Negatives: the three lie classes must be caught ──────────────────
 
 /// (a) Transpose lie: bare param seeded from the sig, inline return
@@ -216,5 +240,123 @@ fn no_explicit_sig_keeps_synthesized_defsig() {
     assert_eq!(
         defsig_count, 1,
         "inline-only annotated def must still synthesize its defsig, got {defsig_count}:\n{deep}"
+    );
+}
+
+// ── Effect-row parity: suppressing the synthesized defsig must not drop ──
+// the def's `! { ... }` effect contract ──────────────────────────────────
+//
+// The synthesized defsig is also the carrier of a `def`'s inline effect
+// clause (`apply_effect_metadata` attaches `eff` to the `t-fn`), and the
+// effect upper-bound check reads the declared effect set only from a
+// `defsig` (`chelis-effects::declared_effects_from_defsig`). So when an
+// explicit `sig` carries no effect clause, naively suppressing the
+// synthesized defsig would silently delete the def's effect bound and let
+// the body leak effects unchecked — the effect-row analogue of #285. The
+// fix makes `Decl::Sig` desugaring inherit the same-named def's clause when
+// the sig declares none. These lock that in.
+
+/// Regression: an explicit `sig` with NO effect clause must still enforce
+/// the `def`'s own `! {}` bound. The body performs `IO` via `print` while
+/// the def declares `! {}` (pure), so the effect upper-bound check must
+/// fire. Passed clean before the effect-row fix.
+#[test]
+fn explicit_eff_less_sig_preserves_def_empty_effect_bound() {
+    let json = check_json(
+        "sig f: &tensor[n, f32] -> unit\n\
+         def f(x) -> unit ! {} = print(x)\n",
+    );
+    assert_effect_rejected(&json, "def !{} effect bound under eff-less sig");
+}
+
+/// Same form but with no inline param/return annotation at all — so
+/// `desugar_fun_def` never enters the synthesized-defsig branch and the
+/// inherited-onto-the-sig path is the *only* carrier of the def's `! {}`.
+/// Locks that the effect bound survives independently of the type-shape path.
+#[test]
+fn explicit_eff_less_sig_preserves_bare_def_empty_effect_bound() {
+    let json = check_json(
+        "sig f: &tensor[n, f32] -> unit\n\
+         def f(x) ! {} = print(x)\n",
+    );
+    assert_effect_rejected(&json, "bare def !{} effect bound under eff-less sig");
+}
+
+/// Positive: the inherited bound is the *def's* clause, so an honest
+/// `! { io }` def whose body performs exactly `IO` under an eff-less sig
+/// must stay clean. The fix must not over-reject by inheriting a wrong
+/// (e.g. empty) bound.
+#[test]
+fn honest_def_io_effect_clause_under_eff_less_sig_type_checks() {
+    let json = check_json(
+        "sig f: &tensor[n, f32] -> unit\n\
+         def f(x) -> unit ! { io } = print(x)\n",
+    );
+    assert_clean(&json, "honest def !{io} under eff-less sig");
+}
+
+/// Control: the same effect lie WITHOUT an explicit sig is caught by the
+/// surviving synthesized defsig, so a future regression that re-drops the
+/// inherited bound is distinguishable from a general effect-check regression.
+#[test]
+fn effect_lie_inline_only_no_sig_control_still_rejected() {
+    let json = check_json("def f(x: &tensor[n, f32]) -> unit ! {} = print(x)\n");
+    assert_effect_rejected(&json, "effect lie control (no inline sig)");
+}
+
+/// Structural lock: an eff-less explicit `sig` plus a `def` with an effect
+/// clause must emit exactly ONE `(defsig`, and that surviving defsig must
+/// carry the inherited `eff` metadata so the effect checker can read it.
+#[test]
+fn eff_less_sig_inherits_def_effect_metadata_into_single_defsig() {
+    let deep = deep_text(
+        "sig f: &tensor[n, f32] -> unit\n\
+         def f(x) -> unit ! {} = print(x)\n",
+    );
+    let defsig_count = deep.matches("(defsig").count();
+    assert_eq!(
+        defsig_count, 1,
+        "expected exactly one defsig for `f` (explicit sig only), got {defsig_count}:\n{deep}"
+    );
+    assert!(
+        deep.contains("eff:"),
+        "the surviving defsig must carry the def's inherited effect metadata:\n{deep}"
+    );
+}
+
+// ── Additional surface-form coverage the first pass missed ──────────────
+
+/// An inline annotation that directly CONTRADICTS the explicit sig (rank-1
+/// param/return vs the sig's rank-2) is the most literal statement of the
+/// #285 bug class. After the fix the explicit sig drives validation and the
+/// contradiction surfaces; before it, the synthesized sig (carrying the
+/// inline rank-1 types) won and the lie passed clean.
+#[test]
+fn contradictory_inline_annotation_vs_sig_is_rejected() {
+    let json = check_json(
+        "sig h: &tensor[batch, seq, f32] -> tensor[batch, seq, f32]\n\
+         def h(x: &tensor[batch, f32]) -> tensor[batch, f32] = relu(x)\n",
+    );
+    assert_body_sig_rejected(
+        &json,
+        "contradictory inline annotation (rank-1 vs sig rank-2)",
+    );
+}
+
+/// Order independence: the `def` written BEFORE its `sig` must still suppress
+/// the synthesized defsig and reject the lie. Suppression is keyed on a
+/// pre-pass over all decls (`explicit_sig_names`), so it cannot depend on
+/// source order; a regression making it order-dependent would slip past
+/// every sig-first test above.
+#[test]
+fn def_before_sig_transpose_lie_is_rejected() {
+    let src = "def g(x) -> tensor[batch, seq, f32] = permute(x, 1, 0)\n\
+               sig g: &tensor[batch, seq, f32] -> tensor[batch, seq, f32]\n";
+    assert_body_sig_rejected(&check_json(src), "transpose lie (def before sig)");
+    let deep = deep_text(src);
+    let defsig_count = deep.matches("(defsig").count();
+    assert_eq!(
+        defsig_count, 1,
+        "def-before-sig must still emit exactly one defsig, got {defsig_count}:\n{deep}"
     );
 }
