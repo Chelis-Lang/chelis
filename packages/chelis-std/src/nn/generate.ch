@@ -4,11 +4,13 @@ type GenerateConfig =
   | GenerateConfig { max_tokens: int64, temperature: f32, top_k: int64, top_p: f32 }
 type KVCache[a] =
   | KVCache(List[a])
-sig generate: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> int64 -> tensor[batch, seq, int64]
-sig generate_with: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> GenerateConfig -> tensor[batch, seq, int64]
-sig generate_greedy_loop: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> Option[KVCache[kv]] -> int64 -> tensor[batch, seq, int64]
-sig generate_loop: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> Option[KVCache[kv]] -> int64 -> GenerateConfig -> tensor[batch, seq, int64]
-sig generate_loop_step: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]) -> tensor[batch, seq, int64] -> Option[KVCache[kv]] -> int64 -> GenerateConfig -> tensor[batch, seq, int64]
+-- The `generate*` functions below take a `model` callback as their first
+-- parameter, so a standalone `sig` for them needs a parenthesized
+-- function-typed argument: `(model_fn) -> context -> ... -> result`. `chelis
+-- fmt` currently strips the grouping parens (`(a -> b) -> c` is rewritten to
+-- `a -> b -> c`, which changes arity), so those sigs can't be written
+-- fmt-clean today. The inline `model:` annotations on the defs are
+-- authoritative; restore explicit sigs once the formatter preserves the parens.
 sig ids_to_batch_tensor: List[int64] -> tensor[rows, cols, int64]
 def generate[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), context: tensor[batch, seq, int64], max_tokens: int64) = generate_greedy_loop(model, context, None, max_tokens)
 def generate_with[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), context: tensor[batch, seq, int64], config: GenerateConfig) = generate_loop(model, context, None, config.max_tokens, config)
