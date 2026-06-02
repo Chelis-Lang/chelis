@@ -1,14 +1,14 @@
 # Lines of Code Report
 
-Generated: 2026-06-02 02:33 UTC
+Generated: 2026-06-02 22:32 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 369 | 140,853 | 17,623 | 52,520 | 210,996 | Compiler, CLI, runtime, backends, type checker |
+| Rust | 370 | 141,024 | 17,659 | 52,608 | 211,291 | Compiler, CLI, runtime, backends, type checker |
 | C | 13 | 33,482 | 325 | 755 | 34,562 | Generated runtime, headers |
 | JSON | 28 | 9,274 | 0 | 3,181 | 12,455 | Package metadata, test fixtures |
 | Python | 40 | 5,368 | 1,508 | 1,683 | 8,559 | PyO3 bindings, tools, benchmarks |
-| **Chelis Surf** (.ch) | **111** | **3,104** | **49** | **7** | **3,160** | **Examples, std library, test fixtures** |
+| **Chelis Surf** (.ch) | **111** | **3,099** | **56** | **7** | **3,162** | **Examples, std library, test fixtures** |
 | **Chelis Deep** (.dp) | **1,501** | **1,699** | **0** | **3** | **1,702** | **Deep test fixtures** |
 | TOML | 35 | 557 | 94 | 76 | 727 | Cargo/reef manifests |
 | YAML | 5 | 485 | 170 | 122 | 777 | CI workflows |
@@ -19,4 +19,4 @@ Generated: 2026-06-02 02:33 UTC
 | Tree-sitter Queries (.scm) | 2 | 102 | 0 | 6 | 108 | Syntax highlighting for Surf and Deep |
 | Markdown | 203 | 0 | 19,578 | 9,574 | 29,152 | Specs, design docs, plans |
 | __generated__ | 1 | 0 | 0 | 0 | 0 |  |
-| **Total** | **2,314** | **195,848** | **39,521** | **68,085** | **303,454** | |
+| **Total** | **2,315** | **196,014** | **39,564** | **68,173** | **303,751** | |
