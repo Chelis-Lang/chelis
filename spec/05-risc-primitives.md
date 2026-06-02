@@ -208,6 +208,17 @@ own right. The Surf `reduce_window_*` names are the public surface;
 the IR node and backends share the single `ReduceWindow` lowering
 path.
 
+*Accumulation precision.* The IR evaluator and host runtime accumulate
+each window in `f64` and store at the tensor precision; the C backend
+accumulates `sum` / `mean` in an `f32` lane (`float acc`). For the small
+windows the parity gate exercises (2×2, 3×3) the two agree well inside the
+`1e-5` compile-run tolerance, but a very large window in `f32` can drift
+past it — widen the C accumulator (or the tolerance) before relying on
+big-window `sum` / `mean` parity. `reduce_window_sum` deliberately does
+**not** widen its result precision the way the global `sum` reduction
+does; the output element type matches the operand type (which is also why
+the adjoint needs no `Cast` — see **AD policy**).
+
 **AD policy.** `reduce_window_*` is differentiable. `chelis_ir::grad`
 lowers the reverse-mode adjoint to a single `RiscOp::ReduceWindowGrad`
 node carrying the same `{reducer, window_shape, strides}` triple, taking
@@ -226,8 +237,9 @@ input cotangent `din` (shape `S_in`). The adjoints, accumulated over the
 Like the forward op, `ReduceWindowGrad` is implemented directly by the IR
 evaluator, the host runtime, and the C backend (the C adjoint is emitted
 serially, since overlapping windows scatter-add into shared `din`
-positions); HIP codegen is deferred (`todo!`). Second-order AD through the
-adjoint itself is not defined. The adjoints are validated against central
+positions); HIP codegen is deferred and rejected before codegen (see
+**Backend status**). Second-order AD through the adjoint itself is not
+defined. The adjoints are validated against central
 finite differences for all four reducers over overlapping and strided
 windows (`chelis-ir::eval` unit tests), and the C backend is checked for
 evaluator parity (`chelis-backend-c::exec_compile::exec_reduce_window_grad_*`).
@@ -244,13 +256,15 @@ contract above.
 
 **Backend status (initial admission).** The C backend is the
 canonical lowering and is exercised by a gcc compile-and-run
-evaluator-parity gate. The HIP backend codegen for `ReduceWindow` is
-**deferred**: a `ReduceWindow` node reaching HIP codegen panics with a
-deferred-feature `todo!`, matching the house style already used for the
-`Pad` / `Shrink` HIP stubs. `chelis build --target hip` on a program
-containing `reduce_window_*` therefore aborts rather than emitting a
-GPU kernel; use the default C target until GPU windowed reductions
-land.
+evaluator-parity gate. The HIP backend codegen for `ReduceWindow` (and
+its `ReduceWindowGrad` adjoint) is **deferred**: `chelis build --target
+hip` on a program containing `reduce_window_*` is **rejected** at compile
+time with a clean `unsupported_feature` error
+(`reject_unsupported_hip_ops`, compiler-api + CLI mirror) rather than
+emitting a GPU kernel. The HIP launch-emit arm retains a deferred-feature
+`todo!` as a defensive backstop (matching the `Pad` / `Shrink` HIP stubs),
+reached only if some path bypasses the guard. Use the default C target
+until GPU windowed reductions land.
 
 **Statically-known windowed extents required on the build path.** The
 build/backend path needs each *windowed* axis extent to be known at
@@ -276,6 +290,14 @@ pass-through axes may remain symbolic. The IR evaluator and host runtime
 always recompute from the concrete runtime shape and so handle
 runtime-only extents correctly; only the ahead-of-time C/HIP build path
 carries this restriction.
+
+Separately, the C `reduce_window_*` emitter is **f32-only** (no bf16/f16
+convert-load path yet). A bf16/f16 windowed reduction is rejected before
+codegen with an `unsupported_feature` error
+(`reject_unsupported_reduce_window_precision`, compiler-api + CLI mirror,
+with the C emitter `panic!` as a defensive backstop), so it surfaces as a
+clean diagnostic rather than an emitter crash. Cast to `f32` before the
+windowed reduction; bf16/f16 widening is follow-on work.
 
 **Acceptance oracle.** The authoritative completion oracle for this
 primitive is the standard per-PR gate, `python3 scripts/gate.py`, which

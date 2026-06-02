@@ -12022,22 +12022,11 @@ fn infer_reduce_window_app(
                     ));
                     return Type::Error;
                 }
+                // `in_dim >= w` (checked above) and `s >= 1` guarantee
+                // `out = floor((in_dim - w) / s) + 1 >= 1`, so the Valid
+                // output extent is always positive here — the `in_dim < w`
+                // guard above is what rejects the empty-window case.
                 let out = (*in_dim - w) / s + 1;
-                if out <= 0 {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            format!(
-                                "{name} axis {} output dim evaluates to {out} for \
-                                 input={in_dim}, window={w}, stride={s}",
-                                leading + i
-                            ),
-                        ),
-                        vec![],
-                    ));
-                    return Type::Error;
-                }
                 out_dims.push(Dim::Lit(out));
             }
             _ => out_dims.push(Dim::Wildcard),

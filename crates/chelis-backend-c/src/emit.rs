@@ -3713,8 +3713,12 @@ impl CEmitter {
     /// through. Output rank equals input rank.
     ///
     /// f32-only for now (matches the rest of the reduction emit
-    /// surface). bf16/f16 widening is follow-on work; we panic on
-    /// non-f32 precision so silent truncation cannot recur.
+    /// surface). bf16/f16 widening is follow-on work. A non-f32
+    /// `reduce_window_*` is rejected before codegen with a clean
+    /// `unsupported_feature` diagnostic by
+    /// `chelis_compiler_api::compiler::reject_unsupported_reduce_window_precision`
+    /// (and the CLI's mirror); the `panic!` below is a defensive backstop so
+    /// silent truncation cannot recur if some path reaches emit unguarded.
     #[allow(clippy::too_many_arguments)]
     fn emit_reduce_window(
         &mut self,

@@ -1439,9 +1439,11 @@ impl HipEmitter {
             }
             // `reduce_window_*` HIP codegen is deferred per the
             // initial-admission scope (issue #254 / spec §2.3.1). C is
-            // the canonical backend; HIP panics with a deferred-feature
-            // message via `todo!`, matching the house style used for
-            // Pad / Shrink HIP stubs above.
+            // the canonical backend. A `reduce_window_*` node is rejected
+            // before codegen with a clean `unsupported_feature` diagnostic by
+            // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); the
+            // `todo!` below is a defensive backstop matching the Pad / Shrink
+            // HIP stubs above, reached only if some path bypasses that guard.
             RiscOp::ReduceWindow { .. } => {
                 todo!(
                     "reduce_window_* HIP codegen is deferred (issue #254 / spec/05-risc-primitives.md §2.3.1). \

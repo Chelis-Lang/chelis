@@ -6545,6 +6545,51 @@ mod tests {
         lower_program(&checked)
     }
 
+    /// `compute_reduce_window_out_dims` refines any *statically-known*
+    /// windowed axis — `Lit` **and** `Named(_, Some(_))` — to a concrete
+    /// `Lit` Valid-padding extent, and defers to the checker-derived
+    /// fallback only when a windowed axis is `Named(_, None)` (runtime-only).
+    /// This pins the intentional asymmetry flagged in PR #261 review: the
+    /// type checker is conservative and yields `Wildcard` for a symbolic
+    /// (named) windowed axis, while the lowering refines a *sized* named dim
+    /// to the concrete output extent. (`Named(_, None)` is additionally
+    /// rejected on the build path by `reject_symbolic_windowed_reduce`.)
+    #[test]
+    fn compute_reduce_window_out_dims_refines_named_sized_windowed_axis() {
+        let f32 = chelis_types::types::Prim::F32;
+        let fallback = TensorType {
+            dims: vec![DimInfo::Lit(1), DimInfo::Lit(1)],
+            precision: f32,
+        };
+
+        // Leading axis passes through; a Named-with-size windowed axis is
+        // refined to floor((8 - 2) / 1) + 1 = 7.
+        let named_sized = vec![
+            DimInfo::Named("batch".into(), Some(2)),
+            DimInfo::Named("h".into(), Some(8)),
+        ];
+        assert_eq!(
+            compute_reduce_window_out_dims(&named_sized, &[2], &[1], &fallback),
+            vec![DimInfo::Named("batch".into(), Some(2)), DimInfo::Lit(7)],
+        );
+
+        // A literal windowed axis is likewise computed concretely:
+        // floor((8 - 2) / 2) + 1 = 4.
+        let literal = vec![DimInfo::Lit(3), DimInfo::Lit(8)];
+        assert_eq!(
+            compute_reduce_window_out_dims(&literal, &[2], &[2], &fallback),
+            vec![DimInfo::Lit(3), DimInfo::Lit(4)],
+        );
+
+        // A runtime-only (`Named(_, None)`) windowed axis is not
+        // representable; fall back to the checker-derived dims verbatim.
+        let runtime_only = vec![DimInfo::Lit(3), DimInfo::Named("seq".into(), None)];
+        assert_eq!(
+            compute_reduce_window_out_dims(&runtime_only, &[2], &[1], &fallback),
+            fallback.dims,
+        );
+    }
+
     fn parse_and_lower_unchecked(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let mut ctx = LowerCtx::new(

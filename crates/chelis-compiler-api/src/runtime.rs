@@ -4388,6 +4388,10 @@ fn tensor_reduce_window_host(
                 ReduceWindowOp::Min => acc.min(value),
                 ReduceWindowOp::Sum | ReduceWindowOp::Mean => acc + value,
             };
+            // Unreachable: `n == 0` already returned `Err` above (a windowed
+            // reduction needs >= 1 windowed axis). Kept to mirror
+            // `chelis_ir::eval::reduce_window`, whose internal walk has no
+            // such early return and so relies on this guard.
             if n == 0 {
                 break;
             }

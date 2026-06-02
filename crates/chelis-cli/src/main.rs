@@ -2235,12 +2235,14 @@ fn cmd_build(
                 reject_eval_only_builtins_host(host_program)?;
                 reject_unsupported_c_precisions_host(host_program)?;
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
+                reject_unsupported_reduce_window_precision_host(host_program, "c")?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
                 reject_unsupported_c_precisions(&dag)?;
                 reject_symbolic_windowed_reduce(&dag, "c")?;
+                reject_unsupported_reduce_window_precision(&dag, "c")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
@@ -2478,12 +2480,14 @@ fn cmd_build_deep(
                 reject_eval_only_builtins_host(host_program)?;
                 reject_unsupported_c_precisions_host(host_program)?;
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
+                reject_unsupported_reduce_window_precision_host(host_program, "c")?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
                 reject_unsupported_c_precisions(&dag)?;
                 reject_symbolic_windowed_reduce(&dag, "c")?;
+                reject_unsupported_reduce_window_precision(&dag, "c")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
@@ -5062,6 +5066,27 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 )
                 .into());
             }
+            // `reduce_window_*` HIP codegen is deferred (spec §2.3.1). Reject
+            // cleanly here rather than reaching the launch-emit `todo!`, which
+            // would abort the build with an `internal error` panic.
+            chelis_ir::dag::RiscOp::ReduceWindow { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support `reduce_window_*`; \
+                     lowered node {} requires it. HIP windowed-reduction codegen is deferred \
+                     (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::ReduceWindowGrad { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support the `reduce_window_*` \
+                     adjoint; lowered node {} requires it. HIP windowed-reduction codegen is \
+                     deferred (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
+                    node.id.0
+                )
+                .into());
+            }
             chelis_ir::dag::RiscOp::OneHot { .. } => {
                 return Err(format!(
                     "`chelis build --target hip` cannot compile internal one_hot node {}: \
@@ -5656,6 +5681,62 @@ fn reject_symbolic_windowed_reduce_host(
     for function in &program.functions {
         for helper in &function.tensor_helpers {
             reject_symbolic_windowed_reduce(&helper.dag, target)?;
+        }
+    }
+    Ok(())
+}
+
+/// `reduce_window_*` (and its adjoint) are f32-only in the C backend:
+/// `emit_reduce_window{,_grad}` have no bf16/f16 convert-load path yet.
+/// `reject_unsupported_c_precisions` admits bf16/f16 generally, so without
+/// this guard a bf16/f16 windowed reduction reaches the emitter and aborts
+/// with an `internal error` panic instead of a clean diagnostic. Reject it
+/// at compile time; the emitter `panic!` stays as a defensive backstop.
+///
+/// Mirrors `chelis_compiler_api::compiler::reject_unsupported_reduce_window_precision`;
+/// the CLI build pipeline is independent of `compile_for_execution`, so the
+/// guard is duplicated here. See spec/05-risc-primitives.md §2.3.1.
+fn reject_unsupported_reduce_window_precision(
+    dag: &chelis_ir::dag::Dag,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use chelis_ir::dag::RiscOp;
+    for node in dag.nodes() {
+        let (op_label, reducer) = match &node.op {
+            RiscOp::ReduceWindow { reducer, .. } => ("reduce_window_*", reducer),
+            RiscOp::ReduceWindowGrad { reducer, .. } => ("reduce_window_* adjoint", reducer),
+            _ => continue,
+        };
+        let prec = node.output_type.precision;
+        if prec != chelis_types::types::Prim::F32 {
+            return Err(format!(
+                "`chelis build --target {target}` supports `{op_label}` (`{}`) on f32 \
+                 tensors only; node {} carries precision `{}`. bf16/f16 windowed \
+                 reductions are not yet lowered (no convert-load path); cast to f32 \
+                 before the windowed reduction. See spec/05-risc-primitives.md §2.3.1.",
+                reducer.surf_name(),
+                node.id.0,
+                prec.name(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Apply [`reject_unsupported_reduce_window_precision`] to every
+/// tensor-helper DAG embedded in a host program, mirroring
+/// [`reject_symbolic_windowed_reduce_host`].
+fn reject_unsupported_reduce_window_precision_host(
+    program: &chelis_ir::host::HostProgram,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for helper in &program.global_tensor_helpers {
+        reject_unsupported_reduce_window_precision(&helper.dag, target)?;
+    }
+    for function in &program.functions {
+        for helper in &function.tensor_helpers {
+            reject_unsupported_reduce_window_precision(&helper.dag, target)?;
         }
     }
     Ok(())
