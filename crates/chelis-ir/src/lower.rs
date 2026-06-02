@@ -2051,6 +2051,10 @@ fn is_shape_sensitive_builtin_app(list: &List) -> bool {
                 | "prod_reduce"
                 | "argmax_reduce"
                 | "argmin_reduce"
+                | "reduce_window_max"
+                | "reduce_window_min"
+                | "reduce_window_sum"
+                | "reduce_window_mean"
                 | "reshape"
                 | "permute"
                 | "expand"
@@ -2441,6 +2445,64 @@ fn any_wildcard_dim(dims: &[DimInfo]) -> bool {
         DimInfo::Named(name, _) => name.is_empty() || name == "*",
         DimInfo::Lit(_) => false,
     })
+}
+
+/// Compute output dims for `reduce_window_*` under `Valid` padding.
+///
+/// Leading `rank - n` axes pass through; each windowed axis has extent
+/// `floor((input_dim - window_shape[i]) / strides[i]) + 1`.
+///
+/// The windowed output axis is strictly a *function* of the input
+/// extent, so it must be recomputed — a windowed axis is never the same
+/// size as its input unless `window == 1, stride == 1`. We therefore
+/// compute concretely for any windowed axis whose size is statically
+/// known (`DimInfo::Lit` or `DimInfo::Named(_, Some(_))`).
+///
+/// A windowed axis whose input extent is unknown at compile time
+/// (`DimInfo::Named(_, None)`, e.g. a `pad_sequences` result whose dims
+/// are bound from runtime metadata) is **not** representable as a static
+/// `DimInfo`: passing the input symbol through would falsely assert
+/// `output_size == input_size`, which mis-allocates the output tensor in
+/// the backends (the input symbol is bound to the larger input extent).
+/// Per `spec/05-risc-primitives.md` §2.3.1 the build/backend path
+/// requires statically-known windowed-axis extents; when a windowed axis
+/// is unknown we fall back to the caller-supplied `ty.dims` so the
+/// type-checker's (wildcard / shape-erased) result governs rather than a
+/// silently-wrong passthrough. The IR evaluator and host runtime always
+/// recompute from the concrete runtime shape and are unaffected.
+fn compute_reduce_window_out_dims(
+    input_dims: &[DimInfo],
+    window_shape: &[usize],
+    strides: &[usize],
+    fallback_ty: &TensorType,
+) -> Vec<DimInfo> {
+    let n = window_shape.len();
+    if input_dims.len() < n || n == 0 || window_shape.len() != strides.len() {
+        return fallback_ty.dims.clone();
+    }
+    let leading = input_dims.len() - n;
+    let mut out_dims: Vec<DimInfo> = input_dims[..leading].to_vec();
+    for i in 0..n {
+        let known = match &input_dims[leading + i] {
+            DimInfo::Lit(in_dim) => Some(*in_dim),
+            DimInfo::Named(_, Some(in_dim)) => Some(*in_dim),
+            DimInfo::Named(_, None) => None,
+        };
+        match known {
+            Some(in_dim) => {
+                if window_shape[i] == 0 || strides[i] == 0 || in_dim < window_shape[i] {
+                    return fallback_ty.dims.clone();
+                }
+                let out = (in_dim - window_shape[i]) / strides[i] + 1;
+                out_dims.push(DimInfo::Lit(out));
+            }
+            // Windowed axis with a compile-time-unknown extent: defer to
+            // the checker-derived fallback rather than emit a wrong
+            // passthrough. See the doc comment above.
+            None => return fallback_ty.dims.clone(),
+        }
+    }
+    out_dims
 }
 
 #[derive(Clone)]
@@ -5097,6 +5159,67 @@ impl LowerCtx {
                     self.current_span_id.clone(),
                 )
             }
+            // Strided windowed reduction over the trailing
+            // `window_shape.len()` axes (Valid padding only). See
+            // `spec/05-risc-primitives.md` §2.3.1. The four Surf
+            // names map to the four `ReduceWindowKind` variants on the
+            // shared IR op.
+            name @ ("reduce_window_max" | "reduce_window_min" | "reduce_window_sum"
+            | "reduce_window_mean")
+                if args.len() == 3 =>
+            {
+                let x = self.lower_expr_node(&args[0], "reduce_window input");
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let window_shape = collect_cons_chain(&args[1])
+                    .and_then(|elems| {
+                        elems
+                            .iter()
+                            .map(|e| extract_int_for_dim(e).and_then(|n| usize::try_from(n).ok()))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .unwrap_or_default();
+                let strides = collect_cons_chain(&args[2])
+                    .and_then(|elems| {
+                        elems
+                            .iter()
+                            .map(|e| extract_int_for_dim(e).and_then(|n| usize::try_from(n).ok()))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .unwrap_or_default();
+                let reducer = match name {
+                    "reduce_window_max" => crate::dag::ReduceWindowKind::Max,
+                    "reduce_window_min" => crate::dag::ReduceWindowKind::Min,
+                    "reduce_window_sum" => crate::dag::ReduceWindowKind::Sum,
+                    "reduce_window_mean" => crate::dag::ReduceWindowKind::Mean,
+                    _ => unreachable!(),
+                };
+                // Compute output dims directly from the input + window
+                // + stride triple. The type checker has already
+                // validated the shape, but recomputing here keeps the
+                // IR self-contained and avoids reliance on the
+                // (sometimes wildcard) caller-provided `ty.dims`.
+                let dims = compute_reduce_window_out_dims(&x_ty.dims, &window_shape, &strides, ty);
+                let precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
+                    x_ty.precision
+                } else {
+                    ty.precision
+                };
+                let out_ty = TensorType { dims, precision };
+                self.dag.add_node(
+                    RiscOp::ReduceWindow {
+                        reducer,
+                        window_shape,
+                        strides,
+                    },
+                    vec![x],
+                    out_ty,
+                    self.current_span_id.clone(),
+                )
+            }
             "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce" if args.len() == 2 => {
                 let name = func_name;
                 let x = self.lower_expr_node(&args[0], "reduction input");
@@ -6420,6 +6543,51 @@ mod tests {
     fn parse_and_lower(src: &str) -> Dag {
         let checked = parse_and_check(src);
         lower_program(&checked)
+    }
+
+    /// `compute_reduce_window_out_dims` refines any *statically-known*
+    /// windowed axis — `Lit` **and** `Named(_, Some(_))` — to a concrete
+    /// `Lit` Valid-padding extent, and defers to the checker-derived
+    /// fallback only when a windowed axis is `Named(_, None)` (runtime-only).
+    /// This pins the intentional asymmetry flagged in PR #261 review: the
+    /// type checker is conservative and yields `Wildcard` for a symbolic
+    /// (named) windowed axis, while the lowering refines a *sized* named dim
+    /// to the concrete output extent. (`Named(_, None)` is additionally
+    /// rejected on the build path by `reject_symbolic_windowed_reduce`.)
+    #[test]
+    fn compute_reduce_window_out_dims_refines_named_sized_windowed_axis() {
+        let f32 = chelis_types::types::Prim::F32;
+        let fallback = TensorType {
+            dims: vec![DimInfo::Lit(1), DimInfo::Lit(1)],
+            precision: f32,
+        };
+
+        // Leading axis passes through; a Named-with-size windowed axis is
+        // refined to floor((8 - 2) / 1) + 1 = 7.
+        let named_sized = vec![
+            DimInfo::Named("batch".into(), Some(2)),
+            DimInfo::Named("h".into(), Some(8)),
+        ];
+        assert_eq!(
+            compute_reduce_window_out_dims(&named_sized, &[2], &[1], &fallback),
+            vec![DimInfo::Named("batch".into(), Some(2)), DimInfo::Lit(7)],
+        );
+
+        // A literal windowed axis is likewise computed concretely:
+        // floor((8 - 2) / 2) + 1 = 4.
+        let literal = vec![DimInfo::Lit(3), DimInfo::Lit(8)];
+        assert_eq!(
+            compute_reduce_window_out_dims(&literal, &[2], &[2], &fallback),
+            vec![DimInfo::Lit(3), DimInfo::Lit(4)],
+        );
+
+        // A runtime-only (`Named(_, None)`) windowed axis is not
+        // representable; fall back to the checker-derived dims verbatim.
+        let runtime_only = vec![DimInfo::Lit(3), DimInfo::Named("seq".into(), None)];
+        assert_eq!(
+            compute_reduce_window_out_dims(&runtime_only, &[2], &[1], &fallback),
+            fallback.dims,
+        );
     }
 
     fn parse_and_lower_unchecked(src: &str) -> Dag {

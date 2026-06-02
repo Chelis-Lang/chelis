@@ -3307,6 +3307,116 @@ fn build_fails_cleanly_when_chelis_runtime_dir_is_wrong() {
         .stderr(predicate::str::contains("libchelis_runtime.a"));
 }
 
+/// Regression for issue #261: `chelis build --target c` must reject
+/// `reduce_window_*` over a runtime-symbolic windowed axis with a clean
+/// `unsupported_feature` diagnostic, rather than silently emit a
+/// mis-allocated, out-of-bounds kernel whose output diverges from the
+/// evaluator (or panic in the emitter). `pad_sequences` produces a
+/// runtime-bound trailing extent, which is the windowed axis here. The
+/// host runtime / IR evaluator handle this case correctly; only the
+/// ahead-of-time build path is restricted. See
+/// `spec/05-risc-primitives.md` §2.3.1.
+#[test]
+fn build_c_rejects_reduce_window_over_runtime_symbolic_axis() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rw_symbolic.ch");
+    write_file(
+        &path,
+        "padded = pad_sequences([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], 0.0)\n\
+         windowed = reduce_window_max(padded, [2], [1])\n",
+    );
+    let out_dir = dir.path().join("rw-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires statically-known windowed-axis extents",
+        ))
+        .stderr(predicate::str::contains("reduce_window"))
+        // Must be the clean guard, not the emitter backstop panic.
+        .stderr(predicate::str::contains("panicked").not());
+}
+
+/// Regression for PR #261 review finding #1: `chelis build --target c` on a
+/// bf16 `reduce_window_*` must fail with a clean `unsupported_feature`
+/// diagnostic, not an emitter `panic!`. `reject_unsupported_c_precisions`
+/// admits bf16 generally, but the C windowed-reduction emitter is f32-only.
+/// See `spec/05-risc-primitives.md` §2.3.1.
+#[test]
+fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rw_bf16.ch");
+    write_file(
+        &path,
+        "def pool_bf16(x: tensor[1, 1, 4, 4, bf16]) -> tensor[1, 1, 3, 3, bf16] = \
+         reduce_window_max(&x, [2, 2], [1, 1])\n",
+    );
+    let out_dir = dir.path().join("rw-bf16-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("f32"))
+        .stderr(predicate::str::contains("reduce_window"))
+        // Must be the clean guard, not the emitter backstop panic.
+        .stderr(predicate::str::contains("panicked").not());
+}
+
+/// Regression for PR #261 review finding #2: `chelis build --target hip` on
+/// a `reduce_window_*` program must fail with a clean `unsupported_feature`
+/// diagnostic (HIP windowed-reduction codegen is deferred), not the
+/// launch-emit `todo!` panic. See `spec/05-risc-primitives.md` §2.3.1.
+#[test]
+fn build_hip_rejects_reduce_window_with_clean_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rw_hip.ch");
+    write_file(
+        &path,
+        "def pool_hip(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
+         reduce_window_max(&x, [2, 2], [1, 1])\n",
+    );
+    let out_dir = dir.path().join("rw-hip-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reduce_window"))
+        .stderr(predicate::str::contains("hip"))
+        // Must be the clean guard, not the launch-emit `todo!` panic.
+        .stderr(predicate::str::contains("panicked").not());
+}
+
 #[test]
 fn build_honors_chelis_runtime_dir_override() {
     let dir = tempdir().expect("tempdir");

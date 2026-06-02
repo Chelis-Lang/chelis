@@ -2692,6 +2692,66 @@ impl<'a> EvalContext<'a> {
                 let bounds = extract_bounds_pair_list(&raw, "shrink")?;
                 tensor_shrink_host(&tensor, &bounds).map(RuntimeValue::Tensor)
             }
+            "reduce_window_max" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let window_raw = expect_list_arg(args, 1)?;
+                let strides_raw = expect_list_arg(args, 2)?;
+                let window = expect_int_list(&window_raw, "reduce_window_max")?;
+                let strides = expect_int_list(&strides_raw, "reduce_window_max")?;
+                tensor_reduce_window_host(
+                    &tensor,
+                    &window,
+                    &strides,
+                    ReduceWindowOp::Max,
+                    "reduce_window_max",
+                )
+                .map(RuntimeValue::Tensor)
+            }
+            "reduce_window_min" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let window_raw = expect_list_arg(args, 1)?;
+                let strides_raw = expect_list_arg(args, 2)?;
+                let window = expect_int_list(&window_raw, "reduce_window_min")?;
+                let strides = expect_int_list(&strides_raw, "reduce_window_min")?;
+                tensor_reduce_window_host(
+                    &tensor,
+                    &window,
+                    &strides,
+                    ReduceWindowOp::Min,
+                    "reduce_window_min",
+                )
+                .map(RuntimeValue::Tensor)
+            }
+            "reduce_window_sum" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let window_raw = expect_list_arg(args, 1)?;
+                let strides_raw = expect_list_arg(args, 2)?;
+                let window = expect_int_list(&window_raw, "reduce_window_sum")?;
+                let strides = expect_int_list(&strides_raw, "reduce_window_sum")?;
+                tensor_reduce_window_host(
+                    &tensor,
+                    &window,
+                    &strides,
+                    ReduceWindowOp::Sum,
+                    "reduce_window_sum",
+                )
+                .map(RuntimeValue::Tensor)
+            }
+            "reduce_window_mean" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let window_raw = expect_list_arg(args, 1)?;
+                let strides_raw = expect_list_arg(args, 2)?;
+                let window = expect_int_list(&window_raw, "reduce_window_mean")?;
+                let strides = expect_int_list(&strides_raw, "reduce_window_mean")?;
+                tensor_reduce_window_host(
+                    &tensor,
+                    &window,
+                    &strides,
+                    ReduceWindowOp::Mean,
+                    "reduce_window_mean",
+                )
+                .map(RuntimeValue::Tensor)
+            }
             "pad" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let raw = expect_list_arg(args, 1)?;
@@ -3991,6 +4051,18 @@ enum ReduceOp {
     Argmin,
 }
 
+/// Reducer selector for the host-runtime `reduce_window_*` family.
+/// Mirrors `chelis_ir::dag::ReduceWindowKind` so host-runtime eval and
+/// IR-evaluator paths agree on the operational meaning of each builtin
+/// name. See `spec/05-risc-primitives.md` §2.3.1.
+#[derive(Clone, Copy)]
+enum ReduceWindowOp {
+    Max,
+    Min,
+    Sum,
+    Mean,
+}
+
 fn tensor_reduce_host(
     tensor: &RuntimeTensorValue,
     axis: i64,
@@ -4231,6 +4303,117 @@ fn tensor_expand_host(
         let in_linear = indices_to_linear(&in_indices, &in_shape);
         *slot = tensor.value.data[in_linear];
     }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: tensor.precision,
+    })
+}
+
+/// Strided windowed reduction host evaluator. Mirrors
+/// `chelis_ir::eval::reduce_window` so host-runtime evaluation and
+/// IR-evaluator runs produce byte-identical output for the four
+/// `reduce_window_*` builtins. See `spec/05-risc-primitives.md`
+/// §2.3.1 for the surface semantics.
+fn tensor_reduce_window_host(
+    tensor: &RuntimeTensorValue,
+    window_shape: &[usize],
+    strides: &[usize],
+    reducer: ReduceWindowOp,
+    op_name: &str,
+) -> Result<RuntimeTensorValue, String> {
+    if window_shape.len() != strides.len() {
+        return Err(format!(
+            "{op_name} window_shape (len {}) and strides (len {}) must agree",
+            window_shape.len(),
+            strides.len()
+        ));
+    }
+    let in_shape = &tensor.value.shape;
+    let n = window_shape.len();
+    if n == 0 {
+        return Err(format!(
+            "{op_name} requires a non-empty window_shape and strides"
+        ));
+    }
+    if in_shape.len() < n {
+        return Err(format!(
+            "{op_name} window arity {n} exceeds tensor rank {}",
+            in_shape.len()
+        ));
+    }
+    let leading = in_shape.len() - n;
+    let mut out_shape = in_shape[..leading].to_vec();
+    for i in 0..n {
+        let w = window_shape[i];
+        let s = strides[i];
+        if w == 0 {
+            return Err(format!("{op_name} window_shape[{i}] must be >= 1"));
+        }
+        if s == 0 {
+            return Err(format!("{op_name} strides[{i}] must be >= 1"));
+        }
+        let in_dim = in_shape[leading + i];
+        if in_dim < w {
+            return Err(format!(
+                "{op_name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
+                leading + i
+            ));
+        }
+        out_shape.push((in_dim - w) / s + 1);
+    }
+
+    let out_numel = tensor_numel(&out_shape);
+    let mut out = vec![0.0_f64; out_numel];
+    let window_volume: usize = window_shape.iter().product();
+    let init_acc = match reducer {
+        ReduceWindowOp::Max => f64::NEG_INFINITY,
+        ReduceWindowOp::Min => f64::INFINITY,
+        ReduceWindowOp::Sum | ReduceWindowOp::Mean => 0.0,
+    };
+
+    for (out_flat, slot) in out.iter_mut().enumerate() {
+        let out_indices = linear_to_indices(out_flat, &out_shape);
+        let mut acc = init_acc;
+        let mut window_pos = vec![0usize; n];
+        loop {
+            let mut src_indices = vec![0usize; in_shape.len()];
+            src_indices[..leading].copy_from_slice(&out_indices[..leading]);
+            for i in 0..n {
+                src_indices[leading + i] = out_indices[leading + i] * strides[i] + window_pos[i];
+            }
+            let src_linear = indices_to_linear(&src_indices, in_shape);
+            let value = tensor.value.data[src_linear];
+            acc = match reducer {
+                ReduceWindowOp::Max => acc.max(value),
+                ReduceWindowOp::Min => acc.min(value),
+                ReduceWindowOp::Sum | ReduceWindowOp::Mean => acc + value,
+            };
+            // Unreachable: `n == 0` already returned `Err` above (a windowed
+            // reduction needs >= 1 windowed axis). Kept to mirror
+            // `chelis_ir::eval::reduce_window`, whose internal walk has no
+            // such early return and so relies on this guard.
+            if n == 0 {
+                break;
+            }
+            let mut carry = n;
+            for i in (0..n).rev() {
+                window_pos[i] += 1;
+                if window_pos[i] < window_shape[i] {
+                    carry = i;
+                    break;
+                }
+                window_pos[i] = 0;
+            }
+            if carry == n {
+                break;
+            }
+        }
+        if matches!(reducer, ReduceWindowOp::Mean) {
+            acc /= window_volume as f64;
+        }
+        *slot = acc;
+    }
+
     Ok(RuntimeTensorValue {
         value: IrTensorValue::from_vec(out_shape, out),
         precision: tensor.precision,

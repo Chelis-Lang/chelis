@@ -7629,6 +7629,25 @@ fn infer_app(
         );
     }
 
+    if matches!(
+        func_name.as_deref(),
+        Some(
+            "reduce_window_max" | "reduce_window_min" | "reduce_window_sum" | "reduce_window_mean"
+        )
+    ) {
+        return infer_reduce_window_app(
+            list,
+            func_name.as_deref().unwrap(),
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
     let ctor_lookup_name = func_name.as_ref().and_then(|fname| {
         adt_reg
             .lookup_variant(fname)
@@ -11771,6 +11790,265 @@ fn infer_pad_app(
     }
 
     Type::Tensor(out_dims, prec)
+}
+
+/// `reduce_window_*(&x, window_shape, strides)` infer.
+///
+/// Per `spec/05-risc-primitives.md` §2.3.1:
+/// - `window_shape` and `strides` are `List[int32]` of equal length
+///   `n >= 1`.
+/// - The trailing `n` axes of the input are the windowed axes; leading
+///   `rank - n` axes pass through.
+/// - Each window/stride entry must be a positive int32 literal at
+///   check time (non-literal arguments fall back to a wildcard output
+///   shape so runtime checks can still apply).
+/// - Output rank equals input rank. Trailing dim i is
+///   `floor((input_dims[rank - n + i] - window_shape[i]) / strides[i]) + 1`.
+///   A non-positive result is rejected as a `DimensionMismatch` per
+///   §2.3.1.
+#[allow(clippy::too_many_arguments)]
+fn infer_reduce_window_app(
+    list: &deep::List,
+    name: &str,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() != 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "{name} expects 3 arguments (tensor, window_shape, strides), got {}",
+                kids.len().saturating_sub(1)
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let window_ty = infer_expr(
+        &kids[2],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let stride_ty = infer_expr(
+        &kids[3],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+
+    if matches!(input_ty, Type::Error)
+        || matches!(window_ty, Type::Error)
+        || matches!(stride_ty, Type::Error)
+    {
+        return Type::Error;
+    }
+
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    if let Err(_te) = unify(&window_ty, &int_list, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "{name} expects window_shape to be List[int32], got {}",
+                    subst.apply(&window_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if let Err(_te) = unify(&stride_ty, &int_list, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "{name} expects strides to be List[int32], got {}",
+                    subst.apply(&stride_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let input_resolved = type_for_readonly_check(&input_ty, subst);
+    let (dims, prec) = match input_resolved {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} expects tensor input, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    // Extract literal window / stride entries. Non-literal arguments
+    // are accepted at infer time (the type is still `List[int32]`) but
+    // the output shape collapses to wildcards so the host runtime can
+    // do the final shape check.
+    let window_lit = cons_chain_int_list(&kids[2]);
+    let strides_lit = cons_chain_int_list(&kids[3]);
+    let (Some(window_shape), Some(strides)) = (window_lit, strides_lit) else {
+        return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+    };
+
+    if window_shape.is_empty() || strides.is_empty() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("{name} requires a non-empty window_shape and strides"),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if window_shape.len() != strides.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "{name} window_shape (len {}) and strides (len {}) must agree",
+                    window_shape.len(),
+                    strides.len()
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    let n = window_shape.len();
+    if dims.len() < n {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("{name} window arity {n} exceeds tensor rank {}", dims.len()),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    for (i, &w) in window_shape.iter().enumerate() {
+        if w <= 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} window_shape[{i}] = {w} must be >= 1"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    }
+    for (i, &s) in strides.iter().enumerate() {
+        if s <= 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} strides[{i}] = {s} must be >= 1"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    }
+    let leading = dims.len() - n;
+    let mut out_dims = Vec::with_capacity(dims.len());
+    out_dims.extend(dims[..leading].iter().map(|d| subst.apply_dim(d)));
+    for i in 0..n {
+        let resolved = subst.apply_dim(&dims[leading + i]);
+        match &resolved {
+            Dim::Lit(in_dim) => {
+                let w = window_shape[i];
+                let s = strides[i];
+                if *in_dim < w {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "{name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
+                                leading + i
+                            ),
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                // `in_dim >= w` (checked above) and `s >= 1` guarantee
+                // `out = floor((in_dim - w) / s) + 1 >= 1`, so the Valid
+                // output extent is always positive here — the `in_dim < w`
+                // guard above is what rejects the empty-window case.
+                let out = (*in_dim - w) / s + 1;
+                out_dims.push(Dim::Lit(out));
+            }
+            _ => out_dims.push(Dim::Wildcard),
+        }
+    }
+
+    Type::Tensor(out_dims, prec)
+}
+
+/// Walk a `Cons(a, Cons(b, ..., Nil))` chain and return the literal
+/// integer entries (cast-aware via `extract_int_for_dim`). Returns
+/// `None` when any element is non-literal or when the structure does
+/// not terminate cleanly in `Nil`.
+///
+/// Shares the cons-chain walk with `collect_cons_chain_for_shape`
+/// (the structural recognizer) and only adds the per-element
+/// integer-literal extraction on top.
+fn cons_chain_int_list(expr: &deep::Expr) -> Option<Vec<i64>> {
+    collect_cons_chain_for_shape(expr)?
+        .iter()
+        .map(|e| extract_int_for_dim(e))
+        .collect()
 }
 
 /// Three-way result of inspecting a `[[s_0, e_0], [s_1, e_1], ...]` list

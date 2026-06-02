@@ -157,6 +157,38 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
         reject_host_only_builtins(host_program, request.target)?;
     }
 
+    // Two C-build-path guards over `reduce_window_*`, applied before
+    // codegen (the C host path below early-returns). The node may live in
+    // the pure-DAG entry or in a host-program tensor-helper DAG depending
+    // on program shape, so check both:
+    //   (a) `reject_symbolic_windowed_reduce` — a runtime-symbolic windowed
+    //       axis cannot be statically allocated; and
+    //   (b) `reject_unsupported_reduce_window_precision` — bf16/f16 windowed
+    //       reductions have no C lowering yet (the emitter is f32-only).
+    // Without either guard the program would surface as an emitter panic
+    // rather than a clean diagnostic. Both are C-specific: the HIP backend
+    // rejects `reduce_window_*` wholesale in `reject_unsupported_hip_ops`
+    // (it never reaches the mis-allocation), so these messages would be
+    // misleading there. See spec/05-risc-primitives.md §2.3.1.
+    if request.target == CompileTarget::C {
+        let check = |dag: &Dag| -> Result<()> {
+            reject_symbolic_windowed_reduce(dag, "c")?;
+            reject_unsupported_reduce_window_precision(dag, "c")?;
+            Ok(())
+        };
+        check(&compiled.dag)?;
+        if let Some(host_program) = host_compiled.host.as_ref() {
+            for helper in &host_program.global_tensor_helpers {
+                check(&helper.dag)?;
+            }
+            for function in &host_program.functions {
+                for helper in &function.tensor_helpers {
+                    check(&helper.dag)?;
+                }
+            }
+        }
+    }
+
     match request.target {
         CompileTarget::C => {
             if let Some(host_program) = host_compiled.host.as_ref()
@@ -1434,6 +1466,93 @@ fn reject_unsized_named_dims(dag: &Dag, target: &str) -> Result<()> {
     Ok(())
 }
 
+/// `reduce_window_*` over a runtime-symbolic windowed axis cannot be
+/// lowered to a correct static output shape on the build path. The
+/// windowed output extent is `floor((d - window) / stride) + 1` — always
+/// strictly smaller than the input extent `d` unless `window == stride ==
+/// 1` — and that expression is not representable in the `DimExpr` model
+/// (no subtraction / floor). Lowering therefore leaves the windowed
+/// output axis as an unsized symbolic dim, which the backend's
+/// symbolic-dim binding then ties to the *input* extent at the same axis
+/// index. The result is a silently mis-allocated output tensor and an
+/// out-of-bounds window read: `chelis build` emits a kernel whose output
+/// diverges from the IR evaluator / host runtime (which recompute the
+/// shape from the concrete runtime extent and are correct).
+///
+/// Reject such a program at compile time with a clear `unsupported_feature`
+/// error, per `spec/05-risc-primitives.md` §2.3.1 ("Statically-known
+/// windowed extents required on the build path"). Only the *windowed*
+/// (trailing `window_shape.len()`) axes are checked; the leading
+/// pass-through axes may remain symbolic and bind correctly. The IR
+/// evaluator and host runtime are unaffected and handle runtime-only
+/// extents.
+fn reject_symbolic_windowed_reduce(dag: &Dag, target: &str) -> Result<()> {
+    for node in dag.nodes() {
+        let RiscOp::ReduceWindow { window_shape, .. } = &node.op else {
+            continue;
+        };
+        let dims = &node.output_type.dims;
+        let leading = dims.len().saturating_sub(window_shape.len());
+        for (offset, dim) in dims.iter().enumerate().skip(leading) {
+            if let DimInfo::Named(name, None) = dim {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target {target}` requires statically-known \
+                         windowed-axis extents for `reduce_window_*`; node {} windowed axis \
+                         {offset} has runtime-only symbolic dimension `{name}`. The windowed \
+                         output extent floor((d - window) / stride) + 1 is not representable \
+                         for a runtime-only input extent, so the build cannot allocate a \
+                         correct output. Window over a statically-sized axis, or pad the \
+                         input to a concrete extent first. See spec/05-risc-primitives.md \
+                         §2.3.1.",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `reduce_window_*` and its adjoint are f32-only in the C backend
+/// today: `chelis_backend_c::emit::emit_reduce_window{,_grad}` route
+/// through `fmaxf` / `fminf` / `float`-accumulator kernels with no
+/// bf16/f16 convert-load path. `reject_unsupported_c_precisions` admits
+/// bf16/f16 tensors generally (other ops widen them via `chelis_<x>_to_f32`
+/// helpers), so without this guard a bf16/f16 `reduce_window_*` would reach
+/// the emitter and abort with an `internal error` panic instead of a clean
+/// diagnostic. Reject at compile time with an `unsupported_feature` error;
+/// the emitter `panic!` stays as a defensive backstop. bf16/f16 widening is
+/// follow-on work — see spec/05-risc-primitives.md §2.3.1.
+fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &str) -> Result<()> {
+    for node in dag.nodes() {
+        let (op_label, reducer) = match &node.op {
+            RiscOp::ReduceWindow { reducer, .. } => ("reduce_window_*", reducer),
+            RiscOp::ReduceWindowGrad { reducer, .. } => ("reduce_window_* adjoint", reducer),
+            _ => continue,
+        };
+        let prec = node.output_type.precision;
+        if prec != chelis_types::types::Prim::F32 {
+            return Err(stage_error(
+                "compile",
+                format!(
+                    "`chelis build --target {target}` supports `{op_label}` (`{}`) on f32 \
+                     tensors only; node {} carries precision `{}`. bf16/f16 windowed \
+                     reductions are not yet lowered (no convert-load path); cast to f32 \
+                     before the windowed reduction. See spec/05-risc-primitives.md §2.3.1.",
+                    reducer.surf_name(),
+                    node.id.0,
+                    prec.name(),
+                ),
+                "unsupported_feature",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Host-only builtins that have no compiled-backend lowering. Calls
 /// to these from a `chelis build` program must fail at compile time
 /// with a clear error rather than silently emit a `/* unsupported
@@ -1646,6 +1765,34 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     "compile",
                     format!(
                         "`chelis build --target hip` does not yet support `shrink`; lowered node {} requires it",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            // `reduce_window_*` HIP codegen is deferred (spec §2.3.1). Reject
+            // it cleanly here rather than letting it reach the launch-emit
+            // `todo!`, which would abort the build with an `internal error`
+            // panic. The C backend is canonical; use `--target c`.
+            RiscOp::ReduceWindow { .. } => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support `reduce_window_*`; \
+                         lowered node {} requires it. HIP windowed-reduction codegen is deferred \
+                         (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
+                        node.id.0
+                    ),
+                    "unsupported_feature",
+                ));
+            }
+            RiscOp::ReduceWindowGrad { .. } => {
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "`chelis build --target hip` does not yet support the `reduce_window_*` \
+                         adjoint; lowered node {} requires it. HIP windowed-reduction codegen is \
+                         deferred (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
                         node.id.0
                     ),
                     "unsupported_feature",
@@ -2485,6 +2632,34 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce { axis: *axis },
         RiscOp::MinReduce { axis } => WireRiscOp::MinReduce { axis: *axis },
         RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce { axis: *axis },
+        RiscOp::ReduceWindow {
+            reducer,
+            window_shape,
+            strides,
+        } => WireRiscOp::ReduceWindow {
+            reducer: match reducer {
+                chelis_ir::dag::ReduceWindowKind::Max => "max".to_string(),
+                chelis_ir::dag::ReduceWindowKind::Min => "min".to_string(),
+                chelis_ir::dag::ReduceWindowKind::Sum => "sum".to_string(),
+                chelis_ir::dag::ReduceWindowKind::Mean => "mean".to_string(),
+            },
+            window_shape: window_shape.clone(),
+            strides: strides.clone(),
+        },
+        RiscOp::ReduceWindowGrad {
+            reducer,
+            window_shape,
+            strides,
+        } => WireRiscOp::ReduceWindowGrad {
+            reducer: match reducer {
+                chelis_ir::dag::ReduceWindowKind::Max => "max".to_string(),
+                chelis_ir::dag::ReduceWindowKind::Min => "min".to_string(),
+                chelis_ir::dag::ReduceWindowKind::Sum => "sum".to_string(),
+                chelis_ir::dag::ReduceWindowKind::Mean => "mean".to_string(),
+            },
+            window_shape: window_shape.clone(),
+            strides: strides.clone(),
+        },
         RiscOp::Argmax { axis } => WireRiscOp::Argmax { axis: *axis },
         RiscOp::Argmin { axis } => WireRiscOp::Argmin { axis: *axis },
         RiscOp::Reshape { new_shape } => WireRiscOp::Reshape {
@@ -2735,6 +2910,188 @@ mod tests {
         let message = &err.errors[0].message;
         assert!(message.contains("indices to be loaded input tensors"));
         assert!(message.contains("Non-load integer index producers need integer HIP codegen"));
+    }
+
+    // --- reduce_window: runtime-symbolic windowed axis is a build error ---
+    //
+    // Regression coverage for issue #261: `chelis build` must reject
+    // `reduce_window_*` over a windowed axis whose extent is only known at
+    // runtime, rather than silently bind the windowed output axis to the
+    // input extent (which mis-allocates the output and emits an
+    // out-of-bounds window read). See spec/05-risc-primitives.md §2.3.1.
+
+    fn reduce_window_node_dag(out_dims: Vec<DimInfo>, window: Vec<usize>) -> Dag {
+        use chelis_ir::dag::ReduceWindowKind;
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_type(vec![2, 8], chelis_types::types::Prim::F32),
+            None,
+        );
+        let rw = dag.add_node(
+            RiscOp::ReduceWindow {
+                reducer: ReduceWindowKind::Max,
+                window_shape: window,
+                strides: vec![1],
+            },
+            vec![input],
+            TensorType {
+                dims: out_dims,
+                precision: chelis_types::types::Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(rw);
+        dag
+    }
+
+    #[test]
+    fn reduce_window_rejects_runtime_symbolic_windowed_axis_dag() {
+        // Leading axis sized, trailing (windowed) axis runtime-only.
+        let dag = reduce_window_node_dag(
+            vec![
+                DimInfo::Named("batch".into(), Some(2)),
+                DimInfo::Named("seq".into(), None),
+            ],
+            vec![2],
+        );
+        let err = reject_symbolic_windowed_reduce(&dag, "c")
+            .expect_err("a runtime-only windowed axis must be rejected on the build path");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("requires statically-known"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("windowed axis 1"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("`seq`"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn reduce_window_allows_symbolic_leading_axis_dag() {
+        // A symbolic *leading* (pass-through) axis is fine; only the
+        // windowed axes must be statically known.
+        let dag = reduce_window_node_dag(
+            vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(7)],
+            vec![2],
+        );
+        reject_symbolic_windowed_reduce(&dag, "c")
+            .expect("symbolic leading axis with a statically-sized windowed axis is allowed");
+    }
+
+    #[test]
+    fn reduce_window_allows_statically_sized_windowed_axis_dag() {
+        // Both a literal and a named-with-size windowed axis are allowed.
+        let lit_dag = reduce_window_node_dag(vec![DimInfo::Lit(2), DimInfo::Lit(7)], vec![2]);
+        reject_symbolic_windowed_reduce(&lit_dag, "c").expect("literal windowed axis is allowed");
+
+        let named_sized_dag = reduce_window_node_dag(
+            vec![DimInfo::Lit(2), DimInfo::Named("h_out".into(), Some(7))],
+            vec![2],
+        );
+        reject_symbolic_windowed_reduce(&named_sized_dag, "c")
+            .expect("named-with-size windowed axis is allowed");
+    }
+
+    #[test]
+    fn compile_rejects_reduce_window_over_runtime_symbolic_axis() {
+        // End-to-end: `pad_sequences` yields a runtime-bound trailing
+        // extent, so windowing over it cannot be lowered to a correct
+        // static output shape. The build must fail rather than emit a
+        // mis-allocated kernel whose output diverges from the evaluator
+        // (issue #261). The host runtime / IR evaluator handle this case
+        // correctly; only the ahead-of-time build path is restricted.
+        let source = r#"
+padded = pad_sequences([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], 0.0)
+windowed = reduce_window_max(padded, [2], [1])
+"#;
+        let err = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            target: CompileTarget::C,
+            entry_name: Some("rw_symbolic".to_string()),
+        })
+        .expect_err("build must reject reduce_window over a runtime-symbolic windowed axis");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("requires statically-known"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("reduce_window"),
+            "unexpected message: {message}"
+        );
+    }
+
+    fn reduce_window_dag_with_precision(prec: chelis_types::types::Prim) -> Dag {
+        use chelis_ir::dag::ReduceWindowKind;
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_type(vec![1, 1, 4, 4], prec),
+            None,
+        );
+        let rw = dag.add_node(
+            RiscOp::ReduceWindow {
+                reducer: ReduceWindowKind::Max,
+                window_shape: vec![2, 2],
+                strides: vec![1, 1],
+            },
+            vec![input],
+            tensor_type(vec![1, 1, 3, 3], prec),
+            None,
+        );
+        dag.add_root(rw);
+        dag
+    }
+
+    // --- reduce_window: bf16/f16 is rejected on the C build path ---
+    //
+    // PR #261 review finding #1: `reject_unsupported_c_precisions` admits
+    // bf16/f16 generally, but the C `reduce_window_*` emitter is f32-only and
+    // `panic!`s on anything else. Without this guard a bf16 windowed reduction
+    // aborts with an `internal error` panic instead of a clean diagnostic.
+    #[test]
+    fn reduce_window_rejects_bf16_precision_on_c_build() {
+        let bf16 = reduce_window_dag_with_precision(chelis_types::types::Prim::Bf16);
+        let err = reject_unsupported_reduce_window_precision(&bf16, "c")
+            .expect_err("bf16 reduce_window must be rejected on the C build path");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("f32") && message.contains("reduce_window"),
+            "unexpected message: {message}"
+        );
+        assert_eq!(err.errors[0].kind, "unsupported_feature");
+
+        // f16 is rejected the same way; f32 is allowed.
+        let f16 = reduce_window_dag_with_precision(chelis_types::types::Prim::F16);
+        reject_unsupported_reduce_window_precision(&f16, "c")
+            .expect_err("f16 reduce_window must be rejected on the C build path");
+        let f32 = reduce_window_dag_with_precision(chelis_types::types::Prim::F32);
+        reject_unsupported_reduce_window_precision(&f32, "c")
+            .expect("f32 reduce_window must be allowed");
+    }
+
+    // --- reduce_window: HIP build rejects the node cleanly (no todo! panic) ---
+    //
+    // PR #261 review finding #2: HIP windowed-reduction codegen is deferred.
+    // The build must reject a `ReduceWindow` node with a clean
+    // `unsupported_feature` error before it reaches the launch-emit `todo!`.
+    #[test]
+    fn hip_rejects_reduce_window_node_with_clean_message() {
+        let dag = reduce_window_dag_with_precision(chelis_types::types::Prim::F32);
+        let err =
+            reject_unsupported_hip_ops(&dag).expect_err("HIP must reject reduce_window codegen");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("reduce_window") && message.contains("--target hip"),
+            "unexpected message: {message}"
+        );
+        assert_eq!(err.errors[0].kind, "unsupported_feature");
     }
 
     #[test]

@@ -962,6 +962,16 @@ impl HipEmitter {
                     Self::elem_kind(input_ty),
                 ))
             }
+            // `reduce_window_*` HIP codegen is deferred per the
+            // initial-admission scope (issue #254 / spec §2.3.1). The
+            // C backend is canonical; returning `None` here means no
+            // kernel name is registered, and the launch-emit arm below
+            // panics via `todo!` if a `ReduceWindow` node ever reaches
+            // codegen on the HIP target.
+            RiscOp::ReduceWindow { .. } => None,
+            // `reduce_window_*` adjoint: HIP codegen deferred alongside the
+            // forward op (see above); launch-emit panics via `todo!`.
+            RiscOp::ReduceWindowGrad { .. } => None,
             RiscOp::OneHot { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)),
@@ -1426,6 +1436,25 @@ impl HipEmitter {
                 // kernel source comes from `extra_reduction_kernel_sources`
                 // collected by the first pass.
                 self.emit_extra_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
+            }
+            // `reduce_window_*` HIP codegen is deferred per the
+            // initial-admission scope (issue #254 / spec §2.3.1). C is
+            // the canonical backend. A `reduce_window_*` node is rejected
+            // before codegen with a clean `unsupported_feature` diagnostic by
+            // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); the
+            // `todo!` below is a defensive backstop matching the Pad / Shrink
+            // HIP stubs above, reached only if some path bypasses that guard.
+            RiscOp::ReduceWindow { .. } => {
+                todo!(
+                    "reduce_window_* HIP codegen is deferred (issue #254 / spec/05-risc-primitives.md §2.3.1). \
+                     Use the C backend, or open a follow-up issue if you need GPU windowed reductions."
+                )
+            }
+            RiscOp::ReduceWindowGrad { .. } => {
+                todo!(
+                    "reduce_window_* adjoint (ReduceWindowGrad) HIP codegen is deferred alongside the forward op \
+                     (spec/05-risc-primitives.md §2.3.1). Use the C backend for windowed-reduction gradients."
+                )
             }
             RiscOp::OneHot { .. } => {
                 panic!(
@@ -2843,6 +2872,8 @@ impl HipEmitter {
             | RiscOp::MaxReduce { .. }
             | RiscOp::MinReduce { .. }
             | RiscOp::ProdReduce { .. }
+            | RiscOp::ReduceWindow { .. }
+            | RiscOp::ReduceWindowGrad { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
             | RiscOp::OneHot { .. }
