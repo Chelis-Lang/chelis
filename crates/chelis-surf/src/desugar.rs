@@ -43,19 +43,33 @@ struct DesugarCtx {
     /// callee has a declared signature with a tensor parameter at that
     /// position.
     top_level_fn_tensor_param_prec: HashMap<String, Vec<Option<String>>>,
+    /// Names that carry an explicit standalone `sig`/signature declaration
+    /// (`Decl::Sig`). When a `def` of the same name also has inline
+    /// annotations, `desugar_fun_def` would otherwise synthesize a second
+    /// `defsig` filling every un-annotated position with a wildcard
+    /// `(t-var {} _)`. That synthesized signature is last-write-wins in the
+    /// type checker's defsig binding (`chelis-types` `collect_declarations`),
+    /// so it silently overwrites the concrete explicit `sig`, dropping the
+    /// body-vs-signature contract on the un-annotated positions
+    /// (chelis#285). When an explicit sig exists, the synthesized one is
+    /// strictly redundant and weaker, so we suppress it here.
+    explicit_sig_names: HashSet<String>,
 }
 
 impl DesugarCtx {
     fn new(decls: &[Decl]) -> Self {
         let mut top_level_fn_params = HashMap::new();
         let mut top_level_fn_tensor_param_prec = HashMap::new();
+        let mut explicit_sig_names = HashSet::new();
         for decl in decls {
             collect_top_level_fn_params(decl, &mut top_level_fn_params);
             collect_top_level_fn_tensor_param_prec(decl, &mut top_level_fn_tensor_param_prec);
+            collect_explicit_sig_names(decl, &mut explicit_sig_names);
         }
         Self {
             top_level_fn_params,
             top_level_fn_tensor_param_prec,
+            explicit_sig_names,
         }
     }
 }
@@ -561,6 +575,26 @@ fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String
     }
 }
 
+/// Collect names that carry an explicit standalone `sig` declaration, so
+/// `desugar_fun_def` can suppress the redundant wildcard-filled `defsig` it
+/// would otherwise synthesize for a same-name annotated `def` (chelis#285).
+/// Descends into `Decl::Module` for the same reason as
+/// `collect_top_level_fn_params`: every idiomatic Surf source wraps its
+/// declarations in a `module`.
+fn collect_explicit_sig_names(decl: &Decl, out: &mut HashSet<String>) {
+    match decl {
+        Decl::Sig { name, .. } => {
+            out.insert(name.clone());
+        }
+        Decl::Module { decls, .. } => {
+            for decl in decls {
+                collect_explicit_sig_names(decl, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Collect per-position tensor element-prim names from each top-level
 /// function's declared signature. Used by the contextual tensor-literal
 /// inference rule (spec §P10b / §5.6) to narrow numeric literals in
@@ -816,7 +850,16 @@ impl DesugarCtx {
         let fn_node = node("fn", vec![params_node, desugared_body]);
         let def_node = node("def", vec![sym(name), fn_node]);
 
-        if params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() {
+        // chelis#285: when an explicit standalone `sig` already declares this
+        // name, the signature synthesized below from inline annotations is
+        // redundant and weaker — it fills every un-annotated position with a
+        // wildcard `(t-var {} _)` and (being last-write-wins in the checker's
+        // defsig binding) would overwrite the concrete explicit sig, dropping
+        // the body-vs-signature contract on those positions. Suppress it and
+        // let the explicit sig drive body validation.
+        if (params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some())
+            && !self.explicit_sig_names.contains(name)
+        {
             // Tvar set for the synthesized sig:
             //
             // - When the def declares an explicit quantifier list
@@ -2350,6 +2393,7 @@ mod tests {
                 vec!["x".to_string(), "w".to_string(), "b".to_string()],
             )]),
             top_level_fn_tensor_param_prec: HashMap::new(),
+            explicit_sig_names: HashSet::new(),
         };
         let actual = print_expr(&ctx.desugar_expr(&expr))
             .split_whitespace()
