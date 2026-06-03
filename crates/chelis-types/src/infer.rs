@@ -6615,11 +6615,54 @@ fn collect_all_declarations(
     adt_reg: &mut AdtRegistry,
     errors: &mut Vec<CheckError>,
 ) {
+    report_duplicate_defs(items, errors);
     for expr in items {
         collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Aliases);
     }
     for expr in items {
         collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Rest);
+    }
+}
+
+/// Reject two same-name `def` declarations in one program (chelis#258).
+///
+/// A def's value binding is silent last-write-wins (`env.bind` →
+/// `HashMap::insert`, like the `defsig` arm of `collect_declarations`), and
+/// Chelis does not dispatch same-name `def`s by argument arity or tensor
+/// rank. So two `def f`s whose sigs differ only in rank leave just one arm
+/// reachable: callers of the other rank fire a confusing `DimensionMismatch`
+/// at the call site instead of a clear error at the redundant definition.
+/// This mirrors the duplicate-`deftype` / duplicate-`typealias` rejection
+/// already in `collect_declarations`, moving the diagnostic to the
+/// definition site.
+///
+/// Scoped to `def` (not `defsig`): a `defsig` legitimately co-occurs with a
+/// synthesized signature for the same name (an inline-annotated `def`
+/// desugars to both a `defsig` and a `def`), so a same-name `defsig` is not
+/// on its own a duplicate definition. `items` is already flattened past
+/// `module` wrappers, and the prelude lives in the builtin env rather than as
+/// `def` nodes here, so only genuine in-program user redefinitions match.
+fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for expr in items {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("def") {
+            continue;
+        }
+        let Some(name) = children(list).first().and_then(symbol_name) else {
+            continue;
+        };
+        if !seen.insert(name) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DuplicateDefinition,
+                format!("duplicate definition: `{name}` is defined more than once"),
+                vec![format!(
+                    "rename one of the `{name}` definitions: Chelis does not dispatch same-name `def`s by argument type or rank"
+                )],
+            ));
+        }
     }
 }
 
@@ -16349,6 +16392,53 @@ mod tests {
             "(typealias {} Alias () (t-prim {} int32))
              (typealias {} Alias () (t-prim {} f32))",
             CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    // ── Duplicate def rejection (chelis#258) ─────────────────────
+    // A def's value binding is silent last-write-wins, and Chelis does
+    // not dispatch same-name defs by arg arity or tensor rank. Two
+    // same-name defs (e.g. rank-distinct "overloads") therefore leave
+    // one arm unreachable and surface a confusing DimensionMismatch at
+    // the other arm's call sites. `report_duplicate_defs` rejects them
+    // at the definition site instead. The tests below pin both sides.
+
+    #[test]
+    fn duplicate_def_in_same_program_is_rejected() {
+        check_err(
+            "(def {} f (fn {} (params {} x) (var {} x)))
+             (def {} f (fn {} (params {} y) (var {} y)))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn duplicate_value_def_in_same_program_is_rejected() {
+        // The rule keys on the `def` tag, so duplicate value defs collide too.
+        check_err(
+            "(def {} x (lit {type: (t-prim {} int32)} 1))
+             (def {} x (lit {type: (t-prim {} int32)} 2))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn distinct_name_defs_are_accepted() {
+        // Only same-name collisions are duplicates; distinct names are fine.
+        check_ok(
+            "(def {} f (fn {} (params {} x) (var {} x)))
+             (def {} g (fn {} (params {} y) (var {} y)))",
+        );
+    }
+
+    #[test]
+    fn sig_plus_def_same_name_is_not_a_duplicate() {
+        // A `defsig` + a `def` for one name is the ordinary annotated-def
+        // shape (and an inline-annotated def desugars to exactly that pair),
+        // so it must not be flagged. Only two `def`s for one name collide.
+        check_ok(
+            "(defsig {} f (t-fn {} (t-var {} a) (t-var {} a)))
+             (def {} f (fn {} (params {} x) (var {} x)))",
         );
     }
 
