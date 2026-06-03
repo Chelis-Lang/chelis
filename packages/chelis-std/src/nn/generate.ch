@@ -6,11 +6,11 @@ type KVCache[a] =
   | KVCache(List[a])
 -- The `generate*` functions below take a `model` callback as their first
 -- parameter, so a standalone `sig` for them needs a parenthesized
--- function-typed argument: `(model_fn) -> context -> ... -> result`. `chelis
--- fmt` currently strips the grouping parens (`(a -> b) -> c` is rewritten to
--- `a -> b -> c`, which changes arity), so those sigs can't be written
--- fmt-clean today. The inline `model:` annotations on the defs are
--- authoritative; restore explicit sigs once the formatter preserves the parens.
+-- function-typed argument: `(model_fn) -> context -> ... -> result`. The
+-- formatter now preserves those grouping parens (#290 fixed the `(a -> b) -> c`
+-- => `a -> b -> c` rewrite that previously changed arity), so explicit sigs can
+-- be written fmt-clean again. The inline `model:` annotations on the defs are
+-- authoritative; restoring standalone `generate*` sigs is a clean follow-up.
 sig ids_to_batch_tensor: List[int64] -> tensor[rows, cols, int64]
 def generate[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), context: tensor[batch, seq, int64], max_tokens: int64) = generate_greedy_loop(model, context, None, max_tokens)
 def generate_with[batch, seq, vocab, kv](model: tensor[batch, seq, int64] -> Option[KVCache[kv]] -> (tensor[batch, vocab, f32], KVCache[kv]), context: tensor[batch, seq, int64], config: GenerateConfig) = generate_loop(model, context, None, config.max_tokens, config)

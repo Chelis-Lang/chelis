@@ -3629,6 +3629,70 @@ fn fmt_check_accepts_trailing_newline_terminated_canonical_surf() {
         .success();
 }
 
+// #290: `chelis fmt` must keep the grouping parens around a function-typed
+// parameter in a `sig`. Arrow types are right-associative, so `(a -> b) -> c`
+// (one function-typed argument) is a different type from the curried 3-ary
+// `a -> b -> c`. The formatter previously stripped the parens, changing the
+// arity and making higher-order sigs impossible to write fmt-clean.
+#[test]
+fn fmt_inplace_preserves_hof_argument_parens() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("hof.ch");
+    write_file(&path, "module T\nsig f: (a -> b) -> c\ndef f(g, x) = x\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    let after = fs::read_to_string(&path).expect("read formatted file");
+    assert!(
+        after.contains("sig f: (a -> b) -> c"),
+        "fmt stripped the function-typed argument's grouping parens; got:\n{after}"
+    );
+    assert!(
+        !after.contains("sig f: a -> b -> c"),
+        "fmt flattened the HOF sig to the curried form; got:\n{after}"
+    );
+
+    // The formatted output must be stable under a second pass (idempotence).
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .success();
+}
+
+// #290 negative parity: a genuinely curried sig must NOT gain spurious parens,
+// and a redundant right-position group `a -> (b -> c)` canonicalizes to the
+// bare flat form.
+#[test]
+fn fmt_inplace_leaves_curried_sig_unparenthesized() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("curried.ch");
+    write_file(&path, "module T\nsig f: a -> (b -> c)\ndef f(x, y, z) = x\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    let after = fs::read_to_string(&path).expect("read formatted file");
+    assert!(
+        after.contains("sig f: a -> b -> c"),
+        "redundant right-position arrow parens were not canonicalized away; got:\n{after}"
+    );
+    assert!(
+        !after.contains("(b -> c)"),
+        "right-position arrow kept spurious parens; got:\n{after}"
+    );
+}
+
 // #144: `chelis fmt --inplace` must preserve `--` line comments and
 // `{- -}` block comments instead of deleting them, and the result must
 // pass `fmt --check` (be idempotent).
