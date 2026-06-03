@@ -235,3 +235,40 @@ out = scale(to_tensor([3.0, 4.0]))\n";
         "scale(x) = x * 2.5 for x=[3,4] must print [7.5, 10.0]; got stdout={stdout:?}",
     );
 }
+
+/// The f64 sibling of the scale test, isolating the f64 const-broadcast
+/// materialization with zero tensor inputs. The #300 emit fix dispatches
+/// `scalar_to_tensor` on the result precision: an f64 const-broadcast must
+/// route through `chelis_scalar_tensor_from_f64` (8-byte storage), NOT the
+/// new f32 default. `1.1` is the canonical f32-truncation smoking gun: an
+/// f32 round-trip of 1.1 widens back to `1.100000023841858`, so if the
+/// constant were materialized at f32 the printed f64 tensor would carry
+/// that signature instead of `1.1`. `expand(scalar_to_tensor(1.1), 0, 2)`
+/// at f64 is the rank-1 tensor `[1.1, 1.1]` at full f64 precision; the
+/// helper has zero tensor inputs, so it also exercises the NULL-inputs /
+/// count-0 path on the f64 surface.
+#[test]
+fn issue_300_const_expand_f64_keeps_full_precision() {
+    let source = "module Repro.ConstExpandF64\n\
+def make_const() -> tensor[2, f64] =\n  \
+  expand(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int32))\n\
+out = make_const()\n";
+
+    let build = chelis_build_c(source, "const64");
+    let kernel_c = build.path().join("const64.c");
+    let stdout = compile_and_run_emitted(build.path(), &kernel_c);
+    assert!(
+        stdout.contains("shape=[2]"),
+        "make_const must print a rank-1 size-2 tensor; got stdout={stdout:?}",
+    );
+    assert!(
+        !stdout.contains("1.100000023841858"),
+        "f64 const-broadcast must not collapse to the f32-truncated value \
+         (issue #300 f64 dispatch); got stdout={stdout:?}",
+    );
+    assert!(
+        stdout.contains("data=[1.1, 1.1]"),
+        "expand(scalar_to_tensor(1.1), 0, 2) at f64 must print [1.1, 1.1]; \
+         got stdout={stdout:?}",
+    );
+}

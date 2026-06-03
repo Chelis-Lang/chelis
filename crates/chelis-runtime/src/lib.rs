@@ -3829,4 +3829,77 @@ mod tests {
             chelis_free(result);
         }
     }
+
+    // Issue #300: each `scalar_to_tensor` constructor must allocate at the
+    // dtype it advertises and write the value through the matching slot
+    // width. A dtype-vs-write-width mismatch silently corrupts the value
+    // when a same-precision consumer (e.g. a DAG `expand` helper) reads the
+    // buffer back; the f32 case is the headline #300 zeroing bug.
+    #[test]
+    fn scalar_tensor_from_f32_stores_f32_value_at_f32_dtype() {
+        unsafe {
+            // 2.5 is exactly representable in f32, so it survives a correct
+            // f32 store/load. The pre-fix path allocated f64 (8 bytes) and a
+            // 4-byte (f32) consumer read the all-zero low half -- 0.0.
+            let tensor = chelis_scalar_tensor_from_f32(2.5);
+            assert_eq!((*tensor).ndim, 0, "rank-0 scalar tensor");
+            assert_eq!(
+                (*tensor).dtype,
+                CHELIS_F32,
+                "from_f32 must advertise f32 storage"
+            );
+            assert_eq!(*((*tensor).data as *const f32), 2.5_f32);
+            // The whole 4-byte slot must equal the f32 bit pattern, with no
+            // stray bytes a wider read could misinterpret.
+            assert_eq!(*((*tensor).data as *const u32), 2.5_f32.to_bits());
+            // The runtime's own rank-0 reader agrees.
+            assert_eq!(chelis_tensor_to_f64(tensor), 2.5_f64);
+            chelis_free(tensor);
+        }
+    }
+
+    #[test]
+    fn scalar_tensor_from_f32_preserves_non_round_value() {
+        unsafe {
+            // 0.1 is not exactly representable; the round-trip value must be
+            // exactly f32(0.1), proving the store/load both happen at f32.
+            let tensor = chelis_scalar_tensor_from_f32(0.1);
+            assert_eq!((*tensor).dtype, CHELIS_F32);
+            assert_eq!(*((*tensor).data as *const f32), 0.1_f32);
+            chelis_free(tensor);
+        }
+    }
+
+    #[test]
+    fn scalar_tensor_from_f64_stores_f64_value_at_f64_dtype() {
+        unsafe {
+            // 1.1 has a low 4-byte (f32-truncated) signature; storing it at
+            // f64 must preserve the full double, distinct from f32(1.1).
+            let tensor = chelis_scalar_tensor_from_f64(1.1);
+            assert_eq!((*tensor).ndim, 0, "rank-0 scalar tensor");
+            assert_eq!(
+                (*tensor).dtype,
+                CHELIS_F64,
+                "from_f64 must advertise f64 storage (RT-4 F1 round-trip)"
+            );
+            assert_eq!(*((*tensor).data as *const f64), 1.1_f64);
+            assert_ne!(
+                *((*tensor).data as *const f64),
+                1.1_f32 as f64,
+                "f64 store must not collapse to the f32-truncated value"
+            );
+            chelis_free(tensor);
+        }
+    }
+
+    #[test]
+    fn scalar_tensor_from_i64_stores_int32_value_at_i32_dtype() {
+        unsafe {
+            let tensor = chelis_scalar_tensor_from_i64(7);
+            assert_eq!((*tensor).ndim, 0, "rank-0 scalar tensor");
+            assert_eq!((*tensor).dtype, CHELIS_I32, "from_i64 advertises i32");
+            assert_eq!(*((*tensor).data as *const i32), 7);
+            chelis_free(tensor);
+        }
+    }
 }
