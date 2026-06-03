@@ -982,8 +982,8 @@ mod tests {
     /// type portion of the `sig <name>: <type>` line.
     fn sig_type_str(source: &str) -> String {
         let decls = crate::parser::parse_str(source).expect("parse sig");
-        let ty = find_sig_ty(&decls)
-            .unwrap_or_else(|| panic!("no Sig declaration found in: {source}"));
+        let ty =
+            find_sig_ty(&decls).unwrap_or_else(|| panic!("no Sig declaration found in: {source}"));
         format_type(ty)
     }
 
