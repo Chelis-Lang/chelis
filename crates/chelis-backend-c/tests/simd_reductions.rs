@@ -500,14 +500,14 @@ fn hex_float_literal_round_trips_exact_f32_bits() {
     let mut cases: Vec<f32> = vec![
         0.1_f32,
         (1.0_f64 / 3.0_f64) as f32,
-        1e-40_f32,                  // subnormal: `%.8` -> `0.00000000f`
+        1e-40_f32, // subnormal: `%.8` -> `0.00000000f`
         f32::from_bits(0x1234_5678), // #189 small-magnitude reproducer
         0.0_f32,
         -0.0_f32,
         -4.0_f32,
         3.999_999_8_f32,
-        f32::MIN_POSITIVE,          // smallest normal
-        f32::from_bits(1),          // smallest subnormal
+        f32::MIN_POSITIVE, // smallest normal
+        f32::from_bits(1), // smallest subnormal
         f32::MAX,
         f32::MIN,
     ];
