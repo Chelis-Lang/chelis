@@ -969,6 +969,22 @@ pub unsafe extern "C" fn chelis_scalar_tensor_from_f64(value: f64) -> *mut cheli
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chelis_scalar_tensor_from_f32(value: f32) -> *mut chelis_tensor {
+    // Issue #300: `scalar_to_tensor(cast(c, f32))` must materialize an
+    // f32-backed rank-0 tensor, not an f64 one. The sibling
+    // `chelis_scalar_tensor_from_f64` stores f64 (8 bytes); when an f32
+    // consumer (e.g. a DAG `expand` helper lowered at the operand's f32
+    // precision) reads that buffer through `(float*)data`, it decodes the
+    // low 4 bytes of the f64 -- which for an exactly-representable value
+    // like 2.5 are all zero -- yielding 0.0. Allocate at f32 storage so
+    // the dtype the emitter advertises matches the bytes it writes.
+    let tensor = chelis_alloc(0, ptr::null(), CHELIS_F32);
+    let ptr = (*tensor).data as *mut f32;
+    *ptr = value;
+    tensor
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_to_f64(t: *const chelis_tensor) -> f64 {
     if t.is_null() || (*t).ndim != 0 {
         runtime_fail!("chelis_tensor_to_f64 expects a rank-0 tensor");

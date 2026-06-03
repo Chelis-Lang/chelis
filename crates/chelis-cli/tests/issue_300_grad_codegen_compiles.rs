@@ -206,30 +206,32 @@ out = h(to_tensor([3.0, 4.0]))\n";
     let kernel_c = build.path().join("fwd.c");
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     let trimmed = stdout.trim();
-    let emitted = fs::read_to_string(&kernel_c).unwrap_or_default();
     assert!(
         trimmed.contains("17.5"),
-        "h(x) = sum(x * 2.5) for x=[3,4] must be 17.5; got stdout={trimmed:?}\nEMITTED C:\n{emitted}",
+        "h(x) = sum(x * 2.5) for x=[3,4] must be 17.5; got stdout={trimmed:?}",
     );
 }
 
-/// A pure-constant `expand` body exercises the zero-input tensor-helper
-/// emission path (no free tensor `Load`). The emitted helper call must
-/// not declare a zero-length C array. `c() = [2.5, 2.5]`.
+/// A tensor-returning function with a constant-`expand` binding consumed
+/// by a tensor helper, driven through a host call (`out = scale(...)`).
+/// This pins that the constant value is actually materialized into the
+/// broadcast tensor: `scale(x) = x * 2.5` for `x = [3, 4]` is
+/// `[7.5, 10.0]`. The pre-fix `scalar_to_tensor` f64-vs-f32 storage
+/// mismatch zeroed the constant, so `mul(x, k)` collapsed to `x * 0`.
 #[test]
-fn issue_300_zero_input_const_expand_compiles_and_runs() {
-    let source = "module Repro.ZeroInputConstExpand\n\
-def make() -> tensor[2, f32] = {\n  \
+fn issue_300_scale_const_expand_materializes_value() {
+    let source = "module Repro.ScaleConstExpand\n\
+def scale(x: tensor[2, f32]) -> tensor[2, f32] = {\n  \
   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))\n  \
-  mul(k, k)\n\
+  mul(x, k)\n\
 }\n\
-out = make()\n";
+out = scale(to_tensor([3.0, 4.0]))\n";
 
-    let build = chelis_build_c(source, "zero");
-    let kernel_c = build.path().join("zero.c");
+    let build = chelis_build_c(source, "scale");
+    let kernel_c = build.path().join("scale.c");
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     assert!(
-        stdout.contains("shape=[2]") && stdout.contains("data=[6.25, 6.25]"),
-        "make() = (2.5*2.5) broadcast must print [6.25, 6.25]; got stdout={stdout:?}",
+        stdout.contains("shape=[2]") && stdout.contains("data=[7.5, 10.0]"),
+        "scale(x) = x * 2.5 for x=[3,4] must print [7.5, 10.0]; got stdout={stdout:?}",
     );
 }

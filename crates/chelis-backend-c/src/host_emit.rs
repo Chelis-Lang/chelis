@@ -1569,9 +1569,25 @@ impl<'a> HostEmitter<'a> {
                 arg_vars[0].0.clone()
             }
             "tensor_to_scalar" => format!("chelis_tensor_to_f64({})", arg_vars[0].0),
-            "scalar_to_tensor" => match arg_vars[0].1 {
-                HostType::Int64 => format!("chelis_scalar_tensor_from_i64({})", arg_vars[0].0),
-                _ => format!("chelis_scalar_tensor_from_f64({})", arg_vars[0].0),
+            // Issue #300: dispatch on the *result* tensor precision, not just
+            // the (coarse) argument host type. `scalar_to_tensor(cast(c,
+            // f32))` must materialize an f32-backed rank-0 tensor: the f64
+            // constructor stores 8 bytes, and an f32 consumer (e.g. a DAG
+            // `expand` helper lowered at the operand's f32 precision) then
+            // decodes the low 4 bytes -- 0.0 for an exactly-representable
+            // value like 2.5. `Float64` host-classifies both f32 and f64, so
+            // the argument type alone cannot distinguish them; the result
+            // `ty` carries the real precision.
+            "scalar_to_tensor" => match (&arg_vars[0].1, ty) {
+                (HostType::Int64, _) => {
+                    format!("chelis_scalar_tensor_from_i64({})", arg_vars[0].0)
+                }
+                (_, HostType::Tensor(tensor_ty)) if matches!(tensor_ty.precision, Prim::F64) => {
+                    format!("chelis_scalar_tensor_from_f64({})", arg_vars[0].0)
+                }
+                // Default float storage is f32 (matches the IR's `Const`
+                // f32 default and the DAG-helper operand precision).
+                _ => format!("chelis_scalar_tensor_from_f32({})", arg_vars[0].0),
             },
             "len" => match arg_vars[0].1 {
                 HostType::Dict(_, _) => format!("chelis_dict_len({})", arg_vars[0].0),
