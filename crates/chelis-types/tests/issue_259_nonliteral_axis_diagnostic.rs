@@ -79,12 +79,18 @@ def go[m, n](x: tensor[m, n, f32], ax: int32) -> tensor[n, f32] = {
         check_ir_program(&deep).expect_err("non-literal reduction axis must be rejected at infer");
     let msgs = messages(&rep);
 
-    // The root-cause diagnostic fires at the reduction site.
-    assert!(
-        msgs.iter().any(|m| m.contains("mean")
-            && m.contains("axis")
-            && m.contains("compile-time constant")),
-        "expected a `mean` compile-time-constant-axis diagnostic, got {msgs:?}"
+    // The root-cause diagnostic fires at the reduction site, exactly
+    // once: returning `Type::Error` must not re-fire the post-check or
+    // cascade a second copy through the deferred-borrow re-check pass.
+    let axis_cause_count = msgs
+        .iter()
+        .filter(|m| {
+            m.contains("mean") && m.contains("axis") && m.contains("compile-time constant")
+        })
+        .count();
+    assert_eq!(
+        axis_cause_count, 1,
+        "expected exactly one `mean` compile-time-constant-axis diagnostic, got {msgs:?}"
     );
     // It names the runtime axis binding so the user can see the cause.
     assert!(
