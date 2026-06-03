@@ -6659,7 +6659,7 @@ fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
                 CheckErrorKind::DuplicateDefinition,
                 format!("duplicate definition: `{name}` is defined more than once"),
                 vec![format!(
-                    "rename one of the `{name}` definitions — Chelis does not dispatch same-name `def`s by argument type or rank"
+                    "rename one of the `{name}` definitions: Chelis does not dispatch same-name `def`s by argument type or rank"
                 )],
             ));
         }
