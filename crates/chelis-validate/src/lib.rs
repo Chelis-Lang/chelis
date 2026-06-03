@@ -124,15 +124,29 @@ pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
     validate_deep(&canonical)
 }
 
+/// True for inner pairs that are structurally invisible to a node's
+/// shape: atomic `comment` tokens (which `spacing` can capture anywhere a
+/// node's internal `spacing` appears) and the synthetic `EOI` marker.
+/// Every site that reads a node's tag, meta, or children must skip these
+/// so a leading `;` comment is never mistaken for the tag. See issue #167.
+fn is_structural_pair(pair: &Pair<'_, deep::Rule>) -> bool {
+    !matches!(pair.as_rule(), deep::Rule::comment | deep::Rule::EOI)
+}
+
 fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
     let span = pair.as_span();
-    let mut inner = pair.into_inner();
+    // `comment` is an atomic (visible) rule, so any comment captured by a
+    // node's internal `spacing` (before the tag, around the meta block, or
+    // trailing after the last child) surfaces as an inner pair here. Filter
+    // those out up front, like `EOI`, so they are never mistaken for the
+    // tag, the meta block, or a node child. See issue #167.
+    let mut inner = pair.into_inner().filter(is_structural_pair);
     let tag = inner.next().expect("node tag").as_str().to_string();
     let meta = inner.next().expect("node meta");
     let children: Vec<_> = inner
         .filter_map(|pair| match pair.as_rule() {
             deep::Rule::child => pair.into_inner().next(),
-            other => Some(pair).filter(|_| other != deep::Rule::EOI),
+            _ => Some(pair),
         })
         .collect();
 
@@ -169,7 +183,9 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
 }
 
 fn validate_typed_helper(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
-    let mut inner = pair.clone().into_inner();
+    // Skip any visible `comment` pairs captured by the helper's internal
+    // `spacing`, mirroring `validate_deep_node`. See issue #167.
+    let mut inner = pair.clone().into_inner().filter(is_structural_pair);
     let name = inner
         .next()
         .expect("typed helper name")
@@ -232,7 +248,11 @@ fn expect_node_tag(
             "Deep tag `{expected_tag}` expected nested node at byte {offset}"
         )));
     }
-    let mut inner = child.clone().into_inner();
+    // A nested node's first internal `spacing` can capture a `;` comment
+    // (e.g. `(; note\nparams {} ...)`), which surfaces as a visible
+    // `comment` pair ahead of the tag. Skip those so the tag is read
+    // correctly, mirroring `validate_deep_node`. See issue #167.
+    let mut inner = child.clone().into_inner().filter(is_structural_pair);
     let found = inner.next().expect("nested tag").as_str().to_string();
     if found != expected_tag {
         return Err(ValidationError::Failed(format!(
@@ -286,11 +306,15 @@ fn validate_effects_children(
     for child in children {
         match child.as_rule() {
             deep::Rule::bare_name => {}
+            // A `(resource {} ...)` entry whose first internal `spacing`
+            // captures a `;` comment surfaces that comment ahead of the
+            // tag, so skip non-structural pairs before reading the tag.
+            // See issue #167.
             deep::Rule::node
                 if child
                     .clone()
                     .into_inner()
-                    .next()
+                    .find(is_structural_pair)
                     .is_some_and(|tag| tag.as_str() == "resource") => {}
             _ => {
                 return Err(ValidationError::Failed(format!(
@@ -372,5 +396,189 @@ mod tests {
     fn desugared_accepts_executable_example_shape() {
         let source = "module HelloTensor\n\ndef main() -> tensor[f32] = 1\n";
         validate_desugared(source).expect("desugared Deep should validate");
+    }
+
+    // ---- issue #167: leading `;` comment lines ----------------------------
+    //
+    // The pest grammar must treat `;` as a line comment everywhere Deep
+    // does, including before the first node and inside `{...}` metadata.
+    // Before the `comment = @{...}` atomic fix, pest auto-inserted
+    // implicit WHITESPACE that swallowed the newline terminating the
+    // comment, so any of these leading-comment shapes failed to parse.
+    //
+    // Each positive case asserts that the commented form validates AND
+    // that it accepts exactly what the comment-free form does, so the two
+    // surfaces stay in parity with `chelis_deep::parser::parse_str_strict`.
+
+    /// The base program these comment cases wrap, comment-free.
+    const BASE: &str = "(module {} hello)\n";
+
+    fn assert_validates(source: &str, label: &str) {
+        // Both the commented and the bare form must validate, and the
+        // strict hand-rolled parser must also accept the source, so the
+        // two Deep surfaces agree (the core complaint of #167).
+        validate_deep(source).unwrap_or_else(|err| panic!("{label} should validate: {err}"));
+        validate_deep(BASE).expect("base program should validate");
+        chelis_deep::parser::parse_str_strict(source)
+            .unwrap_or_else(|err| panic!("{label} should parse strictly: {err}"));
+    }
+
+    #[test]
+    fn deep_accepts_single_leading_comment() {
+        assert_validates(
+            "; a leading comment\n(module {} hello)\n",
+            "single leading comment",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_directive_leading_comment() {
+        // The `; chelis-lint:` directive form is the shape that forced
+        // every CLI callsite to pre-strip; it must now validate directly.
+        assert_validates(
+            "; chelis-lint: disable=foo\n(module {} hello)\n",
+            "leading chelis-lint directive",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_multiple_leading_comments() {
+        assert_validates(
+            "; first\n; second\n(module {} hello)\n",
+            "two consecutive leading comments",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_leading_comment_with_blank_lines() {
+        assert_validates(
+            "; a leading comment\n\n; another\n\n(module {} hello)\n",
+            "leading comments separated by blank lines",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_trailing_comment() {
+        assert_validates("(module {} hello)\n; trailing\n", "trailing comment");
+    }
+
+    #[test]
+    fn deep_accepts_mid_program_comment() {
+        assert_validates(
+            "(module {} hello)\n; mid\n(module {} world)\n",
+            "mid-program comment between nodes",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_meta_internal_comment() {
+        // The surprising case from the issue table: a `;` comment inside a
+        // `{...}` metadata block. `spacing` (which includes `comment`)
+        // appears throughout `meta`, so the atomic fix covers it too.
+        assert_validates(
+            "(module {\n; inside meta\n} hello)\n",
+            "comment inside metadata block",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_comment_before_tag() {
+        // A comment captured by the node's first internal `spacing`, between
+        // `(` and the tag. The visible `comment` token must be skipped so the
+        // tag is still read correctly.
+        assert_validates("(; before tag\nmodule {} hello)\n", "comment before tag");
+    }
+
+    #[test]
+    fn deep_accepts_comment_around_meta_and_children() {
+        // Comments in the node's internal spacing around the meta block and
+        // before a child must not be mistaken for the meta block or a child.
+        assert_validates(
+            "(module ; after tag\n{} ; after meta\nhello ; after child\n)\n",
+            "comments around meta and children",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_leading_comment_without_trailing_newline() {
+        // No newline after the final node; the leading comment is still
+        // terminated by its own newline before the node.
+        assert_validates(
+            "; leading\n(module {} hello)",
+            "leading comment, no trailing newline",
+        );
+    }
+
+    #[test]
+    fn deep_leading_comment_equals_uncommented_program() {
+        // The commented program validates to the same acceptance decision
+        // as the program with the comments removed, which is the issue's
+        // core "equals the same program without the comments" requirement.
+        let commented = "; chelis-lint: disable=foo\n; plain comment\n(module {} hello)\n";
+        validate_deep(commented).expect("commented program should validate");
+        validate_deep(BASE).expect("uncommented program should validate");
+    }
+
+    // ---- issue #167 regression: comments leading a *nested* node's tag ----
+    //
+    // `validate_deep_node` filters comments before reading its own tag, but
+    // several shape checks reach into a nested node and read *its* first
+    // inner pair as the tag: `expect_node_tag` (the `params` child of `fn`
+    // and the `bind` child of `let`) and `validate_effects_children` (the
+    // `resource` entry of `effects`). Each of those nested nodes can carry
+    // a `;` comment in its first internal `spacing`, which surfaces as a
+    // visible `comment` pair ahead of the tag. If the introspection does
+    // not skip it, the validator reads the comment text as the tag and
+    // wrongly rejects source that `parse_str_strict` accepts.
+
+    #[test]
+    fn deep_accepts_comment_before_params_tag_in_fn() {
+        assert_validates(
+            "(fn {} (; note\nparams {}) (var {} x))\n",
+            "comment before nested `params` tag",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_comment_before_bind_tag_in_let() {
+        assert_validates(
+            "(let {} (; note\nbind {}) (var {} x))\n",
+            "comment before nested `bind` tag",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_comment_before_resource_tag_in_effects() {
+        assert_validates(
+            "(effects {} (; note\nresource {} foo))\n",
+            "comment before nested `resource` tag",
+        );
+    }
+
+    // ---- negative parity: the grammar was not loosened -------------------
+
+    #[test]
+    fn deep_still_rejects_unterminated_node() {
+        // A genuinely malformed Deep program (missing closing paren) must
+        // still fail to parse. Confirms the atomic-comment fix did not
+        // relax the grammar into accepting broken structure.
+        let source = "; a comment\n(module {} hello";
+        validate_deep(source).expect_err("unterminated node must still fail to parse");
+    }
+
+    #[test]
+    fn deep_still_rejects_missing_metadata() {
+        // A node without its mandatory `{}` metadata block must still fail,
+        // even when preceded by a leading comment.
+        let source = "; a comment\n(module hello)\n";
+        validate_deep(source).expect_err("node without metadata must still fail");
+    }
+
+    #[test]
+    fn deep_still_rejects_garbage_after_comment() {
+        // Non-node, non-comment garbage following a leading comment must
+        // not be swallowed into a comment and silently accepted.
+        let source = "; a comment\n@@@ not a node\n";
+        validate_deep(source).expect_err("garbage after a comment must still fail to parse");
     }
 }
