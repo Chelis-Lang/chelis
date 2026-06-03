@@ -401,9 +401,15 @@ Every "works" test has its paired "fails with the right reason" test.
 - [ ] **negative:** `tensor[..r, k, f32]` is a parse error (Tier-3 boundary).
 - [ ] **negative:** two rank vars in one shape, or `..r` inside a `List`
       element, rejected.
-- [ ] identity `R` shared across two args forces same *shape* (not just same
+- [x] identity `R` shared across two args forces same *shape* (not just same
       rank): `add2[..r](x,y)` rejects mismatched concrete shapes — no implicit
-      broadcast (§4.2). Positive: matching shapes accepted.
+      broadcast (§4.2). Positive: matching shapes accepted. Covered in
+      `chelis-cli` (`rank_poly_tier2`): positive checks
+      (`multi_arg_rank_poly_def_callable_at_ranks_1_through_4`) and a backend
+      build+run with eval-vs-backend agreement
+      (`multi_arg_rank_poly_builds_and_runs_at_ranks_1_through_4`); negatives
+      reject a rank mismatch (`multi_arg_rank_poly_def_rank_mismatch_rejected`)
+      and an equal-rank dim mismatch (`multi_arg_rank_poly_def_dim_mismatch_rejected`).
 - [x] monomorphization (SHIPPED): call-site rank substitution
       (`tensor_rank_substitutions` + `LowerCtx.rank_substitutions`) resolves
       every `(d-rank)` slot of an inlined rank-poly body to the caller's
@@ -417,8 +423,12 @@ Every "works" test has its paired "fails with the right reason" test.
       `try_extract_tensor_type_with_subst` helper tests) and `chelis-cli`
       (`rank_poly_tier2`: `rank_poly_identity_builds_and_runs_at_ranks_1_through_4`,
       `rank_poly_composed_identity_builds_and_runs`).
-- [ ] decompile/format round-trip: `..r` sigs survive `chelis fmt` and
-      re-parse byte-identical on the corpus.
+- [x] decompile/format round-trip: `..r` sigs survive `chelis fmt` and
+      re-parse byte-identical on the corpus. Covered in `chelis-cli`
+      (`rank_poly_tier2`): `rank_poly_def_survives_fmt_round_trip` and
+      `multi_arg_rank_poly_def_survives_fmt_round_trip` assert `..r` is preserved
+      in every tensor position, `chelis fmt` is idempotent (byte-identical second
+      pass), and the formatted text re-checks clean.
 - [ ] `chelis check --json` shape/semantic invariants on the R-corpus.
 
 ## Acceptance Oracle (one per phase, per CLAUDE.md)

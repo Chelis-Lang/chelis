@@ -32,6 +32,27 @@ fn check_json(src: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
+/// Run `chelis fmt <path>` (canonical formatter to stdout) on `src` and return
+/// the formatted text. Style gate disabled so an ad-hoc `..r` def is formatted
+/// without first having to satisfy every lint rule.
+fn fmt_stdout(src: &str) -> String {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("m.ch");
+    fs::write(&path, src).expect("write file");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap()])
+        .output()
+        .expect("run chelis fmt");
+    assert!(
+        output.status.success(),
+        "chelis fmt must succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf-8 fmt stdout")
+}
+
 fn assert_clean(json: &Value, label: &str) {
     let errors = json["errors"]
         .as_array()
@@ -127,6 +148,51 @@ fn identity_rank_poly_def_callable_at_ranks_3_and_4() {
          def r4(x: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = relu_forward(x)\n",
     );
     assert_clean(&json, "identity rank-poly callable at rank 3 and rank 4");
+}
+
+/// Multi-arg `..r`: one rank var SHARED across two params
+/// (`add2(x: &tensor[..r], y: &tensor[..r]) -> tensor[..r]`) checks clean and is
+/// callable at concrete ranks 1, 2, 3, AND 4 with matching shapes per call. This
+/// is the §"identity `R` shared across two args" acceptance case — the rank var
+/// flows through both args and the result, and an elementwise binop (`add`) is
+/// the only admissible body builtin.
+#[test]
+fn multi_arg_rank_poly_def_callable_at_ranks_1_through_4() {
+    let json = check_json(
+        "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
+         def use1(x: &tensor[n, f32], y: &tensor[n, f32]) -> tensor[n, f32] = add2(x, y)\n\
+         def use2(x: &tensor[a, b, f32], y: &tensor[a, b, f32]) -> tensor[a, b, f32] = add2(x, y)\n\
+         def use3(x: &tensor[a, b, c, f32], y: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = add2(x, y)\n\
+         def use4(x: &tensor[a, b, c, d, f32], y: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = add2(x, y)\n",
+    );
+    assert_clean(&json, "multi-arg shared ..r callable at ranks 1-4");
+}
+
+/// Negative parity (rank mismatch): the shared `..r` forces both args to the
+/// SAME rank. Calling `add2` with a rank-1 `x` and a rank-2 `y` must be rejected
+/// at type-check — the rank var binds to one shape vector, so the two args
+/// cannot have different ranks (no implicit broadcast, §4.2).
+#[test]
+fn multi_arg_rank_poly_def_rank_mismatch_rejected() {
+    let json = check_json(
+        "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
+         def bad(x: &tensor[n, f32], y: &tensor[a, b, f32]) -> tensor[n, f32] = add2(x, y)\n",
+    );
+    assert_rejected(&json, "multi-arg ..r with rank-1 vs rank-2 args");
+}
+
+/// Negative parity (dim mismatch at equal rank): even when both args have the
+/// same rank, the shared `..r` forces the SAME shape — differing concrete dims
+/// (`tensor[2,3]` vs `tensor[3,2]`) must be rejected. The rank var carries the
+/// ordered named-dim vector, not a bare count, so two same-rank-but-different-
+/// shape args do not unify (§4.2 — no implicit broadcast across the rank var).
+#[test]
+fn multi_arg_rank_poly_def_dim_mismatch_rejected() {
+    let json = check_json(
+        "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
+         def bad(x: &tensor[two, three, f32], y: &tensor[three, two, f32]) -> tensor[two, three, f32] = add2(x, y)\n",
+    );
+    assert_rejected(&json, "multi-arg ..r with [two,three] vs [three,two] args");
 }
 
 /// A body composing several shape-identity builtins (silu = x * sigmoid(x))
@@ -421,6 +487,70 @@ fn rank_poly_identity_builds_and_runs_at_ranks_1_through_4() {
     }
 }
 
+/// Multi-arg backend acceptance: ONE rank-poly `add2` def, with a single `..r`
+/// SHARED across both args and the result, called at concrete ranks 1, 2, 3, AND
+/// 4 builds and runs — and the output equals the elementwise sum at every rank
+/// (call-site rank monomorphization resolves the shared `(d-rank)` slot to the
+/// caller's concrete shape in all positions). The compiled-binary output is also
+/// asserted value-for-value against the evaluator oracle (eval-vs-backend
+/// agreement). The §"identity `R` shared across two args" backend acceptance.
+#[test]
+fn multi_arg_rank_poly_builds_and_runs_at_ranks_1_through_4() {
+    let source = "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
+         def r1(x: &tensor[n, f32], y: &tensor[n, f32]) -> tensor[n, f32] = add2(x, y)\n\
+         def r2(x: &tensor[a, b, f32], y: &tensor[a, b, f32]) -> tensor[a, b, f32] = add2(x, y)\n\
+         def r3(x: &tensor[a, b, c, f32], y: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = add2(x, y)\n\
+         def r4(x: &tensor[a, b, c, d, f32], y: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = add2(x, y)\n\
+         out1 = r1(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([10.0, 20.0, 30.0, 40.0]))\n\
+         out2 = r2(to_tensor([[1.0, 2.0], [3.0, 4.0]]), to_tensor([[10.0, 20.0], [30.0, 40.0]]))\n\
+         out3 = r3(to_tensor([[[1.0, 2.0]], [[3.0, 4.0]]]), to_tensor([[[10.0, 20.0]], [[30.0, 40.0]]]))\n\
+         out4 = r4(to_tensor([[[[5.0, 6.0]]]]), to_tensor([[[[50.0, 60.0]]]]))\n";
+
+    let backend = build_compile_run(source, "rank_poly_add2");
+    let backend_tensors = parse_printed_tensors(&backend);
+
+    // Expected: elementwise sum, shape preserved, at every rank.
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out1", &[4], &[11.0, 22.0, 33.0, 44.0]),
+        ("out2", &[2, 2], &[11.0, 22.0, 33.0, 44.0]),
+        ("out3", &[2, 1, 2], &[11.0, 22.0, 33.0, 44.0]),
+        ("out4", &[1, 1, 1, 2], &[55.0, 66.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = backend_tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+
+    // Backend must agree with the evaluator oracle, value-for-value.
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "rank_poly_add2");
+    let eval_tensors = parse_printed_tensors(&eval);
+    for (name, shape, data) in &backend_tensors {
+        let e = eval_tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("evaluator output missing `{name}`: {eval}"));
+        assert_eq!(shape, &e.1, "{name}: eval-vs-backend shape disagreement");
+        assert_eq!(data.len(), e.2.len(), "{name}: eval-vs-backend length");
+        for (i, (b, ev)) in data.iter().zip(e.2.iter()).enumerate() {
+            assert!(
+                (b - ev).abs() < 1e-6,
+                "{name}[{i}]: eval-vs-backend disagreement: backend {b} vs eval {ev}"
+            );
+        }
+    }
+}
+
 /// A composed shape-identity body (`silu = x * sigmoid(x)`) through the
 /// rank-poly def also builds and runs at a concrete rank — composition of
 /// elementwise ops stays rank-monomorphizable.
@@ -461,4 +591,65 @@ fn rank_poly_shape_rewriting_body_still_rejected_at_typecheck() {
         "permute",
         "shape-rewriting body must still be rejected pre-build",
     );
+}
+
+// ── Formatter round-trip: `..r` survives `chelis fmt` ───────────────────
+// The canonical surf formatter (`chelis_surf::format`) must emit and re-parse a
+// rank-poly sig/def identically — the formatter-round-trip invariant from
+// CLAUDE.md, extended to the `..r` surface. `TypeExpr::RankSpread(name)` prints
+// as `..{name}`, and a single round-trip plus an idempotence pass lock it.
+
+/// A rank-poly def survives `chelis fmt`: the formatted output still carries the
+/// `..r` spread in every tensor position (param + result), formatting is
+/// idempotent (a second pass is byte-identical to the first), and the formatted
+/// text still type-checks clean. This locks the `(d-rank)` ↔ `..r` round-trip.
+#[test]
+fn rank_poly_def_survives_fmt_round_trip() {
+    let src = "def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n";
+    let formatted = fmt_stdout(src);
+
+    // The spread marker survives in both the param and the result type.
+    assert_eq!(
+        formatted.matches("..r").count(),
+        2,
+        "formatted rank-poly def must keep `..r` in both param and result: {formatted:?}"
+    );
+    assert!(
+        formatted.contains("tensor[..r, f32]"),
+        "formatted def must keep the `tensor[..r, f32]` shape: {formatted:?}"
+    );
+
+    // Idempotence: re-formatting the formatted text is byte-identical (the
+    // round-trip has reached the fixed point — `..r` re-parses to the same AST).
+    let reformatted = fmt_stdout(&formatted);
+    assert_eq!(
+        formatted, reformatted,
+        "chelis fmt must be idempotent on a rank-poly def (round-trip stable)"
+    );
+
+    // The formatted text is still a well-typed rank-poly def, not just lexically
+    // intact — re-parsing preserved the `..r` semantics, not only the bytes.
+    let json = check_json(&formatted);
+    assert_clean(&json, "formatted rank-poly def still type-checks");
+}
+
+/// Multi-arg parity: a `..r` shared across two params also survives `chelis fmt`
+/// (three `..r` occurrences: two params + the result), idempotently.
+#[test]
+fn multi_arg_rank_poly_def_survives_fmt_round_trip() {
+    let src =
+        "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n";
+    let formatted = fmt_stdout(src);
+    assert_eq!(
+        formatted.matches("..r").count(),
+        3,
+        "formatted multi-arg rank-poly def must keep `..r` in both params and the result: {formatted:?}"
+    );
+    let reformatted = fmt_stdout(&formatted);
+    assert_eq!(
+        formatted, reformatted,
+        "chelis fmt must be idempotent on a multi-arg rank-poly def"
+    );
+    let json = check_json(&formatted);
+    assert_clean(&json, "formatted multi-arg rank-poly def still type-checks");
 }

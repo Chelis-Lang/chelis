@@ -180,7 +180,7 @@ pub enum ShapeClass {
 /// `Rewriting`. That default is the safe direction — a builtin that is not
 /// *provably* shape-identity is rejected inside a rank-poly body, so a missed
 /// classification can only over-reject, never open a §4.2 hole. The
-/// `shape_class_covers_all_builtins` test pins the Identity set so any change
+/// `shape_class_identity_set_is_pinned` test pins the Identity set so any change
 /// is deliberate.
 pub fn shape_class(name: &str) -> ShapeClass {
     match name {
