@@ -1856,6 +1856,12 @@ fn decompile_pattern(expr: &Expr) -> String {
 // Type expressions
 // ---------------------------------------------------------------------------
 
+/// True when `expr` is a `t-fn` Deep node (a function type). Used to decide
+/// whether an arrow type in argument position needs grouping parens (#290).
+fn is_t_fn(expr: &Expr) -> bool {
+    matches!(expr, Expr::List(list, _) if tag(list) == Some("t-fn"))
+}
+
 fn decompile_type_expr(expr: &Expr) -> String {
     if let Expr::List(list, _) = expr {
         match tag(list) {
@@ -1872,17 +1878,38 @@ fn decompile_type_expr(expr: &Expr) -> String {
                 if kids.is_empty() {
                     return "() -> ()".to_string();
                 }
-                let parts: Vec<String> = kids.iter().map(decompile_type_expr).collect();
+                // Arrow is right-associative. A nested `t-fn` in argument
+                // (non-final) position — `(a -> b) -> c` — is a distinct type
+                // from the curried `a -> b -> c`, so it must be parenthesized
+                // to round-trip through the Surf parser (#290). The final
+                // child is the return type, where grouping is redundant.
+                let last = kids.len() - 1;
+                let parts: Vec<String> = kids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, kid)| {
+                        let rendered = decompile_type_expr(kid);
+                        if i != last && is_t_fn(kid) {
+                            format!("({rendered})")
+                        } else {
+                            rendered
+                        }
+                    })
+                    .collect();
                 return parts.join(" -> ");
             }
             Some("t-ref") => {
                 let kids = children(list);
-                return format!(
-                    "&{}",
-                    kids.first()
-                        .map(decompile_type_expr)
-                        .unwrap_or_else(|| "_".to_string())
-                );
+                // `&` binds tighter than `->`, so a reference to a function
+                // type must group the arrow: `&(a -> b)` differs from
+                // `&a -> b` (`(&a) -> b`) (#290).
+                return match kids.first() {
+                    Some(inner) if is_t_fn(inner) => {
+                        format!("&({})", decompile_type_expr(inner))
+                    }
+                    Some(inner) => format!("&{}", decompile_type_expr(inner)),
+                    None => "&_".to_string(),
+                };
             }
             Some("t-tensor") => {
                 let kids = children(list);
@@ -2150,6 +2177,70 @@ mod tests {
     fn decompile_defsig_effects() {
         let rendered = surf_to_surf("sig f: f32 -> f32 ! {Diff, Random, Resource(\"gpu:0\")}");
         assert!(rendered.contains("sig f : f32 -> f32 ! { Diff, Random, Resource(\"gpu:0\") }"));
+    }
+
+    #[test]
+    fn decompile_hof_arg_arrow_keeps_parens() {
+        // A function-typed argument — `(a -> b) -> c` — desugars to a nested
+        // `t-fn` in argument (non-final) position. The decompiler must
+        // re-group it so the emitted Surf reparses to the same 1-argument
+        // arity, not the curried 3-ary `a -> b -> c` (#290). A standalone sig
+        // (no matching def) renders the type verbatim via `decompile_defsig`.
+        let rendered = surf_to_surf("sig f: (a -> b) -> c");
+        assert!(
+            rendered.contains("sig f : (a -> b) -> c"),
+            "decompiled HOF sig dropped argument grouping; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("a -> b -> c"),
+            "decompiled HOF sig flattened to curried form; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn decompile_curried_arrow_gets_no_spurious_parens() {
+        // Negative parity: a genuinely curried sig must NOT gain parens.
+        let rendered = surf_to_surf("sig f: a -> b -> c");
+        assert!(
+            rendered.contains("sig f : a -> b -> c"),
+            "curried sig lost its flat form; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("(a -> b)"),
+            "curried sig gained spurious parens; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn decompile_multi_arg_hof_keeps_parens() {
+        // Two function-typed arguments, both in argument position, both
+        // grouped; the return arrow is bare.
+        let rendered = surf_to_surf("sig f: (a -> b) -> (c -> d) -> e");
+        assert!(
+            rendered.contains("sig f : (a -> b) -> (c -> d) -> e"),
+            "decompiled multi-arg HOF sig dropped grouping; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn decompile_hof_arg_arrow_round_trips_through_surf_parser() {
+        // Stronger end-to-end guard: the decompiled Surf must reparse and
+        // re-decompile to the *same* text. If the grouping were lost on the
+        // first pass, the reparsed `t-fn` arity would differ and the second
+        // decompilation would diverge. Comparing the decompiled strings (not
+        // the Deep trees) sidesteps source-offset span metadata, which differs
+        // between the original and decompiled sources even when the types are
+        // structurally identical.
+        let once = surf_to_surf("sig f: (a -> b) -> c");
+        let twice = surf_to_surf(&once);
+        assert_eq!(
+            once, twice,
+            "decompiled HOF sig is not idempotent; first pass:\n{once}"
+        );
+        assert!(
+            once.contains("(a -> b) -> c"),
+            "decompiled HOF sig dropped argument grouping; got: {once}"
+        );
     }
 
     #[test]

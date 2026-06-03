@@ -363,11 +363,21 @@ fn format_type(ty: &TypeExpr) -> String {
             format!("tensor[{}]", elems.join(", "))
         }
         TypeExpr::Arrow(args, ret, _) => {
-            let mut parts = args.iter().map(format_type).collect::<Vec<_>>();
+            // Arrow types are right-associative, so `a -> b -> c` means
+            // `a -> (b -> c)`. An arrow that sits in *argument* (left) position
+            // of another arrow — `(a -> b) -> c` — is a distinct type (one
+            // function-typed argument, not a curried 3-ary). It must be
+            // parenthesized to survive a format round-trip (#290). The return
+            // type is in right position, where the parens are redundant under
+            // right-associativity, so it is printed without grouping.
+            let mut parts = args.iter().map(format_type_arg).collect::<Vec<_>>();
             parts.push(format_type(ret));
             parts.join(" -> ")
         }
-        TypeExpr::Ref(inner, _) => format!("&{}", format_type(inner)),
+        // `&` binds tighter than `->`, so a reference to a function type must
+        // group the arrow: `&(a -> b)` is distinct from `&a -> b`
+        // (`(&a) -> b`). Reuse the arrow-argument grouping helper (#290).
+        TypeExpr::Ref(inner, _) => format!("&{}", format_type_arg(inner)),
         TypeExpr::App(name, args, _) if args.is_empty() => name.clone(),
         TypeExpr::App(name, args, _) => {
             format!(
@@ -382,6 +392,19 @@ fn format_type(ty: &TypeExpr) -> String {
             )
         }
         TypeExpr::Infer(_) => "_".to_string(),
+    }
+}
+
+/// Format a type that appears in *argument* (left) position of an arrow.
+///
+/// A nested arrow here is a function-typed argument and must be grouped so the
+/// printed form reparses to the same arity. Right-position (return) types do
+/// not need this because arrow is right-associative — see `format_type`'s
+/// `TypeExpr::Arrow` arm (#290).
+fn format_type_arg(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Arrow(..) => format!("({})", format_type(ty)),
+        _ => format_type(ty),
     }
 }
 
@@ -927,5 +950,186 @@ mod tests {
             via_source, via_program,
             "comment-free input must format identically through both paths"
         );
+    }
+
+    // ── higher-order function-type parens in arrow argument position (#290) ──
+    //
+    // Arrow types are right-associative: `a -> b -> c` is `a -> (b -> c)`,
+    // a curried 3-ary function. An arrow that appears in *argument* (left)
+    // position — `(a -> b) -> c` — is a different type: one argument that is
+    // itself a function. The formatter must keep the grouping parens around a
+    // left-position arrow so the printed form reparses to the same arity, and
+    // must NOT add parens to right-position (return) arrows, where they are
+    // redundant under right-associativity.
+
+    /// Find the first `Sig` declaration, descending into a wrapping `Module`.
+    fn find_sig_ty(decls: &[Decl]) -> Option<&TypeExpr> {
+        for decl in decls {
+            match decl {
+                Decl::Sig { ty, .. } => return Some(ty),
+                Decl::Module { decls, .. } => {
+                    if let Some(ty) = find_sig_ty(decls) {
+                        return Some(ty);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Format the single `Sig` declaration in `source` and return only the
+    /// type portion of the `sig <name>: <type>` line.
+    fn sig_type_str(source: &str) -> String {
+        let decls = crate::parser::parse_str(source).expect("parse sig");
+        let ty =
+            find_sig_ty(&decls).unwrap_or_else(|| panic!("no Sig declaration found in: {source}"));
+        format_type(ty)
+    }
+
+    fn sig_type_ast(source: &str) -> TypeExpr {
+        let decls = crate::parser::parse_str(source).expect("parse sig");
+        find_sig_ty(&decls)
+            .cloned()
+            .unwrap_or_else(|| panic!("no Sig declaration found in: {source}"))
+    }
+
+    #[test]
+    fn hof_arg_arrow_keeps_parens() {
+        // `(a -> b) -> c`: the function-typed argument must stay parenthesized.
+        assert_eq!(
+            sig_type_str("module T\nsig f: (a -> b) -> c"),
+            "(a -> b) -> c"
+        );
+    }
+
+    #[test]
+    fn hof_arg_arrow_format_is_idempotent() {
+        // A second format pass over the issue reproducer must be stable.
+        let source = "module T\nsig f: (a -> b) -> c\ndef f(g, x) = x\n";
+        let once = format_source(source).expect("format once");
+        let twice = format_source(&once).expect("format twice");
+        assert_eq!(once, twice, "HOF sig formatting must be idempotent");
+        assert!(
+            once.contains("sig f: (a -> b) -> c"),
+            "grouping parens around the function-typed argument were dropped; got: {once}"
+        );
+    }
+
+    #[test]
+    fn curried_arrow_gets_no_spurious_parens() {
+        // Plain curried `a -> b -> c` must NOT grow parens.
+        assert_eq!(sig_type_str("module T\nsig f: a -> b -> c"), "a -> b -> c");
+    }
+
+    #[test]
+    fn right_nested_arrow_canonicalizes_without_parens() {
+        // Right-position arrow parens are redundant; `a -> (b -> c)` is the
+        // same type as `a -> b -> c` and canonicalizes to the bare form.
+        assert_eq!(
+            sig_type_str("module T\nsig f: a -> (b -> c)"),
+            "a -> b -> c"
+        );
+    }
+
+    #[test]
+    fn hof_arg_and_curried_are_distinct_asts() {
+        // The two sources must parse to *different* ASTs — proof that the
+        // grouping is semantically meaningful, not cosmetic.
+        let hof = sig_type_ast("module T\nsig f: (a -> b) -> c");
+        let curried = sig_type_ast("module T\nsig f: a -> b -> c");
+        assert_ne!(
+            hof, curried,
+            "`(a -> b) -> c` and `a -> b -> c` must be distinct types"
+        );
+        // And each must format to its own canonical, non-equal string.
+        assert_ne!(
+            format_type(&hof),
+            format_type(&curried),
+            "distinct arrow types must render to distinct strings"
+        );
+    }
+
+    #[test]
+    fn hof_arg_arrow_round_trips_through_parser() {
+        // Format → reparse → format must be stable and arity-preserving.
+        let src = "module T\nsig f: (a -> b) -> c";
+        let first = sig_type_str(src);
+        let reparsed = sig_type_str(&format!("module T\nsig f: {first}"));
+        assert_eq!(first, reparsed, "arrow-arg sig must round-trip");
+        // The reparsed AST must still be the one-argument HOF shape.
+        let ast = sig_type_ast(&format!("module T\nsig f: {first}"));
+        match ast {
+            TypeExpr::Arrow(args, _, _) => {
+                assert_eq!(args.len(), 1, "must remain a 1-argument function type");
+                assert!(
+                    matches!(args[0], TypeExpr::Arrow(..)),
+                    "the single argument must itself be a function type"
+                );
+            }
+            other => panic!("expected Arrow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_arg_hof_round_trips() {
+        // `(a -> b) -> (c -> d) -> e`: two function-typed arguments. The
+        // first is in left position (needs parens); the second is also in
+        // argument position of the outer arrow (needs parens); `e` is the
+        // return.
+        assert_eq!(
+            sig_type_str("module T\nsig f: (a -> b) -> (c -> d) -> e"),
+            "(a -> b) -> (c -> d) -> e"
+        );
+    }
+
+    #[test]
+    fn nested_hof_arg_round_trips() {
+        // `((a -> b) -> c) -> d`: a function-typed argument whose own argument
+        // is a function. Both layers of grouping must survive.
+        let src = "module T\nsig f: ((a -> b) -> c) -> d";
+        assert_eq!(sig_type_str(src), "((a -> b) -> c) -> d");
+        let once = sig_type_str(src);
+        let twice = sig_type_str(&format!("module T\nsig f: {once}"));
+        assert_eq!(once, twice, "nested HOF arg must be idempotent");
+    }
+
+    // These two cases build the `TypeExpr` AST directly so they exercise the
+    // formatter's grouping rules independently of the parser's surface grammar
+    // for nested groups.
+
+    fn named(n: &str) -> TypeExpr {
+        TypeExpr::Named(n.to_string(), chelis_deep::Span::new(0, 0))
+    }
+
+    fn arrow(args: Vec<TypeExpr>, ret: TypeExpr) -> TypeExpr {
+        TypeExpr::Arrow(args, Box::new(ret), chelis_deep::Span::new(0, 0))
+    }
+
+    #[test]
+    fn arrow_in_tuple_element_needs_no_parens() {
+        // Tuple commas already delimit an arrow element, so an arrow inside a
+        // tuple is unambiguous and must NOT gain grouping parens. This guards
+        // against the fix over-parenthesizing arrows that are NOT in
+        // arrow-argument position: `(a -> b, c) -> d`.
+        let tuple = TypeExpr::Tuple(
+            vec![arrow(vec![named("a")], named("b")), named("c")],
+            chelis_deep::Span::new(0, 0),
+        );
+        let ty = arrow(vec![tuple], named("d"));
+        assert_eq!(format_type(&ty), "(a -> b, c) -> d");
+    }
+
+    #[test]
+    fn arrow_under_ref_in_arg_position_keeps_inner_parens() {
+        // `&(a -> b) -> c`: the argument is a reference to a function type.
+        // The arrow under the `&` must stay grouped — `&` binds tighter than
+        // `->`, so `&(a -> b)` is distinct from `&a -> b` (`(&a) -> b`).
+        let inner = TypeExpr::Ref(
+            Box::new(arrow(vec![named("a")], named("b"))),
+            chelis_deep::Span::new(0, 0),
+        );
+        let ty = arrow(vec![inner], named("c"));
+        assert_eq!(format_type(&ty), "&(a -> b) -> c");
     }
 }

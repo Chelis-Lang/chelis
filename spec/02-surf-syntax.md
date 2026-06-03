@@ -157,7 +157,7 @@ def multi_head_attn(q, k, v, mask) = ...
 
 **⟹** `(defsig {} multi_head_attn (t-fn {} ...arg_types... ret_type))`
 
-`sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type).
+`sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
 
 Phase 2a effect annotations are optional suffixes on either `sig` or `def`:
 
@@ -1010,6 +1010,7 @@ tensor[batch, seq, f32]           ⟹  (t-tensor {} (d-name {} batch) (d-name {}
 tensor[a, b, f32]  (polymorphic)  ⟹  (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
 &tensor[batch, f32]               ⟹  (t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 A -> B -> C                       ⟹  (t-fn {} A' B' C')  -- flat, last is return
+(A -> B) -> C                     ⟹  (t-fn {} (t-fn {} A' B') C')  -- arg is a function
 Option[f32]                       ⟹  (t-adt {} Option (t-prim {} f32))
 (f32, f32)                        ⟹  (t-tuple {} (t-prim {} f32) (t-prim {} f32))
 ()                                ⟹  (t-unit {})
