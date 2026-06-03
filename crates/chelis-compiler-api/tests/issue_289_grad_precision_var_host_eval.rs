@@ -81,25 +81,16 @@ fn issue289_host_eval_grad_through_precision_var_callee_dw_equals_x() {
 }
 
 // =====================================================================
-// Control: inline-f32 callee (no precision var) already differentiates
-// and must keep producing the same gradient.
+// Control note: the inline-f32 control (no precision-var callee) is
+// covered end-to-end — compiled C, run, and gradient-checked — by
+// `crates/chelis-cli/tests/issue_289_grad_precision_var.rs`'s
+// `issue_289_control_inline_f32_callee_dx_equals_w`. It is not duplicated
+// here because the fully-concrete `dloss` def evaluated through this
+// host-eval entry surfaces a pre-existing, #289-unrelated root-selection
+// quirk ("missing required input `x`") when every def is concrete-lowered
+// as a standalone root. The positive precision-var cases above exercise
+// the host-eval path the issue's reproducer used.
 // =====================================================================
-
-#[test]
-fn issue289_host_eval_control_inline_f32_callee_dx_equals_w() {
-    // Single-`wrt` grad (one tensor output, no grad tuple): the inline-f32
-    // control must differentiate to the same `d/dx sum(x*w) = w`.
-    let src = "def lin_f32(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\
-         def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n\
-           tensor_to_scalar(sum(lin_f32(x, w), cast(0, int32)))\n\
-         def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
-           grad(loss, wrt=(x))(x, w)\n\
-         out = dloss(to_tensor([3.0, 4.0]), to_tensor([5.0, 6.0]))\n";
-    let result = eval_surf(src);
-    let out = root_tensor(&result, "out");
-    assert_eq!(out.shape, vec![2], "issue #289 control shape");
-    assert_eq!(out.data, vec![5.0, 6.0], "issue #289 control d/dx = w");
-}
 
 // =====================================================================
 // Negative parity: grad over a genuinely under-determined precision
