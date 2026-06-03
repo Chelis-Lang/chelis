@@ -20,7 +20,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   HIP F64 const fill routes through `chelis_f64_from_bits`. The C backend
   test-harness input fill (#252) is migrated to the same bit-pattern
   emission. Denormals such as `1e-40` no longer collapse to `0.0f`, and
-  values like `0.1f32` / `1.0 / 3.0` round-trip to identical bits.
+  values like `0.1f32` / `1.0 / 3.0` round-trip to identical bits. The
+  same sibling-sweep also closes the remaining `%.8` / `{:.17e}` decimal
+  fills in the C, HIP, and Metal correctness harnesses (the gcc-gated
+  SIMD-reduction static-array initializer, which now emits exact C99
+  hexadecimal-float constants; the C backend's Sleef fused/single-op
+  test-harness fills; and the HIP / Metal / cross-library GPU-gated
+  driver fills) so the generated device input is byte-identical to the
+  Rust reference the bit-exact and tight-ULP assertions compare against.
 
 ## [0.7.22] — 2026-06-03
 

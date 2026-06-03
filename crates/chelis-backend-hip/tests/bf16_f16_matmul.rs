@@ -455,8 +455,14 @@ fn emit_input_setup(
     match dtype {
         Prim::F32 => {
             for (idx, value) in data.iter().enumerate() {
+                // Sibling of #250/#251/#252: reconstruct from the exact f32
+                // bit pattern via `chelis_f32_from_bits` (declared in the
+                // included `chelis_runtime.h`) rather than a lossy `{:.8}f`
+                // decimal literal, matching the bf16/f16 arms below which
+                // already emit exact `to_bits()` patterns.
+                let bits = value.to_bits();
                 lines.push(format!(
-                    "    {prefix}_input_storage[{slot}]->data[{idx}] = {value:.8}f;"
+                    "    {prefix}_input_storage[{slot}]->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
         }

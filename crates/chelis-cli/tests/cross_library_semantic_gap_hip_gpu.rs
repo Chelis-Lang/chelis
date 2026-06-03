@@ -115,14 +115,24 @@ fn write_harness_main_cpp(harness_path: &Path, hip_entry_symbol: &str, a: &[f32]
     // 8x16 input `a`
     lines.push("    int a_shape[2] = { 8, 16 };".to_string());
     lines.push("    chelis_tensor *a_t = chelis_alloc(2, a_shape, CHELIS_F32);".to_string());
+    // Sibling of #250/#251/#252: exact f32 bit pattern via
+    // `chelis_f32_from_bits` (from the included `chelis_runtime.h`), not a
+    // lossy `{:.8}f` decimal, so the device input is byte-identical to the
+    // Rust `reference_matmul_row_major` operand.
     for (idx, value) in a.iter().enumerate() {
-        lines.push(format!("    a_t->data[{idx}] = {value:.8}f;"));
+        lines.push(format!(
+            "    a_t->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
+            bits = value.to_bits()
+        ));
     }
     // 16x4 input `b`
     lines.push("    int b_shape[2] = { 16, 4 };".to_string());
     lines.push("    chelis_tensor *b_t = chelis_alloc(2, b_shape, CHELIS_F32);".to_string());
     for (idx, value) in b.iter().enumerate() {
-        lines.push(format!("    b_t->data[{idx}] = {value:.8}f;"));
+        lines.push(format!(
+            "    b_t->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
+            bits = value.to_bits()
+        ));
     }
     lines.push("    chelis_tensor *inputs[2] = { a_t, b_t };".to_string());
     lines.push("    chelis_tensor *outputs[1] = { NULL };".to_string());

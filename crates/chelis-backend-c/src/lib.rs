@@ -2733,17 +2733,21 @@ int main(void) {{
         copy_runtime_artifacts(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
-        // Build input initializers from the test vectors.
+        // Build input initializers from the test vectors. Issue #252
+        // sibling: reuse the exact-bits fill helper so the C program
+        // computes its reference from byte-identical f32 inputs, not a
+        // lossy `{:.8}f` truncation that could push the post-exp output
+        // past the 1-ULP (`2e-7`) tolerance asserted below.
         let a_init: String = a_data
             .iter()
             .enumerate()
-            .map(|(i, v)| format!("ta->data[{i}] = {v:.8}f;"))
+            .map(|(i, v)| TestInput::harness_input_fill_line(&format!("ta->data[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
         let b_init: String = b_data
             .iter()
             .enumerate()
-            .map(|(i, v)| format!("tb->data[{i}] = {v:.8}f;"))
+            .map(|(i, v)| TestInput::harness_input_fill_line(&format!("tb->data[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 
@@ -2883,10 +2887,12 @@ int main(void) {{
         // Input: x[i] = 0.3 * i + 0.1 (non-trivial, spans SIMD + tail)
         let inputs: Vec<f32> = (0..n).map(|i| 0.3 * i as f32 + 0.1).collect();
         let reference: Vec<f32> = inputs.iter().map(|v| v.exp()).collect();
+        // Issue #252 sibling: exact-bits fill so the C program's input is
+        // byte-identical to the Rust `reference`, not `{:.8}f`-truncated.
         let x_init = inputs
             .iter()
             .enumerate()
-            .map(|(i, v)| format!("tx->data[{i}] = {v:.8}f;"))
+            .map(|(i, v)| TestInput::harness_input_fill_line(&format!("tx->data[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 

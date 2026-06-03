@@ -181,8 +181,12 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
                 ));
             }
             for (idx, value) in input.data.iter().enumerate() {
+                // Sibling of #250/#251/#252: exact f32 bit pattern via
+                // `chelis_f32_from_bits` (from the included
+                // `chelis_runtime.h`), not a lossy `{:.8}f` decimal.
+                let bits = value.to_bits();
                 body.push(format!(
-                    "    input_storage[{slot}]->data[{idx}] = {value:.8}f;"
+                    "    input_storage[{slot}]->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
         }
