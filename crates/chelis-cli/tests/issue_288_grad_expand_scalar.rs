@@ -82,6 +82,7 @@ fn run_build_c(source: &str, stem: &str) -> (tempfile::TempDir, PathBuf, std::pr
         .expect("binary")
         .current_dir(dir.path())
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_DEBUG_GRAD_DAG", "1")
         .args([
             "build",
             path.to_str().unwrap(),

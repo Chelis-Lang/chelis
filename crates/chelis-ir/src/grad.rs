@@ -406,6 +406,21 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
 
     let verify_errors = crate::verify::verify(&dag);
     if !verify_errors.is_empty() {
+        if std::env::var_os("CHELIS_DEBUG_GRAD_DAG").is_some() {
+            eprintln!("[CHELIS_DEBUG_GRAD_DAG] backward DAG nodes:");
+            for node in dag.nodes() {
+                eprintln!(
+                    "  node {} op={:?} out={:?} inputs={:?}",
+                    node.id.0,
+                    node.op,
+                    node.output_type,
+                    node.inputs
+                        .iter()
+                        .map(|i| (i.0, dag.get(*i).map(|n| n.output_type.clone())))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
         return Err(format!(
             "grad: constructed backward DAG failed verification: {}",
             verify_errors.join("; ")
