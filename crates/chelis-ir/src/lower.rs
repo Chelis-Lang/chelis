@@ -3913,7 +3913,10 @@ impl LowerCtx {
         // wins on overlap). See the longer note at the sub-context seeding
         // below.
         let mut grad_prec_subst = self.prec_substitutions.clone();
-        grad_prec_subst.extend(tensor_prec_substitutions(&grad_param_type_exprs, &actual_types));
+        grad_prec_subst.extend(tensor_prec_substitutions(
+            &grad_param_type_exprs,
+            &actual_types,
+        ));
         // Formal parameter shapes for the differentiated function. Use the
         // call-site-tolerant variant so a precision var that the grad call
         // site does NOT pin (it is internal to a callee, resolved when that

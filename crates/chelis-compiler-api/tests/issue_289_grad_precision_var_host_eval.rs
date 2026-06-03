@@ -87,11 +87,13 @@ fn issue289_host_eval_grad_through_precision_var_callee_dw_equals_x() {
 
 #[test]
 fn issue289_host_eval_control_inline_f32_callee_dx_equals_w() {
+    // Single-`wrt` grad (one tensor output, no grad tuple): the inline-f32
+    // control must differentiate to the same `d/dx sum(x*w) = w`.
     let src = "def lin_f32(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\
          def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(lin_f32(x, w), cast(0, int32)))\n\
          def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
-           (grad(loss)(x, w)).0\n\
+           grad(loss, wrt=(x))(x, w)\n\
          out = dloss(to_tensor([3.0, 4.0]), to_tensor([5.0, 6.0]))\n";
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
