@@ -41,7 +41,7 @@
 //! - `phaseA_item9_unknown_scheme_in_origin_errors` — `remote_origin`
 //!   that doesn't start with a supported scheme surfaces a typed
 //!   `RemoteOriginParseError::UnknownScheme`.
-//! - `phaseA_item9_remote_origin_404_surfaces_release_asset_not_found`.
+//! - `phaseA_item9_remote_origin_404_surfaces_release_tag_not_found_or_unauthorized`.
 //! - `phaseA_item9_malformed_lockfile_errors_with_line_info`.
 //! - `phaseA_item9_no_lockfile_present_suggests_reef_build`.
 //!
@@ -927,11 +927,14 @@ fn phaseA_item9_parse_remote_origin_happy_path() {
     assert_eq!(spec.version, "0.4.0");
 }
 
-/// `remote_origin` pointing at a 404 surfaces
-/// `GitHubFetchError::ReleaseAssetNotFound` (wrapped in
-/// `LockfileInstallError::Fetch`). The error names the URL.
+/// `remote_origin` pointing at a metadata-step 404 surfaces
+/// `GitHubFetchError::ReleaseTagNotFoundOrUnauthorized` (wrapped in
+/// `LockfileInstallError::Fetch`). The error names the URL. The
+/// metadata-step 404 is ambiguous between "tag missing" and
+/// "private repo the token cannot read" (issue #147), so the variant
+/// and message name both possibilities.
 #[test]
-fn phaseA_item9_remote_origin_404_surfaces_release_asset_not_found() {
+fn phaseA_item9_remote_origin_404_surfaces_release_tag_not_found_or_unauthorized() {
     let _g = file_lock();
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
@@ -1001,15 +1004,18 @@ remote_origin = "github://chelis-lang/nautilus@v9.9.9"
             assert_eq!(name, "nautilus");
             assert_eq!(version, "9.9.9");
             assert!(
-                matches!(inner, GitHubFetchError::ReleaseAssetNotFound { .. }),
-                "404 must surface ReleaseAssetNotFound; got: {inner:?}"
+                matches!(
+                    inner,
+                    GitHubFetchError::ReleaseTagNotFoundOrUnauthorized { .. }
+                ),
+                "metadata-step 404 must surface ReleaseTagNotFoundOrUnauthorized; got: {inner:?}"
             );
             assert!(
                 inner.to_string().contains("releases/tags/v9.9.9"),
                 "404 message must name URL: {inner}"
             );
         }
-        other => panic!("expected Failed(ReleaseAssetNotFound), got: {other:?}"),
+        other => panic!("expected Failed(ReleaseTagNotFoundOrUnauthorized), got: {other:?}"),
     }
 }
 

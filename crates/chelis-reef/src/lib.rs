@@ -1077,8 +1077,21 @@ pub enum GitHubFetchError {
     /// token is invalid or lacks scope.
     AuthRejected { url: String, status: u16 },
     /// HTTP 404 — the release tag exists but the named asset is not
-    /// attached to it (or the tag itself does not exist).
+    /// attached to it. This fires only after the release metadata has
+    /// been fetched successfully, so the repo is reachable and the tag
+    /// exists; a 404 here genuinely means "asset missing." The
+    /// metadata-step 404 (repo/tag-level) is the separate, ambiguous
+    /// [`Self::ReleaseTagNotFoundOrUnauthorized`].
     ReleaseAssetNotFound { url: String, asset_name: String },
+    /// HTTP 404 on the release-metadata endpoint (`releases/tags/<tag>`).
+    /// This status is inherently ambiguous: GitHub returns 404 both when
+    /// the tag genuinely does not exist on a reachable repo and when the
+    /// token lacks `contents: read` access to a private repo (GitHub
+    /// returns 404, not 403, for unauthorized private repos as a privacy
+    /// measure, so the repo's existence is not leaked). We cannot tell
+    /// the two apart from this single response, so the variant and its
+    /// message name both possibilities. See issue #147.
+    ReleaseTagNotFoundOrUnauthorized { url: String, tag: String },
     /// HTTP 429 — GitHub rate limit. Message includes the `Retry-After`
     /// header value if present.
     RateLimited {
@@ -1117,6 +1130,16 @@ impl std::fmt::Display for GitHubFetchError {
                 f,
                 "release asset `{asset_name}` not found at {url} (HTTP 404): \
                  verify the release tag exists and that the asset is attached to it"
+            ),
+            Self::ReleaseTagNotFoundOrUnauthorized { url, tag } => write!(
+                f,
+                "release tag `{tag}` at {url} returned HTTP 404. This is ambiguous: \
+                 either (a) the tag does not exist on that repo, or (b) your token \
+                 (GITHUB_TOKEN / `gh auth token`) lacks `contents: read` access to \
+                 the repo. GitHub returns 404 (not 403) in case (b) as a privacy \
+                 measure, so the two cannot be told apart from this response alone. \
+                 Verify with `gh release view {tag} --repo <org>/<repo>` using the \
+                 same token."
             ),
             Self::RateLimited { url, retry_after } => match retry_after {
                 Some(r) => write!(
@@ -1828,10 +1851,13 @@ fn github_api_base_url() -> String {
 /// Map a non-200 HTTP status to the appropriate
 /// [`GitHubFetchError`] variant for the given URL. Used by both the
 /// metadata-fetch step and the byte-download step. The 404 mapping
-/// uses the **caller-provided** `not_found` builder so the metadata
-/// step can name the tag URL while the byte-download step can name
-/// the asset name; both surface as `ReleaseAssetNotFound` at the
-/// outer API boundary.
+/// uses the **caller-provided** `not_found` builder so the two steps
+/// can choose distinct variants: the metadata step builds the ambiguous
+/// [`GitHubFetchError::ReleaseTagNotFoundOrUnauthorized`] (a 404 there
+/// could be a missing tag or a private repo the token cannot read),
+/// while the byte-download step builds [`GitHubFetchError::ReleaseAssetNotFound`]
+/// (a 404 there fires only after metadata fetch succeeded, so the asset
+/// is genuinely absent). See issue #147.
 fn map_http_error_status(
     url: &str,
     response: &reqwest::blocking::Response,
@@ -1876,14 +1902,20 @@ fn map_http_error_status(
 /// given tag and parse the asset list. The response shape is GitHub's
 /// "Release" object; we only read `assets[].id` and `assets[].name`.
 ///
-/// On 404 returns [`GitHubFetchError::ReleaseAssetNotFound`] with the
-/// tag URL — this is the "tag does not exist or release missing"
-/// case. The error names the URL we tried, which lets the user
-/// disambiguate "wrong tag" from "wrong asset name."
+/// On 404 returns [`GitHubFetchError::ReleaseTagNotFoundOrUnauthorized`]
+/// naming both possibilities: the tag genuinely does not exist on the
+/// repo, or the token lacks read access to a private repo (GitHub
+/// returns 404, not 403, in the latter case as a privacy measure). The
+/// `tag` is threaded in so the message can name it and point the user at
+/// `gh release view <tag> --repo <org>/<repo>` for verification. See
+/// issue #147 — this 404 used to surface as `ReleaseAssetNotFound`
+/// naming a `<release-metadata>` placeholder asset, which misled users
+/// hitting the auth-privacy case toward their release pipeline.
 fn fetch_release_metadata(
     client: &reqwest::blocking::Client,
     url: &str,
     token: &str,
+    tag: &str,
 ) -> Result<Vec<ReleaseAsset>, GitHubFetchError> {
     let response = client
         .get(url)
@@ -1900,13 +1932,13 @@ fn fetch_release_metadata(
         })?;
     if !response.status().is_success() {
         return Err(map_http_error_status(url, &response, || {
-            GitHubFetchError::ReleaseAssetNotFound {
+            // Metadata-step 404 is ambiguous: a missing tag and a
+            // private repo the token cannot read both return 404. Emit
+            // the dedicated variant whose message names both cases
+            // rather than the misleading "asset not found" wording.
+            GitHubFetchError::ReleaseTagNotFoundOrUnauthorized {
                 url: url.to_string(),
-                // For the metadata step, the "asset name" the user
-                // tried to find lives one level up: it's the tag.
-                // Surface the tag URL itself so the user knows the
-                // 404 is about the release, not the individual asset.
-                asset_name: "<release-metadata>".to_string(),
+                tag: tag.to_string(),
             }
         }));
     }
@@ -2092,7 +2124,7 @@ pub fn install_from_github(
 
     // Step 1: fetch release metadata, extract asset ids.
     let metadata_url = spec.release_metadata_url(&api_base);
-    let assets = fetch_release_metadata(&client, &metadata_url, &token)?;
+    let assets = fetch_release_metadata(&client, &metadata_url, &token, &spec.tag)?;
     let archive_id = find_asset_id(&assets, &archive_name, &metadata_url)?;
     let shell_id = find_asset_id(&assets, &shell_name, &metadata_url)?;
 
@@ -2590,7 +2622,7 @@ fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ReefManifest, Bootstr
         })?;
 
     let metadata_url = spec.release_metadata_url(&api_base);
-    let assets = fetch_release_metadata(&client, &metadata_url, &token)?;
+    let assets = fetch_release_metadata(&client, &metadata_url, &token, &spec.tag)?;
     let archive_id = find_asset_id(&assets, &archive_name, &metadata_url)?;
     let archive_url = spec.release_asset_url(&api_base, archive_id);
     download_asset_by_id(&client, &archive_url, &archive_name, &token, &archive_path)?;
@@ -3818,8 +3850,8 @@ pub fn canonical_origin_for(name: &str, version: &str) -> String {
 ///   (auth state)
 /// - if `fetch_err` is `Some`, the typed [`GitHubFetchError`] category
 ///   (`auth-missing`, `auth-rejected`, `release-asset-not-found`,
-///   `rate-limited`, `server-error`, `network`, `io`, `validation`,
-///   `parse`)
+///   `release-tag-not-found-or-unauthorized`, `rate-limited`,
+///   `server-error`, `network`, `io`, `validation`, `parse`)
 ///
 /// The message shape is asserted against by the named acceptance oracle
 /// `phaseA_item8_autofetch_build_oracle`. Wording must remain stable
@@ -3879,6 +3911,9 @@ fn github_fetch_error_category(e: &GitHubFetchError) -> &'static str {
         GitHubFetchError::AuthMissing { .. } => "auth-missing",
         GitHubFetchError::AuthRejected { .. } => "auth-rejected",
         GitHubFetchError::ReleaseAssetNotFound { .. } => "release-asset-not-found",
+        GitHubFetchError::ReleaseTagNotFoundOrUnauthorized { .. } => {
+            "release-tag-not-found-or-unauthorized"
+        }
         GitHubFetchError::RateLimited { .. } => "rate-limited",
         GitHubFetchError::ServerError { .. } => "server-error",
         GitHubFetchError::Network { .. } => "network",
