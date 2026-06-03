@@ -181,8 +181,8 @@ fn issue_288_grad_matches_finite_difference() {
         .clone();
 
     let h = 1e-3;
-    let mut numerical = vec![0.0f64; 2];
-    for j in 0..2 {
+    let mut numerical = [0.0f64; 2];
+    for (j, slot) in numerical.iter_mut().enumerate() {
         let mut plus = base.clone();
         let mut minus = base.clone();
         plus.data[j] += h;
@@ -193,7 +193,7 @@ fn issue_288_grad_matches_finite_difference() {
         im.insert("x".into(), minus);
         let fp = eval_tensor(&dag, &ip).expect("plus eval")[&out].data[0];
         let fm = eval_tensor(&dag, &im).expect("minus eval")[&out].data[0];
-        numerical[j] = (fp - fm) / (2.0 * h);
+        *slot = (fp - fm) / (2.0 * h);
     }
     for (i, (a, n)) in analytic.iter().zip(numerical.iter()).enumerate() {
         assert!(
