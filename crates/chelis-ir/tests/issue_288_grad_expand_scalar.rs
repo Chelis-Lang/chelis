@@ -87,7 +87,12 @@ fn build_expand_scalar_forward(n: usize, c_val: f64) -> (Dag, NodeId, NodeId) {
         None,
     );
 
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_ty.clone(), None);
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_ty.clone(),
+        None,
+    );
     let m = dag.add_node(RiscOp::Mul, vec![x, k], vec_ty, None);
     let out = dag.add_node(
         RiscOp::sum_default(0, Prim::F32).expect("sum_default for f32"),
@@ -107,10 +112,7 @@ fn assert_close(label: &str, got: &[f64], want: &[f64]) {
         want.len()
     );
     for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
-        assert!(
-            (g - w).abs() < 1e-5,
-            "{label}: elem {i}: got {g}, want {w}",
-        );
+        assert!((g - w).abs() < 1e-5, "{label}: elem {i}: got {g}, want {w}",);
     }
 }
 
@@ -150,8 +152,7 @@ fn issue_288_grad_through_expand_scalar_constructs() {
 #[test]
 fn issue_288_grad_through_expand_scalar_is_correct() {
     let (dag, x, out) = build_expand_scalar_forward(2, 2.5);
-    let result = grad_dag_checked(&dag, out, &[x])
-        .expect("grad must construct (issue #288)");
+    let result = grad_dag_checked(&dag, out, &[x]).expect("grad must construct (issue #288)");
     let grad_x = result
         .grad_nodes
         .get(&x)
@@ -214,7 +215,12 @@ fn issue_288_grad_matches_finite_difference() {
 fn issue_288_control_sum_mul_x_x() {
     let mut dag = Dag::new();
     let vec_ty = vec_n_f32(2);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_ty.clone(), None);
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_ty.clone(),
+        None,
+    );
     let sq = dag.add_node(RiscOp::Mul, vec![x, x], vec_ty, None);
     let out = dag.add_node(
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
@@ -238,11 +244,21 @@ fn issue_288_control_sum_mul_x_x() {
 fn issue_288_control_mul_by_real_tensor() {
     let mut dag = Dag::new();
     let vec_ty = vec_n_f32(2);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_ty.clone(), None);
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_ty.clone(),
+        None,
+    );
     // A rank-1 constant tensor built as Const+Pad+Add would mirror
     // `to_tensor`; for this control a rank-1 Load standing in for the
     // literal tensor is sufficient to pin the non-scalar-expand path.
-    let t = dag.add_node(RiscOp::Load { name: "t".into() }, vec![], vec_ty.clone(), None);
+    let t = dag.add_node(
+        RiscOp::Load { name: "t".into() },
+        vec![],
+        vec_ty.clone(),
+        None,
+    );
     let m = dag.add_node(RiscOp::Mul, vec![x, t], vec_ty, None);
     let out = dag.add_node(
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
@@ -257,5 +273,63 @@ fn issue_288_control_mul_by_real_tensor() {
     inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![3.0, 4.0]));
     inputs.insert("t".into(), TensorValue::from_vec(vec![2], vec![1.5, -2.0]));
     let vals = eval_tensor(&result.dag, &inputs).expect("control eval");
-    assert_close("control_mul_by_real_tensor", &vals[&grad_x].data, &[1.5, -2.0]);
+    assert_close(
+        "control_mul_by_real_tensor",
+        &vals[&grad_x].data,
+        &[1.5, -2.0],
+    );
+}
+
+/// Probe: differentiate w.r.t. the RANK-0 expand source itself. This
+/// forces the `Expand` adjoint (the `Sum` that reduces the cotangent
+/// back to the rank-0 source) into the requested-output set so it is
+/// NOT pruned and must pass verification. `f(s) = sum(x .* expand(s,
+/// 0, 2))` with scalar `s`, so `df/ds = sum(x)`. With x = [3, 4],
+/// `df/ds = 7`. If the rank-0-source Expand adjoint is the bug, this is
+/// where the over-reduction / verification failure surfaces directly.
+#[test]
+fn issue_288_grad_wrt_rank0_expand_source() {
+    let mut dag = Dag::new();
+    let vec_ty = vec_n_f32(2);
+    let s = dag.add_node(
+        RiscOp::Load { name: "s".into() },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let k = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: DimExpr::Concrete(2),
+        },
+        vec![s],
+        vec_ty.clone(),
+        None,
+    );
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_ty.clone(),
+        None,
+    );
+    let m = dag.add_node(RiscOp::Mul, vec![x, k], vec_ty, None);
+    let out = dag.add_node(
+        RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
+        vec![m],
+        scalar_f32(),
+        None,
+    );
+    let result = grad_dag_checked(&dag, out, &[s])
+        .expect("grad w.r.t. a rank-0 expand source must construct (issue #288)");
+    let grad_s = result.grad_nodes[&s];
+    let mut inputs = HashMap::new();
+    inputs.insert("s".into(), TensorValue::from_vec(vec![], vec![2.5]));
+    inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![3.0, 4.0]));
+    let vals = eval_tensor(&result.dag, &inputs).expect("probe eval");
+    assert_close("grad_wrt_rank0_source", &vals[&grad_s].data, &[7.0]);
+    assert!(
+        vals[&grad_s].shape.is_empty(),
+        "gradient of a rank-0 source must be rank-0; got shape {:?}",
+        vals[&grad_s].shape,
+    );
 }
