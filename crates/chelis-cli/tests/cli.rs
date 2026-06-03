@@ -3673,7 +3673,10 @@ fn fmt_inplace_preserves_hof_argument_parens() {
 fn fmt_inplace_leaves_curried_sig_unparenthesized() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("curried.ch");
-    write_file(&path, "module T\nsig f: a -> (b -> c)\ndef f(x, y, z) = x\n");
+    write_file(
+        &path,
+        "module T\nsig f: a -> (b -> c)\ndef f(x, y, z) = x\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")

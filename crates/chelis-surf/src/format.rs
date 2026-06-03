@@ -962,32 +962,45 @@ mod tests {
     // must NOT add parens to right-position (return) arrows, where they are
     // redundant under right-associativity.
 
+    /// Find the first `Sig` declaration, descending into a wrapping `Module`.
+    fn find_sig_ty(decls: &[Decl]) -> Option<&TypeExpr> {
+        for decl in decls {
+            match decl {
+                Decl::Sig { ty, .. } => return Some(ty),
+                Decl::Module { decls, .. } => {
+                    if let Some(ty) = find_sig_ty(decls) {
+                        return Some(ty);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Format the single `Sig` declaration in `source` and return only the
     /// type portion of the `sig <name>: <type>` line.
     fn sig_type_str(source: &str) -> String {
         let decls = crate::parser::parse_str(source).expect("parse sig");
-        for decl in &decls {
-            if let Decl::Sig { ty, .. } = decl {
-                return format_type(ty);
-            }
-        }
-        panic!("no Sig declaration found in: {source}");
+        let ty = find_sig_ty(&decls)
+            .unwrap_or_else(|| panic!("no Sig declaration found in: {source}"));
+        format_type(ty)
     }
 
     fn sig_type_ast(source: &str) -> TypeExpr {
         let decls = crate::parser::parse_str(source).expect("parse sig");
-        for decl in decls {
-            if let Decl::Sig { ty, .. } = decl {
-                return ty;
-            }
-        }
-        panic!("no Sig declaration found in: {source}");
+        find_sig_ty(&decls)
+            .cloned()
+            .unwrap_or_else(|| panic!("no Sig declaration found in: {source}"))
     }
 
     #[test]
     fn hof_arg_arrow_keeps_parens() {
         // `(a -> b) -> c`: the function-typed argument must stay parenthesized.
-        assert_eq!(sig_type_str("module T\nsig f: (a -> b) -> c"), "(a -> b) -> c");
+        assert_eq!(
+            sig_type_str("module T\nsig f: (a -> b) -> c"),
+            "(a -> b) -> c"
+        );
     }
 
     #[test]
@@ -1013,7 +1026,10 @@ mod tests {
     fn right_nested_arrow_canonicalizes_without_parens() {
         // Right-position arrow parens are redundant; `a -> (b -> c)` is the
         // same type as `a -> b -> c` and canonicalizes to the bare form.
-        assert_eq!(sig_type_str("module T\nsig f: a -> (b -> c)"), "a -> b -> c");
+        assert_eq!(
+            sig_type_str("module T\nsig f: a -> (b -> c)"),
+            "a -> b -> c"
+        );
     }
 
     #[test]
@@ -1078,32 +1094,42 @@ mod tests {
         assert_eq!(once, twice, "nested HOF arg must be idempotent");
     }
 
+    // These two cases build the `TypeExpr` AST directly so they exercise the
+    // formatter's grouping rules independently of the parser's surface grammar
+    // for nested groups.
+
+    fn named(n: &str) -> TypeExpr {
+        TypeExpr::Named(n.to_string(), chelis_deep::Span::new(0, 0))
+    }
+
+    fn arrow(args: Vec<TypeExpr>, ret: TypeExpr) -> TypeExpr {
+        TypeExpr::Arrow(args, Box::new(ret), chelis_deep::Span::new(0, 0))
+    }
+
     #[test]
     fn arrow_in_tuple_element_needs_no_parens() {
         // Tuple commas already delimit an arrow element, so an arrow inside a
-        // tuple is unambiguous and the redundant grouping parens are dropped:
-        // `((a -> b), c)` canonicalizes to `(a -> b, c)`. This guards against
-        // the fix over-parenthesizing arrows that are NOT in arrow-argument
-        // position.
-        assert_eq!(
-            sig_type_str("module T\nsig f: ((a -> b), c) -> d"),
-            "(a -> b, c) -> d"
+        // tuple is unambiguous and must NOT gain grouping parens. This guards
+        // against the fix over-parenthesizing arrows that are NOT in
+        // arrow-argument position: `(a -> b, c) -> d`.
+        let tuple = TypeExpr::Tuple(
+            vec![arrow(vec![named("a")], named("b")), named("c")],
+            chelis_deep::Span::new(0, 0),
         );
-        // And it must be idempotent.
-        let once = sig_type_str("module T\nsig f: ((a -> b), c) -> d");
-        let twice = sig_type_str(&format!("module T\nsig f: {once}"));
-        assert_eq!(once, twice);
+        let ty = arrow(vec![tuple], named("d"));
+        assert_eq!(format_type(&ty), "(a -> b, c) -> d");
     }
 
     #[test]
     fn arrow_under_ref_in_arg_position_keeps_inner_parens() {
         // `&(a -> b) -> c`: the argument is a reference to a function type.
-        // The arrow under the `&` must stay grouped so the ref binds to the
-        // whole function type rather than re-associating across the outer
-        // arrow.
-        assert_eq!(
-            sig_type_str("module T\nsig f: &(a -> b) -> c"),
-            "&(a -> b) -> c"
+        // The arrow under the `&` must stay grouped — `&` binds tighter than
+        // `->`, so `&(a -> b)` is distinct from `&a -> b` (`(&a) -> b`).
+        let inner = TypeExpr::Ref(
+            Box::new(arrow(vec![named("a")], named("b"))),
+            chelis_deep::Span::new(0, 0),
         );
+        let ty = arrow(vec![inner], named("c"));
+        assert_eq!(format_type(&ty), "&(a -> b) -> c");
     }
 }
