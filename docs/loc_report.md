@@ -1,10 +1,10 @@
 # Lines of Code Report
 
-Generated: 2026-06-03 18:32 UTC
+Generated: 2026-06-03 21:26 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 376 | 142,137 | 18,080 | 53,044 | 213,261 | Compiler, CLI, runtime, backends, type checker |
+| Rust | 379 | 143,090 | 18,327 | 53,402 | 214,819 | Compiler, CLI, runtime, backends, type checker |
 | C | 13 | 33,482 | 325 | 755 | 34,562 | Generated runtime, headers |
 | JSON | 28 | 9,274 | 0 | 3,181 | 12,455 | Package metadata, test fixtures |
 | Python | 40 | 5,368 | 1,508 | 1,683 | 8,559 | PyO3 bindings, tools, benchmarks |
@@ -12,11 +12,11 @@ Generated: 2026-06-03 18:32 UTC
 | **Chelis Deep** (.dp) | **1,501** | **1,699** | **0** | **3** | **1,702** | **Deep test fixtures** |
 | TOML | 35 | 557 | 94 | 76 | 727 | Cargo/reef manifests |
 | YAML | 5 | 485 | 170 | 122 | 777 | CI workflows |
-| PEG Grammars (.pest) | 2 | 262 | 0 | 28 | 290 | Validator grammars (Surf + Deep) |
+| PEG Grammars (.pest) | 2 | 262 | 14 | 28 | 304 | Validator grammars (Surf + Deep) |
 | Objective-C | 1 | 248 | 117 | 63 | 428 |  |
 | XML | 1 | 212 | 57 | 38 | 307 |  |
 | JavaScript | 2 | 202 | 0 | 29 | 231 | Tree-sitter grammar definitions |
 | Tree-sitter Queries (.scm) | 2 | 102 | 0 | 6 | 108 | Syntax highlighting for Surf and Deep |
-| Markdown | 203 | 0 | 19,606 | 9,574 | 29,180 | Specs, design docs, plans |
+| Markdown | 203 | 0 | 19,627 | 9,577 | 29,204 | Specs, design docs, plans |
 | __generated__ | 1 | 0 | 0 | 0 | 0 |  |
-| **Total** | **2,321** | **197,127** | **40,013** | **68,609** | **305,749** | |
+| **Total** | **2,324** | **198,080** | **40,295** | **68,970** | **307,345** | |
