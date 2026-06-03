@@ -1,11 +1,36 @@
 # Rank Polymorphism (Tier 2: identity + erasure rank variables)
 
-**Status:** DRAFT phase plan. Scoping only — not yet scheduled. A
-fresh-context red-team pass has run; its verified findings (and one
-correction to its central claim) are in §"Red-Team Findings". **Tier 2 has a
-hard prerequisite: the inline-annotation body-check bypass
-([chelis#285](https://github.com/Chelis-Lang/chelis/issues/285), §Red-Team
-Findings CRITICAL) must be fixed first.**
+**Status:** IDENTITY TIER SHIPPED. The identity position
+(`&tensor[..r, p] -> tensor[..r, p]`) is implemented and gated by the
+Body-Discipline check; the chelis#285 prerequisite is fixed and on `main`.
+
+## Implementation Status (as shipped)
+
+What landed vs. the plan below, with two deliberate divergences:
+
+- **Surface syntax is `..r`, introduced *contextually*** (like a sig dim
+  variable) — there is **no `[..r]` quantifier**. Write
+  `def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)`.
+  The plan's `def f[..r](...)` examples below predate this decision; the
+  contextual form is the shipped surface.
+- **Identity tier is shipped and sound.** `..r` lexer/parser (Tier-3 adjacency
+  rejected at parse time), `(d-rank {} r)` deep node, `Dim::Rank` + `Scheme.rvars`
+  + a unitary rank-unification arm, the `Dim::Rank`-free monomorphization
+  assertion at IR lowering, and the Body-Discipline check (an explicit
+  shape-identity allowlist over every builtin; everything else is rejected in a
+  `..r` body, so a missed classification can only over-reject, never open a
+  §4.2 hole). A `..r` body may currently call only shape-identity *builtins* —
+  calling a user-defined function from a rank-poly body is conservatively
+  rejected (proving an arbitrary callee rank-safe is future work).
+- **Erasure tier is deferred.** `&tensor[..r, p] -> tensor[p]` requires a
+  genuine order-invariant *all-reduce-to-scalar* primitive; Chelis's `sum`/`mean`
+  are axis-indexed (rank-reducing = Tier-3 rank arithmetic), so there is no
+  sound erasure body to write today. Erasure ships when an all-reduce builtin
+  is added; until then the Body-Discipline check rejects reductions in a `..r`
+  body like any other shape-rewriting op.
+
+A fresh-context red-team pass informed the design; its verified findings (and
+one correction to its central claim) are in §"Red-Team Findings".
 
 **Owning issue:** chelis#258 (same-name `def` overloads with rank-distinct
 sigs accepted at type-check time but call site doesn't dispatch by arg rank).

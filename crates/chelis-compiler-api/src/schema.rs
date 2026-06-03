@@ -242,6 +242,10 @@ pub enum WireInferredDim {
     /// `Dim::Wildcard` — an unknown / dynamic dimension (the `*`
     /// display rendering).
     Wildcard,
+    /// `Dim::Rank` — a rank variable standing for an entire shape vector
+    /// (Tier-2 rank polymorphism). `id` is the raw `RankVar` index, matching
+    /// the `..rN` display rendering.
+    Rank { id: u32 },
 }
 
 /// Structured tensor precision slot, mirroring
@@ -846,6 +850,11 @@ pub enum WireSurfTypeExpr {
         span: Span,
     },
     Infer {
+        span: Span,
+    },
+    /// `..r` rank-variable spread (Tier-2 rank polymorphism).
+    RankSpread {
+        name: String,
         span: Span,
     },
 }

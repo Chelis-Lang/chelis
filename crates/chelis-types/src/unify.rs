@@ -58,6 +58,10 @@ pub enum TypeErrorKind {
 pub struct Subst {
     types: Mutex<HashMap<TypeVar, Type>>,
     dims: Mutex<HashMap<DimVar, Dim>>,
+    /// Rank-variable bindings: a `RankVar` binds to the *entire* shape vector
+    /// it stands for (Tier-2 rank polymorphism). A binding to `[Dim::Rank(r2)]`
+    /// is a rank-to-rank alias resolved transitively by `resolve_rvar`.
+    ranks: Mutex<HashMap<RankVar, Vec<Dim>>>,
     /// Issue #256 soundness ledger. The `borrow` inference arm accepts a
     /// borrow whose inner type is still an unresolved `Type::Var`,
     /// deferring the tensor-or-carrier classification to subsequent
@@ -81,6 +85,7 @@ impl Clone for Subst {
         Subst {
             types: Mutex::new(self.types.lock().expect("subst.types poisoned").clone()),
             dims: Mutex::new(self.dims.lock().expect("subst.dims poisoned").clone()),
+            ranks: Mutex::new(self.ranks.lock().expect("subst.ranks poisoned").clone()),
             deferred_borrow_vars: Mutex::new(
                 self.deferred_borrow_vars
                     .lock()
@@ -131,6 +136,43 @@ impl Subst {
             .lock()
             .expect("subst.dims poisoned")
             .insert(v, dim);
+    }
+
+    /// Record a rank-variable binding: `r` stands for the whole shape `dims`.
+    pub fn insert_rank(&mut self, r: RankVar, dims: Vec<Dim>) {
+        self.ranks
+            .lock()
+            .expect("subst.ranks poisoned")
+            .insert(r, dims);
+    }
+
+    /// Snapshot of the rank-variable bindings.
+    pub fn ranks_snapshot(&self) -> HashMap<RankVar, Vec<Dim>> {
+        self.ranks.lock().expect("subst.ranks poisoned").clone()
+    }
+
+    /// Number of rank-variable bindings currently in the substitution.
+    pub fn ranks_len(&self) -> usize {
+        self.ranks.lock().expect("subst.ranks poisoned").len()
+    }
+
+    /// Resolve a rank variable to the shape vector it stands for, chasing
+    /// rank-to-rank aliases. Returns `[Dim::Rank(r)]` (the unbound variable)
+    /// when `r` has no binding. The returned dims are not themselves
+    /// substitution-applied; callers run them through `apply_dim`.
+    fn resolve_rvar(&self, start: RankVar) -> Vec<Dim> {
+        let map = self.ranks.lock().expect("subst.ranks poisoned");
+        let mut current = start;
+        loop {
+            match map.get(&current) {
+                None => return vec![Dim::Rank(current)],
+                Some(bound) => match bound.as_slice() {
+                    [Dim::Rank(next)] if *next != current => current = *next,
+                    [Dim::Rank(_)] => return vec![Dim::Rank(current)],
+                    _ => return bound.clone(),
+                },
+            }
+        }
     }
 
     /// Issue #256: record a borrow site whose inner type was still an
@@ -230,9 +272,20 @@ impl Subst {
             }
             Type::Ref(inner) => Type::Ref(Box::new(self.apply(inner))),
             Type::Tensor(dims, prec) => {
-                let dims = dims.iter().map(|d| self.apply_dim(d)).collect();
-                let prec = self.apply_tensor_prec(prec);
-                Type::Tensor(dims, prec)
+                // A `Dim::Rank` expands to the whole shape vector it is bound
+                // to (or stays as the sole `Dim::Rank` while unbound).
+                let mut out: Vec<Dim> = Vec::with_capacity(dims.len());
+                for d in dims {
+                    match d {
+                        Dim::Rank(r) => {
+                            for rd in self.resolve_rvar(*r) {
+                                out.push(self.apply_dim(&rd));
+                            }
+                        }
+                        _ => out.push(self.apply_dim(d)),
+                    }
+                }
+                Type::Tensor(out, self.apply_tensor_prec(prec))
             }
             Type::Adt(name, args) => {
                 let args = args.iter().map(|a| self.apply(a)).collect();
@@ -358,18 +411,37 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
         // Tensor types
         (Type::Tensor(dims1, p1), Type::Tensor(dims2, p2)) => {
             unify_tensor_prec(p1, p2, subst)?;
-            if dims1.len() != dims2.len() {
+            // Tier-2 rank polymorphism: a `Dim::Rank` stands for the *entire*
+            // shape vector (the sole dim by construction). Resolve any
+            // sole-rank shape through its current binding, then bind or unify.
+            // Because `R` only ever stands for the whole shape, this stays
+            // unitary — there is one most-general binding (Tier 3 would lose
+            // this). See `spec/design/rank_polymorphism.md` §Unification.
+            let d1 = resolve_rank_shape(dims1, subst);
+            let d2 = resolve_rank_shape(dims2, subst);
+            match (d1.as_slice(), d2.as_slice()) {
+                ([Dim::Rank(r1)], [Dim::Rank(r2)]) => {
+                    if r1 != r2 {
+                        subst.insert_rank(*r1, vec![Dim::Rank(*r2)]);
+                    }
+                    return Ok(());
+                }
+                ([Dim::Rank(r)], _) => return bind_rvar(*r, &d2, subst),
+                (_, [Dim::Rank(r)]) => return bind_rvar(*r, &d1, subst),
+                _ => {}
+            }
+            if d1.len() != d2.len() {
                 return Err(TypeError {
                     kind: TypeErrorKind::DimensionMismatch,
                     message: format!(
                         "tensor rank mismatch: {} dims vs {} dims",
-                        dims1.len(),
-                        dims2.len()
+                        d1.len(),
+                        d2.len()
                     ),
                 });
             }
-            for (d1, d2) in dims1.iter().zip(dims2.iter()) {
-                unify_dim(d1, d2, subst)?;
+            for (a, b) in d1.iter().zip(d2.iter()) {
+                unify_dim(a, b, subst)?;
             }
             Ok(())
         }
@@ -546,6 +618,30 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
     Ok(())
 }
 
+/// If `dims` is a sole `Dim::Rank`, resolve it through its current binding
+/// (expanding to the bound shape, or staying `[Dim::Rank(r)]` while unbound);
+/// otherwise return the dims unchanged. Used by the rank-unification arm.
+fn resolve_rank_shape(dims: &[Dim], subst: &Subst) -> Vec<Dim> {
+    if let [Dim::Rank(r)] = dims {
+        subst.resolve_rvar(*r)
+    } else {
+        dims.to_vec()
+    }
+}
+
+/// Bind a rank variable to a concrete shape vector, with an occurs-check:
+/// the rank must not appear within its own binding.
+fn bind_rvar(r: RankVar, dims: &[Dim], subst: &mut Subst) -> Result<(), TypeError> {
+    if dims.iter().any(|d| matches!(d, Dim::Rank(r2) if *r2 == r)) {
+        return Err(TypeError {
+            kind: TypeErrorKind::OccursCheck,
+            message: format!("infinite rank: r{} occurs in {dims:?}", r.0),
+        });
+    }
+    subst.insert_rank(r, dims.to_vec());
+    Ok(())
+}
+
 fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
     let ty = subst.apply(ty);
     match &ty {
@@ -668,6 +764,52 @@ mod tests {
         let t2 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F32));
         assert!(unify(&t1, &t2, &mut s).is_ok());
         assert_eq!(s.apply_dim(&Dim::Var(dv)), Dim::Name("batch".into()));
+    }
+
+    // chelis#258 Tier-2 rank polymorphism: the rank-variable unification arm.
+
+    #[test]
+    fn unify_rank_binds_whole_shape() {
+        let mut g = var_gen();
+        let rv = g.fresh_rvar();
+        let mut s = Subst::new();
+        let rank_tensor = Type::Tensor(vec![Dim::Rank(rv)], tprec(Prim::F32));
+        let concrete = Type::Tensor(
+            vec![Dim::Name("a".into()), Dim::Name("b".into())],
+            tprec(Prim::F32),
+        );
+        assert!(unify(&rank_tensor, &concrete, &mut s).is_ok());
+        // The rank var now stands for the whole 2-dim shape; applying expands it.
+        assert_eq!(s.apply(&rank_tensor), concrete);
+    }
+
+    #[test]
+    fn unify_rank_to_rank_aliases() {
+        let mut g = var_gen();
+        let r1 = g.fresh_rvar();
+        let r2 = g.fresh_rvar();
+        let mut s = Subst::new();
+        let t1 = Type::Tensor(vec![Dim::Rank(r1)], tprec(Prim::F32));
+        let t2 = Type::Tensor(vec![Dim::Rank(r2)], tprec(Prim::F32));
+        assert!(unify(&t1, &t2, &mut s).is_ok());
+        // Binding one to a concrete shape resolves both (alias chased).
+        let concrete = Type::Tensor(vec![Dim::Name("n".into())], tprec(Prim::F32));
+        assert!(unify(&t2, &concrete, &mut s).is_ok());
+        assert_eq!(s.apply(&t1), concrete);
+    }
+
+    #[test]
+    fn unify_rank_precision_still_checked() {
+        // The precision slot unifies independently of the rank binding.
+        let mut g = var_gen();
+        let rv = g.fresh_rvar();
+        let mut s = Subst::new();
+        let t1 = Type::Tensor(vec![Dim::Rank(rv)], tprec(Prim::F32));
+        let t2 = Type::Tensor(vec![Dim::Name("a".into())], tprec(Prim::Int32));
+        assert!(
+            unify(&t1, &t2, &mut s).is_err(),
+            "f32 vs int32 precision must fail even with a rank var"
+        );
     }
 
     #[test]

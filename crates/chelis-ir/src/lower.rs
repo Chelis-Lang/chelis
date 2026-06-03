@@ -3395,6 +3395,24 @@ impl LowerCtx {
             // All children before the last are dimension nodes.
             let mut dims = Vec::new();
             for child in &children[..children.len() - 1] {
+                // Monomorphization invariant (spec/design/rank_polymorphism.md):
+                // a `Dim::Rank` (`(d-rank ...)`) stands for a whole shape vector
+                // and must be eliminated by instantiation before lowering. A
+                // surviving rank node here is a monomorphization bug — never a
+                // backend input — paralleling the `TensorPrec::Var` panic above.
+                if let Expr::List(dl, _) = child
+                    && let Some(Expr::Atom(Atom::Symbol(tag), _)) = dl.elements.first()
+                    && tag == "d-rank"
+                {
+                    panic!(
+                        "BUG: monomorphization missed a rank variable (`(d-rank ...)`); \
+                         this should not be reachable from properly-typed source code. \
+                         spec/design/rank_polymorphism.md requires every reachable tensor \
+                         type to be `Dim::Rank`-free after monomorphization. Reaching this \
+                         point indicates a rank-polymorphic sig with no concrete call site, \
+                         or an internal monomorphization gap."
+                    );
+                }
                 if let Some(dim) = Self::try_extract_dim(child) {
                     dims.push(dim);
                 }

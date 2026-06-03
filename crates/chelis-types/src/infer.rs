@@ -5316,6 +5316,7 @@ fn dim_to_deep_expr(dim: &Dim) -> deep::Expr {
             vec![deep::Expr::Atom(deep::Atom::Int(*value), zero_span())],
         ),
         Dim::Wildcard => node_expr("d-name", vec![symbol_expr("*")]),
+        Dim::Rank(rank) => node_expr("d-rank", vec![symbol_expr(&format!("r{}", rank.0))]),
     }
 }
 
@@ -6941,6 +6942,76 @@ fn collect_declarations(
     }
 }
 
+// ── Tier-2 rank-polymorphism Body Discipline ─────────────────────
+
+/// True if any tensor inside `ty` carries a `Dim::Rank` (a rank variable).
+fn type_contains_rank(ty: &Type) -> bool {
+    match ty {
+        Type::Tensor(dims, _) => dims.iter().any(|d| matches!(d, Dim::Rank(_))),
+        Type::Fn(args, ret) => args.iter().any(type_contains_rank) || type_contains_rank(ret),
+        Type::Ref(inner) => type_contains_rank(inner),
+        Type::Adt(_, args) => args.iter().any(type_contains_rank),
+        Type::Tuple(ts) => ts.iter().any(type_contains_rank),
+        Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+    }
+}
+
+/// Extract the callee name from an `app`'s first child when it is `(var {} name)`.
+fn app_var_name(callee: &deep::Expr) -> Option<&str> {
+    let deep::Expr::List(list, _) = callee else {
+        return None;
+    };
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
+}
+
+/// Walk a rank-polymorphic def's body and reject any call that is not a
+/// shape-identity (elementwise) builtin. Against an opaque rank `..r` there are
+/// no named axes left to catch a transposition/reshape, so a shape-rewriting
+/// op — or a user/non-builtin call not proven rank-safe — would silently break
+/// §4.2 transposition safety (spec/design/rank_polymorphism.md §Soundness Boundary).
+fn check_rank_body_discipline(def_name: &str, expr: &deep::Expr, errors: &mut Vec<CheckError>) {
+    let deep::Expr::List(list, _) = expr else {
+        return;
+    };
+    if get_tag(list) == Some("app")
+        && let Some(callee_name) = children(list).first().and_then(app_var_name)
+    {
+        if !builtins::BUILTIN_NAMES.contains(&callee_name) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "rank-polymorphic def `{def_name}` may not call `{callee_name}`: only \
+                     shape-identity builtins are proven rank-safe in a `..r` body \
+                     (spec/04-type-system.md \u{00a7}4.2). Calling a user-defined function from a \
+                     rank-polymorphic body is not supported."
+                ),
+                vec![],
+            ));
+        } else if builtins::shape_class(callee_name) != builtins::ShapeClass::Identity {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "rank-polymorphic def `{def_name}` may not call shape-rewriting builtin \
+                     `{callee_name}`: against an opaque rank `..r` there are no named axes left \
+                     to catch a transposition or reshape (spec/04-type-system.md \u{00a7}4.2). A \
+                     `..r` body may call only shape-identity (elementwise) operations."
+                ),
+                vec![format!(
+                    "remove the `{callee_name}` call from the rank-polymorphic body, or use \
+                     concrete-rank `def`s instead of a `..r` signature"
+                )],
+            ));
+        }
+    }
+    // Recurse so nested calls (in let/if/match/lambda bodies, args) are checked.
+    for child in &list.elements {
+        check_rank_body_discipline(def_name, child, errors);
+    }
+}
+
 // ── Top-level inference (second pass) ────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -7091,6 +7162,17 @@ fn infer_top_level(
                 }
             }
             check_declared_dvars_rigid(&declared_dvars, subst, errors);
+            // Tier-2 rank-polymorphism Body Discipline
+            // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
+            // a def whose signature mentions a rank variable `..r` may call only
+            // shape-identity (elementwise) builtins. Against an opaque rank there
+            // are no named axes left to catch a transposition/reshape, so any
+            // shape-rewriting op (or an unproven user call) is rejected here.
+            if type_contains_rank(&decl_ty)
+                && let Some((_, body_expr)) = extract_fn_params_and_body(&kids[1])
+            {
+                check_rank_body_discipline(&name, &body_expr, errors);
+            }
             // chelis#272 list-uniformity check. A list literal of
             // tensors with *mismatched concrete* element axes joins to a
             // `Wildcard` along the differing axis (the deliberate #218
@@ -15668,7 +15750,8 @@ fn deep_type_to_type(
     tvar_map: &mut HashMap<String, TypeVar>,
 ) -> Type {
     let mut dvar_map = HashMap::new();
-    deep_type_to_type_inner(expr, vg, tvar_map, &mut dvar_map)
+    let mut rvar_map = HashMap::new();
+    deep_type_to_type_inner(expr, vg, tvar_map, &mut dvar_map, &mut rvar_map)
 }
 
 fn deep_type_to_type_inner(
@@ -15676,6 +15759,7 @@ fn deep_type_to_type_inner(
     vg: &mut VarGen,
     tvar_map: &mut HashMap<String, TypeVar>,
     dvar_map: &mut HashMap<String, DimVar>,
+    rvar_map: &mut HashMap<String, RankVar>,
 ) -> Type {
     match expr {
         deep::Expr::List(list, _) => {
@@ -15711,10 +15795,15 @@ fn deep_type_to_type_inner(
                     }
                     let args: Vec<Type> = kids[..kids.len() - 1]
                         .iter()
-                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map))
+                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
                         .collect();
-                    let ret =
-                        deep_type_to_type_inner(&kids[kids.len() - 1], vg, tvar_map, dvar_map);
+                    let ret = deep_type_to_type_inner(
+                        &kids[kids.len() - 1],
+                        vg,
+                        tvar_map,
+                        dvar_map,
+                        rvar_map,
+                    );
                     Type::Fn(args, Box::new(ret))
                 }
                 "t-ref" => {
@@ -15722,7 +15811,7 @@ fn deep_type_to_type_inner(
                         return Type::Error;
                     }
                     Type::Ref(Box::new(deep_type_to_type_inner(
-                        &kids[0], vg, tvar_map, dvar_map,
+                        &kids[0], vg, tvar_map, dvar_map, rvar_map,
                     )))
                 }
                 "t-tensor" => {
@@ -15736,14 +15825,16 @@ fn deep_type_to_type_inner(
                     // Both shapes are well-formed; any other shape (e.g.,
                     // a `t-fn` or a `t-prim` with an unknown name) is an
                     // ill-formed tensor and is reduced to `Type::Error`.
-                    let prec = match deep_type_to_type_inner(prec_expr, vg, tvar_map, dvar_map) {
+                    let prec = match deep_type_to_type_inner(
+                        prec_expr, vg, tvar_map, dvar_map, rvar_map,
+                    ) {
                         Type::Prim(p) => TensorPrec::Concrete(p),
                         Type::Var(v) => TensorPrec::Var(v),
                         _ => return Type::Error,
                     };
                     let dims: Vec<Dim> = kids[..kids.len() - 1]
                         .iter()
-                        .filter_map(|c| parse_dim(c, vg, dvar_map))
+                        .filter_map(|c| parse_dim(c, vg, dvar_map, rvar_map))
                         .collect();
                     Type::Tensor(dims, prec)
                 }
@@ -15751,7 +15842,7 @@ fn deep_type_to_type_inner(
                     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                         let args: Vec<Type> = kids[1..]
                             .iter()
-                            .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map))
+                            .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
                             .collect();
                         Type::Adt(name.to_string(), args)
                     } else {
@@ -15761,7 +15852,7 @@ fn deep_type_to_type_inner(
                 "t-tuple" => {
                     let elems: Vec<Type> = kids
                         .iter()
-                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map))
+                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
                         .collect();
                     Type::Tuple(elems)
                 }
@@ -15773,11 +15864,14 @@ fn deep_type_to_type_inner(
     }
 }
 
-/// Parse a dimension expression from Deep AST, with support for dim variables.
+/// Parse a dimension expression from Deep AST, with support for dim variables
+/// and rank variables. `rvar_map` memoizes `..r` names to a single `RankVar`
+/// so the same rank variable shared across tensor positions ties together.
 fn parse_dim(
     expr: &deep::Expr,
     vg: &mut VarGen,
     dvar_map: &mut HashMap<String, DimVar>,
+    rvar_map: &mut HashMap<String, RankVar>,
 ) -> Option<Dim> {
     match expr {
         deep::Expr::List(list, _) => {
@@ -15811,6 +15905,15 @@ fn parse_dim(
                     } else {
                         None
                     }
+                }
+                "d-rank" => {
+                    let name = kids
+                        .first()
+                        .and_then(|e| symbol_name(e))
+                        .unwrap_or("_")
+                        .to_string();
+                    let rv = *rvar_map.entry(name).or_insert_with(|| vg.fresh_rvar());
+                    Some(Dim::Rank(rv))
                 }
                 _ => None,
             }

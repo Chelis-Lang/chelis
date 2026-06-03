@@ -2488,6 +2488,10 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
             span: span(*s),
         },
         TypeExpr::Infer(s) => WireSurfTypeExpr::Infer { span: span(*s) },
+        TypeExpr::RankSpread(name, s) => WireSurfTypeExpr::RankSpread {
+            name: name.clone(),
+            span: span(*s),
+        },
     }
 }
 

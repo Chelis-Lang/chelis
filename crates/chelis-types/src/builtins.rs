@@ -156,6 +156,47 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "clamp",
 ];
 
+/// Shape semantics of a builtin for the Tier-2 rank-polymorphism
+/// Body-Discipline check (`spec/design/rank_polymorphism.md` §Soundness
+/// Boundary). Keyed on SHAPE SEMANTICS, **not** the HM scheme: `relu`,
+/// `reshape`, and `permute` all share `&tv -> tv`, but only `relu` is
+/// shape-identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeClass {
+    /// Output shape provably equals an input shape with no axis reordering —
+    /// pure elementwise ops (the precision may change, e.g. comparisons).
+    /// The only class admitted inside a rank-polymorphic (`..r`) body.
+    Identity,
+    /// Rewrites/reorders the shape, is axis- or shape-parameterized, reduces
+    /// rank, or is a non-tensor/host op. Forbidden inside a rank-poly body:
+    /// against an opaque `R` there are no named axes left to catch a
+    /// transposition/reshape (§4.2).
+    Rewriting,
+}
+
+/// Classify a builtin's shape semantics for the Body-Discipline check.
+///
+/// The Identity arm is an explicit allowlist; everything else falls through to
+/// `Rewriting`. That default is the safe direction — a builtin that is not
+/// *provably* shape-identity is rejected inside a rank-poly body, so a missed
+/// classification can only over-reject, never open a §4.2 hole. The
+/// `shape_class_covers_all_builtins` test pins the Identity set so any change
+/// is deliberate.
+pub fn shape_class(name: &str) -> ShapeClass {
+    match name {
+        // Pure elementwise — output shape == input shape (precision may change
+        // for comparisons/logical). No axis argument, no reordering.
+        "add" | "mul" | "sub" | "div" | "mod" | "max_elem" | "min_elem" | "neg" | "recip"
+        | "exp" | "log" | "sin" | "sqrt" | "cos" | "tan" | "atan" | "abs" | "floor" | "ceil"
+        | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "not" | "clamp" | "uniform_like"
+        | "where" | "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "cmplt" | "bitand" | "bitor"
+        | "bitxor" | "shl" | "shr" | "and" | "or" => ShapeClass::Identity,
+        // Reductions, reshapes, permutes, matmul/conv, axis-indexed ops,
+        // gather/scatter, and every non-tensor/host builtin.
+        _ => ShapeClass::Rewriting,
+    }
+}
+
 /// Create the built-in type environment with all RISC Tier 1 + Tier 2 signatures.
 pub fn builtin_env() -> (Env, VarGen) {
     let mut env = Env::new();
@@ -185,6 +226,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![dv],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
                 Box::new(Type::Var(tv)),
@@ -200,6 +242,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
         };
         env.bind(name.to_string(), scheme);
@@ -231,6 +274,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
                 Box::new(Type::Var(tv)), // inference engine overrides for cmplt
@@ -246,6 +290,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
                 Box::new(Type::Var(tv)),
@@ -260,6 +305,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
         };
         env.bind(name.to_string(), scheme);
@@ -272,6 +318,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![t1, t2, t3],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     borrowed(Type::Var(t1)),
@@ -291,6 +338,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![t1, t2, out],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(t1)), borrowed(Type::Var(t2))],
                 Box::new(Type::Var(out)),
@@ -305,6 +353,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![input, out],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(input)), Type::Prim(Prim::Int32)],
                 Box::new(Type::Var(out)),
@@ -325,6 +374,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![input, out],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(input)), int_list.clone(), int_list],
                 Box::new(Type::Var(out)),
@@ -339,6 +389,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![input, out],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     borrowed(Type::Var(input)),
@@ -356,6 +407,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![input],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(input)), Type::Prim(Prim::F32)],
                 Box::new(Type::Var(input)),
@@ -369,6 +421,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![input],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     borrowed(Type::Var(input)),
@@ -388,6 +441,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![input, kernel, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     borrowed(Type::Var(input)),
@@ -406,6 +460,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![input],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(input)), Type::Prim(Prim::Int32)],
                 Box::new(Type::Var(input)),
@@ -420,6 +475,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![input, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(vec![Type::Var(input)], Box::new(Type::Var(output))),
         };
         env.bind(name.to_string(), scheme);
@@ -432,6 +488,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![Type::Var(lhs), Type::Var(rhs)],
                 Box::new(Type::Var(output)),
@@ -448,6 +505,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![Type::Var(a), Type::Var(b), Type::Var(c)],
                 Box::new(Type::Var(output)),
@@ -464,6 +522,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(a)), Type::Var(b), Type::Var(c)],
                 Box::new(Type::Var(output)),
@@ -480,6 +539,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(a)), borrowed(Type::Var(b)), Type::Var(c)],
                 Box::new(Type::Var(output)),
@@ -496,6 +556,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     borrowed(Type::Var(a)),
@@ -516,6 +577,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![Type::Var(a), borrowed(Type::Var(b)), borrowed(Type::Var(c))],
                 Box::new(Type::Var(output)),
@@ -534,6 +596,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![a, b, c, d, e, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     Type::Var(a),
@@ -557,6 +620,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![a, b, c, d, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![Type::Var(a), Type::Var(b), Type::Var(c), Type::Var(d)],
                 Box::new(Type::Var(output)),
@@ -571,6 +635,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![input, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(input))],
                 Box::new(Type::Var(output)),
@@ -584,6 +649,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
         };
         env.bind(name.to_string(), scheme);
@@ -596,6 +662,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(lhs)), Type::Var(rhs)],
                 Box::new(Type::Var(output)),
@@ -709,6 +776,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![Type::Prim(Prim::Bool), Type::Prim(Prim::String)],
                 Box::new(Type::Unit),
@@ -720,6 +788,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     Type::Prim(Prim::F32),
@@ -735,6 +804,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     Type::Prim(Prim::Int64),
@@ -750,6 +820,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     Type::Prim(Prim::Bool),
@@ -765,6 +836,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     Type::Prim(Prim::String),
@@ -783,6 +855,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             Scheme {
                 tvars: vec![tensor_tv],
                 dvars: vec![],
+                rvars: vec![],
                 body: Type::Fn(
                     vec![
                         borrowed(Type::Var(tensor_tv)),
@@ -804,6 +877,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             Scheme {
                 tvars: vec![tensor_tv],
                 dvars: vec![],
+                rvars: vec![],
                 body: Type::Fn(
                     vec![
                         borrowed(Type::Var(tensor_tv)),
@@ -824,6 +898,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
                 Box::new(Type::Prim(Prim::Bool)),
@@ -835,6 +910,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
                 Box::new(Type::Prim(Prim::Bool)),
@@ -846,6 +922,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
                 Box::new(Type::Prim(Prim::Bool)),
@@ -878,6 +955,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![fold_acc, fold_item, fold_ret],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     Type::Var(fold_acc),
@@ -896,6 +974,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![scan_acc, scan_item, scan_ret],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     Type::Var(scan_acc),
@@ -922,6 +1001,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         Scheme {
             tvars: vec![tensor_scan_a, tensor_scan_b, tensor_scan_c, tensor_scan_ret],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![
                     Type::Var(tensor_scan_a),
@@ -993,6 +1073,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         Scheme {
             tvars: vec![option_tvar],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(vec![Type::Var(option_tvar)], Box::new(option_type.clone())),
         },
     );
@@ -1001,6 +1082,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         Scheme {
             tvars: vec![option_tvar],
             dvars: vec![],
+            rvars: vec![],
             body: option_type.clone(),
         },
     );
@@ -1031,6 +1113,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         Scheme {
             tvars: vec![list_tvar],
             dvars: vec![],
+            rvars: vec![],
             body: Type::Fn(
                 vec![Type::Var(list_tvar), list_type.clone()],
                 Box::new(list_type.clone()),
@@ -1042,6 +1125,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         Scheme {
             tvars: vec![list_tvar],
             dvars: vec![],
+            rvars: vec![],
             body: list_type.clone(),
         },
     );
@@ -1087,6 +1171,83 @@ mod tests {
     fn builtin_env_has_add() {
         let (env, _) = builtin_env();
         assert!(env.lookup("add").is_some());
+    }
+
+    // chelis#258 Tier-2 rank polymorphism: shape-class classification lock.
+
+    /// Pin the exact shape-identity allowlist. A change here is the one place
+    /// where a builtin becomes admissible inside a rank-polymorphic `..r`
+    /// body, so it must be deliberate: misclassifying a shape-rewriting op as
+    /// Identity is a §4.2 soundness hole. Every other builtin must be
+    /// `Rewriting` (the safe default).
+    #[test]
+    fn shape_class_identity_set_is_pinned() {
+        let identity: &[&str] = &[
+            "add",
+            "mul",
+            "sub",
+            "div",
+            "mod",
+            "max_elem",
+            "min_elem",
+            "neg",
+            "recip",
+            "exp",
+            "log",
+            "sin",
+            "sqrt",
+            "cos",
+            "tan",
+            "atan",
+            "abs",
+            "floor",
+            "ceil",
+            "relu",
+            "sigmoid",
+            "tanh",
+            "silu",
+            "gelu",
+            "not",
+            "clamp",
+            "uniform_like",
+            "where",
+            "eq",
+            "neq",
+            "lt",
+            "gt",
+            "lte",
+            "gte",
+            "cmplt",
+            "bitand",
+            "bitor",
+            "bitxor",
+            "shl",
+            "shr",
+            "and",
+            "or",
+        ];
+        for name in BUILTIN_NAMES {
+            let expected = if identity.contains(name) {
+                ShapeClass::Identity
+            } else {
+                ShapeClass::Rewriting
+            };
+            assert_eq!(
+                shape_class(name),
+                expected,
+                "builtin `{name}` shape-class drifted from the pinned set"
+            );
+        }
+        // Spot-check the dangerous ones are NOT identity (the §4.2 traps).
+        for op in [
+            "permute", "reshape", "expand", "matmul", "sum", "gather", "conv2d",
+        ] {
+            assert_eq!(
+                shape_class(op),
+                ShapeClass::Rewriting,
+                "`{op}` must be Rewriting"
+            );
+        }
     }
 
     #[test]

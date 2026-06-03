@@ -2072,14 +2072,16 @@ impl Parser {
                 // variable `..r` stands for the entire shape, so it must be the
                 // sole dimension. `tensor[..r, k, f32]` (R adjacent to concrete
                 // dims) is Tier-3 rank arithmetic and is rejected at parse time.
-                if items.iter().any(|d| matches!(d, TypeExpr::RankSpread(..))) && items.len() != 1
-                {
+                if items.iter().any(|d| matches!(d, TypeExpr::RankSpread(..))) && items.len() != 1 {
                     return Err(ParseError::Expected {
                         expected: "rank variable `..r` must be the entire shape; \
                                    `..r` adjacent to concrete dimensions is Tier-3 \
                                    rank arithmetic, not supported"
                             .into(),
-                        found: format!("tensor with {} dims including a rank variable", items.len()),
+                        found: format!(
+                            "tensor with {} dims including a rank variable",
+                            items.len()
+                        ),
                         offset: self.current_offset(),
                     });
                 }
@@ -3174,7 +3176,10 @@ mod tests {
     #[test]
     fn rank_spread_parses_as_sole_dim() {
         let decls = p("def f(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)");
-        let Decl::FunDef { ret_ty: Some(ret), .. } = &decls[0] else {
+        let Decl::FunDef {
+            ret_ty: Some(ret), ..
+        } = &decls[0]
+        else {
             panic!("expected fun def, got {:?}", decls[0]);
         };
         match ret {
