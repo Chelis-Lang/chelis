@@ -15439,6 +15439,15 @@ mod tests {
         check_ir_program(&exprs).expect("IR check")
     }
 
+    /// Run the full Surf → desugar → infer pipeline and return the raw
+    /// `InferResult` (errors included) so a test can assert clean or assert
+    /// a specific failure mode end-to-end.
+    fn infer_surf(src: &str) -> InferResult {
+        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        infer_program(&exprs)
+    }
+
     fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
         match expr {
             deep::Expr::List(list, _) => {
@@ -18128,6 +18137,125 @@ bad = chunk(xs, "two")
                 .iter()
                 .any(|e| matches!(e.kind, CheckErrorKind::CycleDetected)),
             "multiple independent Nautilus inputs must not trigger a cycle error; got {errors:?}"
+        );
+    }
+
+    // ── chelis#293: general type var through a function-typed parameter ──
+    //
+    // A def generic over a general type variable `P` declared in its
+    // explicit `[..]` quantifier list, where `P` is threaded through a
+    // function-typed parameter, must instantiate `P` to a fresh variable at
+    // each call site and unify it against the concrete callback argument.
+    // Before the fix, the Surf desugarer misclassified the uppercase `P` as
+    // a rigid ADT `(t-adt {} P)`, so every call site failed with
+    // `type mismatch: P vs tensor[..]`.
+
+    #[test]
+    fn issue_293_general_tvar_through_arrow_param_checks_clean() {
+        // Positive: the reproducer must check clean — no TypeMismatch.
+        let result = infer_surf(
+            r#"
+module Repro.GenericCallback
+def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner_p))
+def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, w, fn (t, q) -> mul(t, q))
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "expected the general-tvar-through-arrow reproducer to check clean, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn issue_293_apply_resid_checks_clean_in_isolation() {
+        // Control: the generic def alone already checked clean before the
+        // fix; it must keep checking clean.
+        let result = infer_surf(
+            r#"
+module Repro.GenericCallback
+def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner_p))
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "apply_resid must check clean in isolation, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn issue_293_dim_var_callback_variant_checks_clean() {
+        // Control (dim-var path): the same shape where the threaded
+        // parameter is a *dim* var `m` rather than a general type var
+        // already worked and must keep working.
+        let result = infer_surf(
+            r#"
+module Repro.DimCallback
+def apply_resid[n, m](x: tensor[n, f32], inner: tensor[m, f32], f: tensor[n, f32] -> tensor[m, f32] -> tensor[n, f32]) -> tensor[n, f32] =
+  f(x, inner)
+def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, w, fn (t, q) -> add(t, q))
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "the dim-var callback control must check clean, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn issue_293_monomorphic_callback_variant_checks_clean() {
+        // Control (monomorphic path): a fully concrete callback already
+        // worked and must keep working.
+        let result = infer_surf(
+            r#"
+module Repro.MonoCallback
+def apply_resid[n](x: tensor[n, f32], inner: tensor[n, f32], f: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner))
+def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, w, fn (t, q) -> mul(t, q))
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "the monomorphic callback control must check clean, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn issue_293_incompatible_callback_still_rejected() {
+        // Negative parity: the fix must NOT over-loosen unification. Here
+        // the callback's second parameter `q` is multiplied with `t`
+        // (a `tensor[n, f32]`), so `q` must be `tensor[n, f32]`. But the
+        // `inner_p` argument supplied at the call site is a scalar `int32`,
+        // which is bound to the same `P`. `P` cannot be both a tensor and a
+        // scalar int32, so this must still produce a clear mismatch.
+        let result = infer_surf(
+            r#"
+module Repro.BadCallback
+def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner_p))
+def use_it(x: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, 1, fn (t, q) -> mul(t, q))
+"#,
+        );
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e.kind,
+                CheckErrorKind::TypeMismatch
+                    | CheckErrorKind::PrecisionMismatch
+                    | CheckErrorKind::DimensionMismatch
+            )),
+            "an incompatible callback/argument combination must still be rejected with a \
+             unification mismatch; unification must not have been over-loosened (chelis#293), \
+             got: {:?}",
+            result.errors
         );
     }
 }
