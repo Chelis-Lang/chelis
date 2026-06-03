@@ -2968,6 +2968,66 @@ impl LowerCtx {
         Self::default_type()
     }
 
+    /// issue #289: call-site variant of [`Self::type_from_type_expr_with_subst`]
+    /// for computing an inlined callee's *formal parameter* shape.
+    ///
+    /// At a call site the callee's parameter precision is determined by
+    /// the actual argument, not by the formal annotation — the call site
+    /// computes the precision-tvar binding separately (via
+    /// [`tensor_prec_substitutions`] over the raw formal type-exprs and
+    /// the concrete actual `TensorType`s). The formal parameter
+    /// `TensorType` derived here is consumed only for *dimension*
+    /// substitution ([`tensor_dim_substitutions`]); its precision slot is
+    /// discarded. So an as-yet-unresolved `(t-var {} p)` precision slot is
+    /// expected and benign here: it is about to be bound from the actual
+    /// argument. Falling through the panicking
+    /// [`Self::try_extract_tensor_type_with_subst`] would crash on that
+    /// legitimate shape. This tolerant variant substitutes a known
+    /// precision when `prec_subst` has one and otherwise leaves the
+    /// default precision in place (the dims, which is all the caller uses,
+    /// are still extracted correctly).
+    ///
+    /// This does NOT weaken the §5.8.1 backend tripwire: a precision var
+    /// that never gets a concrete binding still reaches the panicking
+    /// extractor when the callee *body* is lowered (the body's own tensor
+    /// types route through [`Self::type_from_meta`] /
+    /// [`Self::type_from_type_expr_with_subst`], which panic when
+    /// `prec_subst` lacks the var).
+    fn formal_param_type_for_call(expr: &Expr, prec_subst: &HashMap<String, Prim>) -> TensorType {
+        if let Some(prim) = Self::try_extract_prim(expr) {
+            return TensorType {
+                dims: vec![],
+                precision: prim,
+            };
+        }
+        if let Some(inner) = Self::try_extract_ref_type(expr) {
+            return Self::formal_param_type_for_call(inner, prec_subst);
+        }
+        // Only the precision slot can panic in the strict extractor; reuse
+        // it when no unresolved precision var is present so the strict
+        // path stays authoritative. When the precision slot is an
+        // unresolved `(t-var)`, swap in the resolved primitive if known,
+        // otherwise the default, then extract the dims with that slot.
+        if let Some(name) = extract_precision_var_name(expr) {
+            let resolved = prec_subst
+                .get(&name)
+                .copied()
+                .unwrap_or_else(|| Self::default_type().precision);
+            // Re-run extraction with the var resolved so the dims come out
+            // correctly; substitute the resolved primitive into the slot.
+            let mut tolerant = prec_subst.clone();
+            tolerant.entry(name).or_insert(resolved);
+            if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, &tolerant) {
+                return tt;
+            }
+            return Self::default_type();
+        }
+        if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, prec_subst) {
+            return tt;
+        }
+        Self::default_type()
+    }
+
     fn try_extract_ref_type(expr: &Expr) -> Option<&Expr> {
         if let Expr::List(list, _) = expr
             && list.elements.len() >= 3
@@ -3832,15 +3892,10 @@ impl LowerCtx {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("grad", std::slice::from_ref(fn_expr));
         };
-        let prec_subst_for_params = self.prec_substitutions.clone();
-        let param_types: Vec<TensorType> = param_names
+        let grad_param_type_exprs: Vec<Option<Expr>> = param_names
             .iter()
             .enumerate()
-            .map(|(index, _)| {
-                extract_param_type(fn_expr, index)
-                    .map(|expr| Self::type_from_type_expr_with_subst(expr, &prec_subst_for_params))
-                    .unwrap_or_else(Self::default_type)
-            })
+            .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
             .collect();
         let actual_types: Vec<TensorType> = actual_args
             .iter()
@@ -3851,11 +3906,69 @@ impl LowerCtx {
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
+        // issue #289: the precision substitution visible to the grad
+        // sub-context. Parent bindings first, then the differentiated
+        // function's own formal precision vars bound against the concrete
+        // actual-argument precisions at this grad call site (the latter
+        // wins on overlap). See the longer note at the sub-context seeding
+        // below.
+        let mut grad_prec_subst = self.prec_substitutions.clone();
+        grad_prec_subst.extend(tensor_prec_substitutions(
+            &grad_param_type_exprs,
+            &actual_types,
+        ));
+        // Formal parameter shapes for the differentiated function. Use the
+        // call-site-tolerant variant so a precision var that the grad call
+        // site does NOT pin (it is internal to a callee, resolved when that
+        // callee is inlined into the body below) does not panic here; the
+        // load nodes' precision is taken from `grad_prec_subst` when known.
+        let param_types: Vec<TensorType> = grad_param_type_exprs
+            .iter()
+            .map(|opt_expr| match opt_expr {
+                Some(expr) => Self::formal_param_type_for_call(expr, &grad_prec_subst),
+                None => Self::default_type(),
+            })
+            .collect();
         let mut subctx = LowerCtx::new(
             self.program_types.clone(),
             self.program_defs.clone(),
             LinearityInfo::default(),
         );
+        // issue #289: propagate the call-site precision-tvar substitution
+        // into the grad sub-context so a precision-polymorphic callee
+        // reached while differentiating the body monomorphizes to the
+        // concrete call-site precision — exactly as an ordinary (non-grad)
+        // call through the same callee does in `lower_plain_callable_app`.
+        //
+        // `LowerCtx::new` seeds an EMPTY `prec_substitutions`, so without
+        // this the sub-context lowers the differentiated body with no
+        // precision bindings; the first inlined `tensor[..., p]` callee
+        // then trips the §5.8.1 "monomorphization missed precision var"
+        // tripwire even though the differentiated entry point is fully
+        // concrete `f32`.
+        //
+        // Two sources are merged, parent first so the more-specific
+        // grad-call-site binding wins on overlap:
+        //   1. the parent's substitutions, so a `grad` taken inside an
+        //      already-monomorphized callee inherits that callee's
+        //      precision bindings; and
+        //   2. the precision vars in the differentiated function's own
+        //      formal parameter annotations, bound against the concrete
+        //      precisions of the actual arguments at this grad call site.
+        //      This is the case where `grad` is applied directly to a
+        //      precision-polymorphic function.
+        //
+        // When neither source supplies a concrete precision (a genuinely
+        // under-determined precision var with no concrete call site), the
+        // substitution stays empty and the §5.8.1 tripwire still fires —
+        // preserving the clear diagnostic for that case.
+        //
+        // A precision var that is internal to a callee of the
+        // differentiated body (the issue #289 reproducer: concrete-f32
+        // `loss` calling precision-polymorphic `lin_p`) is NOT in this map
+        // either; it is resolved when that callee is inlined into the body
+        // by `lower_plain_callable_app`'s own call-site precision binding.
+        subctx.prec_substitutions = grad_prec_subst;
         // Subctx inherits the parent's current span so synthesized loads
         // for grad's parameters carry the grad-call's span.
         subctx.current_span_id = self.current_span_id.clone();
@@ -3960,7 +4073,12 @@ impl LowerCtx {
         let param_types: Vec<TensorType> = param_type_exprs
             .iter()
             .map(|opt_expr| match opt_expr {
-                Some(expr) => Self::type_from_type_expr_with_subst(expr, &prec_subst_for_params),
+                // issue #289: tolerant of an as-yet-unresolved precision
+                // var in a formal parameter annotation — the precision is
+                // bound from the actual argument a few lines below (via
+                // `tensor_prec_substitutions`); only the dims of this
+                // formal type are consumed (by `tensor_dim_substitutions`).
+                Some(expr) => Self::formal_param_type_for_call(expr, &prec_subst_for_params),
                 None => Self::default_type(),
             })
             .collect();
