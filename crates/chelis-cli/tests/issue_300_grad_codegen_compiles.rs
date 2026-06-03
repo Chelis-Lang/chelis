@@ -206,9 +206,10 @@ out = h(to_tensor([3.0, 4.0]))\n";
     let kernel_c = build.path().join("fwd.c");
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     let trimmed = stdout.trim();
+    let emitted = fs::read_to_string(&kernel_c).unwrap_or_default();
     assert!(
         trimmed.contains("17.5"),
-        "h(x) = sum(x * 2.5) for x=[3,4] must be 17.5; got stdout={trimmed:?}",
+        "h(x) = sum(x * 2.5) for x=[3,4] must be 17.5; got stdout={trimmed:?}\nEMITTED C:\n{emitted}",
     );
 }
 
