@@ -2741,13 +2741,13 @@ int main(void) {{
         let a_init: String = a_data
             .iter()
             .enumerate()
-            .map(|(i, v)| TestInput::harness_input_fill_line(&format!("ta->data[{i}]"), *v))
+            .map(|(i, v)| harness_input_fill_line(&format!("ta->data[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
         let b_init: String = b_data
             .iter()
             .enumerate()
-            .map(|(i, v)| TestInput::harness_input_fill_line(&format!("tb->data[{i}]"), *v))
+            .map(|(i, v)| harness_input_fill_line(&format!("tb->data[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 
@@ -2892,7 +2892,7 @@ int main(void) {{
         let x_init = inputs
             .iter()
             .enumerate()
-            .map(|(i, v)| TestInput::harness_input_fill_line(&format!("tx->data[{i}]"), *v))
+            .map(|(i, v)| harness_input_fill_line(&format!("tx->data[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 
