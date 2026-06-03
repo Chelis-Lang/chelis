@@ -219,6 +219,30 @@ dim-var or a precision tvar depending on its position inside a
 precision slot resolves to `t-var`. Position determines kind; the
 quantifier list is unkinded.
 
+A name in a def's `[..]` clause is also a **general type variable**
+wherever it appears as a type by itself — as a bare parameter type, a
+return type, or an argument/return position of a function-typed
+(`->`) parameter. Such a name lowers to `(t-var {} <name>)` and is
+generalized into the def's scheme, so each call site instantiates a
+fresh variable that unifies against the concrete argument. The `[..]`
+clause is the authoritative quantifier source and **overrides the
+PascalCase-vs-snake_case case-split** (§3.1): a quantifier name that
+happens to be PascalCase (e.g. `P`) is a type variable, not a rigid
+ADT, because the user explicitly bound it. Threading such a name
+through a function-typed parameter — e.g.
+
+```text
+def apply_resid[n, P](
+  x: tensor[n, f32],
+  inner_p: P,
+  f: tensor[n, f32] -> P -> tensor[n, f32],
+) -> tensor[n, f32] = add(x, f(x, inner_p))
+```
+
+must therefore type-check both in isolation and at every call site
+(chelis#293). Outside an `[..]` clause the case-split still applies:
+an unquantified PascalCase name is an ADT.
+
 Examples:
 
 ```text

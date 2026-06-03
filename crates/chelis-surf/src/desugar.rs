@@ -1845,15 +1845,29 @@ fn desugar_type_with_scope(
 ) -> deep::Expr {
     match ty {
         TypeExpr::Named(name, _) => {
-            // The contextual rule for type-name positions: a primitive
-            // name is a t-prim; a PascalCase name is an ADT; everything
-            // else is a t-var. Whether the t-var is bound by the
-            // surrounding sig (`tvar_set`) or unbound is decided
-            // downstream — the desugar layer just emits the t-var node
-            // and the type checker resolves the binding.
-            let _ = tvar_set; // contextual rule documented above
+            // The contextual rule for type-name positions:
+            //
+            // - A primitive name (`f32`, `int32`, ...) is a `t-prim`.
+            // - A name that appears in the enclosing quantifier set
+            //   (`tvar_set` — a def's explicit `[..]` clause or a sig's
+            //   implicit quantifiers) is a quantified type variable and
+            //   becomes `(t-var {} <name>)` REGARDLESS of case. The
+            //   `[..]` clause is the authoritative, unkinded source per
+            //   `spec/02-surf-syntax.md` §P4b, so a name the user
+            //   explicitly bound there overrides the lexical
+            //   case-split. This is what threads a general type
+            //   variable (e.g. `def f[n, P](.., f: .. -> P -> ..)`)
+            //   through arrow argument positions so it can unify at the
+            //   call site (chelis#293). Without this, an uppercase
+            //   quantifier name was misclassified as a rigid ADT and
+            //   every call site failed with `type mismatch: P vs ..`.
+            // - Otherwise the lexical case-split applies: a PascalCase
+            //   name is an ADT; a lowercase name is a free `t-var`
+            //   whose binding the type checker resolves downstream.
             if PRIMITIVES.contains(&name.as_str()) {
                 node("t-prim", vec![sym(name)])
+            } else if tvar_set.contains(name.as_str()) {
+                node("t-var", vec![sym(name)])
             } else if name.starts_with(|c: char| c.is_uppercase()) {
                 node("t-adt", vec![sym(name)])
             } else {
@@ -2360,6 +2374,135 @@ mod tests {
                 "function dim params should NOT emit defdim, got:\n{n}"
             );
         }
+    }
+
+    #[test]
+    fn def_quantifier_general_tvar_through_arrow_is_t_var() {
+        // chelis#293: a def generic over a general type variable declared in
+        // the explicit `[..]` quantifier list, threaded through a
+        // function-typed parameter, must desugar that name to `(t-var {} P)`
+        // — NOT `(t-adt {} P)` — even though it is uppercase. The `[..]`
+        // clause is the authoritative, unkinded quantifier source
+        // (spec/02-surf-syntax.md §P4b), so it overrides the lexical
+        // case-split.
+        //
+        // def apply_resid[n, P](
+        //     x: tensor[n, f32],
+        //     inner_p: P,
+        //     f: tensor[n, f32] -> P -> tensor[n, f32],
+        // ) -> tensor[n, f32] = add(x, f(x, inner_p))
+        let decl = Decl::FunDef {
+            name: "apply_resid".to_string(),
+            dim_params: vec!["n".to_string(), "P".to_string()],
+            params: vec![
+                param(
+                    "x",
+                    Some(TypeExpr::Tensor(
+                        vec![named_ty("n")],
+                        "f32".to_string(),
+                        s(),
+                    )),
+                ),
+                param("inner_p", Some(named_ty("P"))),
+                param(
+                    "f",
+                    Some(TypeExpr::Arrow(
+                        vec![
+                            TypeExpr::Tensor(vec![named_ty("n")], "f32".to_string(), s()),
+                            named_ty("P"),
+                        ],
+                        Box::new(TypeExpr::Tensor(
+                            vec![named_ty("n")],
+                            "f32".to_string(),
+                            s(),
+                        )),
+                        s(),
+                    )),
+                ),
+            ],
+            ret_ty: Some(TypeExpr::Tensor(
+                vec![named_ty("n")],
+                "f32".to_string(),
+                s(),
+            )),
+            effects: None,
+            body: Expr::Apply(
+                Box::new(tvar("add")),
+                vec![
+                    tvar("x"),
+                    Expr::Apply(
+                        Box::new(tvar("f")),
+                        vec![tvar("x"), tvar("inner_p")],
+                        s(),
+                    ),
+                ],
+                s(),
+            ),
+            span: s(),
+        };
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 2, "expected defsig + def, got: {nodes:?}");
+        let sig = &nodes[0];
+        // The general type variable `P` must be a t-var everywhere it
+        // appears in the signature — the bare `inner_p` annotation AND the
+        // arrow parameter — so it can unify at the call site.
+        assert!(
+            sig.contains("(t-var {} P)"),
+            "expected `P` to desugar to (t-var {{}} P) in the signature, got:\n{sig}"
+        );
+        assert!(
+            !sig.contains("(t-adt {} P)"),
+            "general type var `P` from the `[..]` quantifier list must NOT be a \
+             rigid ADT (chelis#293), got:\n{sig}"
+        );
+        // `n` is a declared dim param and must stay a d-var.
+        assert!(
+            sig.contains("(d-var {} n)"),
+            "expected `n` to desugar to (d-var {{}} n), got:\n{sig}"
+        );
+    }
+
+    #[test]
+    fn def_uppercase_name_not_in_quantifier_stays_adt() {
+        // Negative control for the chelis#293 fix: an uppercase type name
+        // that is NOT in the `[..]` quantifier list keeps the lexical
+        // case-split and stays a `(t-adt {} Activation)`. Only names the
+        // user explicitly bound in `[..]` are promoted to type variables.
+        //
+        // def run[n](x: tensor[n, f32], a: Activation) -> tensor[n, f32] = x
+        let decl = Decl::FunDef {
+            name: "run".to_string(),
+            dim_params: vec!["n".to_string()],
+            params: vec![
+                param(
+                    "x",
+                    Some(TypeExpr::Tensor(
+                        vec![named_ty("n")],
+                        "f32".to_string(),
+                        s(),
+                    )),
+                ),
+                param("a", Some(named_ty("Activation"))),
+            ],
+            ret_ty: Some(TypeExpr::Tensor(
+                vec![named_ty("n")],
+                "f32".to_string(),
+                s(),
+            )),
+            effects: None,
+            body: tvar("x"),
+            span: s(),
+        };
+        let nodes = desugar_decl_strs(&decl);
+        let sig = &nodes[0];
+        assert!(
+            sig.contains("(t-adt {} Activation)"),
+            "an uppercase name NOT in the quantifier list must stay an ADT, got:\n{sig}"
+        );
+        assert!(
+            !sig.contains("(t-var {} Activation)"),
+            "an unquantified ADT name must not be promoted to a type variable, got:\n{sig}"
+        );
     }
 
     // --- Let def (with type) produces defsig + def ---
