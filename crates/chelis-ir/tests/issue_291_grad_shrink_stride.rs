@@ -393,6 +393,104 @@ fn issue_291_grad_stride_matches_finite_difference() {
     }
 }
 
+/// Step strictly larger than the axis: `n = 2`, `step = 5`, so the
+/// strided size is `ceil(2/5) = 1` and only source slot `0` is sampled.
+/// `f(x) = sum(stride(x, 5)) = x0`, so `df/dx = [1, 0]`. Pins the
+/// single-group case where the upsample pads one kept element to `step`
+/// (5) and the adjoint shrink trims the four-element overshoot back to
+/// the source size 2.
+#[test]
+fn issue_291_grad_stride_step_exceeds_axis() {
+    let (dag, x, out) = build_stride_sum_1d(2, 5);
+    let result = grad_dag_checked(&dag, out, &[x]).expect("grad must construct");
+    let grad_x = result.grad_nodes[&x];
+    let mut inputs = HashMap::new();
+    inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![10.0, 20.0]));
+    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    assert_close("grad_stride_2_by_5", &vals[&grad_x].data, &[1.0, 0.0]);
+    assert_eq!(vals[&grad_x].shape, vec![2]);
+}
+
+/// Step exactly equal to the axis: `n = 4`, `step = 4`, strided size
+/// `ceil(4/4) = 1`, only slot `0` sampled. `f(x) = sum(stride(x, 4)) =
+/// x0`, so `df/dx = [1, 0, 0, 0]`. Pins the boundary where `m_a * step`
+/// (4) equals the source size exactly (no trailing overshoot to trim).
+#[test]
+fn issue_291_grad_stride_step_equals_axis() {
+    let (dag, x, out) = build_stride_sum_1d(4, 4);
+    let result = grad_dag_checked(&dag, out, &[x]).expect("grad must construct");
+    let grad_x = result.grad_nodes[&x];
+    let mut inputs = HashMap::new();
+    inputs.insert(
+        "x".into(),
+        TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
+    );
+    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    assert_close(
+        "grad_stride_4_by_4",
+        &vals[&grad_x].data,
+        &[1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(vals[&grad_x].shape, vec![4]);
+}
+
+/// Higher-order AD through the stride adjoint (the PR's comment claims
+/// this is supported; this pins it). `f(x) = sum(stride(x, 2)^2) =
+/// x0^2 + x2^2`. First grad: `g(x) = df/dx = [2*x0, 0, 2*x2, 0]`. Define
+/// `h(x) = sum(g(x)) = 2*x0 + 2*x2`; the SECOND grad is then
+/// `dh/dx = [2, 0, 2, 0]`. Because the stride adjoint is built entirely
+/// from reshape/pad/shrink (each already higher-order differentiable),
+/// differentiating through the backward DAG itself must construct and
+/// yield the exact second-order scatter.
+#[test]
+fn issue_291_grad_stride_supports_higher_order_ad() {
+    let mut dag = Dag::new();
+    let in_ty = vec_n_f32(4);
+    let strided_ty = vec_n_f32(2);
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    let s = dag.add_node(
+        RiscOp::Stride { strides: vec![2] },
+        vec![x],
+        strided_ty.clone(),
+        None,
+    );
+    let sq = dag.add_node(RiscOp::Mul, vec![s, s], strided_ty, None);
+    let out = dag.add_node(
+        RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
+        vec![sq],
+        scalar_f32(),
+        None,
+    );
+    // First-order backward DAG.
+    let first = grad_dag_checked(&dag, out, &[x]).expect("first grad must construct");
+    let grad_x = first.grad_nodes[&x];
+    // Reduce the first gradient to a scalar so the second grad is well
+    // defined, then differentiate the backward DAG with respect to `x`.
+    let mut g2dag = first.dag.clone();
+    let sum_grad = g2dag.add_node(
+        RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
+        vec![grad_x],
+        scalar_f32(),
+        None,
+    );
+    let second = grad_dag_checked(&g2dag, sum_grad, &[x])
+        .expect("second grad must construct (higher-order AD through stride adjoint)");
+    let grad2_x = second.grad_nodes[&x];
+    let mut inputs = HashMap::new();
+    inputs.insert(
+        "x".into(),
+        TensorValue::from_vec(vec![4], vec![3.0, 99.0, 5.0, 99.0]),
+    );
+    let vals = eval_tensor(&second.dag, &inputs).expect("second-grad eval");
+    // d/dx (2*x0 + 2*x2) = [2, 0, 2, 0]; independent of the skipped slots.
+    assert_close(
+        "grad_grad_stride_2",
+        &vals[&grad2_x].data,
+        &[2.0, 0.0, 2.0, 0.0],
+    );
+    assert_eq!(vals[&grad2_x].shape, vec![4]);
+}
+
 // --- STRIDE: negative parity ---
 
 /// Negative parity: a stride over a SYMBOLIC (unsized) axis cannot be
