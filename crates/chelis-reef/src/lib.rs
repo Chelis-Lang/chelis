@@ -4216,9 +4216,7 @@ fn compute_exports(decls: &[Decl]) -> BTreeSet<String> {
     let ctors_for_type: HashMap<&str, &[Variant]> = decls
         .iter()
         .filter_map(|decl| match decl {
-            Decl::TypeDef {
-                name, variants, ..
-            } => Some((name.as_str(), variants.as_slice())),
+            Decl::TypeDef { name, variants, .. } => Some((name.as_str(), variants.as_slice())),
             _ => None,
         })
         .collect();
@@ -4251,9 +4249,7 @@ fn compute_exports(decls: &[Decl]) -> BTreeSet<String> {
             | Decl::Property { name, .. }
             | Decl::LetDef { name, .. }
             | Decl::TypeAlias { name, .. } => vec![name.clone()],
-            Decl::TypeDef {
-                name, variants, ..
-            } => {
+            Decl::TypeDef { name, variants, .. } => {
                 let mut names = vec![name.clone()];
                 names.extend(variants.iter().map(|variant| variant.name.clone()));
                 names
@@ -4273,9 +4269,7 @@ fn collect_symbol_kinds(decls: &[Decl]) -> BTreeMap<String, SymbolKind> {
             | Decl::Sig { name, .. } => {
                 symbols.insert(name.clone(), SymbolKind::Value);
             }
-            Decl::TypeDef {
-                name, variants, ..
-            } => {
+            Decl::TypeDef { name, variants, .. } => {
                 symbols.insert(name.clone(), SymbolKind::Type);
                 // Constructor (variant) names are value-level symbols:
                 // they appear in expression position (`IntCol(xs, mask)`,
@@ -6609,8 +6603,9 @@ path = "./coral"
         );
 
         let entry = root.join("src/main.ch");
-        let err = prepare_program_for_file(&entry)
-            .expect_err("ambiguous unqualified IntCol import must be rejected, not silently dispatched");
+        let err = prepare_program_for_file(&entry).expect_err(
+            "ambiguous unqualified IntCol import must be rejected, not silently dispatched",
+        );
         assert!(
             err.contains("ambiguous reference to `IntCol`"),
             "diagnostic must name the ambiguous constructor; got: {err}"
