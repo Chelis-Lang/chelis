@@ -520,7 +520,10 @@ fn issue_288_grad_wrt_size1_expand_source_nonzero_axis() {
     );
     let grad_s = result.grad_nodes[&s];
     let mut inputs = HashMap::new();
-    inputs.insert("s".into(), TensorValue::from_vec(vec![3, 1], vec![1.0, 2.0, 3.0]));
+    inputs.insert(
+        "s".into(),
+        TensorValue::from_vec(vec![3, 1], vec![1.0, 2.0, 3.0]),
+    );
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![3, 2], vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
