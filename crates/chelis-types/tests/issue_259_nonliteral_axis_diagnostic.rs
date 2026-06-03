@@ -277,7 +277,8 @@ def consumer[n](x: &tensor[n, f32]) -> tensor[n, f32] = copy(x)
 def go(v: int32) -> tensor[1, f32] = consumer(&v)
 "#;
     let deep = surf_to_deep(src);
-    let rep = check_ir_program(&deep).expect_err("borrow of int32 against &tensor must be rejected");
+    let rep =
+        check_ir_program(&deep).expect_err("borrow of int32 against &tensor must be rejected");
     assert!(
         !rep.errors.is_empty(),
         "borrow of a non-tensor must surface at least one error"
