@@ -402,7 +402,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--hull-known-conservative", required=True, type=Path)
     parser.add_argument("--chelis-bin", required=True)
     parser.add_argument("--hull-commit", required=True)
-    parser.add_argument("--chelis-version", default="0.7.21")
+    parser.add_argument("--chelis-version", default="0.7.22")
     parser.add_argument("--generator-seed", type=int, default=20260530)
     parser.add_argument("--golden-sample", type=int, default=50, help="capture one golden wire blob per N check programs")
     parser.add_argument("--timeout", type=float, default=30.0)
