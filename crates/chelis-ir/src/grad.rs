@@ -1028,22 +1028,112 @@ fn compute_adjoints(
             Some(vec![(x, dx)])
         }
         RiscOp::Expand { axis, .. } => {
+            // Two forward `Expand` shapes exist (see `verify.rs` C10):
+            //
+            //   * rank-INCREASING: a new axis is inserted at `axis`, so
+            //     `output_rank == source_rank + 1`. The broadcast copies
+            //     the source across the new axis; the adjoint is a `Sum`
+            //     over that axis, which *removes* it and recovers the
+            //     source rank exactly.
+            //
+            //   * SAME-RANK: an existing size-1 axis is broadcast to size
+            //     n, so `output_rank == source_rank`. The adjoint must
+            //     `Sum` over `axis` (which removes it, giving rank
+            //     `source_rank - 1`) and then restore the collapsed size-1
+            //     axis so the cotangent matches the source shape
+            //     `[..., 1, ...]`.
+            //
+            // The previous rule emitted `Sum { axis }` with the SOURCE
+            // type as the output for both shapes. For the same-rank case
+            // that mislabels a rank `source_rank - 1` reduction as the
+            // full rank-`source_rank` source type, so the cotangent flows
+            // on with the wrong shape and a downstream elementwise op
+            // fails verification with a dimension mismatch (issue #288:
+            // `expand(scalar_to_tensor(c), 0, n)`, where the constant
+            // lowers to a rank-1 size-1 `tensor[1]` source and the expand
+            // is a same-rank `1 -> n` broadcast). Branch on the forward
+            // shape and reshape the same-rank result back to the source.
             let x = node.inputs[0];
-            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let source_ty = forward.get(x).unwrap().output_type.clone();
+            let source_rank = source_ty.dims.len();
+            let output_rank = node.output_type.dims.len();
+            let same_rank = output_rank == source_rank;
             // The gradient sum runs over the operand precision; use the
             // spec-default accumulator so the AD path tracks WS-A0 §5.7.1.
-            let acc = RiscOp::default_reduce_sum_accumulator(input_ty.precision)
-                .unwrap_or(input_ty.precision);
-            let dx = dag.add_node(
+            let acc = RiscOp::default_reduce_sum_accumulator(source_ty.precision)
+                .unwrap_or(source_ty.precision);
+
+            // `Sum { axis }` over the cotangent removes `axis`. Its
+            // resulting dims depend on the forward expand shape:
+            //
+            //   * RANK-INCREASING: the cotangent's `axis` is the inserted
+            //     axis, which is NOT present in the source, so removing it
+            //     yields the source dims unchanged.
+            //   * SAME-RANK: the cotangent's `axis` IS the source's
+            //     broadcast (size-1) axis, so removing it yields the
+            //     source dims with that axis collapsed away; a follow-up
+            //     reshape restores it to size 1.
+            let summed_dims: Vec<DimInfo> = if same_rank {
+                let mut dims = source_ty.dims.clone();
+                if *axis < dims.len() {
+                    dims.remove(*axis);
+                }
+                dims
+            } else {
+                source_ty.dims.clone()
+            };
+            let summed = dag.add_node(
                 RiscOp::Sum {
                     axis: *axis,
                     accumulator: acc,
                 },
                 vec![g],
-                input_ty,
+                TensorType {
+                    dims: summed_dims.clone(),
+                    precision: acc,
+                },
                 None,
             );
-            Some(vec![(x, dx)])
+
+            // WS-A3: the §5.7.1 accumulator may be wider than the source
+            // precision (bf16/f16 sum into f32); the gradient must be in
+            // the source precision, so cast back when they differ. This
+            // mirrors the `Sum` adjoint above.
+            let summed_in_source_prec = if acc == source_ty.precision {
+                summed
+            } else {
+                dag.add_node(
+                    RiscOp::Cast {
+                        new_precision: source_ty.precision,
+                    },
+                    vec![summed],
+                    TensorType {
+                        dims: summed_dims,
+                        precision: source_ty.precision,
+                    },
+                    None,
+                )
+            };
+
+            if same_rank {
+                // Same-rank broadcast of a size-1 axis: restore the
+                // collapsed size-1 axis so the cotangent matches the
+                // source shape `[..., 1, ...]`.
+                let dx = dag.add_node(
+                    RiscOp::Reshape {
+                        new_shape: source_ty.dims.clone(),
+                    },
+                    vec![summed_in_source_prec],
+                    source_ty,
+                    None,
+                );
+                Some(vec![(x, dx)])
+            } else {
+                // Rank-increasing broadcast: the single `Sum` already
+                // recovered the source rank (this also covers a rank-0
+                // source, whose cotangent is rank 1 and sums to a scalar).
+                Some(vec![(x, summed_in_source_prec)])
+            }
         }
         RiscOp::OneHot { .. } => Some(vec![]),
         RiscOp::Pad { padding, .. } => {
