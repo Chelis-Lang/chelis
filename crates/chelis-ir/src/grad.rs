@@ -209,12 +209,9 @@ pub fn grad_dag_checked(
         }
     }
 
-    grad_dag(forward, output, wrt).ok_or(AdError::NotSupported {
+    grad_dag_result(forward, output, wrt).map_err(|why| AdError::NotSupported {
         op: "<unknown>",
-        reason: AdRejectionReason::Other(
-            "grad: failed to construct backward DAG (unsupported op or verification failure)"
-                .to_string(),
-        ),
+        reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
     })
 }
 
@@ -311,12 +308,29 @@ fn stamp_grad_marker(dag: &mut Dag, dag_size_before: usize, forward_node: &DagNo
 ///
 /// Returns `None` if the forward DAG is empty or the output node doesn't exist.
 pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
+    grad_dag_result(forward, output, wrt).ok()
+}
+
+/// Like [`grad_dag`] but returns a structured failure string instead of
+/// a bare `None` when backward construction fails. The string names the
+/// concrete cause — either an unsupported op whose adjoint is undefined
+/// or the post-construction verifier diagnostics — so callers
+/// (`grad_dag_checked` and its user-facing lowering error) can report
+/// *why* the backward DAG could not be built rather than the legacy
+/// opaque "unsupported op or verification failure".
+fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<GradResult, String> {
     if forward.is_empty() {
-        return None;
+        return Err("grad: forward DAG is empty".to_string());
     }
-    let output_ty = forward.get(output)?.output_type.clone();
+    let output_ty = forward
+        .get(output)
+        .ok_or_else(|| "grad: output node is missing from the forward DAG".to_string())?
+        .output_type
+        .clone();
     if !is_scalar_float(&output_ty) {
-        return None;
+        return Err(format!(
+            "grad: output node type {output_ty:?} is not a scalar float"
+        ));
     }
     // Forward nodes clone span_id + merged_spans unchanged via Dag::clone()
     // — `forward.clone()` deep-copies the DagNodes, and the existing
@@ -344,7 +358,14 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 
         let node = forward.get(node_id).unwrap().clone();
         let dag_size_before = dag.len();
-        let input_grads = compute_adjoints(&node, grad_out, forward, &mut dag)?;
+        let input_grads =
+            compute_adjoints(&node, grad_out, forward, &mut dag).ok_or_else(|| {
+                format!(
+                    "grad: no reverse-mode adjoint is defined for `{}` (node {})",
+                    risc_op_name(&node.op),
+                    node.id.0
+                )
+            })?;
         // Every node added inside compute_adjoints is a backward
         // (adjoint) node for `node`. Stamp the grad marker + the
         // forward span onto each.
@@ -383,11 +404,15 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 
     let (dag, output_node, grad_nodes) = prune_to_requested_outputs(&dag, output, &grad_nodes);
 
-    if !crate::verify::verify(&dag).is_empty() {
-        return None;
+    let verify_errors = crate::verify::verify(&dag);
+    if !verify_errors.is_empty() {
+        return Err(format!(
+            "grad: constructed backward DAG failed verification: {}",
+            verify_errors.join("; ")
+        ));
     }
 
-    Some(GradResult {
+    Ok(GradResult {
         dag,
         output_node,
         grad_nodes,
@@ -1003,22 +1028,112 @@ fn compute_adjoints(
             Some(vec![(x, dx)])
         }
         RiscOp::Expand { axis, .. } => {
+            // Two forward `Expand` shapes exist (see `verify.rs` C10):
+            //
+            //   * rank-INCREASING: a new axis is inserted at `axis`, so
+            //     `output_rank == source_rank + 1`. The broadcast copies
+            //     the source across the new axis; the adjoint is a `Sum`
+            //     over that axis, which *removes* it and recovers the
+            //     source rank exactly.
+            //
+            //   * SAME-RANK: an existing size-1 axis is broadcast to size
+            //     n, so `output_rank == source_rank`. The adjoint must
+            //     `Sum` over `axis` (which removes it, giving rank
+            //     `source_rank - 1`) and then restore the collapsed size-1
+            //     axis so the cotangent matches the source shape
+            //     `[..., 1, ...]`.
+            //
+            // The previous rule emitted `Sum { axis }` with the SOURCE
+            // type as the output for both shapes. For the same-rank case
+            // that mislabels a rank `source_rank - 1` reduction as the
+            // full rank-`source_rank` source type, so the cotangent flows
+            // on with the wrong shape and a downstream elementwise op
+            // fails verification with a dimension mismatch (issue #288:
+            // `expand(scalar_to_tensor(c), 0, n)`, where the constant
+            // lowers to a rank-1 size-1 `tensor[1]` source and the expand
+            // is a same-rank `1 -> n` broadcast). Branch on the forward
+            // shape and reshape the same-rank result back to the source.
             let x = node.inputs[0];
-            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let source_ty = forward.get(x).unwrap().output_type.clone();
+            let source_rank = source_ty.dims.len();
+            let output_rank = node.output_type.dims.len();
+            let same_rank = output_rank == source_rank;
             // The gradient sum runs over the operand precision; use the
             // spec-default accumulator so the AD path tracks WS-A0 §5.7.1.
-            let acc = RiscOp::default_reduce_sum_accumulator(input_ty.precision)
-                .unwrap_or(input_ty.precision);
-            let dx = dag.add_node(
+            let acc = RiscOp::default_reduce_sum_accumulator(source_ty.precision)
+                .unwrap_or(source_ty.precision);
+
+            // `Sum { axis }` over the cotangent removes `axis`. Its
+            // resulting dims depend on the forward expand shape:
+            //
+            //   * RANK-INCREASING: the cotangent's `axis` is the inserted
+            //     axis, which is NOT present in the source, so removing it
+            //     yields the source dims unchanged.
+            //   * SAME-RANK: the cotangent's `axis` IS the source's
+            //     broadcast (size-1) axis, so removing it yields the
+            //     source dims with that axis collapsed away; a follow-up
+            //     reshape restores it to size 1.
+            let summed_dims: Vec<DimInfo> = if same_rank {
+                let mut dims = source_ty.dims.clone();
+                if *axis < dims.len() {
+                    dims.remove(*axis);
+                }
+                dims
+            } else {
+                source_ty.dims.clone()
+            };
+            let summed = dag.add_node(
                 RiscOp::Sum {
                     axis: *axis,
                     accumulator: acc,
                 },
                 vec![g],
-                input_ty,
+                TensorType {
+                    dims: summed_dims.clone(),
+                    precision: acc,
+                },
                 None,
             );
-            Some(vec![(x, dx)])
+
+            // WS-A3: the §5.7.1 accumulator may be wider than the source
+            // precision (bf16/f16 sum into f32); the gradient must be in
+            // the source precision, so cast back when they differ. This
+            // mirrors the `Sum` adjoint above.
+            let summed_in_source_prec = if acc == source_ty.precision {
+                summed
+            } else {
+                dag.add_node(
+                    RiscOp::Cast {
+                        new_precision: source_ty.precision,
+                    },
+                    vec![summed],
+                    TensorType {
+                        dims: summed_dims,
+                        precision: source_ty.precision,
+                    },
+                    None,
+                )
+            };
+
+            if same_rank {
+                // Same-rank broadcast of a size-1 axis: restore the
+                // collapsed size-1 axis so the cotangent matches the
+                // source shape `[..., 1, ...]`.
+                let dx = dag.add_node(
+                    RiscOp::Reshape {
+                        new_shape: source_ty.dims.clone(),
+                    },
+                    vec![summed_in_source_prec],
+                    source_ty,
+                    None,
+                );
+                Some(vec![(x, dx)])
+            } else {
+                // Rank-increasing broadcast: the single `Sum` already
+                // recovered the source rank (this also covers a rank-0
+                // source, whose cotangent is rank 1 and sums to a scalar).
+                Some(vec![(x, summed_in_source_prec)])
+            }
         }
         RiscOp::OneHot { .. } => Some(vec![]),
         RiscOp::Pad { padding, .. } => {

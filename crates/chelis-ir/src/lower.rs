@@ -5596,17 +5596,18 @@ impl LowerCtx {
 
     /// Extract a single usize value from an expression.
     fn extract_usize_value(&self, expr: &Expr) -> Option<usize> {
-        match expr {
-            Expr::Atom(Atom::Int(n), _) => Some(*n as usize),
-            Expr::List(list, _) => {
-                if let Some(Expr::Atom(Atom::Int(n), _)) = list.elements.get(2) {
-                    Some(*n as usize)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+        // Recognize bare ints, `(lit {} n)`, and `(cast {} <inner> ty)`
+        // wrappers via the shared `extract_int_for_dim` walker. Surf
+        // routinely wraps integer arguments in `cast(n, int32)` (e.g.
+        // `expand(x, cast(0, int32), cast(2, int32))`); without
+        // unwrapping the cast this returned `None` and callers silently
+        // fell back to a default (axis 0 / size 1), so `expand(...,
+        // cast(2, int32))` produced a `tensor[1]` instead of `tensor[2]`
+        // and the constant-broadcast idiom in issue #288 lowered to a
+        // shape-mismatched `Mul`. Reject negative values (sizes/axes are
+        // non-negative) so the caller's own negative-axis normalization
+        // path is not bypassed.
+        extract_int_for_dim(expr).and_then(|n| usize::try_from(n).ok())
     }
 
     fn extract_dim_expr_value(&self, expr: &Expr) -> Option<DimExpr> {
