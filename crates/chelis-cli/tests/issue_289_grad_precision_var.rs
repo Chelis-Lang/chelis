@@ -180,6 +180,26 @@ fn error_messages(json: &Value) -> Vec<String> {
 // `def assert_close_tensor[n, p](...)` shape). The concrete dimension `2`
 // stays concrete; only the precision slot is the type variable `p`. The
 // differentiated entry point `loss` is fully concrete `f32`.
+//
+// The compiled-and-run numeric cases use single-`wrt` grad
+// (`grad(loss, wrt=(target))(x, w)`), which lowers to a single gradient
+// tensor — NOT a tuple. The build/check cases below exercise the full
+// two-output `grad(loss)(x, w)` form. This split keeps the numeric
+// assertions off the unrelated `chelis_tuple_get` C-codegen path for
+// projecting a grad tuple, which is its own (non-#289) backend issue;
+// the precision-monomorphization behavior under test here is identical
+// for the single-output and tuple forms.
+fn reproducer_source_wrt(wrt_target: &str) -> String {
+    format!(
+        "def lin_p[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
+         def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n\
+           tensor_to_scalar(sum(lin_p(x, w), cast(0, int32)))\n\
+         def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
+           grad(loss, wrt=({wrt_target}))(x, w)\n\
+         out = dloss(to_tensor([3.0, 4.0]), to_tensor([5.0, 6.0]))\n",
+    )
+}
+
 fn reproducer_source(proj: &str) -> String {
     format!(
         "def lin_p[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
@@ -193,13 +213,13 @@ fn reproducer_source(proj: &str) -> String {
 
 // =====================================================================
 // Positive: the reproducer builds AND differentiates correctly through
-// the precision-polymorphic callee. d/dx sum(x*w) = w.
+// the precision-polymorphic callee. d/dx sum(x*w) = w, d/dw = x.
 // =====================================================================
 
 #[test]
 fn issue_289_grad_through_precision_var_callee_dx_equals_w() {
     // out = d/dx with x=[3,4], w=[5,6]; analytic grad = w = [5, 6].
-    let stdout = build_and_run(&reproducer_source("0"), "grad_pvar_dx");
+    let stdout = build_and_run(&reproducer_source_wrt("x"), "grad_pvar_dx");
     let actual = parse_tensor_data(&stdout, "out");
     assert_grad_matches(&actual, &[5.0, 6.0], 1e-5, "issue #289 d/dx = w");
 }
@@ -207,7 +227,7 @@ fn issue_289_grad_through_precision_var_callee_dx_equals_w() {
 #[test]
 fn issue_289_grad_through_precision_var_callee_dw_equals_x() {
     // out = d/dw with x=[3,4], w=[5,6]; analytic grad = x = [3, 4].
-    let stdout = build_and_run(&reproducer_source("1"), "grad_pvar_dw");
+    let stdout = build_and_run(&reproducer_source_wrt("w"), "grad_pvar_dw");
     let actual = parse_tensor_data(&stdout, "out");
     assert_grad_matches(&actual, &[3.0, 4.0], 1e-5, "issue #289 d/dw = x");
 }
@@ -218,7 +238,8 @@ fn issue_289_reproducer_check_is_clean() {
     // `grad(loss)` has a concrete scalar-float output and the whole
     // program must type-check cleanly. (The issue's "grad requires a
     // scalar floating output, got <error>" check error was a downstream
-    // symptom of the precision var not concretizing.)
+    // symptom of the precision var not concretizing.) Exercises the full
+    // two-output `grad(loss)(x, w).0` tuple form.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("repro_check.ch");
     write_file(&path, &reproducer_source("0"));
@@ -232,6 +253,11 @@ fn issue_289_reproducer_check_is_clean() {
 
 #[test]
 fn issue_289_reproducer_build_does_not_surface_monomorphization_tripwire() {
+    // Exercises the full two-output `grad(loss)(x, w).0` tuple form: the
+    // build must succeed and must NOT trip the §5.8.1 tripwire. (This is
+    // a build-only assertion; it does not run the produced binary, so the
+    // unrelated grad-tuple `chelis_tuple_get` runtime issue does not
+    // affect it.)
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("repro_build.ch");
     write_file(&path, &reproducer_source("0"));
@@ -265,7 +291,7 @@ fn issue_289_control_inline_f32_callee_dx_equals_w() {
          def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(lin_f32(x, w), cast(0, int32)))\n\
          def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
-           (grad(loss)(x, w)).0\n\
+           grad(loss, wrt=(x))(x, w)\n\
          out = dloss(to_tensor([3.0, 4.0]), to_tensor([5.0, 6.0]))\n";
     let stdout = build_and_run(source, "grad_inline_f32_control");
     let actual = parse_tensor_data(&stdout, "out");

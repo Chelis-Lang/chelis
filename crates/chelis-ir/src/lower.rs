@@ -2993,10 +2993,7 @@ impl LowerCtx {
     /// types route through [`Self::type_from_meta`] /
     /// [`Self::type_from_type_expr_with_subst`], which panic when
     /// `prec_subst` lacks the var).
-    fn formal_param_type_for_call(
-        expr: &Expr,
-        prec_subst: &HashMap<String, Prim>,
-    ) -> TensorType {
+    fn formal_param_type_for_call(expr: &Expr, prec_subst: &HashMap<String, Prim>) -> TensorType {
         if let Some(prim) = Self::try_extract_prim(expr) {
             return TensorType {
                 dims: vec![],
@@ -3916,10 +3913,7 @@ impl LowerCtx {
         // wins on overlap). See the longer note at the sub-context seeding
         // below.
         let mut grad_prec_subst = self.prec_substitutions.clone();
-        grad_prec_subst.extend(tensor_prec_substitutions(
-            &grad_param_type_exprs,
-            &actual_types,
-        ));
+        grad_prec_subst.extend(tensor_prec_substitutions(&grad_param_type_exprs, &actual_types));
         // Formal parameter shapes for the differentiated function. Use the
         // call-site-tolerant variant so a precision var that the grad call
         // site does NOT pin (it is internal to a callee, resolved when that
