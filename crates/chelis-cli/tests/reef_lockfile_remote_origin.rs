@@ -41,7 +41,7 @@
 //! - `phaseA_item9_unknown_scheme_in_origin_errors` — `remote_origin`
 //!   that doesn't start with a supported scheme surfaces a typed
 //!   `RemoteOriginParseError::UnknownScheme`.
-//! - `phaseA_item9_remote_origin_404_surfaces_release_asset_not_found`.
+//! - `phaseA_item9_remote_origin_404_surfaces_release_tag_not_found_or_unauthorized`.
 //! - `phaseA_item9_malformed_lockfile_errors_with_line_info`.
 //! - `phaseA_item9_no_lockfile_present_suggests_reef_build`.
 //!
