@@ -5465,12 +5465,7 @@ fn rewrite_pattern(pattern: &Pattern, resolver: &NameResolver) -> Pattern {
         Pattern::Var(name, span) => Pattern::Var(name.clone(), *span),
         Pattern::Lit(lit, span) => Pattern::Lit(lit.clone(), *span),
         Pattern::Constructor(name, args, span) => Pattern::Constructor(
-            resolver
-                .imported_names
-                .get(name)
-                .cloned()
-                .or_else(|| resolver.own_names.get(name).cloned())
-                .unwrap_or_else(|| name.clone()),
+            resolve_ctor_pattern_name(name, resolver),
             args.iter()
                 .map(|arg| rewrite_pattern(arg, resolver))
                 .collect(),
@@ -5488,12 +5483,7 @@ fn rewrite_pattern(pattern: &Pattern, resolver: &NameResolver) -> Pattern {
             // through the same scope as `Pattern::Constructor` so a
             // record-shaped match arm resolves to the module-qualified
             // constructor (chelis#157).
-            resolver
-                .imported_names
-                .get(name)
-                .cloned()
-                .or_else(|| resolver.own_names.get(name).cloned())
-                .unwrap_or_else(|| name.clone()),
+            resolve_ctor_pattern_name(name, resolver),
             fields
                 .iter()
                 .map(|(field, pattern)| (field.clone(), rewrite_pattern(pattern, resolver)))
@@ -5563,6 +5553,27 @@ fn resolve_name(name: &str, resolver: &NameResolver, locals: &HashSet<String>) -
     if locals.contains(name) {
         return name.to_string();
     }
+    resolver
+        .own_names
+        .get(name)
+        .cloned()
+        .or_else(|| resolver.imported_names.get(name).cloned())
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// Resolve a constructor name that appears as a pattern head
+/// (`Pattern::Constructor` / `Pattern::Record`). Patterns introduce
+/// binders rather than reference locals, so unlike `resolve_name` there
+/// is no `locals` shadow set; but the own-module-before-imports
+/// precedence must match `resolve_name` exactly. Otherwise a module that
+/// both declares its own constructor `C` and imports a different `C`
+/// would build `C(..)` as the own (shadowing) constructor but match
+/// `| C(..) =>` against the imported one, because `imported_names`
+/// overwrites the own seed in `build_name_resolver`. That asymmetry
+/// silently mis-resolves a `match` arm to a different package's
+/// constructor (chelis#157); own-first keeps construction and
+/// destructuring on the same mangled name.
+fn resolve_ctor_pattern_name(name: &str, resolver: &NameResolver) -> String {
     resolver
         .own_names
         .get(name)
@@ -6524,6 +6535,77 @@ version = "0.1.0"
         );
     }
 
+    /// Negative parity for the exhaustiveness change (#157): recording the
+    /// *resolved* (mangled) variant name for `pat-ctor` must not over-accept.
+    /// A genuinely non-exhaustive, wildcard-free match on a module-scoped
+    /// multi-constructor ADT (covers `Left` but not `Right`) must still be
+    /// REJECTED with a `non-exhaustive match` diagnostic that names the
+    /// uncovered (mangled) `Right` variant. This is the counterpart to
+    /// `module_scoped_adt_exhaustive_match_checks`: the coverage fix maps a
+    /// covered pattern to the same mangled key `variant_names` returns, so a
+    /// missing variant stays missing: the change tightens nothing into a
+    /// false "exhaustive".
+    #[test]
+    fn module_scoped_adt_non_exhaustive_match_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("school");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "school"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "School"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        // `classify` covers only `Left`, omitting `Right`. With the scrutinee
+        // ADT's variants mangled, the checker must still see `Right`
+        // uncovered.
+        write(
+            &root.join("src/main.ch"),
+            "module School.Main\n\
+             type Side = | Left | Right\n\
+             def classify(s: Side) -> int32 = match s with { | Left => 0 }\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "school"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/main.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // Sanity: the scrutinee ADT's variants are mangled, so this exercises
+        // the resolved-name coverage path, not the bare-name one.
+        let right_mangled = internal_name("school", "School.Main", "Right");
+        assert!(
+            right_mangled.contains("__Right") && right_mangled != "Right",
+            "fixture sanity: Right must mangle; got {right_mangled}"
+        );
+
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        let err = checked_program_with_effects(&deep).expect_err(
+            "a wildcard-free match missing the Right variant must be rejected as non-exhaustive",
+        );
+        assert!(
+            err.contains("NonExhaustiveMatch") || err.contains("non-exhaustive"),
+            "diagnostic must report a non-exhaustive match; got: {err}"
+        );
+        assert!(
+            err.contains("Right"),
+            "diagnostic must name the uncovered Right variant (mangled or bare); got: {err}"
+        );
+    }
+
     /// Negative parity (#157): the principled fix must not silently
     /// dispatch a genuinely ambiguous unqualified constructor reference.
     /// A module that imports `IntCol` unqualified from two different
@@ -6694,6 +6776,145 @@ path = "./coral"
         let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
         checked_program_with_effects(&deep)
             .expect("single imported constructor must resolve and type-check");
+    }
+
+    /// Regression (#157): a module that declares its own constructor `Mark`
+    /// AND imports a different `Mark` from a dependency must resolve a
+    /// *pattern* head the same way it resolves a *construction* head:
+    /// own-module-first. The design rule is "a name the module declares
+    /// itself shadows imports", and the ambiguity check honors it for
+    /// expressions. Before the `resolve_ctor_pattern_name` fix, the pattern
+    /// rewrite checked `imported_names` first; since an import overwrites
+    /// the own seed in that map, `Tag(Mark)` was *constructed* with the own
+    /// mangled name but `| Tag(Mark) =>` was *matched* against the imported
+    /// (other-package) mangled name. The two never unified and the program
+    /// failed to type-check. This test pins construction and destructuring
+    /// to the same own internal name.
+    #[test]
+    fn own_ctor_shadows_imported_same_name_in_pattern() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("school");
+        let dep_root = root.join("coral");
+
+        // Dependency declares + exports its own `Mark` constructor.
+        write(
+            &dep_root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "coral"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Coral"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &dep_root.join("src/frame.ch"),
+            "module Coral.Frame\n\
+             export (Stamp, Mark)\n\
+             type Stamp = | Mark(int64)\n",
+        );
+
+        // Root module declares its OWN `Tag` with an own `Mark` constructor
+        // (positional, single field), imports the dependency's different
+        // `Mark`, then both builds and matches its own `Mark`.
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "school"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "School"
+
+[dependencies]
+coral = {{ path = "./coral" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module School.Main\n\
+             import Coral.Frame (Stamp, Mark)\n\
+             type Tag = | Mark(f32)\n\
+             def build(x: f32) -> Tag = Mark(x)\n\
+             def unwrap(t: Tag) -> f32 = match t with { | Mark(v) => v }\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "school"
+version = "0.1.0"
+
+[[dependencies]]
+name = "coral"
+version = "0.1.0"
+compiler = "=0.1.0"
+archive_sha256 = ""
+shell_sha256 = ""
+
+[dependencies.source]
+kind = "path"
+path = "./coral"
+"#,
+        );
+
+        let entry = root.join("src/main.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // The own `Mark` mangles to School.Main's internal name; the
+        // imported `Mark` mangles to Coral.Frame's. The match arm head must
+        // equal the construction head (the own one), never the imported one.
+        let imported_mark = internal_name("coral", "Coral.Frame", "Mark");
+        let own_mark = internal_name("school", "School.Main", "Mark");
+        assert_ne!(
+            own_mark, imported_mark,
+            "fixture sanity: own and imported Mark must mangle differently"
+        );
+
+        let mut construction_head: Option<String> = None;
+        let mut pattern_head: Option<String> = None;
+        for decl in &prepared.decls {
+            let Decl::FunDef { name, body, .. } = decl else {
+                continue;
+            };
+            if name.ends_with("__build")
+                && let Expr::Apply(func, _, _) = body
+                && let Expr::Constructor(ctor, _) = func.as_ref()
+            {
+                construction_head = Some(ctor.clone());
+            }
+            if name.ends_with("__unwrap")
+                && let Expr::Match(_, arms, _) = body
+                && let Some(arm) = arms.first()
+                && let Pattern::Constructor(ctor, _, _) = &arm.pattern
+            {
+                pattern_head = Some(ctor.clone());
+            }
+        }
+
+        let construction_head =
+            construction_head.expect("build() body must be a constructor application");
+        let pattern_head = pattern_head.expect("unwrap() body must be a constructor-pattern match");
+        assert_eq!(
+            construction_head, own_mark,
+            "construction must resolve to the own Mark; got {construction_head}"
+        );
+        assert_eq!(
+            pattern_head, own_mark,
+            "pattern head must resolve to the SAME own Mark, not the imported one; got {pattern_head} (imported is {imported_mark})"
+        );
+
+        // And the full pipeline must type-check: construction and
+        // destructuring agree on one mangled constructor.
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep).expect(
+            "own constructor shadowing an imported same-name must construct and match consistently",
+        );
     }
 
     /// Positive: `prepare_reef_graph` + two calls to `compile_with_reef_graph`
