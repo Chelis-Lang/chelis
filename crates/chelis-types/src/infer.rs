@@ -13100,7 +13100,34 @@ fn check_reduction_signature(
                 return Type::Error;
             }
         },
-        None => return subst.apply(result_ty),
+        // Issue #259: the input is a concrete tensor (we are past the
+        // `Var | Error` guard above), so the only thing standing between
+        // here and a resolved output shape is the axis. When the axis arg
+        // is not a compile-time constant (a function-parameter `int32`
+        // rather than a literal or `cast(N, int32)`), `extract_int_for_dim`
+        // returns `None` and we cannot know *which* dimension is removed,
+        // so the output shape is undeterminable. Pre-fix this arm returned
+        // the still-unresolved `Type::Var(out)` from `tensor_reduce_to_out`,
+        // which then leaked downstream and surfaced as a misleading
+        // `borrow requires tensor or tensor-carrying input, got ?N`
+        // diagnostic at the next borrow site. Emit a targeted diagnostic
+        // at the reduction call site naming the real root cause instead.
+        None => {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "{name} axis must be a compile-time constant for the output \
+                     shape to be inferable, got {}",
+                    describe_axis_arg(arg_exprs.get(1)),
+                ),
+                vec![format!(
+                    "Pass a literal axis (e.g. `{name}(x, 0)`) or a `cast(N, int32)` \
+                     literal. The reduced axis index selects which dimension is \
+                     removed, so it must be known at compile time."
+                )],
+            ));
+            return Type::Error;
+        }
     };
 
     let mut out_dims = dims;
@@ -13229,7 +13256,32 @@ fn check_expand_signature(
             ));
             return Type::Error;
         }
-        None => return subst.apply(result_ty),
+        // Issue #259: the input is a concrete tensor (past the
+        // `Var | Error` guard above), so the output shape is determinable
+        // once the insert axis is known. When the axis arg is not a
+        // compile-time constant, `extract_int_for_dim` returns `None` and
+        // we cannot place the inserted dimension. Pre-fix this arm returned
+        // the still-unresolved `Type::Var(out)` from `tensor_expand_to_out`,
+        // which leaked downstream and surfaced as a misleading
+        // `borrow requires tensor or tensor-carrying input, got ?N`. Emit a
+        // targeted diagnostic at the expand call site naming the root cause.
+        None => {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "expand axis must be a compile-time constant for the output \
+                     shape to be inferable, got {}",
+                    describe_axis_arg(arg_exprs.get(1)),
+                ),
+                vec![
+                    "Pass a literal axis (e.g. `expand(x, 0, n)`) or a `cast(N, int32)` \
+                     literal. The axis selects where the new dimension is inserted, so \
+                     it must be known at compile time."
+                        .to_string(),
+                ],
+            ));
+            return Type::Error;
+        }
     };
     let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
         Some(size) if size > 0 => Dim::Lit(size),
@@ -13563,6 +13615,23 @@ fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
         return None;
     }
     children(list).first().and_then(symbol_name)
+}
+
+/// Describe a non-literal axis argument for the issue #259 diagnostic.
+///
+/// When the axis is a `(var name)` (the common case: a function-parameter
+/// `int32` such as `mean(&x, ax)`), name it so the user can see which
+/// binding is the runtime value. Otherwise fall back to a generic
+/// "non-constant expression" phrasing. Kept deliberately small: this only
+/// feeds a user-facing message, not a control-flow decision.
+fn describe_axis_arg(axis_expr: Option<&deep::Expr>) -> String {
+    match axis_expr {
+        Some(expr) => match symbolic_dim_ref_name(expr) {
+            Some(name) => format!("a runtime value `{name}`"),
+            None => "a non-constant expression".to_string(),
+        },
+        None => "a missing argument".to_string(),
+    }
 }
 
 /// Post-body rigidity check for a def's declared dimension parameters.

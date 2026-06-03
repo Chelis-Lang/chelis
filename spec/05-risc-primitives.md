@@ -122,6 +122,16 @@ primitive — the reductions here, `softmax`, `mean`, `gather`,
 `scatter`, and the movement and ordering ops — and is the convention
 the formula examples below already use (`axis=-1` for the last axis).
 
+The reduction axis must be a compile-time constant (a literal, or a
+`cast(N, int32)`-wrapped literal). Because the output shape is "remove
+the dimension at position `axis`", the type checker cannot determine
+which dimension is dropped from a runtime axis value. A reduction whose
+axis is a runtime expression (for example a function-parameter `int32`)
+is rejected at the reduction call site with a diagnostic naming the
+compile-time-constant requirement, rather than leaving the output shape
+unresolved (chelis#259). The same constraint and diagnostic apply to
+`expand`'s insert axis.
+
 **Output dimensions:** The dimension at position `axis` is removed. All other dimensions are preserved.
 
 **Accumulator parameter (`sum` only).** The optional `accumulator: prec`
