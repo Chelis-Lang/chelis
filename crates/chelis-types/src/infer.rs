@@ -14269,7 +14269,23 @@ fn pattern_bindings(
             }
             "pat-ctor" => {
                 if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
-                    covered_variants.push(ctor_name.to_string());
+                    // Record the *resolved* variant name for exhaustiveness,
+                    // not the bare pattern name. After reef's module-scoped
+                    // constructor mangling (chelis#157), the registry keys
+                    // variants by their package/module-qualified name, while
+                    // a pattern may still be written with the bare terminal
+                    // name (e.g. an unqualified `JsonNull` arm). Pushing the
+                    // bare name would leave the mangled variant uncovered and
+                    // fire a spurious `non-exhaustive match`. Resolve through
+                    // the registry's terminal-unique lookup so coverage is
+                    // compared on the same (mangled) key `variant_names`
+                    // returns.
+                    let covered_name = adt_reg
+                        .lookup_variant(ctor_name)
+                        .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name))
+                        .map(|(_, variant)| variant.name.clone())
+                        .unwrap_or_else(|| ctor_name.to_string());
+                    covered_variants.push(covered_name);
 
                     // Look up constructor in env and decompose
                     if let Some(scheme) = env
@@ -14332,14 +14348,20 @@ fn pattern_bindings(
                 // (pat-record {} TypeName (kv {} k1 p1) ...): validate against ADT registry
                 // kids[0] = TypeName, kids[1..] = (kv {} key pat)
                 if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
-                    covered_variants.push(ctor_name.to_string());
-
                     // Look up variant in ADT registry for the canonical
                     // field order and known field-name set used for
                     // validation diagnostics.
                     let variant_info = adt_reg
                         .lookup_variant(ctor_name)
                         .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name));
+
+                    // Record the resolved (mangled) variant name for
+                    // exhaustiveness, mirroring `pat-ctor`. See that arm for
+                    // why the bare pattern name is not used (chelis#157).
+                    let covered_name = variant_info
+                        .map(|(_, vi)| vi.name.clone())
+                        .unwrap_or_else(|| ctor_name.to_string());
+                    covered_variants.push(covered_name);
                     let declared_field_names: Vec<Option<String>> = variant_info
                         .map(|(_, vi)| vi.fields.iter().map(|(n, _)| n.clone()).collect())
                         .unwrap_or_default();
