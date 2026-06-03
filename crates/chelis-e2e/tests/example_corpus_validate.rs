@@ -1,6 +1,15 @@
 //! Phase 1f — examples + specs agree with the compiler parser AND the
 //! executable grammar validator (`chelis-validate`).
 //!
+//! ## Scope: validator LIBRARY, not the CLI's full surface
+//!
+//! This file tests the `chelis-validate` LIBRARY — the grammar validator
+//! (`validate_{surf,deep,desugared}`) and renderer-vs-parser agreement
+//! between the Surf→Deep render pipeline and both the strict compiler
+//! parser and the validator. It does NOT exercise the `chelis` CLI's full
+//! surface, and it does NOT claim the same coverage as the old subprocess
+//! path it replaced.
+//!
 //! The validator path used to shell out to `chelis validate <mode> <file>`
 //! once per corpus entry. Each `#[test]` here iterates the executable +
 //! illustrative example corpora plus a handful of spec fixtures, which
@@ -10,9 +19,35 @@
 //! deep renderer is the same `chelis_surf::desugar` +
 //! `chelis_macros::expand_program` + `chelis_deep::printer::print_canonical`
 //! pipeline the `chelis deep` CLI uses, so this file now drives both
-//! in-process. Style-gate enforcement is a CLI-only concern (it ran in
-//! the old subprocess path via `CHELIS_STYLE_GATE_DISABLE=1`, which the
-//! library calls don't see anyway).
+//! in-process.
+//!
+//! ## What the in-process path does NOT cover (covered elsewhere)
+//!
+//! The old subprocess path implicitly ran the CLI style gate
+//! (`chelis fmt --check` + the blocking lint rule set). The in-process
+//! library calls do NOT: `validate_deep`/`validate_surf` are pure
+//! grammar + tag-vocabulary/arity checks. Specifically, **canonical
+//! formatting is not enforced in-process** — `validate_deep`'s pest
+//! grammar treats `\n` as ordinary `WHITESPACE` (see `deep.pest`:
+//! `program = { SOI ~ spacing ~ node+ ~ EOI }`, trailing `spacing`
+//! optional), so a Deep fixture WITHOUT a final newline, or with CRLF
+//! line endings, validates fine in-process. That is by design: it is a
+//! style-gate concern, not a grammar concern, so this file deliberately
+//! adds NO in-process missing-newline negative test (it would assert a
+//! behavior the library does not have).
+//!
+//! The CLI style-gate wiring for `chelis validate` — including the
+//! missing-final-newline and CRLF rejections the reviewer asked about —
+//! is covered by `crates/chelis-cli/tests/style_gate.rs`:
+//!
+//! - `validate_surf_fails_on_non_canonical_source`
+//! - `validate_deep_fails_on_deep_lint_violation`
+//! - `validate_deep_bypass_emits_warning_on_stderr`
+//! - `validate_deep_allows_lint_directive_without_format_failure`
+//! - `validate_deep_still_rejects_missing_final_newline_after_directive_stripping`
+//! - `validate_deep_still_rejects_crlf_after_directive_stripping`
+//!
+//! ## Directive stripping
 //!
 //! User-authored Deep input (the `chelis-deep` fences in `SKILL.md`)
 //! is run through `chelis_validate::strip_deep_lint_directive_lines`
@@ -21,7 +56,14 @@
 //! The strip is required: `validate_deep`'s pest grammar rejects a
 //! leading `; chelis-lint:` line (locked by a unit test in
 //! `chelis-validate`). Rendered-Deep inputs from `render_deep_from_surf`
-//! never contain directive lines, so the strip is a no-op there.
+//! are produced by `chelis_deep::printer::print_canonical`, which emits
+//! no `;` comments and therefore no directive lines — so the strip is a
+//! no-op there. We still apply it unconditionally at those call sites to
+//! lock the "canonical Deep renderers emit no directive comments"
+//! invariant: if a future printer regression ever emitted one, the
+//! parse/validate assertions would still see directive-free input, but
+//! the strip keeps this file's behavior independent of that invariant
+//! rather than silently relying on it.
 
 use chelis_deep::parser::parse_str_strict as parse_deep_strict;
 use chelis_surf::parser::parse_str as parse_surf;
@@ -83,11 +125,12 @@ fn extract_code_blocks(markdown: &str) -> Vec<CodeBlock> {
 /// `chelis deep <file>` produces (parse Surf → desugar → macro expand →
 /// canonical Deep print).
 fn render_deep_from_surf(source: &str) -> Result<String, String> {
-    let decls = chelis_surf::parser::parse_str(source).map_err(|e| e.to_string())?;
+    let decls =
+        chelis_surf::parser::parse_str(source).map_err(|e| format!("surf parse step: {e}"))?;
     let deep = chelis_surf::desugar::desugar_program(&decls);
     let expanded =
         chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("macro-expand step: {e}"))?;
     Ok(chelis_deep::printer::print_canonical(expanded.exprs()))
 }
 
@@ -142,6 +185,17 @@ fn phase1f_deep_examples_and_specs_agree_with_strict_parser() {
             let source = fs::read_to_string(&path).expect("read surf");
             let rendered = render_deep_from_surf(&source)
                 .unwrap_or_else(|e| panic!("render deep for {}: {e}", path.display()));
+            // Lock the "canonical Deep renderers emit no directive
+            // comments" invariant explicitly: `print_canonical` must not
+            // produce any `; chelis-lint:` line. If a future printer
+            // regression ever did, this assertion fails loudly instead of
+            // the directive silently riding through validation.
+            assert_eq!(
+                chelis_validate::strip_deep_lint_directive_lines(&rendered),
+                rendered,
+                "rendered Deep for {} must contain no lint directive lines",
+                path.display()
+            );
             deep_inputs.push((format!("deep output for {}", path.display()), rendered));
         }
     }
@@ -152,6 +206,13 @@ fn phase1f_deep_examples_and_specs_agree_with_strict_parser() {
             .to_string(),
     ));
     for (label, source) in deep_inputs {
+        // Defensive: strip directive lines before validate even though
+        // canonical renderers (asserted above) and the clean literal
+        // fixture emit none. The strip is a unit-tested no-op on
+        // directive-free input, so this keeps the call site honest about
+        // what `validate_deep` accepts (it rejects a leading directive
+        // line) without depending on the no-directive invariant holding.
+        let source = chelis_validate::strip_deep_lint_directive_lines(&source);
         assert!(
             parse_deep_strict(&source).is_ok(),
             "strict compiler parser should accept {label}"
@@ -164,6 +225,12 @@ fn phase1f_deep_examples_and_specs_agree_with_strict_parser() {
 
     let dotted_deep = render_deep_from_surf("module Foo.Bar\nimport Baz.Qux(..)\ndef f(x) = x\n")
         .expect("render dotted module surf");
+    assert_eq!(
+        chelis_validate::strip_deep_lint_directive_lines(&dotted_deep),
+        dotted_deep,
+        "rendered dotted-path Deep must contain no lint directive lines"
+    );
+    let dotted_deep = chelis_validate::strip_deep_lint_directive_lines(&dotted_deep);
     assert!(
         chelis_validate::validate_deep(&dotted_deep).is_ok(),
         "validator should accept canonical Deep with dotted module/import paths"
