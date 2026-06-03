@@ -84,9 +84,7 @@ def go[m, n](x: tensor[m, n, f32], ax: int32) -> tensor[n, f32] = {
     // cascade a second copy through the deferred-borrow re-check pass.
     let axis_cause_count = msgs
         .iter()
-        .filter(|m| {
-            m.contains("mean") && m.contains("axis") && m.contains("compile-time constant")
-        })
+        .filter(|m| m.contains("mean") && m.contains("axis") && m.contains("compile-time constant"))
         .count();
     assert_eq!(
         axis_cause_count, 1,
