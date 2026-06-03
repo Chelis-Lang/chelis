@@ -124,6 +124,15 @@ pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
     validate_deep(&canonical)
 }
 
+/// True for inner pairs that are structurally invisible to a node's
+/// shape: atomic `comment` tokens (which `spacing` can capture anywhere a
+/// node's internal `spacing` appears) and the synthetic `EOI` marker.
+/// Every site that reads a node's tag, meta, or children must skip these
+/// so a leading `;` comment is never mistaken for the tag. See issue #167.
+fn is_structural_pair(pair: &Pair<'_, deep::Rule>) -> bool {
+    !matches!(pair.as_rule(), deep::Rule::comment | deep::Rule::EOI)
+}
+
 fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
     let span = pair.as_span();
     // `comment` is an atomic (visible) rule, so any comment captured by a
@@ -131,9 +140,7 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
     // trailing after the last child) surfaces as an inner pair here. Filter
     // those out up front, like `EOI`, so they are never mistaken for the
     // tag, the meta block, or a node child. See issue #167.
-    let mut inner = pair
-        .into_inner()
-        .filter(|p| !matches!(p.as_rule(), deep::Rule::comment | deep::Rule::EOI));
+    let mut inner = pair.into_inner().filter(is_structural_pair);
     let tag = inner.next().expect("node tag").as_str().to_string();
     let meta = inner.next().expect("node meta");
     let children: Vec<_> = inner
@@ -178,10 +185,7 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
 fn validate_typed_helper(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
     // Skip any visible `comment` pairs captured by the helper's internal
     // `spacing`, mirroring `validate_deep_node`. See issue #167.
-    let mut inner = pair
-        .clone()
-        .into_inner()
-        .filter(|p| !matches!(p.as_rule(), deep::Rule::comment | deep::Rule::EOI));
+    let mut inner = pair.clone().into_inner().filter(is_structural_pair);
     let name = inner
         .next()
         .expect("typed helper name")
@@ -244,7 +248,11 @@ fn expect_node_tag(
             "Deep tag `{expected_tag}` expected nested node at byte {offset}"
         )));
     }
-    let mut inner = child.clone().into_inner();
+    // A nested node's first internal `spacing` can capture a `;` comment
+    // (e.g. `(; note\nparams {} ...)`), which surfaces as a visible
+    // `comment` pair ahead of the tag. Skip those so the tag is read
+    // correctly, mirroring `validate_deep_node`. See issue #167.
+    let mut inner = child.clone().into_inner().filter(is_structural_pair);
     let found = inner.next().expect("nested tag").as_str().to_string();
     if found != expected_tag {
         return Err(ValidationError::Failed(format!(
@@ -298,11 +306,15 @@ fn validate_effects_children(
     for child in children {
         match child.as_rule() {
             deep::Rule::bare_name => {}
+            // A `(resource {} ...)` entry whose first internal `spacing`
+            // captures a `;` comment surfaces that comment ahead of the
+            // tag, so skip non-structural pairs before reading the tag.
+            // See issue #167.
             deep::Rule::node
                 if child
                     .clone()
                     .into_inner()
-                    .next()
+                    .find(is_structural_pair)
                     .is_some_and(|tag| tag.as_str() == "resource") => {}
             _ => {
                 return Err(ValidationError::Failed(format!(
@@ -505,6 +517,42 @@ mod tests {
         let commented = "; chelis-lint: disable=foo\n; plain comment\n(module {} hello)\n";
         validate_deep(commented).expect("commented program should validate");
         validate_deep(BASE).expect("uncommented program should validate");
+    }
+
+    // ---- issue #167 regression: comments leading a *nested* node's tag ----
+    //
+    // `validate_deep_node` filters comments before reading its own tag, but
+    // several shape checks reach into a nested node and read *its* first
+    // inner pair as the tag: `expect_node_tag` (the `params` child of `fn`
+    // and the `bind` child of `let`) and `validate_effects_children` (the
+    // `resource` entry of `effects`). Each of those nested nodes can carry
+    // a `;` comment in its first internal `spacing`, which surfaces as a
+    // visible `comment` pair ahead of the tag. If the introspection does
+    // not skip it, the validator reads the comment text as the tag and
+    // wrongly rejects source that `parse_str_strict` accepts.
+
+    #[test]
+    fn deep_accepts_comment_before_params_tag_in_fn() {
+        assert_validates(
+            "(fn {} (; note\nparams {}) (var {} x))\n",
+            "comment before nested `params` tag",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_comment_before_bind_tag_in_let() {
+        assert_validates(
+            "(let {} (; note\nbind {}) (var {} x))\n",
+            "comment before nested `bind` tag",
+        );
+    }
+
+    #[test]
+    fn deep_accepts_comment_before_resource_tag_in_effects() {
+        assert_validates(
+            "(effects {} (; note\nresource {} foo))\n",
+            "comment before nested `resource` tag",
+        );
     }
 
     // ---- negative parity: the grammar was not loosened -------------------
