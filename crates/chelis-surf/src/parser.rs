@@ -3226,7 +3226,10 @@ mod tests {
 
     #[test]
     fn rank_spread_erasure_position_parses() {
-        // Erasure: `..r` input, rank-0 (`tensor[f32]`) output.
+        // The erasure SHAPE (`..r` input, rank-0 `tensor[f32]` output) parses.
+        // The erasure *tier* is deferred (no all-reduce primitive), so a body
+        // like `sum(x, 0)` is rejected at check time by Body Discipline — this
+        // test only pins that the surface shape is parseable.
         let decls = p("def sum_all(x: &tensor[..r, f32]) -> tensor[f32] = sum(x, 0)");
         assert!(matches!(&decls[0], Decl::FunDef { .. }));
     }

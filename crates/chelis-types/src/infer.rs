@@ -6976,35 +6976,73 @@ fn check_rank_body_discipline(def_name: &str, expr: &deep::Expr, errors: &mut Ve
     let deep::Expr::List(list, _) = expr else {
         return;
     };
-    if get_tag(list) == Some("app")
-        && let Some(callee_name) = children(list).first().and_then(app_var_name)
-    {
-        if !builtins::BUILTIN_NAMES.contains(&callee_name) {
+    match get_tag(list) {
+        // Function-taking transforms apply a *referenced* user function across
+        // the opaque rank. That callee is not inlined here, so its body can
+        // transpose/reshape undetected — reject outright (spec §4.2).
+        // `jit`/`realize`/`cast`/`copy` wrap an *inline* expression that the
+        // recursion below still checks, so they are not rejected here.
+        Some(t @ ("grad" | "vmap")) => {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "rank-polymorphic def `{def_name}` may not call `{callee_name}`: only \
-                     shape-identity builtins are proven rank-safe in a `..r` body \
-                     (spec/04-type-system.md \u{00a7}4.2). Calling a user-defined function from a \
-                     rank-polymorphic body is not supported."
+                    "rank-polymorphic def `{def_name}` may not use `{t}` in its body: it applies \
+                     a function across the opaque rank `..r`, whose body cannot be proven \
+                     shape-identity (spec/04-type-system.md \u{00a7}4.2)."
                 ),
                 vec![],
             ));
-        } else if builtins::shape_class(callee_name) != builtins::ShapeClass::Identity {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "rank-polymorphic def `{def_name}` may not call shape-rewriting builtin \
-                     `{callee_name}`: against an opaque rank `..r` there are no named axes left \
-                     to catch a transposition or reshape (spec/04-type-system.md \u{00a7}4.2). A \
-                     `..r` body may call only shape-identity (elementwise) operations."
-                ),
-                vec![format!(
-                    "remove the `{callee_name}` call from the rank-polymorphic body, or use \
-                     concrete-rank `def`s instead of a `..r` signature"
-                )],
-            ));
         }
+        Some("app") => match children(list).first().and_then(app_var_name) {
+            // Identity builtin — the only admissible call. OK.
+            Some(name)
+                if builtins::BUILTIN_NAMES.contains(&name)
+                    && builtins::shape_class(name) == builtins::ShapeClass::Identity => {}
+            // A named builtin that rewrites shape.
+            Some(name) if builtins::BUILTIN_NAMES.contains(&name) => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "rank-polymorphic def `{def_name}` may not call shape-rewriting builtin \
+                         `{name}`: against an opaque rank `..r` there are no named axes left to \
+                         catch a transposition or reshape (spec/04-type-system.md \u{00a7}4.2). A \
+                         `..r` body may call only shape-identity (elementwise) operations."
+                    ),
+                    vec![format!(
+                        "remove the `{name}` call from the rank-polymorphic body, or use \
+                         concrete-rank `def`s instead of a `..r` signature"
+                    )],
+                ));
+            }
+            // A named user-defined function — not proven rank-safe.
+            Some(name) => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "rank-polymorphic def `{def_name}` may not call `{name}`: only \
+                         shape-identity builtins are proven rank-safe in a `..r` body \
+                         (spec/04-type-system.md \u{00a7}4.2). Calling a user-defined function \
+                         from a rank-polymorphic body is not supported."
+                    ),
+                    vec![],
+                ));
+            }
+            // A computed callee (a transform result like `grad(f)(x)`, a
+            // first-class function value, or an applied lambda's non-inline
+            // form): cannot be proven rank-safe.
+            None => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "rank-polymorphic def `{def_name}` may not apply a computed or \
+                         non-builtin callee in a `..r` body: only shape-identity builtins are \
+                         proven rank-safe (spec/04-type-system.md \u{00a7}4.2)."
+                    ),
+                    vec![],
+                ));
+            }
+        },
+        _ => {}
     }
     // Recurse so nested calls (in let/if/match/lambda bodies, args) are checked.
     for child in &list.elements {

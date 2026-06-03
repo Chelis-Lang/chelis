@@ -44,8 +44,8 @@ This is **Tier 2** of the three-tier analysis on chelis#258:
 
 | Tier | Output-rank function | Example sig | Status |
 |---|---|---|---|
-| 1 | identity (`out = R`) | `&tensor[R, f32] -> tensor[R, f32]` | **this plan** |
-| 2 | constant / erasure (`out = []`) | `&tensor[R, f32] -> tensor[f32]` | **this plan** |
+| 1 | identity (`out = R`) | `&tensor[R, f32] -> tensor[R, f32]` | **SHIPPED** |
+| 2 | constant / erasure (`out = []`) | `&tensor[R, f32] -> tensor[f32]` | **deferred** (no all-reduce primitive — see Implementation Status) |
 | 3 | arithmetic (`out = R±1`, permute) | `&tensor[R ++ [k], f32] -> tensor[R, f32]` | **out of scope** |
 
 Tier 3 (rank arithmetic, `R ++ [k]` concatenation forms) is explicitly

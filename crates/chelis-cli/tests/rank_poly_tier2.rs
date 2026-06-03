@@ -79,6 +79,28 @@ fn assert_rejected(json: &Value, label: &str) {
     );
 }
 
+/// A Body-Discipline rejection citing the rank-polymorphic def (used for the
+/// non-`app` bypass routes — transforms, computed callees, user-fn calls).
+fn assert_rank_rejected(json: &Value, label: &str) {
+    let errors = json["errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: errors should be a json array, got {json}"));
+    let has = errors.iter().any(|e| {
+        e["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("rank-polymorphic def"))
+    });
+    assert!(
+        has,
+        "{label}: expected a rank-polymorphic Body-Discipline rejection, got {errors:?}"
+    );
+    let score = json["score"].as_f64().unwrap_or(1.0);
+    assert!(
+        score < 1.0,
+        "{label}: a rejected body must score < 1.0 ({json})"
+    );
+}
+
 // ── Positives: one rank-poly def, callable across ranks ─────────────────
 
 /// The headline: a single identity-position `..r` def checks clean and is
@@ -140,6 +162,43 @@ fn reshape_in_rank_poly_body_rejected() {
     let json =
         check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = reshape(x, [2, 3])\n");
     assert_body_discipline_rejected(&json, "reshape", "reshape in ..r body");
+}
+
+// ── Negatives: the non-`app` bypass routes (transforms / computed callees) ──
+// A shape-rewriting op must not sneak into a `..r` body by routing through a
+// transform node or a non-builtin/computed callee — the §4.2 hole a pure
+// "reject shape-rewriting `app` builtins" walker would leave open.
+
+/// `vmap` applies a *referenced* user function (which here transposes) across
+/// the opaque rank — rejected outright. Without this the body checks clean and
+/// the build later panics on the surviving rank var.
+#[test]
+fn vmap_transform_in_rank_poly_body_rejected() {
+    let json = check_json(
+        "def inner(x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
+         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = x |> vmap(inner, axis=0)\n",
+    );
+    assert_rank_rejected(&json, "vmap transform in ..r body");
+}
+
+/// `grad(loss)(x)` routes through a transform node and a computed callee — rejected.
+#[test]
+fn grad_transform_in_rank_poly_body_rejected() {
+    let json = check_json(
+        "def loss(x: &tensor[a, f32]) -> tensor[f32] = sum(x, cast(0, int32))\n\
+         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = grad(loss)(x)\n",
+    );
+    assert_rank_rejected(&json, "grad transform in ..r body");
+}
+
+/// A direct call to a user-defined function (not proven rank-safe) is rejected.
+#[test]
+fn user_fn_call_in_rank_poly_body_rejected() {
+    let json = check_json(
+        "def helper(x: &tensor[a, f32]) -> tensor[a, f32] = relu(x)\n\
+         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = helper(x)\n",
+    );
+    assert_rank_rejected(&json, "user-fn call in ..r body");
 }
 
 // ── Negative: the Tier-2/Tier-3 parse boundary ──────────────────────────
