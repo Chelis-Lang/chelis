@@ -174,13 +174,17 @@ def go[n](x: tensor[n, f32], ax: int32) -> tensor[4, n, f32] = {
 
 /// Positive control: the literal-axis reduction still resolves the
 /// output shape and type-checks cleanly. `mean(&x, 1)` on `tensor[m, n,
-/// f32]` removes axis 1, yielding `tensor[m, f32]`. This guards the fix
-/// against over-rejecting the legitimate literal-axis path.
+/// f32]` removes axis 1, yielding `tensor[m, f32]`. The reduced axis
+/// (axis 1) carries a concrete extent `4` so the separate
+/// `concrete reduced axis extent` IR validator (spec/05 mean rule) is
+/// satisfied; that validator is orthogonal to the #259 non-literal-axis
+/// path. This guards the fix against over-rejecting the legitimate
+/// literal-axis path.
 #[test]
 fn issue259_mean_literal_axis_still_typechecks() {
     let src = r#"
 def consumer[m](x: &tensor[m, f32]) -> tensor[m, f32] = copy(x)
-def go[m, n](x: tensor[m, n, f32]) -> tensor[m, f32] = {
+def go[m](x: tensor[m, 4, f32]) -> tensor[m, f32] = {
   y = mean(&x, 1)
   consumer(&y)
 }
@@ -202,7 +206,7 @@ def go[m, n](x: tensor[m, n, f32]) -> tensor[m, f32] = {
 fn issue259_mean_cast_wrapped_literal_axis_still_typechecks() {
     let src = r#"
 def consumer[m](x: &tensor[m, f32]) -> tensor[m, f32] = copy(x)
-def go[m, n](x: tensor[m, n, f32]) -> tensor[m, f32] = {
+def go[m](x: tensor[m, 4, f32]) -> tensor[m, f32] = {
   y = mean(&x, cast(1, int32))
   consumer(&y)
 }
