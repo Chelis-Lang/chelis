@@ -6,6 +6,29 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lossy float emission in HIP / C backend code generation (#250, #251,
+  #252)**: three remaining `%.8`-style decimal format strings emitted
+  float literals into generated HIP / C source that could not round-trip
+  to their exact bit pattern, mirroring the failure mode PR #243 (#189)
+  and PR #249 (#248) already fixed in the C backend's production emit
+  paths. The HIP `emit_const` F32 fill (#250) and the `uniform_like`
+  `low` / `high` args (#251) now narrow to f32 and reconstruct each value
+  from its exact bit pattern via the `chelis_f32_from_bits` static inline
+  helper (with an `f32::to_bits()` / `f64::to_bits()` codegen step); the
+  HIP F64 const fill routes through `chelis_f64_from_bits`. The C backend
+  test-harness input fill (#252) is migrated to the same bit-pattern
+  emission. Denormals such as `1e-40` no longer collapse to `0.0f`, and
+  values like `0.1f32` / `1.0 / 3.0` round-trip to identical bits. The
+  same sibling-sweep also closes the remaining `%.8` / `{:.17e}` decimal
+  fills in the C, HIP, and Metal correctness harnesses (the gcc-gated
+  SIMD-reduction static-array initializer, which now emits exact C99
+  hexadecimal-float constants; the C backend's Sleef fused/single-op
+  test-harness fills; and the HIP / Metal / cross-library GPU-gated
+  driver fills) so the generated device input is byte-identical to the
+  Rust reference the bit-exact and tight-ULP assertions compare against.
+
 ## [0.7.22] — 2026-06-03
 
 ### Added

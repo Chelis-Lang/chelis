@@ -144,6 +144,36 @@ fn naive_argmin(data: &[f32]) -> usize {
 // C program templates.
 // ---------------------------------------------------------------------------
 
+/// Render a finite f32 as an exact C99 hexadecimal-float constant
+/// expression (e.g. `0x1.fffffep+1f`). Unlike a `{:.8}f` decimal literal,
+/// a hex float carries every mantissa bit verbatim, so the `static float`
+/// array these literals initialize is byte-identical to the Rust source
+/// data the bit-exact reductions below compare against. A hex float is
+/// also a constant expression, so it is legal in a `static` initializer
+/// (a `chelis_f32_from_bits(...)` call would not be). Sibling of the #189
+/// / #248 / #250 / #251 / #252 lossy-float-emission class.
+fn f32_to_c_hex_literal(v: f32) -> String {
+    let bits = v.to_bits();
+    let sign = if bits >> 31 == 1 { "-" } else { "" };
+    let exp_field = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x007f_ffff;
+    if exp_field == 0 && mantissa == 0 {
+        // Signed zero.
+        return format!("{sign}0x0p+0f");
+    }
+    // 23-bit mantissa, left-aligned to 24 bits (6 hex digits) so each
+    // nibble is a clean hex digit. `mantissa / 2^23 == (mantissa << 1) / 2^24`.
+    let frac = format!("{:06x}", mantissa << 1);
+    if exp_field == 0 {
+        // Subnormal: implicit leading digit is 0, fixed exponent -126.
+        format!("{sign}0x0.{frac}p-126f")
+    } else {
+        // Normal: implicit leading digit is 1, unbiased exponent.
+        let unbiased = exp_field - 127;
+        format!("{sign}0x1.{frac}p{unbiased:+}f")
+    }
+}
+
 /// Build a comma-separated C float literal list from a slice.
 fn to_c_float_list(data: &[f32]) -> String {
     data.iter()
@@ -155,7 +185,7 @@ fn to_c_float_list(data: &[f32]) -> String {
             } else if *v == f32::NEG_INFINITY {
                 "-__builtin_inff()".to_string()
             } else {
-                format!("{v:.8}f")
+                f32_to_c_hex_literal(*v)
             }
         })
         .collect::<Vec<_>>()
@@ -428,4 +458,93 @@ fn simd_argmin_f32_all_sizes() {
             "argmin n={n}: expected {expected}, got {got}"
         );
     }
+}
+
+/// Reference decoder for the C99 hex-float strings `f32_to_c_hex_literal`
+/// emits, mirroring how a C compiler reads them. Used only by the
+/// round-trip test below; deliberately independent of `f32::from_str`
+/// (which cannot parse C hex floats). Returns the f32 the literal denotes.
+fn parse_c_hex_literal(s: &str) -> f32 {
+    let (sign, rest) = match s.strip_prefix('-') {
+        Some(r) => (-1.0_f64, r),
+        None => (1.0_f64, s),
+    };
+    let body = rest
+        .strip_suffix('f')
+        .and_then(|r| r.strip_prefix("0x"))
+        .unwrap_or_else(|| panic!("unexpected hex-float shape: {s}"));
+    let (mantissa_part, exp_part) = body
+        .split_once('p')
+        .unwrap_or_else(|| panic!("missing exponent in {s}"));
+    let exp: i32 = exp_part.parse().expect("exponent");
+    let (int_part, frac_part) = match mantissa_part.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (mantissa_part, ""),
+    };
+    let mut mantissa = u64::from_str_radix(int_part, 16).expect("int digit") as f64;
+    for (i, c) in frac_part.chars().enumerate() {
+        let digit = c.to_digit(16).expect("hex frac digit") as f64;
+        mantissa += digit * 16f64.powi(-(i as i32 + 1));
+    }
+    (sign * mantissa * 2f64.powi(exp)) as f32
+}
+
+/// Sibling of the #189 / #248 lossy-float-emission fix: every finite f32
+/// `f32_to_c_hex_literal` emits must round-trip to its exact source bits.
+/// The pre-fix `{:.8}f` decimal form silently lost mantissa bits, which
+/// would have broken the `simd_sum_f32_all_sizes` bit-exact (`n <= 16`)
+/// assertion for any input whose 8-place decimal does not reparse to the
+/// same f32. Pure string/bit oracle: no gcc or run needed.
+#[test]
+fn hex_float_literal_round_trips_exact_f32_bits() {
+    // Adversarial corpus (no trailing comments so rustfmt leaves the vec
+    // layout untouched):
+    //   - `1e-40` is a subnormal that `%.8` renders `0.00000000f` (bits 0).
+    //   - `f32::from_bits(0x1234_5678)` is the #189 small-magnitude family.
+    //   - signed zeros, a negative integer, an unrepresentable decimal.
+    //   - `f32::MIN_POSITIVE` (smallest normal) and `from_bits(1)`
+    //     (smallest subnormal) plus `MAX` / `MIN` exercise the extremes.
+    let mut cases: Vec<f32> = vec![
+        0.1_f32,
+        (1.0_f64 / 3.0_f64) as f32,
+        1e-40_f32,
+        f32::from_bits(0x1234_5678),
+        0.0_f32,
+        -0.0_f32,
+        -4.0_f32,
+        3.999_999_8_f32,
+        f32::MIN_POSITIVE,
+        f32::from_bits(1),
+        f32::MAX,
+        f32::MIN,
+    ];
+    // Sweep the actual PRNG corpus the reductions feed in.
+    for &n in SIZES {
+        cases.extend(test_data(n));
+    }
+    for value in cases {
+        let lit = f32_to_c_hex_literal(value);
+        let back = parse_c_hex_literal(&lit);
+        assert_eq!(
+            back.to_bits(),
+            value.to_bits(),
+            "hex literal {lit} for {value:e} (bits {:#010x}) did not round-trip; got bits {:#010x}",
+            value.to_bits(),
+            back.to_bits()
+        );
+        // Negative parity: the emitted literal must be the hex form, not
+        // a lossy `{:.8}f` decimal.
+        assert!(
+            lit.starts_with("0x") || lit.starts_with("-0x"),
+            "literal for {value:e} must be a C hex float, not decimal: {lit}"
+        );
+    }
+    // The subnormal reproducer is the sharpest: `%.8` collapses it to
+    // `0.00000000f` (bits 0), but the bit pattern is nonzero and survives.
+    let denormal = 1e-40_f32;
+    assert_ne!(denormal.to_bits(), 0);
+    assert_eq!(
+        parse_c_hex_literal(&f32_to_c_hex_literal(denormal)).to_bits(),
+        denormal.to_bits()
+    );
 }
