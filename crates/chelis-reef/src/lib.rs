@@ -6610,8 +6610,7 @@ path = "./coral"
 
         let entry = root.join("src/main.ch");
         let err = prepare_program_for_file(&entry)
-            .err()
-            .expect("ambiguous unqualified IntCol import must be rejected, not silently dispatched");
+            .expect_err("ambiguous unqualified IntCol import must be rejected, not silently dispatched");
         assert!(
             err.contains("ambiguous reference to `IntCol`"),
             "diagnostic must name the ambiguous constructor; got: {err}"
