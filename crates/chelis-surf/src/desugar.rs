@@ -527,6 +527,7 @@ fn pattern_mentions_name(pattern: &Pattern, name: &str) -> bool {
 fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
     match ty {
         TypeExpr::Named(found, _) => found == name,
+        TypeExpr::RankSpread(found, _) => found == name,
         TypeExpr::Tensor(items, precision, _) => {
             precision == name || items.iter().any(|item| type_mentions_name(item, name))
         }
@@ -1778,6 +1779,9 @@ fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
                 out.insert(name.clone());
             }
         }
+        // `..r` is a rank variable, not a type variable — it is collected
+        // separately (the checker treats `(d-rank {} r)` as a bound rank var).
+        TypeExpr::RankSpread(_, _) => {}
         TypeExpr::Tensor(dims, precision, _) => {
             for d in dims {
                 collect_sig_type_vars(d, out);
@@ -1875,6 +1879,10 @@ fn desugar_type_with_scope(
             }
         }
 
+        // A bare `..r` reaching here (outside a tensor dim list) is not a
+        // valid standalone type, but desugar defensively to the rank node so
+        // the match stays exhaustive; validation rejects the misuse upstream.
+        TypeExpr::RankSpread(name, _) => node("d-rank", vec![sym(name)]),
         TypeExpr::Tensor(dims, precision, _) => {
             let mut children: Vec<deep::Expr> = dims
                 .iter()
@@ -1895,6 +1903,9 @@ fn desugar_type_with_scope(
                     }
                     // Everything else → d-name (concrete)
                     TypeExpr::Named(n, _) => node("d-name", vec![sym(n)]),
+                    // `..r` rank-variable spread → (d-rank {} r). The parser
+                    // already guaranteed it is the sole shape element.
+                    TypeExpr::RankSpread(n, _) => node("d-rank", vec![sym(n)]),
                     _ => node(
                         "d-var",
                         vec![desugar_type_with_scope(d, dim_vars, tvar_set)],
@@ -2649,6 +2660,20 @@ mod tests {
         assert_eq!(
             print_expr(&desugar_type(&ty)),
             "(t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))"
+        );
+    }
+
+    #[test]
+    fn test_type_tensor_rank_spread() {
+        // `tensor[..r, f32]` desugars to a sole `(d-rank {} r)` dim node.
+        let ty = TypeExpr::Tensor(
+            vec![TypeExpr::RankSpread("r".to_string(), s())],
+            "f32".to_string(),
+            s(),
+        );
+        assert_eq!(
+            print_expr(&desugar_type(&ty)),
+            "(t-tensor {} (d-rank {} r) (t-prim {} f32))"
         );
     }
 

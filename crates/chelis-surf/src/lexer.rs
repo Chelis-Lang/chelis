@@ -410,11 +410,21 @@ fn lex_inner(
                 }
             }
             b'.' => {
-                tokens.push(Token {
-                    kind: TokenKind::Dot,
-                    span: Span::new(start, 1),
-                });
-                i += 1;
+                if i + 1 < bytes.len() && bytes[i + 1] == b'.' {
+                    // `..` is the rank-variable spread marker (`tensor[..r, p]`).
+                    // Chelis has no range syntax, so two dots are unambiguous.
+                    tokens.push(Token {
+                        kind: TokenKind::DotDot,
+                        span: Span::new(start, 2),
+                    });
+                    i += 2;
+                } else {
+                    tokens.push(Token {
+                        kind: TokenKind::Dot,
+                        span: Span::new(start, 1),
+                    });
+                    i += 1;
+                }
             }
             b'@' => {
                 tokens.push(Token {

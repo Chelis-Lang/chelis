@@ -2038,6 +2038,13 @@ impl Parser {
                 let tok = self.advance();
                 Ok(TypeExpr::Named("*".to_string(), tok.span))
             }
+            TokenKind::DotDot => {
+                // `..r` rank-variable spread — only valid as the sole shape
+                // element of a tensor type (enforced in the `Tensor` arm).
+                let tok = self.advance();
+                let (name, name_span) = self.expect_ident()?;
+                Ok(TypeExpr::RankSpread(name, tok.span.merge(name_span)))
+            }
             TokenKind::Tensor => {
                 let tok = self.advance();
                 self.expect(&TokenKind::LBracket)?;
@@ -2061,6 +2068,21 @@ impl Parser {
                         });
                     }
                 };
+                // Tier-2 boundary (spec/design/rank_polymorphism.md): a rank
+                // variable `..r` stands for the entire shape, so it must be the
+                // sole dimension. `tensor[..r, k, f32]` (R adjacent to concrete
+                // dims) is Tier-3 rank arithmetic and is rejected at parse time.
+                if items.iter().any(|d| matches!(d, TypeExpr::RankSpread(..))) && items.len() != 1
+                {
+                    return Err(ParseError::Expected {
+                        expected: "rank variable `..r` must be the entire shape; \
+                                   `..r` adjacent to concrete dimensions is Tier-3 \
+                                   rank arithmetic, not supported"
+                            .into(),
+                        found: format!("tensor with {} dims including a rank variable", items.len()),
+                        offset: self.current_offset(),
+                    });
+                }
                 Ok(TypeExpr::Tensor(items, prec_name, tok.span.merge(end.span)))
             }
             TokenKind::Amp => {
@@ -2471,6 +2493,7 @@ fn expr_span(e: &Expr) -> Span {
 fn type_span(t: &TypeExpr) -> Span {
     match t {
         TypeExpr::Named(_, s) => *s,
+        TypeExpr::RankSpread(_, s) => *s,
         TypeExpr::Tensor(_, _, s) => *s,
         TypeExpr::Arrow(_, _, s) => *s,
         TypeExpr::Ref(_, s) => *s,
@@ -3144,6 +3167,48 @@ mod tests {
             },
             _ => panic!("expected typed let"),
         }
+    }
+
+    // chelis#258 / rank polymorphism Tier-2: `..r` rank-variable spread.
+
+    #[test]
+    fn rank_spread_parses_as_sole_dim() {
+        let decls = p("def f(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)");
+        let Decl::FunDef { ret_ty: Some(ret), .. } = &decls[0] else {
+            panic!("expected fun def, got {:?}", decls[0]);
+        };
+        match ret {
+            TypeExpr::Tensor(dims, prec, _) => {
+                assert_eq!(dims.len(), 1, "rank var must be the sole shape element");
+                assert!(
+                    matches!(&dims[0], TypeExpr::RankSpread(n, _) if n == "r"),
+                    "expected RankSpread(r), got {:?}",
+                    dims[0]
+                );
+                assert_eq!(prec, "f32");
+            }
+            _ => panic!("expected Tensor return type, got {ret:?}"),
+        }
+    }
+
+    #[test]
+    fn rank_spread_adjacent_to_concrete_dim_is_parse_error() {
+        // Tier-3 boundary: `..r` may not sit next to other dims.
+        assert!(
+            parse_str("x: tensor[..r, k, f32] = x").is_err(),
+            "tensor[..r, k, f32] must be a parse error (Tier-3 rank arithmetic)"
+        );
+        assert!(
+            parse_str("x: tensor[k, ..r, f32] = x").is_err(),
+            "tensor[k, ..r, f32] must be a parse error (Tier-3 rank arithmetic)"
+        );
+    }
+
+    #[test]
+    fn rank_spread_erasure_position_parses() {
+        // Erasure: `..r` input, rank-0 (`tensor[f32]`) output.
+        let decls = p("def sum_all(x: &tensor[..r, f32]) -> tensor[f32] = sum(x, 0)");
+        assert!(matches!(&decls[0], Decl::FunDef { .. }));
     }
 
     #[test]

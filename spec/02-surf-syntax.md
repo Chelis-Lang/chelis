@@ -195,6 +195,33 @@ def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] =
 
 **Disambiguation:** A name in a `dim` declaration or imported → concrete `d-name`. A name in a function's `[...]` → variable `d-var`. A lowercase name in a tensor type that is neither declared nor in brackets → parse error.
 
+### P3b: Rank Variables (`..r`)
+
+A **rank variable** `..r` stands for an *entire* shape vector rather than a single
+dimension, letting one `def` be generic over tensor *rank* in the two positions
+that are sound under §4.2 (identity and erasure). See
+[`spec/design/rank_polymorphism.md`](design/rank_polymorphism.md) for the full
+design and soundness boundary.
+
+```
+def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+def sum_all(x: &tensor[..r, f32]) -> tensor[f32] = sum(x, 0)
+```
+
+**⟹**
+```
+(defsig {} relu_forward (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))
+                                 (t-tensor {} (d-rank {} r) (t-prim {} f32))))
+```
+
+`..r` is introduced contextually (like a sig dim variable — no `[..r]` quantifier
+needed) and must be the **sole** shape element. `tensor[..r, k, f32]` (a rank
+variable adjacent to concrete dimensions) is **Tier-3 rank arithmetic** and is a
+**parse error** — this is where the Tier-2/Tier-3 boundary is enforced
+syntactically. A `def` whose signature mentions `..r` is additionally restricted
+by the §4.2 Body-Discipline check (it may call only shape-identity or
+shape-erasing operations, never shape-rewriting ones like `permute`/`reshape`).
+
 ### P4: Type Signatures
 
 Both inline and standalone forms. All types are optional — inference fills them in.

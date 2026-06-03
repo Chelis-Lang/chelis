@@ -3,7 +3,7 @@
 **Status:** v0.2 (post design sprint)
 **Scope:** The primary machine interface. Everything an AI agent or compiler needs to construct, parse, validate, and transform Deep programs.
 
-**Executable surface note:** the 61-tag vocabulary documented here remains the
+**Executable surface note:** the 62-tag vocabulary documented here remains the
 authoritative shipped Deep grammar. Future Phase `3c` / `3d` / `3g` language-
 completeness work may add new Deep forms or keep some functionality as built-in helper
 calls, but that future surface is not yet part of the active closed vocabulary unless
@@ -307,6 +307,7 @@ part of this public vocabulary.
 | `d-name` | `(d-name {} batch)` | Named dimension (concrete) |
 | `d-var` | `(d-var {} a)` | Dimension variable (polymorphic) |
 | `d-lit` | `(d-lit {} 512)` | Literal dimension size |
+| `d-rank` | `(d-rank {} r)` | Rank variable — stands for the *entire* shape vector (Tier-2 rank polymorphism). Must be the **sole** child of its `t-tensor`. |
 
 ### 2.7 Transforms
 
@@ -349,11 +350,11 @@ part of this public vocabulary.
 | Expressions | 18 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, record-update, par, handle-effect, borrow |
 | Patterns | 7 | pat-var, pat-lit, pat-ctor, pat-tuple, pat-record, pat-wild, pat-as |
 | Types | 8 | t-prim, t-fn, t-tensor, t-ref, t-adt, t-var, t-unit, t-tuple |
-| Dimensions | 3 | d-name, d-var, d-lit |
+| Dimensions | 4 | d-name, d-var, d-lit, d-rank |
 | Transforms | 6 | grad, vmap, jit, realize, cast, copy |
 | Meta | 3 | quote, unquote, splice |
 | Helpers | 5 | params, bind, kv, effects, resource |
-| **Total** | **61** | |
+| **Total** | **62** | |
 
 ### 2.11 Planned Phase 3+ Expansion Note
 
@@ -366,7 +367,7 @@ The remaining practical Phase 3 work is expected to stress Deep in new direction
 Those additions are not active Deep tags today.
 If Chelis later needs dedicated Deep tags for those features, this closed-vocabulary
 section and the tag-count summary must be revised at the same time. Until then, the
-current 61-tag count remains the authoritative shipped grammar.
+current 62-tag count remains the authoritative shipped grammar.
 
 ---
 
