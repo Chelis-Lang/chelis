@@ -957,9 +957,11 @@ impl Parser {
 
         let (kind, end) = if *self.peek() == TokenKind::LParen {
             self.advance();
-            let kind = if *self.peek() == TokenKind::Dot {
+            let kind = if *self.peek() == TokenKind::DotDot {
+                // `import Foo(..)` import-all. `..` now lexes as a single
+                // DotDot token (the rank-spread marker), so accept it here
+                // rather than two `Dot`s.
                 self.advance();
-                self.expect(&TokenKind::Dot)?;
                 ImportKind::All
             } else {
                 ImportKind::Names(self.parse_ident_list(TokenKind::RParen)?)
@@ -2784,6 +2786,19 @@ mod tests {
                 );
             }
             _ => panic!("expected Import"),
+        }
+    }
+
+    #[test]
+    fn import_all_uses_dotdot_token() {
+        // Regression lock: `..` now lexes as a single DotDot token (the
+        // rank-spread marker), and `import Foo(..)` import-all must still parse.
+        for src in ["import Foo(..)", "import Foo.Bar(..)"] {
+            let decls = p(src);
+            match &decls[0] {
+                Decl::Import { kind, .. } => assert_eq!(kind, &ImportKind::All, "for `{src}`"),
+                _ => panic!("expected Import for `{src}`"),
+            }
         }
     }
 
