@@ -1,0 +1,1 @@
+(def {} answer (app {} (var {} mul) (lit {type: (t-prim {} f32)} 7.0) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 4.0))))

@@ -146,9 +146,11 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 RiscOp::Const { .. }
                 | RiscOp::Add
                 | RiscOp::Mul
+                | RiscOp::Div
                 | RiscOp::CmpLt
                 | RiscOp::MaxElem
                 | RiscOp::Neg
+                | RiscOp::Recip
                 | RiscOp::Exp
                 | RiscOp::Log
                 | RiscOp::Sin
@@ -166,6 +168,8 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::MaxReduce { .. }
                 | RiscOp::MinReduce { .. }
                 | RiscOp::ProdReduce { .. }
+                | RiscOp::ReduceWindow { .. }
+                | RiscOp::ReduceWindowGrad { .. }
                 | RiscOp::Argmax { .. }
                 | RiscOp::Argmin { .. }
                 | RiscOp::OneHot { .. }

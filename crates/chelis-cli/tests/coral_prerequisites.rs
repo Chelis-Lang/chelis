@@ -284,6 +284,9 @@ fn coral_to_tensor_rejects_mixed_bool_and_float_list() {
 bad = to_tensor([true, 1.0])
 "#,
     );
+    // Issue #207: type errors now produce exit 2; assert on stdout
+    // content only (the dedicated invariant test covers the exit
+    // code).
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -291,7 +294,6 @@ bad = to_tensor([true, 1.0])
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
         // Type checker still flags the heterogeneous list.
         .stdout(
             predicate::str::contains("\"errors\":")
@@ -410,6 +412,8 @@ fn coral_comparison_ops_reject_mismatched_precision() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-mismatch");
 
     // f32 tensor vs int64 scalar must fail.
+    // Issue #207: type errors now produce exit 2; assert on stdout
+    // content only (the dedicated invariant test covers the exit code).
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
@@ -425,7 +429,6 @@ bad = gt(xs, cast(1, int64))
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
         .stdout(
             predicate::str::contains("\"errors\":")
                 .and(predicate::str::contains("\"score\": 1").not()),
@@ -447,7 +450,6 @@ bad = gt(bools, true)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
         .stdout(
             predicate::str::contains("\"errors\":")
                 .and(predicate::str::contains("\"score\": 1").not()),

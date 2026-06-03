@@ -5,8 +5,10 @@
 //! - `chelis/spec/design/`: `snake_case.md` (§8.2)
 //! - `chelis/docs/`, shell `docs/`: `snake_case.md` for narrative docs;
 //!   `SCREAMING_SNAKE_CASE.md` allowed for status reports (§8.3)
-//! - any tree rooted at a `book.toml`: kebab-case (§8.5, deliberate mdBook
-//!   exception, detected by walking ancestors for `book.toml`).
+//! - any path that has a component literally named `book/`: kebab-case
+//!   (§8.5, deliberate mdBook exception). The opt-in is the path
+//!   itself, not ancestor-file inference, so adding or removing a
+//!   `book.toml` cannot flip the verdict for any `docs/*.md`.
 //! - filename matching a Cargo package name in the workspace also accepts
 //!   kebab-case in narrative `docs/` (the `c-earchin` case).
 //! - Other paths: no rule (out of scope here; caught by sibling rules
@@ -47,10 +49,9 @@ enum Slot {
 }
 
 fn classify_doc(path: &Path) -> Slot {
-    // §8.5: any mdBook source tree uses kebab-case. An mdBook source tree
-    // is detected by the presence of a `book.toml` in an ancestor directory.
-    // This generalizes the prior `chelis/docs/book/src/` hardcode to handle
-    // shell repos with different layouts (e.g., nautilus uses `docs/src/`).
+    // §8.5: any path with a component literally named `book` is mdBook
+    // content and uses kebab-case. The discriminator is path-based (issue
+    // #190); ancestor `book.toml` files are not consulted.
     if is_inside_mdbook_tree(path) {
         return Slot::BookSrc;
     }
@@ -81,42 +82,25 @@ fn classify_doc(path: &Path) -> Slot {
 
 /// Detect whether `path` sits inside an mdBook source tree.
 ///
-/// Two detection modes:
+/// The discriminator is path-based: any path with a component
+/// literally named `book` is treated as mdBook content. This covers
+/// the chelis layout (`<repo>/docs/book/...`) and the top-level
+/// `<repo>/book/...` layout some shells use. The legacy chelis
+/// `<repo>/docs/book/src/` location is naturally a subpath of
+/// `docs/book/` and is also covered.
 ///
-/// 1. Path-string fast path. The chelis-ecosystem-canonical mdBook
-///    source trees live under `<repo>/docs/src/` (current layout) or
-///    `<repo>/docs/book/src/` (legacy chelis layout). Files whose path
-///    contains either substring are mdBook chapters.
-/// 2. `book.toml`-anchored detection. When the fast path doesn't fire,
-///    walk ancestors of `path` looking for a sibling `book.toml`. If
-///    found, the entire ancestor tree (from `book.toml`'s directory
-///    downward) is mdBook mode. This generalizes detection to repos
-///    whose mdBook layout doesn't put sources under `docs/src/` — for
-///    example a `docs/` directory with `book.toml` at the top and
-///    chapters at `docs/getting-started.md`.
+/// Path-based discrimination (as opposed to ancestor-`book.toml`
+/// inference) was adopted in issue #190 to remove the retroactive-flip
+/// footgun: previously, adding or removing a `book.toml` anywhere in
+/// the ancestor chain would flip every `docs/*.md` between accepted
+/// (§8.3 snake) and rejected (§8.5 kebab). With path-based dispatch,
+/// the verdict for a file depends only on the file's own path.
+///
+/// `book.toml` is not read here; it is documented for mdBook users in
+/// the spec but is not used as a lint discriminator.
 fn is_inside_mdbook_tree(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    if s.contains("/docs/src/") || s.contains("/docs/book/src/") {
-        return true;
-    }
-    // book.toml-anchored detection. We walk every ancestor directory and
-    // probe for `book.toml`. The probe is cheap (one stat() per ancestor)
-    // and bounded by path depth; no recursive walk.
-    has_ancestor_marker(path, "book.toml")
-}
-
-/// True if any strict ancestor directory of `path` contains a file
-/// named `marker_filename`. The ancestor chain stops at the filesystem
-/// root.
-fn has_ancestor_marker(path: &Path, marker_filename: &str) -> bool {
-    let mut cursor = path.parent();
-    while let Some(dir) = cursor {
-        if dir.join(marker_filename).is_file() {
-            return true;
-        }
-        cursor = dir.parent();
-    }
-    false
+    path.components()
+        .any(|c| c.as_os_str().to_str().is_some_and(|name| name == "book"))
 }
 
 /// True if the filename stem of `path` (without the `.md` extension)
@@ -441,12 +425,14 @@ mod tests {
         assert_eq!(v[0].spec_ref, "§8.1");
     }
 
-    // §8.5 mdBook detection by `book.toml` marker (not just hardcoded
-    // path strings). When `book.toml` exists in any ancestor of the doc
-    // file, the entire ancestor tree is mdBook mode and kebab-case is
-    // accepted across the full tree (not only `src/` underneath).
+    // §8.5 mdBook detection is path-based, not `book.toml`-anchored
+    // (issue #190). A `book.toml` sitting in `docs/` does not retroactively
+    // promote `docs/getting-started.md` to §8.5 kebab-case; the file is
+    // still narrative `docs/` content because its path has no `book/`
+    // component. Mirror invariant tests live in
+    // `tests/issue_190_doc_filename_path_based.rs`.
     #[test]
-    fn accepts_kebab_when_book_toml_is_ancestor() {
+    fn book_toml_at_docs_root_does_not_flip_kebab_in_docs() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path();
         let docs = repo.join("docs");
@@ -462,10 +448,12 @@ mod tests {
             surface: Surface::DocFile,
         };
         let v = DocFilenameConvention.check(&ctx);
-        assert!(
-            v.is_empty(),
-            "kebab in book.toml-rooted tree should pass; got: {v:?}"
+        assert_eq!(
+            v.len(),
+            1,
+            "kebab in docs/ remains a §8.3 violation regardless of book.toml; got: {v:?}"
         );
+        assert_eq!(v[0].spec_ref, "§8.3");
     }
 
     #[test]
@@ -502,9 +490,9 @@ mod tests {
     }
 
     #[test]
-    fn negative_kebab_in_docs_without_book_toml_or_package_match_still_flags() {
-        // Sanity: a kebab-case file in narrative docs without book.toml
-        // marker and without a matching Cargo package name still fires.
+    fn negative_kebab_in_docs_without_package_match_still_flags() {
+        // Sanity: a kebab-case file in narrative docs without a matching
+        // Cargo package name still fires under §8.3.
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path();
         let docs = repo.join("docs");
@@ -522,7 +510,7 @@ mod tests {
         assert_eq!(
             v.len(),
             1,
-            "kebab outside book.toml and not Cargo-package-matching should still flag"
+            "kebab outside book/ and not Cargo-package-matching should still flag"
         );
         assert_eq!(v[0].spec_ref, "§8.3");
     }

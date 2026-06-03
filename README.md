@@ -42,6 +42,32 @@ brew install gcc
 Optional:
 - **Valgrind** — memory leak tests on generated C
 
+**Python via [uv](https://docs.astral.sh/uv/)** (for `scripts/gate.py`, the
+chelis-tools CLI in `py/`, and the `chelis-python` PyO3 link step):
+
+```sh
+# Install uv once
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create the project-local venv (from the repo root)
+uv venv --python 3.11
+```
+
+The project pins Python 3.11 (`py/pyproject.toml` requires `>=3.11`).
+Always use the uv-managed interpreter at `.venv/bin/python` — `.cargo/config.toml`
+sets `PYO3_PYTHON` to it so `cargo build -p chelis-python` links against the
+right `libpython` on every developer's machine. Using the system Python is
+**not supported**; on macOS, Apple's bundled `python3` reports a stale
+`sysconfig.LIBDIR` that breaks the PyO3 link step, and on Linux the
+system Python may not match the chelis-tools version constraint.
+
+Install Python dependencies into the uv venv as needed:
+
+```sh
+uv pip install -e py            # chelis-tools (gate, loc-report, skill-eval, ...)
+uv pip install -e bindings/python # chelis Python bindings (optional)
+```
+
 ## Build
 
 ```sh

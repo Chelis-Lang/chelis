@@ -1,6 +1,39 @@
 use crate::ast::*;
+use crate::lexer::{self, Comment, LexError};
+use crate::parser::{self, ParseError};
 
 const WIDTH: usize = 80;
+
+/// Error from [`format_source`]: the input failed to lex or parse, so
+/// there is no canonical form to produce.
+#[derive(Debug)]
+pub enum FormatError {
+    Lex(LexError),
+    Parse(ParseError),
+}
+
+impl std::fmt::Display for FormatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FormatError::Lex(e) => write!(f, "{e}"),
+            FormatError::Parse(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for FormatError {}
+
+impl From<LexError> for FormatError {
+    fn from(e: LexError) -> Self {
+        FormatError::Lex(e)
+    }
+}
+
+impl From<ParseError> for FormatError {
+    fn from(e: ParseError) -> Self {
+        FormatError::Parse(e)
+    }
+}
 
 pub fn format_program(decls: &[Decl]) -> String {
     let mut out = Vec::new();
@@ -11,6 +44,100 @@ pub fn format_program(decls: &[Decl]) -> String {
         String::new()
     } else {
         format!("{}\n", out.join("\n"))
+    }
+}
+
+/// Canonically format Surf `source`, preserving its comments.
+///
+/// [`format_program`] works purely from the parsed AST, which carries
+/// no comments — it is the right entry point for synthesized decls
+/// (decompiler output, prove fixtures) that never had source comments.
+/// `format_source` is the entry point for `chelis fmt` on a real
+/// on-disk `.ch` file: it re-lexes to recover comments and splices
+/// them back into the formatted output at their source position.
+///
+/// Comments are placed between the formatted declarations whose source
+/// offsets bracket them. A comment that falls inside a declaration's
+/// span (e.g. inside a function body) is emitted immediately before
+/// that declaration rather than being dropped — body-internal comment
+/// placement is not yet position-exact, but no comment is lost.
+pub fn format_source(source: &str) -> Result<String, FormatError> {
+    let (tokens, comments) = lexer::lex_with_comments(source)?;
+    let decls = parser::parse(&tokens)?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut next = 0usize;
+    emit_decls_with_comments(&decls, &comments, &mut next, &mut lines);
+    // Any comments after the last declaration.
+    for comment in &comments[next..] {
+        lines.push(comment.text.clone());
+    }
+    if lines.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!("{}\n", lines.join("\n")))
+    }
+}
+
+/// Walk `decls` in source order, emitting each pending comment whose
+/// source offset precedes the current declaration's start before the
+/// declaration itself. `next` is the index of the first not-yet-emitted
+/// comment in `comments` (which is in source order). Recurses into
+/// `Module` bodies so comments land in the right nesting scope.
+fn emit_decls_with_comments(
+    decls: &[Decl],
+    comments: &[Comment],
+    next: &mut usize,
+    lines: &mut Vec<String>,
+) {
+    for decl in decls {
+        let decl_start = decl.span().offset;
+        while *next < comments.len() && comments[*next].span.offset < decl_start {
+            lines.push(comments[*next].text.clone());
+            *next += 1;
+        }
+        match decl {
+            Decl::Module {
+                name, decls: inner, ..
+            } => {
+                let mut header = format!("module {name}");
+                let decl_end = decl.span().end();
+                if inner.is_empty() {
+                    // Comments inside an otherwise-empty module body.
+                    let mut body: Vec<String> = Vec::new();
+                    while *next < comments.len() && comments[*next].span.offset < decl_end {
+                        body.push(comments[*next].text.clone());
+                        *next += 1;
+                    }
+                    if !body.is_empty() {
+                        header.push('\n');
+                        header.push_str(&body.join("\n"));
+                    }
+                    lines.push(header);
+                } else {
+                    let mut body: Vec<String> = Vec::new();
+                    emit_decls_with_comments(inner, comments, next, &mut body);
+                    // Trailing comments still inside the module span.
+                    while *next < comments.len() && comments[*next].span.offset < decl_end {
+                        body.push(comments[*next].text.clone());
+                        *next += 1;
+                    }
+                    header.push('\n');
+                    header.push_str(&body.join("\n"));
+                    lines.push(header);
+                }
+            }
+            _ => {
+                // A comment whose offset falls within this declaration's
+                // own span (e.g. inside a function body) is emitted just
+                // before the declaration so it is never lost.
+                let decl_end = decl.span().end();
+                while *next < comments.len() && comments[*next].span.offset < decl_end {
+                    lines.push(comments[*next].text.clone());
+                    *next += 1;
+                }
+                lines.push(format_decl(decl));
+            }
+        }
     }
 }
 
@@ -716,6 +843,89 @@ mod tests {
         assert!(
             !rendered.contains("! {"),
             "unannotated def must not grow an effect row; got: {rendered}"
+        );
+    }
+
+    // ── format_source comment preservation (#144) ────────────────
+
+    #[test]
+    fn format_source_preserves_line_and_block_comments() {
+        let source = "module School.Comment_Test\n\
+                       -- regular comment 1\n\
+                       --- triple-dash\n\
+                       -- expect:\n\
+                       {- block comment -}\n\
+                       def main() -> f32 = cast(1.0, f32)\n";
+        let rendered = format_source(source).expect("format");
+        assert!(rendered.contains("-- regular comment 1"), "got: {rendered}");
+        assert!(rendered.contains("--- triple-dash"), "got: {rendered}");
+        assert!(rendered.contains("-- expect:"), "got: {rendered}");
+        assert!(rendered.contains("{- block comment -}"), "got: {rendered}");
+        assert!(rendered.contains("def main"), "got: {rendered}");
+    }
+
+    #[test]
+    fn format_source_is_idempotent_with_comments() {
+        let source = "module Foo\n\
+                       {- multi-line\n   block -}\n\
+                       def a() -> f32 = cast(1.0, f32)\n\
+                       -- between defs\n\
+                       def b() -> f32 = cast(2.0, f32)\n";
+        let once = format_source(source).expect("format once");
+        let twice = format_source(&once).expect("format twice");
+        assert_eq!(once, twice, "format_source must be idempotent");
+    }
+
+    #[test]
+    fn format_source_preserves_comment_only_module_body() {
+        // An illustrative file whose body is 100% documentation must
+        // not collapse to a bare `module Foo`.
+        let source = "module Empty\n\
+                       -- this file is all documentation\n\
+                       -- explaining a concept\n";
+        let rendered = format_source(source).expect("format");
+        assert!(
+            rendered.contains("-- this file is all documentation"),
+            "comment-only module body was dropped; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("-- explaining a concept"),
+            "got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn format_source_preserves_file_header_comment_above_module() {
+        let source = "-- file header above the module\n\
+                       module Top\n\
+                       def x() -> f32 = cast(3.0, f32)\n";
+        let rendered = format_source(source).expect("format");
+        assert!(
+            rendered.starts_with("-- file header above the module"),
+            "header comment lost or moved; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn format_source_reformats_non_canonical_while_keeping_comments() {
+        let source = "module Bar\n-- keep me\ndef   f()  ->  f32  =  cast(1.0,f32)\n";
+        let rendered = format_source(source).expect("format");
+        assert!(rendered.contains("-- keep me"), "got: {rendered}");
+        assert!(
+            rendered.contains("def f() -> f32 = cast(1.0, f32)"),
+            "non-canonical spacing was not normalized; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn format_source_without_comments_matches_format_program() {
+        let source = "module Bare\ndef f() -> f32 = cast(1.0, f32)\n";
+        let via_source = format_source(source).expect("format_source");
+        let decls = crate::parser::parse_str(source).expect("parse");
+        let via_program = format_program(&decls);
+        assert_eq!(
+            via_source, via_program,
+            "comment-free input must format identically through both paths"
         );
     }
 }

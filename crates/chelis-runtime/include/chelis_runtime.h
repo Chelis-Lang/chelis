@@ -14,11 +14,14 @@
 #define CHELIS_I32 2
 #define CHELIS_BOOL 3
 #define CHELIS_I64 4
-/* WS-A3: bf16 / f16 dtype tags. Two-byte storage. The host runtime
- * (chelis-runtime) does not implement bf16/f16 arithmetic in this
- * cycle — these tags are present so the HIP backend can size GPU
- * allocations and shuttle bytes between host and device tensors
- * without round-tripping through a wider type. */
+/* WS-A3 introduced bf16 / f16 dtype tags as storage-only. WS-1 (dtype
+ * + Metal cleanup cycle) promotes both to arithmetic-supported on the
+ * C backend: storage stays two bytes (uint16_t), and the C backend
+ * routes every arithmetic kernel through `chelis_bf16_to_f32` /
+ * `chelis_f32_to_bf16` (and f16 analogues), keeping per-element math
+ * in f32. Matmul on bf16/f16 dispatches via convert-then-`cblas_sgemm`
+ * with f32 scratch buffers (spec/04-type-system.md §5.7.1). The HIP
+ * and Metal backends continue to use their native dispatch paths. */
 #define CHELIS_BF16 5
 #define CHELIS_F16 6
 /* WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
@@ -113,6 +116,50 @@ void chelis_free(chelis_tensor *t);
 void chelis_fill_f32(chelis_tensor *t, float val);
 void chelis_fill_i64(chelis_tensor *t, int64_t val);
 void chelis_fill_f64(chelis_tensor *t, double val);
+/* Issue #189: bit-pattern fill helpers for f32 / f64 Const emission.
+ * Codegen computes the IEEE 754 bit pattern of the source value at
+ * compile time (`f32::to_bits()` / `f64::to_bits()`) and emits
+ * `chelis_fill_f32_bits(t, 0xXXXXXXXXu)` / `chelis_fill_f64_bits(t,
+ * 0xXXXXXXXXXXXXXXXXuLL)`. The runtime bit-casts the integer pattern
+ * back to the IEEE 754 value before filling, so the constant is
+ * bit-identical to the source value -- avoiding the lossy
+ * decimal-format-string round-trip that the pre-fix emitter used. The
+ * shape mirrors `chelis_fill_bf16` / `chelis_fill_f16`. */
+void chelis_fill_f32_bits(chelis_tensor *t, uint32_t bits);
+void chelis_fill_f64_bits(chelis_tensor *t, uint64_t bits);
+/* Issue #248: scalar bit-pattern reconstruction helpers. The C backend
+ * emits `chelis_uniform_sample_f32(..., chelis_f32_from_bits(0xXXXXXXXXu),
+ * chelis_f32_from_bits(0xYYYYYYYYu))` so the runtime sees the byte-identical
+ * f32 narrowing of the source `low` / `high` instead of a `%.8` decimal
+ * round-trip. Symmetric with `chelis_fill_f32_bits` / `chelis_fill_f64_bits`
+ * but for per-call scalar args rather than buffer fills, so a `static inline`
+ * bit-cast suffices; no Rust-side `extern "C"` symbol is needed. */
+static inline float chelis_f32_from_bits(uint32_t bits) {
+    float v;
+    memcpy(&v, &bits, sizeof(float));
+    return v;
+}
+static inline double chelis_f64_from_bits(uint64_t bits) {
+    double v;
+    memcpy(&v, &bits, sizeof(double));
+    return v;
+}
+/* WS-1 (dtype + Metal cleanup cycle): two-byte fill helpers for bf16
+ * and f16 tensors. Codegen computes the exact 16-bit pattern from the
+ * IR literal at compile time (the `half` crate's `to_bits()`) and
+ * passes it as `bits`; the runtime writes that pattern into every
+ * element so the storage round-trips exactly. */
+void chelis_fill_bf16(chelis_tensor *t, uint16_t bits);
+void chelis_fill_f16(chelis_tensor *t, uint16_t bits);
+/* WS-1 buffer-conversion helpers used by the C backend's bf16/f16
+ * matmul wrapper (convert-then-`cblas_sgemm`). The host-side
+ * arithmetic story for bf16/f16 is "always go through f32"; matmul
+ * batches the conversion to amortize the per-element cost across the
+ * GEMM call. */
+void chelis_bf16_buffer_to_f32(const uint16_t *src, float *dst, int64_t n);
+void chelis_f32_buffer_to_bf16(const float *src, uint16_t *dst, int64_t n);
+void chelis_f16_buffer_to_f32(const uint16_t *src, float *dst, int64_t n);
+void chelis_f32_buffer_to_f16(const float *src, uint16_t *dst, int64_t n);
 chelis_tensor *chelis_scalar_tensor_from_i64(int64_t value);
 chelis_tensor *chelis_scalar_tensor_from_f64(double value);
 double chelis_tensor_to_f64(const chelis_tensor *t);
@@ -296,6 +343,124 @@ static inline chelis_dict *chelis_tuple_get_dict(const chelis_tuple *tuple, int6
 
 static inline chelis_adt *chelis_tuple_get_adt(const chelis_tuple *tuple, int64_t index) {
     return chelis_value_as_adt(chelis_tuple_get(tuple, index));
+}
+
+/*
+ * WS-1: bf16 / f16 per-element conversion to and from f32.
+ *
+ * Storage layout for both formats is a 16-bit unsigned integer. The
+ * generated C kernels read a 16-bit element, convert to f32, perform
+ * arithmetic in f32, convert back, and store. Per spec/04-type-system.md
+ * §5.7.1 the matmul accumulator is f32 and the reduction accumulator
+ * for bf16/f16 reduce_sum is also f32; both fall out naturally from
+ * routing through these helpers.
+ *
+ * bf16 encoding: sign(1) exp(8) mantissa(7). The bit pattern matches
+ * the upper half of an IEEE 754 binary32. Conversion to f32 is a
+ * left-shift-by-16 into the high half of the bit pattern; conversion
+ * from f32 rounds to nearest even.
+ *
+ * f16 encoding: sign(1) exp(5) mantissa(10) per IEEE 754 binary16.
+ * Conversion handles subnormals, infinity, NaN, and the smaller
+ * exponent range; conversion from f32 rounds to nearest even.
+ *
+ * NaN propagation: every conversion preserves NaN-ness (the result is
+ * also a NaN), though the exact NaN payload is not preserved across
+ * f32 -> reduced -> f32 round trips. Inf is preserved exactly.
+ *
+ * All helpers are `static inline` so the C compiler can fold the
+ * conversion into the surrounding kernel loop and emit SIMD-friendly
+ * code without a function call per element.
+ */
+static inline float chelis_bf16_to_f32(uint16_t bits) {
+    uint32_t expanded = ((uint32_t)bits) << 16;
+    float out;
+    memcpy(&out, &expanded, sizeof(out));
+    return out;
+}
+
+static inline uint16_t chelis_f32_to_bf16(float v) {
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    /* NaN: preserve the most-significant mantissa bit so the result is
+     * still a NaN (not silently coerced to inf). */
+    if ((bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0) {
+        return (uint16_t)((bits >> 16) | 0x0040u);
+    }
+    /* Round-to-nearest-even on the discarded 16 mantissa bits. */
+    uint32_t lsb = (bits >> 16) & 1u;
+    uint32_t rounded = bits + 0x7FFFu + lsb;
+    return (uint16_t)(rounded >> 16);
+}
+
+static inline float chelis_f16_to_f32(uint16_t bits) {
+    uint32_t sign = ((uint32_t)bits & 0x8000u) << 16;
+    uint32_t exp = ((uint32_t)bits & 0x7C00u) >> 10;
+    uint32_t mant = (uint32_t)bits & 0x03FFu;
+    uint32_t out_bits;
+    if (exp == 0u) {
+        if (mant == 0u) {
+            out_bits = sign;
+        } else {
+            /* Subnormal: normalize. */
+            int shift = 0;
+            while ((mant & 0x0400u) == 0u) {
+                mant <<= 1;
+                shift++;
+            }
+            mant &= 0x03FFu;
+            uint32_t exp32 = (uint32_t)(127 - 15 - shift + 1);
+            out_bits = sign | (exp32 << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1Fu) {
+        /* Inf or NaN. */
+        out_bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        uint32_t exp32 = exp + (127u - 15u);
+        out_bits = sign | (exp32 << 23) | (mant << 13);
+    }
+    float out;
+    memcpy(&out, &out_bits, sizeof(out));
+    return out;
+}
+
+static inline uint16_t chelis_f32_to_f16(float v) {
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    uint32_t sign = (bits >> 16) & 0x8000u;
+    int32_t exp = (int32_t)((bits >> 23) & 0xFFu) - 127 + 15;
+    uint32_t mant = bits & 0x007FFFFFu;
+    if (((bits >> 23) & 0xFFu) == 0xFFu) {
+        /* Inf / NaN: preserve. */
+        if (mant != 0u) {
+            return (uint16_t)(sign | 0x7E00u);
+        }
+        return (uint16_t)(sign | 0x7C00u);
+    }
+    if (exp >= 0x1F) {
+        /* Overflow to inf. */
+        return (uint16_t)(sign | 0x7C00u);
+    }
+    if (exp <= 0) {
+        /* Subnormal or zero in f16. */
+        if (exp < -10) {
+            return (uint16_t)sign;
+        }
+        mant = (mant | 0x00800000u) >> (1 - exp);
+        uint32_t rounded = mant + 0x00001000u;
+        return (uint16_t)(sign | (rounded >> 13));
+    }
+    /* Normal: round-to-nearest-even on the discarded 13 mantissa bits. */
+    uint32_t lsb = (mant >> 13) & 1u;
+    uint32_t rounded = mant + 0x00000FFFu + lsb;
+    if ((rounded & 0x00800000u) != 0u) {
+        rounded = 0u;
+        exp += 1;
+        if (exp >= 0x1F) {
+            return (uint16_t)(sign | 0x7C00u);
+        }
+    }
+    return (uint16_t)(sign | ((uint32_t)exp << 10) | (rounded >> 13));
 }
 
 static inline void chelis_flat_to_indices(int flat, const int *shape, int ndim, int *out) {

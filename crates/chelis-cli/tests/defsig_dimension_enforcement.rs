@@ -42,8 +42,11 @@ sig make_3: tensor[1, 3, f32]
 result = do_thing(make_3)
 "#,
     );
-    // `chelis check` exits 0 even with errors in the JSON; assert on the
-    // JSON content rather than process exit status.
+    // Issue #207: `chelis check` now exits non-zero (exit 2) when the
+    // JSON `errors` array is non-empty. We assert on the JSON
+    // content via stdout; the dedicated invariant test in
+    // `issue_207_check_exit_code_invariant.rs` covers the exit
+    // code separately.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -76,9 +79,9 @@ def make() -> tensor[1, 3, f32] =
 result = do_thing(make())
 "#,
     );
-    // `chelis check` exits 0 even with errors in the JSON; assert on the
-    // JSON content rather than process exit status (matches the working
-    // baseline test's pattern).
+    // Issue #207: `chelis check` exits non-zero (exit 2) when the
+    // JSON `errors` array is non-empty. We assert on the JSON
+    // content; the dedicated invariant test covers the exit code.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")

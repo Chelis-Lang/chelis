@@ -43,7 +43,7 @@ Subprocess tracking is intentionally deferred until FFI lands (no current Chelis
 
 These guarantee that a program is internally consistent. They do NOT guarantee it computes the right answer. A program can be dimension-safe, effect-correct, linear, and differentiable while implementing the wrong formula entirely.
 
-### Level 2 -- Executable Properties as Spec (planned, core future value prop)
+### Level 2 -- Executable Properties as Spec (V1 shipped, core value prop)
 
 The user writes executable Chelis functions that define what "correct" means in their domain. These properties ARE the spec. The toolchain verifies the generated code against them empirically on random inputs.
 
@@ -96,6 +96,16 @@ The last pattern -- `matches_textbook` -- is the highest-value property type. Th
 3. **Behavioral constraints.** Monotonicity (price increases with spot), continuity (small input change produces small output change), symmetry (put-call symmetry), convergence (Monte Carlo converges as path count increases). These encode domain knowledge that test suites can't express.
 
 **Implementation: evolution of `chelis prove`**
+
+Status: V1 shipped in v0.7.1. The `chelis prove` subcommand and the
+first-class `@property NAME forall(...) where ...:` Surf syntax are
+implemented (`crates/chelis-cli/src/prove.rs`), with deterministic
+type-directed sampling, `--samples`/`--seed`/`--only`/`--json` flags, a
+four-state exit-code contract (pass 0, fail 1, unsupported 2, error 3),
+and Deep-bridge provenance. V1 covers scalar binders and fixed-shape
+numeric tensors. Still to land: symbolic-dimension tensor binders and
+counterexample minimization. The bullets below describe the full design;
+items beyond the V1 scope above are still forthcoming.
 
 `chelis prove` runs first-class property declarations:
 
@@ -209,9 +219,15 @@ For the strongest guarantee, the customer writes the properties themselves. They
 
 ## Relationship to Existing Plans
 
-**`chelis prove` (planned, Phase 3 / pre-Phase 4).** Currently scoped as a CLI tool with simple property flags. This document expands the scope: properties become first-class Chelis functions with `@property` annotations, living in the source tree, CI-enforced, with type-directed random input generation and minimal-counterexample reporting.
+**`chelis prove` (V1 shipped, v0.7.1).** Originally scoped as a CLI tool with simple property flags; now shipped as the expanded design — properties are first-class Chelis functions with `@property NAME forall(...) where ...:` annotations, living in the source tree, CI-enforced, with deterministic type-directed input generation and a stable exit-code/NDJSON contract. V1 covers scalar binders and fixed-shape numeric tensors; symbolic-dimension tensor binders and minimal-counterexample reporting remain to land.
 
-**Hull (future shell).** Hull validates the compiler against the language spec via differential testing. The same pattern (reference implementation + production implementation + agreement checking) is what `@property matches_reference forall(...)` does for user code. Hull proves the pattern works on the highest-stakes code in the system (the compiler itself).
+**Hull (shipped, v0.1.2).** Hull is the compiler-vs-spec differential layer. It is a self-hosted executable specification shell (pure Chelis, depends on `chelis-std` only) that implements the LaCaDiLE typing rules and small-step operational semantics directly as a reference type checker and a reference evaluator over the Deep AST. The differential harness runs both against the real `chelis` compiler on type-directed, well-typed-by-construction generated programs and asserts they agree. What it proves, precisely:
+
+- The Hull reference checker and reference evaluator AGREE with the shipped compiler on 10,000 generated programs, with ZERO `CompilerUnsound` (Hull rejects, compiler accepts, no documented gap) and zero unexplained `Disagree`. Two independent fresh-seed campaigns reproduced this. The eval lane agrees within f32 tolerance on 1,000 eval-eligible programs (NaN reconciled to JSON `null`).
+- The generated 10k lane is Hull-accepted-by-construction, so it proves AGREEMENT. The DETECTION capability (that the harness *would* flag a real `CompilerUnsound`) is proven separately by an injected-unsound self-test and by a hand-curated `known_conservative.json` that exercises the reject direction.
+- It is CI-enforced in this monorepo: `tests/conformance/hull/` is the frozen, version-stamped corpus and `.github/workflows/conformance.yml` runs the gate per PR and on push-to-main, failing on any `CompilerUnsound`, unexplained `Disagree`, or `EvalDisagree`. The teeth are verified by an injected-unsound step that EXPECTS the gate to fail. The full fresh 10k campaign runs nightly (`conformance-nightly.yml`).
+
+Scope of v0.1.0: the PURE in-fragment surface (tensor/scalar ops, lambda, let, if, match with `PVar`/`PLit`/`PWildcard`, and the surface `grad` check). The same agreement pattern (reference implementation + production implementation + agreement checking) is what `@property matches_reference forall(...)` does for user code; Hull proves it on the highest-stakes code in the system, the compiler itself. Hull covers the compiler/spec layer that `chelis prove` (per-program `@property`) and c-earchin (spec translation) do not. Three documented v0.1.0 boundaries, all scoped for v0.2.0 in Hull's `docs/v0_2_0_roadmap.md`: grad conservatism is a BUILD-differential concern (the compiler's linearity/Δ rejection is at lowering, not at `chelis check`, so it is out of the v0.1.0 check+eval differential); effects and ADTs (`EConstruct`/`PConstruct`) are out of the typed fragment; builtin-name shadowing and division-by-zero are documented reference/UB gaps, not soundness findings.
 
 **Phase 5g (trusted annotations).** `@convex`, `@lipschitz` start as trusted, evolve toward verified as Beacon (abstract interpretation) matures. No change to the current plan -- this document extends the vision.
 
@@ -259,8 +275,8 @@ These limits are stable: each will move from "limit" to "shipped" only when a co
 
 | Shell/Tool | Change | Status |
 |---|---|---|
-| `chelis prove` | Evolve from CLI flags to first-class Chelis property functions with `@property`, type-directed input generation, counterexample minimization | Planned, scope expanded by this document |
+| `chelis prove` | Evolve from CLI flags to first-class Chelis property functions with `@property`, type-directed input generation, counterexample minimization | V1 shipped (v0.7.1); symbolic-dim tensor binders + counterexample minimization pending |
 | Beacon (abstract interpretation) | New future shell: automated static analysis on the tensor DAG, input range specification, overflow/div-zero/NaN detection | Future, not designed |
 | `Std.Test` | No change -- `chelis test` remains for deterministic assertion-based tests. `chelis prove` is the companion for property-based verification. | Shipped |
-| Hull | No change to Hull itself. Hull validates the pattern (differential testing against a reference) that user-facing `@property matches_reference` uses. | Future (stub) |
+| Hull | The compiler-vs-spec differential layer. Hull's reference checker + evaluator agree with the shipped compiler on 10k generated programs (zero CompilerUnsound), CI-enforced by `tests/conformance/hull/` + `conformance.yml`. Validates the pattern (differential testing against a reference) that user-facing `@property matches_reference` uses, on the compiler itself. | Shipped (v0.1.2) |
 | Phase 5g annotations | No change to near-term plan. Long-term: Beacon may verify annotations automatically. | Deferred |

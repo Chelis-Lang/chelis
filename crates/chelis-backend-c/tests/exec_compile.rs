@@ -7,7 +7,7 @@
 //! We link against the chelis_runtime .a to resolve those symbols.
 
 use chelis_backend_c::{CodegenOptions, MathLib, codegen_with_options};
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::fs;
@@ -53,8 +53,66 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
         .parent()
         .expect("canonical lib path has no parent")
         .join("deps");
+    // First-pass scan of the deps dir.
+    let hashed = find_newest_runtime_archive(&deps_dir)?;
+    // If cargo's incremental cache reused the rlib without re-emitting
+    // the staticlib (observed on CI cold-cache runs against
+    // `chelis-runtime` as a transitive dev-dep), force a rebuild of
+    // the lib target and rescan. `cargo build -p chelis-runtime --lib`
+    // emits both crate-types declared in chelis-runtime/Cargo.toml,
+    // producing the `libchelis_runtime-<hash>.a` artifact the
+    // gcc-link harness needs.
+    let hashed = match hashed {
+        Some(path) => path,
+        None => {
+            std::process::Command::new(env!("CARGO"))
+                .args(["build", "-p", "chelis-runtime", "--lib"])
+                .status()
+                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
+            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "no libchelis_runtime-*.a found in {} after explicit `cargo build -p \
+                     chelis-runtime --lib`",
+                    deps_dir.display()
+                ))
+            })?
+        }
+    };
+    // Use a PID-suffixed tmp filename so concurrent test binaries (this
+    // file and dtype_matrix_bf16_f16.rs both call into this helper, and
+    // nextest runs them in parallel) do not race on a shared tmp path.
+    // Each process writes its own tmp and renames into the shared
+    // canonical location; last writer wins, but the content is
+    // identical so the race is harmless. Without the PID, two
+    // processes that interleave `fs::copy` and `fs::rename` produce an
+    // ENOENT on the second rename because the first rename moved the
+    // shared tmp away.
+    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    fs::copy(&hashed, &tmp)?;
+    // The rename can still race with another process renaming its own
+    // unique tmp into the same canonical path. On POSIX, rename onto an
+    // existing file is atomic, so this is fine. If a peer beat us to
+    // it, treat NotFound from a follow-up cleanup as benign.
+    match fs::rename(&tmp, canonical) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
+    let entries = match fs::read_dir(deps_dir) {
+        Ok(it) => it,
+        // Truly cold target dirs may not have `deps/` yet; let the
+        // caller fall through to the explicit `cargo build` fallback.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -67,17 +125,7 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             }
         }
     }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    // Atomic copy: write to a temp file in the same dir, then rename.
-    let tmp = canonical.with_extension("a.tmp");
-    fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
+    Ok(newest.map(|(_, p)| p))
 }
 
 fn runtime_lib_path() -> PathBuf {
@@ -394,6 +442,539 @@ int main() {{
         panic!("ReduceSum kernel failed to compile/run");
     };
     assert!(output.contains("PASS"), "ReduceSum wrong output:\n{output}");
+}
+
+// ---- Issue #254: reduce_window_* C-backend numerical parity ----
+//
+// The `issue_254_reduce_window_emit` tests pin only the *structural*
+// shape of the emitted C (which intrinsic, which init literal). Per
+// the backend-numerics policy, evaluator-vs-backend agreement needs an
+// actual compile-and-run. These two tests close that gap: the emitted
+// C is compiled with gcc, run, and checked against the exact values
+// the IR evaluator (`chelis_ir::eval::reduce_window`) produces for the
+// same 1x1x3x3 input — the canonical oracle per spec §6. Max exercises
+// the `fmaxf` / `-INFINITY` path; Mean exercises the windowed-sum +
+// `acc /= window_volume` division path.
+
+fn reduce_window_3x3_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
+    let in_ty = TensorType {
+        dims: [1, 1, 3, 3].into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    };
+    let out_ty = TensorType {
+        dims: [1, 1, 2, 2].into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    dag.add_node(
+        RiscOp::ReduceWindow {
+            reducer,
+            window_shape: vec![2, 2],
+            strides: vec![1, 1],
+        },
+        vec![x],
+        out_ty,
+        None,
+    );
+    chelis_backend_c::codegen(&dag, kernel).c_source
+}
+
+// Build a contiguous 1x1x3x3 input view holding [[1..9]] row-major.
+const RW_HARNESS_4D_HEADER: &str = r#"
+static chelis_tensor make_view_1x1x3x3(float* data) {
+    chelis_tensor t;
+    memset(&t, 0, sizeof(t));
+    t.data = data;
+    t.shape[0] = 1; t.shape[1] = 1; t.shape[2] = 3; t.shape[3] = 3;
+    t.strides[0] = 9; t.strides[1] = 9; t.strides[2] = 3; t.strides[3] = 1;
+    t.ndim = 4;
+    t.dtype = CHELIS_F32;
+    t.size = 9;
+    t.owns_data = 0;
+    return t;
+}
+"#;
+
+#[test]
+fn exec_reduce_window_max_matches_evaluator_oracle() {
+    let src = reduce_window_3x3_dag(ReduceWindowKind::Max, "test_rw_max");
+    let harness = format!(
+        r#"{HARNESS_HEADER}{RW_HARNESS_4D_HEADER}
+extern void test_rw_max(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float in_data[9] = {{1,2,3,4,5,6,7,8,9}};
+    chelis_tensor in_t = make_view_1x1x3x3(in_data);
+    chelis_tensor* inputs[1] = {{&in_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+
+    test_rw_max(inputs, 1, outputs, 1);
+
+    // 2x2 maxes of [[1,2,3],[4,5,6],[7,8,9]]: [5,6,8,9].
+    float expected[4] = {{5.0f, 6.0f, 8.0f, 9.0f}};
+    int ok = (outputs[0]->size == 4);
+    for (int i = 0; i < 4; i++) {{
+        if (fabsf(outputs[0]->data[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, outputs[0]->data[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let Some(output) = compile_and_run_kernel("rw_max_3x3", &src, &harness) else {
+        panic!("reduce_window_max kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "reduce_window_max C backend diverged from evaluator oracle:\n{output}"
+    );
+}
+
+#[test]
+fn exec_reduce_window_mean_matches_evaluator_oracle() {
+    let src = reduce_window_3x3_dag(ReduceWindowKind::Mean, "test_rw_mean");
+    let harness = format!(
+        r#"{HARNESS_HEADER}{RW_HARNESS_4D_HEADER}
+extern void test_rw_mean(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float in_data[9] = {{1,2,3,4,5,6,7,8,9}};
+    chelis_tensor in_t = make_view_1x1x3x3(in_data);
+    chelis_tensor* inputs[1] = {{&in_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+
+    test_rw_mean(inputs, 1, outputs, 1);
+
+    // 2x2 means: sums [12,16,24,28] / 4 = [3,4,6,7].
+    float expected[4] = {{3.0f, 4.0f, 6.0f, 7.0f}};
+    int ok = (outputs[0]->size == 4);
+    for (int i = 0; i < 4; i++) {{
+        if (fabsf(outputs[0]->data[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, outputs[0]->data[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let Some(output) = compile_and_run_kernel("rw_mean_3x3", &src, &harness) else {
+        panic!("reduce_window_mean kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "reduce_window_mean C backend diverged from evaluator oracle:\n{output}"
+    );
+}
+
+// ---- reduce_window adjoint (ReduceWindowGrad) C-backend parity ----
+
+// din = ReduceWindowGrad(x[1,1,3,3], g[1,1,2,2]) with window=[2,2]
+// stride=[1,1]. Load "x" is created first (input slot 0), "g" second
+// (slot 1), matching the harness `inputs[]` order.
+fn reduce_window_grad_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
+    let x_ty = TensorType {
+        dims: [1, 1, 3, 3].into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    };
+    let g_ty = TensorType {
+        dims: [1, 1, 2, 2].into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        x_ty.clone(),
+        None,
+    );
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], g_ty, None);
+    dag.add_node(
+        RiscOp::ReduceWindowGrad {
+            reducer,
+            window_shape: vec![2, 2],
+            strides: vec![1, 1],
+        },
+        vec![x, g],
+        x_ty,
+        None,
+    );
+    chelis_backend_c::codegen(&dag, kernel).c_source
+}
+
+const RW_GRAD_HARNESS_HEADER: &str = r#"
+static chelis_tensor make_view_1x1x2x2(float* data) {
+    chelis_tensor t;
+    memset(&t, 0, sizeof(t));
+    t.data = data;
+    t.shape[0] = 1; t.shape[1] = 1; t.shape[2] = 2; t.shape[3] = 2;
+    t.strides[0] = 4; t.strides[1] = 4; t.strides[2] = 2; t.strides[3] = 1;
+    t.ndim = 4;
+    t.dtype = CHELIS_F32;
+    t.size = 4;
+    t.owns_data = 0;
+    return t;
+}
+"#;
+
+#[test]
+fn exec_reduce_window_grad_sum_matches_evaluator_oracle() {
+    let src = reduce_window_grad_dag(ReduceWindowKind::Sum, "test_rwg_sum");
+    let harness = format!(
+        r#"{HARNESS_HEADER}{RW_HARNESS_4D_HEADER}{RW_GRAD_HARNESS_HEADER}
+extern void test_rwg_sum(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float x_data[9] = {{1,2,3,4,5,6,7,8,9}};
+    float g_data[4] = {{1,1,1,1}};
+    chelis_tensor x_t = make_view_1x1x3x3(x_data);
+    chelis_tensor g_t = make_view_1x1x2x2(g_data);
+    chelis_tensor* inputs[2] = {{&x_t, &g_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+
+    test_rwg_sum(inputs, 2, outputs, 1);
+
+    // Sum adjoint with g=ones is the per-position window-cover count for
+    // 2x2 windows / stride 1 over a 3x3 grid: corners 1, edges 2, center 4.
+    float expected[9] = {{1,2,1, 2,4,2, 1,2,1}};
+    int ok = (outputs[0]->size == 9);
+    for (int i = 0; i < 9; i++) {{
+        if (fabsf(outputs[0]->data[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, outputs[0]->data[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let Some(output) = compile_and_run_kernel("rwg_sum_3x3", &src, &harness) else {
+        panic!("reduce_window_grad sum kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "reduce_window_grad(sum) C backend diverged from evaluator oracle:\n{output}"
+    );
+}
+
+#[test]
+fn exec_reduce_window_grad_max_matches_evaluator_oracle() {
+    let src = reduce_window_grad_dag(ReduceWindowKind::Max, "test_rwg_max");
+    let harness = format!(
+        r#"{HARNESS_HEADER}{RW_HARNESS_4D_HEADER}{RW_GRAD_HARNESS_HEADER}
+extern void test_rwg_max(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float x_data[9] = {{1,2,3,4,5,6,7,8,9}};
+    float g_data[4] = {{1,1,1,1}};
+    chelis_tensor x_t = make_view_1x1x3x3(x_data);
+    chelis_tensor g_t = make_view_1x1x2x2(g_data);
+    chelis_tensor* inputs[2] = {{&x_t, &g_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+
+    test_rwg_max(inputs, 2, outputs, 1);
+
+    // Each 2x2 window's max (distinct values) routes its g to the argmax:
+    // windows pick (1,1),(1,2),(2,1),(2,2) of the 3x3 grid.
+    float expected[9] = {{0,0,0, 0,1,1, 0,1,1}};
+    int ok = (outputs[0]->size == 9);
+    for (int i = 0; i < 9; i++) {{
+        if (fabsf(outputs[0]->data[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, outputs[0]->data[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let Some(output) = compile_and_run_kernel("rwg_max_3x3", &src, &harness) else {
+        panic!("reduce_window_grad max kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "reduce_window_grad(max) C backend diverged from evaluator oracle:\n{output}"
+    );
+}
+
+// ---- IEEE-754 corner cases for Div and Recip ----
+// Exercise the C-backend codegen (`emit_binary` for Div, `emit_recip`
+// for Recip) end-to-end on the four corner cases an
+// `exp(neg(log(b)))` decomposition would mishandle: 5/-2, 1/0, -1/0,
+// 0/0 for Div; recip(-2) and recip(0) for Recip. Path: chelis IR →
+// emitted C → gcc → run.
+
+#[test]
+fn exec_div_ieee_corner_cases() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
+    dag.add_node(RiscOp::Div, vec![a, b], vec_f32(4), None);
+    let dag = fuse(&dag);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_div_ieee",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    );
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <math.h>
+extern void test_div_ieee(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float a_data[4] = {{ 5.0f,  1.0f, -1.0f, 0.0f }};
+    float b_data[4] = {{-2.0f,  0.0f,  0.0f, 0.0f }};
+    chelis_tensor a_t = make_view_1d(a_data, 4);
+    chelis_tensor b_t = make_view_1d(b_data, 4);
+    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_div_ieee(inputs, 2, outputs, 1);
+
+    float* o = outputs[0]->data;
+    int ok = 1;
+    if (o[0] != -2.5f) {{ printf("MISMATCH 5/-2: got %f want -2.5\n", o[0]); ok = 0; }}
+    if (!(isinf(o[1]) && o[1] > 0)) {{ printf("MISMATCH 1/0: got %f want +inf\n", o[1]); ok = 0; }}
+    if (!(isinf(o[2]) && o[2] < 0)) {{ printf("MISMATCH -1/0: got %f want -inf\n", o[2]); ok = 0; }}
+    if (!isnan(o[3])) {{ printf("MISMATCH 0/0: got %f want NaN\n", o[3]); ok = 0; }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("div_ieee", src, &harness) else {
+        panic!("Div IEEE kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C-backend Div must produce IEEE results for the four corner cases:\n{output}"
+    );
+}
+
+#[test]
+fn exec_recip_ieee_corner_cases() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(3), None);
+    dag.add_node(RiscOp::Recip, vec![a], vec_f32(3), None);
+    let dag = fuse(&dag);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_recip_ieee",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    );
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <math.h>
+extern void test_recip_ieee(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float a_data[3] = {{-2.0f, 0.0f, 4.0f}};
+    chelis_tensor a_t = make_view_1d(a_data, 3);
+    chelis_tensor* inputs[1] = {{&a_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_recip_ieee(inputs, 1, outputs, 1);
+
+    float* o = outputs[0]->data;
+    int ok = 1;
+    if (o[0] != -0.5f) {{ printf("MISMATCH recip(-2): got %f want -0.5\n", o[0]); ok = 0; }}
+    if (!(isinf(o[1]) && o[1] > 0)) {{ printf("MISMATCH recip(0): got %f want +inf\n", o[1]); ok = 0; }}
+    if (o[2] != 0.25f) {{ printf("MISMATCH recip(4): got %f want 0.25\n", o[2]); ok = 0; }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("recip_ieee", src, &harness) else {
+        panic!("Recip IEEE kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C-backend Recip must produce IEEE results for the corner cases:\n{output}"
+    );
+}
+
+// spec/05-risc-primitives.md §2.1: integer `div` uses C/Rust
+// truncating semantics (round toward zero). This is what
+// chelis-std's `Std.Decimal::normalize` relies on for scale shifts
+// (`div(coefficient, cast(10, int64))`). The C backend emits
+// `int32_t / int32_t` which truncates by language definition; this
+// exec-compile test pins that contract end-to-end.
+#[test]
+fn exec_div_int32_truncates_toward_zero() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
+    dag.add_node(RiscOp::Div, vec![a, b], vec_i32(4), None);
+    let dag = fuse(&dag);
+
+    let result = codegen_with_options(
+        &dag,
+        "test_div_i32_trunc",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    );
+    let src = &result.c_source;
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void test_div_i32_trunc(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    int32_t a_data[4] = {{ 7,  7, -7, -7}};
+    int32_t b_data[4] = {{ 2, -2,  2, -2}};
+    int32_t expected[4] = {{ 3, -3, -3,  3}};
+
+    chelis_tensor a_t;
+    memset(&a_t, 0, sizeof(a_t));
+    a_t.data = (float*)a_data;
+    a_t.shape[0] = 4; a_t.strides[0] = 1; a_t.ndim = 1;
+    a_t.dtype = CHELIS_I32; a_t.size = 4;
+
+    chelis_tensor b_t;
+    memset(&b_t, 0, sizeof(b_t));
+    b_t.data = (float*)b_data;
+    b_t.shape[0] = 4; b_t.strides[0] = 1; b_t.ndim = 1;
+    b_t.dtype = CHELIS_I32; b_t.size = 4;
+
+    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_div_i32_trunc(inputs, 2, outputs, 1);
+
+    int ok = 1;
+    int32_t* o = (int32_t*)outputs[0]->data;
+    if (outputs[0]->dtype != CHELIS_I32) {{
+        printf("FAIL: output dtype %d, expected CHELIS_I32 (%d)\n",
+               outputs[0]->dtype, CHELIS_I32);
+        ok = 0;
+    }}
+    for (int i = 0; i < 4 && ok; i++) {{
+        if (o[i] != expected[i]) {{
+            printf("MISMATCH idx=%d a=%d b=%d got=%d want=%d\n",
+                   i, a_data[i], b_data[i], o[i], expected[i]);
+            ok = 0;
+        }}
+    }}
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+
+    let Some(output) = compile_and_run_kernel("div_i32_trunc", src, &harness) else {
+        panic!("int32 div truncating kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C-backend Div on int32 must truncate toward zero:\n{output}"
+    );
+}
+
+// ---- Test 10b: Cross-backend f32 bit-exactness oracle for issue #163 ----
+//
+// PR #168 review MED #3: pin C-backend / host-evaluator agreement on
+// the issue #163 reproducer at the bit level, end-to-end. The
+// host-evaluator test in `chelis-compiler-api::runtime` asserts the
+// stride-4 ILP cascade result on the same 11-element multiset; this
+// test does the same against the C backend's output by compiling the
+// generated C with gcc, running it, and verifying the printed result
+// is bit-exactly `0x4087012d` (= 4.218893527984619_f32). Without
+// this end-to-end test, a future divergence between the evaluator
+// lane and the codegen lane (e.g., a subtle lane-assignment shift in
+// `chelis_sum_f32` vs `host_runtime::reduce_f32`) would not be caught
+// by either layer's own tests.
+
+#[test]
+fn exec_reduce_sum_issue_163_repro_is_bit_exact_with_evaluator() {
+    let scalar_ty = TensorType::scalar_f32();
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(11), None);
+    dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: chelis_types::types::Prim::F32,
+        },
+        vec![a],
+        scalar_ty,
+        None,
+    );
+    let dag = fuse(&dag);
+    let result = chelis_backend_c::codegen(&dag, "test_issue_163_sum");
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void test_issue_163_sum(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    // Issue #163 right-pad reflected sequence: the issue's exact
+    // reproducer multiset, identical to the host-runtime test in
+    // chelis-compiler-api::runtime::host_runtime_sum_f32_uses_pairwise_order_for_issue_163_repro.
+    float in_data[11] = {{
+        0.49625658988952637f,
+        0.7682217955589294f,
+        0.08847743272781372f,
+        0.13203048706054688f,
+        0.30742114782333374f,
+        0.6340786814689636f,
+        0.30742114782333374f,
+        0.13203048706054688f,
+        0.08847743272781372f,
+        0.7682217955589294f,
+        0.49625658988952637f,
+    }};
+    chelis_tensor in_t = make_view_1d(in_data, 11);
+    chelis_tensor* inputs[1] = {{ &in_t }};
+    chelis_tensor* out_slot = NULL;
+    chelis_tensor* outputs[1] = {{ out_slot }};
+
+    test_issue_163_sum(inputs, 1, outputs, 1);
+
+    float got = outputs[0]->data[0];
+    uint32_t got_bits;
+    memcpy(&got_bits, &got, sizeof(got_bits));
+    // 4.218893527984619_f32 is the stride-4 ILP cascade result the
+    // host runtime emits for the same multiset. Bit-exact equality
+    // is the whole point of this PR.
+    uint32_t expected_bits = 0x4087012d;
+    printf("got=%.17g bits=0x%08x expected_bits=0x%08x\n", (double)got, got_bits, expected_bits);
+    printf("%s\n", got_bits == expected_bits ? "PASS" : "FAIL");
+    return got_bits == expected_bits ? 0 : 1;
+}}
+"#,
+        HARNESS_HEADER = HARNESS_HEADER,
+    );
+
+    let src = &result.c_source;
+    let Some(output) = compile_and_run_kernel("issue_163_sum", src, &harness) else {
+        panic!("issue #163 sum kernel failed to compile/run");
+    };
+    assert!(
+        output.contains("PASS"),
+        "C backend's stride-4 cascade must match the host evaluator bit-exactly \
+         for the issue #163 multiset; got: {output}"
+    );
 }
 
 // ---- Test 5: Zero-size tensor does not crash ----

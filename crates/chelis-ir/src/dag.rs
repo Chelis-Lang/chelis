@@ -434,9 +434,11 @@ pub struct FusedStep {
 pub enum FusedStepOp {
     Add,
     Mul,
+    Div,
     MaxElem,
     CmpLt,
     Neg,
+    Recip,
     Exp,
     Log,
     Sin,
@@ -447,6 +449,36 @@ pub enum FusedStepOp {
     Abs,
     Floor,
     Ceil,
+}
+
+/// Reducer selector for [`RiscOp::ReduceWindow`].
+///
+/// See `spec/05-risc-primitives.md` §2.3.1 for the full surface
+/// contract. The shipped Surf builtins map to the four variants:
+/// `reduce_window_max` → [`ReduceWindowKind::Max`],
+/// `reduce_window_min` → [`ReduceWindowKind::Min`],
+/// `reduce_window_sum` → [`ReduceWindowKind::Sum`],
+/// `reduce_window_mean` → [`ReduceWindowKind::Mean`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReduceWindowKind {
+    Max,
+    Min,
+    Sum,
+    Mean,
+}
+
+impl ReduceWindowKind {
+    /// Canonical Surf builtin name. Used by [`crate::grad::risc_op_name`]
+    /// and by the AD rejection error so error messages reference the
+    /// user-visible builtin rather than an internal variant.
+    pub fn surf_name(self) -> &'static str {
+        match self {
+            ReduceWindowKind::Max => "reduce_window_max",
+            ReduceWindowKind::Min => "reduce_window_min",
+            ReduceWindowKind::Sum => "reduce_window_sum",
+            ReduceWindowKind::Mean => "reduce_window_mean",
+        }
+    }
 }
 
 /// Input reference within a fused chain.
@@ -464,6 +496,11 @@ pub enum RiscOp {
     // --- Binary elementwise ---
     Add,
     Mul,
+    /// Element-wise IEEE-754 division `a / b`. Primitive because the
+    /// algebraic rewrite `mul(a, exp(neg(log(b))))` is NaN for
+    /// `b ≤ 0` (`log(b)` is undefined there). Backends emit native
+    /// `/`; the Rust evaluator uses native `f32`/`f64` division.
+    Div,
     CmpLt,
     MaxElem,
 
@@ -479,6 +516,12 @@ pub enum RiscOp {
     Abs,
     Floor,
     Ceil,
+    /// Element-wise IEEE-754 reciprocal `1.0 / x`. Primitive so that
+    /// `lower_sigmoid` (and any other reciprocal-shaped lowering)
+    /// emits a single op rather than the `exp(neg(log(x)))` chain
+    /// that would NaN on non-positive inputs. Backends emit
+    /// `1.0f / x` (or the f64 / mixed-precision analog).
+    Recip,
     UniformLike {
         low: f64,
         high: f64,
@@ -516,14 +559,74 @@ pub enum RiscOp {
     ProdReduce {
         axis: usize,
     },
+    /// Strided windowed reduction over the trailing `window_shape.len()`
+    /// axes. Per `spec/05-risc-primitives.md` §2.3.1, the leading
+    /// `rank - window_shape.len()` axes pass through unchanged, and each
+    /// windowed output axis has extent
+    /// `floor((input_dim - window_shape[i]) / strides[i]) + 1` under
+    /// `Valid` padding (the only padding mode currently shipped).
+    ///
+    /// The `reducer` field selects which scalar reduction is applied
+    /// inside each window; `Max`, `Min`, `Sum`, and `Mean` are the four
+    /// shipped variants. `Mean` is implemented as windowed `Sum` divided
+    /// by the window volume, inlined into the same loop nest.
+    ///
+    /// AD policy: the reverse-mode adjoint lowers to a single
+    /// [`RiscOp::ReduceWindowGrad`] node carrying the same
+    /// `{reducer, window_shape, strides}` triple (see
+    /// `chelis_ir::grad`). Adjoints follow `spec/05-risc-primitives.md`
+    /// §2.3.1: `Sum`/`Mean` scatter (overlap-add) the upstream gradient
+    /// back over each window, and `Max`/`Min` route it to the window
+    /// extreme (distributing to all tied positions, matching the
+    /// `max_reduce` / `min_reduce` subgradient convention).
+    ReduceWindow {
+        reducer: ReduceWindowKind,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
+    },
+    /// Reverse-mode adjoint (vector-Jacobian product) of
+    /// [`RiscOp::ReduceWindow`]. Inputs are `[x, g]` where `x` is the
+    /// original windowed input (shape `S_in`) and `g` is the upstream
+    /// cotangent (shape `S_out`, the forward output shape). The output
+    /// is the input cotangent `din` with shape `S_in` (equal to `x`).
+    ///
+    /// Semantics per `spec/05-risc-primitives.md` §2.3.1, accumulating
+    /// over the (overlapping) windows that cover each input position:
+    /// - `Sum`:  `din[i] += g[o]` for every `(o, w)` with `o*stride+w = i`.
+    /// - `Mean`: as `Sum` with each contribution scaled by `1 /
+    ///   window_volume`.
+    /// - `Max` / `Min`: for each window `o`, route `g[o]` to every
+    ///   position equal to that window's max / min (ties distribute, so
+    ///   the rule is the windowed generalization of the `max_reduce` /
+    ///   `min_reduce` mask adjoint). `x`'s values are read for `Max` /
+    ///   `Min`; for `Sum` / `Mean` only `x`'s shape is used.
+    ///
+    /// Like the forward op, the IR evaluator, host runtime, and C backend
+    /// implement this directly; HIP codegen is deferred (`todo!`).
+    ReduceWindowGrad {
+        reducer: ReduceWindowKind,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
+    },
     /// Index of maximum element along `axis`.
     ///
-    /// Note: per Phase 3j-pre, argmax/argmin logically return integer indices.
-    /// The evaluator stores them as f64 integer-valued floats and the type
-    /// system carries whatever precision the caller assigns (typically F32,
-    /// since the C backend only supports F32/Bool tensors). The Std wrapper
-    /// layer (Batch 2) is responsible for casting/annotating as needed.
-    /// TODO(phase3j): widen backend runtime to carry Int64 tensors natively.
+    /// argmax / argmin logically return integer indices, and per chelis#230
+    /// the type-system result is canonically `tensor[..., int64]`
+    /// regardless of input precision. Per chelis#233 the host-runtime
+    /// adapter (`chelis_compiler_api::runtime::tensor_reduce_host`) tags
+    /// the produced `RuntimeTensorValue` with `Prim::Int64` storage, so
+    /// `eq` / `to_list` / `tensor_to_scalar` see a matching precision
+    /// label.
+    ///
+    /// The IR-level evaluator (`chelis_ir::eval::reduce_argcmp`) keeps
+    /// the precision-erased f64 representation other reductions use; the
+    /// storage widening lives in the host-runtime adapter that attaches
+    /// the precision tag.
+    ///
+    /// The C/HIP backend lanes do not yet carry Int64 tensors natively,
+    /// so the backend-runtime continues to store integer-valued floats.
+    /// The Std wrapper layer is responsible for any casts the backend
+    /// needs (see `packages/chelis-std/src/tensor/reduce.ch`).
     Argmax {
         axis: usize,
     },

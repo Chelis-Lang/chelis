@@ -1,0 +1,1 @@
+(def {} answer (app {} (var {} exp) (if {} (lit {type: (t-prim {} bool)} false) (if {} (lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} f32)} 0.0) (lit {type: (t-prim {} f32)} 1.0)) (lit {type: (t-prim {} f32)} 4.0))))

@@ -752,9 +752,10 @@ renames forward.
 
 ### 8.5 mdBook book chapters (deliberate exception)
 
-**Rule:** kebab-case. Applies to any mdBook source tree — defined as
-the directory containing the mdBook `book.toml` configuration plus its
-descendants (typically `<repo>/docs/src/` or `<repo>/docs/book/src/`).
+**Rule:** kebab-case. Applies to any path whose components include a
+directory literally named `book/`. In the chelis ecosystem the
+canonical location is `<repo>/docs/book/`; some shells may also use a
+top-level `<repo>/book/`. Both are covered.
 
 mdBook book chapters expect kebab-case URLs for stability across
 renderers. This is a deliberate exception from the broader
@@ -770,19 +771,24 @@ cg-solve.md
 monte-carlo.md
 ```
 
-The detection is `book.toml`-based, not path-string-based, so any
-repo's mdBook layout works (chelis uses `docs/book/src/`; nautilus
-uses `docs/src/`; other shells can choose their own layout).
+The discriminator is path-based, not `book.toml`-anchored. A
+`book.toml` sitting in `docs/` (or anywhere else in the ancestor
+chain) does not retroactively promote sibling `docs/*.md` files to
+§8.5. This is the issue #190 fix: previously the rule walked ancestors
+looking for `book.toml`, which made the verdict for every `docs/*.md`
+depend on unrelated filesystem state (adding or removing one
+`book.toml` flipped every narrative doc between accepted and
+rejected). Path-based opt-in keeps each verdict local to the file.
+
+Shells that want mdBook content put it under `book/` or `docs/book/`.
+This is the chelis-ecosystem convention; non-`book/` mdBook layouts
+are out of scope for the lint.
 
 The lint implements this in
-`crates/chelis-lint/src/rules/doc_filename_convention.rs` with two
-detection paths: a path-string fast path covering the canonical
-chelis-ecosystem `docs/src/` and `docs/book/src/` layouts, and a
-filesystem-anchored fallback that walks ancestor directories of the
-file looking for a sibling `book.toml`. When a `book.toml` is found,
-the entire ancestor tree (rooted at the `book.toml`'s directory) is
-mdBook mode and accepts kebab-case across the full tree — including
-sibling and shallower files such as `docs/getting-started.md`.
+`crates/chelis-lint/src/rules/doc_filename_convention.rs` by checking
+whether the path's components contain the literal name `book`. The
+check is cheap and depends only on the path, not on filesystem
+state.
 
 #### Tool-required exceptions inside any mdBook source tree
 

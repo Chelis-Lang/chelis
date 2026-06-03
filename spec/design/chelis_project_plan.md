@@ -780,11 +780,25 @@ but no Phase 3 sub-phase implements them.
   closes the spec-implementation gap without requiring an external tool or a full
   extraction from the Lean mechanization.
 
-  Prerequisites: LaCaDiLE typing rules finalized, a Deep parser in Chelis, and reusable
-  property-runner generation infrastructure for language-level random generation. Phase
-  4 or Phase 5 item — not actively developed yet. Recorded because it is the natural
-  answer to "how do you know the compiler implements the spec?" and because it is a
-  strong future-work story for the OOPSLA paper.
+  Status: **shipped (v0.1.2)** in the `Chelis-Lang/hull` repo (pins `compiler =
+  "=0.7.21"`, `chelis-std = "0.3.0"`). All three capabilities are built: the reference
+  type checker, the reference evaluator (locally-nameless small-step engine), and the
+  type-directed program generator. The differential harness proves the Hull reference
+  checker + evaluator AGREE with the shipped compiler on 10,000 generated programs, with
+  ZERO `CompilerUnsound` and zero unexplained `Disagree` (two independent fresh-seed
+  campaigns), and 1,000 eval-eligible programs agree within f32 tolerance. The generated
+  lane is Hull-accepted-by-construction, so it proves AGREEMENT; DETECTION is proven by an
+  injected-unsound self-test plus a hand-curated reference-gap corpus. It is CI-enforced
+  in this monorepo: `tests/conformance/hull/` is the frozen, version-stamped corpus and
+  `.github/workflows/conformance.yml` runs the gate per PR + on push-to-main (failing on
+  any `CompilerUnsound` / unexplained `Disagree` / `EvalDisagree`, teeth verified by an
+  injected-unsound step), with the full fresh 10k campaign nightly. v0.1.0 scope is the
+  PURE in-fragment surface (tensor/scalar/lambda/let/if/match/grad surface); grad
+  conservatism is a build-time differential (v0.2.0), and effects, ADTs, builtin-name
+  shadowing, and division-by-zero are documented v0.2.0 deferrals. This is the natural
+  answer to "how do you know the compiler implements the spec?" and the compiler-vs-spec
+  layer of the trust stack (see `spec/design/chelis_trust_stack.md`), alongside
+  `chelis prove` (per-program `@property`) and c-earchin (spec translation).
 - **`octant-docs`** — Octant Phase 4 (from the design doc). Parses full LaTeX model
   documents, extracts `\begin{equation}` environments, and associates formulas with
   surrounding prose so model-validation teams can ingest an entire model document as
@@ -904,8 +918,8 @@ Shoals when they ship.
 **`chelis prove` — executable properties as spec.** The earlier pre-Phase 4 framing of
 `chelis prove` as a CLI-flag property tester is now subsumed by the broader
 executable-properties-as-spec design (first-class `@property` Chelis functions,
-type-directed input generation, counterexample minimization). See the expanded
-`chelis prove` section below and `chelis_trust_stack.md` for the full design.
+type-directed input generation, counterexample minimization). V1 of that design shipped
+in v0.7.1 (see the expanded `chelis prove` section below and `chelis_trust_stack.md`).
 
 ### Why This Is a Distinct Phase
 
@@ -1052,6 +1066,13 @@ Evolution of the originally planned CLI-flag property testing tool into Chelis's
 verification mechanism for AI-generated code. Properties are first-class Chelis
 functions with `@property` annotations, living alongside implementation code,
 version-controlled, CI-enforced.
+
+**Status: V1 shipped (v0.7.1).** The subcommand and `@property` syntax are implemented
+(`crates/chelis-cli/src/prove.rs`) with deterministic type-directed sampling, the
+`--samples`/`--seed`/`--only`/`--json` surface, a four-state exit-code contract, and
+Deep-bridge provenance. V1 covers scalar binders and fixed-shape numeric tensors.
+Remaining: symbolic-dimension tensor binders and counterexample minimization. The
+description below is the full design; items beyond that V1 scope are still forthcoming.
 
 Three property categories:
 

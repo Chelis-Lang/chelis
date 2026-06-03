@@ -6,6 +6,956 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.22] — 2026-06-03
+
+### Added
+
+- **reduce_window_{max,min,sum,mean} (#254)**: windowed reductions land
+  across the type checker, IR, and backends as first-class RISC
+  primitives with positive and negative coverage.
+- **host-runtime `tensor_scan` (#257/#264)**: a prefix-scan primitive
+  implemented in the host runtime, closing issue #257.
+- **Hull Phase 5b conformance gate (#278)**: a vendored, frozen,
+  version-stamped Hull conformance corpus
+  (`tests/conformance/hull/`) plus a CI gate (`conformance.yml`) that
+  re-renders the corpus against the just-built compiler and FAILS on
+  any `CompilerUnsound`, unexplained `Disagree`, or `EvalDisagree`. The
+  manifest now pins chelis `0.7.22`. Hull is documented as shipped
+  (v0.1.0) as the compiler-vs-spec differential layer (#283).
+- **SMT-prove tier features (`chelis prove`)**: `--tier auto` now wires
+  through SMT Tier B, function-body inlining feeds the SMT dispatch,
+  and the dispatcher selects `QF_NRA` vs `QF_NRAT` based on
+  transcendental content of the goal.
+- `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
+  standalone Deep (`.dp`) IR directly. Previously both fed Deep
+  s-expressions to the Surf parser, which reported a bogus
+  `expected declaration (def, sig, ...), found LParen at byte 0` parse
+  error (check) or propagated it as a process error (eval). `check`
+  parses `.dp` through `chelis_deep::parser::parse_str_strict` (the same
+  closed-vocabulary tag gate `build`, `fmt`, and `cost` use) and runs
+  the identical fitness / type / effect / linearity pipeline the `.ch`
+  path uses, emitting the same `CheckResult` JSON. `eval --file .dp`
+  routes the source through the engine's `SourceKind::Deep` path
+  (strict-parsed first for vocabulary parity), emitting the same
+  `EvalResult` shape. A `.dp` and its byte-equivalent-meaning `.ch`
+  produce field-for-field identical check reports. `chelis check <dir>`
+  now also discovers `.dp` files in a mixed directory.
+- `chelis test --batch-mode auto|file`, with `auto` as the default.
+  Auto mode compiles one shared context and one combined batch probe
+  for eligible files, then reports the same NDJSON/per-test rows as
+  the file-worker path. The default now amortizes shell/module graph
+  compilation across a suite: the CLI batches eligible test files into
+  one internal worker, preserves per-file subprocess isolation for
+  files that need it, and falls back to the previous
+  one-worker-per-file path on batch compile/runtime failures. Use
+  `--batch-mode file` to force the old execution strategy.
+- Internal `__test_batch` worker support and crash/timeout fallback
+  coverage so batch execution cannot hide a file-level failure.
+
+### Fixed
+
+- **#285**: suppress a wildcard `defsig` from overwriting an explicit
+  `sig`, preserve the `def` effect-row, and fix the std `generate`
+  signatures.
+- **#258**: reject a duplicate same-name `def` with a clear diagnostic
+  instead of silently shadowing the first definition.
+- **#248 (#189 follow-up)**: the C backend's `emit_uniform_like` was
+  the third lossy `%.8`-format-string site in the same class as the
+  F32/F64 `emit_const` arms that PR #243 closed. `low` / `high` were
+  narrowed to f32 and then baked into the emitted
+  `chelis_uniform_sample_f32(..., {:.8}f, {:.8}f)` call, drifting up
+  to one ULP for ordinary values and collapsing sub-normal-range
+  inputs (e.g. `1e-40`) to `0.0f`. The fix computes
+  `f64_to_f32_truncate(...).to_bits()` at codegen time and emits
+  `chelis_f32_from_bits(0x...u)` for each argument, where
+  `chelis_f32_from_bits` / `chelis_f64_from_bits` are new
+  `static inline` helpers in `chelis_runtime.h` that bit-cast a
+  `uint32_t` / `uint64_t` back to `float` / `double`. Symmetric with
+  PR #243's `chelis_fill_f32_bits` mechanism but for per-call scalar
+  args rather than buffer fills.
+
+### Docs — harmonize Hull / trust-stack / project-plan with shipped reality
+
+Corrected stale status framing across the design docs to match what the repo
+now ships:
+
+- `chelis prove` is described as shipped (V1, v0.7.1) rather than "planned" in
+  `chelis_trust_stack.md`, `chelis_project_plan.md`, and the Hull prerequisite
+  table — with the V1 scope (scalar binders + fixed-shape tensors) and the
+  pending items (symbolic-dim binders, counterexample minimization) stated.
+- The Hull spec's string-operations prerequisite reflects the shipped scalar/
+  string foundation (`String` primitive + `string_*` builtins, `to_int`/
+  `to_float`).
+- The Hull spec's `Effect` ADT now mirrors the shipped enum
+  (`Random`/`Accum`/`Io`/`Test`/`Resource(String)`) instead of listing a
+  non-existent `Fail` and omitting `Test`.
+- The Hull LaCaDiLE/timing notes drop the stale "POPL Jul 9" milestone in
+  favor of the OOPSLA-targeted, stabilizing status.
+
+## [0.7.19] — 2026-05-26
+
+Wave-1 follow-up release. Closes six issues filed during the 0.7.13–0.7.18
+cycle (#185–#208 sprint plus targeted follow-ups #218/#219/#229/#232/#233/#237)
+that the released-binary downstream tooling surfaced: lossy C-backend f32
+constant emission, doc-filename lint retroactive flip, AD-CLI silent
+zero-grad, `chelis check` exit-code contract gap, runtime-shape docs gap,
+and the GitHub Actions Node-20 → Node-24 deadline. Wave-1 red-team pass
+found 4 findings (2 MEDIUM, 2 LOW) which were folded into PR #247 ahead
+of this tag.
+
+### Fixed - Wave-1 red-team follow-ups: #207 parse-error JSON + empty-file rejection, §4.7.5 spec direction, #188 artifact actions
+
+Four findings from the Wave-1 red-team pass on PRs #188 / #189 / #190 /
+#197 / #207 / #208:
+
+- **M1 (#207 follow-up)**: parse errors in `chelis check` used to
+  short-circuit through the generic error arm in `main`, exiting 1
+  with empty stdout. The documented invariant (`exit != 0 iff
+  json.errors.len() > 0`) requires that any failure mode emit a JSON
+  report with a populated `errors[]`. `cmd_check_one` now catches
+  errors from both `chelis_reef::prepare_program_for_file` and the
+  raw `chelis_surf::parser::parse_str` branch, synthesizes a minimal
+  JSON report with a single `Other`-kind entry carrying the error
+  message, and lets the caller map that to exit 2. Reef checksum and
+  missing-export errors now surface on stdout (JSON) rather than
+  stderr; `reef_check_rejects_tampered_registry_shell_exports` was
+  updated accordingly.
+- **M2 (#207 follow-up)**: an empty or whitespace-only `.ch` used to
+  report `score=1, errors=[]` and exit 0 in `chelis check`, while
+  `chelis build` accepted it and emitted a no-op C function. Both
+  surfaces now reject a zero-declaration program with the same
+  canonical message `empty program: no declarations found` (kind
+  `Other` in `check`'s JSON, boxed error in `build`).
+- **L1 (#208 §4.7.5)**: the spec narrative previously described
+  `reshape(x, [shape(x, 0), 4])` as "TYPE ERROR: int32 vs int64" and
+  implied a diagnostic of "expected int64, got int32". The actual
+  type-checker emits `precision mismatch: expected int32, got int64`
+  (the unification-order artifact of the shape-list elementwise check
+  against `List<Int64>`). The spec text now matches the diagnostic
+  exactly, with a short note explaining the unification direction so
+  the contract is unambiguous in either reading.
+- **L2 (#188)**: bumps `actions/upload-artifact@v4` (twice) and
+  `actions/download-artifact@v4` in `.github/workflows/release.yml` to
+  `@v7` (the current node-24-bundled release). Sweep over all other
+  workflow files confirmed no remaining `actions/*@v4` pins.
+
+### Documentation - canonical runtime shape semantics in spec §4.7 (#208)
+
+`spec/04-type-system.md` gains a new §4.7 "Runtime Shape Semantics"
+that pins which `shape` / `expand` / `reshape` call shapes preserve
+symbolic dims and which fall back to `(d-name {} *)`. The canonical
+patterns from chelis#208 (`bias_broadcast` via runtime-sized
+`expand`, `flatten_batch` via `cast(shape(x, axis), int64)` in
+`reshape`) live as a fully-checked illustrative fixture at
+`examples/illustrative/runtime_shape_semantics.ch`, and §4.7 cites
+that file. Fall-back cases (cross-tensor shape source, arithmetic
+wrappers, non-`var` reshape input) are documented so downstream
+tools (Hydronnx, Calcify, other shells emitting Chelis) can emit
+only the recognized syntactic forms instead of reverse-engineering
+behavior from stdlib examples. Pure docs / fixture change; no
+compiler or language behavior changed.
+
+### Changed - CI: bump GitHub Actions to Node-24-compatible versions (#188)
+
+Bumps the four pinned JavaScript actions in `.github/workflows/` to releases
+that target Node 24, ahead of GitHub's 2026-06-02 default-runtime cutover:
+
+- `actions/checkout@v4` -> `@v6` (ci.yml, release.yml, heavy-e2e.yml)
+- `softprops/action-gh-release@v2` -> `@v3` (release.yml)
+
+`docs/maintenance_schedule.md` updated to reflect the migration completing
+and to record the verified-Node-24 adjacent pins (`Swatinem/rust-cache@v2`,
+`astral-sh/setup-uv@v8.1.0`).
+
+### Fixed - `doc-filename-convention` retroactive flip (#190)
+
+`crates/chelis-lint/src/rules/doc_filename_convention.rs` previously
+classified every `.md` under `docs/` by walking ancestors for a
+`book.toml` marker, which made the §8.3-vs-§8.5 verdict depend on
+unrelated filesystem state. Dropping a `book.toml` into `docs/`
+flipped every narrative `docs/foo_bar.md` from accepted to rejected
+(and removing the file flipped them back). The discriminator is now
+path-based: §8.5 applies only to paths whose components include a
+directory literally named `book` (most commonly `docs/book/` in the
+chelis layout). `book.toml` is no longer read by the lint.
+
+Spec §8.5 in `spec/01-nomenclature.md` updated to match. Invariant
+coverage in `crates/chelis-lint/tests/issue_190_doc_filename_path_based.rs`.
+
+### Fixed - C backend f32/f64 Const emission no longer drifts vs evaluator (#189)
+
+The `emit_const` arms for F32 and F64 in `crates/chelis-backend-c/src/emit.rs`
+previously rendered the IR's f64 source value through a decimal format
+string (`{:.8}f` for F32, `{:.17}` for F64). Both format specifiers
+print decimal-places-after-the-point rather than significant digits,
+so values like `0.000000123456789` (issue #189 reproducer) parsed back
+to a different f32 bit pattern -- about 3% off -- and `f64` values
+below `1e-17` collapsed to zero. The same lossy pattern lived on the
+Pad-fill arm.
+
+The C backend now emits the source value's exact bit pattern
+(`f32::to_bits()` / `f64::to_bits()`) and dispatches through new
+`chelis_fill_f32_bits` / `chelis_fill_f64_bits` runtime helpers. The
+helpers bit-cast the integer pattern back to the IEEE 754 value before
+filling, so the emitted constant is bit-identical to the eval-path
+representation (for f64) or the closest-f32 narrowing (for f32). The
+same architectural shape as the existing bf16 / f16 bit-pattern fill
+helpers.
+
+### Fixed - CLI grad path now surfaces `AdError::NotSupported` for non-differentiable ops (#197)
+
+The CLI `chelis build` / `chelis check` / `chelis eval` grad path routed
+through `chelis_ir::grad::grad_dag` (the unchecked variant), so:
+
+- `argmax_reduce` / `argmin_reduce` in a gradient path surfaced as a
+  generic "grad requires a scalar floating output" message instead of
+  the structured `AdError::NotSupported { op: "argmax",
+  reason: IntegerIndexOutput }` rejection that
+  `grad_dag_checked` already implements at the IR layer.
+- `floor` / `ceil` in a gradient path silently zero-graded with no
+  diagnostic — a wrong-result mode. The grad rule arms returned
+  `Const { value: 0.0 }` and the build succeeded, emitting a kernel
+  that filled the gradient tensor with zeros.
+
+The fix is in two parts:
+
+1. **Route through `grad_dag_checked`.** `compile_source::grad`
+   (`crates/chelis-compiler-api/src/compiler.rs`), the `grad(...)`
+   lowering arm in `crates/chelis-ir/src/lower.rs`, and the
+   `vmap(grad(...))` lowering arm in the same file all switch to
+   `grad_dag_checked`; the legacy `grad_then_fuse` carrier gains a
+   sibling `grad_then_fuse_checked` so the fused path stays
+   parallel.
+2. **Mark AD-rejection diagnostics as fatal.** `LowerDiagnostic`
+   grows a `fatal: bool` field. The host-fallback boundary at
+   `host::try_lower_compiled_program`, the sub-lowering call sites
+   in `host::lower_host_function` and
+   `host::lower_tensor_helper_dag`, and the build CLI's
+   `lower_checked_for_cli` (`crates/chelis-cli/src/main.rs`) all
+   propagate fatal diagnostics instead of silently falling through
+   to the host path. Without this the host fallback emitted an
+   undefined-symbol call to the unlowered grad function — a
+   compile-clean build that failed opaquely at gcc-link time.
+
+Locked by `crates/chelis-cli/tests/grad_errors.rs` (5 tests:
+argmax, argmin, floor, ceil negatives + matmul-grad positive
+parity).
+
+### Fixed - `chelis check` exit code mirrors JSON `errors` array (#207)
+
+`chelis check` previously exited `0` even when its JSON report
+contained `TypeMismatch`, `DimensionMismatch`, validator, effect, or
+linearity errors. Downstream CI gates that treat exit `0` as success
+silently accepted programs that `chelis test` later rejected with
+exit `2`. Issue #207 inverts the RT-205 F7 contract: the exit code
+now mirrors the errors array — exit `0` iff `errors[]` is empty,
+exit `2` otherwise (matching `chelis test`'s convention for
+"compile test context" failures). The machine-facing JSON shape is
+unchanged.
+
+This is a user-visible behavior change. Shell-script consumers that
+relied on the previous "always exit 0" contract should either parse
+the JSON `errors[]` array (the recommended path for tools that need
+finer detail) or accept the new exit code. Test helpers and
+fixtures in the in-repo CLI corpus were updated alongside the fix.
+
+The exit-code invariant is locked by
+`crates/chelis-cli/tests/issue_207_check_exit_code_invariant.rs`,
+which sweeps four error categories plus the clean-program control.
+
+## [0.7.18] — 2026-05-25
+
+Hotfix release. Closes a zero-offset spurious-consume linearity bug class
+across multiple consumer paths (closure capture + pipe-stage auto-borrow
+inference) that 0.7.17 still surfaced on downstream shells (coral, hydronnx).
+The sibling-sweep also folds in chelis#229.
+
+### Fixed - zero-offset spurious-consume linearity bug across closure capture + pipe-stage paths (#237, #229, PR #239)
+
+`crates/chelis-types/src/linearity.rs::check_fn` unconditionally structurally
+consumed every captured tensor-carrying name in a closure body regardless of
+how the body actually used it, producing zero-offset `was already consumed by
+closure capture` diagnostics on any reuse of the captured variable. Same root
+shape as #226: the consumer pass was mis-classifying without consulting the
+inner callee's borrow signature.
+
+`crates/chelis-types/src/infer.rs::pipe_consumes_param` had the parallel bug
+that #229 documented: it only recognized the bare-var pipe-stage shape, so
+explicit-arg pipe stages (`x |> add(k)`) became synthesized `__chelis_pipe`
+lambdas it mis-classified as consuming uses.
+
+The fix factors a shared `crates/chelis-types/src/pipe_stage.rs` helper for
+callee resolution and wires both consumer passes through it. `check_fn` now
+calls `param_has_consuming_use` instead of blanket-consuming captures;
+`check_app` (direct call) and `arg_is_borrowed` consult `signature_inference`
+for inferred-readonly callees.
+
+Locked by `crates/chelis-types/tests/issue_237_linearity_sweep.rs` with 9
+tests (6 closure-capture + 3 pipe-stage).
+
+## [0.7.17] — 2026-05-25
+
+Lint cleanup. Removes the `module-pascal-components` rule and its
+`KNOWN_SINGLE_WORDS` allowlist. No language or compiler behavior
+changes; only the lint surface shrinks.
+
+This is the second cut on 2026-05-25; v0.7.16 (commit `9ec2e55`,
+"Add std wrappers for scan index and sort") was tagged in parallel
+with PR #234 and consumed the 0.7.16 version slot.
+
+### Removed - module-pascal-components rule
+
+The `module-pascal-components` (§6.3) lint rule and its supporting
+`KNOWN_SINGLE_WORDS` allowlist are deleted. The rule's correctness
+depended on the allowlist absorbing every long single English word
+any shell in the ecosystem might use as a module component
+(`Optimization`, `Comprehension`, `Conditional`, `Exception`,
+`Translation`, `Calendar`, `Calibration`, …) — a list that grows
+monotonically with the corpus and never converges. Demoting to
+advisory (the 0.7.12 hotfix) reduced the blast radius but did not
+fix the structural problem of a dictionary-dependent lint.
+
+Removed:
+
+- `crates/chelis-lint/src/rules/module_pascal_components.rs`
+  (entire file)
+- `pub mod module_pascal_components;` in
+  `crates/chelis-lint/src/rules/mod.rs`
+- Registration in `crates/chelis-lint/src/registry.rs::non_blocking_rules`
+- The `KNOWN_SINGLE_WORDS` allowlist that the rule consumed
+- Stale `KNOWN_SINGLE_WORDS` cross-reference in
+  `crates/chelis-cli/src/main.rs`
+
+Kept:
+
+- The flattened-compound concern (`Linalg` → `LinAlg`,
+  `Hellotensor` → `HelloTensor`) is still covered by reviewer
+  attention plus the `module-compound-titlecase` rule, which
+  checks a precise, narrowly-scoped list of known compounds rather
+  than guessing from a lowercase-run length.
+- The shared `module_decl` extractor stays (other rules consume it).
+
+Closes `spec/upstream-bugs/module-pascal-components-flags-single-words.md`.
+
+## [0.7.15] — 2026-05-25
+
+Hotfix release. Closes a latent typing bug in `argmax_reduce` /
+`argmin_reduce` output dtype that hydronnx PR #2 surfaced when it
+retargeted from 0.7.13 to 0.7.14. The bug was present in every 0.7.x
+release back to 0.7.0 — not a regression introduced by any of the
+five 0.7.13 → 0.7.14 commits — but the practical impact was the
+same: any downstream Surf program declaring the canonical
+`tensor[..., int64]` return type for an argmax / argmin call hit a
+`TypeMismatch`. The full diagnosis lives in
+[`docs/investigations/issue_230_argmax_reduce_output_dtype_diagnosis.md`](docs/investigations/issue_230_argmax_reduce_output_dtype_diagnosis.md).
+
+### Fixed - argmax_reduce / argmin_reduce return int64, not input dtype (#230)
+
+`crates/chelis-types/src/infer.rs::check_reduction_signature`
+defaulted every non-`sum` reduction's result precision to the input
+precision. `argmax_reduce` and `argmin_reduce` emit element indices,
+not reduced operand values, so the std-package signatures in
+`packages/chelis-std/src/tensor/reduce.ch` already pin the canonical
+output as `tensor[b, int64]`:
+
+```text
+sig argmax: &tensor[a, b, p] -> int32 -> tensor[b, int64]
+sig argmin: &tensor[a, b, p] -> int32 -> tensor[b, int64]
+```
+
+Before the fix, `argmax_reduce(tensor[2, 3, f32], 1)` typed as
+`tensor[2, f32]` and a user-declared `tensor[2, int64]` signature
+was rejected:
+
+```
+def 'forward' body doesn't match declared signature:
+  body has type `... -> tensor[Lit(2), f32]`,
+  declared type is `... -> tensor[Lit(2), int64]`
+```
+
+After the fix, `check_reduction_signature` returns
+`TensorPrec::Concrete(Prim::Int64)` for argmax_reduce / argmin_reduce
+regardless of the input precision. The shape rule
+(`out_dims.remove(axis)`, rank `n` → `n-1`) is unchanged.
+
+The host-runtime / IR evaluator continues to store integer-valued
+floats internally per the Phase 3j-pre Batch 1 caveat documented on
+`RiscOp::Argmax`; the int64 type-system label is independent of the
+storage layout. The `TODO(phase3j): widen backend runtime to carry
+Int64 tensors natively` in `crates/chelis-ir/src/dag.rs` tracks the
+eventual storage widening.
+
+Sibling sweep: `sum`, `max_reduce`, `min_reduce`, `prod_reduce`, and
+`mean` continue to preserve input dtype per spec §5.7.1 — only the
+argmax/argmin family changes dtype.
+
+Acceptance oracle:
+`crates/chelis-types/tests/issue_230_argmax_reduce_output_dtype.rs`
+(11 tests: positive on f32 / int32 / int64 inputs, negative on wrong
+declared dtype, and a sibling-sweep regression guard) plus
+`crates/chelis-compiler-api/tests/issue_230_argmax_argmin_runtime.rs`
+(4 host-runtime parity tests pinning integer-valued index outputs
+on axis 0 and axis 1 for both ops). The existing
+`crates/chelis-ir/tests/negative_axis_normalization.rs` reduction
+loops are updated to expect `int64` for argmax / argmin while the
+other reductions stay `f32`.
+
+## [0.7.14] — 2026-05-24
+
+Hotfix release. Closes the release-blocking linearity-pass regression
+that 0.7.13 surfaced in downstream reef shells (school, hydronnx, c-earchin,
+calcify) whose source contains a tensor-carrying record destructured in a
+function body that then uses the destructured field as the head of a pipe
+into a borrow-arg builtin call. Also bundles the four follow-up fixes
+that landed against 0.7.13's surface.
+
+### Fixed - conv2d validator cascade-suppression is one-level-deep (#212)
+
+The cascade-suppression added in PR #205 to dedupe `conv2d` validator
+diagnostics only propagated one level past the root failure. A let-chain
+of length 3 or more rooted on a non-concrete dim emitted a phantom
+"concrete tensor argument metadata" diagnostic for every other
+downstream let-binder, producing 2 diagnostics for a length-3 chain
+and a "skip one, fire one" pattern beyond.
+
+Root cause: the `failed_let_names` marker insertion in
+`crates/chelis-types/src/infer.rs::validate_ir_expr` (let arm) required
+`errors.len() > errs_before` to detect a failed RHS. Once cascade
+suppression activated for the level-2 RHS, its diagnostic was silenced,
+the count did not grow, and the level-2 name was never marked failed,
+so the level-3 consumer fired its own cascade error.
+
+Fix replaces the diagnostic-count guard with a structural recognition
+predicate `let_rhs_is_recognized_shape_sensitive` that returns true
+when the RHS is one of:
+
+- a recognized shape-sensitive IR builtin (`matmul`, `conv2d`,
+  `softmax`, `mean`, `layer_norm`, reductions, movement ops);
+- a unary shape-passthrough builtin wrapping such a form
+  (`relu`, `tanh`, `gelu`, etc.);
+- a binary shape-passthrough builtin (`add`, `sub`, `mul`, etc.)
+  with such a form on either operand.
+
+Paired with `derive_ir_builtin_output_type` returning `None`, this
+detects "should have derived but couldn't" without depending on the
+per-level diagnostic count, so the suppression marker propagates
+unboundedly through the chain.
+
+The predicate stays narrow: a clean user-defined fn call as a let RHS
+is not a recognized shape-sensitive form, so independent failures in
+later let-binders still produce their own diagnostics (locked by
+`rt205_r4_three_independent_failures_not_suppressed`).
+
+Locked by `crates/chelis-types/tests/issue_212_cascade_suppression_depth.rs`,
+which pins the issue body's 3-level reproducer, a 4-level chain, the
+non-concrete-spatial / non-concrete-channel root variants, a relu-wrapped
+multi-level chain, and the three-independent-failures negative parity.
+Existing `red_team_205_round2_f2_sum_wrapped_chained_conv2d_still_rejected`
+broadens its assertion: the new suppression silences the validator-level
+metadata error in favour of HM's more informative rank-mismatch
+diagnostic. Pure diagnostic-quality fix; correctness (which programs
+chelis check accepts vs rejects) is unchanged.
+
+### Fixed - spurious `UseAfterConsume` on pipe-stage borrow-arg calls (#226)
+
+`crates/chelis-types/src/linearity.rs::check_pipe` only resolved the
+effective callee of a pipe stage when the stage was a bare `(var f)`
+reference. For any stage carrying explicit arguments (`x |> shape(0)`,
+`x |> add(y)`, `x |> mul(k)`, `x |> matmul(w)`, etc.) the desugarer
+emits a synthesized lambda
+`(fn (params __chelis_pipe) (app callee args... (var __chelis_pipe) args...))`,
+and the pre-fix code looked up `arg_is_borrowed` against the lambda
+itself rather than the inner callee. The result was a structural-consume
+classification of the piped value, even when the inner callee was a
+known borrow-arg builtin. Any later read of the same variable then
+tripped `UseAfterConsume` with a malformed "pipe into stage at offset 0
+from offset 0" message (zero offsets because the synthesized lambda
+carries no source span).
+
+The regression manifested only after PR #183 (in 0.7.13) stamped the
+resolved field type onto destructured record-pattern bindings, removing
+the fresh-type-variable fallback that had been accidentally suppressing
+the bug for the destructure-then-pipe shape used heavily by
+`School.Nn.PosEmbed.pos_embed_forward` and adjacent layers.
+
+`check_pipe` now invokes a new `resolve_pipe_stage_callee` helper that
+peers through the synthesized `__chelis_pipe` lambda to reach the inner
+callee and the piped value's actual arg index, then asks
+`arg_is_borrowed` about that callee. The helper falls back to the
+historical bare-var contract for any unrecognized stage shape so
+`(var f)` pipe stages continue to behave exactly as before.
+
+Locked by
+`crates/chelis-types/tests/issue_226_linearity_pipe_borrow_stages.rs`,
+which pins three positive cases (pipe into `shape`, pipe into `add`,
+composed `mul` chain) and three negative-parity cases (pipe into
+`realize`, pipe into a user fn whose first parameter is owned-linear,
+pipe into a user fn with explicit extra args).
+
+### Fixed - `extract_dim_list` matched Cons-chain tag symbol as a dim name (#220, PR #224)
+
+`extract_dim_list` in `crates/chelis-ir/src/lower.rs` walked `list.elements`
+directly and matched any `Atom::Symbol` as a dim name, including the literal
+`"app"` tag symbol that Surf-source dim lists desugar through. Rewritten to
+peel the Cons chain via `collect_cons_chain` and interpret each head via
+`extract_int_for_dim` or `symbolic_dim_var_name`. Defense-in-depth against
+the `dag.rs:1108` ICE.
+
+### Fixed - cast-aware integer extraction across 15 infer-time sites (#216, PR #225)
+
+PR #214 extended cast-aware `extract_int_for_dim` to the movement-op family
+(`shrink`/`stride`/`pad`/`permute`/`expand`). The remaining 15 call sites of
+`extract_int_literal` across reductions, conv2d helpers, gather/scatter,
+softmax, shape, split, vmap, and grad-wrt now also use the cast-aware
+extractor so `cast(N, int32)` boundaries trip infer-time checks rather than
+deferring to host runtime.
+
+### Added - `to_tensor` literals work in differentiable function bodies (#218, includes #219 Option A)
+
+The architectural piece that the PR #211 R1→R4 red-team cascade signalled
+was needed before Part 2 of #199 could ship. Bundles four coordinated
+changes:
+
+- **#219 Option A**: `unify_dim` now binds `Dim::Name(_) ↔ Dim::Lit(_)` so the
+  canonical style-guide pattern `def f(x: tensor[batch, hidden, p])` accepts
+  concrete callers like `f(to_tensor([[1.0, 2.0, 3.0]]))`. Spec amendment in
+  `spec/04-type-system.md §4.1`.
+- **`to_tensor` source fix**: nested-list literals emit concrete `Dim::Lit(n)`
+  via a new `static_to_tensor_shape` walker, rather than the all-`Wildcard`
+  fallback that propagated through every downstream consumer.
+- **Per-axis Cons join**: list-of-tensor element unification at the Cons site
+  uses per-axis-joined element types (`Lit ∩ Lit = Lit` if equal, else
+  `Wildcard`) so `concat([to_tensor([[1,2,3]]), to_tensor([[4,5,6],[7,8,9]])], 0)`
+  type-checks instead of failing element-type unification.
+- **`expr_requires_host_runtime` exemption**: a `to_tensor` literal in a
+  function body destined for `grad` no longer forces host-only routing.
+  `emit_literal_tensor` lowers the static literal as a `Const`/`Pad`/`Add`
+  cascade reachable by the AD pass.
+
+Acceptance oracle: all 19 R1→R4 failure modes type-check + run + finite-diff
+agree at 1e-3 tolerance. Locked by
+`crates/chelis-cli/tests/issue_218_to_tensor_in_grad_body.rs`,
+`crates/chelis-types/tests/issue_219_name_vs_lit.rs`,
+`crates/chelis-ir/tests/issue_218_finite_difference.rs`.
+
+## [0.7.13] — 2026-05-24
+
+Cut to ship six downstream-blocking fixes that the Hydronnx H3.x ONNX-emitter
+spike surfaced, plus an end-to-end acceptance lock against the H3 shapes.
+Part 2 of issue #199 (to_tensor literals in differentiable function bodies)
+remains deferred to follow-up issues #218 / #219 / #220 after the PR #211
+red-team rounds signalled architectural redesign was needed; see the
+`feedback_rround_cascade_is_design_signal` discipline note.
+
+### Fixed - `conv2d` validator rejects every well-formed call (#186, PR #205)
+
+`crates/chelis-types/src/infer.rs::validate_ir_builtin_symbolic_requirements`
+rejected every well-formed `conv2d` call at `chelis check`. Two root causes:
+`app_result_type_is_concrete` read `:type` from app metadata that the
+inference annotation pass writes after the validator runs, so the
+output-dims check was structurally always-false for any Surf source; and
+`expr_tensor_type_is_concrete` did not peel `(borrow {} ...)` wrappers, so
+the idiomatic `conv2d(&x, &k, ...)` form (and the wrappers in
+`packages/chelis-std/src/nn/conv.ch`) defeated the tensor-metadata
+concreteness check.
+
+The replacement derives output concreteness from the args (`input` /
+`kernel` dims, integer-literal `stride` / `padding`) instead of from
+app-level `:type` metadata, evaluates the canonical
+`floor((in + 2p - k) / s) + 1` spatial formula to catch non-positive
+outputs at check time, and routes tensor-metadata lookups through a new
+`arg_tensor_type_expr` helper that peels `(borrow {} ...)`. The sibling
+sweep extended the same borrow peeling to the `mean` and `layer_norm` arms
+and added range checks for zero / negative / overflowing stride and padding
+values that previously panicked or silently emitted nonsense C. Symbolic
+batch dims in `conv2d` input now type-check (per spec §4.5
+`batch, in_c, h, w, p`). `validate_conv2d_symbolic_requirements` is the
+new owner of the conv2d-specific validation surface; the shared cascade
+suppression infrastructure (`failed_let_names`) prevents duplicate
+"concrete tensor argument metadata" diagnostics when a downstream
+conv2d's input depends on an earlier failed conv2d let-binding, including
+through `relu` / `tanh` / `sigmoid` / `gelu` / `add` / `max_elem`
+shape-passthrough wrappers.
+
+Locked by `crates/chelis-types/tests/issue_186_conv2d_validator.rs`,
+which exercises the issue text's exact repro plus the borrow-form variant,
+borrowed-`mean` / `layer_norm` sibling-sweep cases, the formula-evaluation
+spatial-rejection cases, symbolic-batch acceptance, and the pass-through
+cascade-dedup invariant.
+
+### Fixed - `shrink` / `stride` / `pad` not callable from Surf (#187, PR #214)
+
+The windowing builtins `shrink` and `stride` were registered as
+single-arg `tensor_unop` in `crates/chelis-types/src/builtins.rs` even
+though the RISC lowering (`crates/chelis-ir/src/lower.rs::lower_shrink`
+/ `lower_stride`) reads the window parameters from `args[1..]`. The
+bare 1-arg form type-checked but the host runtime answered
+`unsupported builtin \`shrink\` in host runtime`; the parameterized
+form that the lowering actually needed was type-rejected with
+`function arity mismatch: expected 1 args`. `pad` had the same
+antipattern. Hydronnx H3 emitter could not express MaxPool /
+AvgPool / GlobalMaxPool / GlobalAvgPool because of this gap.
+
+The fix introduces dedicated parameterized inference handlers
+(`infer_shrink_app`, `infer_stride_app`, `infer_pad_app`) that mirror
+the lowering's expected signature: `shrink(&tensor, pair-list-of-int)`,
+`stride(&tensor, int, int, ...)` (one positional step per axis), and
+`pad(&tensor, pair-list-of-int, fill)`. Host-runtime arms in
+`crates/chelis-compiler-api/src/runtime.rs::eval_builtin` delegate to
+the existing IR evaluator. The parser-side `extract_pair_list` walks
+the Cons chain instead of `list.elements` so cast-wrapped int literals
+(`cast(N, int32)`) participate in infer-time bounds and stride checks
+the same way reshape's dim list does, and malformed inner pairs
+(`[[0, 1, 2]]` triples, `[[0]]` singletons, `Nil` empty inner lists)
+are rejected at infer time with axis-tagged diagnostics. `pad`'s fill
+arg is now unified against the tensor's precision instead of being
+silently discarded.
+
+Cast-aware extraction was extended across the movement-op family
+(`shrink`, `stride`, `pad`, `permute`, `expand`) so neg-of-cast and
+arbitrarily-nested-cast bound expressions resolve at infer time.
+
+Locked by `crates/chelis-types/tests/issue_187_shrink_stride_sig.rs`,
+`crates/chelis-compiler-api/tests/issue_187_shrink_stride_host_runtime.rs`,
+and four red-team rounds of adversarial probes covering the cast,
+neg-of-cast, double-cast, empty-list, malformed-pair, and per-axis-stride
+surfaces.
+
+The broken `shrink(&qkv)` call in
+`examples/illustrative/mha_slice_combined_qkv.ch` was rewritten to use
+the parameterized form with concrete dims. Three CLI tests
+(`build_hip_rejects_pad_lowering_without_panic`,
+`target_metal_rejects_pad`, `target_metal_rejects_shrink`) that fed the
+no-longer-accepted bare 1-arg form were updated.
+
+### Fixed - `chelis lint` panics on em dash inside Python docstring (#209, PR #210)
+
+`crates/chelis-lint/src/rules/no_em_dash_in_public_strings.rs::dash_spacing`
+took a `line: &str` plus a `dash: usize` byte offset INTO THAT LINE and
+returned `DashSpacing { after_end: after_start + usize::from(after) }`
+where `after_start = dash + '—'.len_utf8()`, also line-relative. Callers
+in the same file (`fix()`, `clause_replacement`, `spaced_dash_replacement`)
+then treated `spacing.after_end` as a SOURCE-absolute byte offset and
+sliced `source[next_start..]` or built `Replacement { end: next_start + ... }`
+with it. On line 1 (`line_start == 0`) the bug was masked. For any later
+line, `after_end` indexed a byte that has nothing to do with the dash's
+source position; when that byte happened to land inside an earlier
+multi-byte char (commonly another em dash inside an excluded docstring),
+the slice panicked. Hydronnx added `chelis lint --check .` to its full
+workspace gate; the command panicked on existing docs / scripts before
+producing actionable output.
+
+The fix threads `line_start` into `dash_spacing` and returns
+source-absolute offsets, matching the source-absolute calling convention
+that `dash` already used. The `DashSpacing.after_end` field now carries
+a doc comment naming the previous bug.
+
+The sibling sweep audited `crates/chelis-lint/src/rules/redundant_linearity_call.rs`,
+the only other rule that crosses line and source byte coordinates;
+it composes `line_start_offset(...) + col - 1` correctly and required
+no change.
+
+Locked by `crates/chelis-lint/tests/issue_209_em_dash_utf8_boundary.rs`
+with 16 regression fixtures plus an end-to-end CLI assertion that
+`chelis lint --check` does not panic on any of the multi-byte / multi-line
+docstring shapes the rule walks.
+
+### Fixed - Runtime-dim `reshape` does not preserve declared symbolic shape (#206, PR #213)
+
+`crates/chelis-types/src/infer.rs::infer_reshape_app::list_literal_dims`
+recognized only concrete-int dim list elements (looking through
+`cast(N, int{32,64})`) and fell back to `vec![Dim::Wildcard; rank]` for
+anything else, including the common runtime-batch pattern
+`cast(shape(x, axis), int64)`. The neighbouring `expand` arm "works"
+only because `check_expand_signature` does not assert a precise output
+dim list when the size arg is non-literal; reshape actively emitted a
+rank-matching all-`Wildcard` dim list, collapsing the body type to
+`tensor[Wildcard, ...]` and producing a spurious `TypeMismatch` against
+the declared sig.
+
+The fix adds a strict-syntactic recognizer (`reshape_output_dims` plus
+helpers `collect_shape_list_elements`, `extract_shape_axis_of`,
+`peel_cast`, `is_target_ty`, `is_shape_app`) that recognizes
+`cast(shape(x, cast(lit_axis, int32)), int64)` as a same-tensor
+dim-reference and injects the input's resolved dim at the named axis
+into the output dim list. The recognizer rejects through-different-tensor
+references, non-literal axes, and arithmetic-wrapped shape calls. The
+earlier `list_literal_dims` / `cons_chain_int_dims` helpers are
+subsumed.
+
+Sibling sweep confirmed `view` and `broadcast_to` are not builtins; only
+`broadcast_pair` exists and takes two tensors. `expand`'s sig-driven
+result type was not affected.
+
+Locked by `crates/chelis-types/tests/issue_206_runtime_dim_reshape.rs`
+with the issue's exact reproducer (`flatten_batch`) plus axis variations,
+reorder and duplicate-axis cases, and rejection of through-different-tensor
+references.
+
+### Added - Host-runtime dispatch for 14 builtins; `BUILTIN_NAMES` invariant lock (#185, PR #217)
+
+`BUILTIN_NAMES` in `crates/chelis-types/src/builtins.rs` listed 12
+builtins that `chelis check` type-accepted but
+`crates/chelis-compiler-api/src/runtime.rs::eval_builtin` did not
+dispatch, so `chelis test` / `chelis eval` failed with
+`unsupported builtin \`X\` in host runtime`. Sibling sweep found 6
+more in the same gap. Hydronnx H3 emitter could not run Conv2D,
+MaxPool / AvgPool / GlobalMaxPool / GlobalAvgPool, reductions, or
+activations through the host runtime against an ONNX-Runtime reference.
+
+This release ships host-runtime arms for:
+
+| Group | Builtins |
+|---|---|
+| A — Unary RISC (spec §2.2) | `abs`, `cos`, `tan`, `floor`, `ceil`, `atan` |
+| B — Reductions (spec §2.2) | `max_reduce` |
+| C — Binary Tier 2 (spec §3.4) | `max_elem`, `min_elem` |
+| E — Composed Tier 2 (spec §3.4 / §4.4 / §4.5) | `mean`, `layer_norm`, `conv2d` |
+| F — Tensor-bool (spec §3.2) | `and`, `or`, `not` (tensor arms; scalar arms already existed) |
+
+`pad` (Tier 1 §2.4) shipped in PR #214 alongside the shrink / stride
+sig fix. The IR evaluator (`crates/chelis-ir/src/eval.rs`) is the
+canonical numerical oracle per the evaluator-vs-backend agreement
+discipline; each new arm delegates to it rather than re-deriving op
+semantics.
+
+`normalize` is registered as a builtin but marked unstable in
+`builtins.rs:55-56`; it is intentionally allowlisted in the new invariant
+test with reason `pending-spec-stability` and tracked separately.
+`scatter_replace` is allowlisted with reason `lowered-before-eval` (the
+Surf call always lowers to `RiscOp::Scatter`).
+
+`crates/chelis-compiler-api/tests/builtin_dispatch_invariant.rs` locks
+the schema: every name in `BUILTIN_NAMES` must have either an
+`eval_builtin` arm or a documented allowlist entry, and every allowlist
+entry must reference a name in `BUILTIN_NAMES`. The invariant catches
+missing arms, double entries, and stale allowlist entries; the policy
+header documents the closed reason vocabulary
+(`type-only`, `target=<backend>-only`, `lowered-before-eval`,
+`pending-spec-stability`).
+
+Locked by per-group test files in
+`crates/chelis-compiler-api/tests/issue_185_host_runtime_*.rs`.
+
+### Fixed - `BlasMatmul` had no gradient rule; `grad` rejected any matmul-bearing body (#199 Part 1, PR #211)
+
+`grad` (`crates/chelis-ir/src/grad.rs::compute_adjoints`) returned `None`
+for `RiscOp::BlasMatmul` because the specialise pass introduces
+`BlasMatmul` whenever a pure `matmul` lowering matches the tier2
+`Sum(Mul(Expand(A), Expand(B)))` template, and `compute_adjoints` only
+had an arm for plain `RiscOp::Matmul`. Any function body containing a
+matmul could not be differentiated, surfacing as
+`AdError::NotSupported { op: "<unknown>", reason: ... }`.
+
+The fix adds a `BlasMatmul` arm to `compute_adjoints` that emits the
+standard reverse-mode adjoint `dA = dY @ B^T`, `dB = A^T @ dY` via
+`Permute` (last-two-axis swap, rank-N safe) plus a fresh `BlasMatmul`
+using the spec §5.7.1 default accumulator. Finite-difference numerical
+agreement verified across 2x2x2, 3x4x2, 1x3x1, batched 2x2x2x2, and
+chain-rule-via-`relu` 2x3 + 3x2 configurations within `abs_tol=1e-3`
+(f64) and `abs_tol=1e-2` (f32). The sibling sweep enumerated every
+remaining `=> None` arm in `compute_adjoints`; the rest are intentional
+non-differentiability (`Floor`, `Ceil`, `Argmax`, `Argmin`,
+`Scatter`, `ScatterAdd`, `Stride`, `Drop`, `FusedElem`) and are not
+realistic-model blockers.
+
+Locked by `crates/chelis-ir/tests/issue_199_grad_blas_matmul_to_tensor.rs`
+with five tests covering analytic match for the 2x2x2 example, batched
+shapes, and the relu-composed chain rule.
+
+**Part 2 is deferred.** Allowing `to_tensor` literal weight constants
+inside differentiable function bodies (the rest of issue #199's text)
+requires either a `Dim::Wildcard`-stripping rule that survives every
+downstream consumer or a type-system change to bind `Dim::Name(_) ↔
+Dim::Lit(_)`. PR #211 went through R1 → R4 of red-team rounds, each
+finding a new consumer (reductions, elementwise, concat, named-dim
+sigs); the consumer-by-consumer pattern signalled architectural
+redesign rather than continued patching. Follow-up issues:
+[#218](https://github.com/Chelis-Lang/chelis/issues/218) (to_tensor in
+differentiable bodies, with the R-round failure modes as design
+requirements), [#219](https://github.com/Chelis-Lang/chelis/issues/219)
+(Name-vs-Var unification asymmetry),
+[#220](https://github.com/Chelis-Lang/chelis/issues/220)
+(`extract_dim_list` parser bug).
+
+### Added - End-to-end acceptance lock for Hydronnx H3.x shapes (PR #221)
+
+`crates/chelis-e2e/tests/issue_185_hydronnx_h3_shapes.rs` exercises the
+three H3.x ONNX-emitter shapes against pen-and-paper references plus
+hand-computed conv2d output pixels:
+
+- `hydronnx_h3_maxpool_2x2_stride2_no_padding_matches_ir_eval` —
+  shrink + stride + concat + max_reduce composition (the H2
+  decomposition pattern)
+- `hydronnx_h3_layer_norm_batch2_hidden4_matches_ir_eval` —
+  `layer_norm(x, gamma, beta)` against the spec §4.4 formula
+- `hydronnx_h3_conv2d_1x3x8x8_kernel_8x3x3x3_matches_ir_eval` —
+  conv2d against a pure-Rust 7-loop NCHW/OIHW reference plus an
+  explicit hand-computed lock on `out[0, 0, 0, 0]`
+
+Forward-pass only; the `grad` surface is covered by the Part 1
+fixtures and (when #218 lands) by Part 2 follow-up work. Verified
+against 15 adversarial probes (ties, all-negative, zero-variance,
+negative gamma / beta, zero / identity / negative kernel,
+batch variations, padding>0).
+
+## [0.7.12] — 2026-05-23
+
+Cut to surface the post-`v0.7.11` `main` work — in particular two
+downstream-blocking lint fixes — to consumers (hydronnx v0.1.0 release
+is gated on this).
+
+### Fixed - `module-pascal-components` lint demoted to advisory
+
+`crates/chelis-lint/src/rules/module_pascal_components.rs` was
+demoted from a blocking error to an advisory warning. The heuristic
+("module component looks like a multi-word compound but has no
+internal capital") is genuinely useful for catching `tabularmlp`-style
+typos in user code, but its blocking posture broke every legitimate
+single-word module name not on the hardcoded `KNOWN_SINGLE_WORDS`
+allowlist (the downstream `Hydronnx` shell hit this on every emitted
+module). The advisory demotion means the rule still surfaces the
+finding in `chelis check` output but does not fail the build.
+
+### Fixed - `Hydronnx` re-allowlisted in `module-pascal-components`
+
+`crates/chelis-lint/src/rules/module_pascal_components.rs` re-adds
+`Hydronnx` to `KNOWN_SINGLE_WORDS` so the lint never even fires the
+advisory warning for it (the shell-ecosystem prefix is a known
+single-word compound name, per spec §6.3 "Shell Ecosystem"). This is
+belt-and-braces with the advisory demotion above: even if a future
+change re-promotes the rule to blocking, the prefix stays clean.
+
+### Other work since `v0.7.11`
+
+Everything previously under `[Unreleased]` shipped in this release.
+
+### Fixed - C backend `emit_cast` corruption on bf16/f16 boundaries (WS-Cleanup-Fixups)
+
+`crates/chelis-backend-c/src/emit.rs::emit_cast` previously emitted the
+C language cast `((dst_et*)t->data)[i] = (dst_et)((src_et*)t->data)[idx]`
+for every cross-precision arm, including the four arms that touch the
+reduced-float dtypes (`Bf16` and `F16`). Those dtypes store as
+`uint16_t`, so the cast `(uint16_t)1.5f` integer-truncates the float to
+`1` and writes bit pattern `0x0001` instead of `bf16(1.5)=0x3FC0` /
+`f16(1.5)=0x3E00`. The widening direction was symmetrically broken:
+`(float)(uint16_t)0x3FC0` is `16320.0f`, not `1.5f`. Three RT-Cleanup
+BLOCKER tests (cast_f32_to_bf16, cast_bf16_to_f32, cast_f32_to_f16) were
+gated on this fix.
+
+The fix routes every cast that touches `Bf16` or `F16` through the
+existing WS-1 runtime helpers (`chelis_f32_to_bf16` /
+`chelis_bf16_to_f32` / `chelis_f32_to_f16` / `chelis_f16_to_f32`).
+Cross-narrow-float casts (`Bf16 <-> F16`) chain through `f32` as the
+intermediate. Casts between reduced floats and `intN` / `f64` route
+through `f32` for the reduced-float leg and use the C primitive cast for
+the other. Pairs not involving reduced floats keep the existing C cast
+semantics.
+
+Locked by un-ignoring the three RT-Cleanup BLOCKER tests in
+`crates/chelis-backend-c/tests/rt_cleanup_redteam.rs`
+(`cast_f32_to_bf16_preserves_value_per_ieee_754`,
+`cast_bf16_to_f32_preserves_value_per_ieee_754`,
+`cast_f32_to_f16_preserves_value_per_ieee_754`) plus a new
+`crates/chelis-backend-c/tests/dtype_matrix_bf16_f16_extended.rs` with
+bit-pattern + round-trip tests for all six reduced-float cast
+directions and a sweep over non-round operand values (0.5, 2.5, -1.75,
+100.0, 0.125).
+
+### Fixed - Metal `host_const_fill_body` invalid C++ literal for F32 NaN/Inf (WS-Cleanup-Fixups)
+
+`crates/chelis-backend-metal/src/dtype.rs::host_const_fill_body` formatted
+the F32 fill value with `{value:?}f`. Rust formats `f64::NAN` as the
+token `NaN`, so the emitted code carried `p[i] = NaNf;` which is not a
+valid C/C++ float literal. The infinity path emitted `inff` with the
+same shape. Latent today because no Phase 0 corpus exercises Metal
+Const with NaN/Inf, but locked as a SPEC-DIVERGENCE by RT-Cleanup.
+
+The fix discriminates `f64::is_nan()` / `f64::is_infinite()` on the F32
+arm and emits the C99 `(float)NAN` / `(float)INFINITY` /
+`-(float)INFINITY` macros, which are well-formed C++ tokens. Finite
+values keep the existing `{value:?}f` shape (byte-identical to the
+pre-fix emission). The F16/Bf16 arms already use the bit-pattern
+literal path (`0x{bits:04X}u`) and so were unaffected; a regression
+test pins that behavior.
+
+Locked by un-ignoring two RT-Cleanup SPEC-DIVERGENCE tests plus three
+new regression tests in
+`crates/chelis-backend-metal/tests/rt_cleanup_redteam.rs`:
+`rt_metal_emit_const_f32_negative_infinity_emits_negated_infinity_macro`,
+`rt_metal_emit_const_f32_finite_value_keeps_typed_float_literal_form`,
+`rt_metal_emit_const_f16_bf16_nan_inf_emit_well_formed_integer_literal`.
+
+### Added - C backend bf16/f16 elementwise + cast coverage (WS-Cleanup-Fixups)
+
+`crates/chelis-backend-c/tests/dtype_matrix_bf16_f16_extended.rs` closes
+the RT-Cleanup coverage gap for ops the original WS-1 matrix did not
+exercise directly. Per-dtype evaluator-agreement tests at `BF16_TOL =
+1e-2` / `F16_TOL = 1e-3` for `Div`, `Recip`, `Sqrt`, `Sin`, `Cos`,
+`Tan`, `Atan`, `Floor`, `Ceil`, plus bit-pattern + round-trip locks for
+all six reduced-float cast directions. `MinReduce` and `ProdReduce` on
+bf16/f16 are pinned with `#[should_panic]` tests against the
+pre-existing `emit_reduce_simple` f32-hardcoded guard
+(`crates/chelis-backend-c/src/emit.rs:3540`); widening that path to
+reduced floats is follow-on work outside the WS-Cleanup-Fixups scope.
+
+### Fixed - Metal `emit_const` host-fill for f16/bf16 (WS-2)
+
+`crates/chelis-backend-metal/src/emit.rs::emit_const` previously emitted
+host Objective-C++ code using the MSL-only kernel types `half` and
+`bfloat` for both the typed-pointer cast and the value cast inside the
+CPU fill loop. Those types are not visible to host `clang++ -fobjc-arc`,
+so any Const-rooted f16 or bf16 program produced a `.mm` that failed to
+compile. The CLI gate (`reject_unsupported_metal_ops`) admits all 8
+active Metal dtypes post-PR #112, so this was a live bug, not latent.
+
+The fix factors the host-fill block through a new
+`dtype::host_const_fill_body` helper that routes through host-safe
+types per dtype: typed `float*` for f32, `uint16_t*` plus IEEE-754
+bit-pattern literal (computed at codegen time via
+`half::f16::from_f64(...).to_bits()` and the bf16 analogue) for f16 /
+bf16, matching `intN_t*` with an explicit integral cast for the
+integer family, and C++ `bool*` for bool. The pre-existing
+`sizeof(msl_ty)` was already routed through `host_sizeof_expr` in PR
+#112; the WS-2 change finishes the migration on the value-write side.
+
+Locked by two new tests:
+
+- `crates/chelis-backend-metal/tests/codegen_structure.rs::ws2_emit_const_f16_bf16_use_uint16_bit_pattern_not_msl_kernel_types`
+  — Linux structural assertion that the emitted source uses
+  `uint16_t*` plus the pinned bit-pattern literal and never `(half*)`,
+  `(bfloat*)`, `sizeof(half)`, or `sizeof(bfloat)` for f16/bf16
+  Const fills. Sweeps eight pinned (precision, value, bits) tuples
+  covering 2.5, 1.5, -1.0, and 0.0.
+- `crates/chelis-backend-metal/tests/gpu_correctness.rs::metal_const_f16_bf16_compiles_under_objc_arc_and_produces_exact_bits`
+  — macOS-only (`#[cfg(target_os = "macos")]`, `#[ignore]`) compile +
+  run gate that builds Const-rooted f16/bf16 DAGs, links them via
+  `xcrun clang++ -fobjc-arc`, runs the binary, and asserts the
+  runtime buffer holds the exact pinned bit patterns.
+
+Plus `crates/chelis-backend-metal/tests/codegen_structure.rs::ws2_emit_const_f32_integer_bool_paths_unchanged`
+which pins the byte-identical shape of f32 / int32 / bool Const
+emission so a future refactor cannot silently route them through the
+bit-pattern path.
+
+### Added - C backend admits bf16 and f16
+
+The C backend now admits `bf16` and `f16` at every active op surface
+(elementwise, reductions, Const, Load, Store, matmul) per
+`spec/04-type-system.md` §1.1.3. Storage stays two bytes (`uint16_t`);
+arithmetic always converts to `f32` via new runtime helpers
+(`chelis_bf16_to_f32` / `chelis_f16_to_f32` and inverses). Matmul
+routes through `convert-then-cblas_sgemm` with f32 scratch buffers,
+matching the §5.7.1 accumulator promise. Reductions on bf16/f16
+operands use an f32 accumulator and produce an f32 result, with a
+locked test that distinguishes the f32-accumulator path from a naive
+bf16-direct accumulation. Brings all three first-party backends
+(C, HIP, Metal) to true 9/9 active-dtype parity modulo Metal's f64
+hardware exclusion. The `sparse_elem_type` silent default-arm
+(`_ => "float"`) and the `emit_const` silent f32 truncation default
+arm are gone; both are replaced with explicit per-dtype arms plus
+panic-on-unsupported.
+
 ### Changed - descriptive test names in backend crates
 
 Renamed scaffolding-named integration test files in `chelis-backend-c`,

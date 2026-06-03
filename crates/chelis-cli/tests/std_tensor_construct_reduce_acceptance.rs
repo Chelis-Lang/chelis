@@ -83,7 +83,7 @@ bad = linspace(to_tensor([cast(0.0, f32)]), cast(1.0, f32), cast(5, int32))
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
+        // Issue #207: type errors produce exit 2; assert on stdout content only.
         // Score must not be perfect when a scalar-vs-tensor mismatch is present.
         .stdout(predicate::str::contains("\"score\": 1").not());
 }
@@ -157,7 +157,7 @@ bad = arange(cast(0.0, f32), cast(4.0, f32))
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
+        // Issue #207: type errors produce exit 2; assert on stdout content only.
         .stdout(predicate::str::contains("\"score\": 1").not());
 }
 
@@ -259,7 +259,7 @@ bad = min(cast(1.0, f32), cast(0, int32))
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
+        // Issue #207: type errors produce exit 2; assert on stdout content only.
         .stdout(predicate::str::contains("\"score\": 1").not());
 }
 

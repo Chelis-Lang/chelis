@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))})) (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))})) (app {} (var {} matmul) (var {} ta) (var {} tb)))))

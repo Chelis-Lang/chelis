@@ -19,6 +19,24 @@ pub struct EffectError {
     pub suggestions: Vec<String>,
 }
 
+/// Compute the inferred effect row for every top-level `def` in a
+/// checked program, keyed by def name.
+///
+/// This runs the same iterative-fixed-point inference that
+/// [`check_program`] uses internally, but exposes the per-def effect
+/// rows directly instead of folding them into validation. It performs
+/// NO validation — callers that need handler-arity / unhandled-random /
+/// declared-vs-inferred checks must still call [`check_program`].
+///
+/// The intended consumer is `chelis check --show-inferred --json`,
+/// which joins these effect rows with the type-level signature
+/// inference so a machine consumer (Hull) can reconstruct each
+/// function's `(Type, EffectRow)` without re-parsing a printer.
+pub fn def_effect_rows(program: &CheckedProgram) -> std::collections::BTreeMap<String, EffectSet> {
+    let (effects_by_def, _top_level_callables) = infer_program_effects(program.annotated_exprs());
+    effects_by_def.into_iter().collect()
+}
+
 pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<EffectError>> {
     let (effects_by_def, top_level_callables) = infer_program_effects(program.annotated_exprs());
     let annotated_exprs: Vec<Expr> = program
@@ -347,6 +365,7 @@ fn infer_app_effects(
                 | "file_exists"
                 | "list_dir"
                 | "mmap_file"
+                | "process_run"
         )
     ) {
         effects.insert(Effect::Io);
@@ -1005,6 +1024,31 @@ mod tests {
         );
     }
 
+    // `def_effect_rows` is the public seam `chelis check --show-inferred
+    // --json` reads to attach a structured effect row to each function.
+    // Positive: a function calling `debug` carries IO. Negative parity:
+    // a pure function carries an EMPTY row (present and empty, not
+    // missing), so a consumer can tell "pure" from "unknown".
+    #[test]
+    fn def_effect_rows_reports_io_and_empty_rows() {
+        let program = surf_checked(
+            r#"
+def logged(msg: string) -> string = debug(msg)
+def pure_add(x: int64, y: int64) -> int64 = add(x, y)
+"#,
+        );
+        let rows = def_effect_rows(&program);
+        let logged = rows.get("logged").expect("logged effect row present");
+        assert!(logged.contains(&Effect::Io));
+        assert_eq!(logged.iter().count(), 1);
+
+        let pure_add = rows.get("pure_add").expect("pure_add effect row present");
+        assert!(
+            pure_add.is_empty(),
+            "pure function must have an empty effect row, got {pure_add}"
+        );
+    }
+
     #[test]
     fn rejects_unhandled_dropout_root() {
         let exprs = parse_str(
@@ -1218,6 +1262,34 @@ contents = read_file("dataset.txt")
                 .is_some_and(|effects| effects.contains(&Effect::Io)),
             "expected IO effect on read_file root, got {:?}",
             inferred.get("contents")
+        );
+    }
+
+    #[test]
+    fn process_run_infers_io_but_pure_binding_stays_pure() {
+        // Hull subprocess exec: a binding whose value applies process_run
+        // acquires Effect::Io (mirroring read_file), while an adjacent pure
+        // arithmetic binding stays effect-free.
+        let program = surf_checked(
+            r#"
+result = process_run("echo", ["hi"])
+pure_value = add(cast(1, int64), cast(2, int64))
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("result")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on process_run root, got {:?}",
+            inferred.get("result")
+        );
+        assert!(
+            inferred
+                .get("pure_value")
+                .is_none_or(|effects| effects.is_empty()),
+            "expected pure arithmetic binding to stay effect-free, got {:?}",
+            inferred.get("pure_value")
         );
     }
 

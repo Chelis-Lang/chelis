@@ -923,7 +923,19 @@ pub fn try_lower_compiled_program(
     program: &CheckedProgram,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
     let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
-    let dag = crate::lower::try_lower_program(program).ok();
+    // Issue #197: a *fatal* diagnostic from IR lowering (e.g. the AD
+    // pass refused to differentiate a non-differentiable op) must
+    // propagate to the user. Falling through to the host path here
+    // emits a call to an undefined symbol (the unlowered grad
+    // function) which compiles cleanly via the `chelis build` step
+    // and then fails opaquely at gcc-link time. Non-fatal
+    // diagnostics (the historical un-representable cases) keep the
+    // original fallback semantics so host-only programs still build.
+    let dag = match crate::lower::try_lower_program(program) {
+        Ok(dag) => Some(dag),
+        Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
+        Err(_) => None,
+    };
     let host =
         crate::lower::catch_lowering_external(|| lower_host_program(program, &lowered_names))?;
 
@@ -1051,7 +1063,23 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     }
 
     let body_expr = kids.get(1)?;
-    crate::lower::try_lower_subexpr_program(body_expr, scope, program.type_env().clone(), defs).ok()
+    // Issue #197: a fatal lowering diagnostic (AD-rejection) must
+    // propagate as a panic so the outer `catch_lowering_external`
+    // surfaces it to the user. Silently absorbing it with `.ok()`
+    // would let the host fallback emit an undefined-symbol call to
+    // the grad function.
+    match crate::lower::try_lower_subexpr_program(
+        body_expr,
+        scope,
+        program.type_env().clone(),
+        defs,
+    ) {
+        Ok(dag) => Some(dag),
+        Err(diagnostic) if diagnostic.fatal => {
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
+        }
+        Err(_) => None,
+    }
 }
 
 fn lower_host_program(
@@ -1374,6 +1402,121 @@ pub fn host_program_unresolved_call_sites(program: &HostProgram) -> Vec<String> 
         }
     }
     out
+}
+
+/// Returns `true` if any global binding or function body in `program`
+/// applies the named builtin. Used by the build backends to reject
+/// eval/test-only builtins (e.g. `process_run`, Hull Phase 0a) with a
+/// clean diagnostic rather than the silent `/* unsupported builtin */ 0`
+/// fallthrough in C codegen.
+pub fn host_program_uses_builtin(program: &HostProgram, builtin: &str) -> bool {
+    program
+        .globals
+        .iter()
+        .any(|binding| host_body_uses_builtin(&binding.value, builtin))
+        || program
+            .functions
+            .iter()
+            .any(|function| host_body_uses_builtin(&function.body, builtin))
+}
+
+fn host_callback_uses_builtin(callback: &HostCallback, builtin: &str) -> bool {
+    match &callback.kind {
+        HostCallbackKind::Inline { body, .. } => host_body_uses_builtin(body, builtin),
+        HostCallbackKind::Named { .. } => false,
+    }
+}
+
+fn host_body_uses_builtin(expr: &HostExpr, builtin: &str) -> bool {
+    match &expr.kind {
+        HostExprKind::Builtin { name, args, .. } => {
+            name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
+        }
+        HostExprKind::Call { args, .. } => {
+            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
+        }
+        HostExprKind::TensorCall { args, .. } => {
+            args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
+        }
+        HostExprKind::AdtConstruct { fields, .. } => {
+            fields.iter().any(|f| host_body_uses_builtin(f, builtin))
+        }
+        HostExprKind::Tuple(items, _) | HostExprKind::List(items, _) => {
+            items.iter().any(|i| host_body_uses_builtin(i, builtin))
+        }
+        HostExprKind::AdtFieldAccess { base, .. } => host_body_uses_builtin(base, builtin),
+        HostExprKind::Let { bindings, body, .. } => {
+            bindings
+                .iter()
+                .any(|b| host_body_uses_builtin(&b.value, builtin))
+                || host_body_uses_builtin(body, builtin)
+        }
+        HostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            host_body_uses_builtin(cond, builtin)
+                || host_body_uses_builtin(then_expr, builtin)
+                || host_body_uses_builtin(else_expr, builtin)
+        }
+        HostExprKind::MatchOption {
+            scrutinee,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            host_body_uses_builtin(scrutinee, builtin)
+                || host_body_uses_builtin(some_expr, builtin)
+                || host_body_uses_builtin(none_expr, builtin)
+        }
+        HostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            host_body_uses_builtin(scrutinee, builtin)
+                || arms
+                    .iter()
+                    .any(|arm| host_body_uses_builtin(&arm.expr, builtin))
+                || default_expr
+                    .as_ref()
+                    .is_some_and(|d| host_body_uses_builtin(d, builtin))
+        }
+        HostExprKind::Map { callback, list, .. }
+        | HostExprKind::Filter { callback, list, .. }
+        | HostExprKind::Partition { callback, list, .. }
+        | HostExprKind::FlatMap { callback, list, .. } => {
+            host_callback_uses_builtin(callback, builtin) || host_body_uses_builtin(list, builtin)
+        }
+        HostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ..
+        }
+        | HostExprKind::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => {
+            host_callback_uses_builtin(callback, builtin)
+                || host_body_uses_builtin(init, builtin)
+                || host_body_uses_builtin(list, builtin)
+        }
+        HostExprKind::WithSeed { seed, body, .. } => {
+            host_body_uses_builtin(seed, builtin) || host_body_uses_builtin(body, builtin)
+        }
+        HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Var(_, _)
+        | HostExprKind::Unit => false,
+    }
 }
 
 fn derive_host_function_specializations(functions: &mut [HostFunction]) {
@@ -2133,13 +2276,22 @@ fn lower_tensor_helper_dag(
     scope: &HashMap<String, HostType>,
     expected: &TensorType,
 ) -> Option<crate::Dag> {
-    let dag = crate::lower::try_lower_subexpr_program(
+    // Issue #197: surface a fatal AD rejection from the tensor-
+    // helper sub-lowering instead of swallowing it; the host
+    // fallback would otherwise emit an undefined-symbol call to
+    // the rejected grad function.
+    let dag = match crate::lower::try_lower_subexpr_program(
         expr,
         collect_tensor_scope(scope),
         program.type_env().clone(),
         collect_program_defs(program.exprs()),
-    )
-    .ok()?;
+    ) {
+        Ok(dag) => dag,
+        Err(diagnostic) if diagnostic.fatal => {
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
+        }
+        Err(_) => return None,
+    };
     Some(remap_tensor_helper_dim_symbols(&dag, scope, expected))
 }
 
@@ -4327,6 +4479,7 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
                 | "filter"
                 | "fold"
                 | "scan"
+                | "tensor_scan"
                 | "partition"
                 | "flat_map"
                 | "sort"
@@ -6731,6 +6884,30 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             Some(init_ty) => Some(HostType::List(Box::new(init_ty.clone()))),
             None => Some(HostType::Unknown),
         },
+        // Issue #257: `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
+        //
+        // We deliberately do NOT synthesize a concrete `HostType::Tensor`
+        // precision here. `HostType` is a *coarse* host-IR class: every
+        // integer width collapses to `Int64` and every float width to
+        // `Float64` (see `host_type_from_tensor_input`), so by the time
+        // the initial value's type reaches this arm its real dtype
+        // (`int8`..`int64`, `f16`..`f64`) is already gone. Any concrete
+        // precision we picked would be a guess — e.g. an earlier version
+        // mapped `Float64 -> F32`, which is wrong for an `f64` initial,
+        // and `Int64` for an `int32` initial. The authoritative element
+        // type lives in the real type checker (`chelis-types`
+        // `infer.rs::infer_app` "tensor_scan" arm) and in the runtime,
+        // which reads the precision straight off the initial value.
+        //
+        // Returning `Unknown` is sound because this host type is *never
+        // consumed*: `tensor_scan` is host-only, so any compiled-backend
+        // program that reaches it is rejected up front by
+        // `compiler.rs::reject_host_only_builtins` (which keys off the
+        // `Builtin` node, not its inferred type) before the C/HIP emitter
+        // runs, and the `chelis eval`/`chelis test` interpreter never
+        // consults host-IR types at all. Emitting `Unknown` keeps this
+        // arm from advertising a precision it cannot actually know.
+        "tensor_scan" => Some(HostType::Unknown),
         "partition" => match arg_tys.get(1) {
             Some(list_ty) => Some(HostType::Tuple(vec![list_ty.clone(), list_ty.clone()])),
             None => Some(HostType::Unknown),
@@ -6948,6 +7125,14 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         "mmap_file" => Some(HostType::MappedFile),
         "mmap_read" => Some(HostType::List(Box::new(HostType::Int64))),
         "mmap_len" => Some(HostType::Int64),
+        // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
+        // Eval/test-only; the C/HIP build backends reject it before codegen
+        // (see `host_program_uses_builtin` / `reject_eval_only_builtins_host`).
+        "process_run" => Some(HostType::Tuple(vec![
+            HostType::Int64,
+            HostType::String,
+            HostType::String,
+        ])),
         _ => None,
     }
 }
@@ -7190,6 +7375,39 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
+    }
+
+    fn surf_check(src: &str) -> CheckedProgram {
+        let decls = chelis_surf::parser::parse_str(src).expect("surf parse failed");
+        let deep = chelis_surf::desugar::desugar_program(&decls);
+        chelis_types::check_ir_program(&deep)
+            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
+    }
+
+    #[test]
+    fn host_program_uses_builtin_detects_process_run() {
+        // Hull subprocess exec: a global binding that applies process_run is
+        // detected so the build backends can reject it before codegen.
+        let checked = surf_check("result = process_run(\"echo\", [\"hi\"])\n");
+        let compiled = lower_compiled_program(&checked);
+        let host = compiled.host.expect("host program present");
+        assert!(
+            host_program_uses_builtin(&host, "process_run"),
+            "host_program_uses_builtin must detect a process_run global binding"
+        );
+    }
+
+    #[test]
+    fn host_program_uses_builtin_is_false_without_process_run() {
+        // Negative parity: a program that uses only file IO must not report
+        // process_run usage, so the positive assertion is not vacuous.
+        let checked = surf_check("contents = read_file(\"dataset.txt\")\n");
+        let compiled = lower_compiled_program(&checked);
+        let host = compiled.host.expect("host program present");
+        assert!(
+            !host_program_uses_builtin(&host, "process_run"),
+            "host_program_uses_builtin must be false for a read_file-only program"
+        );
     }
 
     /// E2 (WS-A0 RT-1 fixup): the `to_list` host classification arm

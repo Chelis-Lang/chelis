@@ -7,9 +7,13 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis fmt` canonicalizes Surf or Deep source.
 - `chelis lint` enforces naming and style conventions from `spec/01-nomenclature.md`.
 - `chelis check` parses, desugars, type-checks, and reports fitness/errors.
+  Accepts both Surf (`.ch`) and already-lowered Deep (`.dp`) inputs; a
+  `.dp` skips desugaring and is type/effect/linearity-checked directly,
+  emitting the same JSON report shape as the `.ch` path.
 - `chelis deep` prints canonical Deep for a Surf program.
 - `chelis surf` decompiles Deep back to Surf.
-- `chelis eval` runs the host/runtime evaluator.
+- `chelis eval` runs the host/runtime evaluator. `chelis eval --file`
+  accepts both `.ch` and `.dp` inputs.
 - `chelis test` discovers and runs Chelis-native Reef package tests.
 - `chelis prove` discovers and runs Level 2 executable properties.
 - `chelis validate` runs the executable-grammar validator on the input.
@@ -106,14 +110,20 @@ itself lives outside `src/` and does not declare a top-level `module`.
 chelis test
 chelis test tests/
 chelis test tests/core.ch
-chelis test tests/ --filter pricing --timeout 10 --jobs auto
-chelis test tests/ --json --jobs 1
+chelis test tests/ --filter pricing --timeout 10 --batch-mode auto
+chelis test tests/ --json --batch-mode file --jobs 1
 ```
 
-Directory runs execute files concurrently by default. `--jobs auto` uses the
-available CPU count capped by the number of selected files; pass `--jobs 1`
-to preserve serial file execution while debugging. Output remains stable in
-discovery order for both plain text and NDJSON.
+Directory runs use `--batch-mode auto` by default: eligible files are compiled
+as one suite batch so the fixed Reef context and test-source compile costs are
+paid once. Files with top-level module-init bindings or top-level name
+collisions use the per-file worker path. If a batch worker crashes, times out,
+or emits incomplete rows, the parent falls back to per-file workers.
+
+Use `--batch-mode file` to force per-file subprocess isolation while debugging.
+`--jobs auto` caps worker concurrency on file-worker paths; pass `--jobs 1` for
+serial file execution. Output remains stable in discovery order for both plain
+text and NDJSON.
 
 ## Property Proof Loop
 

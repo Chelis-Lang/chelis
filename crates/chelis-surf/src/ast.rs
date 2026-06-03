@@ -72,6 +72,25 @@ pub enum Decl {
     },
 }
 
+impl Decl {
+    /// Byte span of this declaration in the original Surf source.
+    pub fn span(&self) -> Span {
+        match self {
+            Decl::Module { span, .. }
+            | Decl::Import { span, .. }
+            | Decl::Sig { span, .. }
+            | Decl::Dim { span, .. }
+            | Decl::TypeDef { span, .. }
+            | Decl::TypeAlias { span, .. }
+            | Decl::FunDef { span, .. }
+            | Decl::Property { span, .. }
+            | Decl::LetDef { span, .. }
+            | Decl::MacroDef { span, .. }
+            | Decl::Export { span, .. } => *span,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PropertyOption {
     Tolerance(Expr, Span),

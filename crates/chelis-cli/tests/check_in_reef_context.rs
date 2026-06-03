@@ -10,9 +10,9 @@
 //! requires the new path to handle:
 //!
 //! 1. Clean program: `score = 1`, empty `errors` array, exit 0.
-//! 2. Program with a type error: `score < 1`, non-empty `errors`, exit 0.
+//! 2. Program with a type error: `score < 1`, non-empty `errors`, exit 2.
 //! 3. Program with an unhandled effect: `score < 1`, non-empty `errors`,
-//!    exit 0 (effect errors render through JSON, not stderr).
+//!    exit 2 (issue #207 ties the exit code to the errors array).
 //!
 //! Each test asserts both the exit code and the JSON diagnostic shape;
 //! together they lock the parity contract chelis-tide and other
@@ -128,18 +128,25 @@ def broken -> int32 = add(1, true)
 "#,
     );
 
+    // Issue #207: `chelis check` now exits with code 2 when the JSON
+    // `errors` array is non-empty. The fixture below produces a
+    // TypeMismatch, so we drive the command via `.output()` and
+    // assert on the exit code explicitly.
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
-        .assert()
-        .success() // legacy cmd_check exits 0 on check-stage failures
-        .get_output()
-        .stdout
-        .clone();
-    let stdout = String::from_utf8(output).expect("utf8");
+        .output()
+        .expect("run chelis check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "issue #207: type errors must produce exit 2; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
     let json = assert_check_json_shape(&stdout);
     let score = json.get("score").and_then(Value::as_f64).expect("score");
     assert!(
@@ -164,8 +171,8 @@ fn check_effect_error_reef_program_yields_lower_score_and_kept_shape() {
     // `broken` declares an empty effect row (`! {}`) but its body calls
     // a `! { Test }` library function. `validate_declared_vs_inferred`
     // surfaces this as an `UnhandledEffect` diagnostic in the JSON
-    // `errors` array (effect errors are recoverable: cmd_check still
-    // exits 0 and prints JSON, matching pre-refactor behavior).
+    // `errors` array. Issue #207 ties the exit code to the errors
+    // array, so an unhandled-effect diagnostic now produces exit 2.
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
@@ -182,12 +189,15 @@ def broken(c: bool) -> unit ! {} = assert_true(c, "expect ok")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
-        .assert()
-        .success() // effect errors render to stdout JSON, not stderr
-        .get_output()
-        .stdout
-        .clone();
-    let stdout = String::from_utf8(output).expect("utf8");
+        .output()
+        .expect("run chelis check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "issue #207: effect errors render to stdout JSON and produce exit 2; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
     let json = assert_check_json_shape(&stdout);
     let errors = json
         .get("errors")

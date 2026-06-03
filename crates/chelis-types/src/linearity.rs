@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
 use crate::errors::{CheckError, CheckErrorKind};
+use crate::infer::SignatureInferenceMetadata;
+use crate::pipe_stage::resolve_pipe_stage_callee;
+use crate::types::Type;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
@@ -228,6 +231,39 @@ struct Checker {
     errors: Vec<CheckError>,
     info: LinearityInfo,
     top_level_types: HashMap<String, Expr>,
+    /// Names of ADTs whose definitions (transitively) carry a tensor
+    /// field. Computed once per `check_linearity` call by walking
+    /// `deftype` declarations in `annotated_exprs`. Used by
+    /// `expr_is_owned_or_borrow_linear` so `&adt_value` is accepted as
+    /// a borrow whenever the ADT's definition contains a tensor, not
+    /// only when the ADT's type *arguments* contain one. Resolves the
+    /// downstream blocker for `School` P1.5 (BatchNorm) and P2.5
+    /// (optimizer `_step_tree`) where `&BatchNormParams` /
+    /// `&AdamState[tensor[..]]` (with the tensor in a record field,
+    /// not the ADT-arg position) was rejected with `InvalidBorrow`.
+    ///
+    /// Keyed on bare ADT name. Two-name collisions are rejected up
+    /// front by `collect_declarations` in `infer.rs` with
+    /// `CheckErrorKind::DuplicateDefinition`, so by the time the
+    /// linearity checker runs, every name in this set corresponds to
+    /// exactly one `deftype`. That guarantee is what makes a bare
+    /// `String` key safe here; without it the carrier set would be
+    /// order-dependent (last-write-wins via `HashMap::insert` in
+    /// `compute_tensor_carrying_adts`). Once Chelis gains qualified
+    /// ADT names, this set should migrate to a `Set<AdtId>` queried
+    /// off the shared `AdtRegistry` instead of reparsing `deftype`
+    /// exprs here. See the function-level note on
+    /// [`compute_tensor_carrying_adts`].
+    tensor_carrying_adts: HashSet<String>,
+    /// Snapshot of `signature_inference` from the program under check.
+    /// Used by `arg_is_borrowed` to recognize call-site borrow
+    /// classification on user-defined functions whose params were
+    /// inferred read-only (see `infer.rs:infer_signature_metadata`).
+    /// Without this, a call to `def reader(t, k: tensor[..]) = t |> add(k)`
+    /// would consume `t` at every callsite, defeating the auto-borrow
+    /// inference that the inferencer already computed. Closes the
+    /// chelis#229 sibling-sweep gap.
+    signature_inference: SignatureInferenceMetadata,
     /// Depth counter for desugarer-synthesized destructure scopes
     /// (`__chelis_tmp_N` bind chains tagged with `destructure: true`
     /// in their meta-map). Incremented by `check_let` when entering
@@ -288,10 +324,13 @@ fn pre_declare_one(expr: &Expr, type_env: &HashMap<String, Expr>, scope: &mut Li
 }
 
 pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
+    let tensor_carrying_adts = compute_tensor_carrying_adts(program.annotated_exprs());
     let mut checker = Checker {
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: program.type_env().clone(),
+        tensor_carrying_adts,
+        signature_inference: program.signature_inference().clone(),
         destructure_scope_depth: 0,
     };
     let mut scope = LinearScope::default();
@@ -363,10 +402,56 @@ pub fn check_linearity_with_context(
 
     // Top-level types come from new_program.type_env(), which Phase C
     // already unioned (library + new-code). New-code types win on shadow.
+    //
+    // The carrier set comes from BOTH library and new code, chained
+    // into one `compute_tensor_carrying_adts` call so the fixed-point
+    // sees every ADT at once. Library decls can introduce tensor-
+    // carrying ADTs that new-code borrows; new-code can introduce
+    // additional ones whose fields reference library ADTs (the
+    // cross-package transitive case). Two independent calls — one
+    // per half, each with its own local set — would miss any new-
+    // code ADT whose carrying status depends on a library ADT, even
+    // though both halves are eventually unioned.
+    //
+    // ALWAYS-RECOMPUTE INVARIANT: this helper is recomputed from the
+    // chained iterator on every call, with no per-call state held by
+    // `Checker`, the library `CheckedProgram`, or any global cache.
+    // The fixed-point bound (`O(adt_count)` passes, each `O(adt_count
+    // * field_count)`) is small relative to the per-expression
+    // linearity walk that follows. Future change risk: if a later
+    // refactor caches `tensor_carrying_adts` per `CheckedProgram` and
+    // composes the library's cached set with a fresh new-code pass,
+    // the fixed-point will not re-resolve new-code ADTs whose
+    // carrying status depends on library ADTs and borrow semantics
+    // will silently desync. The locking test for this contract lives
+    // at `tests/linearity_with_context.rs::
+    // check_linearity_with_context_is_pure_across_repeated_calls`.
+    // Once `CheckedProgram` exposes a shared `AdtRegistry`, the
+    // registry query replaces this helper entirely (and the new
+    // call site is responsible for re-establishing the same union-
+    // and-recompute discipline).
+    let tensor_carrying_adts = compute_tensor_carrying_adts(
+        library_program
+            .annotated_exprs()
+            .iter()
+            .chain(new_program.annotated_exprs().iter()),
+    );
+    // Merge library + new-code signature inference. New-code wins on
+    // name clash, matching `CheckedProgram::compose`'s rule. Library
+    // function signatures are visible at new-code callsites so library
+    // user functions inferred as borrow-arg are recognized as such.
+    let mut merged_signature_inference = library_program.signature_inference().clone();
+    for (name, sig) in &new_program.signature_inference().functions {
+        merged_signature_inference
+            .functions
+            .insert(name.clone(), sig.clone());
+    }
     let mut checker = Checker {
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
+        tensor_carrying_adts,
+        signature_inference: merged_signature_inference,
         destructure_scope_depth: 0,
     };
 
@@ -587,6 +672,32 @@ impl Checker {
         self.maybe_mark_reusable_app_input(expr, kids, scope);
     }
 
+    // Issue #226 diagnosis (regression introduced indirectly by #183
+    // `fix(types): substitute ADT type params into record-pattern
+    // bindings`). Before #183 the destructured record-field bindings
+    // (`PosEmbedParams { table: table }` -> a new local `table`) carried
+    // a fresh type variable in the annotated Deep, so
+    // `expr_is_owned_linear` returned `false` and `check_pipe`
+    // accidentally accepted `table |> shape(0)` followed by a later
+    // `gather(table, ...)`. #183 stamps the resolved field type onto
+    // pattern bindings (the right fix in isolation); that exposed a
+    // pre-existing gap in `check_pipe`. The branch below classifies the
+    // piped value with `var_name(stage)`, which only matches the bare-
+    // var stage shape `(var f)`. For any non-bare-var stage
+    // `chelis_surf::desugar::desugar_pipe_stage` emits a synthesized
+    // `(fn (params __chelis_pipe) (app callee ... (var __chelis_pipe)
+    // ...))` lambda, so `var_name(stage)` returns `None` and
+    // `arg_is_borrowed(stage, None, 0, scope)` falls through to a
+    // function-type lookup on the LAMBDA itself, not on the inner
+    // `callee`. That means borrow-arg builtins called with explicit
+    // arguments (`shape(0)`, `add(y)`, `mul(k)`, `matmul(w)`, ...) get
+    // mis-tagged as structural consumes of the piped variable, tripping
+    // `UseAfterConsume` on any later read with a malformed "pipe into
+    // stage at offset 0 from offset 0" message (both offsets zero
+    // because the synthesized lambda has no source span). The upcoming
+    // fix introduces `resolve_pipe_stage_callee` and peers through the
+    // synthesized lambda to recover the inner callee and the piped
+    // value's arg position before consulting `arg_is_borrowed`.
     fn check_pipe(&mut self, list: &List, scope: &mut LinearScope) {
         let kids = children(list);
         if kids.is_empty() {
@@ -594,8 +705,22 @@ impl Checker {
         }
         let mut current = &kids[0];
         for stage in &kids[1..] {
-            let stage_builtin = var_name(stage);
-            if self.arg_is_borrowed(Some(stage), stage_builtin, 0, scope) {
+            // Pipe stages with explicit args (e.g. `x |> shape(0)`)
+            // are desugared by `chelis_surf::desugar::desugar_pipe_stage`
+            // into a synthesized one-arg lambda
+            // `(fn (params __chelis_pipe) (app callee ... (var __chelis_pipe) ...))`
+            // where the piped value lands at the `__chelis_pipe`
+            // position in the inner app's args. To classify whether the
+            // piped value is borrowed (read) or consumed by the stage,
+            // look through that lambda and ask the inner callee at its
+            // actual arg position. Without this peering, every
+            // non-bare-var stage falls through to the "stage callee
+            // unknown" branch and the piped value is treated as a
+            // structural consume — which mis-fires whenever a borrow-
+            // arg builtin (`shape`, `add`, `mul`, ...) is invoked with
+            // explicit non-piped args. Closes issue #226.
+            let (callee_expr, callee_builtin, piped_arg_index) = resolve_pipe_stage_callee(stage);
+            if self.arg_is_borrowed(callee_expr, callee_builtin, piped_arg_index, scope) {
                 if is_var_expr(current) && self.expr_is_owned_linear(current, scope) {
                     self.read_var_expr(current, scope);
                 } else {
@@ -703,8 +828,58 @@ impl Checker {
         let params = param_names(&kids[0]);
         let captured = free_vars(&kids[1], &params);
         let mut inner_scope = outer_scope.clone();
+        let body = &kids[1];
+        // Build a temporary `HashMap<String, Type>` of currently-known
+        // user-fn display signatures so the closure-body consuming-use
+        // probe can recognize user-defined borrow-arg callees inside
+        // the body. The probe's secondary `type_env` lookup also
+        // matches direct annotations in `top_level_types`, but
+        // `available_signatures` matches by `Type` (the inferencer's
+        // own metadata) so passing the inferred display signatures
+        // covers user fns whose params were auto-borrow-inferred.
+        let available_signatures: HashMap<String, Type> = self
+            .signature_inference
+            .functions
+            .iter()
+            .map(|(name, sig)| (name.clone(), sig.display_signature.clone()))
+            .collect();
         for name in captured {
-            if outer_scope.ty(&name).is_some_and(type_expr_contains_tensor) {
+            let Some(ty) = outer_scope.ty(&name) else {
+                continue;
+            };
+            if !type_expr_contains_tensor(ty, &self.tensor_carrying_adts) {
+                continue;
+            }
+            // chelis#237 closure-capture spurious-consume gap: if the
+            // closure body never uses `name` in a structurally-consuming
+            // position (only borrow-arg reads, etc.), treat the capture
+            // as a borrow of the outer binding rather than a structural
+            // consume. Mirrors the auto-borrow inference at
+            // `infer.rs:1454` (`infer_signature_metadata`) which marks
+            // a function parameter read-only when its body has no
+            // consuming use. Without this, a closure like
+            // `fn (i) -> add(c, c)` (capture only borrow-read) would
+            // consume the outer `c` at closure-creation time, so a
+            // later borrow-read of `c` outside the closure trips
+            // `UseAfterConsume` with the diagnostic "was already
+            // consumed by closure capture at offset N". The probe
+            // reuses `infer::param_has_consuming_use` so the consume
+            // classification stays aligned with what
+            // `param_has_consuming_use_inner` already enforces for
+            // top-level function-param inference.
+            //
+            // Negative parity (a closure body that *does* consume the
+            // capture — e.g. `fn (i) -> realize(c)` or returning the
+            // capture as the body's value) still goes through the
+            // structural-consume branch, so `read_or_error` plus
+            // `outer_scope.consume` keep firing.
+            let body_consumes = crate::infer::param_has_consuming_use(
+                body,
+                name.as_str(),
+                &available_signatures,
+                &self.top_level_types,
+            );
+            if body_consumes {
                 self.read_or_error(name.as_str(), expr, outer_scope);
                 outer_scope.consume(
                     &name,
@@ -713,6 +888,17 @@ impl Checker {
                         kind: ConsumeKind::Structural,
                     },
                 );
+                inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
+            } else {
+                // Borrow capture: error if the outer is already
+                // consumed (read_or_error covers that), then record a
+                // borrow site on the outer binding. The inner scope
+                // sees `name` as a fresh borrow-read binding too, so
+                // the body's borrow-reads inside the closure resolve
+                // against the captured borrow rather than re-entering
+                // the outer binding state.
+                self.read_or_error(name.as_str(), expr, outer_scope);
+                outer_scope.borrow(name.as_str(), borrow_site(expr));
                 inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
             }
         }
@@ -788,9 +974,13 @@ impl Checker {
                 continue;
             }
             let mut arm_scope = scope.clone();
-            let pattern_names = pattern_names(&arm_kids[0]);
-            for name in &pattern_names {
-                arm_scope.declare(name.clone(), None);
+            let pattern_bindings = pattern_named_types(&arm_kids[0]);
+            let pattern_names: Vec<String> = pattern_bindings
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            for (name, ty) in &pattern_bindings {
+                arm_scope.declare(name.clone(), ty.clone());
             }
             self.check_expr(&arm_kids[1], &mut arm_scope);
             self.check_expr(&arm_kids[2], &mut arm_scope);
@@ -1026,7 +1216,10 @@ impl Checker {
         let Some((ty, state)) = scope.pop(name) else {
             return;
         };
-        if !ty.as_ref().is_some_and(type_expr_is_owned_linear) {
+        if !ty
+            .as_ref()
+            .is_some_and(|ty| type_expr_is_owned_linear(ty, &self.tensor_carrying_adts))
+        {
             return;
         }
         let BindingState::Live { borrow_sites } = state else {
@@ -1082,6 +1275,22 @@ impl Checker {
             // matching the semantics already implemented in the IR.
             return true;
         }
+        // chelis#229 / chelis#237 direct-call gap: when the callee is
+        // a `(var name)` and `name` is a user-defined function whose
+        // parameter at `arg_index` was inferred read-only by
+        // `infer_signature_metadata`, treat the arg as a borrow even
+        // though the annotated `type_env` still has the owned tvar
+        // signature. The display-time `&T` rewrite the inferencer
+        // produces in `display_signature` is the contract callers
+        // see; linearity must honor it or every auto-borrow-inferred
+        // user fn spuriously consumes at its call sites.
+        if let Some(callee) = func.and_then(var_name)
+            && let Some(meta) = self.signature_inference.functions.get(callee)
+            && let Some(param) = meta.params.get(arg_index)
+            && matches!(param.display_type, Type::Ref(_))
+        {
+            return true;
+        }
         let Some(func_ty) = func.and_then(|expr| self.expr_type(expr, scope)) else {
             return false;
         };
@@ -1090,12 +1299,14 @@ impl Checker {
 
     fn expr_is_owned_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
         self.expr_type(expr, scope)
-            .is_some_and(type_expr_is_owned_linear)
+            .is_some_and(|ty| type_expr_is_owned_linear(ty, &self.tensor_carrying_adts))
     }
 
     fn expr_is_owned_or_borrow_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
-        self.expr_type(expr, scope)
-            .is_some_and(type_expr_contains_tensor)
+        self.expr_type(expr, scope).is_some_and(|ty| {
+            type_expr_contains_tensor(ty, &self.tensor_carrying_adts)
+                || type_expr_is_unresolved_tvar(ty)
+        })
     }
 }
 
@@ -1246,6 +1457,45 @@ fn collect_pattern_names(expr: &Expr, names: &mut Vec<String>) {
     }
 }
 
+/// Like [`pattern_names`], but also returns each binding's resolved
+/// type expression when the inferencer stamped one onto the pattern
+/// node's metadata. Used by `check_match` to populate arm `LinearScope`
+/// entries with their concrete types — required for destructured
+/// fields whose type comes from the scrutinee's ADT instantiation
+/// rather than a `let`-style RHS. (closes #181)
+fn pattern_named_types(expr: &Expr) -> Vec<(String, Option<Expr>)> {
+    let mut bindings = Vec::new();
+    collect_pattern_named_types(expr, &mut bindings);
+    bindings
+}
+
+fn collect_pattern_named_types(expr: &Expr, bindings: &mut Vec<(String, Option<Expr>)>) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        Some("pat-var") => {
+            if let Some(name) = children(list).first().and_then(symbol_name) {
+                bindings.push((name.to_string(), type_metadata(expr).cloned()));
+            }
+        }
+        Some("pat-as") => {
+            let kids = children(list);
+            if let Some(name) = kids.first().and_then(symbol_name) {
+                bindings.push((name.to_string(), type_metadata(expr).cloned()));
+            }
+            if let Some(inner) = kids.get(1) {
+                collect_pattern_named_types(inner, bindings);
+            }
+        }
+        _ => {
+            for child in children(list) {
+                collect_pattern_named_types(child, bindings);
+            }
+        }
+    }
+}
+
 fn free_vars(expr: &Expr, params: &[String]) -> Vec<String> {
     let mut bound = vec![params.iter().cloned().collect::<HashSet<_>>()];
     let mut free = HashSet::new();
@@ -1362,6 +1612,7 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
         (name, arg_index),
         (
             "neg"
+                | "recip"
                 | "exp"
                 | "log"
                 | "sin"
@@ -1510,14 +1761,36 @@ fn bind_introduces_destructure_tmp(bind_list: &List) -> bool {
     })
 }
 
-fn type_expr_contains_tensor(expr: &Expr) -> bool {
+fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &HashSet<String>) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
     match get_tag(list) {
         Some("t-tensor") => true,
-        Some("t-ref") => children(list).iter().any(type_expr_contains_tensor),
-        Some("t-tuple") | Some("t-adt") => children(list).iter().any(type_expr_contains_tensor),
+        Some("t-ref") => children(list)
+            .iter()
+            .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts)),
+        Some("t-tuple") => children(list)
+            .iter()
+            .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts)),
+        Some("t-adt") => {
+            // An ADT is tensor-carrying if EITHER one of its type
+            // arguments is (the original behavior — e.g. `Wrapper[a]`
+            // where `a` is `tensor[..]`), OR the ADT's own definition
+            // has a variant with a tensor-carrying field (the
+            // chelis#153 fix for `&BatchNormParams { weight: tensor[..],
+            // ... }`). The pre-computed set in `tensor_carrying_adts`
+            // already accounts for transitive ADT-field tensor-carry.
+            let name_carries = children(list)
+                .first()
+                .and_then(symbol_name)
+                .is_some_and(|n| tensor_carrying_adts.contains(n));
+            name_carries
+                || children(list)
+                    .iter()
+                    .skip(1) // skip the name; only check type args
+                    .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts))
+        }
         Some("t-fn") => false,
         _ => false,
     }
@@ -1527,8 +1800,184 @@ fn type_expr_is_ref(expr: &Expr) -> bool {
     matches!(get_tag_expr(expr), Some("t-ref"))
 }
 
-fn type_expr_is_owned_linear(expr: &Expr) -> bool {
-    type_expr_contains_tensor(expr) && !type_expr_is_ref(expr)
+/// Issue #256: detect a stamped `(t-var ...)` (or `(t-ref (t-var ...))`)
+/// whose underlying type variable was left unresolved by the
+/// annotation pass. This shape arises when a let-bound name receives
+/// its type from a polymorphic-return call (e.g. `relu(prev_out)`)
+/// whose dim variables are pinned only after the borrow site by a
+/// later unification (typically the receiving function's `&tensor[..]`
+/// parameter). The inference-layer borrow arm at
+/// `infer.rs::borrow` accepts a `Type::Var` borrow precisely so that
+/// later unification can pin it; the linearity classification must
+/// not reject the same shape and re-introduce the bug. If the
+/// underlying variable is genuinely free (not a tensor in any
+/// instantiation), the inference layer's downstream unification --
+/// not linearity -- surfaces the type mismatch.
+///
+/// Negative parity: a borrow whose inner is genuinely not a tensor
+/// or carrier (e.g. `&int32` against a non-borrow consumer) is
+/// rejected by the inference-layer `borrow` arm before reaching
+/// linearity (the `_ => TypeMismatch` arm fires for `Type::Prim`,
+/// `Type::Unit`, `Type::Fn`, etc.), so this leniency cannot leak.
+fn type_expr_is_unresolved_tvar(expr: &Expr) -> bool {
+    match get_tag_expr(expr) {
+        Some("t-var") => true,
+        Some("t-ref") => {
+            if let Expr::List(list, _) = expr {
+                children(list)
+                    .first()
+                    .is_some_and(type_expr_is_unresolved_tvar)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>) -> bool {
+    type_expr_contains_tensor(expr, tensor_carrying_adts) && !type_expr_is_ref(expr)
+}
+
+/// Walk top-level declarations and return the set of ADT names whose
+/// definitions (transitively) carry a tensor field. Used by the
+/// linearity checker to recognize `&MyParams` as a valid borrow when
+/// `MyParams` is a record with a `tensor[...]` field — previously the
+/// `t-adt` arm of `type_expr_contains_tensor` only inspected the ADT's
+/// type *arguments*, missing tensor fields declared in the variant.
+///
+/// # Caller contract
+///
+/// The caller MUST pass every `deftype` whose name might appear
+/// (transitively) in the field type of any other `deftype` in the
+/// same call. The fixed point converges only over the ADTs visible
+/// in `exprs`: an unrelated-library ADT whose carrier status would
+/// flip a new-code ADT into the result is invisible if the library
+/// half is not chained in. `check_linearity_with_context` enforces
+/// this by chaining `library_program.annotated_exprs()` with
+/// `new_program.annotated_exprs()` in one call; any future caller
+/// (e.g. an incremental `AdtRegistry`-backed query) must preserve
+/// the same union-and-recompute discipline or the carrier set will
+/// silently desync from the cross-package borrow rules. The locking
+/// regression test is at `tests/linearity_with_context.rs::
+/// check_linearity_with_context_is_pure_across_repeated_calls`.
+///
+/// # Complexity
+///
+/// Fixed-point iteration handles ADTs whose fields reference other
+/// ADTs (the standard "is this type transitively tensor-carrying?"
+/// graph walk). Each pass scans every (adt, field) pair; the loop
+/// terminates after at most `O(adt_count)` passes (one per
+/// transitive layer), giving a worst-case bound of
+/// `O(adt_count^2 * fields_per_adt)`. In practice 2-3 passes suffice
+/// on the existing corpus, so the cost is small relative to the
+/// per-expression linearity walk. The function is recomputed on
+/// every `check_linearity` / `check_linearity_with_context` call —
+/// notably including REPL-driven re-evaluations (`chelis surf`,
+/// `chelis eval`). When that cost becomes load-bearing, the
+/// migration trigger is exposure of a shared `AdtRegistry` query on
+/// `CheckedProgram`: replace this helper with a registry lookup of
+/// variant-field types, keeping the same union-and-recompute
+/// invariant on the lookup side.
+///
+/// Typealiases (`typealias`) are NOT walked here. The inference layer
+/// owns alias resolution — see `resolve_type_aliases` in `infer.rs`
+/// (exercised by `typealias_zero_param_resolves_in_defsig` and
+/// siblings) — and any case where a `typealias` name reaches the
+/// linearity checker still wearing a `(t-adt {} Alias ...)` shape is
+/// a bug in inference, not in this carrier set. If/when the linearity
+/// checker gains direct access to a shared `AdtRegistry`, this helper
+/// retires in favor of querying that registry's variant-field types
+/// (which already know about aliases too).
+fn compute_tensor_carrying_adts<'a, I>(exprs: I) -> HashSet<String>
+where
+    I: IntoIterator<Item = &'a Expr>,
+{
+    // Step 1: collect every (adt_name, field_type_exprs) pair from
+    // `(deftype {} Name (params?) (variant {} VariantName [field_or_tyarg]...)...)`
+    // declarations, descending through `(module {} name ...)` wrappers.
+    //
+    // The caller decides what to include: a single program passes its
+    // own `annotated_exprs()`; the with-context entry chains library
+    // and new-code so cross-package field references (a new-code ADT
+    // wrapping a library tensor-carrying ADT) are resolved by the same
+    // fixed-point pass instead of two independent ones.
+    let mut adt_field_types: HashMap<String, Vec<Expr>> = HashMap::new();
+    fn collect(expr: &Expr, out: &mut HashMap<String, Vec<Expr>>) {
+        let Expr::List(list, _) = expr else {
+            return;
+        };
+        let tag = get_tag(list);
+        match tag {
+            Some("module") => {
+                // `(module {} name body...)` — `children()` skips tag
+                // and meta, leaving `[name, body...]`; skip the name
+                // for the same shape the `deftype` branch below uses.
+                for child in children(list).iter().skip(1) {
+                    collect(child, out);
+                }
+            }
+            Some("deftype") => {
+                let kids = children(list);
+                let Some(name) = kids.first().and_then(symbol_name) else {
+                    return;
+                };
+                let mut field_tys: Vec<Expr> = Vec::new();
+                for child in kids.iter().skip(1) {
+                    let Expr::List(inner, _) = child else {
+                        continue;
+                    };
+                    if get_tag(inner) != Some("variant") {
+                        continue;
+                    }
+                    // variant children: name, then either `(field name ty)`
+                    // entries (record-style) or bare type exprs (positional).
+                    for v in children(inner).iter().skip(1) {
+                        match v {
+                            Expr::List(vlist, _) if get_tag(vlist) == Some("field") => {
+                                if let Some(ty) = children(vlist).get(1) {
+                                    field_tys.push(ty.clone());
+                                }
+                            }
+                            other => field_tys.push(other.clone()),
+                        }
+                    }
+                }
+                out.insert(name.to_string(), field_tys);
+            }
+            _ => {}
+        }
+    }
+    for expr in exprs {
+        collect(expr, &mut adt_field_types);
+    }
+
+    // Step 2: fixed-point iteration. An ADT is tensor-carrying iff any
+    // of its field types contains a tensor (looking up other ADTs in
+    // the current set). Reuses `type_expr_contains_tensor` against
+    // the in-progress carrier set, so the recursive `t-adt` lookup
+    // walks the same code path used at check time. Stop when a pass
+    // adds no new names; bounded by the ADT count.
+    let mut carriers: HashSet<String> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for (name, field_tys) in &adt_field_types {
+            if carriers.contains(name) {
+                continue;
+            }
+            if field_tys
+                .iter()
+                .any(|ty| type_expr_contains_tensor(ty, &carriers))
+            {
+                carriers.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    carriers
 }
 
 fn type_expr_fn_arg(expr: &Expr, index: usize) -> Option<&Expr> {
@@ -1593,4 +2042,150 @@ fn borrow_site(expr: &Expr) -> String {
 
 fn expr_scope_end(expr: &Expr) -> usize {
     expr.span().offset + expr.span().len
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the private linearity helpers. Locks the contract
+    //! `pattern_named_types` must uphold for `check_match` to populate
+    //! arm scopes with the correct binding types after the issue #181
+    //! substitution fix.
+
+    use super::*;
+    use chelis_deep::Span;
+    use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+
+    fn span() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn sym(name: &str) -> Expr {
+        Expr::Atom(Atom::Symbol(name.to_string()), span())
+    }
+
+    fn meta(entries: Vec<(&str, Expr)>) -> Expr {
+        Expr::Map(
+            MetaMap {
+                entries: entries
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+            },
+            span(),
+        )
+    }
+
+    /// Build `(tag {meta} children...)`.
+    fn node(tag: &str, meta_entries: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
+        let mut elements = vec![sym(tag), meta(meta_entries)];
+        elements.extend(children);
+        Expr::List(List { elements }, span())
+    }
+
+    /// Build a synthetic `(t-tensor {} (d-lit 4) (t-prim f32))` so the
+    /// tests can assert metadata is the exact `Expr` we stamped.
+    fn tensor_4_f32() -> Expr {
+        node(
+            "t-tensor",
+            vec![],
+            vec![
+                node("d-lit", vec![], vec![Expr::Atom(Atom::Int(4), span())]),
+                node("t-prim", vec![], vec![sym("f32")]),
+            ],
+        )
+    }
+
+    #[test]
+    fn pat_var_with_type_metadata_returns_some_ty() {
+        // (pat-var {type: <ty>} x)
+        let pat = node("pat-var", vec![("type", tensor_4_f32())], vec![sym("x")]);
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].0, "x");
+        assert_eq!(bindings[0].1, Some(tensor_4_f32()));
+    }
+
+    #[test]
+    fn pat_var_without_type_metadata_returns_none() {
+        // (pat-var {} y)
+        let pat = node("pat-var", vec![], vec![sym("y")]);
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings, vec![("y".to_string(), None)]);
+    }
+
+    #[test]
+    fn pat_tuple_walks_into_children() {
+        // (pat-tuple {} (pat-var {type:<ty>} a) (pat-var {} b))
+        let pat = node(
+            "pat-tuple",
+            vec![],
+            vec![
+                node("pat-var", vec![("type", tensor_4_f32())], vec![sym("a")]),
+                node("pat-var", vec![], vec![sym("b")]),
+            ],
+        );
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0], ("a".to_string(), Some(tensor_4_f32())));
+        assert_eq!(bindings[1], ("b".to_string(), None));
+    }
+
+    #[test]
+    fn pat_record_walks_into_kv_children() {
+        // (pat-record {} FooState (kv {} x (pat-var {type:<ty>} x)))
+        let pat = node(
+            "pat-record",
+            vec![],
+            vec![
+                sym("FooState"),
+                node(
+                    "kv",
+                    vec![],
+                    vec![
+                        sym("x"),
+                        node("pat-var", vec![("type", tensor_4_f32())], vec![sym("x")]),
+                    ],
+                ),
+            ],
+        );
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings, vec![("x".to_string(), Some(tensor_4_f32()))]);
+    }
+
+    #[test]
+    fn pat_ctor_walks_into_positional_subpatterns() {
+        // (pat-ctor {} Some (pat-var {type:<ty>} v))
+        let pat = node(
+            "pat-ctor",
+            vec![],
+            vec![
+                sym("Some"),
+                node("pat-var", vec![("type", tensor_4_f32())], vec![sym("v")]),
+            ],
+        );
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings, vec![("v".to_string(), Some(tensor_4_f32()))]);
+    }
+
+    #[test]
+    fn pat_as_returns_outer_and_inner_bindings() {
+        // (pat-as {type:<ty>} whole (pat-var {} x))
+        let pat = node(
+            "pat-as",
+            vec![("type", tensor_4_f32())],
+            vec![sym("whole"), node("pat-var", vec![], vec![sym("x")])],
+        );
+        let bindings = pattern_named_types(&pat);
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0], ("whole".to_string(), Some(tensor_4_f32())));
+        assert_eq!(bindings[1], ("x".to_string(), None));
+    }
+
+    #[test]
+    fn pat_wild_returns_no_bindings() {
+        // (pat-wild {})
+        let pat = node("pat-wild", vec![], vec![]);
+        let bindings = pattern_named_types(&pat);
+        assert!(bindings.is_empty());
+    }
 }

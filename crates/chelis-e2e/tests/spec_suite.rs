@@ -306,17 +306,26 @@ fn spec_sigmoid_decomposes() {
             (var {} sigmoid) (var {} x)))
     "#;
     let dag = lower_deep(src);
-    // sigmoid(x) = 1/(1+exp(-x)) decomposes to Exp, Neg, Add, plus div decomposition.
+    // sigmoid(x) = recip(1 + exp(-x)) decomposes to Exp + Neg + Add
+    // + Recip (4 ops). An `exp(neg(log(_)))` reciprocal chain would
+    // produce a `Log` node; that is a regression — the chain NaNs
+    // on non-positive inputs.
     let has_exp = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Exp));
     let has_neg = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Neg));
     let has_add = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Add));
+    let has_recip = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Recip));
     let has_log = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Log));
     assert!(has_exp, "sigmoid decomposition should contain Exp");
     assert!(has_neg, "sigmoid decomposition should contain Neg");
     assert!(has_add, "sigmoid decomposition should contain Add");
     assert!(
-        has_log,
-        "sigmoid decomposition should contain Log (from recip)"
+        has_recip,
+        "sigmoid decomposition should contain Recip (the IEEE reciprocal primitive primitive)"
+    );
+    assert!(
+        !has_log,
+        "sigmoid decomposition must not contain Log; a Log node would indicate the historically \
+         recip-via-log cascade has returned"
     );
 }
 

@@ -1,0 +1,1 @@
+(def {} answer (app {} (var {} mul) (lit {type: (t-prim {} f32)} 0.0) (app {} (var {} add) (lit {type: (t-prim {} f32)} 7.0) (app {} (var {} neg) (app {} (var {} add) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 3.0)) (var {} xa)) (lit {type: (t-prim {} f32)} 4.0))))))

@@ -6,6 +6,13 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# WS-1 (dtype + Metal cleanup cycle): opt-in HIP cross-validation. The
+# default-feature Linux CI runner does not have hipcc / libhipblas, so
+# any test that requires GPU execution is gated behind this flag.
+# Manual gate: `cargo test -p chelis-e2e --features hip-local-gpu`.
+hip-local-gpu = []
+
 [dependencies]
 chelis-deep.workspace = true
 chelis-macros.workspace = true
@@ -22,5 +29,6 @@ tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
+chelis-compiler-api = { path = "../chelis-compiler-api" }
 chelis-validate = { path = "../chelis-validate" }
 predicates = "3"

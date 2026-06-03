@@ -413,17 +413,18 @@ fn write_symbolic_hidden_layer_norm_program(path: &Path) {
     );
 }
 
+// Issue #207: `chelis check` now exits non-zero when the JSON
+// `errors` array is non-empty. These helpers are called from both
+// clean-program and error-expecting tests in this file, so they
+// drop the `.success()` assertion and capture stdout regardless.
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).expect("check output should be json")
+        .output()
+        .expect("run chelis check");
+    serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
 fn run_json_check_show_inferred(path: &Path) -> Value {
@@ -431,12 +432,9 @@ fn run_json_check_show_inferred(path: &Path) -> Value {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap(), "--show-inferred"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).expect("check --show-inferred output should be json")
+        .output()
+        .expect("run chelis check --show-inferred");
+    serde_json::from_slice(&output.stdout).expect("check --show-inferred output should be json")
 }
 
 #[test]
@@ -473,6 +471,118 @@ fn check_show_inferred_prints_signature_inference_metadata() {
     assert_eq!(readonly["params"][0]["name"], "x");
     assert_eq!(readonly["params"][0]["inferred_read_only"], true);
     assert_eq!(readonly["params"][0]["written"], false);
+}
+
+// Hull Phase 0a Packet B, commit 1: `chelis check --show-inferred
+// --json` must emit a STRUCTURED, lossless type tree and effect row
+// alongside the human display strings, so a consumer (Hull) does not
+// have to re-parse a type printer. This pins the structured shape for a
+// function carrying the IO effect.
+#[test]
+fn check_show_inferred_emits_structured_type_and_effect_row() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("io_fn.ch");
+    // `debug` carries the IO effect and returns its argument unchanged,
+    // so `logged` infers `(string) -> string` with an IO effect row.
+    write_file(&path, "def logged(msg: string) -> string = debug(msg)\n");
+
+    let json = run_json_check_show_inferred(&path);
+    let signatures = json["inferred_signatures"]
+        .as_array()
+        .expect("inferred_signatures array");
+    let logged = signatures
+        .iter()
+        .find(|entry| entry["function"] == "logged")
+        .expect("logged signature metadata");
+
+    // Human display strings remain present and unchanged.
+    assert_eq!(logged["display_signature"], "(string) -> string");
+
+    // Structured signature: a function from one string to a string.
+    let sig = &logged["display_signature_structured"];
+    assert_eq!(sig["kind"], "fn");
+    assert_eq!(sig["args"].as_array().expect("args").len(), 1);
+    assert_eq!(sig["args"][0]["kind"], "prim");
+    assert_eq!(sig["args"][0]["name"], "string");
+    assert_eq!(sig["ret"]["kind"], "prim");
+    assert_eq!(sig["ret"]["name"], "string");
+
+    // The checked signature tree is also present and equals the display
+    // tree for this monomorphic function.
+    assert_eq!(logged["checked_signature_structured"], *sig);
+
+    // Structured per-parameter type tree.
+    let param = &logged["params"][0];
+    assert_eq!(param["name"], "msg");
+    assert_eq!(param["display_type_structured"]["kind"], "prim");
+    assert_eq!(param["display_type_structured"]["name"], "string");
+    assert_eq!(param["checked_type_structured"]["kind"], "prim");
+    assert_eq!(param["checked_type_structured"]["name"], "string");
+
+    // Structured effect row: exactly one IO effect, internally tagged.
+    let effect_row = logged["effect_row"].as_array().expect("effect_row array");
+    assert_eq!(effect_row.len(), 1);
+    assert_eq!(effect_row[0]["kind"], "io");
+    // Human Display spelling matches `Effect::Display` (IO, not io).
+    assert_eq!(
+        logged["effect_row_display"]
+            .as_array()
+            .expect("effect_row_display array"),
+        &vec![Value::from("IO")]
+    );
+}
+
+// Hull Phase 0a Packet B, commit 1, structured tensor + negative
+// parity: a PURE function over tensors must carry an EMPTY effect row
+// (distinct from "effects unknown"), and the structured tensor type
+// must reconstruct dims and the concrete precision losslessly. The
+// borrowed parameter must serialize as a `ref` wrapping a `tensor`.
+#[test]
+fn check_show_inferred_pure_tensor_fn_has_empty_effect_row_and_structured_tensor() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("readonly.ch");
+    write_file(&path, "def readonly(x, y: tensor[4, f32]) = add(x, y)\n");
+
+    let json = run_json_check_show_inferred(&path);
+    let signatures = json["inferred_signatures"]
+        .as_array()
+        .expect("inferred_signatures array");
+    let readonly = signatures
+        .iter()
+        .find(|entry| entry["function"] == "readonly")
+        .expect("readonly signature metadata");
+
+    // Negative parity: a pure function emits an empty effect row, not a
+    // missing field and not an unknown sentinel.
+    assert_eq!(
+        readonly["effect_row"].as_array().expect("effect_row").len(),
+        0
+    );
+    assert_eq!(
+        readonly["effect_row_display"]
+            .as_array()
+            .expect("effect_row_display")
+            .len(),
+        0
+    );
+
+    // Structured tensor: the borrowed first arg is `ref(tensor[lit 4, f32])`.
+    let sig = &readonly["display_signature_structured"];
+    assert_eq!(sig["kind"], "fn");
+    let arg0 = &sig["args"][0];
+    assert_eq!(arg0["kind"], "ref");
+    let inner = &arg0["inner"];
+    assert_eq!(inner["kind"], "tensor");
+    assert_eq!(inner["dims"][0]["kind"], "lit");
+    assert_eq!(inner["dims"][0]["size"], 4);
+    assert_eq!(inner["precision"]["kind"], "concrete");
+    assert_eq!(inner["precision"]["name"], "f32");
+
+    // The owned second arg is a bare `tensor[lit 4, f32]` (no ref).
+    let arg1 = &sig["args"][1];
+    assert_eq!(arg1["kind"], "tensor");
+    assert_eq!(arg1["dims"][0]["size"], 4);
+    assert_eq!(arg1["precision"]["name"], "f32");
 }
 
 fn runtime_library_path() -> PathBuf {
@@ -659,6 +769,176 @@ fn eval_surfaces_debug_transcript() {
         .assert()
         .success()
         .stdout(predicate::str::contains("trace\ntrace"));
+}
+
+/// Run `chelis eval --json EXPR` and parse stdout as JSON. Asserts the
+/// command succeeded and stdout is a single JSON document.
+fn run_eval_json_expr(expr: &str) -> Value {
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", expr])
+        .output()
+        .expect("run chelis eval --json");
+    assert!(
+        output.status.success(),
+        "eval --json should succeed for `{expr}`: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|err| panic!("eval --json stdout should be JSON for `{expr}`: {err}"))
+}
+
+// Hull Phase 0a Packet B, commit 2: `chelis eval --json` emits the raw
+// EvalResult as JSON on stdout. A host scalar integer expression yields
+// a single root whose value is internally tagged `int64`.
+#[test]
+fn eval_json_emits_int64_scalar() {
+    let json = run_eval_json_expr("mod(cast(17, int64), cast(5, int64))");
+    let roots = json["roots"].as_array().expect("roots array");
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0]["value"]["type"], "int64");
+    assert_eq!(roots[0]["value"]["value"], 2);
+}
+
+// A tensor expression yields a `tensor` value carrying shape + data.
+#[test]
+fn eval_json_emits_tensor_shape_and_data() {
+    let json = run_eval_json_expr("to_tensor([1.0, 2.0, 3.0])");
+    let roots = json["roots"].as_array().expect("roots array");
+    assert_eq!(roots.len(), 1);
+    let value = &roots[0]["value"];
+    assert_eq!(value["type"], "tensor");
+    assert_eq!(
+        value["value"]["shape"].as_array().expect("shape"),
+        &vec![Value::from(3)]
+    );
+    assert_eq!(
+        value["value"]["data"].as_array().expect("data"),
+        &vec![Value::from(1.0), Value::from(2.0), Value::from(3.0)]
+    );
+}
+
+// A tuple value (internally tagged `tuple`) with two int64 elements. A
+// top-level `(a, b)` binding is split by the evaluator into per-element
+// roots, so a genuine `tuple` ExecutionValue is exercised by nesting the
+// tuple inside a host list, where it survives as a single value.
+#[test]
+fn eval_json_emits_tuple_of_int64() {
+    let json = run_eval_json_expr("[(cast(7, int64), cast(8, int64))]");
+    let roots = json["roots"].as_array().expect("roots array");
+    assert_eq!(roots.len(), 1);
+    let list = &roots[0]["value"];
+    assert_eq!(list["type"], "list");
+    let tuple = &list["value"][0];
+    assert_eq!(tuple["type"], "tuple");
+    let elems = tuple["value"].as_array().expect("tuple elements");
+    assert_eq!(elems.len(), 2);
+    assert_eq!(elems[0]["type"], "int64");
+    assert_eq!(elems[0]["value"], 7);
+    assert_eq!(elems[1]["type"], "int64");
+    assert_eq!(elems[1]["value"], 8);
+}
+
+// A top-level tuple binding splits into per-component roots. This pins
+// the actual `chelis eval` behavior so the JSON contract is honest: a
+// bare `(a, b)` does NOT produce a single `tuple` root.
+#[test]
+fn eval_json_top_level_tuple_splits_into_roots() {
+    let json = run_eval_json_expr("(cast(7, int64), cast(8, int64))");
+    let roots = json["roots"].as_array().expect("roots array");
+    assert_eq!(roots.len(), 2);
+    // Both components are scalar tensors through the IR evaluator path.
+    assert_eq!(roots[0]["value"]["type"], "tensor");
+    assert_eq!(roots[1]["value"]["type"], "tensor");
+}
+
+// `--file` form (non-reef legacy path) emits JSON for an evaluable
+// top-level binding.
+#[test]
+fn eval_json_file_form_emits_json() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scalar.ch");
+    write_file(&path, "answer = mod(cast(43, int64), cast(41, int64))\n");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval --json --file");
+    assert!(output.status.success(), "eval --json --file should succeed");
+    let json: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
+    let roots = json["roots"].as_array().expect("roots array");
+    let answer = roots
+        .iter()
+        .find(|r| r["name"] == "answer")
+        .expect("answer root");
+    assert_eq!(answer["value"]["type"], "int64");
+    assert_eq!(answer["value"]["value"], 2);
+}
+
+// Empty-roots input (only `def` declarations) emits valid JSON
+// `{"roots":[]}` on stdout with exit 0, instead of the human-mode
+// stderr-only breadcrumb. Negative parity for the non-empty cases.
+#[test]
+fn eval_json_def_only_emits_empty_roots_json() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("defonly.ch");
+    write_file(
+        &path,
+        "def helper(x: int64) -> int64 = add(x, cast(1, int64))\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval --json --file");
+    assert!(output.status.success(), "def-only eval --json exits 0");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(stdout.trim(), r#"{"roots":[]}"#);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["roots"].as_array().expect("roots").len(), 0);
+}
+
+// Negative: a failing eval in `--json` mode still errors. Stdout carries
+// no partial JSON; the error surfaces on stderr with a nonzero exit.
+#[test]
+fn eval_json_unbound_name_errors_with_empty_stdout() {
+    let json_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "add(input, 1.0)"])
+        .output()
+        .expect("run chelis eval --json");
+    assert!(
+        !json_output.status.success(),
+        "unbound name must fail in --json mode"
+    );
+    assert!(
+        json_output.stdout.is_empty(),
+        "stdout must stay empty on error, got {:?}",
+        String::from_utf8_lossy(&json_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&json_output.stderr).contains("unbound variable: input"),
+        "error must name the unbound variable on stderr"
+    );
+}
+
+// Parity: text-mode (non-JSON) output is unchanged by the `--json`
+// addition. The same scalar expression renders the human form on stdout.
+#[test]
+fn eval_text_mode_output_unchanged_alongside_json_flag() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "mod(cast(17, int64), cast(5, int64))"])
+        .assert()
+        .success()
+        .stdout("2\n");
 }
 
 #[test]
@@ -3027,6 +3307,116 @@ fn build_fails_cleanly_when_chelis_runtime_dir_is_wrong() {
         .stderr(predicate::str::contains("libchelis_runtime.a"));
 }
 
+/// Regression for issue #261: `chelis build --target c` must reject
+/// `reduce_window_*` over a runtime-symbolic windowed axis with a clean
+/// `unsupported_feature` diagnostic, rather than silently emit a
+/// mis-allocated, out-of-bounds kernel whose output diverges from the
+/// evaluator (or panic in the emitter). `pad_sequences` produces a
+/// runtime-bound trailing extent, which is the windowed axis here. The
+/// host runtime / IR evaluator handle this case correctly; only the
+/// ahead-of-time build path is restricted. See
+/// `spec/05-risc-primitives.md` §2.3.1.
+#[test]
+fn build_c_rejects_reduce_window_over_runtime_symbolic_axis() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rw_symbolic.ch");
+    write_file(
+        &path,
+        "padded = pad_sequences([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], 0.0)\n\
+         windowed = reduce_window_max(padded, [2], [1])\n",
+    );
+    let out_dir = dir.path().join("rw-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires statically-known windowed-axis extents",
+        ))
+        .stderr(predicate::str::contains("reduce_window"))
+        // Must be the clean guard, not the emitter backstop panic.
+        .stderr(predicate::str::contains("panicked").not());
+}
+
+/// Regression for PR #261 review finding #1: `chelis build --target c` on a
+/// bf16 `reduce_window_*` must fail with a clean `unsupported_feature`
+/// diagnostic, not an emitter `panic!`. `reject_unsupported_c_precisions`
+/// admits bf16 generally, but the C windowed-reduction emitter is f32-only.
+/// See `spec/05-risc-primitives.md` §2.3.1.
+#[test]
+fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rw_bf16.ch");
+    write_file(
+        &path,
+        "def pool_bf16(x: tensor[1, 1, 4, 4, bf16]) -> tensor[1, 1, 3, 3, bf16] = \
+         reduce_window_max(&x, [2, 2], [1, 1])\n",
+    );
+    let out_dir = dir.path().join("rw-bf16-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("f32"))
+        .stderr(predicate::str::contains("reduce_window"))
+        // Must be the clean guard, not the emitter backstop panic.
+        .stderr(predicate::str::contains("panicked").not());
+}
+
+/// Regression for PR #261 review finding #2: `chelis build --target hip` on
+/// a `reduce_window_*` program must fail with a clean `unsupported_feature`
+/// diagnostic (HIP windowed-reduction codegen is deferred), not the
+/// launch-emit `todo!` panic. See `spec/05-risc-primitives.md` §2.3.1.
+#[test]
+fn build_hip_rejects_reduce_window_with_clean_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rw_hip.ch");
+    write_file(
+        &path,
+        "def pool_hip(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
+         reduce_window_max(&x, [2, 2], [1, 1])\n",
+    );
+    let out_dir = dir.path().join("rw-hip-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reduce_window"))
+        .stderr(predicate::str::contains("hip"))
+        // Must be the clean guard, not the launch-emit `todo!` panic.
+        .stderr(predicate::str::contains("panicked").not());
+}
+
 #[test]
 fn build_honors_chelis_runtime_dir_override() {
     let dir = tempdir().expect("tempdir");
@@ -3231,6 +3621,52 @@ fn fmt_check_accepts_trailing_newline_terminated_canonical_surf() {
         "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
     );
 
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .success();
+}
+
+// #144: `chelis fmt --inplace` must preserve `--` line comments and
+// `{- -}` block comments instead of deleting them, and the result must
+// pass `fmt --check` (be idempotent).
+#[test]
+fn fmt_inplace_preserves_surf_comments() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("commented.ch");
+    write_file(
+        &path,
+        "module School.Comment_Test\n\
+         -- regular comment 1\n\
+         --- triple-dash\n\
+         {- block comment -}\n\
+         def main() -> f32 = cast(1.0, f32)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    let after = fs::read_to_string(&path).expect("read back");
+    assert!(
+        after.contains("-- regular comment 1"),
+        "line comment was stripped by fmt; got:\n{after}"
+    );
+    assert!(
+        after.contains("--- triple-dash"),
+        "triple-dash comment was stripped by fmt; got:\n{after}"
+    );
+    assert!(
+        after.contains("{- block comment -}"),
+        "block comment was stripped by fmt; got:\n{after}"
+    );
+
+    // The formatted-with-comments output must itself be canonical.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -3736,6 +4172,12 @@ def main(x: f32) -> f32 = hidden(x)
 "#,
     );
 
+    // Wave-1 red-team M1 (#207 follow-up): `chelis check` now routes
+    // `prepare_program_for_file` failures (including reef checksum and
+    // missing-export errors) through the JSON `errors[]` array on
+    // stdout, so the iff invariant (`exit != 0 iff errors[] non-empty`)
+    // holds for every per-file failure mode rather than only the Ok-arm
+    // type errors. Look on stdout for the diagnostic string.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -3743,7 +4185,7 @@ def main(x: f32) -> f32 = hidden(x)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(
+        .stdout(
             predicate::str::contains("checksum")
                 .or(predicate::str::contains("does not export `hidden`")),
         );
@@ -3979,9 +4421,13 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
 fn build_hip_rejects_pad_lowering_without_panic() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pad.ch");
+    // Parameterized form `pad(&x, [[lo, hi]], fill)` per spec §2.4 and
+    // issue Chelis-Lang/chelis#187 (the bare 1-arg form is no longer
+    // accepted at type-check; previously it slipped through to the HIP
+    // backend rejection below).
     write_file(
         &path,
-        "def f(x: tensor[4, f32]): tensor[4, f32] = (pad(x) : tensor[4, f32])\n",
+        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], 0.0)\n",
     );
 
     let json = run_json_check(&path);
@@ -4969,12 +5415,11 @@ fn target_metal_unknown_target_message_lists_metal() {
 fn target_metal_rejects_pad() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pad.ch");
-    // Same form the HIP rejection test uses; pad takes its padding via a
-    // metadata channel, so the surface call is single-arg with an ascribed
-    // output shape.
+    // Parameterized pad per spec §2.4 and issue Chelis-Lang/chelis#187
+    // (the bare 1-arg form is no longer accepted at type-check).
     write_file(
         &path,
-        "def f(x: tensor[4, f32]): tensor[4, f32] = (pad(x) : tensor[4, f32])\n",
+        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], 0.0)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -4992,12 +5437,11 @@ fn target_metal_rejects_pad() {
 fn target_metal_rejects_shrink() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("shrink.ch");
-    // Same shape as the pad test — shrink is registered as a tensor_unop
-    // with bounds carried via metadata, so the surface call is single-arg
-    // with an ascribed output shape.
+    // Parameterized shrink per spec §2.4 and issue Chelis-Lang/chelis#187
+    // (the bare 1-arg form is no longer accepted at type-check).
     write_file(
         &path,
-        "def f(x: tensor[4, f32]): tensor[4, f32] = (shrink(x) : tensor[4, f32])\n",
+        "def f(x: tensor[4, f32]) -> tensor[2, f32] = shrink(&x, [[1, 3]])\n",
     );
 
     Command::cargo_bin("chelis")

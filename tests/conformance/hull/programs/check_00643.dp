@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (xa {type: (t-prim {} f32)})) (cast {} (let {} (bind {} xb (app {} (var {} add) (var {} xa) (var {} xa))) (app {} (var {} add) (var {} xb) (var {} xb))) (t-prim {} f32))))

@@ -1,0 +1,33 @@
+# Point pyo3-build-config at the uv-managed Python 3.11 in `.venv/`
+# instead of letting it auto-detect a system Python. On macOS, Apple's
+# bundled Python 3.9 reports a `sysconfig.LIBDIR` of
+# `/Applications/Xcode.app/.../Python3.framework/.../lib` (baked at
+# framework build time), which doesn't exist on workstations with
+# only the Command Line Tools installed; pyo3 emits that stale path
+# as `-L` to the linker and `chelis-python` fails with
+# `library 'python3.9' not found`. The same uv-managed Python is the
+# project policy on every platform (see AGENTS.md "Scripting Language
+# Policy") so behavior is consistent across dev and CI.
+#
+# REQUIRES: a `.venv/` at the repo root. Create it once with:
+#     uv venv --python 3.11
+# (see README.md "Prerequisites"). On a fresh clone without `.venv/`,
+# `cargo build` for any crate that transitively pulls pyo3 (today
+# only `chelis-python`) will fail with
+# `failed to run the Python interpreter at .venv/bin/python: No such
+# file or directory`. This is the project policy, not a bug: run
+# `uv venv --python 3.11` first.
+#
+# The `relative = true` flag resolves `.venv/bin/python` against the
+# directory containing this config.toml, so the setting works from
+# any subdir and on any developer's machine.
+#
+# Override: env vars take precedence over `[env]` in cargo config
+# (cargo `[env]` defaults to `force = false`). Export
+# `PYO3_PYTHON=/path/to/python` in your shell to use a different
+# interpreter.
+[env]
+PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
+# Required for cvc5-sys bindgen on Fedora where the ROCm clang doesn't
+# include standard system headers in its search path.
+BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/include"

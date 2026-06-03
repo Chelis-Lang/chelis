@@ -9,17 +9,18 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+// Issue #207: `chelis check` now exits non-zero when the JSON
+// `errors` array is non-empty. The `check_rejects_negative_shape_axis`
+// test expects a non-empty errors array, so this helper does not
+// assert on the process exit status.
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).expect("check output should be json")
+        .output()
+        .expect("run chelis check");
+    serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
 #[test]

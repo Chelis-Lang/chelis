@@ -668,14 +668,14 @@ impl Emitter {
 
     fn emit_const(&mut self, node: &DagNode, value: f64) -> Result<(), String> {
         let (n, prec) = self.require_static_rank1(&node.output_type, "Const")?;
-        let msl_ty = dtype::msl_type(prec);
         let buf = format!("buf_{}", node.id.0);
-        // Host-safe sizeof: see `dtype::host_sizeof_expr` (MSL `half`/`bfloat`
-        // are not visible to host C++). The host-side fill loop below still
-        // uses `msl_ty` for the cast; M-phase const emission for f16/bf16
-        // is gated by the type-checker so the cast path is reached only for
-        // f32/integer/bool today, all of which spell identically in MSL and
-        // host C++.
+        // Both the byte-count and the fill body route through host-safe
+        // helpers in `dtype` (MSL `half`/`bfloat` are not visible to host
+        // C++ and would fail to compile under `clang++ -fobjc-arc`). The
+        // helper picks a typed `float*` for F32, `uint16_t*` + IEEE-754
+        // bit-pattern literal for F16/Bf16, matching `intN_t*` for the
+        // integer family, and `bool*` for Bool. See
+        // `dtype::host_const_fill_body` for the per-dtype contract.
         let bytes = format!("{n}u * {}", dtype::host_sizeof_expr(prec));
         self.push_span_comments(node);
         self.body
@@ -686,9 +686,8 @@ impl Emitter {
         // Fill via a small CPU loop; small enough for M2's static-extent
         // first cut. M4 will switch to a fused fill MSL kernel when scale
         // matters.
-        self.body.push(format!(
-            "{{ {msl_ty} *p = ({msl_ty}*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = ({msl_ty}){value:?}; }}"
-        ));
+        self.body
+            .push(dtype::host_const_fill_body(prec, value, &buf, n));
         self.plans[node.id.0] = Some(TensorPlan {
             buf,
             prec,

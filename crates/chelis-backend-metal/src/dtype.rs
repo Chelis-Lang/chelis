@@ -175,6 +175,111 @@ pub fn requires_msl_320_guard(prec: Prim) -> bool {
     matches!(prec, Prim::Bf16)
 }
 
+/// Host-side Const-fill block for an active Metal dtype.
+///
+/// Returns the inner Objective-C++ block (including the outer `{ ... }`) that
+/// fills `n` elements at host-side buffer `buf` with `value`. Routes through
+/// host-safe types for every active Metal dtype so the emitted `.mm` compiles
+/// under `clang++ -fobjc-arc` (which is not a Metal kernel translation unit
+/// and therefore has no `half` or `bfloat` type in scope).
+///
+/// For `F16` and `Bf16` the f64 `value` is converted to the IEEE-754 bit
+/// pattern at codegen time (`half::f16::from_f64(...).to_bits()` /
+/// `half::bf16::from_f64(...).to_bits()`) and written through a `uint16_t*`,
+/// matching the MPS f16 wrapper convention already established in the Metal
+/// runtime. Integer dtypes use the matching `intN_t` host type with an
+/// explicit integral cast; `Bool` uses C++ `bool`; `F32` keeps the typed
+/// `float*` form for byte-identical compatibility with the pre-WS-2 emission.
+///
+/// `F64` panics here as defense in depth; the IR validation pass and the
+/// `reject_unsupported_metal_ops` CLI gate reject `f64` upstream with the
+/// FP64-ALU diagnostic so this arm should be unreachable from any well-formed
+/// build.
+pub fn host_const_fill_body(prec: Prim, value: f64, buf: &str, n: usize) -> String {
+    match prec {
+        Prim::F32 => {
+            // SPEC-DIVERGENCE fix (WS-Cleanup-Fixups): Rust's `{:?}` for
+            // `f64::NAN` formats as the literal token `NaN`, which when
+            // appended with `f` produces `NaNf`, an invalid C/C++ float
+            // literal. Same for `f64::INFINITY` -> `inff`. Discriminate
+            // NaN / +-Inf explicitly and emit the C99 `NAN` / `INFINITY`
+            // macros (cast to `float` so the literal type is `float`,
+            // matching the surrounding pointer type and the byte-for-byte
+            // shape of the existing finite-value emission). Finite values
+            // keep the existing `{value:?}f` form: typical finite f64 is
+            // formatted by Rust as a decimal that round-trips back through
+            // `strtod` (and clang++'s f64-literal parser) to the same f64
+            // bit pattern, then the trailing `f` narrows to f32 with the
+            // canonical round-to-nearest-even rule.
+            let value_lit = if value.is_nan() {
+                "(float)NAN".to_string()
+            } else if value.is_infinite() {
+                if value.is_sign_negative() {
+                    "-(float)INFINITY".to_string()
+                } else {
+                    "(float)INFINITY".to_string()
+                }
+            } else {
+                format!("{value:?}f")
+            };
+            format!(
+                "{{ float *p = (float*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = {value_lit}; }}",
+            )
+        }
+        Prim::F16 => {
+            let bits = half::f16::from_f64(value).to_bits();
+            format!(
+                "{{ uint16_t *p = (uint16_t*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = 0x{bits:04X}u; }}",
+            )
+        }
+        Prim::Bf16 => {
+            let bits = half::bf16::from_f64(value).to_bits();
+            format!(
+                "{{ uint16_t *p = (uint16_t*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = 0x{bits:04X}u; }}",
+            )
+        }
+        Prim::Int8 => {
+            let v = value as i64;
+            format!(
+                "{{ int8_t *p = (int8_t*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = (int8_t){v}; }}",
+            )
+        }
+        Prim::Int16 => {
+            let v = value as i64;
+            format!(
+                "{{ int16_t *p = (int16_t*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = (int16_t){v}; }}",
+            )
+        }
+        Prim::Int32 => {
+            let v = value as i64;
+            format!(
+                "{{ int32_t *p = (int32_t*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = (int32_t){v}; }}",
+            )
+        }
+        Prim::Int64 => {
+            let v = value as i64;
+            format!(
+                "{{ int64_t *p = (int64_t*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = (int64_t){v}LL; }}",
+            )
+        }
+        Prim::Bool => {
+            let v = value != 0.0;
+            format!(
+                "{{ bool *p = (bool*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = {v}; }}",
+            )
+        }
+        Prim::F64 => panic!(
+            "Metal backend rejects f64 (Apple Silicon GPUs lack FP64 ALUs); \
+             reject_unsupported_metal_ops should have caught the rest"
+        ),
+        other => panic!(
+            "Metal backend dtype not in the active per-backend matrix: {} \
+             (see spec/04-type-system.md §1.1.3)",
+            other.name()
+        ),
+    }
+}
+
 /// Matmul-accumulator promotion per spec/04-type-system.md §5.7.1.
 ///
 /// Mirrors [`sum_accumulator`] but explicitly named for the matmul
@@ -294,6 +399,111 @@ mod tests {
         assert!(requires_msl_320_guard(Prim::Bf16));
         assert!(!requires_msl_320_guard(Prim::F32));
         assert!(!requires_msl_320_guard(Prim::F16));
+    }
+
+    #[test]
+    fn host_const_fill_body_uses_host_safe_types_for_active_matrix() {
+        // F32 keeps the typed-pointer form so the byte-for-byte output is
+        // identical to the pre-WS-2 emission for the default case.
+        let f32_body = host_const_fill_body(Prim::F32, 2.5, "buf_0", 8);
+        assert!(
+            f32_body.contains("float *p = (float*)[buf_0 contents]"),
+            "F32 body must use typed `float*`: {f32_body}"
+        );
+        assert!(
+            f32_body.contains("p[i] = 2.5f"),
+            "F32 body must use `f`-suffixed literal: {f32_body}"
+        );
+
+        // F16/Bf16 must route through `uint16_t*` with the bit-pattern
+        // literal so the `.mm` compiles under `clang++ -fobjc-arc` (which
+        // has no `half`/`bfloat` host type in scope).
+        let f16_body = host_const_fill_body(Prim::F16, 2.5, "buf_1", 4);
+        assert!(
+            f16_body.contains("uint16_t *p = (uint16_t*)[buf_1 contents]"),
+            "F16 body must use `uint16_t*`: {f16_body}"
+        );
+        assert!(
+            f16_body.contains("0x4100u"),
+            "F16(2.5) bit pattern is 0x4100: {f16_body}"
+        );
+        assert!(
+            !f16_body.contains("half"),
+            "F16 body must not mention `half` (kernel-only type): {f16_body}"
+        );
+
+        let bf16_body = host_const_fill_body(Prim::Bf16, 2.5, "buf_2", 4);
+        assert!(
+            bf16_body.contains("uint16_t *p = (uint16_t*)[buf_2 contents]"),
+            "Bf16 body must use `uint16_t*`: {bf16_body}"
+        );
+        assert!(
+            bf16_body.contains("0x4020u"),
+            "Bf16(2.5) bit pattern is 0x4020: {bf16_body}"
+        );
+        assert!(
+            !bf16_body.contains("bfloat"),
+            "Bf16 body must not mention `bfloat` (kernel-only type): {bf16_body}"
+        );
+
+        // Integer dtypes carry the matching `intN_t` cast.
+        let i8_body = host_const_fill_body(Prim::Int8, 5.0, "buf_3", 4);
+        assert!(
+            i8_body.contains("int8_t *p = (int8_t*)[buf_3 contents]"),
+            "Int8 body shape: {i8_body}"
+        );
+        assert!(i8_body.contains("(int8_t)5"), "Int8 cast: {i8_body}");
+
+        let i64_body = host_const_fill_body(Prim::Int64, 7.0, "buf_4", 4);
+        assert!(
+            i64_body.contains("int64_t *p = (int64_t*)[buf_4 contents]"),
+            "Int64 body shape: {i64_body}"
+        );
+        assert!(i64_body.contains("(int64_t)7LL"), "Int64 cast: {i64_body}");
+
+        // Bool uses the C++ literal `true`/`false`, not 0/1.
+        let bool_true = host_const_fill_body(Prim::Bool, 1.0, "buf_5", 2);
+        assert!(
+            bool_true.contains("bool *p = (bool*)[buf_5 contents]"),
+            "Bool body shape: {bool_true}"
+        );
+        assert!(bool_true.contains("p[i] = true"), "Bool true: {bool_true}");
+        let bool_false = host_const_fill_body(Prim::Bool, 0.0, "buf_6", 2);
+        assert!(
+            bool_false.contains("p[i] = false"),
+            "Bool false: {bool_false}"
+        );
+    }
+
+    /// Pinned bit-pattern sweep per WS-2 plan. Catches a regression in
+    /// `half::{f16,bf16}::from_f64` round-tripping or a typo in the helper's
+    /// format string.
+    #[test]
+    fn host_const_fill_body_pinned_bit_patterns() {
+        let cases = [
+            (Prim::F16, 2.5_f64, 0x4100_u16),
+            (Prim::Bf16, 2.5, 0x4020),
+            (Prim::F16, 1.5, 0x3E00),
+            (Prim::Bf16, 1.5, 0x3FC0),
+            (Prim::F16, -1.0, 0xBC00),
+            (Prim::Bf16, -1.0, 0xBF80),
+            (Prim::F16, 0.0, 0x0000),
+            (Prim::Bf16, 0.0, 0x0000),
+        ];
+        for (prec, value, expected_bits) in cases {
+            let body = host_const_fill_body(prec, value, "buf", 4);
+            let needle = format!("0x{expected_bits:04X}u");
+            assert!(
+                body.contains(&needle),
+                "{prec:?}({value}) must emit `{needle}`; got: {body}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Metal backend rejects f64")]
+    fn host_const_fill_body_panics_on_f64() {
+        let _ = host_const_fill_body(Prim::F64, 1.0, "buf", 1);
     }
 
     #[test]

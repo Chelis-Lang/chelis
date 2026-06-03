@@ -1,0 +1,1 @@
+(def {} answer (app {} (var {} log) (lit {type: (t-prim {} f32)} 2.0)))

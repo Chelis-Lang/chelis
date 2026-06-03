@@ -1,0 +1,1 @@
+(def {} answer (app {} (var {} sub) (lit {type: (t-prim {} f32)} 2.0) (lit {type: (t-prim {} f32)} 4.0)))

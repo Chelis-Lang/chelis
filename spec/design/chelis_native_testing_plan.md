@@ -49,7 +49,8 @@ If the `Test` effect adds too much complexity to the initial implementation, the
 chelis test                     # discover and run all test files in tests/
 chelis test tests/frame.ch      # run a specific test file
 chelis test tests/ --filter erf # run only tests whose names contain "erf"
-chelis test tests/ --jobs auto  # run test files concurrently on available CPUs
+chelis test tests/ --batch-mode auto # batch eligible files by default
+chelis test tests/ --batch-mode file # force legacy per-file workers
 ```
 
 Discovery convention: test files live in `tests/*.ch` (or `tests/**/*.ch` for subdirectories). Each test file contains zero or more `def test_*()` functions. The CLI discovers test files, evaluates each via the evaluator (not build→gcc→link→run), calls every `test_*` function, and reports results.
@@ -273,6 +274,7 @@ Add `chelis test` to the CLI commands table:
 ```
 chelis test tests/          # discover and run Chelis-native test files
 chelis test tests/foo.ch    # run a specific test file
+chelis test tests/ --batch-mode file # force per-file worker isolation
 ```
 
 Add the testing convention rule to Cross-Cutting Design Decisions:
@@ -419,18 +421,21 @@ tests/core.ch
 A filter that matches nothing still exits `0` with `0 passed, 0 failed` — consistent
 with `cargo test` and `pytest` ergonomics.
 
-### Parallel file execution with `--jobs`
+### Suite batching, isolation, and `--jobs`
 
-Directory runs execute test files concurrently by default. `--jobs auto` resolves to
-`min(number_of_selected_test_files, available_parallelism())`; there is no fixed cap.
-Use `--jobs 1` for serial file execution while debugging. The parent buffers completed
-file results by discovery index and emits the next in-order file as soon as all prior
-files have completed, so plain text and NDJSON remain deterministic even when workers
-finish out of order.
+Directory runs use `--batch-mode auto` by default. The parent builds the shared package
+context once, groups batch-eligible test files into a suite batch, compiles that batch
+once, and evaluates every selected test root from the shared handle. Files with top-level
+module-init bindings or top-level name collisions use the per-file worker path instead.
 
-The parent builds the shared package context once before spawning workers. If that
-context fails to compile, `chelis test` fails fast and does not fan out identical
-per-worker errors.
+If the batch worker crashes, times out, or cannot produce complete ordered rows, the
+parent falls back to the existing per-file subprocess workers for that batch. Plain text
+and NDJSON output remain deterministic in discovery order. Use `--batch-mode file` to
+force per-file workers while debugging. `--jobs auto` still caps worker concurrency on
+paths that use file workers.
+
+If the shared package context fails to compile, `chelis test` fails fast and does not fan
+out identical per-worker errors.
 
 ### Machine-readable output with `--json`
 

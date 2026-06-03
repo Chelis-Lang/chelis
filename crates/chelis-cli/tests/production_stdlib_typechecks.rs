@@ -158,3 +158,8 @@ fn production_stdlib_optim_typechecks() {
 fn production_stdlib_test_typechecks() {
     assert_stdlib_clean("src/test.ch");
 }
+
+#[test]
+fn production_stdlib_process_typechecks() {
+    assert_stdlib_clean("src/process.ch");
+}

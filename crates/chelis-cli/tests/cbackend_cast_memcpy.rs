@@ -87,10 +87,20 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             deps_dir.display()
         )));
     };
-    let tmp = canonical.with_extension("a.tmp");
+    // PID-suffixed tmp so concurrent test binaries (nextest runs sister
+    // exec-style tests in parallel; they all materialize the same
+    // canonical path) do not race on a shared tmp filename and trip
+    // ENOENT on rename when a peer renames it away first.
+    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
     fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
+    match fs::rename(&tmp, canonical) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Run `chelis build --target c` on the source program. Returns the

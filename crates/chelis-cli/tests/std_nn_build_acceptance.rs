@@ -264,7 +264,7 @@ g = grad(loss_fn)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .success()
+        // Issue #207: type errors produce exit 2; assert on stdout content only.
         .stdout(predicate::str::contains("\"score\": 1").not())
         .stdout(predicate::str::contains(
             "grad requires a scalar floating output",

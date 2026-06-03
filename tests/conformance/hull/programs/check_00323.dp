@@ -1,0 +1,1 @@
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-name {} seq) (d-name {} rdim) (d-lit {} 2) (t-prim {} f32))})) (app {} (var {} sum) (var {} ta) (d-name {} rdim))))

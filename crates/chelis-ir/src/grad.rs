@@ -201,6 +201,10 @@ pub fn grad_dag_checked(
                     reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
                 });
             }
+            // `reduce_window_*` now has a reverse-mode adjoint
+            // (`RiscOp::ReduceWindowGrad`, lowered in `grad_dag` below) per
+            // spec/05-risc-primitives.md §2.3.1, so it is no longer rejected
+            // here.
             _ => {}
         }
     }
@@ -221,9 +225,11 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
     match op {
         RiscOp::Add => "add",
         RiscOp::Mul => "mul",
+        RiscOp::Div => "div",
         RiscOp::CmpLt => "cmplt",
         RiscOp::MaxElem => "max_elem",
         RiscOp::Neg => "neg",
+        RiscOp::Recip => "recip",
         RiscOp::Exp => "exp",
         RiscOp::Log => "log",
         RiscOp::Sin => "sin",
@@ -240,6 +246,8 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::MaxReduce { .. } => "max_reduce",
         RiscOp::MinReduce { .. } => "min_reduce",
         RiscOp::ProdReduce { .. } => "prod_reduce",
+        RiscOp::ReduceWindow { reducer, .. } => reducer.surf_name(),
+        RiscOp::ReduceWindowGrad { .. } => "reduce_window_grad",
         RiscOp::Argmax { .. } => "argmax",
         RiscOp::Argmin { .. } => "argmin",
         RiscOp::Reshape { .. } => "reshape",
@@ -492,6 +500,19 @@ fn compute_adjoints(
             let db = dag.add_node(RiscOp::Mul, vec![g, a], ty, None);
             Some(vec![(a, da), (b, db)])
         }
+        RiscOp::Div => {
+            // y = a / b
+            // dL/da = g / b           = Div(g, b)
+            // dL/db = -g * a / b^2    = -g * y / b   (using y = a/b ⇒ a/b² = y/b)
+            let a = node.inputs[0];
+            let b = node.inputs[1];
+            let ty = forward.get(a).unwrap().output_type.clone();
+            let da = dag.add_node(RiscOp::Div, vec![g, b], ty.clone(), None);
+            let g_times_y = dag.add_node(RiscOp::Mul, vec![g, node.id], ty.clone(), None);
+            let g_y_over_b = dag.add_node(RiscOp::Div, vec![g_times_y, b], ty.clone(), None);
+            let db = dag.add_node(RiscOp::Neg, vec![g_y_over_b], ty, None);
+            Some(vec![(a, da), (b, db)])
+        }
         RiscOp::CmpLt => {
             let a = node.inputs[0];
             let b = node.inputs[1];
@@ -535,6 +556,15 @@ fn compute_adjoints(
             let ty = forward.get(x).unwrap().output_type.clone();
             let dg = dag.add_node(RiscOp::Neg, vec![g], ty, None);
             Some(vec![(x, dg)])
+        }
+        RiscOp::Recip => {
+            // y = 1/x  ⇒  dL/dx = -g * y * y   (using y = 1/x ⇒ -1/x² = -y²)
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let y_sq = dag.add_node(RiscOp::Mul, vec![node.id, node.id], ty.clone(), None);
+            let g_y_sq = dag.add_node(RiscOp::Mul, vec![g, y_sq], ty.clone(), None);
+            let dx = dag.add_node(RiscOp::Neg, vec![g_y_sq], ty, None);
+            Some(vec![(x, dx)])
         }
         RiscOp::Exp => {
             // d/dx exp(x) = exp(x). Reuse the forward exp node.
@@ -1079,6 +1109,40 @@ fn compute_adjoints(
             Some(vec![(values, dvalues)])
         }
         RiscOp::ScatterAdd { .. } => None,
+        RiscOp::ReduceWindow {
+            reducer,
+            window_shape,
+            strides,
+        } => {
+            // Reverse-mode adjoint of `reduce_window_*`
+            // (spec/05-risc-primitives.md §2.3.1): lower to a single
+            // `ReduceWindowGrad` node carrying the same window contract.
+            // It scatters/overlap-adds (Sum/Mean) or routes-to-extreme
+            // (Max/Min) the upstream cotangent `g` back to the input shape.
+            //
+            // No `Cast` is needed (unlike `Sum`): `reduce_window` does not
+            // widen its accumulator — the forward output precision equals
+            // the input precision — so `g` and `x` share a precision and
+            // the adjoint carries the operand precision directly.
+            let x = node.inputs[0];
+            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let din = dag.add_node(
+                RiscOp::ReduceWindowGrad {
+                    reducer: *reducer,
+                    window_shape: window_shape.clone(),
+                    strides: strides.clone(),
+                },
+                vec![x, g],
+                input_ty,
+                None,
+            );
+            Some(vec![(x, din)])
+        }
+        RiscOp::ReduceWindowGrad { .. } => {
+            // Second-order AD through the windowed adjoint itself is not
+            // defined; fail closed rather than synthesize a wrong adjoint.
+            None
+        }
         RiscOp::Scatter { .. } => {
             // Replace-scatter (last-write-wins) is non-differentiable.
             // `grad_dag_checked` rejects this case before reaching here
@@ -1091,7 +1155,106 @@ fn compute_adjoints(
             // un-checked entry point.
             None
         }
-        RiscOp::BlasMatmul { .. } => None,
+        RiscOp::BlasMatmul {
+            batch_dims,
+            m,
+            n,
+            k,
+            ..
+        } => {
+            // Forward: Y = A @ B with A: [..., m, k], B: [..., k, n],
+            // Y: [..., m, n]. Standard reverse-mode adjoint
+            // (well-known matrix-multiply gradient):
+            //   dA = g @ B^T   (shape [..., m, k])
+            //   dB = A^T @ g   (shape [..., k, n])
+            //
+            // We express both via `BlasMatmul` nodes whose accumulator
+            // follows the spec §5.7.1 default for the operand
+            // precision. The transposes use `Permute` over the last
+            // two axes so the rule supports batched matmuls
+            // (`batch_dims.len() >= 0`) without special-casing rank-2
+            // vs rank-N.
+            let a_id = node.inputs[0];
+            let b_id = node.inputs[1];
+            let a_ty = forward.get(a_id).unwrap().output_type.clone();
+            let b_ty = forward.get(b_id).unwrap().output_type.clone();
+            debug_assert!(
+                a_ty.precision == b_ty.precision,
+                "blas matmul operand precisions must match (verifier-checked)",
+            );
+            let operand_prim = a_ty.precision;
+            let adjoint_accumulator =
+                RiscOp::default_matmul_accumulator(operand_prim).unwrap_or(operand_prim);
+
+            // Build the last-two-axes transpose permutation. For
+            // rank-2 inputs this is [1, 0]; for rank-N (N >= 2) it is
+            // [0, 1, ..., N-3, N-1, N-2].
+            let transpose_last_two = |rank: usize| -> Vec<usize> {
+                assert!(rank >= 2, "blas matmul operand must be rank >= 2");
+                let mut axes: Vec<usize> = (0..rank).collect();
+                axes.swap(rank - 2, rank - 1);
+                axes
+            };
+
+            // --- dA = g @ B^T ---
+            //
+            // B has type [..., k, n] -> B^T has type [..., n, k].
+            let bt_axes = transpose_last_two(b_ty.dims.len());
+            let mut bt_dims = b_ty.dims.clone();
+            let bt_rank = bt_dims.len();
+            bt_dims.swap(bt_rank - 2, bt_rank - 1);
+            let bt_ty = TensorType {
+                dims: bt_dims,
+                precision: operand_prim,
+            };
+            let b_transposed =
+                dag.add_node(RiscOp::Permute { axes: bt_axes }, vec![b_id], bt_ty, None);
+            // dA shape = A's shape.
+            let da_ty = a_ty.clone();
+            let da_op = RiscOp::matmul_with_accumulator(
+                batch_dims.clone(),
+                m.clone(),
+                k.clone(),
+                n.clone(),
+                operand_prim,
+                adjoint_accumulator,
+            )
+            .expect(
+                "adjoint matmul accumulator must be valid for the operand precision \
+                 (spec/04-type-system.md §5.7.1 default for non-integer operand)",
+            );
+            let da = dag.add_node(da_op, vec![g, b_transposed], da_ty, None);
+
+            // --- dB = A^T @ g ---
+            //
+            // A has type [..., m, k] -> A^T has type [..., k, m].
+            let at_axes = transpose_last_two(a_ty.dims.len());
+            let mut at_dims = a_ty.dims.clone();
+            let at_rank = at_dims.len();
+            at_dims.swap(at_rank - 2, at_rank - 1);
+            let at_ty = TensorType {
+                dims: at_dims,
+                precision: operand_prim,
+            };
+            let a_transposed =
+                dag.add_node(RiscOp::Permute { axes: at_axes }, vec![a_id], at_ty, None);
+            let db_ty = b_ty.clone();
+            let db_op = RiscOp::matmul_with_accumulator(
+                batch_dims.clone(),
+                k.clone(),
+                n.clone(),
+                m.clone(),
+                operand_prim,
+                adjoint_accumulator,
+            )
+            .expect(
+                "adjoint matmul accumulator must be valid for the operand precision \
+                 (spec/04-type-system.md §5.7.1 default for non-integer operand)",
+            );
+            let db = dag.add_node(db_op, vec![a_transposed, g], db_ty, None);
+
+            Some(vec![(a_id, da), (b_id, db)])
+        }
     }
 }
 
@@ -1217,6 +1380,44 @@ mod tests {
         let (a, n) = finite_diff(&dag, out, x, "x", &[("y", 3.0)], 2.0, 1e-5);
         assert_grad_close(a, n);
         assert!((a - 3.0).abs() < 1e-6); // d(x*y)/dx = y = 3
+    }
+
+    #[test]
+    fn grad_div_lhs() {
+        let (dag, x, _y, out) = build_binary_dag(|dag, a, b, ty| {
+            dag.add_node(RiscOp::Div, vec![a, b], ty.clone(), None)
+        });
+        let (a, n) = finite_diff(&dag, out, x, "x", &[("y", 4.0)], 2.0, 1e-5);
+        assert_grad_close(a, n);
+        assert!(
+            (a - 0.25).abs() < 1e-6,
+            "d(x/y)/dx at y=4 should be 0.25, got {a}"
+        );
+    }
+
+    #[test]
+    fn grad_div_rhs() {
+        let (dag, _x, y, out) = build_binary_dag(|dag, a, b, ty| {
+            dag.add_node(RiscOp::Div, vec![a, b], ty.clone(), None)
+        });
+        let (a, n) = finite_diff(&dag, out, y, "y", &[("x", 2.0)], 4.0, 1e-5);
+        assert_grad_close(a, n);
+        assert!(
+            (a - (-0.125)).abs() < 1e-6,
+            "d(x/y)/dy at x=2,y=4 should be -0.125, got {a}"
+        );
+    }
+
+    #[test]
+    fn grad_recip() {
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Recip, vec![a], ty.clone(), None));
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
+        assert_grad_close(a, n);
+        assert!(
+            (a - (-0.25)).abs() < 1e-6,
+            "d(1/x)/dx at x=2 should be -0.25, got {a}"
+        );
     }
 
     #[test]
@@ -2515,10 +2716,10 @@ mod tests {
 
     #[test]
     fn adv_div_gradient() {
-        // div(a, b) = a * exp(neg(log(b)))
-        // d(a/b)/da = 1/b
-        // d(a/b)/db = -a/b^2
-        // Test at a=6, b=3: d/da=1/3, d/db=-6/9=-2/3
+        // div(a, b) lowers to RiscOp::Div(a, b); the closed-form
+        // adjoint pair is da = g / b, db = -g * y / b (where y =
+        // a / b is the forward output). At a=6, b=3 the expected
+        // gradients are d/da = 1/3, d/db = -6/9 = -2/3.
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::Load { name: "a".into() },

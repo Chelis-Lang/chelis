@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
 
-use crate::adt::AdtRegistry;
+use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
 use crate::context::{TypeEnv, TypeEnvInner};
 use crate::env::Env;
@@ -271,16 +271,14 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // First pass: collect deftype and defsig declarations. Descend through
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
-    for expr in top_level_decl_items(exprs) {
-        collect_declarations(
-            expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &mut adt_reg,
-            &mut errors,
-        );
-    }
+    collect_all_declarations(
+        &top_level_decl_items(exprs),
+        &mut env,
+        &mut vg,
+        &mut subst,
+        &mut adt_reg,
+        &mut errors,
+    );
 
     // Second pass: infer def bodies. Same module-descent rationale as the
     // declaration pass — without it, the entire HM checker is a no-op on
@@ -296,6 +294,9 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
             &mut typed_nodes,
             &mut total_nodes,
         );
+        // Issue #256 round 2: re-check each deferred borrow against the
+        // now-complete substitution (see `validate_deferred_borrow_vars`).
+        validate_deferred_borrow_vars(&subst, &adt_reg, &mut errors);
     }
 
     // Third pass: reject tensor types whose element precision isn't supported
@@ -914,16 +915,14 @@ fn infer_ir_program_with_state(
     // Descend through `(module {} name ...)` wrappers: every idiomatic
     // Surf source wraps its declarations in `module X`, and without
     // flattening none of the walkers below see any def/defsig/deftype.
-    for expr in top_level_decl_items(exprs) {
-        collect_declarations(
-            expr,
-            &mut state.env,
-            &mut state.var_gen,
-            &mut state.subst,
-            &mut state.adt_reg,
-            &mut errors,
-        );
-    }
+    collect_all_declarations(
+        &top_level_decl_items(exprs),
+        &mut state.env,
+        &mut state.var_gen,
+        &mut state.subst,
+        &mut state.adt_reg,
+        &mut errors,
+    );
 
     for (name, ty_expr) in new_ir_types {
         let ty = deep_type_to_resolved_type(
@@ -963,6 +962,11 @@ fn infer_ir_program_with_state(
             let name = top_level_decl_name(expr).unwrap_or("<anon>");
             eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
         }
+        // Issue #256 round 2: drain the deferred-borrow ledger for this
+        // def and re-check each recorded variable against the now-complete
+        // substitution. Draining per-def keeps error attribution local and
+        // prevents one def's deferrals from leaking into the next.
+        validate_deferred_borrow_vars(&state.subst, &state.adt_reg, &mut errors);
     }
 
     for warning in chelis_deep::validate::validate(exprs) {
@@ -1019,8 +1023,19 @@ fn validate_ir_program(exprs: &[deep::Expr], type_env: &IrTypeEnv, errors: &mut 
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     let mut static_env = HashMap::new();
+    // Names of let-bindings whose RHS validation already emitted a
+    // diagnostic (so their derived output type is unknown). Downstream
+    // shape-sensitive calls that consume such a name emit a redundant
+    // cascade diagnostic; suppress it. See RT-205 round-2 F3.
+    let mut failed_let_names: HashSet<String> = HashSet::new();
     for expr in top_level_decl_items(exprs) {
-        validate_ir_expr(expr, type_env, &mut static_env, errors);
+        validate_ir_expr(
+            expr,
+            type_env,
+            &mut static_env,
+            &mut failed_let_names,
+            errors,
+        );
     }
 }
 
@@ -1748,7 +1763,7 @@ fn collect_top_level_calls(
     }
 }
 
-fn param_has_consuming_use(
+pub(crate) fn param_has_consuming_use(
     expr: &deep::Expr,
     param: &str,
     available_signatures: &HashMap<String, Type>,
@@ -1933,9 +1948,23 @@ fn pipe_consumes_param(
     }
     let mut current = &kids[0];
     for stage in &kids[1..] {
-        let stage_name = var_name_expr(stage);
+        // Issue #229 (sibling sweep of chelis#226): peer through any
+        // synthesized `__chelis_pipe` lambda the desugarer emits for
+        // explicit-arg pipe stages so the borrow-arg classifier sees
+        // the inner callee and the piped value's actual arg position
+        // — not the lambda's type. Without this peering, every
+        // non-bare-var pipe stage is mis-classified as a consuming
+        // use, the wrapping function never gets auto-borrow inferred,
+        // and downstream calls spuriously consume their argument.
+        let (_callee_expr, callee_builtin, piped_arg_index) =
+            crate::pipe_stage::resolve_pipe_stage_callee(stage);
         if is_direct_unshadowed_var(current, param, bound) {
-            if !callee_arg_is_borrowed(stage_name, 0, available_signatures, type_env) {
+            if !callee_arg_is_borrowed(
+                callee_builtin,
+                piped_arg_index,
+                available_signatures,
+                type_env,
+            ) {
                 return true;
             }
         } else if param_has_consuming_use_inner(
@@ -2031,6 +2060,145 @@ fn type_contains_tensor(ty: &Type) -> bool {
         Type::Ref(inner) => type_contains_tensor(inner),
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(type_contains_tensor),
         Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+    }
+}
+
+/// Issue #256 round 3: does `ty` carry a tensor, consulting `carriers`
+/// for the by-name ADT carry decision? This is the `Type`-level mirror
+/// of linearity's `type_expr_contains_tensor`: an ADT carries iff its
+/// name is in the precomputed carrier set (its definition has a
+/// tensor-carrying field) OR one of its type arguments carries (e.g.
+/// `Wrapper[tensor[..]]`). Bare `type_contains_tensor` cannot make the
+/// by-name decision — it only sees the `Type::Adt` shell, not the
+/// variant fields — which is exactly why the deferred-borrow gate must
+/// be handed the carrier set rather than trust an args-only check.
+fn type_carries_tensor_with_carriers(ty: &Type, carriers: &HashSet<String>) -> bool {
+    match ty {
+        Type::Tensor(_, _) => true,
+        Type::Ref(inner) => type_carries_tensor_with_carriers(inner, carriers),
+        Type::Tuple(args) => args
+            .iter()
+            .any(|a| type_carries_tensor_with_carriers(a, carriers)),
+        Type::Adt(name, args) => {
+            carriers.contains(name)
+                || args
+                    .iter()
+                    .any(|a| type_carries_tensor_with_carriers(a, carriers))
+        }
+        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+    }
+}
+
+/// Issue #256 round 3: compute the set of tensor-carrying ADT names from
+/// the registry. This is the registry-backed mirror of linearity's
+/// `compute_tensor_carrying_adts` (which works off stamped Deep exprs):
+/// fixed-point iteration where an ADT joins the carrier set once any of
+/// its variant fields carries a tensor against the in-progress set, so a
+/// chain `A { f: B }, B { g: tensor }` resolves transitively. Bounded by
+/// the ADT count. The two classifiers must agree: the gate uses this set
+/// to reject a deferred borrow that resolved to a non-carrying ADT, and
+/// linearity uses its own set to reject the concrete (non-deferred) form.
+fn adt_carrier_set(adt_reg: &AdtRegistry) -> HashSet<String> {
+    let mut carriers: HashSet<String> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for (name, def) in &adt_reg.defs {
+            if carriers.contains(name) {
+                continue;
+            }
+            let carries = def.variants.iter().any(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .any(|(_, field_ty)| type_carries_tensor_with_carriers(field_ty, &carriers))
+            });
+            if carries {
+                carriers.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    carriers
+}
+
+/// Issue #256 round 2 soundness gate. The `borrow` inference arm accepts a
+/// borrow whose inner type is still an unresolved `Type::Var`, recording
+/// the variable in the substitution's deferred-borrow ledger. That
+/// deferral is sound only when the variable is *eventually* pinned to a
+/// tensor or tensor-carrying type by a later unification (the surrounding
+/// `&tensor[..]` / `&Carrier[..]` parameter). This pass drains the ledger
+/// after a def body's inference completes and re-checks each recorded
+/// variable against the now-complete substitution:
+///
+///   - `Tensor` / `Ref(Tensor)`: pinned to a tensor — sound, accept.
+///   - `Adt` / `Tuple` / `Ref(Adt|Tuple)`: an aggregate that *may* carry a
+///     tensor. Round 3 (#256 soundness): classify it here against the
+///     registry-backed carrier set rather than blanket-accepting and
+///     deferring to linearity. Deferring was unsound — round 1 loosened
+///     linearity's `expr_is_owned_or_borrow_linear` to accept a stale
+///     `(t-var ..)` stamp (so a tensor that resolved late is not
+///     rejected), and a deferred borrow that resolves to a *non*-carrying
+///     ADT/tuple keeps that same `(t-var ..)` stamp at the linearity
+///     layer. Both gates would then wave it through. So the gate, which
+///     already holds the final `Type`, must make the carry decision: a
+///     tensor-carrying aggregate is accepted, a non-carrying one rejected.
+///   - still `Var`: never pinned. A fully-polymorphic consumer (e.g.
+///     `consume_any[a](t: a)`) unifies the parameter to `&a` without ever
+///     forcing a tensor, so a genuinely-non-tensor value would slip past
+///     every other gate. Reject.
+///   - `Prim` / `Unit` / `Fn`: pinned to a concretely-non-tensor scalar
+///     only after the borrow arm ran (so the arm's own `_ => TypeMismatch`
+///     could not fire). Reject.
+fn validate_deferred_borrow_vars(
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+) {
+    let deferred = subst.take_deferred_borrow_vars();
+    if deferred.is_empty() {
+        return;
+    }
+    // Computed lazily: only programs that actually deferred a borrow pay
+    // the fixed-point pass, and only once per drain.
+    let carriers = adt_carrier_set(adt_reg);
+    for tv in deferred {
+        let resolved = subst.apply(&Type::Var(tv));
+        // Peel every `Ref` layer: the recorded variable is the borrow
+        // inner, but a later unification may have wrapped it in one or
+        // more `&` layers (e.g. the parameter type was itself `&T`).
+        let mut peeled = &resolved;
+        while let Type::Ref(inner) = peeled {
+            peeled = inner.as_ref();
+        }
+        let sound = match peeled {
+            // Pinned to a tensor: always sound.
+            Type::Tensor(_, _) => true,
+            // Pinned to an aggregate: sound iff it actually carries a
+            // tensor against the registry carrier set (round 3). A
+            // non-carrying record/tuple resolved through the deferred
+            // path is rejected here — linearity's loosened classifier
+            // can no longer be relied on to catch it.
+            Type::Adt(_, _) | Type::Tuple(_) => {
+                type_carries_tensor_with_carriers(peeled, &carriers)
+            }
+            // Don't double-report an inner that already failed inference.
+            Type::Error => true,
+            // Never pinned, or pinned to a concretely-non-tensor value.
+            Type::Var(_) | Type::Prim(_) | Type::Unit | Type::Fn(_, _) => false,
+            // `Ref` is fully peeled above; treat as sound to avoid a
+            // spurious reject if a future shape reaches here.
+            Type::Ref(_) => true,
+        };
+        if !sound {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("borrow requires tensor or tensor-carrying input, got {peeled}"),
+                vec!["Use `&x` only with tensor values".to_string()],
+            ));
+        }
     }
 }
 
@@ -3251,6 +3419,14 @@ const TRANSCENDENTAL_FLOAT_ONLY_OPS: &[&str] = &[
     "gelu",
     "layer_norm",
     "normalize",
+    // `recip` is float-only per spec/05-risc-primitives.md §2.2: an
+    // integer reciprocal has no meaningful IEEE-754 interpretation
+    // (would always be 0 for |x| > 1 and undefined for x = 0).
+    // `div` is intentionally absent — integer division is admitted with
+    // C/Rust truncating semantics per spec §2.1, so chelis-std's
+    // Decimal arithmetic (`div(int64, int64)` for scale shifts) keeps
+    // type-checking through polymorphic wrappers.
+    "recip",
 ];
 
 const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];
@@ -3357,13 +3533,14 @@ fn validate_ir_expr(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
     static_env: &mut HashMap<String, StaticValue>,
+    failed_let_names: &mut HashSet<String>,
     errors: &mut Vec<CheckError>,
 ) -> StaticValue {
     match expr {
         deep::Expr::List(list, _) => {
             if get_tag(list) == Some("module") {
                 for elem in list.elements.iter().skip(3) {
-                    validate_ir_expr(elem, type_env, static_env, errors);
+                    validate_ir_expr(elem, type_env, static_env, failed_let_names, errors);
                 }
                 return StaticValue::Unknown;
             }
@@ -3375,7 +3552,8 @@ fn validate_ir_expr(
                 let Some(value_expr) = kids.get(1) else {
                     return StaticValue::Unknown;
                 };
-                let value = validate_ir_expr(value_expr, type_env, static_env, errors);
+                let value =
+                    validate_ir_expr(value_expr, type_env, static_env, failed_let_names, errors);
                 static_env.insert(name.to_string(), value);
                 return StaticValue::Unknown;
             }
@@ -3384,13 +3562,26 @@ fn validate_ir_expr(
                 let mut scoped_static_env = static_env.clone();
                 bind_fn_params_unknown(list, &mut scoped_static_env);
                 for elem in &list.elements {
-                    validate_ir_expr(elem, &scoped_env, &mut scoped_static_env, errors);
+                    validate_ir_expr(
+                        elem,
+                        &scoped_env,
+                        &mut scoped_static_env,
+                        failed_let_names,
+                        errors,
+                    );
                 }
                 return StaticValue::Unknown;
             }
             if get_tag(list) == Some("let") {
                 let kids = children(list);
                 let mut scoped_static_env = static_env.clone();
+                // Clone the type env on let-scope entry so each binding's
+                // derivable IR-shape-sensitive type (e.g. conv2d's output
+                // dims) can extend the env visible to the let body. Without
+                // this the validator cannot resolve `(var y)` for a let-
+                // bound `y = conv2d(...)` and silently rejects the next
+                // shape-sensitive call that consumes `y` (RT-205 F5).
+                let mut scoped_type_env = type_env.clone();
                 if let Some(deep::Expr::List(bind_list, _)) = kids.first()
                     && get_tag(bind_list) == Some("bind")
                 {
@@ -3398,19 +3589,86 @@ fn validate_ir_expr(
                     let mut index = 0;
                     while index + 1 < bind_children.len() {
                         if let Some(name) = symbol_name(&bind_children[index]) {
+                            let value_expr = &bind_children[index + 1];
+                            // Recurse into the RHS so its own validation
+                            // can push diagnostics and suppress downstream
+                            // cascade errors via `failed_let_names` (set
+                            // below when the RHS is a recognized
+                            // shape-sensitive form whose output type is
+                            // non-derivable, RT-205 round-4 / issue #212).
                             let value = validate_ir_expr(
-                                &bind_children[index + 1],
-                                type_env,
+                                value_expr,
+                                &scoped_type_env,
                                 &mut scoped_static_env,
+                                failed_let_names,
                                 errors,
                             );
                             scoped_static_env.insert(name.to_string(), value);
+                            // If the RHS is a shape-sensitive IR builtin
+                            // whose output type is derivable from its args,
+                            // register the derived type so downstream uses
+                            // of `name` resolve correctly.
+                            let derived =
+                                derive_ir_builtin_output_type(value_expr, &scoped_type_env);
+                            match derived {
+                                Some(ty) => {
+                                    scoped_type_env.insert(name.to_string(), ty);
+                                }
+                                None => {
+                                    // Mark as failed-derivation when the
+                                    // RHS is structurally a recognized
+                                    // shape-sensitive form (a known
+                                    // shape-sensitive builtin or a
+                                    // unary/binary passthrough wrapper
+                                    // around one, recursively) but its
+                                    // output type could not be derived.
+                                    // This catches `y = conv2d(bad)`
+                                    // and the R3 F-A passthrough cases
+                                    // like `y = relu(conv2d(bad))`.
+                                    //
+                                    // RT-205 round-4 / issue #212: the
+                                    // previous guard checked
+                                    // `errors.len() > errs_before` to
+                                    // detect an errored RHS, which fails
+                                    // for chains of length 3+ because
+                                    // cascade suppression already
+                                    // silences the level-2 RHS's
+                                    // diagnostic, so the level-2 name is
+                                    // never marked and the level-3 RHS
+                                    // re-emits a phantom error. The
+                                    // structural check
+                                    // `let_rhs_is_recognized_shape_sensitive`
+                                    // does not depend on diagnostic
+                                    // count and propagates the failed
+                                    // marker unboundedly down the chain.
+                                    //
+                                    // The recognition is intentionally
+                                    // narrow: a clean RHS that is not
+                                    // a recognized shape-sensitive form
+                                    // (e.g. a user-defined fn call) still
+                                    // does NOT cause suppression
+                                    // downstream, so legitimate
+                                    // "really wrong arg" cases still
+                                    // surface their own diagnostic.
+                                    if let deep::Expr::List(_, _) = value_expr
+                                        && let_rhs_is_recognized_shape_sensitive(value_expr)
+                                    {
+                                        failed_let_names.insert(name.to_string());
+                                    }
+                                }
+                            }
                         }
                         index += 2;
                     }
                 }
                 if let Some(body) = kids.get(1) {
-                    return validate_ir_expr(body, type_env, &mut scoped_static_env, errors);
+                    return validate_ir_expr(
+                        body,
+                        &scoped_type_env,
+                        &mut scoped_static_env,
+                        failed_let_names,
+                        errors,
+                    );
                 }
                 return StaticValue::Unknown;
             }
@@ -3424,7 +3682,13 @@ fn validate_ir_expr(
                     && let Some(func_name) = ir_builtin_name(list)
                     && is_ir_shape_sensitive_builtin(func_name)
                 {
-                    validate_ir_builtin_symbolic_requirements(list, func_name, type_env, errors);
+                    validate_ir_builtin_symbolic_requirements(
+                        list,
+                        func_name,
+                        type_env,
+                        failed_let_names,
+                        errors,
+                    );
                 }
             }
 
@@ -3447,7 +3711,9 @@ fn validate_ir_expr(
                 let kids = children(list);
                 return kids
                     .first()
-                    .map(|inner| validate_ir_expr(inner, type_env, static_env, errors))
+                    .map(|inner| {
+                        validate_ir_expr(inner, type_env, static_env, failed_let_names, errors)
+                    })
                     .unwrap_or(StaticValue::Unknown);
             }
             if get_tag(list) == Some("app") {
@@ -3456,7 +3722,9 @@ fn validate_ir_expr(
                 let arg_values = kids
                     .iter()
                     .skip(1)
-                    .map(|arg| validate_ir_expr(arg, type_env, static_env, errors))
+                    .map(|arg| {
+                        validate_ir_expr(arg, type_env, static_env, failed_let_names, errors)
+                    })
                     .collect::<Vec<_>>();
                 if func_name == Some("Cons") && arg_values.len() == 2 {
                     if let StaticValue::List(mut tail) = arg_values[1].clone() {
@@ -3472,21 +3740,21 @@ fn validate_ir_expr(
             }
 
             for elem in &list.elements {
-                validate_ir_expr(elem, type_env, static_env, errors);
+                validate_ir_expr(elem, type_env, static_env, failed_let_names, errors);
             }
             StaticValue::Unknown
         }
         deep::Expr::Map(map, _) => {
             for (_, value) in &map.entries {
-                validate_ir_expr(value, type_env, static_env, errors);
+                validate_ir_expr(value, type_env, static_env, failed_let_names, errors);
             }
             StaticValue::Unknown
         }
         deep::Expr::MetaExpr(meta, _) => {
             for (_, value) in &meta.entries {
-                validate_ir_expr(value, type_env, static_env, errors);
+                validate_ir_expr(value, type_env, static_env, failed_let_names, errors);
             }
-            validate_ir_expr(&meta.expr, type_env, static_env, errors)
+            validate_ir_expr(&meta.expr, type_env, static_env, failed_let_names, errors)
         }
         deep::Expr::Atom(_, _) => literal_static_value(expr),
     }
@@ -4007,7 +4275,10 @@ fn resolve_axis_pair_member(
     list: &deep::List,
     errors: &mut Vec<CheckError>,
 ) -> Result<usize, ()> {
-    match axis_expr.and_then(extract_int_literal) {
+    // Issue #216: use the cast-aware extractor so `cast(N, int32)`-wrapped
+    // axis literals trip the infer-time bounds check instead of slipping
+    // through to host-runtime defense-in-depth.
+    match axis_expr.and_then(extract_int_for_dim) {
         Some(raw) => match tensor_ty {
             Type::Tensor(dims, _) => match normalize_static_axis(dims.len(), raw) {
                 Some(axis) => Ok(axis),
@@ -4051,7 +4322,8 @@ fn resolve_builtin_axis(
     list: &deep::List,
     errors: &mut Vec<CheckError>,
 ) -> Option<usize> {
-    let raw_axis = axis_expr.and_then(extract_int_literal);
+    // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
+    let raw_axis = axis_expr.and_then(extract_int_for_dim);
     match (tensor_ty, raw_axis) {
         (Type::Tensor(dims, _), Some(raw)) => match normalize_static_axis(dims.len(), raw) {
             Some(axis) => Some(axis),
@@ -4139,16 +4411,21 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     // pass. Restored on drop.
     let _declared_sig_guard = install_declared_sig_param_types(exprs);
 
-    for expr in exprs {
-        collect_declarations(
-            expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &mut adt_reg,
-            &mut declaration_errors,
-        );
-    }
+    // Descend through `(module {} name ...)` wrappers when collecting
+    // declarations, matching `infer_program`. Without this, module-
+    // wrapped user ADTs and defsigs never reach `env` / `adt_reg`
+    // during annotation, so `pat-record`'s constructor lookup (#181)
+    // and every other annotation-time env query for a user-declared
+    // name silently misses. See `infer_program` for the parallel
+    // iteration.
+    collect_all_declarations(
+        &top_level_decl_items(exprs),
+        &mut env,
+        &mut vg,
+        &mut subst,
+        &mut adt_reg,
+        &mut declaration_errors,
+    );
 
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
@@ -4160,19 +4437,29 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
         } else {
             None
         };
+        // Run `infer_top_level` on the unit being annotated; for a
+        // `(module {} ...)` wrapper, this means inferring every inner
+        // decl before annotating the wrapper, so that annotation's
+        // recursive walk sees fully-inferred bindings for each inner
+        // decl. For a bare top-level decl, this preserves the original
+        // per-expr alternation (infer THIS decl, then annotate THIS
+        // decl) that signature-inference forward-reference assertions
+        // depend on. (closes #181)
         let mut step_errors = Vec::new();
         let mut typed_nodes = 0;
         let mut total_nodes = 0;
-        infer_top_level(
-            expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &adt_reg,
-            &mut step_errors,
-            &mut typed_nodes,
-            &mut total_nodes,
-        );
+        for decl in top_level_decl_items(std::slice::from_ref(expr)) {
+            infer_top_level(
+                decl,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                &mut step_errors,
+                &mut typed_nodes,
+                &mut total_nodes,
+            );
+        }
 
         let annotated_expr = annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg);
         if let Some(t0) = t0 {
@@ -4212,16 +4499,17 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
     // exprs being annotated here. Restored on drop.
     let _declared_sig_guard = install_declared_sig_param_types(exprs);
 
-    for expr in exprs {
-        collect_declarations(
-            expr,
-            &mut state.env,
-            &mut state.var_gen,
-            &mut state.subst,
-            &mut state.adt_reg,
-            &mut declaration_errors,
-        );
-    }
+    // Descend through `(module {} name ...)` wrappers when collecting
+    // declarations; mirrors the `infer_program` shape and the parallel
+    // fix in `annotate_ir_program`. (closes #181)
+    collect_all_declarations(
+        &top_level_decl_items(exprs),
+        &mut state.env,
+        &mut state.var_gen,
+        &mut state.subst,
+        &mut state.adt_reg,
+        &mut declaration_errors,
+    );
 
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
@@ -4233,19 +4521,25 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
         } else {
             None
         };
+        // See the parallel comment in `annotate_ir_program`: infer
+        // every inner decl of a module wrapper before annotating, so
+        // user-declared ADT constructors and defsigs are visible at
+        // annotation time; preserve per-expr alternation otherwise.
         let mut step_errors = Vec::new();
         let mut typed_nodes = 0;
         let mut total_nodes = 0;
-        infer_top_level(
-            expr,
-            &mut state.env,
-            &mut state.var_gen,
-            &mut state.subst,
-            &state.adt_reg,
-            &mut step_errors,
-            &mut typed_nodes,
-            &mut total_nodes,
-        );
+        for decl in top_level_decl_items(std::slice::from_ref(expr)) {
+            infer_top_level(
+                decl,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                &mut step_errors,
+                &mut typed_nodes,
+                &mut total_nodes,
+            );
+        }
 
         let annotated_expr = annotate_expr_with_scope(
             expr,
@@ -4639,6 +4933,20 @@ fn annotate_match_children(
         {
             let arm_kids = children(arm_list);
             let mut arm_env = env.clone();
+            // `pattern_vg` and `pattern_subst` are clones rather than
+            // shared refs with the outer state. The clone is safe
+            // because the primary inference pass (`infer_program` →
+            // `infer_top_level` → `infer_match`) has already executed
+            // `pattern_bindings` against the unshared outer `subst`,
+            // populating it with the same type-parameter unifications
+            // we're about to (re-)derive here. So the body annotation
+            // below using the outer `subst` sees the same mappings the
+            // pattern-binding stamper would have written to
+            // `pattern_subst`. If a future caller invokes
+            // `annotate_ir_program` against a `Subst` that hasn't been
+            // pre-populated by `infer_program`, this invariant breaks
+            // and body-annotation type variables go stale; that's a bug
+            // in the caller, not here.
             let mut pattern_vg = vg.clone();
             let mut pattern_subst = subst.clone();
             let mut pattern_errors = Vec::new();
@@ -4660,7 +4968,17 @@ fn annotate_match_children(
 
             let mut elements = vec![arm_list.elements[0].clone(), arm_list.elements[1].clone()];
             if let Some(pattern) = arm_kids.first() {
-                elements.push(annotate_expr_with_scope(pattern, env, vg, subst, adt_reg));
+                // Stamp pattern-binding types onto `pat-var`/`pat-as`
+                // nodes so the linearity checker (which consumes the
+                // annotated Deep) can declare scope entries with the
+                // resolved binding type rather than `None`. Without
+                // this, a destructured tensor field's `&x` borrow
+                // fails the linearity check because `expr_type` can't
+                // resolve the binding's type. (closes #181)
+                let annotated_pattern = annotate_expr_with_scope(pattern, env, vg, subst, adt_reg);
+                let annotated_pattern =
+                    stamp_pattern_binding_types(&annotated_pattern, &arm_env, &pattern_subst);
+                elements.push(annotated_pattern);
             }
             if let Some(guard) = arm_kids.get(1) {
                 elements.push(annotate_expr_with_scope(
@@ -4677,6 +4995,104 @@ fn annotate_match_children(
     }
 
     result
+}
+
+/// Walk a pattern AST and stamp the resolved binding type onto each
+/// `pat-var` (and `pat-as`) node's metadata map under the `type` key.
+///
+/// The binding type is looked up by name in `arm_env`, which was just
+/// populated by `pattern_bindings` against `pattern_subst`. We re-apply
+/// `pattern_subst` here so any post-unify substitutions (e.g. the ADT
+/// type-parameter pinning that happens when `pat-record` unifies the
+/// constructor's return ADT against the scrutinee) flow into the
+/// stamped metadata.
+///
+/// The downstream consumer is `linearity::check_match`, which reads
+/// each pattern var's stamped `:type` to populate the arm's
+/// `LinearScope`. Without this, destructured field bindings stay
+/// untyped at linearity time and `&field` fails `expr_is_owned_or_borrow_linear`.
+/// (closes #181)
+fn stamp_pattern_binding_types(
+    pat: &deep::Expr,
+    arm_env: &Env,
+    pattern_subst: &Subst,
+) -> deep::Expr {
+    match pat {
+        deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => pat.clone(),
+        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                expr: Box::new(stamp_pattern_binding_types(
+                    &meta.expr,
+                    arm_env,
+                    pattern_subst,
+                )),
+                entries: meta.entries.clone(),
+            },
+            *span,
+        ),
+        deep::Expr::List(list, span) => {
+            let tag = get_tag(list);
+            let kids = children(list);
+            let needs_type_stamp = matches!(tag, Some("pat-var") | Some("pat-as"));
+
+            // The binding's name lives at the first child for both
+            // `pat-var` and `pat-as`. Other pattern tags carry no
+            // direct binding here (their sub-patterns recurse).
+            //
+            // The `Type::Error` filter is intentional: when a pattern
+            // earlier in the same arm raised an error (e.g., unknown
+            // record field), `pattern_bindings` stores `Type::Error`
+            // for the bind name. Stamping that onto the metadata would
+            // round-trip through `type_to_deep_expr` as
+            // `(t-var {} _)` (see line ~4962) and the linearity check
+            // would read it as an opaque type variable, possibly
+            // surfacing a cascading "borrow requires tensor or
+            // tensor-carrying input, got ?N" on top of the original
+            // unknown-field error. Suppressing the stamp here lets the
+            // linearity check fall through to its `None`-typed path,
+            // which already produces a cleaner "borrowed arguments
+            // must be tensor or tensor-carrying values" diagnostic
+            // without inventing a fictional type for the binding.
+            let resolved_ty = if needs_type_stamp {
+                kids.first()
+                    .and_then(symbol_name)
+                    .and_then(|name| arm_env.lookup(name))
+                    .map(|scheme| pattern_subst.apply(&scheme.body))
+                    .filter(|ty| !matches!(ty, Type::Error))
+            } else {
+                None
+            };
+
+            let meta_expr =
+                match list.elements.get(1) {
+                    Some(deep::Expr::Map(meta, meta_span)) => {
+                        if let Some(ty) = resolved_ty.as_ref() {
+                            let mut entries = meta.entries.clone();
+                            let ty_expr = type_to_deep_expr(ty);
+                            if let Some((_, existing)) =
+                                entries.iter_mut().find(|(key, _)| key == "type")
+                            {
+                                *existing = ty_expr;
+                            } else {
+                                entries.push(("type".to_string(), ty_expr));
+                            }
+                            deep::Expr::Map(deep::MetaMap { entries }, *meta_span)
+                        } else {
+                            list.elements[1].clone()
+                        }
+                    }
+                    _ => list.elements.get(1).cloned().unwrap_or_else(|| {
+                        deep::Expr::Map(deep::MetaMap { entries: vec![] }, *span)
+                    }),
+                };
+
+            let mut elements = vec![list.elements[0].clone(), meta_expr];
+            for child in kids {
+                elements.push(stamp_pattern_binding_types(child, arm_env, pattern_subst));
+            }
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+    }
 }
 
 fn annotated_meta_map_with_override(
@@ -4905,6 +5321,115 @@ fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
     )
 }
 
+/// Is `name` a unary shape-passthrough op for the purposes of let-RHS
+/// recognition? Must match the unary arm of
+/// `derive_ir_builtin_output_type` so the failed-marker insertion in
+/// the let arm covers the same surface as the type-derivation
+/// passthrough recognition (issue #212 / RT-205 round-4).
+fn is_ir_unary_shape_passthrough_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "relu"
+            | "tanh"
+            | "sigmoid"
+            | "gelu"
+            | "silu"
+            | "exp"
+            | "log"
+            | "neg"
+            | "recip"
+            | "sqrt"
+            | "abs"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "atan"
+            | "floor"
+            | "ceil"
+            | "not"
+            | "softmax"
+    )
+}
+
+/// Is `name` a binary shape-passthrough op? Must match the binary arm
+/// of `derive_ir_builtin_output_type` for the same reason as
+/// `is_ir_unary_shape_passthrough_builtin` (issue #212 / RT-205
+/// round-4).
+fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "add"
+            | "sub"
+            | "mul"
+            | "div"
+            | "max_elem"
+            | "min_elem"
+            | "cmplt"
+            | "lt"
+            | "gt"
+            | "gte"
+            | "lte"
+            | "eq"
+            | "neq"
+            | "and"
+            | "or"
+    )
+}
+
+/// Recognise a let-RHS expression as a "shape-sensitive form" for the
+/// purposes of cascade-suppression marker insertion: either a direct
+/// recognised shape-sensitive IR builtin, or a unary/binary shape-
+/// passthrough wrapper around one (recursively). Peeks through
+/// borrow wrappers like the rest of the validator.
+///
+/// Returns true when, structurally, this RHS shape COULD have a
+/// derivable output type via `derive_ir_builtin_output_type`; the
+/// caller pairs this with `derived.is_none()` to detect the "should
+/// have derived but didn't" failure mode (issue #212 / RT-205
+/// round-4). The decoupled structural check means we no longer
+/// depend on whether the RHS validation pushed a diagnostic at this
+/// level: cascade-suppressed intermediate let-binders are still
+/// marked failed so the suppression propagates unboundedly down the
+/// chain.
+fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
+    let inner = peel_borrow(expr);
+    let deep::Expr::List(list, _) = inner else {
+        return false;
+    };
+    if get_tag(list) != Some("app") {
+        return false;
+    }
+    let Some(func_name) = ir_builtin_name(list) else {
+        return false;
+    };
+    if is_ir_shape_sensitive_builtin(func_name) {
+        return true;
+    }
+    if is_ir_unary_shape_passthrough_builtin(func_name)
+        && let Some(arg) = list.elements.get(3)
+    {
+        return let_rhs_is_recognized_shape_sensitive(arg);
+    }
+    if is_ir_binary_shape_passthrough_builtin(func_name) {
+        // Either operand being a recognised shape-sensitive form is
+        // sufficient: the passthrough derivation uses the first
+        // resolvable operand's type and falls through to the second,
+        // so a failed inner shape-sensitive call on either side
+        // means the whole RHS is structurally broken.
+        if let Some(lhs) = list.elements.get(3)
+            && let_rhs_is_recognized_shape_sensitive(lhs)
+        {
+            return true;
+        }
+        if let Some(rhs) = list.elements.get(4)
+            && let_rhs_is_recognized_shape_sensitive(rhs)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
     match expr {
         deep::Expr::List(list, _) => {
@@ -4955,41 +5480,61 @@ fn extend_ir_env_with_fn_params(fn_list: &deep::List, type_env: &IrTypeEnv) -> I
 }
 
 fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &IrTypeEnv) -> bool {
-    expr_type_expr(expr, type_env)
+    // Peel `(borrow {} ...)` so the idiomatic Surf borrow form does
+    // not silently bypass the dim-concreteness check.
+    arg_tensor_type_expr(expr, type_env)
         .map(|ty| type_expr_is_ir_concrete(&ty))
         .unwrap_or(false)
+}
+
+/// Check whether a conv2d input tensor argument is concrete in every
+/// dimension EXCEPT axis 0 (batch). Per spec/05-risc-primitives.md
+/// §4.5 the canonical signature is `tensor[batch, in_c, h, w, p]`
+/// and `batch` is named, so symbolic-batch programs are first-class
+/// (RT-205 round-3 F-C). The spatial dims and `in_c` must remain
+/// concrete because they appear in the im2col/matmul lowering.
+///
+/// Returns true when the type resolves to a rank-4 tensor whose
+/// axes 1, 2, 3 are all `Dim::Lit`. Axis 0 may be `Dim::Lit` or
+/// `Dim::NonConcrete`. Returns false on unresolvable type or any
+/// non-concrete axis other than 0.
+fn conv2d_input_dims_concrete_modulo_batch(
+    expr: Option<&deep::Expr>,
+    type_env: &IrTypeEnv,
+) -> bool {
+    let Some(expr) = expr else {
+        return false;
+    };
+    let Some(ty) = arg_tensor_type_expr(expr, type_env) else {
+        return false;
+    };
+    let Some(dims) = tensor_dims_from_type_expr(&ty) else {
+        // Not a tensor; fall back to scalar-prim check.
+        return type_expr_is_ir_concrete(&ty);
+    };
+    if dims.len() != 4 {
+        // Rank mismatch is reported separately; return true so the
+        // rank-4 guard later in the validator can fire instead of
+        // suppressing it with a metadata error.
+        return true;
+    }
+    // axes 1, 2, 3 must be concrete; axis 0 (batch) may be symbolic.
+    dims[1..].iter().all(|d| matches!(d, DeepDimKind::Lit(_)))
 }
 
 fn validate_ir_builtin_symbolic_requirements(
     list: &deep::List,
     func_name: &str,
     type_env: &IrTypeEnv,
+    failed_let_names: &HashSet<String>,
     errors: &mut Vec<CheckError>,
 ) {
     match func_name {
-        "conv2d" => {
-            if !app_result_type_is_concrete(list) {
-                errors.push(CheckError::new(
-                    CheckErrorKind::Other,
-                    "IR builtin `conv2d` requires concrete output tensor dimensions".to_string(),
-                    vec!["Use concrete d-lit dimensions for IR lowering".to_string()],
-                ));
-            }
-            for arg in list.elements.iter().skip(3).take(2) {
-                if !expr_tensor_type_is_concrete(arg, type_env) {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::Other,
-                        "IR builtin `conv2d` requires concrete tensor argument metadata"
-                            .to_string(),
-                        vec!["Use concrete d-lit dimensions for IR lowering".to_string()],
-                    ));
-                    break;
-                }
-            }
-        }
+        "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, failed_let_names, errors),
         "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
-            errors.push(CheckError::new(
-                CheckErrorKind::Other,
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
                 "IR builtin `mean` requires a concrete reduced axis extent".to_string(),
                 vec!["Use a concrete d-lit dimension on the reduced axis".to_string()],
             ));
@@ -4998,14 +5543,15 @@ fn validate_ir_builtin_symbolic_requirements(
             let x_dims = list
                 .elements
                 .get(3)
-                .and_then(|expr| expr_type_expr(expr, type_env))
+                .and_then(|expr| arg_tensor_type_expr(expr, type_env))
                 .and_then(|ty| tensor_dims_from_type_expr(&ty));
             if matches!(
                 x_dims.as_ref().and_then(|dims| dims.last()),
                 Some(DeepDimKind::NonConcrete)
             ) {
-                errors.push(CheckError::new(
-                    CheckErrorKind::Other,
+                errors.push(validator_error(
+                    CheckErrorKind::DimensionMismatch,
+                    list,
                     "IR builtin `layer_norm` requires a concrete normalized axis extent"
                         .to_string(),
                     vec!["Use a concrete d-lit dimension for the final axis".to_string()],
@@ -5013,6 +5559,615 @@ fn validate_ir_builtin_symbolic_requirements(
             }
         }
         _ => {}
+    }
+}
+
+/// Return `true` if any of `list`'s tensor arguments (positional 3, 4)
+/// is a `(var <name>)` whose `name` is in `failed_let_names`. Used by
+/// `validate_conv2d_symbolic_requirements` to suppress the cascade
+/// diagnostic when a let-bound name's own derivation already emitted
+/// the owning diagnostic (RT-205 round-2 F3).
+fn conv2d_input_is_failed_let_name(list: &deep::List, failed_let_names: &HashSet<String>) -> bool {
+    if failed_let_names.is_empty() {
+        return false;
+    }
+    for arg in list.elements.iter().skip(3).take(2) {
+        let inner = peel_borrow(arg);
+        if let deep::Expr::List(arg_list, _) = inner
+            && get_tag(arg_list) == Some("var")
+            && let Some(name) = children(arg_list).first().and_then(symbol_name)
+            && failed_let_names.contains(name)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Build a `CheckError` for a validator-arm diagnostic that
+/// references a specific call site. Appends the call site's `:span`
+/// metadata identifier (if present) to the message so JSON consumers
+/// can locate the offending expression in the source.
+///
+/// All shape-sensitive validator errors flow through this helper so
+/// they uniformly get DimensionMismatch-grade severity and span
+/// suffixes, matching the inference-layer DimensionMismatch surface
+/// that JSON tooling already understands (RT-205 F6).
+fn validator_error(
+    kind: CheckErrorKind,
+    call_site: &deep::List,
+    message: String,
+    suggestions: Vec<String>,
+) -> CheckError {
+    let suffixed = match validator_span_suffix(call_site) {
+        Some(span) => format!("{message} {span}"),
+        None => message,
+    };
+    CheckError::new(kind, suffixed, suggestions)
+}
+
+/// Render the call site's source span as a parenthesized suffix
+/// (e.g. ` (at surf:144..165)`). Returns `None` when the call site
+/// carries no `:span` metadata so the unmodified message is used.
+fn validator_span_suffix(call_site: &deep::List) -> Option<String> {
+    let meta = get_meta(call_site)?;
+    for (key, value) in &meta.entries {
+        if key == "span"
+            && let deep::Expr::Atom(deep::Atom::Str(s), _) = value
+        {
+            return Some(format!("(at {s})"));
+        }
+    }
+    None
+}
+
+/// Validate the symbolic requirements of an IR-level `conv2d` call.
+///
+/// The previous implementation read `:type` from the app node's
+/// metadata via `app_result_type_is_concrete` to decide whether the
+/// output dims were concrete. Surf-desugared apps only carry `:span`
+/// metadata; the annotation pass that would stamp inferred app types
+/// back into Deep runs after `validate_ir_program`, so that check was
+/// structurally always-false for any Surf source (see issue #186).
+///
+/// The replacement derives output concreteness from the arguments
+/// (input tensor dims, kernel tensor dims, stride/padding literal
+/// values), all of which are knowable at validation time. After
+/// extracting the args this function evaluates the output spatial-
+/// dim formula `floor((in + 2 * padding - kernel) / stride) + 1`
+/// per axis (spec/05-risc-primitives.md §471-483) and rejects calls
+/// whose evaluated output dim is non-positive. Also enforces rank-4
+/// input/kernel and positive-stride / non-negative-padding.
+fn validate_conv2d_symbolic_requirements(
+    list: &deep::List,
+    type_env: &IrTypeEnv,
+    failed_let_names: &HashSet<String>,
+    errors: &mut Vec<CheckError>,
+) {
+    // RT-205 round-2 F3: if either tensor arg is a `(var <name>)`
+    // whose `name` is in the failed-derivation set, the owning
+    // diagnostic was already emitted for the let-binding's own RHS.
+    // Suppress the cascade so the user sees one error per root cause,
+    // not one per consumer.
+    if conv2d_input_is_failed_let_name(list, failed_let_names) {
+        return;
+    }
+    // Args at elements[3]..[6] for the canonical 4-arg call shape:
+    // (app {} (var conv2d) input kernel stride padding).
+    //
+    // RT-205 round-3 F-C: input axis 0 (batch) is allowed to be
+    // NonConcrete per spec/05 §4.5, since it does not enter the
+    // spatial-dim formula and conv2d's IR lowering can carry a
+    // symbolic batch through. All OTHER input axes (in_c, h, w) and
+    // all kernel axes must remain concrete -- they appear in the
+    // im2col/matmul lowering and must be statically knowable.
+    if !conv2d_input_dims_concrete_modulo_batch(list.elements.get(3).map(peel_borrow), type_env)
+        || !expr_tensor_type_is_concrete(
+            list.elements.get(4).expect("arity already implicit"),
+            type_env,
+        )
+    {
+        errors.push(validator_error(
+            CheckErrorKind::DimensionMismatch,
+            list,
+            "IR builtin `conv2d` requires concrete tensor argument metadata".to_string(),
+            vec![
+                "Use concrete d-lit dimensions for IR lowering (axis 0 / batch may be symbolic)"
+                    .to_string(),
+            ],
+        ));
+        return;
+    }
+    // Extract and range-check stride/padding. The IR lowering relies
+    // on these being statically-knowable positive (stride) or
+    // non-negative (padding) integers; the output spatial dim formula
+    // `floor((in + 2p - k) / s) + 1` (spec/05-risc-primitives.md
+    // §471-483) divides by stride, so `stride <= 0` is undefined and
+    // a negative padding shrinks the effective input below zero.
+    // Without these guards the validator silently accepts the
+    // ill-formed call and the back-end ICEs at codegen time
+    // (issue #186 RT findings F1, F2, F3).
+    let stride = match extract_typed_scalar_literal(list, 5, "stride", errors) {
+        Some(v) => v,
+        None => return,
+    };
+    if stride <= 0 {
+        errors.push(validator_error(
+            CheckErrorKind::DimensionMismatch,
+            list,
+            format!("IR builtin `conv2d` requires a positive stride, got {stride}"),
+            vec!["Stride must be >= 1; the output dim formula divides by stride".to_string()],
+        ));
+        return;
+    }
+    let padding = match extract_typed_scalar_literal(list, 6, "padding", errors) {
+        Some(v) => v,
+        None => return,
+    };
+    if padding < 0 {
+        errors.push(validator_error(
+            CheckErrorKind::DimensionMismatch,
+            list,
+            format!("IR builtin `conv2d` requires non-negative padding, got {padding}"),
+            vec!["Padding must be >= 0".to_string()],
+        ));
+        return;
+    }
+    // Resolve input + kernel tensor dims so we can evaluate the
+    // output spatial-dim formula. expr_tensor_type_is_concrete above
+    // already established concreteness; the lookups below should both
+    // succeed, but bail gracefully on the unexpected case rather than
+    // unwrap-panicking.
+    let Some(input_dims) = list
+        .elements
+        .get(3)
+        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
+        .and_then(|ty| tensor_dims_from_type_expr(&ty))
+    else {
+        return;
+    };
+    let Some(kernel_dims) = list
+        .elements
+        .get(4)
+        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
+        .and_then(|ty| tensor_dims_from_type_expr(&ty))
+    else {
+        return;
+    };
+    // Rank guard: the canonical conv2d shape is [N, C, H, W] x [F, C, kH, kW].
+    // The HM signature check (check_conv2d_signature, infer.rs:9999+) also
+    // catches rank errors and may have already emitted its diagnostic via
+    // `check_conv2d_signature`. Dedupe so the user sees ONE rank error per
+    // role (input/kernel), not two (RT-205 round-2 F4).
+    if input_dims.len() != 4 {
+        let rank = input_dims.len();
+        let hm_emitted = errors.iter().any(|e| {
+            e.message.contains(&format!(
+                "conv2d expects rank-4 input tensor, got rank {rank}"
+            ))
+        });
+        if !hm_emitted {
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                format!("IR builtin `conv2d` requires a rank-4 input tensor, got rank {rank}"),
+                vec!["Pass a [N, C, H, W] tensor as the first argument".to_string()],
+            ));
+        }
+        return;
+    }
+    if kernel_dims.len() != 4 {
+        let rank = kernel_dims.len();
+        let hm_emitted = errors.iter().any(|e| {
+            e.message.contains(&format!(
+                "conv2d expects rank-4 kernel tensor, got rank {rank}"
+            ))
+        });
+        if !hm_emitted {
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                format!("IR builtin `conv2d` requires a rank-4 kernel tensor, got rank {rank}"),
+                vec!["Pass a [F, C, kH, kW] tensor as the second argument".to_string()],
+            ));
+        }
+        return;
+    }
+    // Output spatial-dim formula per spec/05-risc-primitives.md §471-483:
+    //   out = floor((in + 2 * padding - kernel) / stride) + 1
+    // for both H (axis 2) and W (axis 3). If either evaluates to <= 0
+    // the call is ill-formed; without this guard the back-end emits a
+    // less-actionable error after codegen begins.
+    let in_h = match input_dims[2] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return,
+    };
+    let in_w = match input_dims[3] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return,
+    };
+    let k_h = match kernel_dims[2] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return,
+    };
+    let k_w = match kernel_dims[3] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return,
+    };
+    for (axis, name, in_extent, k_extent) in [("H", "height", in_h, k_h), ("W", "width", in_w, k_w)]
+        .iter()
+        .map(|(short, long, inp, kr)| (*short, *long, *inp, *kr))
+    {
+        let Some(val) = conv2d_output_extent(in_extent, k_extent, stride, padding) else {
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                format!(
+                    "IR builtin `conv2d` output {name} (axis {axis}) cannot be computed: input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding} overflows i64 in the canonical formula"
+                ),
+                vec![
+                    "Use input/kernel/stride/padding values whose intermediate `input + 2 * padding - kernel` and final `+ 1` fit in a signed 64-bit integer".to_string(),
+                ],
+            ));
+            return;
+        };
+        if val <= 0 {
+            // Reaching this branch implies `conv2d_output_extent`
+            // returned `Some(val)`, which in turn means
+            // `padding.checked_mul(2)` and
+            // `in_extent.checked_add(2 * padding)` both succeeded
+            // upstream. Plain arithmetic is safe here; the
+            // saturating-mul + checked-add fallback that earlier
+            // code carried is unreachable. (RT-205 round-3 F-D.)
+            let padded_hint = in_extent + 2 * padding;
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                format!(
+                    "IR builtin `conv2d` output {name} (axis {axis}) evaluates to {val} for input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding}; output dims must be positive"
+                ),
+                vec![format!(
+                    "Increase padding, decrease stride, or shrink the kernel so the padded input ({padded_hint}) is at least the kernel size ({k_extent})"
+                )],
+            ));
+            return;
+        }
+    }
+}
+
+/// Compute the output spatial extent of a conv2d axis using the
+/// canonical formula `floor((in + 2 * padding - kernel) / stride) + 1`
+/// (spec/05-risc-primitives.md §471-483). Returns a signed value so
+/// the validator can detect ill-formed configurations (output <= 0)
+/// before they reach the back-end.
+///
+/// Uses `div_euclid` for floor division so a negative numerator (the
+/// kernel does not fit the padded input) produces an informative
+/// negative output value rather than truncating toward zero.
+/// `stride` is required to be positive by the caller, which is what
+/// makes `div_euclid` equivalent to mathematical floor here.
+///
+/// Returns `None` on integer overflow in any intermediate (RT-205
+/// round-2 F1). Callers must treat `None` as "input parameters
+/// outside the representable range" and emit a diagnostic; previously
+/// a huge `padding` like `i64::MAX/2` triggered `attempt to multiply
+/// with overflow` and panicked `chelis check`.
+fn conv2d_output_extent(input: i64, kernel: i64, stride: i64, padding: i64) -> Option<i64> {
+    let two_p = padding.checked_mul(2)?;
+    let padded = input.checked_add(two_p)?;
+    let numerator = padded.checked_sub(kernel)?;
+    numerator.checked_div_euclid(stride)?.checked_add(1)
+}
+
+/// If `expr` is a recognizable shape-sensitive IR builtin call whose
+/// output tensor type can be derived from its argument types and
+/// literal scalar args, return that type as a Deep `(t-tensor ...)`
+/// expression. Used to extend the validator's per-let-scope type env
+/// so downstream uses of a let-bound name resolve to a concrete
+/// tensor type (RT-205 F5).
+///
+/// In addition to `conv2d` direct calls, this also handles
+/// shape-PRESERVING unary and binary point-wise ops (relu, tanh,
+/// add, mul, etc.) so the canonical CNN layer pattern
+/// `y = relu(conv2d(...))` chains correctly into a downstream
+/// `conv2d(&y, ...)` (RT-205 round-2 F2). Reductions and movement
+/// ops are intentionally NOT handled here; they would need a
+/// separate per-op derivation because they change rank or shape.
+///
+/// Returns `None` when the call shape is unrecognized, the args are
+/// non-concrete, or the derived output would be ill-formed (in which
+/// case the validator's own arm will report the diagnostic).
+fn derive_ir_builtin_output_type(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("app") {
+        return None;
+    }
+    let func_name = ir_builtin_name(list)?;
+    match func_name {
+        "conv2d" => derive_conv2d_output_type(list, type_env),
+        // Shape-preserving unary point-wise: output type == input type.
+        // Each entry below is cross-verified against the lowerer's
+        // accepted name set in `crates/chelis-ir/src/lower.rs` (the
+        // canonical IR vocabulary) and spec/05-risc-primitives.md
+        // §2.2 / §3.3 (RT-205 round-3 F-B audit).
+        //
+        // Reductions (sum, mean, max_reduce, argmax_reduce,
+        // prod_reduce, min_reduce, argmin_reduce) and movement ops
+        // (reshape, permute, gather, pad, shrink, stride, expand) are
+        // EXCLUDED: they change rank or shape and need per-op
+        // derivation.
+        //
+        // softmax takes a (tensor, axis) tuple but its output shape
+        // equals the input tensor's shape, so it fits the unary
+        // passthrough path (positional [3] is the tensor).
+        "relu" | "tanh" | "sigmoid" | "gelu" | "silu" | "exp" | "log" | "neg" | "recip"
+        | "sqrt" | "abs" | "sin" | "cos" | "tan" | "atan" | "floor" | "ceil" | "not"
+        | "softmax" => derive_unary_shape_passthrough(list, type_env),
+        // Shape-preserving binary point-wise: output type == first
+        // operand's type. Broadcasting cases are caught by HM
+        // elsewhere; here we fall through to None if the first
+        // operand's type is not derivable and try the second.
+        //
+        // RT-205 round-3 F-B: `maximum` and `minimum` were the wrong
+        // names. The canonical IR names per spec/05 §2.1 and §3.4 are
+        // `max_elem` (Tier 1) and `min_elem` (Tier 2). The lowerer
+        // accepts `max_elem`/`min_elem` (lower.rs:1329-1330);
+        // `maximum`/`minimum` do not appear anywhere in the IR
+        // vocabulary, so the old allowlist never matched.
+        //
+        // `lt` is an alias for `cmplt` accepted at lowerer.rs:3913
+        // (kept). `gte`, `lte`, `neq` are Tier 2 comparison ops
+        // (spec/05 §3.2) accepted by the lowerer (lower.rs:1349-1352)
+        // and added here so passthrough recognizes them. `and`, `or`
+        // are bool binaries (lower.rs:1353-1354).
+        "add" | "sub" | "mul" | "div" | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte"
+        | "lte" | "eq" | "neq" | "and" | "or" => derive_binary_shape_passthrough(list, type_env),
+        _ => None,
+    }
+}
+
+/// Derive the output tensor type of a shape-preserving unary
+/// point-wise call: it equals the type of the single argument.
+/// Recurses through nested apps so e.g. `relu(conv2d(...))`
+/// resolves to conv2d's derived output type, peeking through any
+/// borrow wrapper as usual (RT-205 round-2 F2).
+fn derive_unary_shape_passthrough(list: &deep::List, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let arg = list.elements.get(3)?;
+    resolve_let_value_tensor_type(arg, type_env)
+}
+
+/// Derive the output tensor type of a shape-preserving binary
+/// point-wise call: it equals the type of whichever operand is
+/// concretely resolvable (typically the first). Broadcasting and
+/// dtype-promotion cases are caught by HM elsewhere; this helper
+/// only needs to surface a shape that the next validator arm can
+/// inspect (RT-205 round-2 F2).
+fn derive_binary_shape_passthrough(list: &deep::List, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let lhs = list.elements.get(3)?;
+    if let Some(ty) = resolve_let_value_tensor_type(lhs, type_env) {
+        return Some(ty);
+    }
+    let rhs = list.elements.get(4)?;
+    resolve_let_value_tensor_type(rhs, type_env)
+}
+
+/// Resolve the tensor type expression of a let-binding RHS or any
+/// nested sub-expression: try the borrow-aware var/lit lookup first,
+/// and if that fails recurse into the sub-expression as another
+/// recognized shape-sensitive call. Used by the unary and binary
+/// passthrough helpers (RT-205 round-2 F2).
+fn resolve_let_value_tensor_type(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    if let Some(ty) = arg_tensor_type_expr(expr, type_env) {
+        return Some(ty);
+    }
+    // Peek through borrow before recursing in case a wrapper op
+    // appears under an `&` borrow (uncommon but cheap).
+    let inner = peel_borrow(expr);
+    derive_ir_builtin_output_type(inner, type_env)
+}
+
+/// Derive a conv2d call's output tensor type (rank-4 `[N, F, outH, outW]`
+/// with the input's precision) from its argument types and literal
+/// stride/padding values. Returns `None` if any non-batch input dim
+/// or any kernel dim is non-concrete, stride/padding are not int
+/// literals, ranks are wrong, or the output dims would be non-positive.
+///
+/// RT-205 round-3 F-C: input axis 0 (batch) is allowed to be
+/// `Dim::NonConcrete` per spec/05 §4.5. When the input batch is
+/// symbolic, the synthesized output type preserves the input
+/// tensor's raw batch-dim expression (e.g. `(d-name {} batch)`)
+/// rather than forcing a `d-lit`. This lets downstream chained
+/// conv2d calls resolve `&y` to the symbolic-batch type.
+fn derive_conv2d_output_type(list: &deep::List, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let input_ty = list
+        .elements
+        .get(3)
+        .and_then(|e| arg_tensor_type_expr(e, type_env))?;
+    let kernel_ty = list
+        .elements
+        .get(4)
+        .and_then(|e| arg_tensor_type_expr(e, type_env))?;
+    let input_dims = tensor_dims_from_type_expr(&input_ty)?;
+    let kernel_dims = tensor_dims_from_type_expr(&kernel_ty)?;
+    if input_dims.len() != 4 || kernel_dims.len() != 4 {
+        return None;
+    }
+    // Issue #216: cast-aware so `conv2d(x, k, cast(1, int32), cast(0, int32))`
+    // surfaces the same derived output type as the bare-literal form.
+    let stride = extract_int_for_dim(list.elements.get(5)?)?;
+    let padding = extract_int_for_dim(list.elements.get(6)?)?;
+    if stride <= 0 || padding < 0 {
+        return None;
+    }
+    // Capture the input tensor's raw batch-dim Expr (axis 0) so a
+    // symbolic batch can pass through verbatim into the synthesized
+    // output type. axes 1-3 must be concrete literals (RT-205 r3 F-C).
+    let input_dim_exprs = tensor_dim_exprs_from_type_expr(&input_ty)?;
+    if input_dim_exprs.len() != 4 {
+        return None;
+    }
+    let batch_dim_expr = input_dim_exprs[0].clone();
+    let f = match kernel_dims[0] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let in_h = match input_dims[2] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let in_w = match input_dims[3] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let k_h = match kernel_dims[2] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    let k_w = match kernel_dims[3] {
+        DeepDimKind::Lit(v) => v,
+        DeepDimKind::NonConcrete => return None,
+    };
+    // `conv2d_output_extent` returns None on integer overflow (RT-205
+    // round-2 F1); in that case there's no valid output tensor type
+    // to register, so the caller falls back to no extension and the
+    // validator's own arm will emit the overflow diagnostic.
+    let out_h = conv2d_output_extent(in_h, k_h, stride, padding)?;
+    let out_w = conv2d_output_extent(in_w, k_w, stride, padding)?;
+    if out_h <= 0 || out_w <= 0 {
+        return None;
+    }
+    // Build `(t-tensor {} <batch-expr> (d-lit {} f) (d-lit {} out_h)
+    // (d-lit {} out_w) <precision-expr>)` from the input's precision
+    // and the captured batch-dim expression (which may be a symbolic
+    // `(d-name {} ...)` per RT-205 r3 F-C).
+    let prec_expr = tensor_precision_expr(&input_ty)?;
+    Some(build_tensor_type_expr_with_batch(
+        batch_dim_expr,
+        &[f, out_h, out_w],
+        prec_expr,
+    ))
+}
+
+/// Return the raw Deep `Expr` for each dimension in a `(t-tensor {} dim1
+/// dim2 ... prec)`. Unlike `tensor_dims_from_type_expr`, which returns a
+/// `DeepDimKind` flattening, this preserves the original
+/// `(d-name {} batch)` / `(d-var {} ...)` / `(d-lit {} N)` sub-expression
+/// so the caller can carry it forward verbatim when synthesizing a
+/// derived tensor type (RT-205 round-3 F-C, symbolic batch propagation).
+fn tensor_dim_exprs_from_type_expr(expr: &deep::Expr) -> Option<Vec<deep::Expr>> {
+    let list = match expr {
+        deep::Expr::List(list, _) => list,
+        _ => return None,
+    };
+    if get_tag(list) == Some("t-ref") {
+        return children(list)
+            .first()
+            .and_then(tensor_dim_exprs_from_type_expr);
+    }
+    if get_tag(list) != Some("t-tensor") {
+        return None;
+    }
+    let kids = children(list);
+    if kids.is_empty() {
+        return None;
+    }
+    Some(kids[..kids.len().saturating_sub(1)].to_vec())
+}
+
+/// Extract the precision sub-expression (last child) of a
+/// `(t-tensor {} dim1 dim2 ... precision)` expression. Returns the
+/// raw Deep `Expr` so it can be re-used unchanged when synthesizing
+/// a derived tensor type.
+fn tensor_precision_expr(ty: &deep::Expr) -> Option<deep::Expr> {
+    let deep::Expr::List(list, _) = ty else {
+        return None;
+    };
+    if get_tag(list) == Some("t-ref") {
+        return children(list).first().and_then(tensor_precision_expr);
+    }
+    if get_tag(list) != Some("t-tensor") {
+        return None;
+    }
+    let kids = children(list);
+    kids.last().cloned()
+}
+
+/// Build a synthetic `(t-tensor {} <batch-dim-expr> (d-lit {} d1)
+/// (d-lit {} d2) ... prec)`, placing a verbatim Deep expression at
+/// axis 0 (the batch dim) and integer literals for the remaining
+/// axes. Used to preserve symbolic batch (`(d-name {} batch)`) when
+/// deriving a chained conv2d's output type (RT-205 round-3 F-C).
+/// Spans are zeroed because the derived type is synthetic; downstream
+/// lookups care only about the structural shape.
+fn build_tensor_type_expr_with_batch(
+    batch_dim: deep::Expr,
+    other_dims: &[i64],
+    prec: deep::Expr,
+) -> deep::Expr {
+    let zero = zero_span();
+    let empty_meta = || deep::MetaMap { entries: vec![] };
+    let make_d_lit = |v: i64| {
+        deep::Expr::List(
+            deep::List {
+                elements: vec![
+                    deep::Expr::Atom(deep::Atom::Symbol("d-lit".to_string()), zero),
+                    deep::Expr::Map(empty_meta(), zero),
+                    deep::Expr::Atom(deep::Atom::Int(v), zero),
+                ],
+            },
+            zero,
+        )
+    };
+    let mut elements = vec![
+        deep::Expr::Atom(deep::Atom::Symbol("t-tensor".to_string()), zero),
+        deep::Expr::Map(empty_meta(), zero),
+    ];
+    elements.push(batch_dim);
+    for &d in other_dims {
+        elements.push(make_d_lit(d));
+    }
+    elements.push(prec);
+    deep::Expr::List(deep::List { elements }, zero)
+}
+
+/// Look up positional arg `idx` of a `conv2d` call, attempt to
+/// extract it as an integer literal, and emit a clear diagnostic if
+/// the arg is missing or non-literal.
+///
+/// `label` names the role (`"stride"` / `"padding"`) for the error
+/// message. Returns `Some(value)` on success and `None` when an error
+/// was pushed (the caller should bail to avoid piling on cascading
+/// diagnostics).
+fn extract_typed_scalar_literal(
+    list: &deep::List,
+    idx: usize,
+    label: &str,
+    errors: &mut Vec<CheckError>,
+) -> Option<i64> {
+    let Some(arg) = list.elements.get(idx) else {
+        // Arity mismatch is caught elsewhere; bail without piling on.
+        return None;
+    };
+    // Issue #216: cast-aware so a cast-wrapped literal (e.g.
+    // `conv2d(x, k, cast(0, int32), 0)`) lands the precise
+    // positive-stride / non-negative-padding diagnostic instead of the
+    // misleading "requires a literal integer stride" message that
+    // pre-fix appeared whenever the literal was wrapped.
+    match extract_int_for_dim(arg) {
+        Some(v) => Some(v),
+        None => {
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                format!("IR builtin `conv2d` requires a literal integer {label}"),
+                vec![format!(
+                    "Pass `{label}` as a constant int literal, not a variable or expression"
+                )],
+            ));
+            None
+        }
     }
 }
 
@@ -5025,24 +6180,44 @@ fn ir_builtin_axis_dim(
     let tensor_dims = list
         .elements
         .get(3 + tensor_arg_index)
-        .and_then(|expr| expr_type_expr(expr, type_env))
+        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
         .and_then(|ty| tensor_dims_from_type_expr(&ty))?;
     // Negative axes index from the end; normalize against the operand
     // rank so this concrete-extent check inspects the same axis the op
     // actually reduces.
+    // Issue #216: cast-aware so a `cast(N, int32)`-wrapped axis arg
+    // still resolves through to the operand's concrete dim.
     let raw_axis = list
         .elements
         .get(3 + axis_arg_index)
-        .and_then(extract_int_literal)?;
+        .and_then(extract_int_for_dim)?;
     let axis = normalize_static_axis(tensor_dims.len(), raw_axis)?;
     tensor_dims.get(axis).copied()
 }
 
-fn app_result_type_is_concrete(list: &deep::List) -> bool {
-    get_meta(list)
-        .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
-        .map(|(_, ty)| type_expr_is_ir_concrete(ty))
-        .unwrap_or(false)
+/// Resolve the tensor type expression of a callsite argument, peeking
+/// through a `(borrow {} <inner>)` wrapper if present.
+///
+/// Surf source idiomatically passes tensors to shape-sensitive IR
+/// builtins via borrows (e.g. the `Std.Nn.Conv.conv2d_small` sig
+/// requires `&tensor[...]`). The validator's lookup helpers need to
+/// see through that wrapper to find the underlying tensor type in the
+/// IR type environment; otherwise the dim-concreteness checks in the
+/// `conv2d`, `mean`, and `layer_norm` arms silently no-op on borrowed
+/// inputs (see issue #186).
+fn arg_tensor_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let inner = peel_borrow(expr);
+    expr_type_expr(inner, type_env)
+}
+
+fn peel_borrow(expr: &deep::Expr) -> &deep::Expr {
+    if let deep::Expr::List(list, _) = expr
+        && get_tag(list) == Some("borrow")
+        && let Some(child) = children(list).first()
+    {
+        return peel_borrow(child);
+    }
+    expr
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5413,13 +6588,92 @@ fn deep_type_to_resolved_type(
 
 // ── Declaration collection (first pass) ──────────────────────────
 
+/// Which declaration kinds a `collect_declarations` sub-pass should process.
+///
+/// `deftype` constructor schemes expand transparent type aliases in their
+/// field types at registration (see `AdtRegistry::expand_aliases`), so every
+/// `typealias` must be in the registry first. Running `Aliases` over all
+/// top-level items before `Rest` guarantees that even for a forward reference
+/// — an alias declared textually after the `deftype` that uses it, as in
+/// `Hull.Ast` where `type EffectRow = List[Effect]` follows `type Type = ...
+/// | TArrow(Type, Type, EffectRow) | ...`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclPhase {
+    /// Process only `typealias` declarations.
+    Aliases,
+    /// Process everything except `typealias` (`deftype`, `defsig`, ...).
+    Rest,
+}
+
+/// Run the two-phase declaration collection over `items` (already flattened
+/// past `module` wrappers): register all type aliases, then everything else.
+fn collect_all_declarations(
+    items: &[&deep::Expr],
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &mut AdtRegistry,
+    errors: &mut Vec<CheckError>,
+) {
+    report_duplicate_defs(items, errors);
+    for expr in items {
+        collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Aliases);
+    }
+    for expr in items {
+        collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Rest);
+    }
+}
+
+/// Reject two same-name `def` declarations in one program (chelis#258).
+///
+/// A def's value binding is silent last-write-wins (`env.bind` →
+/// `HashMap::insert`, like the `defsig` arm of `collect_declarations`), and
+/// Chelis does not dispatch same-name `def`s by argument arity or tensor
+/// rank. So two `def f`s whose sigs differ only in rank leave just one arm
+/// reachable: callers of the other rank fire a confusing `DimensionMismatch`
+/// at the call site instead of a clear error at the redundant definition.
+/// This mirrors the duplicate-`deftype` / duplicate-`typealias` rejection
+/// already in `collect_declarations`, moving the diagnostic to the
+/// definition site.
+///
+/// Scoped to `def` (not `defsig`): a `defsig` legitimately co-occurs with a
+/// synthesized signature for the same name (an inline-annotated `def`
+/// desugars to both a `defsig` and a `def`), so a same-name `defsig` is not
+/// on its own a duplicate definition. `items` is already flattened past
+/// `module` wrappers, and the prelude lives in the builtin env rather than as
+/// `def` nodes here, so only genuine in-program user redefinitions match.
+fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for expr in items {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("def") {
+            continue;
+        }
+        let Some(name) = children(list).first().and_then(symbol_name) else {
+            continue;
+        };
+        if !seen.insert(name) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DuplicateDefinition,
+                format!("duplicate definition: `{name}` is defined more than once"),
+                vec![format!(
+                    "rename one of the `{name}` definitions: Chelis does not dispatch same-name `def`s by argument type or rank"
+                )],
+            ));
+        }
+    }
+}
+
 fn collect_declarations(
     expr: &deep::Expr,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
-    _errors: &mut Vec<CheckError>,
+    errors: &mut Vec<CheckError>,
+    phase: DeclPhase,
 ) {
     let list = match expr {
         deep::Expr::List(list, _) => list,
@@ -5431,10 +6685,39 @@ fn collect_declarations(
         None => return,
     };
 
+    // Aliases register first so `deftype` field-type alias expansion sees a
+    // fully-populated alias table; every other decl kind runs in the second
+    // sub-pass.
+    let in_phase = match phase {
+        DeclPhase::Aliases => tag == "typealias",
+        DeclPhase::Rest => tag != "typealias",
+    };
+    if !in_phase {
+        return;
+    }
+
     let kids = children(list);
 
     match tag {
         "deftype" => {
+            // Reject same-namespace collisions (another `deftype`, a
+            // `typealias`, or a prelude ADT registered earlier in this
+            // program). Without this check `AdtRegistry::defs` is
+            // silently last-write-wins, which propagates wrong
+            // constructor types and (per `compute_tensor_carrying_adts`
+            // in linearity.rs) order-dependent borrow semantics.
+            if let Some(name) = kids.first().and_then(symbol_name)
+                && let Some(prior_kind) = adt_reg.existing_kind(name)
+            {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DuplicateDefinition,
+                    format!(
+                        "duplicate type definition: `{name}` was already declared as a {prior_kind}"
+                    ),
+                    vec![format!("rename one of the `{name}` declarations")],
+                ));
+                return;
+            }
             let ctors = adt_reg.register_deftype(kids, vg);
             for (name, scheme) in ctors {
                 env.bind(name, scheme);
@@ -5455,6 +6738,16 @@ fn collect_declarations(
             if kids.len() >= 3
                 && let Some(name) = symbol_name(&kids[0])
             {
+                if let Some(prior_kind) = adt_reg.existing_kind(name) {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DuplicateDefinition,
+                        format!(
+                            "duplicate type definition: `{name}` was already declared as a {prior_kind}"
+                        ),
+                        vec![format!("rename one of the `{name}` declarations")],
+                    ));
+                    return;
+                }
                 let params = match &kids[1] {
                     deep::Expr::List(list, _) => list
                         .elements
@@ -5631,6 +6924,26 @@ fn infer_top_level(
                 }
             }
             check_declared_dvars_rigid(&declared_dvars, subst, errors);
+            // chelis#272 list-uniformity check. A list literal of
+            // tensors with *mismatched concrete* element axes joins to a
+            // `Wildcard` along the differing axis (the deliberate #218
+            // bare-`concat` ergonomic). That wildcard is a defensible
+            // "I don't know the shape" result for an unannotated bare
+            // list, but it must NOT silently satisfy a declared element
+            // type that names a rigid/named dimension — `List[tensor[k]]`
+            // promises every element has the *same* length `k`. A body
+            // like `def make[k](a: tensor[2], b: tensor[3])
+            //   -> List[tensor[k]] = [a, b]` produces
+            // `List<tensor[Wildcard]>`; the wildcard unifies permissively
+            // with the rigid `k` and leaves it unbound, so neither the
+            // pin-to-literal nor the distinct-collapse arm of
+            // `check_declared_dvars_rigid` fires. Flag that mismatch here
+            // by comparing the declared return's list-element dims
+            // against the resolved body's. (The `[k, m]` variant is
+            // already caught above: the tightened Cons-join now unifies
+            // the two rigid dims, and `check_declared_dvars_rigid`
+            // reports the collapse.)
+            check_list_elem_rigid_dim_vs_wildcard(&decl_ty, &resolved_body, errors);
             // Implicit-copy fan-out v3 Shape A relaxed retry: if the
             // initial unify fails and the body's tail position resolves
             // to a `(var x)` reference whose declared return is owned
@@ -5988,6 +7301,39 @@ fn infer_expr(
                             Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error => {
                                 Type::Ref(Box::new(resolved))
                             }
+                            // Issue #256: when the borrow inner is still an
+                            // unresolved type variable (e.g. the output of a
+                            // polymorphic-return call whose dim variables
+                            // have not yet been pinned at this point in
+                            // left-to-right inference), defer the
+                            // tensor-or-carrier classification to subsequent
+                            // unification. Wrapping as `Type::Ref(Type::Var)`
+                            // lets the surrounding flow's expected argument
+                            // type (e.g. a sig parameter `&tensor[..]`) pin
+                            // the variable through unification. If the
+                            // variable never gets pinned to a tensor or
+                            // tensor-carrying type, the later unification
+                            // failure surfaces the same diagnostic via the
+                            // mismatched call site -- there is no silent
+                            // accept. The linearity checker's
+                            // `expr_is_owned_or_borrow_linear` still rejects
+                            // a stamped `(t-var ...)` if no pinning happens.
+                            //
+                            // Soundness ledger (issue #256 round 2): record
+                            // the inner type variable so the inference driver
+                            // can re-check it against the *final*
+                            // substitution after the def body completes. The
+                            // deferral is sound only when the variable is
+                            // eventually pinned to a tensor or tensor carrier;
+                            // a fully-polymorphic consumer (e.g.
+                            // `consume_any[a](t: a)`) never pins it, and a
+                            // genuinely-non-tensor value would otherwise slip
+                            // past every gate. See
+                            // `validate_deferred_borrow_vars`.
+                            Type::Var(tv) => {
+                                subst.record_deferred_borrow_var(tv);
+                                Type::Ref(Box::new(Type::Var(tv)))
+                            }
                             _ => {
                                 errors.push(CheckError::new(
                                     CheckErrorKind::TypeMismatch,
@@ -6287,6 +7633,64 @@ fn infer_app(
         );
     }
 
+    if matches!(func_name.as_deref(), Some("shrink")) {
+        return infer_shrink_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
+    if matches!(func_name.as_deref(), Some("pad")) {
+        return infer_pad_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
+    if matches!(func_name.as_deref(), Some("stride")) {
+        return infer_stride_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
+    if matches!(
+        func_name.as_deref(),
+        Some(
+            "reduce_window_max" | "reduce_window_min" | "reduce_window_sum" | "reduce_window_mean"
+        )
+    ) {
+        return infer_reduce_window_app(
+            list,
+            func_name.as_deref().unwrap(),
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
     let ctor_lookup_name = func_name.as_ref().and_then(|fname| {
         adt_reg
             .lookup_variant(fname)
@@ -6298,9 +7702,20 @@ fn infer_app(
             })
     });
 
+    // The call site uses positional `(app)` syntax here (named-field
+    // record construction lowers through a different builder, not
+    // through `infer_app`). When two ADTs in the dep graph define
+    // same-named constructors with different shapes (chelis#148: e.g.
+    // Coral.Frame.Column.IntCol is positional, School.Data.Dataset.IntCol
+    // is record), prefer the positional variant for this call site so
+    // the call dispatches to the matching ADT instead of erroring on
+    // the colliding record variant. Only emit the "must use named
+    // fields" error when EVERY same-named variant in scope is record-
+    // shaped, which is the original single-package case the error was
+    // written for.
     if let Some(ref fname) = ctor_lookup_name
         && let Some((_adt_name, variant)) = adt_reg
-            .lookup_variant(fname)
+            .lookup_variant_preferring_shape(fname, CallShape::Positional)
             .or_else(|| adt_reg.lookup_variant_terminal_unique(fname))
         && !variant.fields.is_empty()
         && variant
@@ -6357,6 +7772,133 @@ fn infer_app(
     // If func or any arg is Error, propagate
     if matches!(func_ty, Type::Error) || arg_tys.iter().any(|t| matches!(t, Type::Error)) {
         return Type::Error;
+    }
+
+    // Issue Chelis-Lang/chelis#218 R3 HIGH-CONCAT: when `Cons` is
+    // called with two concrete tensor-typed args (head: tensor,
+    // tail: List<tensor>), skip the generic per-dim equality
+    // unification and produce a per-axis join (Lit(n) when both
+    // dims are Lit(n) and equal; Wildcard otherwise). The generic
+    // `unify` recursion walks dims pairwise and rejects
+    // `Lit(2) vs Lit(3)`, which breaks `concat([a, b], 0)` after
+    // the to_tensor source fix made nested-list literals emit
+    // concrete dims.
+    //
+    // Precondition guards:
+    //   * exactly two args (Cons signature)
+    //   * head is a concrete tensor type
+    //   * tail is `List<tensor[...]>` with a concrete tensor element
+    //   * head and tail-element have matching rank (no rank join;
+    //     mismatched ranks remain structural errors)
+    //   * head and tail-element have matching precision (no
+    //     precision join; mismatched precisions would mask real
+    //     type errors)
+    //
+    // When any precondition fails, fall through to the generic
+    // unify path so other Cons shapes (e.g. `Cons(scalar, list)` or
+    // `Cons(head, Nil)` where `Nil`'s tvar binds the element type)
+    // keep their existing semantics.
+    if matches!(func_name.as_deref(), Some("Cons")) && arg_tys.len() == 2 {
+        let head_resolved = subst.apply(&arg_tys[0]);
+        let tail_resolved = subst.apply(&arg_tys[1]);
+        if let (Type::Tensor(head_dims, head_prec), Type::Adt(list_name, list_args)) =
+            (&head_resolved, &tail_resolved)
+            && list_name == "List"
+            && list_args.len() == 1
+            && let Type::Tensor(tail_dims, tail_prec) = subst.apply(&list_args[0])
+        {
+            if head_dims.len() != tail_dims.len() {
+                // chelis#255: surface the rank-uniform rule and the
+                // reshape/flatten remediation in the diagnostic itself,
+                // so users (and agents reading JSON output) are not
+                // left guessing why a `List[tensor[k, f32]]` rejected
+                // a rank-mixed literal. The dim slot `k` is a
+                // dimension variable, not a shape-vector variable;
+                // see spec/04-type-system.md §4.5.1.
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "list element rank mismatch: {} dims vs {} dims; \
+                             List[tensor[...]] requires rank-uniform elements \
+                             (the dim slot is a dimension variable, not a \
+                             shape-vector variable). Reshape or flatten \
+                             elements to a common rank before listing \
+                             (spec/04-type-system.md §4.5.1).",
+                            head_dims.len(),
+                            tail_dims.len(),
+                        ),
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+            if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
+                errors.push(te.into());
+                return Type::Error;
+            }
+            // Per-axis join (chelis#218 concat ergonomics, tightened
+            // by chelis#272). Resolve each dim through the current
+            // substitution first so already-bound dim variables compare
+            // as their concrete value.
+            //
+            //   * equal concrete literals or equal names  -> keep them;
+            //   * genuinely-mismatched concrete literals
+            //     (e.g. `Lit(2)` vs `Lit(3)`) or mismatched concrete
+            //     names                                    -> widen to
+            //     `Wildcard`. This is the deliberate #218 behavior that
+            //     lets bare `concat([a, b], axis)` accept ragged
+            //     concrete axes; and
+            //   * any pair that involves a dimension *variable*
+            //     (a declared rigid dim parameter such as `k`/`m`)
+            //     -> `unify_dim` the two dims instead of widening.
+            //
+            // The last arm is the #272 fix: the old `_ => Wildcard`
+            // erased named dim variables, so a list body that violated
+            // the §4.4 rigid-distinct-dim guarantee
+            // (`def make[k, m](a: tensor[k], b: tensor[m])
+            //   -> List[tensor[k]] = [a, b]`) collapsed `k`/`m` to a
+            // wildcard before `check_declared_dvars_rigid` ran. Unifying
+            // them instead keeps the surviving evidence: distinct rigid
+            // dims unify with each other (the guard then reports the
+            // collapse) and a `(rigid, concrete)` pair pins the rigid
+            // dim to a literal (the guard reports the pin). A
+            // `unify_dim` failure here (which the permissive
+            // Name/Lit/Wildcard arms make rare) surfaces as a structural
+            // dimension mismatch rather than being silently widened.
+            let mut joined_dims: Vec<Dim> = Vec::with_capacity(head_dims.len());
+            for (h, t) in head_dims.iter().zip(tail_dims.iter()) {
+                let hr = subst.apply_dim(h);
+                let tr = subst.apply_dim(t);
+                let joined = match (&hr, &tr) {
+                    (Dim::Lit(a), Dim::Lit(b)) if a == b => Dim::Lit(*a),
+                    (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Dim::Name(n1.clone()),
+                    // Mismatched concrete dims (literal/literal or
+                    // name/name): the deliberate #218 ragged-axis
+                    // widening. Neither side is a dim variable, so there
+                    // is no rigid-dim promise to preserve here.
+                    (Dim::Lit(_), Dim::Lit(_))
+                    | (Dim::Name(_), Dim::Name(_))
+                    | (Dim::Lit(_), Dim::Name(_))
+                    | (Dim::Name(_), Dim::Lit(_)) => Dim::Wildcard,
+                    // At least one side is a dim variable (or a
+                    // wildcard). Unify so rigid dim parameters keep their
+                    // identity and `check_declared_dvars_rigid` can fire.
+                    _ => {
+                        if let Err(te) = unify_dim(&hr, &tr, subst) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        subst.apply_dim(&hr)
+                    }
+                };
+                joined_dims.push(joined);
+            }
+            let joined_prec = subst.apply_tensor_prec(head_prec);
+            let elem = Type::Tensor(joined_dims, joined_prec);
+            return Type::Adt("List".to_string(), vec![elem]);
+        }
     }
 
     let ret_tv = vg.fresh_type();
@@ -6420,6 +7962,7 @@ fn infer_app(
         "sub",
         "div",
         "neg",
+        "recip",
         "exp",
         "log",
         "sin",
@@ -6465,11 +8008,20 @@ fn infer_app(
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                         }
                         "add" | "mul" | "sub" | "div" | "max_elem" | "min_elem" | "neg" => {
+                            // `div` is numeric (not float-only) so that
+                            // integer Decimal arithmetic in chelis-std
+                            // (e.g. `Std.Decimal::normalize` doing
+                            // `div(coefficient, cast(10, int64))` for
+                            // scale shifts) continues to type-check.
+                            // The IEEE-754 semantics in
+                            // spec/05-risc-primitives.md §2.1 apply
+                            // for float operands; integer operands use
+                            // C/Rust native truncating division.
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
                         "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
-                        | "gelu" => {
+                        | "gelu" | "recip" => {
                             // WS-A8 / RT-3 F3: spec/04-type-system.md §5.4
                             // restricts transcendental ops to float
                             // precisions (f32, f64, bf16, f16). The
@@ -6521,6 +8073,7 @@ fn infer_app(
                                 | "tanh"
                                 | "silu"
                                 | "gelu"
+                                | "recip"
                         );
                         let (kind, message, hints) = if is_transcendental
                             && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
@@ -6646,10 +8199,12 @@ fn infer_app(
                 // axis range is validated here. Negative axes index from
                 // the end via `normalize_static_axis`, consistent with
                 // the reductions and gather/scatter.
+                // Issue #216: cast-aware so `softmax(x, cast(N, int32))`
+                // surfaces the bounds-check diagnostic at infer.
                 if fname == "softmax"
                     && let Some(first_arg) = arg_tys.first()
                     && let Type::Tensor(dims, _) = type_for_readonly_check(first_arg, subst)
-                    && let Some(raw) = kids.get(2).and_then(extract_int_literal)
+                    && let Some(raw) = kids.get(2).and_then(extract_int_for_dim)
                     && normalize_static_axis(dims.len(), raw).is_none()
                 {
                     errors.push(CheckError::new(
@@ -6930,7 +8485,14 @@ fn infer_app(
                             check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
                     }
                     "conv2d" => {
-                        result_ty = check_conv2d_signature(&arg_tys, &result_ty, vg, subst, errors);
+                        result_ty = check_conv2d_signature(
+                            &kids[1..],
+                            &arg_tys,
+                            &result_ty,
+                            vg,
+                            subst,
+                            errors,
+                        );
                     }
                     _ => {}
                 }
@@ -7249,8 +8811,12 @@ fn infer_app(
                         } else {
                             None
                         };
+                        // Issue #216: cast-aware so `shape(x, cast(N, int32))`
+                        // (the idiomatic form from issue #206 for runtime-dim
+                        // reshape) surfaces the same diagnostic as the bare-
+                        // literal form.
                         if let Some(axis_expr) = kids.get(2)
-                            && let Some(axis) = extract_int_literal(axis_expr)
+                            && let Some(axis) = extract_int_for_dim(axis_expr)
                         {
                             if axis < 0 {
                                 errors.push(CheckError::new(
@@ -7971,7 +9537,10 @@ fn infer_app(
                                     return Type::Error;
                                 }
                                 // Negative axes index from the end.
-                                let raw_axis = kids.get(2).and_then(extract_int_literal);
+                                // Issue #216: cast-aware so a
+                                // `cast(N, int32)`-wrapped split axis still
+                                // surfaces the bounds diagnostic at infer.
+                                let raw_axis = kids.get(2).and_then(extract_int_for_dim);
                                 let axis = match raw_axis {
                                     Some(raw) => match normalize_static_axis(dims.len(), raw) {
                                         Some(axis) => axis,
@@ -8257,6 +9826,92 @@ fn infer_app(
                             return Type::Error;
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&acc_ty)]);
+                    }
+                    "tensor_scan" => {
+                        // `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
+                        //
+                        // Issue #257: host-runtime scan that produces a tensor
+                        // directly, sidestepping the right-recursive list build
+                        // that overflows the worker stack at ~10k elements.
+                        // Element type `T` must resolve to a concrete scalar
+                        // Prim before tensor lowering; the runtime arm enforces
+                        // that at execution time. At type-check time we accept
+                        // any Type::Prim and let unification do the rest.
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let elem_ty = vg.fresh_type();
+                        let int64 = Type::Prim(Prim::Int64);
+                        let list_expr = deep::Expr::List(list.clone(), zero_span());
+                        // arg 0: initial accumulator of type T.
+                        if let Err(te) = unify(&subst.apply(&arg_tys[0]), &elem_ty.clone(), subst) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "tensor_scan",
+                                "expects an initial value whose type matches the callback element type",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        // arg 1: callback `(T, int64) -> T`.
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[1]),
+                            &Type::Fn(
+                                vec![elem_ty.clone(), int64.clone()],
+                                Box::new(elem_ty.clone()),
+                            ),
+                            subst,
+                        ) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "tensor_scan",
+                                "expects a callback (T, int64) -> T",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        // arg 2: length `n: int64`.
+                        if let Err(te) = unify(&subst.apply(&arg_tys[2]), &int64, subst) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "tensor_scan",
+                                "expects a length `n: int64`",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        // Element type must be a concrete scalar Prim once
+                        // unified. If it's still a Var the call site is
+                        // under-constrained; if it's a Tensor/Adt/Fn the call
+                        // is invalid. We only allow primitive scalars so the
+                        // host-runtime arm can determine precision.
+                        let resolved_elem = subst.apply(&elem_ty);
+                        let precision = match &resolved_elem {
+                            Type::Prim(p) => TensorPrec::Concrete(*p),
+                            Type::Var(tv) => {
+                                // Defer: leave the precision as the same type
+                                // variable as the element. `Subst::apply` will
+                                // resolve it once outer inference pins T.
+                                // Using F32 as a placeholder (the previous
+                                // behavior) silently lies about the dtype
+                                // when T is later pinned to int64 or bool.
+                                TensorPrec::Var(*tv)
+                            }
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &list_expr,
+                                        format!(
+                                            "tensor_scan element type must be a scalar primitive, got {other}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        };
+                        return Type::Tensor(vec![Dim::Wildcard], precision);
                     }
                     "partition" => {
                         if arg_tys.len() != 2 {
@@ -8764,9 +10419,23 @@ fn infer_app(
                     "to_tensor" => {
                         if let Some(first_arg) = arg_tys.first() {
                             // Bucket 4b: support arbitrarily-nested numeric/bool
-                            // lists. Each enclosing `List` adds one wildcard
-                            // outer dimension, and the innermost element type
-                            // must be a numeric or bool primitive.
+                            // lists. Each enclosing `List` adds one outer
+                            // dimension, and the innermost element type must
+                            // be a numeric or bool primitive.
+                            //
+                            // Issue Chelis-Lang/chelis#218 (R2 HIGH-A from
+                            // PR #211): when the argument is a statically-
+                            // resolvable Cons-chain literal, emit concrete
+                            // `Dim::Lit(n)` per axis instead of wildcards.
+                            // The wildcard fallback only fires when the
+                            // argument is variable-fed (e.g.
+                            // `to_tensor(items)`), where the shape is
+                            // genuinely unknown at type-check time. Emitting
+                            // concrete dims at this single source point
+                            // means every downstream consumer (reductions,
+                            // elementwise activations, anything that reads
+                            // the to_tensor app's `type:` metadata) sees a
+                            // sound shape instead of `Dim::Wildcard`.
                             let resolved = subst.apply(first_arg);
                             if matches!(resolved, Type::Var(_) | Type::Error) {
                                 return result_ty;
@@ -8789,7 +10458,19 @@ fn infer_app(
                                         ));
                                         return Type::Error;
                                     }
-                                    let dims = vec![Dim::Wildcard; rank];
+                                    // R2 HIGH-A: try the static-shape walker
+                                    // on the actual argument expression
+                                    // first. `kids[0]` is the `(var
+                                    // to_tensor)` callee; `kids[1]` is the
+                                    // argument expression. If the walker
+                                    // can't resolve a uniform shape
+                                    // (variable-fed argument, ragged
+                                    // literal, or unrecognized leaf), fall
+                                    // back to the legacy wildcard rank.
+                                    let dims = kids
+                                        .get(1)
+                                        .and_then(|arg| static_to_tensor_shape(arg, rank))
+                                        .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
                                     return Type::Tensor(dims, TensorPrec::Concrete(precision));
                                 }
                                 ToTensorPeel::Pending => return result_ty,
@@ -8966,6 +10647,20 @@ fn infer_app(
                             errors.push(te.into());
                             return Type::Error;
                         }
+                        // The padded (axis-1) dimension equals the `width`
+                        // argument. When `width` is a literal — including
+                        // `cast(N, int64)`, the form every caller uses —
+                        // propagate `Dim::Lit(N)` so the padded width is a
+                        // concrete dim that participates in shape checking.
+                        // A non-literal or non-positive width stays
+                        // `Dim::Wildcard` (the runtime validates the value).
+                        // `extract_int_for_dim` (not `extract_int_literal`)
+                        // is the cast-aware extractor used for dim contexts.
+                        let width_dim = children(list)
+                            .get(2)
+                            .and_then(extract_int_for_dim)
+                            .filter(|width| *width > 0)
+                            .map_or(Dim::Wildcard, Dim::Lit);
                         match seqs_ty {
                             Type::Adt(outer_name, outer_args)
                                 if outer_name == "List" && outer_args.len() == 1 =>
@@ -8981,7 +10676,7 @@ fn infer_app(
                                         match subst.apply(&inner_args[0]) {
                                             Type::Prim(precision) if precision.is_numeric() => {
                                                 return Type::Tensor(
-                                                    vec![Dim::Wildcard, Dim::Wildcard],
+                                                    vec![Dim::Wildcard, width_dim],
                                                     TensorPrec::Concrete(precision),
                                                 );
                                             }
@@ -9052,6 +10747,16 @@ fn infer_app(
                         return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                     }
                     "mmap_len" => return Type::Prim(Prim::Int64),
+                    // Hull Phase 0a: `process_run(cmd, args)` returns
+                    // `(exit_code, stdout, stderr)`. Eval/test-only; the build
+                    // backends reject it (see `reject_eval_only_builtins_host`).
+                    "process_run" => {
+                        return Type::Tuple(vec![
+                            Type::Prim(Prim::Int64),
+                            Type::Prim(Prim::String),
+                            Type::Prim(Prim::String),
+                        ]);
+                    }
                     _ => {}
                 }
             }
@@ -9226,12 +10931,21 @@ fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
 /// `TypeCheck-FreeDimVarUnification-F1` (SR-LEAK-A): the Shape A
 /// relaxed-retry must not accept a body whose return dim diverges from
 /// the declared return dim.
+///
+/// Name <-> Lit (issue Chelis-Lang/chelis#219, Option A): mirrors
+/// `unify_dim`'s permissive Name <-> Lit arm. The Shape A relaxed-
+/// retry's structural check must agree with `unify_dim` so the
+/// retry path doesn't silently reject a callee-shape pairing that
+/// the call-site unification would accept.
 fn dims_identical(d1: &Dim, d2: &Dim) -> bool {
     match (d1, d2) {
         (Dim::Wildcard, _) | (_, Dim::Wildcard) => true,
         (Dim::Name(n1), Dim::Name(n2)) => n1 == n2,
         (Dim::Lit(l1), Dim::Lit(l2)) => l1 == l2,
         (Dim::Var(v1), Dim::Var(v2)) => v1 == v2,
+        // Issue #219 Option A: Name and Lit count as identical for
+        // the Shape A relaxed-retry's structural check.
+        (Dim::Name(_), Dim::Lit(_)) | (Dim::Lit(_), Dim::Name(_)) => true,
         _ => false,
     }
 }
@@ -9382,9 +11096,14 @@ fn infer_permute_app(
         return Type::Error;
     };
 
+    // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
+    // axes reach the OOB-axis check and the unique-axis check at infer
+    // time instead of silently falling back to original-dim order (red
+    // team round 3 sibling sweep within the spec section 2.4 movement
+    // family).
     let Some(axes) = kids[2..]
         .iter()
-        .map(extract_int_literal)
+        .map(extract_int_for_dim)
         .collect::<Option<Vec<_>>>()
     else {
         return Type::Tensor(dims, prec);
@@ -9474,6 +11193,7 @@ fn infer_reshape_app(
         typed_nodes,
         total_nodes,
     );
+    let input_var_name = symbolic_dim_ref_name(&kids[1]).map(|s| s.to_string());
     match type_for_readonly_check(&input_ty, subst) {
         Type::Prim(precision) => {
             if let Some(shape_expr) = kids.get(2) {
@@ -9493,16 +11213,13 @@ fn infer_reshape_app(
                     errors.push(te.into());
                     return Type::Error;
                 }
-                let dims = list_literal_dims(shape_expr).unwrap_or_else(|| {
-                    let rank = list_literal_len(shape_expr).unwrap_or(1);
-                    vec![Dim::Wildcard; rank]
-                });
+                let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 return Type::Tensor(dims, TensorPrec::Concrete(precision));
             }
 
             Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision))
         }
-        Type::Tensor(_, precision) => {
+        Type::Tensor(input_dims, precision) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(
                     shape_expr,
@@ -9520,10 +11237,8 @@ fn infer_reshape_app(
                     errors.push(te.into());
                     return Type::Error;
                 }
-                let dims = list_literal_dims(shape_expr).unwrap_or_else(|| {
-                    let rank = list_literal_len(shape_expr).unwrap_or(1);
-                    vec![Dim::Wildcard; rank]
-                });
+                let dims =
+                    reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
                 return Type::Tensor(dims, precision);
             }
 
@@ -9561,6 +11276,1032 @@ fn infer_reshape_app(
     }
 }
 
+/// `shrink(&x, [[s0, e0], [s1, e1], ...]) -> tensor[e0-s0, e1-s1, ..., p]`
+///
+/// Per spec/05-risc-primitives.md §2.4, `shrink` slices a sub-tensor whose
+/// rank matches the input and whose i-th axis dim is `end_i - start_i`.
+/// The second argument is a list-of-pair-of-int32 with one entry per input
+/// axis. Each pair is `[start, end]` with `0 <= start < end <= input_dim[i]`.
+///
+/// Closes issue Chelis-Lang/chelis#187 on the type-system side: before this
+/// path was added, `shrink` was registered as `tensor_unop` (1-arg
+/// `&tensor -> tensor`) so `shrink(&x, bounds)` failed with
+/// `function arity mismatch: expected 1 args` even though the IR lowering
+/// at `crates/chelis-ir/src/lower.rs:4635-4647` reads bounds from `args[1]`.
+#[allow(clippy::too_many_arguments)]
+fn infer_shrink_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() != 3 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            "shrink expects a tensor and a list of [start, end] bounds pairs, one pair per axis"
+                .to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let bounds_ty = infer_expr(
+        &kids[2],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+
+    if matches!(input_ty, Type::Error) || matches!(bounds_ty, Type::Error) {
+        return Type::Error;
+    }
+
+    // The bounds argument must be a `List[List[Int32]]`.
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    let expected_bounds_ty = Type::Adt("List".to_string(), vec![int_list]);
+    if let Err(_te) = unify(&bounds_ty, &expected_bounds_ty, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "shrink expects a list of [start, end] int32 bounds pairs, got {}",
+                    subst.apply(&bounds_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let input_resolved = type_for_readonly_check(&input_ty, subst);
+    let (dims, prec) = match input_resolved {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("shrink expects tensor input, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    // Classify the (already desugared) Cons/Nil chain. The three-way
+    // result distinguishes "concrete literals" (validate precisely)
+    // from "structure looks fine but elements are non-literal" (defer
+    // to runtime, output wildcards) from "structurally malformed"
+    // (reject at infer with a clear axis-tagged message). See PR #214
+    // red team round 1 finding R1-F1.
+    let bounds = match cons_chain_int_pairs(&kids[2]) {
+        PairListShape::Literal(pairs) => pairs,
+        PairListShape::NonLiteralLiterals | PairListShape::Unknown => {
+            return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+        }
+        PairListShape::Malformed { axis, reason } => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("shrink axis {axis} pair {reason}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    if bounds.len() != dims.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "shrink expects {} bounds pairs for rank {} tensor, got {}",
+                    dims.len(),
+                    dims.len(),
+                    bounds.len()
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let mut out_dims = Vec::with_capacity(dims.len());
+    for (axis, ((start, end), dim)) in bounds.iter().zip(dims.iter()).enumerate() {
+        if *start < 0 || *end < 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("shrink axis {axis} bound [{start}, {end}] has negative endpoint"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        if *start >= *end {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
+                    ),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        if let Dim::Lit(input_dim) = dim
+            && *end > *input_dim
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {input_dim}"
+                    ),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        out_dims.push(Dim::Lit(end - start));
+    }
+
+    Type::Tensor(out_dims, prec)
+}
+
+/// `stride(&x, s0, s1, ...) -> tensor[ceil_div(d0, s0), ...]`
+///
+/// Per spec/05-risc-primitives.md §2.4, `stride` takes every `s_i`-th
+/// element along axis i; the i-th output dim is `ceil(input_dim[i] /
+/// s_i)`. The strides are passed as variadic int32 args, one per input
+/// axis. Zero or negative strides are rejected.
+///
+/// Closes issue Chelis-Lang/chelis#187 on the type-system side -- before
+/// this path was added, `stride` was registered as `tensor_unop` (arity
+/// 1) so `stride(&x, 1, 2)` failed with `function arity mismatch:
+/// expected 1 args`.
+#[allow(clippy::too_many_arguments)]
+fn infer_stride_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() < 3 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            "stride expects a tensor followed by one positive int32 stride per axis".to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let stride_tys: Vec<Type> = kids[2..]
+        .iter()
+        .map(|arg| {
+            infer_expr(
+                arg,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                typed_nodes,
+                total_nodes,
+            )
+        })
+        .collect();
+
+    if matches!(input_ty, Type::Error) || stride_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Type::Error;
+    }
+
+    for stride_ty in &stride_tys {
+        let resolved = subst.apply(stride_ty);
+        match resolved {
+            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+            other => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("stride expects int32 strides, got {other}"),
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+        }
+    }
+
+    let input_resolved = type_for_readonly_check(&input_ty, subst);
+    let (dims, prec) = match input_resolved {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("stride expects tensor input, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    let Some(strides) = kids[2..]
+        .iter()
+        .map(extract_int_for_dim)
+        .collect::<Option<Vec<_>>>()
+    else {
+        // Strides are int32-typed but non-literal (e.g. parameters). Keep
+        // the rank, make dims wildcard. Uses `extract_int_for_dim` so
+        // `cast(N, int32)`-wrapped literal strides reach the positive-
+        // stride check at infer time instead of falling back to host
+        // runtime (red team round 3 finding R3-HIGH1).
+        return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+    };
+
+    if strides.len() != dims.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "stride expects {} strides for rank {} tensor, got {}",
+                    dims.len(),
+                    dims.len(),
+                    strides.len()
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let mut out_dims = Vec::with_capacity(dims.len());
+    for (axis, (step, dim)) in strides.iter().zip(dims.iter()).enumerate() {
+        if *step <= 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "stride axis {axis} step {step} must be positive (zero or negative strides are not allowed)"
+                    ),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        let step_us = *step as usize;
+        match dim {
+            Dim::Lit(input_dim) => {
+                let out = (*input_dim as usize).div_ceil(step_us);
+                out_dims.push(Dim::Lit(out as i64));
+            }
+            other => out_dims.push(other.clone()),
+        }
+    }
+
+    Type::Tensor(out_dims, prec)
+}
+
+/// `pad(&x, [[lo_0, hi_0], [lo_1, hi_1], ...], fill) -> tensor[d_0 + lo_0
+/// + hi_0, ..., p]`
+///
+/// Per spec/05-risc-primitives.md §2.4, `pad` widens each axis by the
+/// `(lo, hi)` padding amounts and fills the inserted region with `fill`.
+/// Same structural antipattern as `shrink`: the `tensor_unop` registration
+/// said 1-arg, but the IR lowering at `crates/chelis-ir/src/lower.rs:4616-4634`
+/// reads padding from `args[1]` and fill from `args[2]`. Sibling sweep
+/// finding for issue Chelis-Lang/chelis#187.
+#[allow(clippy::too_many_arguments)]
+fn infer_pad_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() != 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            "pad expects a tensor, a list of [lo, hi] padding pairs (one per axis), and a fill scalar".to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let padding_ty = infer_expr(
+        &kids[2],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let fill_ty = infer_expr(
+        &kids[3],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+
+    if matches!(input_ty, Type::Error) || matches!(padding_ty, Type::Error) {
+        return Type::Error;
+    }
+
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    let expected_padding_ty = Type::Adt("List".to_string(), vec![int_list]);
+    if let Err(_te) = unify(&padding_ty, &expected_padding_ty, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "pad expects a list of [lo, hi] int32 padding pairs, got {}",
+                    subst.apply(&padding_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let input_resolved = type_for_readonly_check(&input_ty, subst);
+    let (dims, prec) = match input_resolved {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("pad expects tensor input, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    // R1-F2: enforce the fill arg is a scalar of the input tensor
+    // precision. The previous code dropped `fill_ty` on the floor, so a
+    // list, tuple, bool, or wrong-precision scalar would slip through to
+    // host-runtime. Per spec/05-risc-primitives.md §2.4, `pad`'s fill
+    // value is a single scalar of the input precision.
+    //
+    // Use unification rather than a hard match so polymorphic-precision
+    // tensors (precision still a `TensorPrec::Var`) generate the
+    // constraint cleanly instead of being rejected. The expected scalar
+    // type is `Type::Prim(p)` where `p` is the tensor's element
+    // precision.
+    let expected_fill_ty = match prec {
+        TensorPrec::Concrete(p) => Type::Prim(p),
+        TensorPrec::Var(_) => {
+            // Precision is still polymorphic; introduce a fresh tvar and
+            // let unification tie it to whatever the tensor lands on.
+            Type::Var(vg.fresh_tvar())
+        }
+    };
+    if let Err(_te) = unify(&fill_ty, &expected_fill_ty, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "pad fill must be a scalar of the input tensor precision ({expected_fill_ty}), got {}",
+                    subst.apply(&fill_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let padding = match cons_chain_int_pairs(&kids[2]) {
+        PairListShape::Literal(pairs) => pairs,
+        PairListShape::NonLiteralLiterals | PairListShape::Unknown => {
+            return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+        }
+        PairListShape::Malformed { axis, reason } => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("pad axis {axis} pair {reason}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    if padding.len() != dims.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "pad expects {} padding pairs for rank {} tensor, got {}",
+                    dims.len(),
+                    dims.len(),
+                    padding.len()
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let mut out_dims = Vec::with_capacity(dims.len());
+    for (axis, ((lo, hi), dim)) in padding.iter().zip(dims.iter()).enumerate() {
+        if *lo < 0 || *hi < 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("pad axis {axis} padding [{lo}, {hi}] has negative entry"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        match dim {
+            Dim::Lit(input_dim) => {
+                out_dims.push(Dim::Lit(input_dim + lo + hi));
+            }
+            other => out_dims.push(other.clone()),
+        }
+    }
+
+    Type::Tensor(out_dims, prec)
+}
+
+/// `reduce_window_*(&x, window_shape, strides)` infer.
+///
+/// Per `spec/05-risc-primitives.md` §2.3.1:
+/// - `window_shape` and `strides` are `List[int32]` of equal length
+///   `n >= 1`.
+/// - The trailing `n` axes of the input are the windowed axes; leading
+///   `rank - n` axes pass through.
+/// - Each window/stride entry must be a positive int32 literal at
+///   check time (non-literal arguments fall back to a wildcard output
+///   shape so runtime checks can still apply).
+/// - Output rank equals input rank. Trailing dim i is
+///   `floor((input_dims[rank - n + i] - window_shape[i]) / strides[i]) + 1`.
+///   A non-positive result is rejected as a `DimensionMismatch` per
+///   §2.3.1.
+#[allow(clippy::too_many_arguments)]
+fn infer_reduce_window_app(
+    list: &deep::List,
+    name: &str,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() != 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "{name} expects 3 arguments (tensor, window_shape, strides), got {}",
+                kids.len().saturating_sub(1)
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let window_ty = infer_expr(
+        &kids[2],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let stride_ty = infer_expr(
+        &kids[3],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+
+    if matches!(input_ty, Type::Error)
+        || matches!(window_ty, Type::Error)
+        || matches!(stride_ty, Type::Error)
+    {
+        return Type::Error;
+    }
+
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    if let Err(_te) = unify(&window_ty, &int_list, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "{name} expects window_shape to be List[int32], got {}",
+                    subst.apply(&window_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if let Err(_te) = unify(&stride_ty, &int_list, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "{name} expects strides to be List[int32], got {}",
+                    subst.apply(&stride_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let input_resolved = type_for_readonly_check(&input_ty, subst);
+    let (dims, prec) = match input_resolved {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} expects tensor input, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    // Extract literal window / stride entries. Non-literal arguments
+    // are accepted at infer time (the type is still `List[int32]`) but
+    // the output shape collapses to wildcards so the host runtime can
+    // do the final shape check.
+    let window_lit = cons_chain_int_list(&kids[2]);
+    let strides_lit = cons_chain_int_list(&kids[3]);
+    let (Some(window_shape), Some(strides)) = (window_lit, strides_lit) else {
+        return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+    };
+
+    if window_shape.is_empty() || strides.is_empty() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("{name} requires a non-empty window_shape and strides"),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if window_shape.len() != strides.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "{name} window_shape (len {}) and strides (len {}) must agree",
+                    window_shape.len(),
+                    strides.len()
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    let n = window_shape.len();
+    if dims.len() < n {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("{name} window arity {n} exceeds tensor rank {}", dims.len()),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    for (i, &w) in window_shape.iter().enumerate() {
+        if w <= 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} window_shape[{i}] = {w} must be >= 1"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    }
+    for (i, &s) in strides.iter().enumerate() {
+        if s <= 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} strides[{i}] = {s} must be >= 1"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    }
+    let leading = dims.len() - n;
+    let mut out_dims = Vec::with_capacity(dims.len());
+    out_dims.extend(dims[..leading].iter().map(|d| subst.apply_dim(d)));
+    for i in 0..n {
+        let resolved = subst.apply_dim(&dims[leading + i]);
+        match &resolved {
+            Dim::Lit(in_dim) => {
+                let w = window_shape[i];
+                let s = strides[i];
+                if *in_dim < w {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "{name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
+                                leading + i
+                            ),
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                // `in_dim >= w` (checked above) and `s >= 1` guarantee
+                // `out = floor((in_dim - w) / s) + 1 >= 1`, so the Valid
+                // output extent is always positive here — the `in_dim < w`
+                // guard above is what rejects the empty-window case.
+                let out = (*in_dim - w) / s + 1;
+                out_dims.push(Dim::Lit(out));
+            }
+            _ => out_dims.push(Dim::Wildcard),
+        }
+    }
+
+    Type::Tensor(out_dims, prec)
+}
+
+/// Walk a `Cons(a, Cons(b, ..., Nil))` chain and return the literal
+/// integer entries (cast-aware via `extract_int_for_dim`). Returns
+/// `None` when any element is non-literal or when the structure does
+/// not terminate cleanly in `Nil`.
+///
+/// Shares the cons-chain walk with `collect_cons_chain_for_shape`
+/// (the structural recognizer) and only adds the per-element
+/// integer-literal extraction on top.
+fn cons_chain_int_list(expr: &deep::Expr) -> Option<Vec<i64>> {
+    collect_cons_chain_for_shape(expr)?
+        .iter()
+        .map(|e| extract_int_for_dim(e))
+        .collect()
+}
+
+/// Three-way result of inspecting a `[[s_0, e_0], [s_1, e_1], ...]` list
+/// literal arg: well-formed concrete literals, structurally malformed
+/// (wrong inner length, missing `Nil`, etc.), or "structure looks fine
+/// but inner entries are non-literal" (e.g. variables) so the caller
+/// should fall back to a wildcard output shape.
+///
+/// Red team round 1 on PR #214 found that `cons_chain_int_pairs`
+/// returning a plain `Option` couldn't distinguish "user wrote a triple"
+/// from "user wrote a variable" -- both became `None`, both fell through
+/// to `Dim::Wildcard`, so malformed input silently slipped past
+/// `chelis check` and only failed at host-runtime or IR-verifier time.
+enum PairListShape {
+    /// Top-level chain closed by `Nil`, every entry was a literal
+    /// `Cons(start, Cons(end, Nil))` pair.
+    Literal(Vec<(i64, i64)>),
+    /// Top-level chain closed by `Nil` and every entry was structurally
+    /// a `Cons(_, Cons(_, Nil))`, but at least one inner element was a
+    /// non-literal (variable, call, etc.). Output shape must be
+    /// wildcarded but no infer-side error -- runtime will validate.
+    NonLiteralLiterals,
+    /// At least one inner entry has the wrong structural shape (wrong
+    /// number of elements, missing `Nil` close, etc.). The caller MUST
+    /// emit an infer-time error naming the offending axis.
+    Malformed { axis: usize, reason: String },
+    /// The top-level chain is well-typed as `List[List[Int32]]` but
+    /// isn't a literal Cons/Nil chain (e.g. it's a variable resolved by
+    /// the type system). Caller falls back to wildcard output shape.
+    Unknown,
+}
+
+/// Walk a `Cons(Cons(start_i, Cons(end_i, Nil)), ..., Nil)` chain — the
+/// desugared form of a Surf `[[start_0, end_0], [start_1, end_1], ...]`
+/// list-of-pair literal — and classify it via [`PairListShape`].
+fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
+    let mut pairs: Vec<(i64, i64)> = Vec::new();
+    let mut any_non_literal = false;
+    let mut cursor = expr;
+    let mut axis = 0usize;
+    loop {
+        let deep::Expr::List(outer, _) = cursor else {
+            return PairListShape::Unknown;
+        };
+        match get_tag(outer) {
+            Some("var") => {
+                let name = match children(outer).first().and_then(symbol_name) {
+                    Some(name) => name,
+                    None => return PairListShape::Unknown,
+                };
+                if name == "Nil" {
+                    if any_non_literal {
+                        return PairListShape::NonLiteralLiterals;
+                    }
+                    return PairListShape::Literal(pairs);
+                }
+                return PairListShape::Unknown;
+            }
+            Some("app") => {
+                let app_children = children(outer);
+                let func = match app_children.first() {
+                    Some(func) => func,
+                    None => return PairListShape::Unknown,
+                };
+                if !is_builtin_var(func, "Cons") {
+                    return PairListShape::Unknown;
+                }
+                let pair_expr = match app_children.get(1) {
+                    Some(p) => p,
+                    None => return PairListShape::Unknown,
+                };
+                let tail = match app_children.get(2) {
+                    Some(t) => t,
+                    None => return PairListShape::Unknown,
+                };
+                match cons_chain_two_ints(pair_expr, axis) {
+                    InnerPairShape::Literal(pair) => pairs.push(pair),
+                    InnerPairShape::NonLiteral => any_non_literal = true,
+                    InnerPairShape::Malformed { reason } => {
+                        return PairListShape::Malformed { axis, reason };
+                    }
+                    InnerPairShape::Unknown => return PairListShape::Unknown,
+                }
+                cursor = tail;
+                axis += 1;
+            }
+            _ => return PairListShape::Unknown,
+        }
+    }
+}
+
+/// Classification of a single inner pair expression. Distinguishes the
+/// "wrong shape" case (must be reported at infer) from the "right shape,
+/// non-literal element" case (defer to runtime).
+enum InnerPairShape {
+    Literal((i64, i64)),
+    NonLiteral,
+    Malformed { reason: String },
+    Unknown,
+}
+
+/// Walk a `Cons(start, Cons(end, Nil))` chain and classify it. Counts
+/// the actual number of elements in the inner list so the error message
+/// can name the bad arity explicitly (e.g. "got 3-element list").
+///
+/// Bare `(var Nil)` at the top level is the desugared form of `[]` --
+/// a zero-element list literal. That is just as malformed as a triple
+/// or singleton (it has zero of the required two endpoints), so it
+/// must surface as `Malformed { reason: "got 0-element list" }` rather
+/// than `NonLiteral` (red team round 2 finding R2-M1). Other `var` tags
+/// represent opaque `List[Int32]` references the type system already
+/// constrained; those still defer to runtime via `NonLiteral`.
+///
+/// Inner head values are extracted via [`extract_int_for_dim`], which
+/// peels `cast(N, int32)` / `cast(N, int64)` -- so cast-wrapped int
+/// literals participate in the infer-time bounds check rather than
+/// silently falling back to `NonLiteral` (red team round 2 finding
+/// R2-L1; mirrors how reshape extracts dim literals).
+fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
+    let deep::Expr::List(list, _) = expr else {
+        return InnerPairShape::Unknown;
+    };
+    if get_tag(list) != Some("app") {
+        // Inner element is not a Cons-chain. The `Nil` case (zero-element
+        // list literal) is malformed; any other `var` is an opaque
+        // `List[Int32]` reference whose contents the runtime will check.
+        if matches!(get_tag(list), Some("var")) {
+            let is_nil = children(list)
+                .first()
+                .and_then(symbol_name)
+                .map(|name| name == "Nil")
+                .unwrap_or(false);
+            if is_nil {
+                return InnerPairShape::Malformed {
+                    reason: "expects a pair [start, end] of two int literals, got 0-element list"
+                        .to_string(),
+                };
+            }
+            return InnerPairShape::NonLiteral;
+        }
+        return InnerPairShape::Unknown;
+    }
+    // Count the elements in the inner list so we can give a precise
+    // "got N-element list" diagnostic. Walk the chain element-by-element.
+    let mut elements_seen = 0usize;
+    let mut head_values: Vec<Option<i64>> = Vec::new();
+    let mut inner_cursor: &deep::Expr = expr;
+    loop {
+        let deep::Expr::List(inner, _) = inner_cursor else {
+            return InnerPairShape::Unknown;
+        };
+        match get_tag(inner) {
+            Some("var") => {
+                let name = match children(inner).first().and_then(symbol_name) {
+                    Some(n) => n,
+                    None => return InnerPairShape::Unknown,
+                };
+                if name != "Nil" {
+                    return InnerPairShape::Unknown;
+                }
+                if elements_seen != 2 {
+                    return InnerPairShape::Malformed {
+                        reason: format!(
+                            "expects a pair [start, end] of two int literals, got {}-element list",
+                            elements_seen
+                        ),
+                    };
+                }
+                let start = match head_values[0] {
+                    Some(v) => v,
+                    None => return InnerPairShape::NonLiteral,
+                };
+                let end = match head_values[1] {
+                    Some(v) => v,
+                    None => return InnerPairShape::NonLiteral,
+                };
+                return InnerPairShape::Literal((start, end));
+            }
+            Some("app") => {
+                let app_children = children(inner);
+                let func = match app_children.first() {
+                    Some(f) => f,
+                    None => return InnerPairShape::Unknown,
+                };
+                if !is_builtin_var(func, "Cons") {
+                    return InnerPairShape::Unknown;
+                }
+                let head_expr = match app_children.get(1) {
+                    Some(h) => h,
+                    None => return InnerPairShape::Unknown,
+                };
+                let tail = match app_children.get(2) {
+                    Some(t) => t,
+                    None => return InnerPairShape::Unknown,
+                };
+                head_values.push(extract_int_for_dim(head_expr));
+                elements_seen += 1;
+                inner_cursor = tail;
+                // Guard against extra trailing elements: if we already
+                // saw a [start, end] pair but the chain continues past
+                // `Nil`, report malformed. The Nil arm above catches the
+                // n==2 happy path before we get here on subsequent
+                // iterations, so just keep walking and the count check
+                // at Nil-time will catch it.
+            }
+            _ => return InnerPairShape::Unknown,
+        }
+    }
+}
+
 fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
     let deep::Expr::List(list, _) = expr else {
         return None;
@@ -9571,37 +12312,88 @@ fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
     Some(children(list).len())
 }
 
-/// If `expr` is a list literal whose every element is a concrete int literal
-/// (`5`, `lit 5`, or `cast(5, int64)` / `cast(5, int32)`), return the dim
-/// vector with each element as `Dim::Lit(N)`. Handles both the `(list ...)`
-/// tag form and the desugared Cons/Nil chain — surface list literals lower
-/// to the chain form by the time reshape is type-checked.
+/// Build the output dim list for `reshape(input, shape_list)`.
 ///
-/// Returns `None` if any element is not a concrete integer or the list is
-/// not closed by a `Nil` — the caller falls back to `Dim::Wildcard`.
+/// Walks `shape_expr` element by element. For each element, the first
+/// recognizer that matches wins:
 ///
-/// Without this, `reshape(t, [2, 1, 3])` infers as
-/// `tensor[Wildcard, Wildcard, Wildcard, p]` and a function declared as
-/// `-> tensor[2, 1, 3, f32]` reports a body/signature mismatch — RT-A1W1
-/// CRIT root cause (#35).
-fn list_literal_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
+/// 1. concrete int literal (or `cast(N, int{32,64})`) → `Dim::Lit(N)`;
+/// 2. `cast(shape(input, lit_axis), int64)` where the inner var matches
+///    the reshape input by name and `lit_axis` is a valid axis of the
+///    input → the input's dim at that axis (resolved through `subst`);
+/// 3. fallback → `Dim::Wildcard`.
+///
+/// The shape list itself may surface as the explicit `(list ...)` tag
+/// form or as a `Cons(head, ..., Nil)` chain after desugaring; both are
+/// recognized. If neither form is matched, the rank is inferred from
+/// `list_literal_len` (best-effort), and the whole output is filled
+/// with `Wildcard`s -- the pre-fix behavior.
+///
+/// `input_var_name` is the name of the reshape input expression when it
+/// is a bare `(var {} NAME)`, otherwise `None`. The symbolic-dim
+/// recognizer requires this to match; with a non-var reshape input the
+/// rule conservatively falls back to `Wildcard`.
+///
+/// Pre-fix the body of `infer_reshape_app` ran a literal-only
+/// recognizer (the now-removed `list_literal_dims`) and fell back to
+/// `vec![Wildcard; rank]` for anything else, including the common
+/// runtime-batch pattern `cast(shape(x, axis), int64)`. That blind spot
+/// is chelis#206; this helper closes it. The earlier `Dim::Lit`-only
+/// behavior is also still covered (see the RT-A1W1 CRIT root cause for
+/// chelis#35: `reshape(t, [2, 1, 3])` must yield
+/// `tensor[Lit(2), Lit(1), Lit(3), p]`, not `tensor[Wildcard, ..., p]`).
+fn reshape_output_dims(
+    shape_expr: &deep::Expr,
+    input_var_name: Option<&str>,
+    input_dims: &[Dim],
+    subst: &Subst,
+) -> Vec<Dim> {
+    let elements = match collect_shape_list_elements(shape_expr) {
+        Some(elems) => elems,
+        None => {
+            let rank = list_literal_len(shape_expr).unwrap_or(1);
+            return vec![Dim::Wildcard; rank];
+        }
+    };
+    elements
+        .into_iter()
+        .map(|elem| reshape_output_dim(elem, input_var_name, input_dims, subst))
+        .collect()
+}
+
+/// Recognize a single dim-list element from a reshape shape list.
+fn reshape_output_dim(
+    elem: &deep::Expr,
+    input_var_name: Option<&str>,
+    input_dims: &[Dim],
+    subst: &Subst,
+) -> Dim {
+    if let Some(n) = extract_int_for_dim(elem) {
+        return Dim::Lit(n);
+    }
+    if input_var_name.is_some()
+        && let Some(axis) = extract_shape_axis_of(elem, input_var_name)
+        && let Some(dim) = input_dims.get(axis)
+    {
+        // Resolve through current substitution so a recently-bound dim
+        // var surfaces as its concrete name/lit.
+        return subst.apply_dim(dim);
+    }
+    Dim::Wildcard
+}
+
+/// Collect the elements of a reshape shape-list argument as a flat
+/// `Vec` of expressions, handling both the `(list ...)` tag form and
+/// the desugared `Cons(head, ..., Nil)` chain. Returns `None` if the
+/// shape arg is not a recognized list form (in which case the caller
+/// falls back to all-wildcards with rank inferred from `list_literal_len`).
+fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep::Expr>> {
     if let deep::Expr::List(list, _) = expr
         && get_tag(list) == Some("list")
     {
-        return children(list)
-            .iter()
-            .map(extract_int_for_dim)
-            .map(|opt| opt.map(Dim::Lit))
-            .collect();
+        return Some(children(list).iter().collect());
     }
-    cons_chain_int_dims(expr)
-}
-
-/// Walk a `Cons(head, Cons(head, ..., Nil))` chain and collect each head as
-/// a `Dim::Lit`. Returns `None` if the chain isn't closed by `Nil` or any
-/// head fails to extract as a concrete int.
-fn cons_chain_int_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
-    let mut dims = Vec::new();
+    let mut elems = Vec::new();
     let mut cursor = expr;
     loop {
         let deep::Expr::List(list, _) = cursor else {
@@ -9611,7 +12403,7 @@ fn cons_chain_int_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
             "var" => {
                 let name = children(list).first().and_then(symbol_name)?;
                 if name == "Nil" {
-                    return Some(dims);
+                    return Some(elems);
                 }
                 return None;
             }
@@ -9621,14 +12413,111 @@ fn cons_chain_int_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
                 if !is_builtin_var(func, "Cons") {
                     return None;
                 }
-                let head = app_children.get(1)?;
-                let tail = app_children.get(2)?;
-                dims.push(Dim::Lit(extract_int_for_dim(head)?));
-                cursor = tail;
+                elems.push(app_children.get(1)?);
+                cursor = app_children.get(2)?;
             }
             _ => return None,
         }
     }
+}
+
+/// If `expr` has the syntactic form
+/// `cast(shape(<var named input_var_name>, <concrete int axis>), int64)`,
+/// return the axis. Both `cast` and `shape` may surface either as the
+/// dedicated tag (`(cast {} ...)`, ...) or as `(app {} (var {} cast)
+/// ...)`. The axis expression matches `extract_int_for_dim` -- it
+/// accepts `N`, `lit N`, and `cast(N, int{32,64})`.
+///
+/// Returns `None` when:
+/// - `expr` doesn't match the expected outer cast-to-int64,
+/// - the inner expression is not a `shape(...)` call,
+/// - the shape's tensor arg is not a `var` matching `input_var_name`,
+/// - the axis is not a concrete non-negative int.
+fn extract_shape_axis_of(expr: &deep::Expr, input_var_name: Option<&str>) -> Option<usize> {
+    let input = input_var_name?;
+    let (inner, target_ty) = peel_cast(expr)?;
+    if !is_target_ty(target_ty, Prim::Int64) {
+        return None;
+    }
+    let shape_call = inner_to_list(inner)?;
+    if !is_shape_app(shape_call) {
+        return None;
+    }
+    let shape_args = children(shape_call);
+    let func = shape_args.first()?;
+    if !is_builtin_var(func, "shape") {
+        return None;
+    }
+    let tensor_arg = shape_args.get(1)?;
+    let arg_name = symbolic_dim_ref_name(tensor_arg)?;
+    if arg_name != input {
+        return None;
+    }
+    let axis_expr = shape_args.get(2)?;
+    let axis = extract_int_for_dim(axis_expr)?;
+    if axis < 0 {
+        return None;
+    }
+    Some(axis as usize)
+}
+
+/// Strip one layer of `cast` (tag-form or `app`-form) and return
+/// (inner_expr, target_type_expr).
+fn peel_cast(expr: &deep::Expr) -> Option<(&deep::Expr, &deep::Expr)> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    match get_tag(list)? {
+        "cast" => {
+            let kids = children(list);
+            Some((kids.first()?, kids.get(1)?))
+        }
+        "app" => {
+            let kids = children(list);
+            let func = kids.first()?;
+            if !is_builtin_var(func, "cast") {
+                return None;
+            }
+            Some((kids.get(1)?, kids.get(2)?))
+        }
+        _ => None,
+    }
+}
+
+/// Treat `(t-prim {} <name>)` as the target type marker emitted by
+/// `cast(..., int64)` etc. Returns true iff the marker matches `prim`.
+fn is_target_ty(expr: &deep::Expr, prim: Prim) -> bool {
+    let deep::Expr::List(list, _) = expr else {
+        return false;
+    };
+    if get_tag(list) != Some("t-prim") {
+        return false;
+    }
+    let Some(name_expr) = children(list).first() else {
+        return false;
+    };
+    symbol_name(name_expr) == Some(prim.name())
+}
+
+/// Treat `expr` as an `(app {} ...)` list and return its `deep::List`,
+/// or `None` if it isn't.
+fn inner_to_list(expr: &deep::Expr) -> Option<&deep::List> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) == Some("app") {
+        Some(list)
+    } else {
+        None
+    }
+}
+
+/// True iff `app_list` is an `(app {} (var {} shape) ...)`.
+fn is_shape_app(app_list: &deep::List) -> bool {
+    children(app_list)
+        .first()
+        .map(|f| is_builtin_var(f, "shape"))
+        .unwrap_or(false)
 }
 
 /// Extract an int literal from a Deep expr, looking through `cast(N, int64)`
@@ -9636,6 +12525,51 @@ fn cons_chain_int_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
 /// literals default to int32 and require an explicit cast for int64 contexts.
 /// `cast` may surface either as the `(cast {} ... ...)` tag or as an `app`
 /// of the `cast` var, depending on how far desugaring has progressed.
+///
+/// Note: callers in the spec section 2.4 movement family (shrink, pad,
+/// stride, permute, expand) typically unify the surrounding bounds /
+/// strides argument against an `int32`-pinned expected type before
+/// reaching this extractor, so a `cast(N, int64)` endpoint is rejected
+/// at the outer unification step rather than slipping through to here
+/// (red team round 3 HIGH-2 contract note).
+///
+/// The cast arm recurses through `extract_int_for_dim` so that
+/// `cast(cast(N, int32), int32)` and other doubly-nested forms peel to
+/// their literal at any depth (red team round 3 finding R3-MED2).
+/// Termination is bounded: each recursive call strictly reduces the
+/// expression depth (peels one wrapper layer).
+///
+/// Audit catalog of issue #216 sites that use this cast-aware extractor
+/// (one row per infer-time int-literal extraction that gates a
+/// user-facing validation check). Each row also notes any host-runtime
+/// defense-in-depth so a regression here does not silently corrupt
+/// runtime behavior, only the diagnostic layer.
+///
+/// | Domain               | Site (approx)                        | User-reachable cast? | Validation                | Host-runtime defense |
+/// |----------------------|--------------------------------------|----------------------|---------------------------|----------------------|
+/// | trace/diagonal axis  | `resolve_axis_pair_member` (~4110)   | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | builtin axis         | `resolve_builtin_axis` (~4154)       | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | conv2d output type   | `derive_conv2d_output_type` (~5720)  | yes (`stride=cast`)  | positivity + spatial dim  | yes (validator arm)  |
+/// | conv2d output type   | `derive_conv2d_output_type` (~5721)  | yes (`padding=cast`) | non-neg + spatial dim     | yes (validator arm)  |
+/// | conv2d validator     | `extract_typed_scalar_literal`(~5874)| yes                  | literal-int + then >0/>=0 | yes (codegen panic)  |
+/// | conv2d axis-dim      | `ir_builtin_axis_dim` (~5907)        | yes                  | rank bounds via normalize | yes (eval)           |
+/// | softmax axis         | softmax arm (~7630)                  | yes (`axis=cast`)    | rank bounds + diagnostic  | yes (eval)           |
+/// | shape axis           | shape arm (~8238)                    | yes (issue #206)     | non-neg + rank bounds     | yes (eval)           |
+/// | split axis           | split arm (~8959)                    | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | conv2d spatial out   | `compute_concrete_conv2d_spatial`(11722)| yes                | positivity + spatial dim  | yes (validator arm)  |
+/// | conv2d spatial out   | `compute_concrete_conv2d_spatial`(11723)| yes                | non-neg + spatial dim     | yes (validator arm)  |
+/// | reduction axis       | `check_reduce_signature` (~12076)    | yes (`axis=cast`)    | rank bounds + diagnostic  | yes (eval)           |
+/// | grad wrt tuple       | `grad_wrt_indices` (~13793)          | NO (surf desugar)    | int-type + non-neg        | yes (AD pass)        |
+/// | grad wrt single      | `grad_wrt_indices` (~13814)          | NO (surf desugar)    | int-type + non-neg        | yes (AD pass)        |
+/// | vmap axis            | `infer_vmap` (~13866)                | NO (surf parser)     | non-neg + diagnostic      | yes (eval)           |
+///
+/// The three "NO" rows -- vmap axis, both grad wrt sites -- have no
+/// idiomatic Surf cast-wrapping pattern because the Surf parser /
+/// desugarer normalizes them to bare literal ints before reaching the
+/// extractor. They are reachable only through direct Deep input
+/// (decompiler output, custom tooling, macro expansion). The swap there
+/// is defense-in-depth on Deep-direct paths; the post-fix tests use
+/// `parse_deep` rather than the Surf parser.
 fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
     if let Some(value) = extract_int_literal(expr) {
         return Some(value);
@@ -9644,14 +12578,14 @@ fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
         return None;
     };
     match get_tag(list)? {
-        "cast" => extract_int_literal(children(list).first()?),
+        "cast" => extract_int_for_dim(children(list).first()?),
         "app" => {
             let app_children = children(list);
             let func = app_children.first()?;
             if !is_builtin_var(func, "cast") {
                 return None;
             }
-            extract_int_literal(app_children.get(1)?)
+            extract_int_for_dim(app_children.get(1)?)
         }
         _ => None,
     }
@@ -9776,7 +12710,63 @@ fn check_layer_norm_signature(
     subst.apply(&canonical)
 }
 
+/// If `arg_exprs[2]` and `arg_exprs[3]` are integer literals and the
+/// input/kernel spatial dims (axes 2, 3) resolve to concrete
+/// `Dim::Lit` values after substitution, return the computed output
+/// spatial extents `(out_h, out_w)`. Returns `None` if any of the
+/// inputs are non-literal or non-concrete; the caller falls back to
+/// fresh dim-vars in that case.
+///
+/// `extract_int_literal` already handles the canonical
+/// `(lit {type: ...} N)` Deep shape used for stride/padding literals.
+fn compute_concrete_conv2d_spatial(
+    arg_exprs: &[deep::Expr],
+    input_dims: &[Dim],
+    kernel_dims: &[Dim],
+    subst: &Subst,
+) -> Option<(i64, i64)> {
+    // Issue #216: cast-aware so cast-wrapped stride/padding still
+    // resolve the concrete spatial output dims at infer time.
+    let stride = arg_exprs.get(2).and_then(extract_int_for_dim)?;
+    let padding = arg_exprs.get(3).and_then(extract_int_for_dim)?;
+    if stride <= 0 || padding < 0 {
+        return None;
+    }
+    let in_h = match subst.apply_dim(input_dims.get(2)?) {
+        Dim::Lit(v) => v,
+        _ => return None,
+    };
+    let in_w = match subst.apply_dim(input_dims.get(3)?) {
+        Dim::Lit(v) => v,
+        _ => return None,
+    };
+    let k_h = match subst.apply_dim(kernel_dims.get(2)?) {
+        Dim::Lit(v) => v,
+        _ => return None,
+    };
+    let k_w = match subst.apply_dim(kernel_dims.get(3)?) {
+        Dim::Lit(v) => v,
+        _ => return None,
+    };
+    // `conv2d_output_extent` returns None on i64 overflow (RT-205
+    // round-2 F1); fall back to fresh dim-vars in that case so the
+    // validator's arm reports the overflow with a precise diagnostic
+    // rather than us computing here with saturating math and
+    // producing a confusing dim-lit-vs-dim-lit mismatch.
+    let out_h = conv2d_output_extent(in_h, k_h, stride, padding)?;
+    let out_w = conv2d_output_extent(in_w, k_w, stride, padding)?;
+    if out_h <= 0 || out_w <= 0 {
+        // Let the validator's arm emit the diagnostic; here we just
+        // fall back to fresh dim-vars so the inference pass produces
+        // a useful (declared-vs-fresh) mismatch instead of failing
+        // here with a confusing dim-lit-vs-dim-lit unify error.
+        return None;
+    }
+    Some((out_h, out_w))
+}
+
 fn check_conv2d_signature(
+    arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
     vg: &mut VarGen,
@@ -9854,12 +12844,28 @@ fn check_conv2d_signature(
         return Type::Error;
     }
 
+    // RT-205 F8: when stride/padding are integer literals and the
+    // input/kernel spatial dims are concrete Dim::Lit values, compute
+    // the output spatial dims via the canonical formula
+    // (`floor((in + 2 * padding - kernel) / stride) + 1`) and place
+    // concrete `Dim::Lit` values into the output template. Without
+    // this the placeholders are fresh dim-vars that unify with any
+    // positive declared spatial dim, so an explicit but WRONG
+    // declared output (e.g. `tensor[1, 8, 100, 100]` for the
+    // canonical 8x8 input + 3x3 kernel case whose real output is
+    // 6x6) silently type-checks.
+    let computed_spatial =
+        compute_concrete_conv2d_spatial(arg_exprs, &input_dims, &kernel_dims, subst);
+    let (out_h_dim, out_w_dim) = match computed_spatial {
+        Some((h, w)) => (Dim::Lit(h), Dim::Lit(w)),
+        None => (Dim::Var(vg.fresh_dvar()), Dim::Var(vg.fresh_dvar())),
+    };
     let output_template = Type::Tensor(
         vec![
             subst.apply_dim(&input_dims[0]),
             subst.apply_dim(&kernel_dims[0]),
-            Dim::Var(vg.fresh_dvar()),
-            Dim::Var(vg.fresh_dvar()),
+            out_h_dim,
+            out_w_dim,
         ],
         input_prec.clone(),
     );
@@ -10075,7 +13081,11 @@ fn check_reduction_signature(
     // use `axis=-1`. `normalize_static_axis` maps `rank + axis` and
     // bounds-checks; gather/scatter use the same helper, so reductions
     // stay consistent with them and with IR lowering's `normalize_axis`.
-    let axis = match arg_exprs.get(1).and_then(extract_int_literal) {
+    //
+    // Issue #216: cast-aware so reductions like `sum(x, cast(-1, int32))`
+    // or `max_reduce(x, cast(7, int32))` surface the bounds diagnostic
+    // at infer time rather than slipping through to host-runtime defense.
+    let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(raw) => match normalize_static_axis(dims.len(), raw) {
             Some(axis) => axis,
             None => {
@@ -10100,9 +13110,20 @@ fn check_reduction_signature(
     // precision of `reduce_sum` follows the §5.7.1 table — int8/int16
     // operand → int32 result, int32/int64/f32/f64 → operand precision,
     // bf16/f16 → operand precision (the f32 accumulator is consumed
-    // inside the op and downcast on output). For all other reductions
-    // (max_reduce, min_reduce, prod_reduce, argmax/argmin_reduce, mean)
-    // the result precision is the operand precision.
+    // inside the op and downcast on output). For `max_reduce`,
+    // `min_reduce`, `prod_reduce`, and `mean` the result precision is
+    // the operand precision.
+    //
+    // Issue #230: `argmax_reduce` and `argmin_reduce` are index-returning
+    // reductions — they produce element indices, not reduced operand
+    // values. Their result precision is canonically `int64`, regardless
+    // of the input dtype. The std-package signatures in
+    // `packages/chelis-std/src/tensor/reduce.ch` pin this (`tensor[b,
+    // int64]`); the type checker was returning the input precision and
+    // diverging from std. (The host-runtime/backend still stores
+    // integer-valued floats internally per the Phase 3j-pre Batch 1
+    // caveat documented on `RiscOp::Argmax`; the int64 label is the
+    // declarative output type.)
     //
     // WS-A5: the §5.7.1 widening rule is defined over a known operand
     // precision. If the operand precision is still polymorphic
@@ -10124,6 +13145,8 @@ fn check_reduction_signature(
             },
             TensorPrec::Var(_) => prec.clone(),
         }
+    } else if name == "argmax_reduce" || name == "argmin_reduce" {
+        TensorPrec::Concrete(Prim::Int64)
     } else {
         prec.clone()
     };
@@ -10192,7 +13215,11 @@ fn check_expand_signature(
         }
     };
 
-    let axis = match arg_exprs.get(1).and_then(extract_int_literal) {
+    // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
+    // axis/size reach the non-negative-axis and positive-size checks at
+    // infer time (red team round 3 sibling sweep within the spec
+    // section 2.4 movement family).
+    let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
             errors.push(CheckError::new(
@@ -10204,7 +13231,7 @@ fn check_expand_signature(
         }
         None => return subst.apply(result_ty),
     };
-    let size = match arg_exprs.get(2).and_then(extract_int_literal) {
+    let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
         Some(size) if size > 0 => Dim::Lit(size),
         Some(size) => {
             errors.push(CheckError::new(
@@ -10343,6 +13370,19 @@ fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
     }
 }
 
+/// Extract an int literal from a Deep expr, recognizing the canonical
+/// literal forms (`Atom::Int`, `(lit {type: ...} N)`) and the `neg` app
+/// wrapper. Float-in-cast intentionally is not recognized: the spec
+/// says integer literals default to `int32` and require explicit
+/// notation for other widths, so a float wrapped in a cast to an int
+/// dtype is a precision-narrowing operation that the runtime should
+/// validate -- not a literal int (round 3 LOW-2 design note).
+///
+/// The `neg` arm recurses through `extract_int_for_dim` so that
+/// `neg(cast(N, int32))` peels both wrappers and resolves to `-N` at
+/// infer time (red team round 3 finding R3-MED1). Mutual recursion
+/// with `extract_int_for_dim` is bounded: each call strictly reduces
+/// the expression depth (peels one wrapper layer).
 fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
     match expr {
         deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n),
@@ -10356,7 +13396,7 @@ fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
             let app_children = children(list);
             match (app_children.first(), app_children.get(1)) {
                 (Some(func), Some(arg)) if is_builtin_var(func, "neg") => {
-                    extract_int_literal(arg).map(|value| -value)
+                    extract_int_for_dim(arg).map(|value| -value)
                 }
                 _ => None,
             }
@@ -10370,6 +13410,149 @@ fn is_builtin_var(expr: &deep::Expr, expected: &str) -> bool {
         return false;
     };
     get_tag(list) == Some("var") && children(list).first().and_then(symbol_name) == Some(expected)
+}
+
+/// Extract the static shape of a `to_tensor` argument when the
+/// argument is a nested Cons-chain literal whose every leaf is a
+/// numeric/bool atom (or a recognized `cast` / `neg` wrapper).
+///
+/// Returns `Some(dims)` with one `Dim::Lit(n)` per axis (outermost
+/// first) when the structure is statically resolvable and every
+/// axis is uniformly shaped. Returns `None` when:
+///   * the argument is not a Cons-chain (e.g. a variable like
+///     `to_tensor(items)`),
+///   * the chain is malformed or not closed by `Nil`,
+///   * a leaf is not a recognizable numeric atom,
+///   * sibling axes have different lengths (ragged literal).
+///
+/// `expected_rank` is the rank inferred from peeling List wrappers
+/// in the argument's TYPE; it is used as a sanity check, not as a
+/// hard requirement. A mismatch returns `None` so the caller falls
+/// back to the legacy wildcard-rank path.
+///
+/// This is the issue Chelis-Lang/chelis#218 R2 HIGH-A source fix:
+/// by emitting concrete dims here, every downstream consumer
+/// (reductions, elementwise activations, anything that reads the
+/// to_tensor app's `type:` metadata) sees a sound shape instead of
+/// a `Dim::Wildcard`.
+fn static_to_tensor_shape(arg: &deep::Expr, expected_rank: usize) -> Option<Vec<Dim>> {
+    let dims = walk_static_cons_chain_shape(arg)?;
+    if dims.len() != expected_rank {
+        return None;
+    }
+    Some(dims.into_iter().map(|n| Dim::Lit(n as i64)).collect())
+}
+
+/// Recursive helper for `static_to_tensor_shape`. Returns
+/// `Some(dims)` if `expr` is a Cons / Nil chain whose every leaf
+/// reduces to a numeric atom (or recursively to another Cons chain
+/// of uniform length). `dims` is the rank-N shape (outermost axis
+/// first).
+fn walk_static_cons_chain_shape(expr: &deep::Expr) -> Option<Vec<usize>> {
+    let elements = collect_cons_chain_for_shape(expr)?;
+    if elements.is_empty() {
+        // Empty list at the outermost level has rank 1, size 0.
+        // For empty inner lists we still want a concrete dim list,
+        // but ragged-but-empty cases can't be uniformly typed; the
+        // top-level case is sufficient here.
+        return Some(vec![0]);
+    }
+    // If every element is a numeric leaf, this is a rank-1 axis.
+    if elements
+        .iter()
+        .all(|element| extract_numeric_leaf_for_shape(element).is_some())
+    {
+        return Some(vec![elements.len()]);
+    }
+    // Otherwise every element should recurse to a same-shape
+    // sub-vector. The outermost axis is `elements.len()`; the inner
+    // axes must agree.
+    let nested: Vec<Vec<usize>> = elements
+        .iter()
+        .map(|element| walk_static_cons_chain_shape(element))
+        .collect::<Option<_>>()?;
+    let inner_shape = nested.first()?.clone();
+    if nested.iter().any(|shape| shape != &inner_shape) {
+        return None;
+    }
+    let mut out = vec![nested.len()];
+    out.extend(inner_shape);
+    Some(out)
+}
+
+/// Collect a `Cons(head, Cons(head, ..., Nil))` chain into a vector
+/// of head expressions. Returns `None` if the chain isn't closed by
+/// `Nil` or contains a non-Cons app. Local helper for
+/// `walk_static_cons_chain_shape`; mirrors `cons_chain_int_dims`'s
+/// chain-walking shape but returns the heads themselves so the
+/// caller can recurse.
+fn collect_cons_chain_for_shape(expr: &deep::Expr) -> Option<Vec<&deep::Expr>> {
+    let mut out = Vec::new();
+    let mut cursor = expr;
+    loop {
+        let deep::Expr::List(list, _) = cursor else {
+            return None;
+        };
+        match get_tag(list)? {
+            "var" => {
+                let name = children(list).first().and_then(symbol_name)?;
+                if name == "Nil" {
+                    return Some(out);
+                }
+                return None;
+            }
+            "app" => {
+                let app_children = children(list);
+                let func = app_children.first()?;
+                if !is_builtin_var(func, "Cons") {
+                    return None;
+                }
+                let head = app_children.get(1)?;
+                let tail = app_children.get(2)?;
+                out.push(head);
+                cursor = tail;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// True iff `expr` is a numeric leaf (Int/Float/Bool atom, `lit` of
+/// the same, `cast` of one, or `neg` of one). Mirrors the shape of
+/// `extract_numeric_leaf` in `crates/chelis-ir/src/lower.rs` so the
+/// type-check and IR-lowering passes agree on what counts as a
+/// "static to_tensor leaf." We don't need the actual value here,
+/// only the static-recognition predicate.
+fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Int(_), _) => Some(()),
+        deep::Expr::Atom(deep::Atom::Float(_), _) => Some(()),
+        deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
+        deep::Expr::List(list, _) => match get_tag(list)? {
+            "lit" => match list.elements.get(2)? {
+                deep::Expr::Atom(deep::Atom::Int(_), _)
+                | deep::Expr::Atom(deep::Atom::Float(_), _)
+                | deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
+                _ => None,
+            },
+            "cast" => extract_numeric_leaf_for_shape(list.elements.get(2)?),
+            "app" => {
+                // Issue #218 R1 HIGH-1 mirror: a surface negative
+                // literal `-x` desugars to `(app (var neg) <inner>)`.
+                // Recurse through the unary minus so the static
+                // recognizer matches the IR lowering's analogous
+                // recognizer in `crates/chelis-ir/src/lower.rs`.
+                let callee = children(list).first()?;
+                if !is_builtin_var(callee, "neg") {
+                    return None;
+                }
+                let inner = children(list).get(1)?;
+                extract_numeric_leaf_for_shape(inner)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
@@ -10457,6 +13640,77 @@ fn check_declared_dvars_rigid(
         } else {
             seen.insert(resolved, *dv);
         }
+    }
+}
+
+/// chelis#272 list-uniformity guard.
+///
+/// A declared return type of the form `List[tensor[..., d, ...]]` whose
+/// element dim `d` is a *rigid/named* dimension (`Dim::Var` for a
+/// declared dim parameter, or `Dim::Name` for a named symbolic dim)
+/// promises that every list element has the *same* length at that axis.
+/// The #218 Cons-join widens a *mismatched-concrete* list-element axis
+/// to `Dim::Wildcard`, and `unify_dim` lets that wildcard satisfy a
+/// rigid `Var`/`Name` permissively *without binding it* — so neither the
+/// pin-to-literal nor the distinct-collapse arm of
+/// `check_declared_dvars_rigid` observes the violation.
+///
+/// This check closes that gap structurally: it walks the declared type
+/// and the resolved body type in parallel and flags any list-element
+/// tensor axis where the declaration names a rigid/named dim but the
+/// body produced a `Wildcard`. It is deliberately scoped to *list
+/// element* tensors (`List[tensor[...]]`), the surface where the #272
+/// soundness gap lives; it does not touch bare `tensor[...]` returns
+/// whose wildcard axes legitimately flow from `expand`/`reshape`/`shape`
+/// (§4.7), where the declared return's named dim binds the result tvar
+/// directly rather than being absorbed by a heterogeneous-list wildcard.
+fn check_list_elem_rigid_dim_vs_wildcard(
+    decl_ty: &Type,
+    body_ty: &Type,
+    errors: &mut Vec<CheckError>,
+) {
+    match (decl_ty, body_ty) {
+        // Descend through the function type to its return position.
+        (Type::Fn(_, decl_ret), Type::Fn(_, body_ret)) => {
+            check_list_elem_rigid_dim_vs_wildcard(decl_ret, body_ret, errors);
+        }
+        // `List[T]`: check the element type. The list element is where
+        // the uniformity promise lives.
+        (Type::Adt(dn, dargs), Type::Adt(bn, bargs))
+            if dn == "List" && bn == "List" && dargs.len() == 1 && bargs.len() == 1 =>
+        {
+            if let (Type::Tensor(ddims, _), Type::Tensor(bdims, _)) = (&dargs[0], &bargs[0])
+                && ddims.len() == bdims.len()
+            {
+                for (dd, bd) in ddims.iter().zip(bdims.iter()) {
+                    let rigid = matches!(dd, Dim::Var(_) | Dim::Name(_));
+                    if rigid && matches!(bd, Dim::Wildcard) {
+                        let promised = match dd {
+                            Dim::Var(v) => format!("dim parameter d{}", v.0),
+                            Dim::Name(n) => format!("named dimension `{n}`"),
+                            _ => unreachable!(),
+                        };
+                        errors.push(CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "list element dimension is unknown (wildcard) in the function \
+                                 body but the declared element type promises a uniform {promised}: \
+                                 a heterogeneous list literal cannot satisfy a declared \
+                                 List[tensor[..]] whose element dimension names a rigid/named axis"
+                            ),
+                            vec![
+                                "Every element of a `List[tensor[k, ..]]` must share the same \
+                                 length `k`. Either give the elements a uniform dimension, or \
+                                 declare the element axis as a concrete literal / wildcard \
+                                 (`tensor[*, ..]`) if the lengths genuinely differ"
+                                    .to_string(),
+                            ],
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -11080,18 +14334,60 @@ fn pattern_bindings(
                 if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
                     covered_variants.push(ctor_name.to_string());
 
-                    // Look up variant in ADT registry to get field types
+                    // Look up variant in ADT registry for the canonical
+                    // field order and known field-name set used for
+                    // validation diagnostics.
                     let variant_info = adt_reg
                         .lookup_variant(ctor_name)
                         .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name));
-                    let declared_fields: std::collections::HashMap<&str, &Type> = variant_info
-                        .map(|(_, vi)| {
-                            vi.fields
-                                .iter()
-                                .filter_map(|(name, ty)| name.as_deref().map(|n| (n, ty)))
-                                .collect()
-                        })
+                    let declared_field_names: Vec<Option<String>> = variant_info
+                        .map(|(_, vi)| vi.fields.iter().map(|(n, _)| n.clone()).collect())
                         .unwrap_or_default();
+                    let known_field_set: std::collections::HashSet<&str> = declared_field_names
+                        .iter()
+                        .filter_map(|n| n.as_deref())
+                        .collect();
+
+                    // Mirror the `pat-ctor` (positional) path: instantiate
+                    // the constructor scheme and unify its return type
+                    // with the scrutinee so the ADT's type parameters get
+                    // pinned to the scrutinee's concrete instantiation
+                    // (e.g. `FooState[a] -> FooState[tensor[n, f32]]`).
+                    // The instantiated function's arg types are the
+                    // properly substituted per-field types. Without this
+                    // step, the declared field types still reference the
+                    // ADT's abstract `a`, leaving record-pattern bindings
+                    // stuck as fresh type variables and breaking
+                    // downstream linearity/borrow checks. (closes #181)
+                    let instantiated_arg_types: Vec<Type> = if let Some(scheme) = env
+                        .lookup(ctor_name)
+                        .or_else(|| env.lookup_terminal_unique(ctor_name))
+                    {
+                        let scheme = scheme.clone();
+                        let ctor_ty = env.instantiate(&scheme, vg);
+                        match ctor_ty {
+                            Type::Fn(arg_types, ret) => {
+                                let _ = unify(&ret, scrutinee_ty, subst);
+                                arg_types
+                            }
+                            // Nullary constructor: the scheme body is the
+                            // ADT type itself, no Fn-wrapping. Still unify
+                            // with the scrutinee so the ADT's type
+                            // parameters are pinned to its concrete
+                            // instantiation, mirroring `pat-ctor`'s
+                            // positional path. There are no fields to
+                            // bind for `Foo {}`, so the empty
+                            // `instantiated_arg_types` is the right
+                            // return value either way; the unify is the
+                            // side-effect that matters.
+                            other => {
+                                let _ = unify(&other, scrutinee_ty, subst);
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    };
 
                     for kv_expr in kids.iter().skip(1) {
                         if let deep::Expr::List(kv_list, _) = kv_expr
@@ -11102,9 +14398,71 @@ fn pattern_bindings(
                                 let field_name = symbol_name(&kv_kids[0]);
                                 // Look up declared field type — reject unknown fields
                                 let field_ty = match field_name {
-                                    Some(n) => match declared_fields.get(n) {
-                                        Some(ty) => (*ty).clone(),
-                                        None if !declared_fields.is_empty() => {
+                                    Some(n) => {
+                                        if known_field_set.contains(n) {
+                                            // Prefer the instantiated arg type from
+                                            // the constructor scheme so the
+                                            // scrutinee's concrete type arguments
+                                            // are reflected in the pattern binding.
+                                            let pos = declared_field_names
+                                                .iter()
+                                                .position(|nm| nm.as_deref() == Some(n));
+                                            match pos.and_then(|i| instantiated_arg_types.get(i)) {
+                                                Some(ty) => subst.apply(ty),
+                                                None => {
+                                                    // Fallback: un-instantiated declared field
+                                                    // type when the constructor scheme isn't
+                                                    // in `env`. This branch SHOULD be
+                                                    // unreachable in practice: every `deftype`
+                                                    // registered in `adt_reg` via
+                                                    // `collect_declarations` also binds its
+                                                    // constructor scheme in `env` in the same
+                                                    // call. If that invariant drifts (e.g., a
+                                                    // future code path populates `adt_reg`
+                                                    // without binding into `env`), the
+                                                    // fallback would silently produce
+                                                    // `Var(T_a)` from the un-instantiated
+                                                    // VariantInfo — exactly the bug #181 fixed.
+                                                    // The debug_assert below flags the drift
+                                                    // in tests; the runtime fallback to
+                                                    // `vi.fields[i]` preserves pre-fix
+                                                    // behavior in release builds.
+                                                    debug_assert!(
+                                                        false,
+                                                        "env/adt_reg sync invariant violated: \
+                                                         field `{n}` of constructor `{ctor_name}` \
+                                                         is known to `adt_reg` (variant_info found) \
+                                                         but the constructor scheme is missing from \
+                                                         `env`. See infer.rs pat-record fallback note."
+                                                    );
+                                                    variant_info
+                                                        .and_then(|(_, vi)| {
+                                                            vi.fields.iter().find_map(
+                                                                |(name, ty)| {
+                                                                    (name.as_deref() == Some(n))
+                                                                        .then(|| ty.clone())
+                                                                },
+                                                            )
+                                                        })
+                                                        // Per the loop guard `known_field_set
+                                                        // .contains(n)` and the fact that
+                                                        // `known_field_set` is derived from
+                                                        // `declared_field_names` whose
+                                                        // `Some(_)` entries are exactly the
+                                                        // named fields of `vi.fields`, the
+                                                        // find_map above always returns Some
+                                                        // here. The expect makes that explicit;
+                                                        // if it ever fires, both data sources
+                                                        // are themselves out of sync — a bug
+                                                        // upstream of this site.
+                                                        .expect(
+                                                            "known_field_set is derived from \
+                                                             vi.fields' named entries; mismatch \
+                                                             indicates a corrupted AdtRegistry",
+                                                        )
+                                                }
+                                            }
+                                        } else if !known_field_set.is_empty() {
                                             // Unknown field name — error
                                             errors.push(CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
@@ -11114,13 +14472,17 @@ fn pattern_bindings(
                                                 ),
                                                 vec![format!(
                                                     "known fields: {:?}",
-                                                    declared_fields.keys().collect::<Vec<_>>()
+                                                    declared_field_names
+                                                        .iter()
+                                                        .filter_map(|f| f.as_deref())
+                                                        .collect::<Vec<_>>()
                                                 )],
                                             ));
                                             Type::Error
+                                        } else {
+                                            vg.fresh_type() // no ADT info available
                                         }
-                                        None => vg.fresh_type(), // no ADT info available
-                                    },
+                                    }
                                     None => vg.fresh_type(),
                                 };
                                 pattern_bindings(
@@ -11663,11 +15025,17 @@ fn grad_wrt_indices(list: &deep::List, errors: &mut Vec<CheckError>) -> Option<O
         return Some(None);
     };
 
+    // Issue #216: cast-aware so a Deep-direct grad node with cast-wrapped
+    // wrt indices peels to the underlying int and trips the
+    // non-negative-index check at infer time. Surf desugar resolves
+    // parameter names to bare literal ints before reaching here, so the
+    // swap is defense-in-depth for Deep-direct callers (decompiler,
+    // macro output, custom tooling).
     match wrt_expr {
         deep::Expr::List(tuple, _) if get_tag(tuple) == Some("tuple") => {
             let mut indices = Vec::new();
             for item in children(tuple) {
-                let Some(index) = extract_int_literal(item) else {
+                let Some(index) = extract_int_for_dim(item) else {
                     errors.push(CheckError::new(
                         CheckErrorKind::TypeMismatch,
                         "grad `wrt` tuple must contain integer parameter indices".to_string(),
@@ -11688,7 +15056,7 @@ fn grad_wrt_indices(list: &deep::List, errors: &mut Vec<CheckError>) -> Option<O
             Some(Some(indices))
         }
         other => {
-            let Some(index) = extract_int_literal(other) else {
+            let Some(index) = extract_int_for_dim(other) else {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     "grad `wrt` must be an integer parameter index or tuple of indices".to_string(),
@@ -11740,7 +15108,11 @@ fn infer_vmap(
         return Type::Error;
     }
 
-    let axis = kids.get(1).and_then(extract_int_literal).unwrap_or(0);
+    // Issue #216: cast-aware so a Deep-direct vmap node with a cast-
+    // wrapped axis literal peels to the underlying int and trips the
+    // non-negative check. Surf parser restricts vmap's axis to bare
+    // ints, so this is defense-in-depth for Deep-direct callers.
+    let axis = kids.get(1).and_then(extract_int_for_dim).unwrap_or(0);
     if axis < 0 {
         errors.push(CheckError::new(
             CheckErrorKind::DimensionMismatch,
@@ -12931,16 +16303,16 @@ mod tests {
     #[test]
     fn adt_deftype_and_construct() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42)))",
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42)))",
         );
     }
 
     #[test]
     fn adt_nullary_constructor() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
-             (def {} x (var {} None))",
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
+             (def {} x (var {} MyNone))",
         );
     }
 
@@ -12952,28 +16324,146 @@ mod tests {
         );
     }
 
+    // ── Duplicate type-definition rejection ──────────────────────
+    // The carrier-set in `linearity::compute_tensor_carrying_adts`
+    // keys on bare ADT names, so silent last-write-wins on duplicate
+    // `deftype`s would produce order-dependent borrow semantics. The
+    // type checker rejects collisions at declaration time
+    // (`CheckErrorKind::DuplicateDefinition`); the tests below pin
+    // both sides of that rule.
+
+    #[test]
+    fn duplicate_deftype_in_same_program_is_rejected() {
+        check_err(
+            "(deftype {} Dup () (variant {} A))
+             (deftype {} Dup () (variant {} B))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn distinct_deftypes_with_overlapping_variant_names_are_accepted() {
+        // Two ADTs may share a variant name; only ADT-name collisions
+        // are duplicates. This pins that the rejection is scoped to
+        // the type name, not to constructor names.
+        check_ok(
+            "(deftype {} Lhs () (variant {} A))
+             (deftype {} Rhs () (variant {} B))
+             (def {} x (var {} A))
+             (def {} y (var {} B))",
+        );
+    }
+
+    #[test]
+    fn deftype_colliding_with_prelude_option_is_rejected() {
+        // `Option[a]` is registered by `register_prelude_adts` before
+        // `collect_declarations` runs. User code re-declaring it would
+        // overwrite the prelude entry under `HashMap::insert`.
+        check_err(
+            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn deftype_then_typealias_with_same_name_is_rejected() {
+        // `deftype` and `typealias` share the same type-name namespace
+        // (both live in `AdtRegistry`). A later `typealias Holder = ...`
+        // would silently overwrite an earlier `deftype Holder`.
+        check_err(
+            "(deftype {} Holder () (variant {} V))
+             (typealias {} Holder () (t-prim {} int32))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn typealias_then_deftype_with_same_name_is_rejected() {
+        check_err(
+            "(typealias {} Holder () (t-prim {} int32))
+             (deftype {} Holder () (variant {} V))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn duplicate_typealias_is_rejected() {
+        check_err(
+            "(typealias {} Alias () (t-prim {} int32))
+             (typealias {} Alias () (t-prim {} f32))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    // ── Duplicate def rejection (chelis#258) ─────────────────────
+    // A def's value binding is silent last-write-wins, and Chelis does
+    // not dispatch same-name defs by arg arity or tensor rank. Two
+    // same-name defs (e.g. rank-distinct "overloads") therefore leave
+    // one arm unreachable and surface a confusing DimensionMismatch at
+    // the other arm's call sites. `report_duplicate_defs` rejects them
+    // at the definition site instead. The tests below pin both sides.
+
+    #[test]
+    fn duplicate_def_in_same_program_is_rejected() {
+        check_err(
+            "(def {} f (fn {} (params {} x) (var {} x)))
+             (def {} f (fn {} (params {} y) (var {} y)))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn duplicate_value_def_in_same_program_is_rejected() {
+        // The rule keys on the `def` tag, so duplicate value defs collide too.
+        check_err(
+            "(def {} x (lit {type: (t-prim {} int32)} 1))
+             (def {} x (lit {type: (t-prim {} int32)} 2))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn distinct_name_defs_are_accepted() {
+        // Only same-name collisions are duplicates; distinct names are fine.
+        check_ok(
+            "(def {} f (fn {} (params {} x) (var {} x)))
+             (def {} g (fn {} (params {} y) (var {} y)))",
+        );
+    }
+
+    #[test]
+    fn sig_plus_def_same_name_is_not_a_duplicate() {
+        // A `defsig` + a `def` for one name is the ordinary annotated-def
+        // shape (and an inline-annotated def desugars to exactly that pair),
+        // so it must not be flagged. Only two `def`s for one name collide.
+        check_ok(
+            "(defsig {} f (t-fn {} (t-var {} a) (t-var {} a)))
+             (def {} f (fn {} (params {} x) (var {} x)))",
+        );
+    }
+
     // ── Match tests ──────────────────────────────────────────────
 
     #[test]
     fn match_simple_adt() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42)))
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42)))
              (def {} result
                (match {} (var {} x)
-                 (arm {} (pat-ctor {} Some (pat-var {} v)) () (var {} v))
-                 (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} int32)} 0))))",
+                 (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))
+                 (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} int32)} 0))))",
         );
     }
 
     #[test]
     fn match_non_exhaustive() {
         check_err(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42)))
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42)))
              (def {} result
                (match {} (var {} x)
-                 (arm {} (pat-ctor {} Some (pat-var {} v)) () (var {} v))))",
+                 (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))))",
             CheckErrorKind::NonExhaustiveMatch,
         );
     }
@@ -13029,6 +16519,173 @@ mod tests {
         check_ok(
             "(typealias {} Scalar () (t-prim {} f32))
              (def {} x (lit {type: (t-adt {} Scalar)} 1.0))",
+        );
+    }
+
+    // ── Transparent-alias-in-constructor-field tests ──────────────
+    //
+    // Per spec/02-surf-syntax.md ("Aliases are transparent — expanded
+    // during desugaring"), a `deftype` field declared with a transparent
+    // alias must unify against the alias expansion. The Hull.Ast scenario
+    // that motivated this is `type EffectRow = List[Effect]` used in
+    // `type Type = ... | TArrow(Type, Type, EffectRow) | ...`; constructing
+    // `TArrow(a, b, [])` must not report `EffectRow vs List`.
+
+    /// Surf source -> desugar -> IR check. Returns the collected check
+    /// errors (empty on success). Parse failures panic — the source is
+    /// the test's own fixture, not user input under test.
+    fn surf_check_errors(src: &str) -> Vec<CheckError> {
+        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        match check_ir_program(&exprs) {
+            Ok(_) => Vec::new(),
+            Err(result) => result.errors,
+        }
+    }
+
+    fn assert_surf_ok(src: &str) {
+        let errors = surf_check_errors(src);
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn alias_typed_ctor_field_constructs_with_list_value() {
+        // EffectRow = List[Effect] declared AFTER the deftype that uses it
+        // (forward reference). Constructing TArrow(a, b, e) where the third
+        // field is the alias must type-check: the field expands to
+        // List[Effect] and unifies with the EffectRow-typed argument.
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty, e: EffectRow) -> Ty = TArrow(a, b, e)\n",
+        );
+    }
+
+    #[test]
+    fn alias_typed_ctor_field_constructs_with_empty_list_literal() {
+        // Constructing TArrow(a, b, []) where the third field is the alias
+        // must type-check: [] is List[Effect], the field expands to
+        // List[Effect].
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty) -> Ty = TArrow(a, b, [])\n",
+        );
+    }
+
+    #[test]
+    fn def_returning_option_tuple_with_alias_field_type_checks() {
+        // The spec §3 pattern `Some((Ctor(...), []))` returning
+        // Option[(Ty, EffectRow)].
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty) -> Option[(Ty, EffectRow)] = Some((TArrow(a, b, []), []))\n",
+        );
+    }
+
+    #[test]
+    fn two_level_alias_in_ctor_field_resolves() {
+        // Alias of an alias: Effects = EffectRow = List[Effect].
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, Effects)\n\
+             type EffectRow = List[Effect]\n\
+             type Effects = EffectRow\n\
+             def mk(a: Ty, b: Ty) -> Ty = TArrow(a, b, [])\n",
+        );
+    }
+
+    #[test]
+    fn ctx_list_of_tuple_alias_used_in_value_position() {
+        // Ctx = List[(String, Ty)] -- a tuple-bearing alias used as a
+        // constructor field; constructing with an empty list must work.
+        assert_surf_ok(
+            "module M\n\
+             export (mk)\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty)\n\
+             type Ctx = List[(String, Ty)]\n\
+             type Judgement =\n\
+               | Judge(Ctx, Ty)\n\
+             def mk(t: Ty) -> Judgement = Judge([], t)\n",
+        );
+    }
+
+    #[test]
+    fn genuine_mismatch_against_expanded_alias_still_rejected() {
+        // NEGATIVE PARITY: passing an Int where the expanded alias is
+        // List[Effect] must STILL be a TypeMismatch. Alias transparency
+        // must not weaken genuine error detection.
+        let errors = surf_check_errors(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty) -> Ty = TArrow(a, b, 5)\n",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::TypeMismatch)),
+            "expected a TypeMismatch for Int passed to a List[Effect] field, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn alias_field_rejects_wrong_list_element_type() {
+        // NEGATIVE PARITY: List[Ty] where the field expands to
+        // List[Effect] must still mismatch on the element type.
+        let errors = surf_check_errors(
+            "module M\n\
+             export (mk)\n\
+             type Effect =\n\
+               | Pure\n\
+               | Impure\n\
+             type Ty =\n\
+               | TBase\n\
+               | TArrow(Ty, Ty, EffectRow)\n\
+             type EffectRow = List[Effect]\n\
+             def mk(a: Ty, b: Ty, ts: List[Ty]) -> Ty = TArrow(a, b, ts)\n",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::TypeMismatch)),
+            "expected a TypeMismatch for List[Ty] passed to a List[Effect] field, got: {errors:?}"
         );
     }
 
@@ -13347,8 +17004,8 @@ mod tests {
     #[test]
     fn fix6a_wildcard_exhaustive() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None)) \
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42))) \
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone)) \
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42))) \
              (def {} result \
                (match {} (var {} x) \
                  (arm {} (pat-wild {}) () (lit {type: (t-prim {} int32)} 0))))",
@@ -13359,8 +17016,8 @@ mod tests {
     #[test]
     fn fix6b_pat_as_binds_name() {
         check_ok(
-            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None)) \
-             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42))) \
+            "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone)) \
+             (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42))) \
              (def {} result \
                (match {} (var {} x) \
                  (arm {} (pat-as {} whole (pat-wild {})) () (var {} whole))))",
@@ -13738,6 +17395,70 @@ padded = pad_sequences_to([[cast(1, int64)], [cast(2, int64), cast(3, int64)]], 
 "#,
         );
         assert!(checked.annotated_exprs().len() >= 9);
+    }
+
+    // #143: `pad_sequences_to`'s padded (axis-1) dimension equals its
+    // literal `width` argument. The result type carries `Dim::Lit(width)`
+    // for that axis (not `Dim::Wildcard`), so a declared return type with
+    // the matching concrete width type-checks and a mismatched one is
+    // rejected. The width arrives as `cast(N, int64)` in every caller.
+
+    #[test]
+    fn pad_sequences_to_literal_width_matches_declared_shape() {
+        let decls = chelis_surf::parser::parse_str(
+            "def f() -> tensor[1, 4, f32] = \
+             pad_sequences_to([[cast(10.0, f32)]], cast(4, int64), cast(0.0, f32))\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let result = infer_ir_program(&exprs);
+        assert!(
+            result.errors.is_empty(),
+            "literal pad width 4 should match declared tensor[1, 4, f32], got {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn pad_sequences_to_wrong_literal_width_is_rejected() {
+        let decls = chelis_surf::parser::parse_str(
+            "def f() -> tensor[1, 5, f32] = \
+             pad_sequences_to([[cast(10.0, f32)]], cast(4, int64), cast(0.0, f32))\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let result = infer_ir_program(&exprs);
+        assert!(
+            !result.errors.is_empty(),
+            "pad width 4 declared as tensor[1, 5, f32] should be a type error"
+        );
+    }
+
+    #[test]
+    fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
+        // The two `pad_sequences_to` results flow into a function whose
+        // sig declares the same dim variable `d` on both parameters.
+        // Different literal widths (8 vs 5) must collide on `d`.
+        let decls = chelis_surf::parser::parse_str(
+            "sig demo_unify: &tensor[s, d, p] -> &tensor[s, d, p] -> tensor[s, d, p]\n\
+             def demo_unify(a, b) = a\n\
+             def test_mismatch() -> tensor[s, d, f32] = {\n\
+               q = pad_sequences_to([[cast(0.0, f32)]], cast(8, int64), cast(0.0, f32))\n\
+               k = pad_sequences_to([[cast(0.0, f32)]], cast(5, int64), cast(0.0, f32))\n\
+               demo_unify(q, k)\n\
+             }\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let result = infer_ir_program(&exprs);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+            "widths 8 and 5 sharing sig dim `d` should surface a DimensionMismatch, got {:?}",
+            result.errors
+        );
     }
 
     #[test]

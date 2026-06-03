@@ -141,6 +141,52 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
 }
 
 #[test]
+fn module_wrapped_helper_signature_visible_to_caller_annotation() {
+    // Pre-#181, module-wrapped multi-decl programs had NO inference
+    // pre-populated during annotation (a silent no-op), so the
+    // wrapped vs unwrapped flavors of the same source produced
+    // different signature-inference results. PR #183 fixed
+    // `annotate_ir_program{,_with_context}` to descend through
+    // `(module {} name ...)` wrappers, which means the helper IS
+    // visible at caller-annotation time in the wrapped case.
+    //
+    // This test pins the post-fix behavior: for a module-wrapped
+    // version of `later_helper_does_not_retroactively_...`, caller's
+    // `a` becomes read-only because helper's read-only-`x` signature
+    // is visible by the time caller is annotated. (Bare-decl
+    // forward-reference semantics stay as-is in the sibling test
+    // above.) Together the two tests document the intentional
+    // asymmetry between bare-decl and module-wrapped programs.
+    let checked = checked_surf(
+        r#"
+module Foo
+def caller(a, b: tensor[4, f32]) = {
+  z = helper(a, b)
+  add(a, z)
+}
+def helper(x, y: tensor[4, f32]) = add(x, y)
+"#,
+    );
+
+    let helper = checked
+        .signature_inference()
+        .functions
+        .get("helper")
+        .expect("helper metadata");
+    let caller = checked
+        .signature_inference()
+        .functions
+        .get("caller")
+        .expect("caller metadata");
+    assert!(helper.params[0].inferred_read_only);
+    assert!(
+        caller.params[0].inferred_read_only,
+        "module-wrapped caller's `a` SHOULD become read-only: helper's signature \
+         is visible at caller-annotation time after the #183 module-descent fix"
+    );
+}
+
+#[test]
 fn recursive_cycle_member_does_not_infer_read_only_param() {
     let checked = checked_surf(
         r#"

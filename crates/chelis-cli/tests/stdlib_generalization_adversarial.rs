@@ -101,27 +101,41 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+// Issue #207: `chelis check` now exits non-zero when the JSON
+// `errors` array is non-empty. The adversarial fixtures here use
+// both clean and error-expecting cases; the helper captures stdout
+// regardless of exit status so both shapes work.
 fn run_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).expect("check output should be json")
+        .output()
+        .expect("run chelis check");
+    serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
 fn run_build(path: &Path) -> std::process::Output {
     // Use std::process::Command directly because assert_cmd's
     // `.unwrap()` panics on non-zero exit, which is the case we
     // want to inspect.
+    //
+    // Output is pinned to the source file's parent dir (always a
+    // tempdir for these tests) via `-o`. Without this, `chelis build`
+    // emits its C/header bundle into the cargo test runner's CWD
+    // (`crates/chelis-cli/`), littering the working tree with files
+    // like `concrete.c` / `simple_poly_build.c` and forcing
+    // .gitignore allowlists.
+    let out_dir = path.parent().expect("source path has parent");
     let bin = assert_cmd::cargo::cargo_bin("chelis");
     std::process::Command::new(bin)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["build", path.to_str().unwrap()])
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
         .output()
         .expect("spawn chelis")
 }
@@ -288,6 +302,70 @@ def call(q: &tensor[4, 4, {dtype}], k: &tensor[4, 4, {dtype}], v: &tensor[4, 4, 
 }
 
 // =================================================================
+// `div` is admitted on integer operands with C/Rust truncating
+// semantics per spec/05-risc-primitives.md §2.1 (used by
+// `Std.Decimal` for scale shifts). `recip` is float-only per §2.2
+// because an integer reciprocal has no useful IEEE-754
+// interpretation. These tests pin both sides: polymorphic `div`
+// wrappers must accept integer instantiations; polymorphic `recip`
+// wrappers must reject them.
+// =================================================================
+
+#[test]
+fn polymorphic_div_wrapper_accepts_integer_call_site() {
+    for dtype in INTEGER_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("div_wrapper_int.ch");
+        let src = format!(
+            r#"sig my_div: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+def my_div(a, b) = div(a, b)
+def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_div(x, y)
+"#
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        let errs = errors(&json);
+        assert!(
+            errs.is_empty(),
+            "polymorphic `div` wrapper at integer dtype `{dtype}` must \
+             type-check clean (C/Rust truncating semantics per \
+             spec/05-risc-primitives.md \u{00a7}2.1); got {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn polymorphic_recip_wrapper_rejects_integer_call_site() {
+    for dtype in INTEGER_DTYPES {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("recip_wrapper_int.ch");
+        let src = format!(
+            r#"sig my_recip: tensor[4, p] -> tensor[4, p]
+def my_recip(x) = recip(x)
+def call(y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_recip(y)
+"#
+        );
+        write_file(&path, &src);
+        let json = run_check(&path);
+        let errs = errors(&json);
+        assert!(
+            !errs.is_empty(),
+            "PR #176 red-team: polymorphic `recip` wrapper at integer \
+             dtype `{dtype}` must reject per spec/04-type-system.md \
+             \u{00a7}5.4; got clean. errs={errs:?}"
+        );
+        let messages = error_messages(&json);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("5.4") && m.contains("recip")),
+            "PR #176 red-team: rejection of recip(`{dtype}`) wrapper \
+             must cite \u{00a7}5.4 and name `recip`; got {messages:?}"
+        );
+    }
+}
+
+// =================================================================
 // FINDING 3: tensor-form transcendentals silently accept integer
 // operands. This is the upstream root cause of findings 1 + 2.
 // =================================================================
@@ -302,6 +380,13 @@ fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
         ("log", "log(x)"),
         ("sin", "sin(x)"),
         ("sqrt", "sqrt(x)"),
+        // `recip` is float-only per spec/05-risc-primitives.md §2.2
+        // because integer reciprocal has no useful IEEE-754 meaning.
+        // `div` is NOT in this list — integer div is admitted with
+        // C/Rust truncating semantics per spec §2.1, used by
+        // `Std.Decimal` for scale shifts; that case is locked by the
+        // positive-parity tests below.
+        ("recip", "recip(x)"),
     ];
     for (name, body) in probes {
         let dir = tempdir().expect("tempdir");
@@ -457,14 +542,21 @@ def call(x: &tensor[3, f32], y: &tensor[3, f32]) -> tensor[3, f32] = add_t(x, y)
 }
 
 // =================================================================
-// FINDING 5: multi-letter dim names in a sig are parsed as d-name
-// (concrete) instead of d-var, so any sig using them rejects all
-// concrete-dim callers.
+// FINDING 5: regression-lock — multi-letter dim sig accepts concrete
+// caller (issue Chelis-Lang/chelis#219, Option A).
 // =================================================================
+//
+// Before #219 Option A, multi-letter dim names in a sig parsed as
+// `d-name` (concrete) and `unify_dim` had an asymmetry where
+// `Var <-> Lit` was accepted but `Name <-> Lit` was rejected. The
+// test below was originally written as a diagnostic pin
+// (`finding_5_multi_letter_dim_in_sig_rejects_concrete_caller`,
+// `#[ignore]`-flagged) to flip when the fix landed. With Option A,
+// the call site now type-checks cleanly; this test pins the
+// post-fix contract so a regression in the unify_dim arm is loud.
 
 #[test]
-#[ignore = "WS-A9 follow-up: multi-letter dim names parsed as d-name (concrete) instead of d-var; out of WS-A8 scope"]
-fn finding_5_multi_letter_dim_in_sig_rejects_concrete_caller() {
+fn finding_5_multi_letter_dim_in_sig_accepts_concrete_caller() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("multi_letter.ch");
     write_file(
@@ -475,15 +567,11 @@ def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = take(xs)
 "#,
     );
     let json = run_check(&path);
-    let kinds = error_kinds(&json);
+    let errs = errors(&json);
     assert!(
-        kinds.iter().any(|k| k == "DimensionMismatch"),
-        "finding-5 regression-flip: multi-letter dim is now treated as d-var. Got kinds {kinds:?}"
-    );
-    let messages = error_messages(&json);
-    assert!(
-        messages.iter().any(|m| m.contains("batch")),
-        "finding-5 expected diagnostic to name 'batch'; got {messages:?}"
+        errs.is_empty(),
+        "finding-5 post-#219 Option A: multi-letter dim sig should accept concrete \
+         caller; got errors {errs:?}"
     );
 }
 

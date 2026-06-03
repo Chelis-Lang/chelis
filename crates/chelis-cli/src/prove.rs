@@ -17,6 +17,10 @@ pub struct ProveOptions<'a> {
     pub max_attempts: Option<usize>,
     pub json: bool,
     pub spans: Option<&'a Path>,
+    #[allow(dead_code)]
+    pub tier: &'a str,
+    #[allow(dead_code)]
+    pub smt_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +54,8 @@ struct Property {
     source: PathBuf,
     params: Vec<Param>,
     preconditions: Vec<Expr>,
+    #[allow(dead_code)]
+    body: Expr,
     samples: Option<usize>,
     seed: Option<u64>,
 }
@@ -241,6 +247,7 @@ fn collect_surf_properties(path: &Path, decls: &[Decl], only: Option<&str>) -> V
                 name,
                 params,
                 preconditions,
+                body,
                 options,
                 ..
             } if matches_filter(name, only) => Some(Property {
@@ -248,6 +255,7 @@ fn collect_surf_properties(path: &Path, decls: &[Decl], only: Option<&str>) -> V
                 source: path.to_path_buf(),
                 params: params.clone(),
                 preconditions: preconditions.clone(),
+                body: body.clone(),
                 samples: property_samples(options),
                 seed: property_seed(options),
             }),
@@ -281,6 +289,99 @@ fn prove_surf_property(
     totals: &mut Summary,
 ) -> Status {
     totals.total += 1;
+
+    // Tier B: attempt SMT proof when --tier auto
+    #[cfg(feature = "chelis-prove")]
+    if (options.tier == "auto" || options.tier == "smt-only")
+        && let Some(postcondition) = surf_expr_to_smt(
+            &property.body,
+            &InlineCtx {
+                decls,
+                depth: 0,
+                max_depth: 3,
+                call_stack: vec![],
+            },
+        )
+    {
+        let variables: Vec<(String, chelis_prove::solver::SmtSort)> = property
+            .params
+            .iter()
+            .filter_map(|p| {
+                let sort = match p.ty.as_ref()? {
+                    TypeExpr::Named(name, _) => match name.as_str() {
+                        "f32" | "f64" => chelis_prove::solver::SmtSort::Real,
+                        "int32" | "int64" => chelis_prove::solver::SmtSort::Int,
+                        "bool" => chelis_prove::solver::SmtSort::Bool,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                Some((p.name.clone(), sort))
+            })
+            .collect();
+        if variables.len() == property.params.len() {
+            let preconditions: Vec<chelis_prove::solver::SmtExpr> = property
+                .preconditions
+                .iter()
+                .filter_map(|e| {
+                    surf_expr_to_smt(
+                        e,
+                        &InlineCtx {
+                            decls,
+                            depth: 0,
+                            max_depth: 3,
+                            call_stack: vec![],
+                        },
+                    )
+                })
+                .collect();
+            if preconditions.len() == property.preconditions.len() {
+                let smt_prop = chelis_prove::tier_b::SmtProperty {
+                    variables,
+                    preconditions,
+                    postcondition,
+                };
+                if let chelis_prove::Inlineability::Inlineable =
+                    chelis_prove::classify_inlineability(&smt_prop.postcondition)
+                {
+                    match chelis_prove::solve_property(&smt_prop, options.smt_timeout_ms) {
+                        chelis_prove::tier_b::TierBResult::Proved => {
+                            totals.passed += 1;
+                            if options.json {
+                                println!(
+                                    "{}",
+                                    serde_json::json!({"kind":"property","name":property.name,"status":"passed","proof_tier":"smt","samples":0,"seed":options.effective_seed(property.seed)})
+                                );
+                            } else {
+                                println!("property: {} -- proved (smt)", property.name);
+                            }
+                            return Status::Passed;
+                        }
+                        chelis_prove::tier_b::TierBResult::Disproved(_model) => {
+                            totals.failed += 1;
+                            if options.json {
+                                println!(
+                                    "{}",
+                                    serde_json::json!({"kind":"property","name":property.name,"status":"failed","proof_tier":"smt","samples":0,"seed":options.effective_seed(property.seed)})
+                                );
+                            } else {
+                                println!(
+                                    "property failure: {} (smt counterexample)",
+                                    property.name
+                                );
+                            }
+                            return Status::Failed;
+                        }
+                        chelis_prove::tier_b::TierBResult::Timeout
+                        | chelis_prove::tier_b::TierBResult::Unknown => {
+                            // Fall through to fuzz (Tier C)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let samples_needed = options.samples.or(property.samples).unwrap_or(100);
     let max_attempts = options
         .max_attempts
@@ -1550,6 +1651,344 @@ fn sibling_spans_path(path: &Path) -> Option<PathBuf> {
     let stem = path.file_stem()?.to_str()?;
     let candidate = path.with_file_name(format!("{stem}.spans.json"));
     candidate.exists().then_some(candidate)
+}
+
+#[cfg(feature = "chelis-prove")]
+struct InlineCtx<'a> {
+    decls: &'a [Decl],
+    depth: usize,
+    max_depth: usize,
+    call_stack: Vec<String>,
+}
+
+#[cfg(feature = "chelis-prove")]
+fn lookup_fun_body<'a>(decls: &'a [Decl], name: &str) -> Option<(&'a [Param], &'a Expr)> {
+    decls.iter().find_map(|d| match d {
+        Decl::FunDef {
+            name: n,
+            params,
+            body,
+            ..
+        } if n == name => Some((params.as_slice(), body)),
+        _ => None,
+    })
+}
+
+#[cfg(feature = "chelis-prove")]
+fn surf_expr_to_smt(expr: &Expr, ctx: &InlineCtx) -> Option<chelis_prove::solver::SmtExpr> {
+    use chelis_prove::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
+    match expr {
+        Expr::Binary(BinOp::Ge, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Ge,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Binary(BinOp::Le, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Le,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Binary(BinOp::Gt, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Gt,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Binary(BinOp::Lt, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Lt,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Binary(BinOp::Eq, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Eq,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Binary(BinOp::Ne, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Ne,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Binary(BinOp::And, l, r, _) => Some(SmtExpr::Bool(
+            SB::And,
+            vec![surf_expr_to_smt(l, ctx)?, surf_expr_to_smt(r, ctx)?],
+        )),
+        Expr::Binary(BinOp::Or, l, r, _) => Some(SmtExpr::Bool(
+            SB::Or,
+            vec![surf_expr_to_smt(l, ctx)?, surf_expr_to_smt(r, ctx)?],
+        )),
+        Expr::Lit(Literal::Bool(v), _) => Some(SmtExpr::BoolLit(*v)),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "chelis-prove")]
+fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<chelis_prove::solver::SmtExpr> {
+    use chelis_prove::solver::{ArithOp as SA, SmtExpr};
+    match expr {
+        Expr::Var(name, _) => Some(SmtExpr::Var(name.clone())),
+        Expr::Lit(Literal::Float(v), _) => Some(SmtExpr::RealLit(*v)),
+        Expr::Lit(Literal::Int(v), _) => Some(SmtExpr::IntLit(*v)),
+        Expr::Binary(BinOp::Add, l, r, _) => Some(SmtExpr::Arith(
+            SA::Add,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Binary(BinOp::Sub, l, r, _) => Some(SmtExpr::Arith(
+            SA::Sub,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Binary(BinOp::Mul, l, r, _) => Some(SmtExpr::Arith(
+            SA::Mul,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Binary(BinOp::Div, l, r, _) => Some(SmtExpr::Arith(
+            SA::Div,
+            Box::new(surf_arith(l, ctx)?),
+            Box::new(surf_arith(r, ctx)?),
+        )),
+        Expr::Apply(func, args, _) => {
+            let name = match func.as_ref() {
+                Expr::Var(n, _) => n.clone(),
+                _ => return None,
+            };
+            let smt_args: Option<Vec<_>> = args.iter().map(|a| surf_arith(a, ctx)).collect();
+            let smt_args = smt_args?;
+            if let Some((params, body)) = lookup_fun_body(ctx.decls, &name) {
+                if ctx.call_stack.contains(&name) {
+                    return None;
+                }
+                if ctx.depth >= ctx.max_depth {
+                    return None;
+                }
+                if params.len() != args.len() {
+                    return None;
+                }
+                let subst: std::collections::HashMap<String, &Expr> = params
+                    .iter()
+                    .zip(args.iter())
+                    .map(|(p, a)| (p.name.clone(), a))
+                    .collect();
+                let deeper = InlineCtx {
+                    decls: ctx.decls,
+                    depth: ctx.depth + 1,
+                    max_depth: ctx.max_depth,
+                    call_stack: {
+                        let mut s = ctx.call_stack.clone();
+                        s.push(name.clone());
+                        s
+                    },
+                };
+                return surf_arith_subst(body, &subst, &deeper);
+            }
+            Some(SmtExpr::Apply(name, smt_args))
+        }
+        Expr::If(cond, then_e, else_e, _) => Some(SmtExpr::Ite(
+            Box::new(surf_expr_to_smt(cond, ctx)?),
+            Box::new(surf_arith(then_e, ctx)?),
+            Box::new(surf_arith(else_e, ctx)?),
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "chelis-prove")]
+fn surf_arith_subst(
+    expr: &Expr,
+    subst: &std::collections::HashMap<String, &Expr>,
+    ctx: &InlineCtx,
+) -> Option<chelis_prove::solver::SmtExpr> {
+    use chelis_prove::solver::{ArithOp as SA, BoolOp as SB, CmpOp as SC, SmtExpr};
+    match expr {
+        Expr::Var(name, _) => {
+            if let Some(replacement) = subst.get(name.as_str()) {
+                surf_arith(replacement, ctx)
+            } else {
+                Some(SmtExpr::Var(name.clone()))
+            }
+        }
+        Expr::Lit(Literal::Float(v), _) => Some(SmtExpr::RealLit(*v)),
+        Expr::Lit(Literal::Int(v), _) => Some(SmtExpr::IntLit(*v)),
+        Expr::Binary(BinOp::Add, l, r, _) => Some(SmtExpr::Arith(
+            SA::Add,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Sub, l, r, _) => Some(SmtExpr::Arith(
+            SA::Sub,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Mul, l, r, _) => Some(SmtExpr::Arith(
+            SA::Mul,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Div, l, r, _) => Some(SmtExpr::Arith(
+            SA::Div,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Ge, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Ge,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Le, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Le,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Gt, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Gt,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Lt, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Lt,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Eq, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Eq,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Ne, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Ne,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::And, l, r, _) => Some(SmtExpr::Bool(
+            SB::And,
+            vec![
+                surf_expr_to_smt_subst(l, subst, ctx)?,
+                surf_expr_to_smt_subst(r, subst, ctx)?,
+            ],
+        )),
+        Expr::Binary(BinOp::Or, l, r, _) => Some(SmtExpr::Bool(
+            SB::Or,
+            vec![
+                surf_expr_to_smt_subst(l, subst, ctx)?,
+                surf_expr_to_smt_subst(r, subst, ctx)?,
+            ],
+        )),
+        Expr::If(cond, then_e, else_e, _) => {
+            let c = surf_expr_to_smt_subst(cond, subst, ctx)?;
+            let t = surf_arith_subst(then_e, subst, ctx)?;
+            let e = surf_arith_subst(else_e, subst, ctx)?;
+            Some(SmtExpr::Ite(Box::new(c), Box::new(t), Box::new(e)))
+        }
+        Expr::Apply(func, args, _) => {
+            let name = match func.as_ref() {
+                Expr::Var(n, _) => n.clone(),
+                _ => return None,
+            };
+            let smt_args: Option<Vec<_>> = args
+                .iter()
+                .map(|a| surf_arith_subst(a, subst, ctx))
+                .collect();
+            let smt_args = smt_args?;
+            if let Some((params, body)) = lookup_fun_body(ctx.decls, &name) {
+                if ctx.call_stack.contains(&name) {
+                    return None;
+                }
+                if ctx.depth >= ctx.max_depth {
+                    return None;
+                }
+                if params.len() != args.len() {
+                    return None;
+                }
+                let inner_subst: std::collections::HashMap<String, &Expr> = params
+                    .iter()
+                    .zip(args.iter())
+                    .map(|(p, a)| (p.name.clone(), a))
+                    .collect();
+                let deeper = InlineCtx {
+                    decls: ctx.decls,
+                    depth: ctx.depth + 1,
+                    max_depth: ctx.max_depth,
+                    call_stack: {
+                        let mut s = ctx.call_stack.clone();
+                        s.push(name);
+                        s
+                    },
+                };
+                return surf_arith_subst(body, &inner_subst, &deeper);
+            }
+            Some(SmtExpr::Apply(name, smt_args))
+        }
+        Expr::Block(bindings, body, _) => {
+            let mut extended_subst = subst.clone();
+            for binding in bindings {
+                if let LetPattern::Var(name, _) = &binding.pattern {
+                    extended_subst.insert(name.clone(), &binding.value);
+                } else {
+                    return None;
+                }
+            }
+            surf_arith_subst(body, &extended_subst, ctx)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "chelis-prove")]
+fn surf_expr_to_smt_subst(
+    expr: &Expr,
+    subst: &std::collections::HashMap<String, &Expr>,
+    ctx: &InlineCtx,
+) -> Option<chelis_prove::solver::SmtExpr> {
+    use chelis_prove::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
+    match expr {
+        Expr::Binary(BinOp::Ge, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Ge,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Le, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Le,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Gt, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Gt,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Lt, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Lt,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Eq, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Eq,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::Ne, l, r, _) => Some(SmtExpr::Cmp(
+            SC::Ne,
+            Box::new(surf_arith_subst(l, subst, ctx)?),
+            Box::new(surf_arith_subst(r, subst, ctx)?),
+        )),
+        Expr::Binary(BinOp::And, l, r, _) => Some(SmtExpr::Bool(
+            SB::And,
+            vec![
+                surf_expr_to_smt_subst(l, subst, ctx)?,
+                surf_expr_to_smt_subst(r, subst, ctx)?,
+            ],
+        )),
+        Expr::Binary(BinOp::Or, l, r, _) => Some(SmtExpr::Bool(
+            SB::Or,
+            vec![
+                surf_expr_to_smt_subst(l, subst, ctx)?,
+                surf_expr_to_smt_subst(r, subst, ctx)?,
+            ],
+        )),
+        Expr::Lit(Literal::Bool(v), _) => Some(SmtExpr::BoolLit(*v)),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]

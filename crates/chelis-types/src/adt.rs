@@ -33,6 +33,18 @@ pub struct TypeAliasDef {
     pub body: Type,
 }
 
+/// Shape of a constructor call site, used by
+/// [`AdtRegistry::lookup_variant_preferring_shape`] to disambiguate
+/// same-named variants across colliding ADTs (chelis#148).
+///
+/// `Positional` covers `Ctor(arg1, arg2)` form (lowered to `app`);
+/// `Record` covers `Ctor { field1: ..., field2: ... }` form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallShape {
+    Positional,
+    Record,
+}
+
 /// Registry of all ADT definitions and type aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdtRegistry {
@@ -145,7 +157,13 @@ impl AdtRegistry {
                     _ => continue,
                 };
 
-                // Remaining children are either field definitions or positional type args
+                // Remaining children are either field definitions or positional type args.
+                // Field types are expanded through the alias registry so a field declared
+                // with a transparent alias (`type EffectRow = List[Effect]`) is stored and
+                // unified as its expansion. Any alias the field references must already be
+                // registered; `collect_declarations` registers all `typealias` decls before
+                // any `deftype` so forward references (alias declared after the deftype that
+                // uses it) resolve too.
                 let mut fields: Vec<(Option<String>, Type)> = Vec::new();
                 for field_expr in &vchildren[1..] {
                     match field_expr {
@@ -156,14 +174,18 @@ impl AdtRegistry {
                                     deep::Expr::Atom(deep::Atom::Symbol(s), _) => s.clone(),
                                     _ => continue,
                                 };
-                                let ftype =
-                                    deep_type_to_type_with_params(&fchildren[1], &param_map);
+                                let ftype = self.expand_aliases(&deep_type_to_type_with_params(
+                                    &fchildren[1],
+                                    &param_map,
+                                ));
                                 fields.push((Some(fname), ftype));
                             }
                         }
                         _ => {
                             // Positional type argument
-                            let ftype = deep_type_to_type_with_params(field_expr, &param_map);
+                            let ftype = self.expand_aliases(&deep_type_to_type_with_params(
+                                field_expr, &param_map,
+                            ));
                             fields.push((None, ftype));
                         }
                     }
@@ -220,6 +242,26 @@ impl AdtRegistry {
         self.defs.get(name)
     }
 
+    /// If `name` is already bound (by a `deftype`, `typealias`, or
+    /// prelude ADT registered earlier in this program), return the
+    /// human-readable kind of the existing definition so the caller
+    /// can emit a `DuplicateDefinition` diagnostic. Returns `None` if
+    /// the name is free.
+    ///
+    /// Type names share one flat string-keyed namespace here, so a
+    /// `deftype Foo` cannot coexist with either a second `deftype Foo`
+    /// or a `typealias Foo = ...` — `HashMap::insert` is last-write-
+    /// wins and silently corrupts the registry otherwise.
+    pub fn existing_kind(&self, name: &str) -> Option<&'static str> {
+        if self.defs.contains_key(name) {
+            Some("deftype")
+        } else if self.aliases.contains_key(name) {
+            Some("typealias")
+        } else {
+            None
+        }
+    }
+
     /// Get all variant names for an ADT (for exhaustiveness checking).
     pub fn variant_names(&self, adt_name: &str) -> Option<Vec<String>> {
         self.defs
@@ -250,6 +292,49 @@ impl AdtRegistry {
         });
         let first = matches.next()?;
         matches.next().is_none().then_some(first)
+    }
+
+    /// Look up a variant by constructor name, preferring the variant whose
+    /// field-naming style matches `call_shape`. Resolves chelis#148-class
+    /// collisions where two ADTs in different deps export constructors with
+    /// the same unqualified name but different shapes (e.g.
+    /// School.Data.Dataset.IntCol is a record-style constructor;
+    /// Coral.Frame.Column.IntCol is a positional/tuple constructor). When
+    /// the caller's call syntax is positional, return the positional
+    /// variant; when it's record-style, return the record variant.
+    /// Falls back to the first match if no shape-preferred variant exists.
+    ///
+    /// Candidates are sorted by ADT name before the shape filter, so
+    /// dispatch is deterministic across runs even when multiple variants
+    /// of the same shape collide. Without the sort, `self.defs.iter()`
+    /// (HashMap) leaks iteration-order non-determinism into the choice
+    /// of "first match" in both the shape-match and the fallback path.
+    pub fn lookup_variant_preferring_shape(
+        &self,
+        ctor_name: &str,
+        call_shape: CallShape,
+    ) -> Option<(&str, &VariantInfo)> {
+        let mut candidates: Vec<(&str, &VariantInfo)> = self
+            .defs
+            .iter()
+            .flat_map(|(adt_name, def)| {
+                def.variants.iter().filter_map(move |variant| {
+                    (variant.name == ctor_name).then_some((adt_name.as_str(), variant))
+                })
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_by_key(|(a, _)| *a);
+        let want_named = matches!(call_shape, CallShape::Record);
+        let shape_match = candidates.iter().find(|(_, v)| {
+            !v.fields.is_empty()
+                && v.fields
+                    .iter()
+                    .all(|(name, _)| name.is_some() == want_named)
+        });
+        shape_match.copied().or_else(|| candidates.first().copied())
     }
 
     /// Register a type alias: `typealias Name[params] = Type`.
@@ -290,6 +375,69 @@ impl AdtRegistry {
             .collect();
 
         Some(substitute_alias_type(&alias.body, &subst))
+    }
+
+    /// Recursively expand every registered type alias inside `ty`, leaving
+    /// non-alias `Adt`, tuple, and function structure intact. This is the
+    /// transparency rule from `spec/02-surf-syntax.md` ("Aliases are
+    /// transparent — expanded during desugaring") applied to a stored type.
+    ///
+    /// Used at `deftype` registration so the constructor schemes bound into
+    /// the type environment carry the expanded field type (e.g. a field
+    /// declared `EffectRow` where `type EffectRow = List[Effect]` is stored
+    /// as `List[Effect]`), not the opaque alias `Adt` node. Without this,
+    /// constructor application unifies the supplied `List[Effect]` argument
+    /// against the unexpanded `EffectRow` alias and reports a spurious
+    /// `EffectRow vs List` mismatch.
+    ///
+    /// Mirrors the logic of `resolve_type_aliases` in `infer.rs` but lives
+    /// here as a method so it can read `self.aliases` immutably from within
+    /// `register_deftype`'s `&mut self` borrow. The `seen` set guards against
+    /// infinite recursion on a (mutually) recursive alias chain, matching the
+    /// `infer.rs` guard.
+    pub fn expand_aliases(&self, ty: &Type) -> Type {
+        let mut seen = std::collections::HashSet::new();
+        self.expand_aliases_inner(ty, &mut seen)
+    }
+
+    fn expand_aliases_inner(
+        &self,
+        ty: &Type,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Type {
+        match ty {
+            Type::Adt(name, args) => {
+                let resolved_args: Vec<Type> = args
+                    .iter()
+                    .map(|arg| self.expand_aliases_inner(arg, seen))
+                    .collect();
+
+                if seen.contains(name) {
+                    return Type::Adt(name.clone(), resolved_args);
+                }
+
+                if let Some(expanded) = self.instantiate_alias(name, &resolved_args) {
+                    seen.insert(name.clone());
+                    let resolved = self.expand_aliases_inner(&expanded, seen);
+                    seen.remove(name);
+                    resolved
+                } else {
+                    Type::Adt(name.clone(), resolved_args)
+                }
+            }
+            Type::Fn(args, ret) => Type::Fn(
+                args.iter()
+                    .map(|a| self.expand_aliases_inner(a, seen))
+                    .collect(),
+                Box::new(self.expand_aliases_inner(ret, seen)),
+            ),
+            Type::Tuple(ts) => Type::Tuple(
+                ts.iter()
+                    .map(|t| self.expand_aliases_inner(t, seen))
+                    .collect(),
+            ),
+            _ => ty.clone(),
+        }
     }
 }
 

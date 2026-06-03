@@ -256,6 +256,249 @@ def test_second() -> unit = test_assert(true, "second")
 }
 
 #[test]
+fn chelis_test_auto_batch_preserves_two_file_ndjson_order() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-order");
+    write_file(
+        &pkg.join("tests/a_first.ch"),
+        r#"module Smoke.Tests.BatchFirst
+
+def test_first() -> unit = test_assert(true, "first")
+"#,
+    );
+    write_file(
+        &pkg.join("tests/b_second.ch"),
+        r#"module Smoke.Tests.BatchSecond
+
+def test_second() -> unit = test_assert(true, "second")
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "--json", "tests/"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).expect("utf-8 stdout");
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("json line"))
+        .collect();
+    assert_eq!(lines[0]["file"], "tests/a_first.ch");
+    assert_eq!(lines[0]["test"], "test_first");
+    assert_eq!(lines[0]["status"], "pass");
+    assert_eq!(lines[1]["file"], "tests/b_second.ch");
+    assert_eq!(lines[1]["test"], "test_second");
+    assert_eq!(lines[1]["status"], "pass");
+    assert_eq!(lines[2]["summary"]["passed"], 2);
+    assert_eq!(lines[2]["summary"]["failed"], 0);
+}
+
+#[test]
+fn chelis_test_batch_mode_file_keeps_per_file_output_shape() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-file-mode");
+    write_file(
+        &pkg.join("tests/pass.ch"),
+        r#"module Smoke.Tests.BatchFileMode
+
+def test_ok() -> unit = test_assert(true, "ok")
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "file", "tests/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tests/pass.ch"))
+        .stdout(predicate::str::contains("test_ok"))
+        .stdout(predicate::str::contains("1 passed, 0 failed"));
+}
+
+#[test]
+fn chelis_test_auto_batch_compile_error_falls_back_to_file_rows() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-compile-fallback");
+    write_file(
+        &pkg.join("tests/a_broken.ch"),
+        r#"module Smoke.Tests.BatchBroken
+
+import Missing.Module (ghost)
+
+def test_broken() -> unit = test_assert(true, "unreachable")
+"#,
+    );
+    write_file(
+        &pkg.join("tests/b_ok.ch"),
+        r#"module Smoke.Tests.BatchOk
+
+def test_ok() -> unit = test_assert(true, "ok")
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected test failure exit; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("tests/a_broken.ch")
+            && stdout.contains("<file>")
+            && stdout.contains("FAIL"),
+        "broken file-level row missing from:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("tests/b_ok.ch") && stdout.contains("test_ok") && stdout.contains("PASS"),
+        "healthy sibling PASS missing from:\nstdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn chelis_test_auto_batch_name_collision_uses_file_isolation() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-collision");
+    write_file(
+        &pkg.join("tests/a_first.ch"),
+        r#"module Smoke.Tests.CollisionFirst
+
+def test_same() -> unit = test_assert(true, "first")
+"#,
+    );
+    write_file(
+        &pkg.join("tests/b_second.ch"),
+        r#"module Smoke.Tests.CollisionSecond
+
+def test_same() -> unit = test_assert(true, "second")
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "--json", "tests/"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).expect("utf-8 stdout");
+    let rows: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("json line"))
+        .collect();
+    assert_eq!(rows[0]["file"], "tests/a_first.ch");
+    assert_eq!(rows[0]["test"], "test_same");
+    assert_eq!(rows[0]["status"], "pass");
+    assert_eq!(rows[1]["file"], "tests/b_second.ch");
+    assert_eq!(rows[1]["test"], "test_same");
+    assert_eq!(rows[1]["status"], "pass");
+    assert_eq!(rows[2]["summary"]["passed"], 2);
+}
+
+#[test]
+fn chelis_test_auto_batch_skips_module_init_files() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-module-init");
+    write_file(
+        &pkg.join("tests/init.ch"),
+        r#"module Smoke.Tests.BatchInit
+
+_init_failure = test_assert(false, "module init failed in fallback")
+
+def test_one() -> unit = test_assert(true, "would pass")
+"#,
+    );
+    write_file(
+        &pkg.join("tests/ok.ch"),
+        r#"module Smoke.Tests.BatchInitOk
+
+def test_ok() -> unit = test_assert(true, "ok")
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("module-init"),
+        "module-init row missing from:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("module init failed in fallback"),
+        "module-init error missing from:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("test_ok") && stdout.contains("PASS"),
+        "batchable sibling did not pass:\n{stdout}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn chelis_test_auto_batch_worker_abort_falls_back_to_file_workers() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-abort-fallback");
+    write_file(
+        &pkg.join("tests/a_first.ch"),
+        r#"module Smoke.Tests.BatchAbortFirst
+
+def test_first() -> unit = test_assert(true, "first")
+"#,
+    );
+    write_file(
+        &pkg.join("tests/b_second.ch"),
+        r#"module Smoke.Tests.BatchAbortSecond
+
+def test_second() -> unit = test_assert(true, "second")
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_FORCE_BATCH_ABORT", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "batch abort should fall back to per-file workers; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("test_first") && stdout.contains("test_second"),
+        "fallback did not run both files:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("2 passed, 0 failed"),
+        "fallback summary missing:\nstdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
 fn chelis_test_rejects_zero_jobs() {
     let (_dir, pkg) = make_reef_package("phase3t-smoke-zero-jobs");
     write_file(

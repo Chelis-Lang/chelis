@@ -66,17 +66,18 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+// Issue #207: `chelis check` now exits non-zero when the JSON
+// `errors` array is non-empty. The RT-4 invariant tests below mix
+// clean and error-expecting cases (e.g. integer matmul rejection)
+// through the same helper.
 fn run_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).expect("check output should be json")
+        .output()
+        .expect("run chelis check");
+    serde_json::from_slice(&output.stdout).expect("check output should be json")
 }
 
 fn run_build_in(dir: &Path, source: &Path, output: Option<&Path>) -> std::process::Output {
@@ -289,7 +290,12 @@ fn rt4_f3_cast_must_convert_values_not_reinterpret_bits() {
 }
 
 // =====================================================================
-// F4: C backend panics on bf16 input instead of clean diagnostic.
+// F4 (post-WS-1): the numeric-dtype cycle's F4 fix replaced the
+// C-backend panic on bf16 input with a clean CLI diagnostic. WS-1
+// (dtype + Metal cleanup cycle) then promotes bf16 from "rejected
+// cleanly" to "admitted via convert-to-f32" per spec/04-type-system.md
+// §1.1.3 + §5.7.1. This test pins the new behavior: the build
+// succeeds and the C backend never panics on bf16 input.
 // =====================================================================
 
 #[test]
@@ -303,21 +309,14 @@ fn rt4_f4_c_backend_must_not_panic_on_bf16_input() {
     );
     let build = run_build_in(dir.path(), &src, None);
     let stderr = String::from_utf8_lossy(&build.stderr);
-    // After the F4 fix (reject_unsupported_c_precisions_host) the build
-    // returns a structured CLI diagnostic instead of panicking inside
-    // the C backend's emit::validate_supported_precisions.
-    assert!(
-        !build.status.success(),
-        "RT-4 F4: bf16 on --target c must fail at the CLI gate, not pass"
-    );
     assert!(
         !stderr.contains("panicked at"),
-        "RT-4 F4: C backend panicked on bf16 input instead of producing a structured \
-         diagnostic. stderr={stderr}"
+        "WS-1 F4: C backend panicked on bf16 input instead of admitting it. stderr={stderr}"
     );
     assert!(
-        stderr.contains("bf16") && stderr.contains("does not yet support"),
-        "RT-4 F4: expected structured diagnostic citing bf16 as unsupported; got {stderr}"
+        build.status.success(),
+        "WS-1 F4: bf16 on --target c must succeed (admitted via convert-to-f32 per \
+         spec/04-type-system.md §1.1.3 + §5.7.1). stderr={stderr}"
     );
 }
 

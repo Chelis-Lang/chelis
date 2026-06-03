@@ -1,0 +1,1 @@
+(def {} g (app {} (var {} sub) (lit {type: (t-prim {} string)} a) (lit {type: (t-prim {} string)} b)))

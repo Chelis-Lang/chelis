@@ -119,20 +119,25 @@ def run(x) = softmax(x, 1)
 /// reductions previously went through `check_reduction_signature`,
 /// which rejected negative axes outright with `requires non-negative
 /// axis`; that rejection was the checker-side half of the same bug.
+///
+/// Per issue #230, `argmax_reduce` / `argmin_reduce` produce `int64`
+/// indices regardless of input dtype, matching the std-package
+/// signature `tensor[a, b, p] -> int32 -> tensor[b, int64]`. The other
+/// reductions preserve the input dtype.
 #[test]
 fn reductions_negative_last_axis_lower_and_verify() {
-    for op in [
-        "sum",
-        "mean",
-        "max_reduce",
-        "min_reduce",
-        "prod_reduce",
-        "argmax_reduce",
-        "argmin_reduce",
+    for (op, out_dtype) in [
+        ("sum", "f32"),
+        ("mean", "f32"),
+        ("max_reduce", "f32"),
+        ("min_reduce", "f32"),
+        ("prod_reduce", "f32"),
+        ("argmax_reduce", "int64"),
+        ("argmin_reduce", "int64"),
     ] {
         let src = format!(
             r#"
-sig run: tensor[2, 3, f32] -> tensor[2, f32]
+sig run: tensor[2, 3, f32] -> tensor[2, {out_dtype}]
 def run(x) = {op}(x, -1)
 "#
         );
@@ -148,18 +153,18 @@ def run(x) = {op}(x, -1)
 /// last axis and must lower identically clean.
 #[test]
 fn reductions_positive_axis_control_lower_and_verify() {
-    for op in [
-        "sum",
-        "mean",
-        "max_reduce",
-        "min_reduce",
-        "prod_reduce",
-        "argmax_reduce",
-        "argmin_reduce",
+    for (op, out_dtype) in [
+        ("sum", "f32"),
+        ("mean", "f32"),
+        ("max_reduce", "f32"),
+        ("min_reduce", "f32"),
+        ("prod_reduce", "f32"),
+        ("argmax_reduce", "int64"),
+        ("argmin_reduce", "int64"),
     ] {
         let src = format!(
             r#"
-sig run: tensor[2, 3, f32] -> tensor[2, f32]
+sig run: tensor[2, 3, f32] -> tensor[2, {out_dtype}]
 def run(x) = {op}(x, 1)
 "#
         );

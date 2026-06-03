@@ -1,0 +1,1 @@
+(def {} h (fn {} (params {} (mul {type: (t-prim {} f32)})) (var {} mul)))

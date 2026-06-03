@@ -47,6 +47,43 @@ Explicit source `copy()` lowers to the same `RiscOp::Copy` used for inserted cop
 Cost and training signals intentionally do not distinguish explicit and inserted
 copies.
 
+## Tensor-Carrying ADTs
+
+Implicit linearity extends to ADTs whose definitions transitively carry a
+tensor. The reference rule lives in `spec/04-type-system.md` §8.4; this
+section covers how it plugs into copy/drop insertion.
+
+An ADT `T` is **tensor-carrying** iff some variant of `T` has a field whose
+type contains a tensor, considered transitively through tuples, ADT
+instantiations, and other tensor-carrying ADTs. Recursive and mutually
+recursive ADTs are resolved by least-fixed-point.
+
+Owned `T` values are linear. The same auto-borrow, auto-copy, and auto-drop
+rules used for `tensor[...]` apply to `T`:
+
+- An unconsumed local `T` receives an inserted end-of-scope `Drop`.
+- A single owned `T` used in two consuming positions is fan-out: the
+  earlier site receives an inserted `Copy`, the final site takes the
+  original.
+- Passing owned `T` where `&T` is expected auto-borrows.
+- `match` on owned `T` consumes the scrutinee per §8.3.
+
+`t-fn` is intentionally excluded from the carrier relation: a field whose
+type is a function that happens to take or return a tensor does not make
+the enclosing ADT tensor-carrying. Closures that capture tensors are
+governed by the §8.3 capture rule and do not need ADT carrier participation
+to be correctly handled.
+
+Cross-package transitivity is preserved. When the linearity checker runs
+against a library context plus new code, both halves of the ADT declaration
+set are resolved in one fixed-point pass, so a new-code wrapper around a
+library tensor-carrying ADT is recognized as carrying without re-walking
+the library's bodies.
+
+The carrier-set rule presumes type-name uniqueness within the program
+(`spec/04-type-system.md` §8.5). Duplicate `deftype` / `typealias` names
+are rejected as `DuplicateDefinition` before linearity runs.
+
 ## Preserved Hard Errors
 
 Implicit handling replaces missing-local-drop and ordinary consume-fan-out diagnostics.

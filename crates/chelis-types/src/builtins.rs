@@ -16,6 +16,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mul",
     "max_elem",
     "neg",
+    "recip",
     "exp",
     "log",
     "sin",
@@ -63,6 +64,13 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "prod_reduce",
     "argmax_reduce",
     "argmin_reduce",
+    // §2.3.1 strided windowed reduction (Valid padding). One Surf
+    // builtin per reducer; the IR collapses them to a single
+    // `RiscOp::ReduceWindow` with a `ReduceWindowKind` discriminator.
+    "reduce_window_max",
+    "reduce_window_min",
+    "reduce_window_sum",
+    "reduce_window_mean",
     "reshape",
     "permute",
     "expand",
@@ -106,6 +114,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "filter",
     "fold",
     "scan",
+    "tensor_scan",
     "partition",
     "flat_map",
     "flatten",
@@ -133,6 +142,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mmap_file",
     "mmap_read",
     "mmap_len",
+    "process_run",
     "einsum",
     "split",
     "gather",
@@ -297,6 +307,26 @@ pub fn builtin_env() -> (Env, VarGen) {
             dvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(input)), Type::Prim(Prim::Int32)],
+                Box::new(Type::Var(out)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    /// Fallback HM scheme for the `reduce_window_*` family. The dedicated
+    /// `infer_reduce_window_app` arm in `infer.rs` overrides the result
+    /// type with the spec §2.3.1 shape contract; this scheme exists so
+    /// the function name is in scope at lookup time and the canonical
+    /// arg-arity / list-of-int32 constraints are visible during unification.
+    fn tensor_reduce_window(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let out = vg.fresh_tvar();
+        let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+        let scheme = Scheme {
+            tvars: vec![input, out],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![borrowed(Type::Var(input)), int_list.clone(), int_list],
                 Box::new(Type::Var(out)),
             ),
         };
@@ -579,9 +609,14 @@ pub fn builtin_env() -> (Env, VarGen) {
     // Tier 1: RISC Primitives
     tensor_binop("add", &mut env, &mut vg);
     tensor_binop("mul", &mut env, &mut vg);
+    // `div` and `recip` were promoted from a Tier 2
+    // `exp(neg(log(_)))` decomposition to native Tier 1 primitives
+    // (IEEE-754 semantics, correct on the full real line).
+    tensor_binop("div", &mut env, &mut vg);
     tensor_binop("max_elem", &mut env, &mut vg);
 
     tensor_unop("neg", &mut env, &mut vg);
+    tensor_unop("recip", &mut env, &mut vg);
     tensor_unop("exp", &mut env, &mut vg);
     tensor_unop("log", &mut env, &mut vg);
     tensor_unop("sin", &mut env, &mut vg);
@@ -598,7 +633,6 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     // Tier 2: Derived built-ins
     tensor_binop("sub", &mut env, &mut vg);
-    tensor_binop("div", &mut env, &mut vg);
     generic_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
@@ -640,6 +674,22 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("prod_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("argmax_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("argmin_reduce", &mut env, &mut vg);
+    // §2.3.1 reduce_window family. Fallback HM scheme is
+    // `&tensor[D, p] -> List[int32] -> List[int32] -> tensor[D', p]`;
+    // the actual shape contract (output rank = input rank, trailing
+    // axis extents derived from the window/stride formula) is enforced
+    // by the dedicated `infer_reduce_window_app` arm in `infer.rs`,
+    // which also rejects non-positive window/stride literals.
+    tensor_reduce_window("reduce_window_max", &mut env, &mut vg);
+    tensor_reduce_window("reduce_window_min", &mut env, &mut vg);
+    tensor_reduce_window("reduce_window_sum", &mut env, &mut vg);
+    tensor_reduce_window("reduce_window_mean", &mut env, &mut vg);
+    // Movement primitives whose RISC lowering reads window parameters from
+    // `args[1..]`. The `tensor_unop` scheme below only declares the arity-1
+    // fallback; `reshape` and `permute` already have dedicated `infer_*_app`
+    // paths in `infer.rs` that accept the parameterized arity. `pad`,
+    // `shrink`, and `stride` do not — see issue Chelis-Lang/chelis#187 and
+    // the matching dedicated `infer_shrink_app` / `infer_stride_app` paths.
     tensor_unop("reshape", &mut env, &mut vg);
     tensor_unop("permute", &mut env, &mut vg);
     tensor_expand_to_out("expand", &mut env, &mut vg);
@@ -856,6 +906,32 @@ pub fn builtin_env() -> (Env, VarGen) {
             ),
         },
     );
+    // `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
+    // The actual constraint shape (scalar `T`, callback signature, int64 `n`,
+    // tensor return) is enforced by the special-case arm in
+    // `crates/chelis-types/src/infer.rs` so error reporting can pinpoint each
+    // role independently. This loose generic scheme is the type-env entry
+    // point; it lets the inference engine see three argument slots and a
+    // return slot it will overwrite. Same shape as `fold`/`scan` above.
+    let tensor_scan_a = vg.fresh_tvar();
+    let tensor_scan_b = vg.fresh_tvar();
+    let tensor_scan_c = vg.fresh_tvar();
+    let tensor_scan_ret = vg.fresh_tvar();
+    env.bind(
+        "tensor_scan".to_string(),
+        Scheme {
+            tvars: vec![tensor_scan_a, tensor_scan_b, tensor_scan_c, tensor_scan_ret],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Var(tensor_scan_a),
+                    Type::Var(tensor_scan_b),
+                    Type::Var(tensor_scan_c),
+                ],
+                Box::new(Type::Var(tensor_scan_ret)),
+            ),
+        },
+    );
     generic_binop("partition", &mut env, &mut vg);
     generic_binop("flat_map", &mut env, &mut vg);
     generic_unop("flatten", &mut env, &mut vg);
@@ -881,6 +957,12 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop("file_exists", &mut env, &mut vg);
     generic_unop("list_dir", &mut env, &mut vg);
     generic_unop("mmap_file", &mut env, &mut vg);
+    // `process_run(cmd, args)` is an eval/test-only subprocess exec builtin
+    // (Hull Phase 0a). The 2-arg `generic_binop` scheme declares the arity;
+    // the concrete return tuple `(Int64, String, String)` is pinned in
+    // `infer.rs` and the IO effect is assigned in `chelis-effects`, mirroring
+    // how `read_file` acquires IO. Rejected by the C/HIP build backends.
+    generic_binop("process_run", &mut env, &mut vg);
     generic_triop("mmap_read", &mut env, &mut vg);
     generic_unop("mmap_len", &mut env, &mut vg);
     generic_triop_second_third_borrow("einsum", &mut env, &mut vg);
@@ -1055,6 +1137,37 @@ mod tests {
         assert!(env.lookup("bitxor").is_some());
         assert!(env.lookup("shl").is_some());
         assert!(env.lookup("shr").is_some());
+    }
+
+    #[test]
+    fn builtin_env_has_process_run_and_it_is_a_known_name() {
+        // Hull subprocess exec: process_run is a registered 2-arg builtin and
+        // appears in the closed BUILTIN_NAMES vocabulary (so the lint naming
+        // gate and host-lane resolver recognize it).
+        let (env, _) = builtin_env();
+        let scheme = env.lookup("process_run").expect("process_run registered");
+        match &scheme.body {
+            Type::Fn(params, _) => assert_eq!(
+                params.len(),
+                2,
+                "process_run takes (cmd, args), got arity {}",
+                params.len()
+            ),
+            other => panic!("process_run should be a function type, got {other:?}"),
+        }
+        assert!(
+            BUILTIN_NAMES.contains(&"process_run"),
+            "process_run must be in the closed BUILTIN_NAMES vocabulary"
+        );
+    }
+
+    #[test]
+    fn builtin_env_does_not_register_unknown_name() {
+        // Negative parity: a name we never register stays absent, so the
+        // process_run presence assertion above is not vacuously true.
+        let (env, _) = builtin_env();
+        assert!(env.lookup("process_run_definitely_unregistered").is_none());
+        assert!(!BUILTIN_NAMES.contains(&"process_run_definitely_unregistered"));
     }
 
     #[test]

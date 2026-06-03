@@ -58,6 +58,22 @@ pub enum TypeErrorKind {
 pub struct Subst {
     types: Mutex<HashMap<TypeVar, Type>>,
     dims: Mutex<HashMap<DimVar, Dim>>,
+    /// Issue #256 soundness ledger. The `borrow` inference arm accepts a
+    /// borrow whose inner type is still an unresolved `Type::Var`,
+    /// deferring the tensor-or-carrier classification to subsequent
+    /// unification (the surrounding `&tensor[..]` parameter pins it).
+    /// That deferral is only sound when the variable is *eventually*
+    /// pinned to a tensor or tensor-carrying type. When the consumer is
+    /// itself fully polymorphic (e.g. `consume_any[a](t: a)`), the
+    /// variable is never pinned and a genuinely-non-tensor value would
+    /// slip past every gate. Each deferred borrow records the inner
+    /// `TypeVar` here; after a def body's inference completes, the
+    /// driver resolves each one against the now-complete substitution
+    /// and rejects any that did not become a tensor or tensor carrier.
+    /// Not serialized: this is transient per-pass bookkeeping, drained
+    /// by the inference driver, and never part of a persisted context.
+    #[serde(skip)]
+    deferred_borrow_vars: Mutex<Vec<TypeVar>>,
 }
 
 impl Clone for Subst {
@@ -65,6 +81,12 @@ impl Clone for Subst {
         Subst {
             types: Mutex::new(self.types.lock().expect("subst.types poisoned").clone()),
             dims: Mutex::new(self.dims.lock().expect("subst.dims poisoned").clone()),
+            deferred_borrow_vars: Mutex::new(
+                self.deferred_borrow_vars
+                    .lock()
+                    .expect("subst.deferred_borrow_vars poisoned")
+                    .clone(),
+            ),
         }
     }
 }
@@ -109,6 +131,30 @@ impl Subst {
             .lock()
             .expect("subst.dims poisoned")
             .insert(v, dim);
+    }
+
+    /// Issue #256: record a borrow site whose inner type was still an
+    /// unresolved `Type::Var` when the `borrow` inference arm ran. The
+    /// driver drains these after a def body's inference completes and
+    /// re-checks each against the final substitution. See the
+    /// `deferred_borrow_vars` field doc for the soundness rationale.
+    pub fn record_deferred_borrow_var(&self, v: TypeVar) {
+        self.deferred_borrow_vars
+            .lock()
+            .expect("subst.deferred_borrow_vars poisoned")
+            .push(v);
+    }
+
+    /// Drain the deferred-borrow ledger, returning every recorded
+    /// `TypeVar`. Called once per def body's inference by the driver so
+    /// the ledger does not leak deferred sites across defs.
+    pub fn take_deferred_borrow_vars(&self) -> Vec<TypeVar> {
+        std::mem::take(
+            &mut *self
+                .deferred_borrow_vars
+                .lock()
+                .expect("subst.deferred_borrow_vars poisoned"),
+        )
     }
 
     /// Resolve a type variable to its terminal binding (a non-Var, or
@@ -434,6 +480,19 @@ pub fn unify_tensor_prec(
 /// lets a concrete arg in any later position bind it, after which a
 /// different concrete value trips the `Lit ↔ Lit` mismatch as the sig
 /// demands.
+///
+/// Name ↔ Lit invariant (issue Chelis-Lang/chelis#219, Option A): a
+/// concrete-but-named slot (`Dim::Name("batch")`) accepts a concrete
+/// literal (`Dim::Lit(2)`) at the call site without binding any
+/// substitution. Names are preserved in diagnostics; they do not
+/// impose a distinct-from-literal constraint. This eliminates the
+/// asymmetry whereby `Var <-> Lit` was accepted at call sites but
+/// `Name <-> Lit` was rejected, which blocked stdlib sigs like
+/// `def f(x: tensor[batch, hidden, f32])` from being called with
+/// concrete-shaped inputs (e.g. `f(to_tensor([[1.0, 2.0, 3.0]]))`).
+/// The relaxation is narrow: distinct `Name <-> Name` and
+/// distinct `Lit <-> Lit` continue to be rejected, and the
+/// `Var <-> Lit` cross-position contract is unaffected.
 pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
     let d1 = subst.apply_dim(d1);
     let d2 = subst.apply_dim(d2);
@@ -442,6 +501,10 @@ pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError>
         (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Ok(()),
         (Dim::Lit(l1), Dim::Lit(l2)) if l1 == l2 => Ok(()),
         (Dim::Wildcard, _) | (_, Dim::Wildcard) => Ok(()),
+        // Issue #219 Option A: Name and Lit unify without binding any
+        // substitution. The Name carries a label for diagnostics, the
+        // Lit carries the concrete value; nothing flows into `subst`.
+        (Dim::Name(_), Dim::Lit(_)) | (Dim::Lit(_), Dim::Name(_)) => Ok(()),
         (Dim::Var(v), _) => bind_dvar(*v, &d2, subst),
         (_, Dim::Var(v)) => bind_dvar(*v, &d1, subst),
         _ => Err(TypeError {
@@ -605,6 +668,48 @@ mod tests {
         let t2 = Type::Tensor(vec![Dim::Name("batch".into())], tprec(Prim::F32));
         assert!(unify(&t1, &t2, &mut s).is_ok());
         assert_eq!(s.apply_dim(&Dim::Var(dv)), Dim::Name("batch".into()));
+    }
+
+    #[test]
+    fn unify_name_with_lit_accepts() {
+        // Issue Chelis-Lang/chelis#219 Option A: a Name slot on the
+        // left and a concrete Lit on the right unify without binding
+        // any substitution.
+        let mut s = Subst::new();
+        assert!(unify_dim(&Dim::Name("batch".into()), &Dim::Lit(2), &mut s).is_ok());
+        // Subst stays untouched — the Name carries diagnostics, the
+        // Lit carries the value, nothing flows in.
+        assert_eq!(s.dims_len(), 0);
+    }
+
+    #[test]
+    fn unify_name_with_lit_accepts_symmetric() {
+        // Issue #219 Option A: the symmetric direction (Lit on left,
+        // Name on right) also unifies.
+        let mut s = Subst::new();
+        assert!(unify_dim(&Dim::Lit(3), &Dim::Name("hidden".into()), &mut s).is_ok());
+        assert_eq!(s.dims_len(), 0);
+    }
+
+    #[test]
+    fn unify_name_distinct_names_still_errors() {
+        // Issue #219 regression-lock: the Name <-> Lit relaxation
+        // must not bleed into Name <-> Name. Distinct symbolic names
+        // continue to surface as DimensionMismatch (this is the
+        // dim-polymorphism rigidity rule from §4.4).
+        let mut s = Subst::new();
+        let err =
+            unify_dim(&Dim::Name("batch".into()), &Dim::Name("seq".into()), &mut s).unwrap_err();
+        assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
+    }
+
+    #[test]
+    fn unify_lit_distinct_still_errors() {
+        // Issue #219 regression-lock: distinct Lit <-> Lit still
+        // errors. The permissive arm is narrowly Name <-> Lit.
+        let mut s = Subst::new();
+        let err = unify_dim(&Dim::Lit(2), &Dim::Lit(3), &mut s).unwrap_err();
+        assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
     }
 
     #[test]

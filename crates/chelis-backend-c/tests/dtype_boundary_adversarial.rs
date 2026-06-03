@@ -29,13 +29,18 @@ fn mat(r: usize, c: usize, p: Prim) -> TensorType {
 // E. Removed silent-default-arm verification
 // ---------------------------------------------------------------
 
-/// E. Element type for a tensor with f16 precision must NOT be silently
-/// emitted as `float`. The pre-WS-A0 fallback `_ => "float"` was removed;
-/// the new behavior is a panic. Verify by trying to emit a DAG containing
-/// an f16 tensor and asserting the panic.
+/// E (post-WS-1). f16 tensors are now admitted by the C backend per
+/// `spec/04-type-system.md` §1.1.3: storage is `uint16_t`, arithmetic
+/// converts to f32 via runtime helpers, matmul routes through
+/// convert-then-`cblas_sgemm`. The pre-WS-1 behavior was a panic; the
+/// post-WS-1 behavior is admission. This test pins the new behavior
+/// by asserting that the emitted C contains the `uint16_t` storage
+/// type plus the `CHELIS_F16` runtime dtype tag, so a future
+/// regression that re-routes f16 storage through `float*` (the silent
+/// 4-byte-per-element downgrade the WS-A0 footgun targeted) trips
+/// here immediately.
 #[test]
-#[should_panic(expected = "f16")]
-fn c_backend_panics_on_f16_tensor_no_silent_float_downgrade() {
+fn c_backend_admits_f16_tensor_with_uint16_storage_post_ws_1() {
     let mut dag = Dag::new();
     let _ = dag.add_node(
         RiscOp::Const { value: 1.0 },
@@ -46,12 +51,21 @@ fn c_backend_panics_on_f16_tensor_no_silent_float_downgrade() {
         },
         None,
     );
-    let _ = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn");
+    assert!(
+        src.contains("CHELIS_F16"),
+        "WS-1: C backend must allocate f16 tensors via `CHELIS_F16`; got source:\n{src}"
+    );
+    assert!(
+        src.contains("chelis_fill_f16"),
+        "WS-1: C backend must use the dedicated `chelis_fill_f16` Const helper \
+         (not `chelis_fill_f32`); got source:\n{src}"
+    );
 }
 
+/// E sibling: same as above for bf16.
 #[test]
-#[should_panic(expected = "bf16")]
-fn c_backend_panics_on_bf16_tensor_no_silent_float_downgrade() {
+fn c_backend_admits_bf16_tensor_with_uint16_storage_post_ws_1() {
     let mut dag = Dag::new();
     let _ = dag.add_node(
         RiscOp::Const { value: 1.0 },
@@ -62,7 +76,16 @@ fn c_backend_panics_on_bf16_tensor_no_silent_float_downgrade() {
         },
         None,
     );
-    let _ = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn");
+    assert!(
+        src.contains("CHELIS_BF16"),
+        "WS-1: C backend must allocate bf16 tensors via `CHELIS_BF16`; got source:\n{src}"
+    );
+    assert!(
+        src.contains("chelis_fill_bf16"),
+        "WS-1: C backend must use the dedicated `chelis_fill_bf16` Const helper \
+         (not `chelis_fill_f32`); got source:\n{src}"
+    );
 }
 
 /// WS-A4 lifts the WS-A0 panic-until-wired guard for i8 tensors:
@@ -212,15 +235,18 @@ fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
     }
 }
 
-/// F. Same shape as the f64 case, but for bf16/f32 — the bf16 row of
-/// §5.7.1 has accumulator=f32, and matmul result precision = operand
-/// precision = bf16. The C backend `validate_supported_precisions`
-/// will panic on bf16 OUTPUT, which is the right outcome. Pin it so a
-/// future regression that allows bf16 output but still emits sgemm
-/// without a bf16-aware path is caught.
+/// F (post-WS-1). bf16 matmul is now admitted by the C backend per
+/// `spec/04-type-system.md` §1.1.3 + §5.7.1: operands are bf16,
+/// accumulator is f32, output is bf16. The wrapper allocates f32
+/// scratch buffers, calls `chelis_bf16_buffer_to_f32` to convert,
+/// dispatches `cblas_sgemm` against the f32 buffers, and converts
+/// the result back to bf16 via `chelis_f32_buffer_to_bf16`. This
+/// test pins the new routing so a future regression that emits
+/// `cblas_sgemm` directly on the `uint16_t` operand bytes (the
+/// silent-data-corruption pattern this whole boundary file targets)
+/// trips here immediately.
 #[test]
-#[should_panic(expected = "bf16")]
-fn c_backend_blas_matmul_bf16_panics_until_bf16_output_supported() {
+fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::Const { value: 1.0 },
@@ -243,5 +269,17 @@ fn c_backend_blas_matmul_bf16_panics_until_bf16_output_supported() {
     )
     .expect("bf16 matmul default constructs (accumulator=f32 per §5.7.1)");
     let _matmul = dag.add_node(matmul_op, vec![a, b], mat(2, 4, Prim::Bf16), None);
-    let _ = CEmitter::emit_dag(&dag, "test_fn");
+    let src = CEmitter::emit_dag(&dag, "test_fn");
+    assert!(
+        src.contains("chelis_bf16_buffer_to_f32"),
+        "WS-1: bf16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
+    );
+    assert!(
+        src.contains("cblas_sgemm"),
+        "WS-1: bf16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
+    );
+    assert!(
+        src.contains("chelis_f32_buffer_to_bf16"),
+        "WS-1: bf16 matmul must downcast the f32 accumulator buffer back to bf16 storage; got:\n{src}"
+    );
 }

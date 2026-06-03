@@ -1,0 +1,15 @@
+-- Hull subprocess exec from pure Chelis.
+--
+-- process_run(cmd, args) runs an external program and returns
+-- (exit_code, stdout, stderr). It carries the Io effect and is an
+-- eval/test-only builtin: it works under chelis eval / chelis test but
+-- the C/HIP build backends reject it (a compiled artifact has no host
+-- interpreter to reach the subprocess exec path).
+--
+-- Arguments are passed as argv with no shell, so a value in args cannot
+-- inject extra shell commands.
+--
+-- This example is illustrative, not part of the executable corpus: it
+-- shells out to the chelis binary, so its result depends on the host
+-- environment having that binary on PATH.
+def chelis_version() -> (int64, string, string) = process_run("chelis", ["--version"])
