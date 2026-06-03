@@ -236,30 +236,32 @@ out = scale(to_tensor([3.0, 4.0]))\n";
     );
 }
 
-/// The f64 sibling of the scale test, isolating the f64 const-broadcast
-/// materialization with zero tensor inputs. The #300 emit fix dispatches
+/// The f64 sibling of the scale test. The #300 emit fix dispatches
 /// `scalar_to_tensor` on the result precision: an f64 const-broadcast must
 /// route through `chelis_scalar_tensor_from_f64` (8-byte storage), NOT the
 /// new f32 default. `1.1` is the canonical f32-truncation smoking gun: an
 /// f32 round-trip of 1.1 widens back to `1.100000023841858`, so if the
-/// constant were materialized at f32 the printed f64 tensor would carry
-/// that signature instead of `1.1`. `expand(scalar_to_tensor(1.1), 0, 2)`
-/// at f64 is the rank-1 tensor `[1.1, 1.1]` at full f64 precision; the
-/// helper has zero tensor inputs, so it also exercises the NULL-inputs /
-/// count-0 path on the f64 surface.
+/// constant were materialized at f32 the printed f64 product would carry
+/// that signature instead of `1.1`. Mirrors the f32 scale test's host-lane
+/// shape (a top-level binding calling a tensor-argument function, which
+/// forces the host emit path that owns the `scalar_to_tensor` dispatch).
+/// `scale64(x) = x * 1.1` for the f64 input `[1.0, 1.0]` is `[1.1, 1.1]`
+/// at full f64 precision.
 #[test]
-fn issue_300_const_expand_f64_keeps_full_precision() {
-    let source = "module Repro.ConstExpandF64\n\
-def make_const() -> tensor[2, f64] =\n  \
-  expand(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int32))\n\
-out = make_const()\n";
+fn issue_300_scale_const_expand_f64_keeps_full_precision() {
+    let source = "module Repro.ScaleConstExpandF64\n\
+def scale64(x: tensor[2, f64]) -> tensor[2, f64] = {\n  \
+  k = expand(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int32))\n  \
+  mul(x, k)\n\
+}\n\
+out = scale64(cast(to_tensor([1.0, 1.0]), f64))\n";
 
-    let build = chelis_build_c(source, "const64");
-    let kernel_c = build.path().join("const64.c");
+    let build = chelis_build_c(source, "scale64");
+    let kernel_c = build.path().join("scale64.c");
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     assert!(
         stdout.contains("shape=[2]"),
-        "make_const must print a rank-1 size-2 tensor; got stdout={stdout:?}",
+        "scale64 must print a rank-1 size-2 tensor; got stdout={stdout:?}",
     );
     assert!(
         !stdout.contains("1.100000023841858"),
@@ -268,7 +270,7 @@ out = make_const()\n";
     );
     assert!(
         stdout.contains("data=[1.1, 1.1]"),
-        "expand(scalar_to_tensor(1.1), 0, 2) at f64 must print [1.1, 1.1]; \
+        "scale64(x) = x * 1.1 for x=[1,1] must print [1.1, 1.1] at f64; \
          got stdout={stdout:?}",
     );
 }
