@@ -209,12 +209,9 @@ pub fn grad_dag_checked(
         }
     }
 
-    grad_dag(forward, output, wrt).ok_or(AdError::NotSupported {
+    grad_dag_result(forward, output, wrt).map_err(|why| AdError::NotSupported {
         op: "<unknown>",
-        reason: AdRejectionReason::Other(
-            "grad: failed to construct backward DAG (unsupported op or verification failure)"
-                .to_string(),
-        ),
+        reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
     })
 }
 
@@ -311,12 +308,29 @@ fn stamp_grad_marker(dag: &mut Dag, dag_size_before: usize, forward_node: &DagNo
 ///
 /// Returns `None` if the forward DAG is empty or the output node doesn't exist.
 pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
+    grad_dag_result(forward, output, wrt).ok()
+}
+
+/// Like [`grad_dag`] but returns a structured failure string instead of
+/// a bare `None` when backward construction fails. The string names the
+/// concrete cause — either an unsupported op whose adjoint is undefined
+/// or the post-construction verifier diagnostics — so callers
+/// (`grad_dag_checked` and its user-facing lowering error) can report
+/// *why* the backward DAG could not be built rather than the legacy
+/// opaque "unsupported op or verification failure".
+fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<GradResult, String> {
     if forward.is_empty() {
-        return None;
+        return Err("grad: forward DAG is empty".to_string());
     }
-    let output_ty = forward.get(output)?.output_type.clone();
+    let output_ty = forward
+        .get(output)
+        .ok_or_else(|| "grad: output node is missing from the forward DAG".to_string())?
+        .output_type
+        .clone();
     if !is_scalar_float(&output_ty) {
-        return None;
+        return Err(format!(
+            "grad: output node type {output_ty:?} is not a scalar float"
+        ));
     }
     // Forward nodes clone span_id + merged_spans unchanged via Dag::clone()
     // — `forward.clone()` deep-copies the DagNodes, and the existing
@@ -344,7 +358,14 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 
         let node = forward.get(node_id).unwrap().clone();
         let dag_size_before = dag.len();
-        let input_grads = compute_adjoints(&node, grad_out, forward, &mut dag)?;
+        let input_grads =
+            compute_adjoints(&node, grad_out, forward, &mut dag).ok_or_else(|| {
+                format!(
+                    "grad: no reverse-mode adjoint is defined for `{}` (node {})",
+                    risc_op_name(&node.op),
+                    node.id.0
+                )
+            })?;
         // Every node added inside compute_adjoints is a backward
         // (adjoint) node for `node`. Stamp the grad marker + the
         // forward span onto each.
@@ -383,11 +404,15 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 
     let (dag, output_node, grad_nodes) = prune_to_requested_outputs(&dag, output, &grad_nodes);
 
-    if !crate::verify::verify(&dag).is_empty() {
-        return None;
+    let verify_errors = crate::verify::verify(&dag);
+    if !verify_errors.is_empty() {
+        return Err(format!(
+            "grad: constructed backward DAG failed verification: {}",
+            verify_errors.join("; ")
+        ));
     }
 
-    Some(GradResult {
+    Ok(GradResult {
         dag,
         output_node,
         grad_nodes,
