@@ -6,8 +6,26 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.22] — 2026-06-03
+
 ### Added
 
+- **reduce_window_{max,min,sum,mean} (#254)**: windowed reductions land
+  across the type checker, IR, and backends as first-class RISC
+  primitives with positive and negative coverage.
+- **host-runtime `tensor_scan` (#257/#264)**: a prefix-scan primitive
+  implemented in the host runtime, closing issue #257.
+- **Hull Phase 5b conformance gate (#278)**: a vendored, frozen,
+  version-stamped Hull conformance corpus
+  (`tests/conformance/hull/`) plus a CI gate (`conformance.yml`) that
+  re-renders the corpus against the just-built compiler and FAILS on
+  any `CompilerUnsound`, unexplained `Disagree`, or `EvalDisagree`. The
+  manifest now pins chelis `0.7.22`. Hull is documented as shipped
+  (v0.1.0) as the compiler-vs-spec differential layer (#283).
+- **SMT-prove tier features (`chelis prove`)**: `--tier auto` now wires
+  through SMT Tier B, function-body inlining feeds the SMT dispatch,
+  and the dispatcher selects `QF_NRA` vs `QF_NRAT` based on
+  transcendental content of the goal.
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep
   s-expressions to the Surf parser, which reported a bogus
@@ -22,25 +40,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `EvalResult` shape. A `.dp` and its byte-equivalent-meaning `.ch`
   produce field-for-field identical check reports. `chelis check <dir>`
   now also discovers `.dp` files in a mixed directory.
-
-Default `chelis test` now amortizes shell/module graph compilation
-across a suite. The CLI batches eligible test files into one internal
-worker in `--batch-mode auto` (the default), preserves per-file
-subprocess isolation for files that need it, and falls back to the
-previous one-worker-per-file path on batch compile/runtime failures.
-Use `--batch-mode file` to force the old execution strategy.
-
-### Added
-
 - `chelis test --batch-mode auto|file`, with `auto` as the default.
   Auto mode compiles one shared context and one combined batch probe
   for eligible files, then reports the same NDJSON/per-test rows as
-  the file-worker path.
+  the file-worker path. The default now amortizes shell/module graph
+  compilation across a suite: the CLI batches eligible test files into
+  one internal worker, preserves per-file subprocess isolation for
+  files that need it, and falls back to the previous
+  one-worker-per-file path on batch compile/runtime failures. Use
+  `--batch-mode file` to force the old execution strategy.
 - Internal `__test_batch` worker support and crash/timeout fallback
   coverage so batch execution cannot hide a file-level failure.
 
 ### Fixed
 
+- **#285**: suppress a wildcard `defsig` from overwriting an explicit
+  `sig`, preserve the `def` effect-row, and fix the std `generate`
+  signatures.
+- **#258**: reject a duplicate same-name `def` with a clear diagnostic
+  instead of silently shadowing the first definition.
 - **#248 (#189 follow-up)**: the C backend's `emit_uniform_like` was
   the third lossy `%.8`-format-string site in the same class as the
   F32/F64 `emit_const` arms that PR #243 closed. `low` / `high` were
