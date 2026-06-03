@@ -1425,11 +1425,37 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
         // skip the standalone top-level emission.
         Some("t-fn") => {
             type_expr_has_precision_var(expr)
+                // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
+                // a t-fn carrying a `(d-rank ...)` rank variable is
+                // rank-polymorphic and has no standalone monomorphization — its
+                // rank is supplied by call-site inlining, exactly like the
+                // precision-var case above. Skip the standalone emission so the
+                // `(d-rank ...)` never reaches the lowering assertion.
+                || type_expr_has_rank_var(expr)
                 || list.elements.last().is_some_and(type_is_never_lowerable)
         }
         Some("t-tuple") => children(list).iter().any(type_is_never_lowerable),
         Some("t-adt") | Some("t-unit") => true,
         Some("t-prim") => false,
+        _ => false,
+    }
+}
+
+/// Walk a Deep type expression and report whether any tensor carries a
+/// `(d-rank ...)` rank variable (Tier-2 rank polymorphism). Mirrors
+/// `type_expr_has_precision_var`: such a signature is rank-polymorphic, has no
+/// standalone monomorphization, and is reached only through call-site inlining.
+fn type_expr_has_rank_var(expr: &Expr) -> bool {
+    let Expr::List(list, _) = expr else {
+        return false;
+    };
+    match get_tag(list) {
+        Some("t-tensor") => children(list)
+            .iter()
+            .any(|c| matches!(c, Expr::List(d, _) if get_tag(d) == Some("d-rank"))),
+        Some("t-ref") | Some("t-fn") | Some("t-tuple") | Some("t-adt") => {
+            children(list).iter().any(type_expr_has_rank_var)
+        }
         _ => false,
     }
 }
@@ -3395,22 +3421,27 @@ impl LowerCtx {
             // All children before the last are dimension nodes.
             let mut dims = Vec::new();
             for child in &children[..children.len() - 1] {
-                // Monomorphization invariant (spec/design/rank_polymorphism.md):
+                // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
                 // a `Dim::Rank` (`(d-rank ...)`) stands for a whole shape vector
-                // and must be eliminated by instantiation before lowering. A
-                // surviving rank node here is a monomorphization bug — never a
-                // backend input — paralleling the `TensorPrec::Var` panic above.
+                // and must be eliminated before lowering. Standalone emission of
+                // a rank-poly sig is already skipped via `type_is_never_lowerable`
+                // (paralleling precision polymorphism), so reaching here means a
+                // concrete caller inlined a rank-poly def but the rank was not
+                // substituted — call-site rank monomorphization is not yet
+                // implemented. This is a known unimplemented-feature boundary,
+                // surfaced as a clear diagnostic rather than a silent miscompile.
                 if let Expr::List(dl, _) = child
                     && let Some(Expr::Atom(Atom::Symbol(tag), _)) = dl.elements.first()
                     && tag == "d-rank"
                 {
                     panic!(
-                        "BUG: monomorphization missed a rank variable (`(d-rank ...)`); \
-                         this should not be reachable from properly-typed source code. \
-                         spec/design/rank_polymorphism.md requires every reachable tensor \
-                         type to be `Dim::Rank`-free after monomorphization. Reaching this \
-                         point indicates a rank-polymorphic sig with no concrete call site, \
-                         or an internal monomorphization gap."
+                        "rank-polymorphic def cannot yet be lowered to a backend: a `..r` \
+                         signature needs call-site rank monomorphization (substituting the \
+                         concrete shape for the rank variable when a concrete caller is lowered), \
+                         which is not yet implemented. Rank polymorphism IS supported at \
+                         type-check time (`chelis check`); to `build`, express the function as \
+                         concrete-rank `def`s for now. See spec/design/rank_polymorphism.md \
+                         (Implementation Status)."
                     );
                 }
                 if let Some(dim) = Self::try_extract_dim(child) {

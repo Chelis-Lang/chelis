@@ -28,6 +28,19 @@ What landed vs. the plan below, with two deliberate divergences:
   sound erasure body to write today. Erasure ships when an all-reduce builtin
   is added; until then the Body-Discipline check rejects reductions in a `..r`
   body like any other shape-rewriting op.
+- **Backend lowering of `..r` programs is FUTURE WORK; the feature is
+  type-check-level.** `chelis check` fully and soundly accepts/rejects rank-poly
+  defs (this is the §258 value — the verb proliferation collapses and §4.2 is
+  enforced at the type level). A standalone rank-poly def emits nothing
+  (`type_is_never_lowerable` skips it, paralleling precision polymorphism). But
+  a program that *uses* a rank-poly def through a concrete caller cannot yet
+  `build`: call-site **rank monomorphization** (substituting the caller's
+  concrete shape for `..r` in the inlined body, the rank analogue of the
+  precision `prec_subst` path) is not implemented, so `build` stops with a clear
+  "not yet lowerable — express as concrete-rank defs" diagnostic rather than a
+  miscompile. This is a completeness gap, not a soundness hole: the build path
+  *refuses* the un-monomorphized rank rather than emitting wrong code. Closing it
+  (a call-site rank-substitution pass) is the natural follow-up.
 
 A fresh-context red-team pass informed the design; its verified findings (and
 one correction to its central claim) are in §"Red-Team Findings".

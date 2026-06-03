@@ -218,3 +218,58 @@ fn concrete_rank_activation_still_clean() {
     let json = check_json("def relu2d(x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu(x)\n");
     assert_clean(&json, "concrete-rank activation control");
 }
+
+/// Name-collision bypass (red-team #1): a user `def` that SHADOWS an Identity
+/// builtin name (`relu`) and transposes must still be rejected inside a `..r`
+/// body — the discipline check resolves the callee against the user defs, not
+/// just the builtin-name table.
+#[test]
+fn shadowing_builtin_name_in_rank_poly_body_rejected() {
+    let json = check_json(
+        "def relu(x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
+         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n",
+    );
+    assert_rank_rejected(&json, "user `relu` shadowing the builtin in a ..r body");
+}
+
+/// Backend-lowering scope (red-team #2): a rank-poly program `check`s clean but
+/// `build` is not yet supported — it must stop with an honest "not yet
+/// lowerable" diagnostic, NOT a `BUG:`/internal-panic message (a green-check /
+/// build-fail split is acceptable only if the build failure is intended and
+/// clearly communicated).
+#[test]
+fn rank_poly_build_emits_honest_not_lowerable_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("m.ch");
+    let out = dir.path().join("out");
+    fs::write(
+        &src,
+        "def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
+         def use_it(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu_forward(x)\n",
+    )
+    .expect("write");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run chelis build");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "rank-poly build is not yet supported; expected failure. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("cannot yet be lowered") && stderr.contains("concrete-rank"),
+        "expected an honest 'cannot yet be lowered … concrete-rank' diagnostic, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("BUG:"),
+        "the build diagnostic must not be framed as an internal BUG: {stderr}"
+    );
+}

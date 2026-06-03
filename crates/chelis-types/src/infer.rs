@@ -283,6 +283,7 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // Second pass: infer def bodies. Same module-descent rationale as the
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
+    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     for expr in top_level_decl_items(exprs) {
         infer_top_level(
             expr,
@@ -293,6 +294,7 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
             &mut errors,
             &mut typed_nodes,
             &mut total_nodes,
+            &user_def_names,
         );
         // Issue #256 round 2: re-check each deferred borrow against the
         // now-complete substitution (see `validate_deferred_borrow_vars`).
@@ -941,6 +943,7 @@ fn infer_ir_program_with_state(
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
+    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     for expr in top_level_decl_items(exprs) {
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
@@ -956,6 +959,7 @@ fn infer_ir_program_with_state(
             &mut errors,
             &mut typed_nodes,
             &mut total_nodes,
+            &user_def_names,
         );
         if let Some(t0) = t0 {
             let elapsed = t0.elapsed();
@@ -4410,6 +4414,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     // `def` arm of `annotate_expr_with_scope` for the duration of this
     // pass. Restored on drop.
     let _declared_sig_guard = install_declared_sig_param_types(exprs);
+    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
 
     // Descend through `(module {} name ...)` wrappers when collecting
     // declarations, matching `infer_program`. Without this, module-
@@ -4458,6 +4463,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
                 &mut step_errors,
                 &mut typed_nodes,
                 &mut total_nodes,
+                &user_def_names,
             );
         }
 
@@ -4498,6 +4504,7 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
     // Declared `defsig` parameter type expressions for the new-code
     // exprs being annotated here. Restored on drop.
     let _declared_sig_guard = install_declared_sig_param_types(exprs);
+    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
 
     // Descend through `(module {} name ...)` wrappers when collecting
     // declarations; mirrors the `infer_program` shape and the parallel
@@ -4538,6 +4545,7 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
                 &mut step_errors,
                 &mut typed_nodes,
                 &mut total_nodes,
+                &user_def_names,
             );
         }
 
@@ -6967,12 +6975,33 @@ fn app_var_name(callee: &deep::Expr) -> Option<&str> {
     children(list).first().and_then(symbol_name)
 }
 
+/// Names of every top-level `def` in the program (after module flattening),
+/// so the Body-Discipline check can reject a call that resolves to a user
+/// function shadowing an Identity builtin name (chelis#258 §4.2).
+fn collect_user_def_names(items: &[&deep::Expr]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for expr in items {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
 /// Walk a rank-polymorphic def's body and reject any call that is not a
 /// shape-identity (elementwise) builtin. Against an opaque rank `..r` there are
 /// no named axes left to catch a transposition/reshape, so a shape-rewriting
 /// op — or a user/non-builtin call not proven rank-safe — would silently break
 /// §4.2 transposition safety (spec/design/rank_polymorphism.md §Soundness Boundary).
-fn check_rank_body_discipline(def_name: &str, expr: &deep::Expr, errors: &mut Vec<CheckError>) {
+fn check_rank_body_discipline(
+    def_name: &str,
+    expr: &deep::Expr,
+    user_def_names: &HashSet<String>,
+    errors: &mut Vec<CheckError>,
+) {
     let deep::Expr::List(list, _) = expr else {
         return;
     };
@@ -6994,6 +7023,22 @@ fn check_rank_body_discipline(def_name: &str, expr: &deep::Expr, errors: &mut Ve
             ));
         }
         Some("app") => match children(list).first().and_then(app_var_name) {
+            // A user-defined `def` of this name — possibly SHADOWING an
+            // Identity builtin (`def relu(x) = permute(x,1,0)`). The call
+            // resolves to the user def, whose body is not proven rank-safe, so
+            // it must be rejected before the builtin-name classification below.
+            Some(name) if user_def_names.contains(name) => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "rank-polymorphic def `{def_name}` may not call user-defined `{name}`: \
+                         only shape-identity builtins are proven rank-safe in a `..r` body, and a \
+                         user `def` (even one shadowing a builtin name) is not (spec/04-type-system.md \
+                         \u{00a7}4.2)."
+                    ),
+                    vec![],
+                ));
+            }
             // Identity builtin — the only admissible call. OK.
             Some(name)
                 if builtins::BUILTIN_NAMES.contains(&name)
@@ -7046,7 +7091,7 @@ fn check_rank_body_discipline(def_name: &str, expr: &deep::Expr, errors: &mut Ve
     }
     // Recurse so nested calls (in let/if/match/lambda bodies, args) are checked.
     for child in &list.elements {
-        check_rank_body_discipline(def_name, child, errors);
+        check_rank_body_discipline(def_name, child, user_def_names, errors);
     }
 }
 
@@ -7062,6 +7107,7 @@ fn infer_top_level(
     errors: &mut Vec<CheckError>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
+    user_def_names: &HashSet<String>,
 ) {
     let list = match expr {
         deep::Expr::List(list, _) => list,
@@ -7209,7 +7255,7 @@ fn infer_top_level(
             if type_contains_rank(&decl_ty)
                 && let Some((_, body_expr)) = extract_fn_params_and_body(&kids[1])
             {
-                check_rank_body_discipline(&name, &body_expr, errors);
+                check_rank_body_discipline(&name, &body_expr, user_def_names, errors);
             }
             // chelis#272 list-uniformity check. A list literal of
             // tensors with *mismatched concrete* element axes joins to a
