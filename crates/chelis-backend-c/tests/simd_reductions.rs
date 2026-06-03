@@ -497,17 +497,24 @@ fn parse_c_hex_literal(s: &str) -> f32 {
 /// same f32. Pure string/bit oracle: no gcc or run needed.
 #[test]
 fn hex_float_literal_round_trips_exact_f32_bits() {
+    // Adversarial corpus (no trailing comments so rustfmt leaves the vec
+    // layout untouched):
+    //   - `1e-40` is a subnormal that `%.8` renders `0.00000000f` (bits 0).
+    //   - `f32::from_bits(0x1234_5678)` is the #189 small-magnitude family.
+    //   - signed zeros, a negative integer, an unrepresentable decimal.
+    //   - `f32::MIN_POSITIVE` (smallest normal) and `from_bits(1)`
+    //     (smallest subnormal) plus `MAX` / `MIN` exercise the extremes.
     let mut cases: Vec<f32> = vec![
         0.1_f32,
         (1.0_f64 / 3.0_f64) as f32,
-        1e-40_f32, // subnormal: `%.8` -> `0.00000000f`
-        f32::from_bits(0x1234_5678), // #189 small-magnitude reproducer
+        1e-40_f32,
+        f32::from_bits(0x1234_5678),
         0.0_f32,
         -0.0_f32,
         -4.0_f32,
         3.999_999_8_f32,
-        f32::MIN_POSITIVE, // smallest normal
-        f32::from_bits(1), // smallest subnormal
+        f32::MIN_POSITIVE,
+        f32::from_bits(1),
         f32::MAX,
         f32::MIN,
     ];
