@@ -32,11 +32,18 @@ string_char = { "\\\\" ~ ("n" | "r" | "t" | "0" | "\"" | "\\")
 
 spacing = _{ (WHITESPACE | comment)* }
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
-// `comment` must be atomic (`@{...}`). A silent rule (`_{...}`) is
-// non-atomic, so pest auto-inserts implicit WHITESPACE between its
-// subrules. With WHITESPACE including "\n", that swallows the newline
-// that should terminate the comment, stranding the parser on the next
-// node. Atomic rules opt out of implicit-whitespace insertion, so
-// `(!"\n" ~ ANY)*` stays the sole consumer up to the newline, which the
-// surrounding `spacing` then handles as WHITESPACE. See issue #167.
+// `comment` must be atomic (`@{...}`), not silent (`_{...}`). A silent
+// rule is non-atomic, so pest auto-inserts implicit WHITESPACE between
+// its subrules. With WHITESPACE including "\n", that swallows the
+// newline that should terminate the comment, stranding the parser on
+// the next node (issue #167). Atomic rules opt out of implicit-
+// whitespace insertion, so `(!"\n" ~ ANY)*` stays the sole consumer up
+// to the newline, which the surrounding `spacing` then handles as
+// WHITESPACE.
+//
+// Making `comment` atomic also makes it visible in the parse tree
+// (only `_{...}` rules are suppressed). The Rust child-collection in
+// `validate_deep_node` therefore skips `comment` pairs the same way it
+// skips `EOI`, so an inline or trailing comment is never mistaken for a
+// node child.
 comment = @{ ";" ~ (!"\n" ~ ANY)* }

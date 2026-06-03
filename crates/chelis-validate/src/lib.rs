@@ -126,13 +126,20 @@ pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
 
 fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
     let span = pair.as_span();
-    let mut inner = pair.into_inner();
+    // `comment` is an atomic (visible) rule, so any comment captured by a
+    // node's internal `spacing` (before the tag, around the meta block, or
+    // trailing after the last child) surfaces as an inner pair here. Filter
+    // those out up front, like `EOI`, so they are never mistaken for the
+    // tag, the meta block, or a node child. See issue #167.
+    let mut inner = pair
+        .into_inner()
+        .filter(|p| !matches!(p.as_rule(), deep::Rule::comment | deep::Rule::EOI));
     let tag = inner.next().expect("node tag").as_str().to_string();
     let meta = inner.next().expect("node meta");
     let children: Vec<_> = inner
         .filter_map(|pair| match pair.as_rule() {
             deep::Rule::child => pair.into_inner().next(),
-            other => Some(pair).filter(|_| other != deep::Rule::EOI),
+            _ => Some(pair),
         })
         .collect();
 
@@ -169,7 +176,12 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
 }
 
 fn validate_typed_helper(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
-    let mut inner = pair.clone().into_inner();
+    // Skip any visible `comment` pairs captured by the helper's internal
+    // `spacing`, mirroring `validate_deep_node`. See issue #167.
+    let mut inner = pair
+        .clone()
+        .into_inner()
+        .filter(|p| !matches!(p.as_rule(), deep::Rule::comment | deep::Rule::EOI));
     let name = inner
         .next()
         .expect("typed helper name")
@@ -401,7 +413,10 @@ mod tests {
 
     #[test]
     fn deep_accepts_single_leading_comment() {
-        assert_validates("; a leading comment\n(module {} hello)\n", "single leading comment");
+        assert_validates(
+            "; a leading comment\n(module {} hello)\n",
+            "single leading comment",
+        );
     }
 
     #[test]
@@ -455,10 +470,31 @@ mod tests {
     }
 
     #[test]
+    fn deep_accepts_comment_before_tag() {
+        // A comment captured by the node's first internal `spacing`, between
+        // `(` and the tag. The visible `comment` token must be skipped so the
+        // tag is still read correctly.
+        assert_validates("(; before tag\nmodule {} hello)\n", "comment before tag");
+    }
+
+    #[test]
+    fn deep_accepts_comment_around_meta_and_children() {
+        // Comments in the node's internal spacing around the meta block and
+        // before a child must not be mistaken for the meta block or a child.
+        assert_validates(
+            "(module ; after tag\n{} ; after meta\nhello ; after child\n)\n",
+            "comments around meta and children",
+        );
+    }
+
+    #[test]
     fn deep_accepts_leading_comment_without_trailing_newline() {
         // No newline after the final node; the leading comment is still
         // terminated by its own newline before the node.
-        assert_validates("; leading\n(module {} hello)", "leading comment, no trailing newline");
+        assert_validates(
+            "; leading\n(module {} hello)",
+            "leading comment, no trailing newline",
+        );
     }
 
     #[test]
