@@ -2094,16 +2094,21 @@ fn is_app_of_builtin(expr: &Expr, expected: &str) -> bool {
     )
 }
 
-/// Extract an `i64` from `expr` if it is a literal or `(lit {} N)` form.
+/// Extract an `i64` from a `pad`/`shrink` bound element.
+///
+/// Routes through the shared [`extract_int_for_dim`] walker so the same
+/// `Atom::Int` / `(lit {} N)` / `(cast {} N <prim>)` shapes that
+/// `reshape`/`stride` already accept also work for bound pairs. Issue
+/// Chelis-Lang/chelis#291: the headline reproducer writes the bounds as
+/// `[[cast(0, int32), cast(2, int32)]]`, and the old literal-only walker
+/// returned `None` for the `(cast ...)` element, so `extract_pair_list`
+/// fell back to an empty `bounds = vec![]` and the resulting
+/// `RiscOp::Shrink { bounds: [] }` failed backward-DAG verification with
+/// `bounds len 0 != input rank 1`. PR #296 hardened the `stride`/`wrt`
+/// integer extraction against the same `cast`-wrapped shape; this closes
+/// the matching gap for `shrink`/`pad` bounds.
 fn cons_pair_extract_int(expr: &Expr) -> Option<i64> {
-    match expr {
-        Expr::Atom(Atom::Int(n), _) => Some(*n),
-        Expr::List(list, _) if get_tag(list) == Some("lit") => match list.elements.get(2) {
-            Some(Expr::Atom(Atom::Int(n), _)) => Some(*n),
-            _ => None,
-        },
-        _ => None,
-    }
+    extract_int_for_dim(expr)
 }
 
 /// Walk `Cons(start, Cons(end, Nil))` and return `(start, end)` as
@@ -5873,16 +5878,16 @@ impl LowerCtx {
             let mut pairs = Vec::new();
             for elem in &list.elements {
                 if let Expr::List(pair_list, _) = elem {
+                    // Issue Chelis-Lang/chelis#291: accept `cast`-wrapped
+                    // ints (and `(lit ...)`) here too, via the shared
+                    // `cons_pair_extract_int`/`extract_int_for_dim` walker,
+                    // so the hand-written `(list ...)` form matches the
+                    // Surf cons-chain form's bound-element vocabulary.
                     let vals: Vec<usize> = pair_list
                         .elements
                         .iter()
-                        .filter_map(|e| {
-                            if let Expr::Atom(Atom::Int(n), _) = e {
-                                Some(*n as usize)
-                            } else {
-                                None
-                            }
-                        })
+                        .filter_map(cons_pair_extract_int)
+                        .filter_map(|n| usize::try_from(n).ok())
                         .collect();
                     if vals.len() >= 2 {
                         pairs.push((vals[0], vals[1]));
@@ -7758,6 +7763,87 @@ mod tests {
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(matches!(last.op, RiscOp::Stride { .. }));
         assert!(verify::verify(&dag).is_empty());
+    }
+
+    /// Issue #291: a `shrink` bound literal written as a Surf-desugared
+    /// `Cons` chain whose pair elements are `cast`-wrapped ints
+    /// (`[[cast(0, int32), cast(2, int32)]]`) must lower to
+    /// `RiscOp::Shrink { bounds: [(0, 2)] }`, NOT an empty `bounds = []`.
+    /// Before the fix the bound-pair walker accepted only `Atom::Int` /
+    /// `(lit ...)`, so the `(cast ...)` elements dropped out and the
+    /// resulting `Shrink { bounds: [] }` failed downstream verification
+    /// (`bounds len 0 != input rank 1`), which surfaced as the `grad`
+    /// "failed to construct backward DAG" error in the issue.
+    #[test]
+    fn lower_shrink_cast_wrapped_cons_bounds_issue_291() {
+        // The exact desugared Deep that Surf emits for
+        // `shrink(x, [[cast(0, int32), cast(2, int32)]])`: an outer
+        // `Cons(pair, Nil)`, where `pair` is `Cons(cast(0), Cons(cast(2),
+        // Nil))` and each `cast` wraps an int32 `lit`.
+        let src = r#"
+            (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+            (def {} y
+              (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                   (var {} shrink)
+                   (var {} x)
+                   (app {} (var {} Cons)
+                        (app {} (var {} Cons)
+                             (cast {} (lit {type: (t-prim {} int32)} 0) (t-prim {} int32))
+                             (app {} (var {} Cons)
+                                  (cast {} (lit {type: (t-prim {} int32)} 2) (t-prim {} int32))
+                                  (var {} Nil)))
+                        (var {} Nil))))
+        "#;
+        let dag = parse_and_lower_unchecked(src);
+        let bounds = dag
+            .nodes()
+            .iter()
+            .find_map(|n| match &n.op {
+                RiscOp::Shrink { bounds } => Some(bounds.clone()),
+                _ => None,
+            })
+            .expect("a Shrink node must be present");
+        assert_eq!(
+            bounds,
+            vec![(0, 2)],
+            "cast-wrapped cons-chain bounds must extract to (0, 2), not an empty list",
+        );
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    /// Negative parity for #291: the plain (non-cast) `Cons`-chain bound
+    /// form must still extract, so routing the bound walker through
+    /// `extract_int_for_dim` did not regress the literal path.
+    #[test]
+    fn lower_shrink_plain_cons_bounds_still_extract_issue_291() {
+        let src = r#"
+            (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+            (def {} y
+              (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                   (var {} shrink)
+                   (var {} x)
+                   (app {} (var {} Cons)
+                        (app {} (var {} Cons)
+                             (lit {type: (t-prim {} int32)} 0)
+                             (app {} (var {} Cons)
+                                  (lit {type: (t-prim {} int32)} 2)
+                                  (var {} Nil)))
+                        (var {} Nil))))
+        "#;
+        let dag = parse_and_lower_unchecked(src);
+        let bounds = dag
+            .nodes()
+            .iter()
+            .find_map(|n| match &n.op {
+                RiscOp::Shrink { bounds } => Some(bounds.clone()),
+                _ => None,
+            })
+            .expect("a Shrink node must be present");
+        assert_eq!(
+            bounds,
+            vec![(0, 2)],
+            "plain cons-chain bounds must still extract to (0, 2)",
+        );
     }
 
     // --- H4: sum/max_reduce lowering ---

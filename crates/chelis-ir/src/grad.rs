@@ -1161,10 +1161,132 @@ fn compute_adjoints(
             Some(vec![(x, dx)])
         }
         RiscOp::Stride { strides } => {
-            // Phase 0 does not have a scatter/upsample primitive, so exact stride adjoints
-            // cannot be represented soundly in the current RISC set.
-            let _ = strides;
-            None
+            // Forward `stride(x, s)`: `out[i] = x[i .* s]` along each
+            // axis, with `out` axis size `ceil(in / s)` (verify.rs C10).
+            // The exact reverse-mode adjoint scatters each cotangent
+            // element `g[i]` back to source position `i .* s` and zeros
+            // every skipped slot (spec/05-risc-primitives.md §2.4: stride
+            // adjoint = "appropriate expand/scatter").
+            //
+            // No new primitive is needed: the scatter is the separable
+            // "insert `s - 1` zeros after each element, then trim to the
+            // original size" upsample, which is exactly `pad` of a
+            // freshly-inserted minor axis followed by `shrink`, applied
+            // one axis at a time. For a single axis `a` with step `s_a`
+            // and source size `n_a` (so the strided size is
+            // `m_a = ceil(n_a / s_a)`):
+            //
+            //   reshape : [.., m_a, ..]      -> [.., m_a, 1, ..]
+            //   pad     : [.., m_a, 1, ..]   -> [.., m_a, s_a, ..]   (axis a+1, after = s_a - 1)
+            //   reshape : [.., m_a, s_a, ..] -> [.., m_a * s_a, ..]
+            //   shrink  : [.., m_a * s_a, ..]-> [.., n_a, ..]        (axis a, [0, n_a))
+            //
+            // which places `g[.., i, ..]` at source index `i * s_a` and 0
+            // at every `i * s_a + 1 ..= i * s_a + (s_a - 1)`. A step of 1
+            // is the identity (`m_a == n_a`) and is skipped. All four ops
+            // already have evaluator, C-backend, and adjoint coverage, so
+            // this is sound under eval-vs-backend agreement and supports
+            // higher-order AD.
+            let x = node.inputs[0];
+            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let precision = input_ty.precision;
+            // Source sizes per axis; symbolic (unsized) dims cannot be
+            // upsampled because the trim size is unknown, so fail closed.
+            let source_sizes: Vec<usize> = input_ty.dims.iter().map(dim_size).collect();
+
+            // Running cotangent; its dims mutate axis-by-axis from the
+            // strided shape back toward the source shape.
+            let mut cur = g;
+            let mut cur_dims: Vec<DimInfo> = node.output_type.dims.clone();
+
+            for (axis, (&step, &n_a)) in strides.iter().zip(source_sizes.iter()).enumerate() {
+                if step <= 1 {
+                    // Identity stride on this axis: m_a == n_a already.
+                    continue;
+                }
+                let m_a = dim_size(&cur_dims[axis]);
+
+                // reshape: insert a size-1 axis after `axis`.
+                let mut split_dims = cur_dims.clone();
+                split_dims.insert(axis + 1, DimInfo::Lit(1));
+                let split = dag.add_node(
+                    RiscOp::Reshape {
+                        new_shape: split_dims.clone(),
+                    },
+                    vec![cur],
+                    TensorType {
+                        dims: split_dims.clone(),
+                        precision,
+                    },
+                    None,
+                );
+
+                // pad the new minor axis with (0, step - 1).
+                let mut padding = vec![(0usize, 0usize); split_dims.len()];
+                padding[axis + 1] = (0, step - 1);
+                let mut padded_dims = split_dims.clone();
+                padded_dims[axis + 1] = DimInfo::Lit(step);
+                let padded = dag.add_node(
+                    RiscOp::Pad { padding, fill: 0.0 },
+                    vec![split],
+                    TensorType {
+                        dims: padded_dims.clone(),
+                        precision,
+                    },
+                    None,
+                );
+
+                // reshape: merge axis and axis+1 back into one axis of
+                // size m_a * step.
+                let mut merged_dims = cur_dims.clone();
+                merged_dims[axis] = DimInfo::Lit(m_a * step);
+                let merged = dag.add_node(
+                    RiscOp::Reshape {
+                        new_shape: merged_dims.clone(),
+                    },
+                    vec![padded],
+                    TensorType {
+                        dims: merged_dims.clone(),
+                        precision,
+                    },
+                    None,
+                );
+
+                // shrink axis back to [0, n_a). m_a * step >= n_a always
+                // (ceil), so this is a valid trim of the trailing
+                // overshoot from the final group.
+                let mut bounds: Vec<(usize, usize)> =
+                    merged_dims.iter().map(|d| (0usize, dim_size(d))).collect();
+                bounds[axis] = (0, n_a);
+                let mut trimmed_dims = merged_dims.clone();
+                trimmed_dims[axis] = DimInfo::Lit(n_a);
+                let trimmed = dag.add_node(
+                    RiscOp::Shrink { bounds },
+                    vec![merged],
+                    TensorType {
+                        dims: trimmed_dims.clone(),
+                        precision,
+                    },
+                    None,
+                );
+
+                cur = trimmed;
+                cur_dims = trimmed_dims;
+            }
+
+            // The accumulated cotangent now has the source shape exactly;
+            // label the terminal node with the original input type.
+            if cur == g {
+                // All steps were identity (every step <= 1): stride was a
+                // no-op, so the adjoint is the cotangent unchanged.
+                Some(vec![(x, g)])
+            } else {
+                debug_assert_eq!(
+                    cur_dims, input_ty.dims,
+                    "stride adjoint must reconstruct the source shape",
+                );
+                Some(vec![(x, cur)])
+            }
         }
 
         // --- Memory ---
@@ -3034,7 +3156,13 @@ mod tests {
     }
 
     #[test]
-    fn adv_stride_gradient_is_rejected_until_supported() {
+    fn adv_stride_gradient_scatters_into_strided_slots() {
+        // Issue #291: the stride adjoint scatters the cotangent back into
+        // the strided source slots (zeros elsewhere) using existing
+        // movement primitives (reshape/pad/shrink). `f(x) = sum(stride(x,
+        // 2)) = x0 + x2`, so `df/dx = [1, 0, 1, 0]`.
+        use crate::eval::{TensorValue, eval_tensor};
+
         let vec4_ty = TensorType {
             dims: vec![DimInfo::Lit(4)],
             precision: chelis_types::types::Prim::F32,
@@ -3066,9 +3194,20 @@ mod tests {
             scalar_f32(),
             None,
         );
-        assert!(
-            grad_dag(&dag, out, &[x]).is_none(),
-            "stride gradients should fail closed until the RISC set can express them soundly"
+        let grad_result =
+            grad_dag(&dag, out, &[x]).expect("stride gradients are supported (issue #291)");
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
+        );
+        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let grad = &vals[&grad_result.grad_nodes[&x]];
+        assert_eq!(
+            grad.data,
+            vec![1.0, 0.0, 1.0, 0.0],
+            "stride gradient must scatter into strided slots: got {:?}",
+            grad.data
         );
     }
 
