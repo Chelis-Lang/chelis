@@ -402,7 +402,8 @@ fn phaseA_item6_from_github_oracle() {
     oracle_auth_missing_no_gh();
     oracle_auth_rejected_401_distinct_from_missing();
     oracle_auth_rejected_403_also_typed();
-    oracle_404_release_asset_not_found();
+    oracle_404_metadata_step_tag_missing();
+    oracle_404_metadata_step_auth_privacy();
     oracle_hash_mismatch_on_second_fetch();
     oracle_5xx_server_error_distinct_category();
     oracle_429_rate_limited_includes_retry_after();
@@ -681,14 +682,55 @@ fn oracle_auth_rejected_403_also_typed() {
     );
 }
 
-fn oracle_404_release_asset_not_found() {
-    // Tag has no release at all: the metadata endpoint 404s and the
-    // helper must surface ReleaseAssetNotFound naming the metadata
-    // URL we tried — that is the actionable signal for "wrong tag /
-    // release missing." Asset-list-mismatch (release exists but the
-    // named asset is absent) is exercised separately by
-    // `phaseA_item6_wrong_asset_name_in_release_is_typed_404`, which
-    // covers the post-metadata branch of `find_asset_id`.
+/// Shared assertions for both metadata-step 404 scenarios (issue #147).
+/// The metadata endpoint returns 404 identically whether the tag is
+/// genuinely missing on a reachable repo or the token lacks read access
+/// to a private repo (GitHub returns 404, not 403, for the latter as a
+/// privacy measure). We cannot tell the two apart from this single
+/// response, so the typed error and its message must name BOTH
+/// possibilities rather than asserting the publisher's pipeline is
+/// broken.
+fn assert_metadata_404_is_ambiguous(err: &chelis_reef::GitHubFetchError) {
+    assert!(
+        matches!(
+            err,
+            chelis_reef::GitHubFetchError::ReleaseTagNotFoundOrUnauthorized { .. }
+        ),
+        "metadata-step 404 must surface ReleaseTagNotFoundOrUnauthorized, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("releases/tags/v0.3.0"),
+        "metadata-404 message must name the metadata URL: {msg}"
+    );
+    assert!(
+        msg.contains("HTTP 404"),
+        "404 message must name status: {msg}"
+    );
+    // Possibility (a): the tag does not exist on the repo.
+    assert!(
+        msg.contains("the tag does not exist"),
+        "404 message must name the tag-missing possibility: {msg}"
+    );
+    // Possibility (b): the token lacks read access (private repo).
+    assert!(
+        msg.contains("contents: read") && msg.contains("404 (not 403)"),
+        "404 message must name the auth-privacy possibility and the \
+         404-not-403 GitHub behavior: {msg}"
+    );
+    // Actionable next step: verify with the same token.
+    assert!(
+        msg.contains("gh release view"),
+        "404 message must point at `gh release view` for verification: {msg}"
+    );
+}
+
+/// Scenario (a): the tag genuinely does not exist on a reachable repo.
+/// The metadata endpoint 404s. Asset-list-mismatch (release exists but
+/// the named asset is absent) is a different, unambiguous case covered
+/// by `phaseA_item6_wrong_asset_name_in_release_is_typed_404`, which
+/// keeps surfacing `ReleaseAssetNotFound`.
+fn oracle_404_metadata_step_tag_missing() {
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
         Mock::given(method("GET"))
@@ -707,23 +749,50 @@ fn oracle_404_release_asset_not_found() {
         Some("unit-test-token"),
         &dir.path().join("reef-home"),
     )
-    .expect_err("must 404");
-    assert!(
-        matches!(
-            err,
-            chelis_reef::GitHubFetchError::ReleaseAssetNotFound { .. }
-        ),
-        "expected ReleaseAssetNotFound, got: {err:?}"
-    );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("releases/tags/v0.3.0"),
-        "metadata-404 message must name the metadata URL: {msg}"
-    );
-    assert!(
-        msg.contains("HTTP 404"),
-        "404 message must name status: {msg}"
-    );
+    .expect_err("missing tag must 404");
+    assert_metadata_404_is_ambiguous(&err);
+}
+
+/// Scenario (b): auth-privacy 404. The repo is private and the token
+/// lacks read access, so GitHub returns 404 (not 403) on the metadata
+/// endpoint to avoid leaking the repo's existence. This is the exact
+/// case misdiagnosed for two days in issue #147: the old wording told
+/// the user the release was missing, pointing them at the publisher's
+/// pipeline instead of their token scope. Over the wire it is
+/// indistinguishable from scenario (a) (same 404), so we simulate it as
+/// a 404 on the metadata endpoint and require the same ambiguity-naming
+/// message; the only difference is the test's intent and that the body
+/// would, in the real auth-privacy case, carry GitHub's "Not Found"
+/// JSON, which we do not rely on for the classification.
+fn oracle_404_metadata_step_auth_privacy() {
+    let harness = WiremockHarness::new();
+    harness.mount_all(vec![
+        Mock::given(method("GET"))
+            .and(wm_path(metadata_path(
+                "chelis-lang",
+                "private-shell",
+                "v0.3.0",
+            )))
+            // GitHub's auth-privacy 404 carries a "Not Found" message
+            // body, the same body a genuinely-missing repo returns, which
+            // is exactly why the two cannot be told apart from the
+            // response alone.
+            .respond_with(ResponseTemplate::new(404).set_body_string(
+                r#"{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}"#,
+            )),
+    ]);
+
+    let dir = tempdir().expect("tempdir");
+    let err = lib_install_from_github(
+        "chelis-lang/private-shell@v0.3.0",
+        &harness.uri(),
+        // A real, well-formed token that simply lacks scope for this
+        // private repo: the auth-privacy case, not a missing token.
+        Some("scope-limited-but-valid-token"),
+        &dir.path().join("reef-home"),
+    )
+    .expect_err("auth-privacy 404 must surface a typed error");
+    assert_metadata_404_is_ambiguous(&err);
 }
 
 fn oracle_hash_mismatch_on_second_fetch() {

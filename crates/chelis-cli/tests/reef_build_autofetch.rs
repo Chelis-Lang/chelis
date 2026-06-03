@@ -898,7 +898,7 @@ fn phaseA_item8_lockfile_remote_origin_honored_when_present() {
     );
     harness.mount_all(vec![
         // Canonical org path: 404. If the resolver hit this we'd see
-        // a `release-asset-not-found` error and fail.
+        // a `release-tag-not-found-or-unauthorized` error and fail.
         Mock::given(method("GET"))
             .and(wm_path(canonical_meta))
             .and(header("authorization", "token unit-test-token"))
