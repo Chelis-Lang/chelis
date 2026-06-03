@@ -6377,6 +6377,18 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
         Expr::List(list, _) if tag(list) == Some("lit") => {
             children(list).first().and_then(expr_int_literal)
         }
+        // Movement-op axis/size args are routinely written as
+        // `cast(0, int32)` / `cast(2, int32)` (the canonical integer-
+        // literal form, since bare int literals default to int32 and the
+        // axis/size parameters are int32). A `cast` whose operand is an
+        // integer literal carries the same compile-time value, so see
+        // through it: otherwise `infer_app_expr_host_type`'s `expand`
+        // shape handler bails and the result type degrades to a
+        // dims-less placeholder, splitting a constant-broadcast `let`
+        // binding into an unsupported host-lane builtin (issue #300).
+        Expr::List(list, _) if tag(list) == Some("cast") => {
+            children(list).first().and_then(expr_int_literal)
+        }
         _ => None,
     }
 }
@@ -6815,7 +6827,19 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             })),
             _ => Some(HostType::Bool),
         },
-        "reshape" => match arg_tys.first() {
+        // Movement ops preserve the element precision and stay tensors.
+        // The concrete output shape (e.g. `expand`'s broadcast axis) is
+        // recomputed inside the tensor-helper DAG; the host `HostType`
+        // is coarse (precision + a dims placeholder used only for the
+        // typed-runtime dispatch), so propagating the *input* tensor
+        // type here is sufficient to keep the result classified as a
+        // tensor. Without these arms `expand`/`pad`/`shrink`/`stride`/
+        // `permute` fell through to `None`, so a host-lane `let k =
+        // expand(scalar_to_tensor(c), 0, n)` binding lost its tensor
+        // type and was emitted as `void* k = /* unsupported builtin
+        // expand */ 0`, then mistyped as a scalar at the consuming
+        // tensor-helper callsite (`(float)(void* k)`, issue #300).
+        "reshape" | "expand" | "pad" | "shrink" | "stride" | "permute" => match arg_tys.first() {
             Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(tensor_ty.clone())),
             _ => Some(HostType::Unknown),
         },

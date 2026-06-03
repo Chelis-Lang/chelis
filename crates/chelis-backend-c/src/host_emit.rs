@@ -2012,20 +2012,30 @@ impl<'a> HostEmitter<'a> {
                 }
             })
             .collect::<Vec<_>>();
-        let inputs_name = self.next_temp("inputs");
         let outputs_name = self.next_temp("outputs");
-        self.lines.push(format!(
-            "{}chelis_tensor *{}[{}];",
-            self.indent,
-            inputs_name,
-            tensor_args.len()
-        ));
-        for (index, (arg, _)) in tensor_args.iter().enumerate() {
+        // A constant-only tensor helper (e.g. `expand(scalar_to_tensor(c),
+        // 0, n)`) has zero inputs. ISO C forbids a zero-length array
+        // (`chelis_tensor *inputs[0];`), so pass a NULL inputs pointer with
+        // count 0 instead; the helper's `n_in == 0` guard never dereferences
+        // it (issue #300).
+        let inputs_arg = if tensor_args.is_empty() {
+            "NULL".to_string()
+        } else {
+            let inputs_name = self.next_temp("inputs");
             self.lines.push(format!(
-                "{}{}[{index}] = {};",
-                self.indent, inputs_name, arg
+                "{}chelis_tensor *{}[{}];",
+                self.indent,
+                inputs_name,
+                tensor_args.len()
             ));
-        }
+            for (index, (arg, _)) in tensor_args.iter().enumerate() {
+                self.lines.push(format!(
+                    "{}{}[{index}] = {};",
+                    self.indent, inputs_name, arg
+                ));
+            }
+            inputs_name
+        };
         self.lines.push(format!(
             "{}chelis_tensor *{}[1] = {{ NULL }};",
             self.indent, outputs_name
@@ -2034,7 +2044,7 @@ impl<'a> HostEmitter<'a> {
             "{}{}({}, {}, {}, 1);",
             self.indent,
             helper_name,
-            inputs_name,
+            inputs_arg,
             tensor_args.len(),
             outputs_name
         ));
