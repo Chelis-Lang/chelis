@@ -1,8 +1,11 @@
 # Rank Polymorphism (Tier 2: identity + erasure rank variables)
 
-**Status:** IDENTITY TIER SHIPPED. The identity position
-(`&tensor[..r, p] -> tensor[..r, p]`) is implemented and gated by the
-Body-Discipline check; the chelis#285 prerequisite is fixed and on `main`.
+**Status:** IDENTITY TIER SHIPPED, INCLUDING BACKEND LOWERING. The identity
+position (`&tensor[..r, p] -> tensor[..r, p]`) is implemented and gated by the
+Body-Discipline check; the chelis#285 prerequisite is fixed and on `main`. The
+call-site **rank-monomorphization** pass (the follow-up to PR #286) is shipped:
+a program that uses a `..r` def through a concrete-rank caller now `build`s and
+runs correctly — see Implementation Status below.
 
 ## Implementation Status (as shipped)
 
@@ -28,19 +31,40 @@ What landed vs. the plan below, with two deliberate divergences:
   sound erasure body to write today. Erasure ships when an all-reduce builtin
   is added; until then the Body-Discipline check rejects reductions in a `..r`
   body like any other shape-rewriting op.
-- **Backend lowering of `..r` programs is FUTURE WORK; the feature is
-  type-check-level.** `chelis check` fully and soundly accepts/rejects rank-poly
+- **Backend lowering of `..r` programs is SHIPPED via call-site rank
+  monomorphization.** `chelis check` fully and soundly accepts/rejects rank-poly
   defs (this is the §258 value — the verb proliferation collapses and §4.2 is
-  enforced at the type level). A standalone rank-poly def emits nothing
-  (`type_is_never_lowerable` skips it, paralleling precision polymorphism). But
-  a program that *uses* a rank-poly def through a concrete caller cannot yet
-  `build`: call-site **rank monomorphization** (substituting the caller's
-  concrete shape for `..r` in the inlined body, the rank analogue of the
-  precision `prec_subst` path) is not implemented, so `build` stops with a clear
-  "not yet lowerable — express as concrete-rank defs" diagnostic rather than a
-  miscompile. This is a completeness gap, not a soundness hole: the build path
-  *refuses* the un-monomorphized rank rather than emitting wrong code. Closing it
-  (a call-site rank-substitution pass) is the natural follow-up.
+  enforced at the type level). A *standalone* rank-poly def still emits nothing
+  (`type_is_never_lowerable` / `type_expr_has_rank_var` skip it in both the DAG
+  and host lanes, paralleling precision polymorphism). A program that *uses* a
+  rank-poly def through a concrete caller now **builds**: call-site **rank
+  monomorphization** substitutes the caller's concrete shape for `..r` in the
+  inlined body — the rank analogue of the precision `prec_subst` path. The
+  implementation is the structural twin of WS-A8 precision monomorphization in
+  `crates/chelis-ir/src/lower.rs`:
+  - `tensor_rank_substitutions` builds the formal-vs-actual rank-var map at a
+    call site (binding a sole `(d-rank {} r)` formal slot to the actual arg's
+    concrete dim vector), exactly as `tensor_prec_substitutions` does for
+    precision.
+  - `LowerCtx.rank_substitutions` threads that map through
+    `type_from_type_expr_with_subst` / `try_extract_tensor_type_with_subst`, so
+    an inlined rank-poly body resolves its `(d-rank)` slots to concrete dims.
+  - the host lane (`crates/chelis-ir/src/host.rs`) gets the matching guards: a
+    rank-poly sig is skipped from standalone emission (`type_expr_has_rank_var`),
+    a rank-poly tensor parses to `HostType::Unknown` rather than tripping the
+    tripwire, and a rank-poly callee is force-inlined at its call site
+    (`callee_is_polymorphic_rank`) so no undefined symbol is emitted — every
+    branch mirrors the precision-var path next to it.
+
+  Because the IR `DimInfo` has no rank variant, no `Dim::Rank` can survive into
+  a backend tensor type by construction: a successful lowering *is* a successful
+  monomorphization. A standalone rank-poly def with no concrete caller is
+  skipped from emission entirely (it has no usable monomorphization), so the
+  genuinely-unresolvable case never reaches the backend rather than miscompiling.
+  Verified end-to-end: a single `relu_forward(x: &tensor[..r, f32]) ->
+  tensor[..r, f32] = relu(x)` called at concrete ranks 1, 2, 3, and 4 builds,
+  compiles, and runs, with backend output equal to the evaluator output
+  value-for-value (the `rank_poly_tier2` acceptance suite).
 
 A fresh-context red-team pass informed the design; its verified findings (and
 one correction to its central claim) are in §"Red-Team Findings".
@@ -143,10 +167,17 @@ unchanged; only unification and the monomorphization assertion care.
 concrete shape.
 
 **Monomorphization invariant (parallels `TensorPrec::Var`):** after
-instantiation every reachable tensor must be `Dim::Rank`-free. Backends and IR
-builders assert this at lowering, exactly as they already assert
-`TensorPrec::Concrete(_)` (`types.rs:236`). A surviving `Dim::Rank` is a
-monomorphization bug, not a backend input.
+instantiation every reachable tensor must be `Dim::Rank`-free. As shipped, this
+holds *by construction* at the IR boundary: the IR `DimInfo` (`dag.rs`) has only
+`Named` and `Lit` variants — there is no rank dim to represent — so call-site
+rank monomorphization (`try_extract_tensor_type_with_subst` in `lower.rs`)
+either expands a bound `(d-rank)` slot to the caller's concrete dims or, for the
+speculative annotation read on an un-monomorphized slot, drops it (the inlined
+body supplies the concrete shape downstream). A standalone rank-poly def, which
+has no caller to supply the binding, is skipped from emission entirely in both
+the DAG and host lanes. Thus a `Dim::Rank` can never become a backend input;
+reaching the backend with one would be a monomorphization bug, exactly as a
+surviving `TensorPrec::Var` (`types.rs:236`) would be.
 
 ## Unification
 
@@ -373,8 +404,19 @@ Every "works" test has its paired "fails with the right reason" test.
 - [ ] identity `R` shared across two args forces same *shape* (not just same
       rank): `add2[..r](x,y)` rejects mismatched concrete shapes — no implicit
       broadcast (§4.2). Positive: matching shapes accepted.
-- [ ] monomorphization: no `Dim::Rank` survives to any backend; lowering
-      asserts. Negative: a synthetic unmonomorphized tensor trips the assert.
+- [x] monomorphization (SHIPPED): call-site rank substitution
+      (`tensor_rank_substitutions` + `LowerCtx.rank_substitutions`) resolves
+      every `(d-rank)` slot of an inlined rank-poly body to the caller's
+      concrete shape. No `Dim::Rank` reaches a backend by construction (the IR
+      `DimInfo` has no rank variant). A rank-poly `relu_forward` called at ranks
+      1–4 builds, links, runs, and matches the evaluator value-for-value; a
+      standalone rank-poly def with no concrete caller is skipped from emission
+      rather than miscompiled. Unit + CLI coverage in `chelis-ir`
+      (`rank_poly_def_lowers_through_concrete_caller` and the
+      `tensor_rank_substitutions` / `extract_rank_var_name` /
+      `try_extract_tensor_type_with_subst` helper tests) and `chelis-cli`
+      (`rank_poly_tier2`: `rank_poly_identity_builds_and_runs_at_ranks_1_through_4`,
+      `rank_poly_composed_identity_builds_and_runs`).
 - [ ] decompile/format round-trip: `..r` sigs survive `chelis fmt` and
       re-parse byte-identical on the corpus.
 - [ ] `chelis check --json` shape/semantic invariants on the R-corpus.

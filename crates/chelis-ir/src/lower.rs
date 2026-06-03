@@ -1228,6 +1228,122 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
     }
 }
 
+/// Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): build a
+/// rank-var substitution map from formal vs actual tensor types at a
+/// rank-polymorphic-def call site. The structural twin of
+/// [`tensor_prec_substitutions`]. The formal types come from the def's
+/// annotated parameter signatures and may carry a sole `(d-rank {} r)` dim
+/// slot (a rank variable standing for the *entire* shape vector). The actual
+/// types come from the call site's lowered argument nodes and always carry a
+/// concrete shape (the call site is the monomorphization boundary).
+///
+/// The returned map is keyed by the rank-var name as it appears in the
+/// `(d-rank {} r)` slot. The map flows into [`LowerCtx::rank_substitutions`]
+/// so any `try_extract_tensor_type` call reached during inlining of the def
+/// body expands the `Dim::Rank` slot to the caller's concrete dims and the
+/// rank-poly monomorphization tripwire never fires for a properly-
+/// monomorphized program.
+///
+/// Formals are walked via the raw type-expr tree (not the already-extracted
+/// `TensorType` value) so the `(d-rank {} r)` shape — and the rank-var name —
+/// is preserved. The actual types come from the lowered DAG so their dims are
+/// concrete.
+fn tensor_rank_substitutions(
+    formal_param_exprs: &[Option<Expr>],
+    actual_args: &[TensorType],
+) -> HashMap<String, Vec<DimInfo>> {
+    let mut subst = HashMap::new();
+    for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
+        let Some(formal_expr) = formal_expr else {
+            continue;
+        };
+        if let Some(var_name) = extract_rank_var_name(formal_expr) {
+            // First-binding-wins: when a rank var appears in more than one
+            // param (e.g. `add2(x: &tensor[..r], y: &tensor[..r])`), every
+            // occurrence binds to the SAME concrete dim vector because the type
+            // checker already unified them before lowering (the rank-var
+            // unification arm forces every `..r` position to one shape). So the
+            // first actual's dims are authoritative; later params agree by
+            // construction and `or_insert_with` correctly keeps the first.
+            // The debug_assert is a tripwire for a future inconsistency (a
+            // checker regression that let two `..r` positions diverge).
+            match subst.entry(var_name) {
+                std::collections::hash_map::Entry::Occupied(existing) => {
+                    debug_assert_eq!(
+                        existing.get(),
+                        &actual.dims,
+                        "rank-var bound to two distinct concrete shapes at one \
+                         call site: the type checker should have rejected this",
+                    );
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(actual.dims.clone());
+                }
+            }
+        }
+    }
+    subst
+}
+
+/// Pull the rank-var name out of a tensor type expression whose shape is a
+/// sole `(d-rank {} r)` slot. Returns `Some(name)` when the tensor's only dim
+/// child is `(d-rank {} name)` (the structural invariant from
+/// spec/design/rank_polymorphism.md: a `Dim::Rank` is always the sole element
+/// of its dim list); returns `None` for a concrete-shape tensor or a
+/// non-tensor expression.
+///
+/// Strips a leading `(t-ref {} ...)` wrapper so a `&tensor[..r, p]` parameter
+/// is treated the same as `tensor[..r, p]` for substitution purposes — the
+/// borrow is irrelevant to rank monomorphization (mirrors
+/// [`extract_precision_var_name`]).
+fn extract_rank_var_name(expr: &Expr) -> Option<String> {
+    let stripped = if let Expr::List(list, _) = expr
+        && list.elements.len() >= 3
+        && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
+        && tag == "t-ref"
+    {
+        list.elements.get(2)?
+    } else {
+        expr
+    };
+    let Expr::List(list, _) = stripped else {
+        return None;
+    };
+    if list.elements.len() < 3 {
+        return None;
+    }
+    let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0] else {
+        return None;
+    };
+    if tag != "t-tensor" {
+        return None;
+    }
+    // Children after tag+meta are dim nodes followed by the precision node.
+    // A rank-var tensor is exactly `(t-tensor {} (d-rank {} r) (t-prim/.. {} p))`:
+    // one dim child, which is `(d-rank {} name)`.
+    let children = &list.elements[2..];
+    if children.len() != 2 {
+        return None;
+    }
+    let Expr::List(dim_list, _) = &children[0] else {
+        return None;
+    };
+    if dim_list.elements.len() < 3 {
+        return None;
+    }
+    let Expr::Atom(Atom::Symbol(dim_tag), _) = &dim_list.elements[0] else {
+        return None;
+    };
+    if dim_tag != "d-rank" {
+        return None;
+    }
+    if let Expr::Atom(Atom::Symbol(name), _) = &dim_list.elements[2] {
+        Some(name.clone())
+    } else {
+        None
+    }
+}
+
 pub fn top_level_expr_is_lowered(
     expr: &Expr,
     program_exprs: &[Expr],
@@ -1445,7 +1561,7 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
 /// `(d-rank ...)` rank variable (Tier-2 rank polymorphism). Mirrors
 /// `type_expr_has_precision_var`: such a signature is rank-polymorphic, has no
 /// standalone monomorphization, and is reached only through call-site inlining.
-fn type_expr_has_rank_var(expr: &Expr) -> bool {
+pub fn type_expr_has_rank_var(expr: &Expr) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
@@ -3014,6 +3130,21 @@ struct LowerCtx {
     /// monomorphization every reachable tensor type carries
     /// `TensorPrec::Concrete(_)` per spec/04-type-system.md §5.8.1.
     prec_substitutions: HashMap<String, Prim>,
+    /// Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): rank-var
+    /// substitutions, keyed by the `..r` rank-var name as it appears in a sole
+    /// `(d-rank {} r)` dim slot of a rank-polymorphic def's signature. The
+    /// structural twin of [`Self::prec_substitutions`]: where precision
+    /// substitutes a concrete `Prim` into a `(t-var {} p)` slot, rank
+    /// substitutes the caller's concrete shape vector into a `(d-rank {} r)`
+    /// slot. Populated at call sites of rank-poly top-level defs (see
+    /// `lower_plain_callable_app`) alongside `dim_substitutions` and
+    /// `prec_substitutions`. Consulted by
+    /// [`Self::try_extract_tensor_type_with_subst`] to expand a `Dim::Rank`
+    /// slot into the bound concrete dims before backends see the type. After
+    /// monomorphization every reachable tensor type is `Dim::Rank`-free per
+    /// the spec's monomorphization invariant; a surviving rank var is a
+    /// monomorphization bug, not a backend input.
+    rank_substitutions: HashMap<String, Vec<DimInfo>>,
     /// The span_id of the Deep `Expr` currently being lowered. Threaded
     /// through `lower_expr` (set on entry, restored on exit) so every
     /// helper that calls `self.dag.add_node(...)` can pass the
@@ -3041,6 +3172,7 @@ impl LowerCtx {
             fn_typed_params: HashSet::new(),
             dim_substitutions: HashMap::new(),
             prec_substitutions: HashMap::new(),
+            rank_substitutions: HashMap::new(),
             current_span_id: None,
         }
     }
@@ -3159,14 +3291,18 @@ impl LowerCtx {
     }
 
     /// Extract a type from a metadata map if one is present, otherwise return a default.
-    /// WS-A8: instance entry that consults `self.prec_substitutions`
-    /// when extracting a tensor type out of a Deep meta map. Ensures
-    /// inlined polymorphic-def bodies see substituted precisions on
-    /// their `type:` annotations.
+    /// WS-A8: instance entry that consults `self.prec_substitutions` and
+    /// `self.rank_substitutions` when extracting a tensor type out of a Deep
+    /// meta map. Ensures inlined polymorphic-def bodies see substituted
+    /// precisions and concrete ranks on their `type:` annotations.
     fn type_from_meta(&self, meta: &[(String, Expr)]) -> TensorType {
         for (key, val) in meta {
             if key == "type" {
-                return Self::type_from_type_expr_with_subst(val, &self.prec_substitutions);
+                return Self::type_from_type_expr_with_subst(
+                    val,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                );
             }
         }
         Self::default_type()
@@ -3237,7 +3373,7 @@ impl LowerCtx {
     }
 
     fn type_from_type_expr(expr: &Expr) -> TensorType {
-        Self::type_from_type_expr_with_subst(expr, &HashMap::new())
+        Self::type_from_type_expr_with_subst(expr, &HashMap::new(), &HashMap::new())
     }
 
     /// WS-A8: precision-aware variant of [`Self::type_from_type_expr`].
@@ -3252,6 +3388,7 @@ impl LowerCtx {
     fn type_from_type_expr_with_subst(
         expr: &Expr,
         prec_subst: &HashMap<String, Prim>,
+        rank_subst: &HashMap<String, Vec<DimInfo>>,
     ) -> TensorType {
         if let Some(prim) = Self::try_extract_prim(expr) {
             return TensorType {
@@ -3260,9 +3397,9 @@ impl LowerCtx {
             };
         }
         if let Some(inner) = Self::try_extract_ref_type(expr) {
-            return Self::type_from_type_expr_with_subst(inner, prec_subst);
+            return Self::type_from_type_expr_with_subst(inner, prec_subst, rank_subst);
         }
-        if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, prec_subst) {
+        if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, prec_subst, rank_subst) {
             return tt;
         }
         Self::default_type()
@@ -3293,7 +3430,11 @@ impl LowerCtx {
     /// types route through [`Self::type_from_meta`] /
     /// [`Self::type_from_type_expr_with_subst`], which panic when
     /// `prec_subst` lacks the var).
-    fn formal_param_type_for_call(expr: &Expr, prec_subst: &HashMap<String, Prim>) -> TensorType {
+    fn formal_param_type_for_call(
+        expr: &Expr,
+        prec_subst: &HashMap<String, Prim>,
+        rank_subst: &HashMap<String, Vec<DimInfo>>,
+    ) -> TensorType {
         if let Some(prim) = Self::try_extract_prim(expr) {
             return TensorType {
                 dims: vec![],
@@ -3301,7 +3442,7 @@ impl LowerCtx {
             };
         }
         if let Some(inner) = Self::try_extract_ref_type(expr) {
-            return Self::formal_param_type_for_call(inner, prec_subst);
+            return Self::formal_param_type_for_call(inner, prec_subst, rank_subst);
         }
         // Only the precision slot can panic in the strict extractor; reuse
         // it when no unresolved precision var is present so the strict
@@ -3317,12 +3458,12 @@ impl LowerCtx {
             // correctly; substitute the resolved primitive into the slot.
             let mut tolerant = prec_subst.clone();
             tolerant.entry(name).or_insert(resolved);
-            if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, &tolerant) {
+            if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, &tolerant, rank_subst) {
                 return tt;
             }
             return Self::default_type();
         }
-        if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, prec_subst) {
+        if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, prec_subst, rank_subst) {
             return tt;
         }
         Self::default_type()
@@ -3365,6 +3506,7 @@ impl LowerCtx {
     fn try_extract_tensor_type_with_subst(
         expr: &Expr,
         prec_subst: &HashMap<String, Prim>,
+        rank_subst: &HashMap<String, Vec<DimInfo>>,
     ) -> Option<TensorType> {
         // Flat format: (t-tensor {} dim1 dim2 ... (t-prim {} p))
         // Children after tag+meta: dimension nodes followed by a t-prim node as the last child.
@@ -3422,27 +3564,49 @@ impl LowerCtx {
             let mut dims = Vec::new();
             for child in &children[..children.len() - 1] {
                 // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
-                // a `Dim::Rank` (`(d-rank ...)`) stands for a whole shape vector
-                // and must be eliminated before lowering. Standalone emission of
-                // a rank-poly sig is already skipped via `type_is_never_lowerable`
-                // (paralleling precision polymorphism), so reaching here means a
-                // concrete caller inlined a rank-poly def but the rank was not
-                // substituted — call-site rank monomorphization is not yet
-                // implemented. This is a known unimplemented-feature boundary,
-                // surfaced as a clear diagnostic rather than a silent miscompile.
+                // a `Dim::Rank` (`(d-rank {} r)`) stands for the *entire* shape
+                // vector and must be eliminated before lowering. Standalone
+                // emission of a rank-poly sig is skipped via
+                // `type_is_never_lowerable` (paralleling precision
+                // polymorphism), so reaching here means a concrete caller
+                // inlined a rank-poly def. Call-site rank monomorphization
+                // (`tensor_rank_substitutions`, the rank analogue of the
+                // precision `prec_subst` path) supplied the caller's concrete
+                // shape in `rank_subst`, keyed by the rank-var name. Expand the
+                // `(d-rank {} r)` slot to those concrete dims — the
+                // monomorphization-success path. An unbound slot is a
+                // speculative annotation read repaired by the inlined body (see
+                // the inner comment); it is dropped, never emitted as a rank
+                // dim, because the IR `DimInfo` cannot represent one.
                 if let Expr::List(dl, _) = child
                     && let Some(Expr::Atom(Atom::Symbol(tag), _)) = dl.elements.first()
                     && tag == "d-rank"
                 {
-                    panic!(
-                        "rank-polymorphic def cannot yet be lowered to a backend: a `..r` \
-                         signature needs call-site rank monomorphization (substituting the \
-                         concrete shape for the rank variable when a concrete caller is lowered), \
-                         which is not yet implemented. Rank polymorphism IS supported at \
-                         type-check time (`chelis check`); to `build`, express the function as \
-                         concrete-rank `def`s for now. See spec/design/rank_polymorphism.md \
-                         (Implementation Status)."
-                    );
+                    let rank_name = match dl.elements.get(2) {
+                        Some(Expr::Atom(Atom::Symbol(name), _)) => name.clone(),
+                        _ => "?".to_string(),
+                    };
+                    if let Some(concrete_dims) = rank_subst.get(&rank_name) {
+                        // Monomorphization-success path: expand the rank var
+                        // to the caller's concrete shape vector.
+                        dims.extend(concrete_dims.iter().cloned());
+                    }
+                    // Unbound here: this is a speculative type read (e.g. an
+                    // `app`/param `type:` annotation that the type-checker
+                    // stamped with the rank-poly return type before this call
+                    // site monomorphized it). The concrete type is supplied by
+                    // call-site inlining of the rank-poly body, which produces
+                    // a fully concrete tensor — the inlined-body output type
+                    // repairs this speculative read downstream. Drop the
+                    // unresolved rank dim rather than raising: a standalone
+                    // rank-poly def with no concrete caller is already skipped
+                    // from emission entirely (`type_is_never_lowerable` /
+                    // `type_expr_has_rank_var` in both the DAG and host lanes),
+                    // so reaching here always means an inlining context will
+                    // supply the concrete shape. The IR `DimInfo` has no rank
+                    // variant, so no `Dim::Rank` can survive into a backend
+                    // type by construction. See spec/design/rank_polymorphism.md.
+                    continue;
                 }
                 if let Some(dim) = Self::try_extract_dim(child) {
                     dims.push(dim);
@@ -4240,6 +4404,19 @@ impl LowerCtx {
             &grad_param_type_exprs,
             &actual_types,
         ));
+        // Tier-2 rank polymorphism (#286/#258): the rank-var substitution
+        // visible to the grad sub-context — the structural twin of
+        // `grad_prec_subst`. Parent bindings first, then the differentiated
+        // function's own formal `..r` rank vars bound against the concrete
+        // actual-argument shapes at this grad call site. Seeded into the
+        // sub-context below so a rank-polymorphic callee reached while
+        // differentiating the body monomorphizes to concrete ranks, exactly
+        // as the precision path does.
+        let mut grad_rank_subst = self.rank_substitutions.clone();
+        grad_rank_subst.extend(tensor_rank_substitutions(
+            &grad_param_type_exprs,
+            &actual_types,
+        ));
         // Formal parameter shapes for the differentiated function. Use the
         // call-site-tolerant variant so a precision var that the grad call
         // site does NOT pin (it is internal to a callee, resolved when that
@@ -4248,7 +4425,9 @@ impl LowerCtx {
         let param_types: Vec<TensorType> = grad_param_type_exprs
             .iter()
             .map(|opt_expr| match opt_expr {
-                Some(expr) => Self::formal_param_type_for_call(expr, &grad_prec_subst),
+                Some(expr) => {
+                    Self::formal_param_type_for_call(expr, &grad_prec_subst, &grad_rank_subst)
+                }
                 None => Self::default_type(),
             })
             .collect();
@@ -4292,6 +4471,11 @@ impl LowerCtx {
         // either; it is resolved when that callee is inlined into the body
         // by `lower_plain_callable_app`'s own call-site precision binding.
         subctx.prec_substitutions = grad_prec_subst;
+        // Tier-2 rank polymorphism (#286/#258): seed the sub-context's rank
+        // substitution the same way as precision, so a rank-poly callee
+        // reached while differentiating the body monomorphizes to concrete
+        // ranks instead of tripping the rank-monomorphization boundary.
+        subctx.rank_substitutions = grad_rank_subst;
         // Subctx inherits the parent's current span so synthesized loads
         // for grad's parameters carry the grad-call's span.
         subctx.current_span_id = self.current_span_id.clone();
@@ -4383,16 +4567,19 @@ impl LowerCtx {
         let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
         let saved_prec_substitutions = self.prec_substitutions.clone();
+        let saved_rank_substitutions = self.rank_substitutions.clone();
         // WS-A8: capture the raw param-type Deep exprs so we can pull
-        // out `(t-var {} p)` precision-var names for monomorphization.
-        // The parsed `TensorType` already collapses `t-var` slots to a
-        // default precision, which loses the var-name we need.
+        // out `(t-var {} p)` precision-var names for monomorphization,
+        // and (Tier-2) `(d-rank {} r)` rank-var names for rank
+        // monomorphization. The parsed `TensorType` already collapses
+        // both slots, losing the var-names we need.
         let param_type_exprs: Vec<Option<Expr>> = param_names
             .iter()
             .enumerate()
             .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
             .collect();
         let prec_subst_for_params = self.prec_substitutions.clone();
+        let rank_subst_for_params = self.rank_substitutions.clone();
         let param_types: Vec<TensorType> = param_type_exprs
             .iter()
             .map(|opt_expr| match opt_expr {
@@ -4401,7 +4588,13 @@ impl LowerCtx {
                 // bound from the actual argument a few lines below (via
                 // `tensor_prec_substitutions`); only the dims of this
                 // formal type are consumed (by `tensor_dim_substitutions`).
-                Some(expr) => Self::formal_param_type_for_call(expr, &prec_subst_for_params),
+                // #286/#258: rank-aware, so a `..r` formal slot is expanded
+                // from `rank_subst_for_params` here too.
+                Some(expr) => Self::formal_param_type_for_call(
+                    expr,
+                    &prec_subst_for_params,
+                    &rank_subst_for_params,
+                ),
                 None => Self::default_type(),
             })
             .collect();
@@ -4480,6 +4673,15 @@ impl LowerCtx {
         for (var_name, prim) in formal_precision_var_bindings(fn_expr, body, &actual_types) {
             self.prec_substitutions.entry(var_name).or_insert(prim);
         }
+        // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
+        // extend the rank-var substitution with bindings from this call
+        // site's formal-vs-actual shape slots. A formal param whose shape
+        // is a sole `(d-rank {} r)` binds `r` to the actual arg's concrete
+        // dim vector, so the inlined rank-poly body resolves its `..r`
+        // tensors to concrete ranks before any backend sees them. The
+        // rank analogue of the `prec_substitutions.extend(...)` above.
+        self.rank_substitutions
+            .extend(tensor_rank_substitutions(&formal_type_exprs, &actual_types));
         // Inlining-F1: install the recursion guard *here*, after argument
         // evaluation, so legitimate nested calls passed as arguments to
         // the same fn-typed-parameter alias (e.g. `outer(doubler, seed)`
@@ -4500,6 +4702,7 @@ impl LowerCtx {
         self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
         self.prec_substitutions = saved_prec_substitutions;
+        self.rank_substitutions = saved_rank_substitutions;
         result
     }
 
@@ -4522,8 +4725,11 @@ impl LowerCtx {
         }
         let result = self.lower_expr(body);
         if let Some(ret_ty_expr) = extract_fn_return_type(fn_expr) {
-            let ret_ty =
-                Self::type_from_type_expr_with_subst(ret_ty_expr, &self.prec_substitutions);
+            let ret_ty = Self::type_from_type_expr_with_subst(
+                ret_ty_expr,
+                &self.prec_substitutions,
+                &self.rank_substitutions,
+            );
             self.repair_output_type_if_default(&result, &ret_ty);
         }
         self.bindings = saved;
@@ -4558,12 +4764,19 @@ impl LowerCtx {
             return self.lower_unrepresentable("vmap", std::slice::from_ref(fn_expr));
         };
         let prec_subst_for_params = self.prec_substitutions.clone();
+        let rank_subst_for_params = self.rank_substitutions.clone();
         let param_types: Vec<TensorType> = param_names
             .iter()
             .enumerate()
             .map(|(index, _)| {
                 extract_param_type(fn_expr, index)
-                    .map(|expr| Self::type_from_type_expr_with_subst(expr, &prec_subst_for_params))
+                    .map(|expr| {
+                        Self::type_from_type_expr_with_subst(
+                            expr,
+                            &prec_subst_for_params,
+                            &rank_subst_for_params,
+                        )
+                    })
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
@@ -4723,12 +4936,19 @@ impl LowerCtx {
             return self.lower_unrepresentable("vmap(grad)", std::slice::from_ref(fn_expr));
         };
         let prec_subst_for_params = self.prec_substitutions.clone();
+        let rank_subst_for_params = self.rank_substitutions.clone();
         let param_types: Vec<TensorType> = param_names
             .iter()
             .enumerate()
             .map(|(index, _)| {
                 extract_param_type(fn_expr, index)
-                    .map(|expr| Self::type_from_type_expr_with_subst(expr, &prec_subst_for_params))
+                    .map(|expr| {
+                        Self::type_from_type_expr_with_subst(
+                            expr,
+                            &prec_subst_for_params,
+                            &rank_subst_for_params,
+                        )
+                    })
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
@@ -6612,7 +6832,13 @@ impl LowerCtx {
         }
 
         let ty = ty_expr
-            .map(|expr| Self::type_from_type_expr_with_subst(expr, &self.prec_substitutions))
+            .map(|expr| {
+                Self::type_from_type_expr_with_subst(
+                    expr,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                )
+            })
             .unwrap_or_else(Self::default_type);
         LoweredValue::Node(self.dag.add_node(
             RiscOp::Load { name: name.into() },
@@ -8925,6 +9151,134 @@ mod tests {
         let dag = parse_and_lower_unchecked(src);
         let node = dag.get(NodeId(0)).unwrap();
         assert_eq!(node.output_type.precision, Prim::F64);
+    }
+
+    // ── Tier-2 rank monomorphization (spec/design/rank_polymorphism.md) ──
+
+    fn parse_type_expr(src: &str) -> Expr {
+        chelis_deep::parser::parse_str(src)
+            .expect("parse failed")
+            .into_iter()
+            .next()
+            .expect("one expr")
+    }
+
+    /// `extract_rank_var_name` recognises a sole `(d-rank {} r)` shape, strips
+    /// a `(t-ref)` wrapper, and returns the rank-var name; a concrete-shape
+    /// tensor and a rank-var ADJACENT to a concrete dim both yield `None`.
+    #[test]
+    fn extract_rank_var_name_recognises_sole_rank_slot() {
+        let bare = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
+        assert_eq!(extract_rank_var_name(&bare), Some("r".to_string()));
+
+        let borrowed = parse_type_expr("(t-ref {} (t-tensor {} (d-rank {} rr) (t-prim {} f32)))");
+        assert_eq!(extract_rank_var_name(&borrowed), Some("rr".to_string()));
+
+        let concrete =
+            parse_type_expr("(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))");
+        assert_eq!(extract_rank_var_name(&concrete), None);
+
+        // Adjacency (`tensor[..r, k]`) is rejected at parse time, but if a
+        // malformed slot ever reached here it must NOT register as a sole
+        // rank var — only a single-dim list qualifies.
+        let adjacent = parse_type_expr("(t-tensor {} (d-rank {} r) (d-lit {} 4) (t-prim {} f32))");
+        assert_eq!(extract_rank_var_name(&adjacent), None);
+    }
+
+    /// `tensor_rank_substitutions` binds a formal `(d-rank {} r)` param to the
+    /// actual arg's concrete dim vector (the call-site monomorphization
+    /// boundary), keyed by the rank-var name.
+    #[test]
+    fn tensor_rank_substitutions_binds_rank_var_to_concrete_dims() {
+        let formals = vec![Some(parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))",
+        ))];
+        let actuals = vec![TensorType {
+            dims: vec![
+                DimInfo::Named("a".into(), None),
+                DimInfo::Named("b".into(), None),
+            ],
+            precision: Prim::F32,
+        }];
+        let subst = tensor_rank_substitutions(&formals, &actuals);
+        assert_eq!(
+            subst.get("r"),
+            Some(&vec![
+                DimInfo::Named("a".into(), None),
+                DimInfo::Named("b".into(), None)
+            ]),
+            "rank var `r` must bind to the actual arg's full shape vector"
+        );
+    }
+
+    /// `try_extract_tensor_type_with_subst` expands a bound `(d-rank)` slot to
+    /// the substituted concrete dims (monomorphization-success path) and drops
+    /// an unbound one (the speculative-annotation path repaired by inlining).
+    #[test]
+    fn try_extract_tensor_type_expands_bound_rank_var() {
+        let prec_subst = HashMap::new();
+        let mut rank_subst: HashMap<String, Vec<DimInfo>> = HashMap::new();
+        rank_subst.insert("r".into(), vec![DimInfo::Lit(3), DimInfo::Lit(4)]);
+
+        let bound = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
+        let tt = LowerCtx::try_extract_tensor_type_with_subst(&bound, &prec_subst, &rank_subst)
+            .expect("bound rank var resolves to a concrete tensor type");
+        assert_eq!(tt.dims, vec![DimInfo::Lit(3), DimInfo::Lit(4)]);
+        assert_eq!(tt.precision, Prim::F32);
+
+        // Unbound: the rank dim drops (no `Dim::Rank` is representable in the
+        // IR `DimInfo`); the inlined body supplies the concrete shape.
+        let unbound = parse_type_expr("(t-tensor {} (d-rank {} q) (t-prim {} f32))");
+        let tt = LowerCtx::try_extract_tensor_type_with_subst(&unbound, &prec_subst, &rank_subst)
+            .expect("a tensor type is still produced");
+        assert!(
+            tt.dims.is_empty(),
+            "an unbound rank var drops rather than emitting a rank dim, got {:?}",
+            tt.dims
+        );
+    }
+
+    /// End-to-end: a rank-poly identity def, called through a concrete-rank
+    /// caller, lowers with no surviving rank var and the caller's root carries
+    /// the caller's concrete shape (here `[2, 3]`).
+    #[test]
+    fn rank_poly_def_lowers_through_concrete_caller() {
+        // Deep form of:
+        //   def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+        //   def use2d(x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)
+        let dag = parse_and_lower(
+            "(defsig {} relu_forward \
+               (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) \
+                        (t-tensor {} (d-rank {} r) (t-prim {} f32)))) \
+             (def {} relu_forward \
+               (fn {} (params {} (x {type: (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))})) \
+                  (app {} (var {} relu) (var {} x)))) \
+             (defsig {} use2d \
+               (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))) \
+                        (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32)))) \
+             (def {} use2d \
+               (fn {} (params {} (x {type: (t-ref {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32)))})) \
+                  (app {} (var {} relu_forward) (var {} x))))",
+        );
+        // The core assertion: lowering *completes* (the pre-feature path
+        // panicked here with the "not yet lowerable" refusal). Every node's
+        // output type is `Dim::Rank`-free by construction — `DimInfo` has no
+        // rank variant — so a successful lowering is exactly a successful
+        // monomorphization. Lock that no node carries a stray named dim that
+        // is the un-substituted rank-var symbol `r` (the symbol would leak
+        // only if a `(d-rank {} r)` were mis-extracted as a named dim).
+        for node in dag.nodes() {
+            for dim in &node.output_type.dims {
+                if let DimInfo::Named(name, _) = dim {
+                    assert_ne!(
+                        name, "r",
+                        "the rank-var symbol `r` must not survive as a named dim after \
+                         monomorphization (node op {:?})",
+                        node.op
+                    );
+                }
+            }
+        }
     }
 }
 

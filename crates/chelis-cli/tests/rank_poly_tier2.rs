@@ -15,6 +15,8 @@
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
+use std::path::Path;
+use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
 fn check_json(src: &str) -> Value {
@@ -232,44 +234,231 @@ fn shadowing_builtin_name_in_rank_poly_body_rejected() {
     assert_rank_rejected(&json, "user `relu` shadowing the builtin in a ..r body");
 }
 
-/// Backend-lowering scope (red-team #2): a rank-poly program `check`s clean but
-/// `build` is not yet supported — it must stop with an honest "not yet
-/// lowerable" diagnostic, NOT a `BUG:`/internal-panic message (a green-check /
-/// build-fail split is acceptable only if the build failure is intended and
-/// clearly communicated).
-#[test]
-fn rank_poly_build_emits_honest_not_lowerable_diagnostic() {
+// ── Backend lowering: call-site rank monomorphization ───────────────────
+// Follow-up to PR #286: a program that calls a `..r` def through a
+// concrete-rank caller now `build`s. The lowering pipeline substitutes the
+// caller's concrete shape into the callee's `(d-rank)` slots (the rank
+// analogue of the precision `prec_subst` path), so every reachable tensor
+// type at lowering is `Dim::Rank`-free and the inlined relu produces concrete
+// numerics. See spec/design/rank_polymorphism.md.
+
+/// Run `chelis build --target c`, then compile + run the emitted binary and
+/// return its stdout. Mirrors the host-toolchain link harness used by
+/// `issue_218_numerical_correctness.rs`.
+fn build_compile_run(source: &str, name: &str) -> String {
     let dir = tempdir().expect("tempdir");
-    let src = dir.path().join("m.ch");
-    let out = dir.path().join("out");
-    fs::write(
-        &src,
-        "def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
-         def use_it(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu_forward(x)\n",
-    )
-    .expect("write");
-    let output = Command::cargo_bin("chelis")
+    let src = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    fs::write(&src, source).expect("write source");
+
+    let build = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             src.to_str().unwrap(),
+            "--target",
+            "c",
             "--output",
-            out.to_str().unwrap(),
+            out_dir.to_str().unwrap(),
         ])
         .output()
         .expect("run chelis build");
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !output.status.success(),
-        "rank-poly build is not yet supported; expected failure. stderr: {stderr}"
+        build.status.success(),
+        "rank-poly build must succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
     );
-    assert!(
-        stderr.contains("cannot yet be lowered") && stderr.contains("concrete-rank"),
-        "expected an honest 'cannot yet be lowered … concrete-rank' diagnostic, got: {stderr}"
+
+    let c_source = format!("{name}.c");
+    let needs_blas = fs::read_to_string(out_dir.join(&c_source))
+        .map(|t| t.contains("cblas_sgemm(") || t.contains("\"chelis_blas.h\""))
+        .unwrap_or(false);
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas,
+        },
     );
+    let bin = out_dir.join(name);
+    let mut cc = StdCommand::new(&toolchain.compiler);
+    cc.current_dir(&out_dir)
+        .arg("-O2")
+        .args(&toolchain.compile_flags)
+        .arg(&c_source)
+        .args(["-L.", "-lchelis_runtime"])
+        .args(&toolchain.link_flags)
+        .args(["-o", bin.to_str().unwrap()]);
+    let link = cc.status().expect("host compiler runs");
+    assert!(link.success(), "link of rank-poly C must succeed: {link}");
+
+    let run = StdCommand::new(&bin).output().expect("binary runs");
     assert!(
-        !stderr.contains("BUG:"),
-        "the build diagnostic must not be framed as an internal BUG: {stderr}"
+        run.status.success(),
+        "rank-poly binary must run: {}\nstderr: {}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    String::from_utf8(run.stdout).expect("utf-8 stdout")
+}
+
+/// Run `chelis eval --file` and return its stdout (the evaluator oracle the
+/// backend must agree with, per the backend-numerics discipline).
+fn eval_stdout(dir: &Path, source: &str, name: &str) -> String {
+    let src = dir.join(format!("{name}.ch"));
+    fs::write(&src, source).expect("write source");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "eval",
+            "--file",
+            src.to_str().unwrap(),
+            "--allow-style-violations",
+        ])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "rank-poly eval must succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf-8 stdout")
+}
+
+/// Parse `name = tensor(shape=[..], data=[..])` lines from printed output into
+/// `(name, shape, data)` triples — the shared shape/numeric oracle for
+/// backend-vs-evaluator agreement.
+fn parse_printed_tensors(stdout: &str) -> Vec<(String, Vec<usize>, Vec<f64>)> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let Some((name, rest)) = line.split_once(" = tensor(") else {
+            continue;
+        };
+        let shape = rest
+            .split_once("shape=[")
+            .and_then(|(_, s)| s.split_once(']'))
+            .map(|(s, _)| {
+                s.split(',')
+                    .filter_map(|p| p.trim().parse::<usize>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let data = rest
+            .split_once("data=[")
+            .and_then(|(_, s)| s.split_once(']'))
+            .map(|(s, _)| {
+                s.split(',')
+                    .filter_map(|p| p.trim().parse::<f64>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        out.push((name.trim().to_string(), shape, data));
+    }
+    out
+}
+
+/// Headline backend acceptance: ONE rank-poly `relu_forward` def, called at
+/// concrete ranks 1, 2, 3, AND 4, builds and runs — and the output equals the
+/// input with negatives zeroed (the identity/elementwise tier means
+/// out[i] == relu(in[i]) at every rank). The compiled-binary output is also
+/// asserted byte-for-byte against the evaluator oracle (backend-numerics
+/// eval-vs-backend agreement).
+#[test]
+fn rank_poly_identity_builds_and_runs_at_ranks_1_through_4() {
+    let source = "def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
+         def r1(x: &tensor[n, f32]) -> tensor[n, f32] = relu_forward(x)\n\
+         def r2(x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)\n\
+         def r3(x: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = relu_forward(x)\n\
+         def r4(x: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = relu_forward(x)\n\
+         out1 = r1(to_tensor([-1.0, 2.0, -3.0, 4.0]))\n\
+         out2 = r2(to_tensor([[-1.0, 2.0], [3.0, -4.0]]))\n\
+         out3 = r3(to_tensor([[[-1.0, 2.0]], [[3.0, -4.0]]]))\n\
+         out4 = r4(to_tensor([[[[-5.0, 6.0]]]]))\n";
+
+    let backend = build_compile_run(source, "rank_poly_identity");
+    let backend_tensors = parse_printed_tensors(&backend);
+
+    // Expected: relu zeroes the negatives, preserves shape, at every rank.
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out1", &[4], &[0.0, 2.0, 0.0, 4.0]),
+        ("out2", &[2, 2], &[0.0, 2.0, 3.0, 0.0]),
+        ("out3", &[2, 1, 2], &[0.0, 2.0, 3.0, 0.0]),
+        ("out4", &[1, 1, 1, 2], &[0.0, 6.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = backend_tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+
+    // Backend must agree with the evaluator oracle, value-for-value.
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "rank_poly_identity");
+    let eval_tensors = parse_printed_tensors(&eval);
+    for (name, shape, data) in &backend_tensors {
+        let e = eval_tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("evaluator output missing `{name}`: {eval}"));
+        assert_eq!(shape, &e.1, "{name}: eval-vs-backend shape disagreement");
+        assert_eq!(data.len(), e.2.len(), "{name}: eval-vs-backend length");
+        for (i, (b, ev)) in data.iter().zip(e.2.iter()).enumerate() {
+            assert!(
+                (b - ev).abs() < 1e-6,
+                "{name}[{i}]: eval-vs-backend disagreement: backend {b} vs eval {ev}"
+            );
+        }
+    }
+}
+
+/// A composed shape-identity body (`silu = x * sigmoid(x)`) through the
+/// rank-poly def also builds and runs at a concrete rank — composition of
+/// elementwise ops stays rank-monomorphizable.
+#[test]
+fn rank_poly_composed_identity_builds_and_runs() {
+    let source = "def my_silu(x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, sigmoid(x))\n\
+         def use2d(x: &tensor[a, b, f32]) -> tensor[a, b, f32] = my_silu(x)\n\
+         out = use2d(to_tensor([[0.0, 1.0], [-1.0, 2.0]]))\n";
+    let backend = build_compile_run(source, "rank_poly_silu");
+    let tensors = parse_printed_tensors(&backend);
+    let (_, shape, data) = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("missing `out`: {backend}"));
+    assert_eq!(shape, &[2, 2], "silu output shape ({backend})");
+    // silu(x) = x * sigmoid(x); silu(0)=0, silu(1)=0.731..., silu(-1)=-0.268...,
+    // silu(2)=1.761...
+    let expected = [0.0, 0.7310586, -0.2689414, 1.7615942];
+    for (i, (g, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-4,
+            "silu[{i}]: backend {g} != expected {e} ({backend})"
+        );
+    }
+}
+
+/// Negative parity: a body that violates §4.2 shape-identity (`permute`) is
+/// STILL rejected at type-check — call-site rank monomorphization does not
+/// loosen the Body-Discipline gate. The negative paired with the positive
+/// build above: shape-rewriting under `..r` never reaches the backend because
+/// it never type-checks.
+#[test]
+fn rank_poly_shape_rewriting_body_still_rejected_at_typecheck() {
+    let json =
+        check_json("def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = permute(x, 1, 0)\n");
+    assert_body_discipline_rejected(
+        &json,
+        "permute",
+        "shape-rewriting body must still be rejected pre-build",
     );
 }

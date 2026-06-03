@@ -1138,6 +1138,21 @@ fn lower_host_program(
         if ty_expr.is_some_and(crate::lower::type_expr_has_precision_var) {
             continue;
         }
+        // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): skip
+        // rank-polymorphic sigs at host emission time, the exact analogue of
+        // the precision-var skip above. A `t-fn` whose tensor types carry a
+        // sole `(d-rank {} r)` rank slot has no standalone monomorphization;
+        // reaching `parse_host_type` for its parameters would trip the
+        // rank-poly lowering tripwire (a surviving `Dim::Rank` is a
+        // monomorphization bug, not a backend input). Such a def is reachable
+        // from concrete client code via call-site inlining (the inliner
+        // threads the call site's concrete shape into the body — see
+        // `tensor_rank_substitutions` in `lower.rs`); the standalone host
+        // symbol is intentionally omitted because no caller can use it
+        // without supplying the monomorphization binding the inliner provides.
+        if ty_expr.is_some_and(crate::lower::type_expr_has_rank_var) {
+            continue;
+        }
         // Pure-tensor top-level function defs are normally lowered to the
         // DAG. But when the program also has host-lane bindings (i.e. some
         // def is NOT DAG-lowerable), downstream host-lane callers still
@@ -5204,7 +5219,16 @@ fn lower_app_host_expr(
     // concrete arg types. Force inlining for this case.
     let callee_is_polymorphic_precision = lookup_declared_type_expr(program, &name)
         .is_some_and(crate::lower::type_expr_has_precision_var);
-    if callee_is_polymorphic_precision
+    // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): the exact
+    // analogue of the precision case above. The host emitter elided the
+    // rank-poly callee's standalone definition (per the `type_expr_has_rank_var`
+    // skip in `lower_host_program`); calling such a name in C is an
+    // undefined-symbol link error. The only legal lowering is to inline the
+    // body at the call site so the rank var is monomorphized from the call's
+    // concrete arg shapes (via the DAG `tensor_rank_substitutions` path).
+    let callee_is_polymorphic_rank =
+        lookup_declared_type_expr(program, &name).is_some_and(crate::lower::type_expr_has_rank_var);
+    if (callee_is_polymorphic_precision || callee_is_polymorphic_rank)
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
     {
         let pushed = push_inlining(&name);
@@ -6587,7 +6611,18 @@ fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) ->
             // sig-parse path (e.g. `lookup_declared_fn_type` reached
             // from a call-site lookup of a polymorphic callee's
             // signature).
-            if crate::lower::type_expr_has_precision_var(expr) {
+            // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
+            // a `t-tensor` whose shape is a sole `(d-rank {} r)` rank slot is
+            // rank-polymorphic and has no concrete `HostType::Tensor`
+            // representation by itself — its rank is supplied by call-site
+            // inlining (which carries the caller's concrete shape). Surface it
+            // as `HostType::Unknown`, the exact analogue of the precision-var
+            // guard, so any secondary sig-parse path (e.g. a call-site lookup
+            // of a rank-poly callee's signature) never trips the rank-poly
+            // lowering tripwire.
+            if crate::lower::type_expr_has_precision_var(expr)
+                || crate::lower::type_expr_has_rank_var(expr)
+            {
                 HostType::Unknown
             } else {
                 HostType::Tensor(crate::lower::tensor_type_from_deep(expr))
