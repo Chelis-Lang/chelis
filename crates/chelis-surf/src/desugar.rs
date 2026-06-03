@@ -2430,11 +2430,7 @@ mod tests {
                 Box::new(tvar("add")),
                 vec![
                     tvar("x"),
-                    Expr::Apply(
-                        Box::new(tvar("f")),
-                        vec![tvar("x"), tvar("inner_p")],
-                        s(),
-                    ),
+                    Expr::Apply(Box::new(tvar("f")), vec![tvar("x"), tvar("inner_p")], s()),
                 ],
                 s(),
             ),
