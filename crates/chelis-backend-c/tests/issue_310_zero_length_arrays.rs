@@ -87,7 +87,10 @@ fn issue_310_adt_variant_with_fields_still_emits_array() {
         fields: vec![HostExpr::new(HostExprKind::Int(7))],
         ty: HostType::Adt("Maybe".to_string(), vec![HostType::Int64]),
     });
-    let program = program_with_body(HostType::Adt("Maybe".to_string(), vec![HostType::Int64]), body);
+    let program = program_with_body(
+        HostType::Adt("Maybe".to_string(), vec![HostType::Int64]),
+        body,
+    );
     let src = emit_host_program(&program, "adt_with_field");
 
     assert!(
@@ -228,7 +231,9 @@ fn issue_310_nullary_adt_compiles_under_pedantic_iso_c() {
     let src = emit_host_program(&program, "nullary_adt_pedantic");
 
     if let Some(stderr) = pedantic_compile_error("nullary_adt", &src) {
-        panic!("nullary ADT host C must compile under strict ISO C:\n{stderr}\n--- source ---\n{src}");
+        panic!(
+            "nullary ADT host C must compile under strict ISO C:\n{stderr}\n--- source ---\n{src}"
+        );
     }
 }
 
@@ -243,6 +248,8 @@ fn issue_310_empty_tuple_compiles_under_pedantic_iso_c() {
     let src = emit_host_program(&program, "empty_tuple_pedantic");
 
     if let Some(stderr) = pedantic_compile_error("empty_tuple", &src) {
-        panic!("empty tuple host C must compile under strict ISO C:\n{stderr}\n--- source ---\n{src}");
+        panic!(
+            "empty tuple host C must compile under strict ISO C:\n{stderr}\n--- source ---\n{src}"
+        );
     }
 }
