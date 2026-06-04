@@ -2310,6 +2310,32 @@ fn finish_tensor_helper_call(
         .and_then(|id| dag.get(*id))
         .map(|node| node.output_type.clone())
         .unwrap_or_else(|| expected.clone());
+    // Issue #309: a helper whose body has more than one DAG root (the
+    // canonical case is a multi-`wrt` `grad`, which differentiates a
+    // scalar w.r.t. several tensor params and so produces one gradient
+    // tensor per param) returns a TUPLE of tensors, not a single
+    // tensor. The DAG emit wires `roots[i]` to `outputs[i]` with
+    // `n_out = roots().len()`, and a downstream `.N` projection reads
+    // root `N`. Typing the call as a single `Tensor` here made the
+    // projection emit `chelis_tuple_get` over a `chelis_tensor*`
+    // receiver (a mistyped crash) and sized the helper output array to
+    // one slot for a two-output helper. Mirror the IR/eval-lane
+    // `LoweredValue::Tuple` semantics by typing the multi-root call as
+    // a `Tuple` of the per-root tensor types, in root order.
+    let root_tys: Vec<HostType> = dag
+        .roots()
+        .iter()
+        .map(|id| {
+            dag.get(*id)
+                .map(|node| HostType::Tensor(node.output_type.clone()))
+                .unwrap_or_else(|| HostType::Tensor(expected.clone()))
+        })
+        .collect();
+    let call_ty = if root_tys.len() > 1 {
+        HostType::Tuple(root_tys)
+    } else {
+        HostType::Tensor(expected.clone())
+    };
     let args = tensor_helper_args(&inputs, scope);
     let (sparse_specialization, sparse_rejection) =
         match try_summarize_sparse_helper(&dag, &inputs, &output) {
@@ -2356,7 +2382,7 @@ fn finish_tensor_helper_call(
     HostExpr::new(HostExprKind::TensorCall {
         helper: helper_index,
         args,
-        ty: HostType::Tensor(expected),
+        ty: call_ty,
     })
 }
 

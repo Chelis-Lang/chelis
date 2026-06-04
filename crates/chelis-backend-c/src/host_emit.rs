@@ -15,7 +15,7 @@ enum SparseSummaryKind {
 }
 
 use crate::emit::CEmitter;
-use chelis_ir::dag::{DimExpr, DimInfo, RiscOp};
+use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::collections::HashMap;
 
@@ -2052,20 +2052,71 @@ impl<'a> HostEmitter<'a> {
             }
             inputs_name
         };
+        // Issue #309: a helper whose body has more than one DAG root
+        // (the canonical case is a multi-`wrt` `grad`) writes one
+        // tensor per root into `outputs[0..n_out]` and its emitted
+        // wrapper asserts `n_out == roots().len()`. Size the output
+        // array and the `n_out` argument from the helper's actual root
+        // count; the prior hard-coded `[1]` / `n_out = 1` both crashed
+        // the helper's arity guard for a multi-output grad and left the
+        // downstream `.N` projection reading a single tensor as if it
+        // were a tuple. When the call is tuple-typed, box each output
+        // tensor and assemble a real `chelis_tuple` so the subsequent
+        // `chelis_tuple_get` projection has a correctly-typed receiver.
+        let root_count = self
+            .tensor_helpers
+            .get(helper)
+            .map(|host_helper| host_helper.dag.roots().len().max(1))
+            .unwrap_or(1);
         self.lines.push(format!(
-            "{}chelis_tensor *{}[1] = {{ NULL }};",
-            self.indent, outputs_name
+            "{}chelis_tensor *{}[{}] = {{ NULL }};",
+            self.indent, outputs_name, root_count
         ));
         self.lines.push(format!(
-            "{}{}({}, {}, {}, 1);",
+            "{}{}({}, {}, {}, {});",
             self.indent,
             helper_name,
             inputs_arg,
             tensor_args.len(),
-            outputs_name
+            outputs_name,
+            root_count
         ));
-        self.lines
-            .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
+        if let HostType::Tuple(parts) = ty
+            && root_count > 1
+        {
+            let values_name = self.next_temp("tuple_values");
+            self.lines.push(format!(
+                "{}chelis_value {}[{}];",
+                self.indent, values_name, root_count
+            ));
+            for index in 0..root_count {
+                // Each helper output slot is a `chelis_tensor*`; box it as
+                // a tensor value regardless of the tuple part annotation
+                // (a multi-root tensor helper only ever produces tensors).
+                let elem_ty = parts
+                    .get(index)
+                    .filter(|part| matches!(part, HostType::Tensor(_)))
+                    .cloned()
+                    .unwrap_or(HostType::Tensor(TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::F32,
+                    }));
+                let slot_expr = format!("{outputs_name}[{index}]");
+                self.lines.push(format!(
+                    "{}{}[{index}] = {};",
+                    self.indent,
+                    values_name,
+                    self.box_value_expr(&slot_expr, &elem_ty)
+                ));
+            }
+            self.lines.push(format!(
+                "{}{target} = chelis_tuple_from_values({}, {});",
+                self.indent, values_name, root_count
+            ));
+        } else {
+            self.lines
+                .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
+        }
         for (_, boxed) in tensor_args {
             if let Some(boxed) = boxed {
                 self.lines
