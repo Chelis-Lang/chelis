@@ -2822,29 +2822,38 @@ impl<'a> HostEmitter<'a> {
         fields: &[HostExpr],
         _ty: &HostType,
     ) {
-        let values_name = self.next_temp("adt_fields");
-        self.lines.push(format!(
-            "{}chelis_value {}[{}];",
-            self.indent,
-            values_name,
-            fields.len()
-        ));
-        for (index, field) in fields.iter().enumerate() {
-            let field_var = self.next_temp(&format!("adt_field{index}"));
-            let field_ty = host_type(field);
-            self.emit_expr_to_var(field, &field_var, &field_ty);
+        // A nullary variant (e.g. `Nothing`, `True`) has no payload fields.
+        // ISO C forbids a zero-length array (`chelis_value adt_fields[0];`),
+        // so pass a NULL fields pointer with count 0 instead; the runtime
+        // helper's `len <= 0` guard never dereferences it (issue #310).
+        let fields_arg = if fields.is_empty() {
+            "NULL".to_string()
+        } else {
+            let values_name = self.next_temp("adt_fields");
             self.lines.push(format!(
-                "{}{}[{index}] = {};",
+                "{}chelis_value {}[{}];",
                 self.indent,
                 values_name,
-                self.box_value_expr(&field_var, &field_ty)
+                fields.len()
             ));
-        }
+            for (index, field) in fields.iter().enumerate() {
+                let field_var = self.next_temp(&format!("adt_field{index}"));
+                let field_ty = host_type(field);
+                self.emit_expr_to_var(field, &field_var, &field_ty);
+                self.lines.push(format!(
+                    "{}{}[{index}] = {};",
+                    self.indent,
+                    values_name,
+                    self.box_value_expr(&field_var, &field_ty)
+                ));
+            }
+            values_name
+        };
         self.lines.push(format!(
             "{}{target} = chelis_adt_construct(chelis_string_from_cstr({:?}), {}, {});",
             self.indent,
             ctor,
-            values_name,
+            fields_arg,
             fields.len()
         ));
     }
@@ -2964,38 +2973,47 @@ impl<'a> HostEmitter<'a> {
     }
 
     fn assign_tuple_literal(&mut self, target: &str, items: &[HostExpr], ty: &HostType) {
-        let values_name = self.next_temp("tuple_values");
-        self.lines.push(format!(
-            "{}chelis_value {}[{}];",
-            self.indent,
-            values_name,
-            items.len()
-        ));
-        for (index, item) in items.iter().enumerate() {
-            let item_var = self.next_temp(&format!("tuple_item{index}"));
-            let inferred_ty = host_type(item);
-            let item_ty = if has_unknown(&inferred_ty) {
-                match ty {
-                    HostType::Tuple(item_tys) => {
-                        item_tys.get(index).cloned().unwrap_or(inferred_ty)
-                    }
-                    _ => inferred_ty,
-                }
-            } else {
-                inferred_ty
-            };
-            self.emit_expr_to_var(item, &item_var, &item_ty);
+        // An empty tuple has no elements. ISO C forbids a zero-length array
+        // (`chelis_value tuple_values[0];`), so pass a NULL items pointer with
+        // count 0 instead; the runtime helper's `len <= 0` guard never
+        // dereferences it (issue #310).
+        let items_arg = if items.is_empty() {
+            "NULL".to_string()
+        } else {
+            let values_name = self.next_temp("tuple_values");
             self.lines.push(format!(
-                "{}{}[{index}] = {};",
+                "{}chelis_value {}[{}];",
                 self.indent,
                 values_name,
-                self.box_value_expr(&item_var, &item_ty)
+                items.len()
             ));
-        }
+            for (index, item) in items.iter().enumerate() {
+                let item_var = self.next_temp(&format!("tuple_item{index}"));
+                let inferred_ty = host_type(item);
+                let item_ty = if has_unknown(&inferred_ty) {
+                    match ty {
+                        HostType::Tuple(item_tys) => {
+                            item_tys.get(index).cloned().unwrap_or(inferred_ty)
+                        }
+                        _ => inferred_ty,
+                    }
+                } else {
+                    inferred_ty
+                };
+                self.emit_expr_to_var(item, &item_var, &item_ty);
+                self.lines.push(format!(
+                    "{}{}[{index}] = {};",
+                    self.indent,
+                    values_name,
+                    self.box_value_expr(&item_var, &item_ty)
+                ));
+            }
+            values_name
+        };
         self.lines.push(format!(
             "{}{target} = chelis_tuple_from_values({}, {});",
             self.indent,
-            values_name,
+            items_arg,
             items.len()
         ));
     }
