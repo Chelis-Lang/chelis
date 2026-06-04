@@ -101,9 +101,9 @@ fn issue309_multi_wrt_grad_call_sizes_two_output_slots() {
          slots, got:\n{c}"
     );
 
-    let calls_helper_with_two_outputs = c.lines().any(|line| {
-        line.contains("__tensor_") && line.trim_end().ends_with(", 2);")
-    });
+    let calls_helper_with_two_outputs = c
+        .lines()
+        .any(|line| line.contains("__tensor_") && line.trim_end().ends_with(", 2);"));
     assert!(
         calls_helper_with_two_outputs,
         "multi-wrt grad helper must be called with n_out = 2, got:\n{c}"
@@ -133,9 +133,9 @@ def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = grad(loss, w
 "#;
     let c = compile_c(source, "single");
 
-    let calls_helper_with_one_output = c.lines().any(|line| {
-        line.contains("__tensor_") && line.trim_end().ends_with(", 1);")
-    });
+    let calls_helper_with_one_output = c
+        .lines()
+        .any(|line| line.contains("__tensor_") && line.trim_end().ends_with(", 1);"));
     assert!(
         calls_helper_with_one_output,
         "single-wrt grad helper must be called with n_out = 1, got:\n{c}"
