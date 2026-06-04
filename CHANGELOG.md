@@ -6,8 +6,51 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.23] — 2026-06-04
+
+### Added
+
+- **Module-scoped constructor resolution (#157)**: the reef linker now
+  mangles, rewrites, and exports ADT constructor names as module
+  symbols, so a downstream program can import a constructor across
+  modules (e.g. `import Std.Io.Json (JsonInt)`) and pattern-match on it.
+- **chelis-std bundle regenerated to expose std constructors
+  cross-module (#311)**: the prebuilt bundle now carries the
+  constructor-mangled, exported symbols from #157, with a cross-module
+  constructor acceptance test wired as a manual gate.
+
 ### Fixed
 
+- **grad-tuple projection receiver in the C backend (#309)**: a
+  multi-`wrt` `grad(f)(x, w)` projected with `.N` now reads from a
+  correctly-typed `chelis_tuple` instead of emitting `chelis_tuple_get`
+  over a `chelis_tensor*`. Multi-root grad helper calls are typed as a
+  tuple sized from the helper's actual root count; single-root and
+  zero-root helpers are unchanged.
+- **Zero-length arrays for nullary ADT variants and empty tuples
+  (#310)**: `assign_adt_construct` and `assign_tuple_literal` no longer
+  emit ISO-C-illegal `chelis_value[0]` arrays; they pass `NULL` with
+  count 0, mirroring the list and tensor-helper guards.
+- **const-broadcast tensor binding (#300)**: the C backend emits valid C
+  for a constant-only broadcast tensor binding in a scalar-return body.
+- **grad backward for shrink and stride movement ops (#291)**: the
+  reverse pass now lowers `shrink` and `stride`.
+- **grad backward through the expand-of-scalar constant idiom (#288)**.
+- **precision-variable monomorphization through the grad sub-context
+  (#289)**: precision type variables are now resolved when lowering a
+  grad call.
+- **non-literal reduce/expand axis diagnostic (#259)**: a targeted error
+  replaces a confusing failure when a reduction or expand axis is not a
+  literal.
+- **PascalCase `def` quantifier names (#293)**: promoted to type
+  variables during desugaring rather than being treated as types.
+- **function-typed arrow-argument grouping parens (#290)**: the
+  formatter and printers preserve parentheses around function-typed
+  arguments in arrow types.
+- **Deep `comment` rule (#167)**: made atomic so leading `;` comment
+  lines parse.
+- **reef metadata-step 404 disambiguation (#147)**: a metadata-step 404
+  is distinguished from an auth-privacy 404.
 - **Lossy float emission in HIP / C backend code generation (#250, #251,
   #252)**: three remaining `%.8`-style decimal format strings emitted
   float literals into generated HIP / C source that could not round-trip
