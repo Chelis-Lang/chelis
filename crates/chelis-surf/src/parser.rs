@@ -982,7 +982,22 @@ impl Parser {
                         let tok = self.advance();
                         let start = expr_span(&lhs);
                         lhs = Expr::Access(Box::new(lhs), field, start.merge(tok.span));
-                        continue;
+                    }
+                    // A PascalCase segment after `.` is a module/type path
+                    // component, never a record field (fields are snake_case,
+                    // §3.2). Accepting it lets a module-qualified reference
+                    // such as `Demo.Dropout.Eval` (a constructor) or
+                    // `Demo.Dropout.use` (a value) parse into an `Access`
+                    // chain that reef resolves to the module-qualified
+                    // internal name (chelis#316). Without this, the only way
+                    // to disambiguate two imported modules that export the
+                    // same constructor name was to rename one — and the
+                    // ambiguity diagnostic's own suggestion (`Module.Eval`)
+                    // did not parse.
+                    TokenKind::TypeIdent(segment) => {
+                        let tok = self.advance();
+                        let start = expr_span(&lhs);
+                        lhs = Expr::Access(Box::new(lhs), segment, start.merge(tok.span));
                     }
                     TokenKind::Int(index) => {
                         let tok = self.advance();
@@ -998,6 +1013,22 @@ impl Parser {
                         });
                     }
                 }
+                // A dotted path may be applied: `Demo.Dropout.use(m)` or the
+                // qualified constructor call `Demo.List.Cons(x, xs)`. The
+                // prefix-position juxtaposition handler only runs on the head
+                // atom, before this postfix `.` chain is built, so consume a
+                // trailing parenthesized argument list (or a curried chain of
+                // them) here. This also fixes plain `Module.func(arg)`, which
+                // previously failed with "expected end of declaration
+                // expression, found LParen".
+                while *self.peek() == TokenKind::LParen {
+                    let start = expr_span(&lhs);
+                    self.advance();
+                    let args = self.parse_expr_list(TokenKind::RParen)?;
+                    let end = self.expect(&TokenKind::RParen)?;
+                    lhs = Expr::Apply(Box::new(lhs), args, start.merge(end.span));
+                }
+                continue;
             }
 
             // Check for pipe
@@ -3563,5 +3594,89 @@ mod tests {
             }
             _ => panic!("expected Match, got {e:?}"),
         }
+    }
+
+    // ===== Module-qualified path tests (chelis#316) =====
+
+    // `Demo.Dropout.Eval` is a module-qualified nullary constructor. It must
+    // parse into a nested `Access` chain rooted at the head segment so reef
+    // can walk the segments and resolve them to the module-qualified internal
+    // name. Before the fix the parser rejected the uppercase `Dropout`
+    // segment with "expected field name or tuple index".
+    #[test]
+    fn qualified_nullary_constructor_parses() {
+        let e = body("def f() = Demo.Dropout.Eval");
+        match &e {
+            Expr::Access(inner, last, _) => {
+                assert_eq!(last, "Eval");
+                match inner.as_ref() {
+                    Expr::Access(head, mid, _) => {
+                        assert_eq!(mid, "Dropout");
+                        assert!(matches!(head.as_ref(), Expr::Constructor(n, _) if n == "Demo"));
+                    }
+                    other => panic!("expected Access(Demo.Dropout), got {other:?}"),
+                }
+            }
+            other => panic!("expected Access chain, got {other:?}"),
+        }
+    }
+
+    // `Demo.Dropout.use(m)` is a module-qualified value applied to an
+    // argument. The whole-path-then-call shape must yield `Apply(<access
+    // chain>, [arg])`. This form previously failed with "expected end of
+    // declaration expression, found LParen" even for a lowercase tail.
+    #[test]
+    fn qualified_call_parses() {
+        let e = body("def f(m) = Demo.Dropout.use(m)");
+        match &e {
+            Expr::Apply(func, args, _) => {
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], Expr::Var(n, _) if n == "m"));
+                match func.as_ref() {
+                    Expr::Access(inner, last, _) => {
+                        assert_eq!(last, "use");
+                        assert!(
+                            matches!(inner.as_ref(), Expr::Access(_, mid, _) if mid == "Dropout")
+                        );
+                    }
+                    other => panic!("expected Access chain as call head, got {other:?}"),
+                }
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    // A qualified constructor applied to arguments: `Demo.List.Cons(x, xs)`.
+    #[test]
+    fn qualified_constructor_application_parses() {
+        let e = body("def f(x, xs) = Demo.List.Cons(x, xs)");
+        match &e {
+            Expr::Apply(func, args, _) => {
+                assert_eq!(args.len(), 2);
+                assert!(matches!(func.as_ref(), Expr::Access(_, last, _) if last == "Cons"));
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    // Lowercase field access must still work and still bind tighter than a
+    // following binary operator — the new trailing-call loop must not disturb
+    // it.
+    #[test]
+    fn lowercase_field_access_still_parses() {
+        let e = body("def f(r) = r.field + 1");
+        match &e {
+            Expr::Binary(BinOp::Add, left, _, _) => {
+                assert!(matches!(left.as_ref(), Expr::Access(_, f, _) if f == "field"));
+            }
+            other => panic!("expected Add with field access on the left, got {other:?}"),
+        }
+    }
+
+    // Tuple index access is unchanged.
+    #[test]
+    fn tuple_index_access_still_parses() {
+        let e = body("def f(t) = t.0");
+        assert!(matches!(&e, Expr::TupleGet(_, 0, _)));
     }
 }

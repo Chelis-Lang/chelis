@@ -5622,14 +5622,29 @@ fn resolve_qualified_expr(expr: &Expr, resolver: &NameResolver) -> Option<Expr> 
     if segments.len() < 2 {
         return None;
     }
+    let mut prefix_names_module = false;
     for split in 1..segments.len() {
         let module = segments[..split].join(".");
         let name = segments[split..].join(".");
-        if let Some(map) = resolver.qualified_modules.get(&module)
-            && let Some(internal) = map.get(&name)
-        {
-            return Some(Expr::Var(internal.clone(), span));
+        if let Some(map) = resolver.qualified_modules.get(&module) {
+            prefix_names_module = true;
+            if let Some(internal) = map.get(&name) {
+                return Some(Expr::Var(internal.clone(), span));
+            }
         }
+    }
+    // The head segments name an imported module, but the trailing name is not
+    // one of its exports: a qualified reference to a missing name (a typo, or
+    // a name the module does not export), not a record field access. Field
+    // access is never type-checked against the base (there is no `access`
+    // node handler in the checker), so leaving this as an `Access` chain would
+    // let `Demo.Dropout.Missing` silently type-check as an unconstrained
+    // field projection. Rewrite it to the written dotted path as a `Var` so
+    // the checker reports a precise `unbound variable: Demo.Dropout.Missing`
+    // instead (chelis#316). A path whose head is *not* an imported module
+    // (an ordinary record field access such as `opt.lr`) is left untouched.
+    if prefix_names_module {
+        return Some(Expr::Var(segments.join("."), span));
     }
     None
 }
@@ -6949,6 +6964,181 @@ path = "./coral"
         let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
         checked_program_with_effects(&deep).expect(
             "own constructor shadowing an imported same-name must construct and match consistently",
+        );
+    }
+
+    /// Issue #316: two modules in one package each declare
+    /// `type Mode = | Train | Eval`. A third module that needs both must be
+    /// able to disambiguate with a module-qualified reference
+    /// (`Demo.Dropout.Eval`) instead of renaming one module's constructors.
+    /// This is the positive resolution of `ambiguous_unqualified_ctor_import_is_rejected`:
+    /// where importing both `Eval`s unqualified is an error, qualifying each
+    /// reference resolves cleanly to that module's own mangled constructor and
+    /// the program type-checks. Before the parser fix the qualified form did
+    /// not even parse — the ambiguity diagnostic recommended a syntax the
+    /// front end rejected.
+    #[test]
+    fn qualified_ctor_reference_disambiguates_same_named_constructors() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        write(
+            &root.join("src/sd.ch"),
+            "module Demo.Sd\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        // `combo` pulls in both modules qualified-access-only (`()`), so no
+        // unqualified `Mode`/`Train`/`Eval`/`use` collide, and reaches each
+        // module's constructor and value through the qualified path.
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             import Demo.Sd ()\n\
+             def go() -> i64 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // The qualified references must resolve to each module's OWN mangled
+        // names, not collapse onto one. Walk `go`'s rewritten body and collect
+        // every `Var` head; it must contain both modules' `Eval`/`Train` and
+        // both `use` internals.
+        fn collect_vars(expr: &Expr, out: &mut Vec<String>) {
+            match expr {
+                Expr::Var(name, _) | Expr::Constructor(name, _) => out.push(name.clone()),
+                Expr::Apply(func, args, _) => {
+                    collect_vars(func, out);
+                    for arg in args {
+                        collect_vars(arg, out);
+                    }
+                }
+                Expr::Binary(_, l, r, _) => {
+                    collect_vars(l, out);
+                    collect_vars(r, out);
+                }
+                Expr::Access(inner, _, _) => collect_vars(inner, out),
+                _ => {}
+            }
+        }
+        let go_body = prepared
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef { name, body, .. } if name.ends_with("__go") => Some(body),
+                _ => None,
+            })
+            .expect("combo go() must be present after rewrite");
+        let mut vars = Vec::new();
+        collect_vars(go_body, &mut vars);
+
+        let dropout_eval = internal_name("demo", "Demo.Dropout", "Eval");
+        let sd_train = internal_name("demo", "Demo.Sd", "Train");
+        let dropout_use = internal_name("demo", "Demo.Dropout", "use");
+        let sd_use = internal_name("demo", "Demo.Sd", "use");
+        assert_ne!(
+            dropout_eval, sd_train,
+            "fixture sanity: per-module constructors must mangle differently"
+        );
+        for expected in [&dropout_eval, &sd_train, &dropout_use, &sd_use] {
+            assert!(
+                vars.contains(expected),
+                "qualified reference must resolve to {expected}; resolved heads were {vars:?}"
+            );
+        }
+
+        // The full pipeline must type-check: each `use` receives a value of its
+        // own module's `Mode`, so the #316 `Pkg__demo__Demo__Dropout__Mode vs
+        // Pkg__demo__Demo__Sd__Mode` mismatch cannot arise.
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("module-qualified constructor references must let two same-named ADTs coexist");
+    }
+
+    /// Negative parity for #316: a module-qualified reference to a name the
+    /// target module does NOT export must not silently resolve. `Demo.Dropout`
+    /// exports `Mode`/`use`/`Train`/`Eval` but not `Missing`, so
+    /// `Demo.Dropout.Missing` has no qualified binding and must surface as an
+    /// unresolved reference rather than be invented.
+    #[test]
+    fn qualified_reference_to_unexported_name_is_unresolved() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             def go() -> i64 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        let err = checked_program_with_effects(&deep)
+            .expect_err("qualified reference to an unexported name must not type-check");
+        assert!(
+            err.to_string().contains("Demo.Dropout.Missing"),
+            "diagnostic must name the unresolved qualified path; got: {err}"
         );
     }
 
