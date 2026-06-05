@@ -125,9 +125,10 @@ This is the disambiguation escape hatch when two imported modules export the
 same constructor name (e.g. each defines `type Mode = | Train | Eval`):
 write `Demo.Dropout.Eval` and `Demo.Sd.Eval` to select each module's own
 constructor. Importing both names unqualified is rejected as an ambiguous
-reference; qualifying resolves it. A qualified reference whose trailing name
-the target module does not export is an unbound-variable error, not a silent
-field access.
+reference; qualifying resolves it. In every position — value, constructor,
+pattern, and type — a qualified reference whose head names an imported module
+but whose trailing name that module does not export is rejected with a
+`module \`M\` does not export \`N\`` error, not silently accepted.
 
 **Export:** Explicit. If no `export` declaration appears, all top-level `def` and `type` are public. Once any `export` appears, only listed names are public.
 
