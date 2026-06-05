@@ -294,3 +294,28 @@ fn qualified_type_annotation_distinguishes_modules() {
         "mixing two modules' qualified Mode types must be a mismatch; got {combo}"
     );
 }
+
+#[test]
+fn qualified_type_to_unexported_name_is_rejected() {
+    // The type position must reject an unknown qualified leaf as loudly as the
+    // expression and pattern positions — not silently accept it as an opaque
+    // type. `Demo.Dropout` exports `Mode`, never `Nope`.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("src/dropout.ch"), DROPOUT);
+    write_file(
+        &root.join("src/combo.ch"),
+        "module Demo.Combo\n\
+         import Demo.Dropout ()\n\
+         def relay(m: Demo.Dropout.Nope) -> i64 = 0\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "combo.ch");
+    let blob = combo.to_string();
+    assert!(
+        blob.contains("does not export") && blob.contains("Nope"),
+        "qualified type to an unexported name must be rejected; got {combo}"
+    );
+}

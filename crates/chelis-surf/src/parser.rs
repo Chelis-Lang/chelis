@@ -2003,11 +2003,15 @@ impl Parser {
                 while self.peek_dot_then_typeident() {
                     self.advance(); // consume `.`
                     let seg = self.advance(); // consume the PascalCase segment
-                    if let TokenKind::TypeIdent(segment) = seg.kind {
-                        name.push('.');
-                        name.push_str(&segment);
-                        head_span = seg.span;
-                    }
+                    // `peek_dot_then_typeident` just verified this is a
+                    // `TypeIdent`; `let else` pins that invariant so a future
+                    // drift fails loudly instead of silently dropping a segment.
+                    let TokenKind::TypeIdent(segment) = seg.kind else {
+                        unreachable!("peek_dot_then_typeident guaranteed a TypeIdent segment")
+                    };
+                    name.push('.');
+                    name.push_str(&segment);
+                    head_span = seg.span;
                 }
                 let tok_span = tok.span.merge(head_span);
                 if *self.peek() == TokenKind::LBracket {
