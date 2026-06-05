@@ -869,6 +869,27 @@ mod tests {
         );
     }
 
+    // Module-qualified references (chelis#316) must survive a format round
+    // trip and stay parseable — the formatter-output-is-parseable invariant.
+    // A qualified constructor and a qualified applied value both render back
+    // to their dotted-path form.
+    #[test]
+    fn qualified_reference_round_trips() {
+        let source = "def f(m) = add(Demo.Dropout.use(m), Demo.Sd.use(Demo.Sd.Eval))\n";
+        let program = crate::parser::parse_str(source).expect("parse");
+        let rendered = format_program(&program);
+        assert!(
+            rendered.contains("Demo.Dropout.use(m)"),
+            "qualified call must render as a dotted path; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Demo.Sd.Eval"),
+            "qualified constructor must render as a dotted path; got: {rendered}"
+        );
+        // The rendered text must re-parse — the canonical invariant.
+        crate::parser::parse_str(&rendered).expect("formatted qualified reference must re-parse");
+    }
+
     // ── format_source comment preservation (#144) ────────────────
 
     #[test]

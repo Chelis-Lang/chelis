@@ -100,6 +100,25 @@ def forward(x, w, b) = add(matmul(x, w), b)
 
 Qualified access (`Foo.Bar.baz`) is always available after any import form. Selective import additionally brings names into unqualified scope.
 
+A qualified reference names the module path followed by the exported name. The
+trailing name may be a value or a **constructor**, and the whole reference may
+be applied:
+
+```
+Foo.Bar.baz                 -- qualified value
+Demo.Dropout.Eval           -- qualified nullary constructor
+Demo.Dropout.use(mode)      -- qualified value applied to an argument
+Demo.List.Cons(x, xs)       -- qualified constructor applied to arguments
+```
+
+This is the disambiguation escape hatch when two imported modules export the
+same constructor name (e.g. each defines `type Mode = | Train | Eval`):
+write `Demo.Dropout.Eval` and `Demo.Sd.Eval` to select each module's own
+constructor. Importing both names unqualified is rejected as an ambiguous
+reference; qualifying resolves it. A qualified reference whose trailing name
+the target module does not export is an unbound-variable error, not a silent
+field access.
+
 **Export:** Explicit. If no `export` declaration appears, all top-level `def` and `type` are public. Once any `export` appears, only listed names are public.
 
 ```
@@ -803,7 +822,10 @@ UnaryExpr     <- ('-' / '!') S UnaryExpr / AccessExpr
 
 # ── Postfix ──
 
-AccessExpr    <- AppExpr ('.' (Ident / IntLit))*
+AccessExpr    <- AppExpr AccessStep*
+AccessStep    <- '.' IntLit                              # tuple index
+               / '.' (Ident / TypeIdent) CallArgs*       # field / module path, optionally applied
+CallArgs      <- '(' S (Expr (S ',' S Expr)* (S ',')?)? S ')'
 AppExpr       <- AtomExpr (S !InfixOp AtomExpr)*
 
 # ── Atoms ──
