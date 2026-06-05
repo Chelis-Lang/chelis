@@ -5320,6 +5320,10 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
                 .get(name)
                 .cloned()
                 .or_else(|| resolver.imported_names.get(name).cloned())
+                // A dotted head is a module-qualified type name
+                // (`Demo.Dropout.Mode`, chelis#316): resolve it through the
+                // same `qualified_modules` map qualified constructors use.
+                .or_else(|| resolve_qualified_name(name, resolver))
                 .unwrap_or_else(|| name.clone()),
             *span,
         ),
@@ -5343,6 +5347,8 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
                 .get(name)
                 .cloned()
                 .or_else(|| resolver.imported_names.get(name).cloned())
+                // Qualified applied type head `Demo.Coral.Frame[n]` (chelis#316).
+                .or_else(|| resolve_qualified_name(name, resolver))
                 .unwrap_or_else(|| name.clone()),
             args.iter().map(|arg| rewrite_type(arg, resolver)).collect(),
             *span,
@@ -7323,6 +7329,87 @@ version = "0.1.0"
         let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
         checked_program_with_effects(&deep)
             .expect("qualified constructor patterns must type-check per module");
+    }
+
+    /// Issue #316 (types): a module-qualified *type* name (`Demo.Dropout.Mode`)
+    /// in annotation position resolves to the declaring module's mangled type,
+    /// so a consumer that imports two modules exporting the same type name can
+    /// still annotate against one. Completes the qualification trio alongside
+    /// qualified constructor expressions and patterns.
+    #[test]
+    fn qualified_type_name_resolves_in_annotation() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        write(
+            &root.join("src/sd.ch"),
+            "module Demo.Sd\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        // `relay` annotates its parameter with the qualified type and forwards
+        // it to the qualified `use`. Both `Mode` ADTs are linked, so a bare
+        // `Mode` would be ambiguous; the qualified annotation pins Dropout's.
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             import Demo.Sd ()\n\
+             def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // `relay`'s parameter type must resolve to Dropout's mangled `Mode`.
+        let expected = internal_name("demo", "Demo.Dropout", "Mode");
+        let param_ty = prepared
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef { name, params, .. } if name.ends_with("__relay") => {
+                    params.first().and_then(|p| p.ty.clone())
+                }
+                _ => None,
+            })
+            .expect("relay must have an annotated parameter");
+        assert!(
+            matches!(&param_ty, TypeExpr::Named(n, _) if *n == expected),
+            "qualified type must resolve to Dropout's mangled Mode ({expected}); got {param_ty:?}"
+        );
+
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("qualified type annotation must resolve and type-check");
     }
 
     /// Positive: `prepare_reef_graph` + two calls to `compile_with_reef_graph`

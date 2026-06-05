@@ -1991,6 +1991,25 @@ impl Parser {
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
+                // Extend the type name into a module-qualified path
+                // `Demo.Dropout.Mode` (chelis#316), so a consumer that imports
+                // two modules exporting the same type name can still annotate
+                // against one. reef resolves the dotted head to the declaring
+                // module's mangled type name, mirroring qualified constructor
+                // expressions and patterns. Type names are PascalCase, so only
+                // `.TypeIdent` segments extend the path.
+                let mut name = name;
+                let mut head_span = tok.span;
+                while self.peek_dot_then_typeident() {
+                    self.advance(); // consume `.`
+                    let seg = self.advance(); // consume the PascalCase segment
+                    if let TokenKind::TypeIdent(segment) = seg.kind {
+                        name.push('.');
+                        name.push_str(&segment);
+                        head_span = seg.span;
+                    }
+                }
+                let tok_span = tok.span.merge(head_span);
                 if *self.peek() == TokenKind::LBracket {
                     self.advance();
                     let mut args = Vec::new();
@@ -2005,9 +2024,9 @@ impl Parser {
                         }
                     }
                     let end = self.expect(&TokenKind::RBracket)?;
-                    Ok(TypeExpr::App(name, args, tok.span.merge(end.span)))
+                    Ok(TypeExpr::App(name, args, tok_span.merge(end.span)))
                 } else {
-                    Ok(TypeExpr::Named(name, tok.span))
+                    Ok(TypeExpr::Named(name, tok_span))
                 }
             }
             TokenKind::Star => {
@@ -3047,6 +3066,48 @@ mod tests {
             }
             _ => panic!("expected typed let"),
         }
+    }
+
+    // The first parameter's type annotation of a single `def`.
+    fn first_param_type(s: &str) -> TypeExpr {
+        match p(s).into_iter().next().unwrap() {
+            Decl::FunDef { params, .. } => params.into_iter().next().unwrap().ty.unwrap(),
+            other => panic!("expected FunDef, got {other:?}"),
+        }
+    }
+
+    // A module-qualified type name `Demo.Dropout.Mode` (chelis#316) parses as
+    // a `Named` type carrying the dotted path; reef resolves it to the
+    // declaring module's type. Lets a consumer annotate against one of two
+    // imported modules that export the same type name.
+    #[test]
+    fn qualified_named_type_parses() {
+        let ty = first_param_type("def f(m: Demo.Dropout.Mode) = m");
+        assert!(
+            matches!(&ty, TypeExpr::Named(n, _) if n == "Demo.Dropout.Mode"),
+            "expected qualified Named type, got {ty:?}"
+        );
+    }
+
+    // A qualified *applied* type head: `xs: Demo.Coral.Frame[n]`.
+    #[test]
+    fn qualified_applied_type_parses() {
+        let ty = first_param_type("def f(xs: Demo.Coral.Frame[n]) = xs");
+        match &ty {
+            TypeExpr::App(name, args, _) => {
+                assert_eq!(name, "Demo.Coral.Frame");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected qualified App type, got {other:?}"),
+        }
+    }
+
+    // A bare type name is unchanged — the dotted extension only fires on a
+    // following `.PascalCase` segment.
+    #[test]
+    fn bare_named_type_unchanged() {
+        let ty = first_param_type("def f(m: Mode) = m");
+        assert!(matches!(&ty, TypeExpr::Named(n, _) if n == "Mode"));
     }
 
     #[test]

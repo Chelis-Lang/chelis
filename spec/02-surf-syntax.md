@@ -121,8 +121,16 @@ match m with {
 }
 ```
 
+A **type** name may be qualified the same way in any type position, so a
+consumer that imports two modules exporting the same type name can annotate
+against one:
+
+```
+def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)
+```
+
 This is the disambiguation escape hatch when two imported modules export the
-same constructor name (e.g. each defines `type Mode = | Train | Eval`):
+same constructor or type name (e.g. each defines `type Mode = | Train | Eval`):
 write `Demo.Dropout.Eval` and `Demo.Sd.Eval` to select each module's own
 constructor. Importing both names unqualified is rejected as an ambiguous
 reference; qualifying resolves it. In every position — value, constructor,
@@ -792,7 +800,10 @@ TypeAtom      <- 'tensor' '[' S DimList S ',' S PrecType S ']'
                / '(' S TypeExpr S ',' S TypeExpr
                   (S ',' S TypeExpr)* (S ',')? S ')'
                / '(' S TypeExpr S ')'
-               / TypeIdent
+               / TypeName
+
+# Bare or module-qualified type name (`Mode`, `Demo.Dropout.Mode`).
+TypeName      <- TypeIdent ('.' TypeIdent)*
 
 PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
                / 'int8' / 'int16' / 'int32' / 'int64'
