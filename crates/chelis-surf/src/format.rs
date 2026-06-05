@@ -890,6 +890,22 @@ mod tests {
         crate::parser::parse_str(&rendered).expect("formatted qualified reference must re-parse");
     }
 
+    // A module-qualified constructor *pattern* (chelis#316) must likewise
+    // survive a format round trip and re-parse.
+    #[test]
+    fn qualified_constructor_pattern_round_trips() {
+        let source =
+            "def f(m) = match m with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n";
+        let program = crate::parser::parse_str(source).expect("parse");
+        let rendered = format_program(&program);
+        assert!(
+            rendered.contains("Demo.Dropout.Train") && rendered.contains("Demo.Dropout.Eval"),
+            "qualified constructor patterns must render as dotted paths; got: {rendered}"
+        );
+        crate::parser::parse_str(&rendered)
+            .expect("formatted qualified constructor pattern must re-parse");
+    }
+
     // ── format_source comment preservation (#144) ────────────────
 
     #[test]

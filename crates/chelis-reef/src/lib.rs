@@ -5608,13 +5608,46 @@ fn resolve_name(name: &str, resolver: &NameResolver, locals: &HashSet<String>) -
 /// silently mis-resolves a `match` arm to a different package's
 /// constructor (chelis#157); own-first keeps construction and
 /// destructuring on the same mangled name.
+/// A dotted head (`| Demo.Dropout.Train =>`) is a module-qualified
+/// constructor pattern (chelis#316). It cannot match `own_names`/
+/// `imported_names` (those are keyed by bare names), so resolve it through the
+/// same `qualified_modules` map a qualified constructor *expression* uses,
+/// keeping construction and destructuring on one mangled name even when two
+/// imported modules export the same constructor.
 fn resolve_ctor_pattern_name(name: &str, resolver: &NameResolver) -> String {
     resolver
         .own_names
         .get(name)
         .cloned()
         .or_else(|| resolver.imported_names.get(name).cloned())
+        .or_else(|| resolve_qualified_name(name, resolver))
         .unwrap_or_else(|| name.to_string())
+}
+
+/// Resolve a module-qualified dotted name (`Demo.Dropout.Train`) to the
+/// declaring module's internal name, the string-keyed counterpart of
+/// `resolve_qualified_expr`'s segment walk. Returns `None` for a bare name or
+/// a path whose prefix does not name an imported module / whose leaf the
+/// module does not export; the caller then leaves the dotted name in place so
+/// the type checker rejects it as an unknown constructor rather than inventing
+/// a binding.
+fn resolve_qualified_name(name: &str, resolver: &NameResolver) -> Option<String> {
+    if !name.contains('.') {
+        return None;
+    }
+    let segments: Vec<&str> = name.split('.').collect();
+    for split in 1..segments.len() {
+        let module = segments[..split].join(".");
+        let leaf = segments[split..].join(".");
+        if let Some(internal) = resolver
+            .qualified_modules
+            .get(&module)
+            .and_then(|map| map.get(&leaf))
+        {
+            return Some(internal.clone());
+        }
+    }
+    None
 }
 
 fn resolve_qualified_expr(expr: &Expr, resolver: &NameResolver) -> Option<Expr> {
@@ -7140,6 +7173,116 @@ version = "0.1.0"
             err.to_string().contains("Demo.Dropout.Missing"),
             "diagnostic must name the unresolved qualified path; got: {err}"
         );
+    }
+
+    /// Issue #316 (patterns): module-qualified constructor *patterns*
+    /// (`| Demo.Dropout.Train =>`) resolve to the declaring module's mangled
+    /// constructor, the destructuring dual of the qualified construction in
+    /// `qualified_ctor_reference_disambiguates_same_named_constructors`. With
+    /// two modules each declaring `type Mode = | Train | Eval`, a `match` whose
+    /// arms qualify against one module must bind that module's variants (so the
+    /// arm heads equal the scrutinee ADT's variant names) and type-check.
+    #[test]
+    fn qualified_constructor_patterns_resolve_per_module() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, Train, Eval)\n\
+             type Mode = | Train | Eval\n",
+        );
+        write(
+            &root.join("src/sd.ch"),
+            "module Demo.Sd\n\
+             export (Mode, Train, Eval)\n\
+             type Mode = | Train | Eval\n",
+        );
+        // The scrutinee is a qualified constructor expression (pinning the
+        // ADT), and every arm qualifies to the same module — so no unqualified
+        // `Mode`/`Train`/`Eval` is needed and the two modules cannot collide.
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             import Demo.Sd ()\n\
+             def classify_dropout() -> i64 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
+             def classify_sd() -> i64 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // Collect each function's match-arm pattern heads.
+        fn arm_heads(decls: &[Decl], fn_suffix: &str) -> Vec<String> {
+            decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::FunDef { name, body, .. } if name.ends_with(fn_suffix) => Some(body),
+                    _ => None,
+                })
+                .and_then(|body| match body {
+                    Expr::Match(_, arms, _) => Some(arms),
+                    _ => None,
+                })
+                .map(|arms| {
+                    arms.iter()
+                        .filter_map(|arm| match &arm.pattern {
+                            Pattern::Constructor(name, _, _) => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
+        let dropout_heads = arm_heads(&prepared.decls, "__classify_dropout");
+        let sd_heads = arm_heads(&prepared.decls, "__classify_sd");
+        assert_eq!(
+            dropout_heads,
+            vec![
+                internal_name("demo", "Demo.Dropout", "Train"),
+                internal_name("demo", "Demo.Dropout", "Eval"),
+            ],
+            "Dropout arms must resolve to Dropout's mangled constructors"
+        );
+        assert_eq!(
+            sd_heads,
+            vec![
+                internal_name("demo", "Demo.Sd", "Train"),
+                internal_name("demo", "Demo.Sd", "Eval"),
+            ],
+            "Sd arms must resolve to Sd's mangled constructors"
+        );
+
+        // Both exhaustive matches must type-check: arm heads and scrutinee
+        // agree on one module's `Mode`, so neither the #316 cross-module
+        // mismatch nor a spurious non-exhaustive diagnostic can arise.
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("qualified constructor patterns must type-check per module");
     }
 
     /// Positive: `prepare_reef_graph` + two calls to `compile_with_reef_graph`

@@ -122,6 +122,35 @@ impl Parser {
         matches!(self.peek(), TokenKind::Eof)
     }
 
+    /// True when the next two significant tokens are `.` followed by a
+    /// PascalCase `TypeIdent` — the shape of a module-qualified path segment
+    /// (`.Dropout`, `.Train`). Used to extend a constructor pattern head into
+    /// a qualified path (`Demo.Dropout.Train`, chelis#316) without consuming
+    /// the `.` when it is not part of such a path.
+    fn peek_dot_then_typeident(&self) -> bool {
+        let mut pos = self.pos;
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
+        if !matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Dot)) {
+            return false;
+        }
+        pos += 1;
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
+        matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::TypeIdent(_))
+        )
+    }
+
     fn current_offset(&self) -> usize {
         let mut pos = self.pos;
         while matches!(
@@ -2104,6 +2133,24 @@ impl Parser {
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
+                // Extend the constructor head into a module-qualified path:
+                // `| Demo.Dropout.Train =>` (chelis#316). The dotted head is
+                // carried on the pattern's constructor name; reef resolves it
+                // to the declaring module's mangled constructor, mirroring how
+                // qualified constructor *expressions* resolve. Constructors are
+                // PascalCase, so only `.TypeIdent` segments extend the path.
+                let mut name = name;
+                let mut head_span = tok.span;
+                while self.peek_dot_then_typeident() {
+                    self.advance(); // consume `.`
+                    let seg = self.advance(); // consume the PascalCase segment
+                    if let TokenKind::TypeIdent(segment) = seg.kind {
+                        name.push('.');
+                        name.push_str(&segment);
+                        head_span = seg.span;
+                    }
+                }
+                let tok_span = tok.span.merge(head_span);
                 // Check for record pattern: Ctor { field1, field2 }
                 if *self.peek() == TokenKind::LBrace {
                     self.advance(); // consume {
@@ -2136,7 +2183,7 @@ impl Parser {
                         }
                     }
                     let end = self.expect(&TokenKind::RBrace)?;
-                    Ok(Pattern::Record(name, fields, tok.span.merge(end.span)))
+                    Ok(Pattern::Record(name, fields, tok_span.merge(end.span)))
                 } else if *self.peek() == TokenKind::LParen {
                     self.advance();
                     let mut sub_pats = Vec::new();
@@ -2154,7 +2201,7 @@ impl Parser {
                     Ok(Pattern::Constructor(
                         name,
                         sub_pats,
-                        tok.span.merge(end.span),
+                        tok_span.merge(end.span),
                     ))
                 } else {
                     let mut sub_pats = Vec::new();
@@ -2162,10 +2209,10 @@ impl Parser {
                         sub_pats.push(self.parse_pattern_atom()?);
                     }
                     if sub_pats.is_empty() {
-                        Ok(Pattern::Constructor(name, vec![], tok.span))
+                        Ok(Pattern::Constructor(name, vec![], tok_span))
                     } else {
                         let end = pattern_span(sub_pats.last().unwrap());
-                        Ok(Pattern::Constructor(name, sub_pats, tok.span.merge(end)))
+                        Ok(Pattern::Constructor(name, sub_pats, tok_span.merge(end)))
                     }
                 }
             }
@@ -3678,5 +3725,72 @@ mod tests {
     fn tuple_index_access_still_parses() {
         let e = body("def f(t) = t.0");
         assert!(matches!(&e, Expr::TupleGet(_, 0, _)));
+    }
+
+    // Convenience: parse a single def, return the first match arm's pattern.
+    fn first_arm_pattern(s: &str) -> Pattern {
+        match body(s) {
+            Expr::Match(_, arms, _) => arms.into_iter().next().unwrap().pattern,
+            other => panic!("expected Match, got {other:?}"),
+        }
+    }
+
+    // A module-qualified *nullary* constructor pattern: `| Demo.Dropout.Train =>`.
+    // The dotted head must land on the `Pattern::Constructor` name verbatim so
+    // reef can resolve it to the declaring module's constructor (chelis#316).
+    #[test]
+    fn qualified_nullary_constructor_pattern_parses() {
+        let pat = first_arm_pattern("def f(m) = match m with { | Demo.Dropout.Train => 1 }");
+        match pat {
+            Pattern::Constructor(name, args, _) => {
+                assert_eq!(name, "Demo.Dropout.Train");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected Constructor pattern, got {other:?}"),
+        }
+    }
+
+    // A qualified constructor pattern with positional sub-patterns:
+    // `| Demo.List.Cons(x, xs) =>`. The dotted head and the sub-patterns must
+    // both survive.
+    #[test]
+    fn qualified_constructor_pattern_with_args_parses() {
+        let pat = first_arm_pattern("def f(m) = match m with { | Demo.List.Cons(x, xs) => 1 }");
+        match pat {
+            Pattern::Constructor(name, args, _) => {
+                assert_eq!(name, "Demo.List.Cons");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], Pattern::Var(n, _) if n == "x"));
+            }
+            other => panic!("expected Constructor pattern, got {other:?}"),
+        }
+    }
+
+    // A qualified *record* constructor pattern: `| Demo.Frame.Col { values } =>`.
+    #[test]
+    fn qualified_record_pattern_parses() {
+        let pat = first_arm_pattern("def f(m) = match m with { | Demo.Frame.Col { values } => 1 }");
+        match pat {
+            Pattern::Record(name, fields, _) => {
+                assert_eq!(name, "Demo.Frame.Col");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "values");
+            }
+            other => panic!("expected Record pattern, got {other:?}"),
+        }
+    }
+
+    // A bare constructor pattern is unchanged — the dotted-path extension only
+    // fires when a `.PascalCase` segment actually follows.
+    #[test]
+    fn bare_constructor_pattern_unchanged() {
+        let pat = first_arm_pattern("def f(m) = match m with { | None => 1 }");
+        match pat {
+            Pattern::Constructor(name, args, _) => {
+                assert_eq!(name, "None");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected Constructor pattern, got {other:?}"),
+        }
     }
 }

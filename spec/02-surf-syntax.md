@@ -111,6 +111,16 @@ Demo.Dropout.use(mode)      -- qualified value applied to an argument
 Demo.List.Cons(x, xs)       -- qualified constructor applied to arguments
 ```
 
+A constructor may also be qualified in **pattern** position, so a `match` can
+destructure one module's variant when same-named constructors are in scope:
+
+```
+match m with {
+  | Demo.Dropout.Train => 1
+  | Demo.Dropout.Eval  => 0
+}
+```
+
 This is the disambiguation escape hatch when two imported modules export the
 same constructor name (e.g. each defines `type Mode = | Train | Eval`):
 write `Demo.Dropout.Eval` and `Demo.Sd.Eval` to select each module's own
@@ -865,12 +875,15 @@ Pattern       <- PatAtom (S 'as' S Ident)?
 PatAtom       <- '(' S Pattern (S ',' S Pattern)+
                   (S ',')? S ')'
                / '(' S Pattern S ')'
-               / TypeIdent S '{' S RecordPatField
+               / CtorName S '{' S RecordPatField
                   (S ',' S RecordPatField)* (S ',')? S '}'
-               / TypeIdent PatAtom*
+               / CtorName PatAtom*
                / Literal
                / '_'
                / Ident
+
+# Bare or module-qualified constructor head (`Train`, `Demo.Dropout.Train`).
+CtorName       <- TypeIdent ('.' TypeIdent)*
 
 RecordPatField <- Ident S ':' S Pattern / Ident
 

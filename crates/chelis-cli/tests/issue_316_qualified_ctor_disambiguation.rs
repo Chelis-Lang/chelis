@@ -167,3 +167,40 @@ fn qualified_reference_to_unexported_name_is_unbound() {
         "qualified reference to an unexported name must be unbound; got {combo}"
     );
 }
+
+#[test]
+fn qualified_constructor_patterns_match_per_module() {
+    // Destructuring dual of the headline test: a `match` whose arms qualify
+    // against one module (`| Demo.Dropout.Train =>`) binds that module's
+    // variants, so two same-named `Mode` ADTs can be matched in one build
+    // without renaming. The scrutinee is a qualified constructor expression so
+    // no qualified *type* annotation is needed.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("src/dropout.ch"), DROPOUT);
+    write_file(&root.join("src/sd.ch"), SD);
+    write_file(
+        &root.join("src/combo.ch"),
+        "module Demo.Combo\n\
+         import Demo.Dropout ()\n\
+         import Demo.Sd ()\n\
+         def classify_dropout() -> i64 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
+         def classify_sd() -> i64 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "combo.ch");
+    let report = &combo["report"];
+    assert_eq!(
+        report["score"], 1,
+        "qualified constructor patterns must type-check per module: {combo}"
+    );
+    assert!(
+        report["errors"]
+            .as_array()
+            .expect("errors array")
+            .is_empty(),
+        "no errors expected for the qualified-pattern combo: {combo}"
+    );
+}
