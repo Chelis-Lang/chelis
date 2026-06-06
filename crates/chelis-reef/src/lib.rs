@@ -7,6 +7,7 @@ use chelis_surf::ast::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -4843,6 +4844,7 @@ fn build_name_resolver(
         own_names: module_internal,
         imported_names: unqualified,
         qualified_modules: qualified,
+        qualified_failures: RefCell::new(Vec::new()),
     })
 }
 
@@ -4866,7 +4868,18 @@ fn rewrite_module_decls(
             )),
         }
     }
+    drain_qualified_failures(&resolver)?;
     Ok(out)
+}
+
+/// Turn any qualified-reference misses recorded during rewrite into a hard
+/// error (chelis#316). Reported deterministically (first by record order) so a
+/// program with several unknown qualified names fails on a stable one.
+fn drain_qualified_failures(resolver: &NameResolver) -> Result<(), String> {
+    match resolver.qualified_failures.borrow().first() {
+        Some(msg) => Err(msg.clone()),
+        None => Ok(()),
+    }
 }
 
 fn rewrite_eval_module_decls(
@@ -4884,6 +4897,7 @@ fn rewrite_eval_module_decls(
             _ => out.push(rewrite_eval_decl(decl, &resolver)),
         }
     }
+    drain_qualified_failures(&resolver)?;
     Ok(out)
 }
 
@@ -4932,6 +4946,28 @@ struct NameResolver {
     own_names: HashMap<String, String>,
     imported_names: HashMap<String, String>,
     qualified_modules: HashMap<String, HashMap<String, String>>,
+    /// Qualified references whose head named an imported module but whose leaf
+    /// that module does not export — a typo or unexported name. Recorded by
+    /// the expression / pattern / type resolvers as they run, then drained
+    /// into a hard error by `rewrite_module_decls` so all three positions
+    /// reject an unknown qualified name uniformly (chelis#316). A `RefCell`
+    /// because the resolvers take `&NameResolver`; each module is rewritten
+    /// with its own resolver on a single thread, so there is no sharing.
+    qualified_failures: RefCell<Vec<String>>,
+}
+
+/// Record that a qualified reference named the imported module `module` but a
+/// leaf `leaf` it does not export. Shared by the expression, pattern, and type
+/// resolvers so an unknown qualified name fails the same way everywhere
+/// instead of silently surviving into a later stage that may not catch it
+/// (e.g. an opaque `Named` type, or a dead `match` arm). Deduplicated so the
+/// same typo used in several positions reports once.
+fn record_qualified_miss(resolver: &NameResolver, module: &str, leaf: &str) {
+    let msg = format!("module `{module}` does not export `{leaf}` (qualified reference)");
+    let mut failures = resolver.qualified_failures.borrow_mut();
+    if !failures.contains(&msg) {
+        failures.push(msg);
+    }
 }
 
 fn internal_name(package: &str, module: &str, name: &str) -> String {
@@ -5284,6 +5320,10 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
                 .get(name)
                 .cloned()
                 .or_else(|| resolver.imported_names.get(name).cloned())
+                // A dotted head is a module-qualified type name
+                // (`Demo.Dropout.Mode`, chelis#316): resolve it through the
+                // same `qualified_modules` map qualified constructors use.
+                .or_else(|| resolve_qualified_name(name, resolver))
                 .unwrap_or_else(|| name.clone()),
             *span,
         ),
@@ -5307,6 +5347,8 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
                 .get(name)
                 .cloned()
                 .or_else(|| resolver.imported_names.get(name).cloned())
+                // Qualified applied type head `Demo.Coral.Frame[n]` (chelis#316).
+                .or_else(|| resolve_qualified_name(name, resolver))
                 .unwrap_or_else(|| name.clone()),
             args.iter().map(|arg| rewrite_type(arg, resolver)).collect(),
             *span,
@@ -5608,13 +5650,52 @@ fn resolve_name(name: &str, resolver: &NameResolver, locals: &HashSet<String>) -
 /// silently mis-resolves a `match` arm to a different package's
 /// constructor (chelis#157); own-first keeps construction and
 /// destructuring on the same mangled name.
+/// A dotted head (`| Demo.Dropout.Train =>`) is a module-qualified
+/// constructor pattern (chelis#316). It cannot match `own_names`/
+/// `imported_names` (those are keyed by bare names), so resolve it through the
+/// same `qualified_modules` map a qualified constructor *expression* uses,
+/// keeping construction and destructuring on one mangled name even when two
+/// imported modules export the same constructor.
 fn resolve_ctor_pattern_name(name: &str, resolver: &NameResolver) -> String {
     resolver
         .own_names
         .get(name)
         .cloned()
         .or_else(|| resolver.imported_names.get(name).cloned())
+        .or_else(|| resolve_qualified_name(name, resolver))
         .unwrap_or_else(|| name.to_string())
+}
+
+/// Resolve a module-qualified dotted name (`Demo.Dropout.Train`) to the
+/// declaring module's internal name, the string-keyed counterpart of
+/// `resolve_qualified_expr`'s segment walk (used for constructor patterns and
+/// type names). Returns `None` for a bare name, for a path whose prefix does
+/// not name an imported module (left untouched — an ordinary unknown name), or
+/// for a path whose prefix *does* name a module but whose leaf it does not
+/// export. In that last case it also records a qualified-reference miss so
+/// `rewrite_module_decls` rejects the typo with a precise error — matching the
+/// expression position rather than silently leaving a dotted name for a later
+/// stage that may not catch it.
+fn resolve_qualified_name(name: &str, resolver: &NameResolver) -> Option<String> {
+    if !name.contains('.') {
+        return None;
+    }
+    let segments: Vec<&str> = name.split('.').collect();
+    let mut miss: Option<(String, String)> = None;
+    for split in 1..segments.len() {
+        let module = segments[..split].join(".");
+        let leaf = segments[split..].join(".");
+        if let Some(map) = resolver.qualified_modules.get(&module) {
+            if let Some(internal) = map.get(&leaf) {
+                return Some(internal.clone());
+            }
+            miss.get_or_insert((module, leaf));
+        }
+    }
+    if let Some((module, leaf)) = miss {
+        record_qualified_miss(resolver, &module, &leaf);
+    }
+    None
 }
 
 fn resolve_qualified_expr(expr: &Expr, resolver: &NameResolver) -> Option<Expr> {
@@ -5622,28 +5703,30 @@ fn resolve_qualified_expr(expr: &Expr, resolver: &NameResolver) -> Option<Expr> 
     if segments.len() < 2 {
         return None;
     }
-    let mut prefix_names_module = false;
+    let mut miss: Option<(String, String)> = None;
     for split in 1..segments.len() {
         let module = segments[..split].join(".");
         let name = segments[split..].join(".");
         if let Some(map) = resolver.qualified_modules.get(&module) {
-            prefix_names_module = true;
             if let Some(internal) = map.get(&name) {
                 return Some(Expr::Var(internal.clone(), span));
             }
+            miss.get_or_insert((module, name));
         }
     }
     // The head segments name an imported module, but the trailing name is not
     // one of its exports: a qualified reference to a missing name (a typo, or
-    // a name the module does not export), not a record field access. Field
-    // access is never type-checked against the base (there is no `access`
-    // node handler in the checker), so leaving this as an `Access` chain would
-    // let `Demo.Dropout.Missing` silently type-check as an unconstrained
-    // field projection. Rewrite it to the written dotted path as a `Var` so
-    // the checker reports a precise `unbound variable: Demo.Dropout.Missing`
-    // instead (chelis#316). A path whose head is *not* an imported module
-    // (an ordinary record field access such as `opt.lr`) is left untouched.
-    if prefix_names_module {
+    // a name the module does not export), not a record field access. Record
+    // the miss so `rewrite_module_decls` rejects it with a precise error —
+    // the same diagnostic the pattern and type positions now get (chelis#316).
+    // Also rewrite it to the written dotted path as a `Var` so that even if the
+    // failure is somehow not drained, the checker still reports an unbound
+    // variable rather than silently typing it as an unconstrained field
+    // projection (field access is not checked against its base). A path whose
+    // head is *not* an imported module (an ordinary record field access such
+    // as `opt.lr`) is left untouched.
+    if let Some((module, leaf)) = miss {
+        record_qualified_miss(resolver, &module, &leaf);
         return Some(Expr::Var(segments.join("."), span));
     }
     None
@@ -7088,9 +7171,9 @@ version = "0.1.0"
 
     /// Negative parity for #316: a module-qualified reference to a name the
     /// target module does NOT export must not silently resolve. `Demo.Dropout`
-    /// exports `Mode`/`use`/`Train`/`Eval` but not `Missing`, so
-    /// `Demo.Dropout.Missing` has no qualified binding and must surface as an
-    /// unresolved reference rather than be invented.
+    /// does not export `Missing`, so `Demo.Dropout.Missing` is rejected during
+    /// reef rewrite with a `does not export` error rather than being invented
+    /// or left to silently survive into a later stage.
     #[test]
     fn qualified_reference_to_unexported_name_is_unresolved() {
         let dir = tempdir().expect("tempdir");
@@ -7130,16 +7213,203 @@ version = "0.1.0"
         );
 
         let entry = root.join("src/combo.ch");
+        let err = prepare_program_for_file(&entry)
+            .expect_err("qualified reference to an unexported name must be rejected");
+        assert!(
+            err.contains("does not export") && err.contains("Missing"),
+            "diagnostic must name the unexported leaf; got: {err}"
+        );
+    }
+
+    /// Issue #316 (patterns): module-qualified constructor *patterns*
+    /// (`| Demo.Dropout.Train =>`) resolve to the declaring module's mangled
+    /// constructor, the destructuring dual of the qualified construction in
+    /// `qualified_ctor_reference_disambiguates_same_named_constructors`. With
+    /// two modules each declaring `type Mode = | Train | Eval`, a `match` whose
+    /// arms qualify against one module must bind that module's variants (so the
+    /// arm heads equal the scrutinee ADT's variant names) and type-check.
+    #[test]
+    fn qualified_constructor_patterns_resolve_per_module() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, Train, Eval)\n\
+             type Mode = | Train | Eval\n",
+        );
+        write(
+            &root.join("src/sd.ch"),
+            "module Demo.Sd\n\
+             export (Mode, Train, Eval)\n\
+             type Mode = | Train | Eval\n",
+        );
+        // The scrutinee is a qualified constructor expression (pinning the
+        // ADT), and every arm qualifies to the same module — so no unqualified
+        // `Mode`/`Train`/`Eval` is needed and the two modules cannot collide.
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             import Demo.Sd ()\n\
+             def classify_dropout() -> i64 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
+             def classify_sd() -> i64 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
         let prepared = prepare_program_for_file(&entry)
             .expect("prepare ok")
             .expect("entry inside reef package");
-        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
-        let err = checked_program_with_effects(&deep)
-            .expect_err("qualified reference to an unexported name must not type-check");
-        assert!(
-            err.to_string().contains("Demo.Dropout.Missing"),
-            "diagnostic must name the unresolved qualified path; got: {err}"
+
+        // Collect each function's match-arm pattern heads.
+        fn arm_heads(decls: &[Decl], fn_suffix: &str) -> Vec<String> {
+            decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::FunDef { name, body, .. } if name.ends_with(fn_suffix) => Some(body),
+                    _ => None,
+                })
+                .and_then(|body| match body {
+                    Expr::Match(_, arms, _) => Some(arms),
+                    _ => None,
+                })
+                .map(|arms| {
+                    arms.iter()
+                        .filter_map(|arm| match &arm.pattern {
+                            Pattern::Constructor(name, _, _) => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
+        let dropout_heads = arm_heads(&prepared.decls, "__classify_dropout");
+        let sd_heads = arm_heads(&prepared.decls, "__classify_sd");
+        assert_eq!(
+            dropout_heads,
+            vec![
+                internal_name("demo", "Demo.Dropout", "Train"),
+                internal_name("demo", "Demo.Dropout", "Eval"),
+            ],
+            "Dropout arms must resolve to Dropout's mangled constructors"
         );
+        assert_eq!(
+            sd_heads,
+            vec![
+                internal_name("demo", "Demo.Sd", "Train"),
+                internal_name("demo", "Demo.Sd", "Eval"),
+            ],
+            "Sd arms must resolve to Sd's mangled constructors"
+        );
+
+        // Both exhaustive matches must type-check: arm heads and scrutinee
+        // agree on one module's `Mode`, so neither the #316 cross-module
+        // mismatch nor a spurious non-exhaustive diagnostic can arise.
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("qualified constructor patterns must type-check per module");
+    }
+
+    /// Issue #316 (types): a module-qualified *type* name (`Demo.Dropout.Mode`)
+    /// in annotation position resolves to the declaring module's mangled type,
+    /// so a consumer that imports two modules exporting the same type name can
+    /// still annotate against one. Completes the qualification trio alongside
+    /// qualified constructor expressions and patterns.
+    #[test]
+    fn qualified_type_name_resolves_in_annotation() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        write(
+            &root.join("src/sd.ch"),
+            "module Demo.Sd\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        // `relay` annotates its parameter with the qualified type and forwards
+        // it to the qualified `use`. Both `Mode` ADTs are linked, so a bare
+        // `Mode` would be ambiguous; the qualified annotation pins Dropout's.
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             import Demo.Sd ()\n\
+             def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // `relay`'s parameter type must resolve to Dropout's mangled `Mode`.
+        let expected = internal_name("demo", "Demo.Dropout", "Mode");
+        let param_ty = prepared
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef { name, params, .. } if name.ends_with("__relay") => {
+                    params.first().and_then(|p| p.ty.clone())
+                }
+                _ => None,
+            })
+            .expect("relay must have an annotated parameter");
+        assert!(
+            matches!(&param_ty, TypeExpr::Named(n, _) if *n == expected),
+            "qualified type must resolve to Dropout's mangled Mode ({expected}); got {param_ty:?}"
+        );
+
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("qualified type annotation must resolve and type-check");
     }
 
     /// Positive: `prepare_reef_graph` + two calls to `compile_with_reef_graph`

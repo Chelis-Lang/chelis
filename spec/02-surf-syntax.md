@@ -111,13 +111,32 @@ Demo.Dropout.use(mode)      -- qualified value applied to an argument
 Demo.List.Cons(x, xs)       -- qualified constructor applied to arguments
 ```
 
+A constructor may also be qualified in **pattern** position, so a `match` can
+destructure one module's variant when same-named constructors are in scope:
+
+```
+match m with {
+  | Demo.Dropout.Train => 1
+  | Demo.Dropout.Eval  => 0
+}
+```
+
+A **type** name may be qualified the same way in any type position, so a
+consumer that imports two modules exporting the same type name can annotate
+against one:
+
+```
+def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)
+```
+
 This is the disambiguation escape hatch when two imported modules export the
-same constructor name (e.g. each defines `type Mode = | Train | Eval`):
+same constructor or type name (e.g. each defines `type Mode = | Train | Eval`):
 write `Demo.Dropout.Eval` and `Demo.Sd.Eval` to select each module's own
 constructor. Importing both names unqualified is rejected as an ambiguous
-reference; qualifying resolves it. A qualified reference whose trailing name
-the target module does not export is an unbound-variable error, not a silent
-field access.
+reference; qualifying resolves it. In every position — value, constructor,
+pattern, and type — a qualified reference whose head names an imported module
+but whose trailing name that module does not export is rejected with a
+`module \`M\` does not export \`N\`` error, not silently accepted.
 
 **Export:** Explicit. If no `export` declaration appears, all top-level `def` and `type` are public. Once any `export` appears, only listed names are public.
 
@@ -781,7 +800,10 @@ TypeAtom      <- 'tensor' '[' S DimList S ',' S PrecType S ']'
                / '(' S TypeExpr S ',' S TypeExpr
                   (S ',' S TypeExpr)* (S ',')? S ')'
                / '(' S TypeExpr S ')'
-               / TypeIdent
+               / TypeName
+
+# Bare or module-qualified type name (`Mode`, `Demo.Dropout.Mode`).
+TypeName      <- TypeIdent ('.' TypeIdent)*
 
 PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
                / 'int8' / 'int16' / 'int32' / 'int64'
@@ -865,12 +887,15 @@ Pattern       <- PatAtom (S 'as' S Ident)?
 PatAtom       <- '(' S Pattern (S ',' S Pattern)+
                   (S ',')? S ')'
                / '(' S Pattern S ')'
-               / TypeIdent S '{' S RecordPatField
+               / CtorName S '{' S RecordPatField
                   (S ',' S RecordPatField)* (S ',')? S '}'
-               / TypeIdent PatAtom*
+               / CtorName PatAtom*
                / Literal
                / '_'
                / Ident
+
+# Bare or module-qualified constructor head (`Train`, `Demo.Dropout.Train`).
+CtorName       <- TypeIdent ('.' TypeIdent)*
 
 RecordPatField <- Ident S ':' S Pattern / Ident
 
