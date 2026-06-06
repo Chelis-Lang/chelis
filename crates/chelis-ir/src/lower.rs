@@ -1000,6 +1000,77 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
     }
 }
 
+/// issue #319: collect every precision type-variable name that appears in
+/// a tensor precision slot ANYWHERE inside `expr` (in node `type:`
+/// metadata, parameter annotations, or nested type expressions).
+///
+/// The checker stamps a separate-`sig` precision-polymorphic verb's body
+/// nodes (e.g. the `permute` adjoint's output type) with the sig's
+/// precision variable, but renames it to a fresh internal inference var
+/// during annotation (`type_to_deep_expr` prints `TensorPrec::Var(_)`
+/// anonymously, e.g. `t304`). That renamed name is NOT the formal
+/// parameter's precision-var name (`p`), so the call-site
+/// `tensor_prec_substitutions` (keyed on `p`) does not cover it and
+/// `type_from_meta` trips the §5.8.1 monomorphization tripwire when the
+/// body node is lowered.
+///
+/// This walks the whole callee body so those renamed body precision
+/// variables can be bound to the concrete call-site precision when the
+/// call is precision-monomorphic (see `monomorphic_actual_precision`).
+fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
+    if let Some(name) = extract_precision_var_name(expr) {
+        out.insert(name);
+    }
+    match expr {
+        Expr::List(list, _) => {
+            for child in &list.elements {
+                collect_body_precision_var_names(child, out);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_body_precision_var_names(value, out);
+            }
+        }
+        Expr::MetaExpr(meta, _) => {
+            for (_, value) in &meta.entries {
+                collect_body_precision_var_names(value, out);
+            }
+            collect_body_precision_var_names(&meta.expr, out);
+        }
+        Expr::Atom(_, _) => {}
+    }
+}
+
+/// issue #319: the single concrete precision shared by every tensor-typed
+/// actual argument at a call site, or `None` when the actuals carry more
+/// than one precision (a genuinely precision-heterogeneous call, where
+/// binding every body precision var to one precision would be unsound).
+///
+/// Used to decide whether the renamed body precision variables collected
+/// by [`collect_body_precision_var_names`] can be safely monomorphized to
+/// a single concrete precision. A precision-monomorphic call (every
+/// tensor operand the same precision — the overwhelmingly common case,
+/// and exactly the issue #319 `sdpa` shape where `q`, `k`, `v`, `scale`
+/// are all `f32`) yields `Some(prim)`.
+fn monomorphic_actual_precision(actual_types: &[TensorType]) -> Option<Prim> {
+    let mut found: Option<Prim> = None;
+    for ty in actual_types {
+        // Only tensor arguments (rank >= 1) constrain the verb's
+        // precision variable; a scalar argument carries its own
+        // precision that is not the polymorphic tensor precision.
+        if ty.dims.is_empty() {
+            continue;
+        }
+        match found {
+            None => found = Some(ty.precision),
+            Some(prim) if prim == ty.precision => {}
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
 pub fn top_level_expr_is_lowered(
     expr: &Expr,
     program_exprs: &[Expr],
@@ -4131,6 +4202,25 @@ impl LowerCtx {
         // primitives at lowering time).
         self.prec_substitutions
             .extend(tensor_prec_substitutions(&formal_type_exprs, &actual_types));
+        // issue #319: the checker renames a separate-`sig`
+        // precision-polymorphic verb's body precision variable to a fresh
+        // internal name (e.g. `t304`) when it stamps the body's adjoint /
+        // shape-op output types. That renamed name is not the formal
+        // parameter's `p`, so the name-keyed substitution above misses it
+        // and a shape-preserving op (`permute`) lowered from the body
+        // trips the §5.8.1 monomorphization tripwire in `type_from_meta`.
+        // When this call is precision-monomorphic (every tensor operand
+        // shares one precision), bind every body precision variable to
+        // that concrete precision so the inlined body lowers cleanly. The
+        // monomorphic guard keeps a genuinely precision-heterogeneous call
+        // from being forced onto a single precision.
+        if let Some(mono_prim) = monomorphic_actual_precision(&actual_types) {
+            let mut body_prec_vars = HashSet::new();
+            collect_body_precision_var_names(body, &mut body_prec_vars);
+            for var_name in body_prec_vars {
+                self.prec_substitutions.entry(var_name).or_insert(mono_prim);
+            }
+        }
         // Inlining-F1: install the recursion guard *here*, after argument
         // evaluation, so legitimate nested calls passed as arguments to
         // the same fn-typed-parameter alias (e.g. `outer(doubler, seed)`
@@ -5396,10 +5486,37 @@ impl LowerCtx {
                 let x = self.lower_expr_node(&args[0], "permute input");
                 // Extract axes ordering from remaining args.
                 let axes = self.extract_usize_list(&args[1..]);
+                // `permute` never changes precision; it only reorders
+                // axes. Compute the output type directly from the input
+                // operand's resolved type and the axes when the axes
+                // cover the operand's full rank — this is the
+                // authoritative shape/precision and is independent of the
+                // app-node's `type:` metadata.
+                //
+                // issue #319: for a separate-`sig` precision-polymorphic
+                // verb, the checker resolves the body's `permute` app type
+                // but renames the sig's precision variable `p` to a fresh
+                // inference tvar (`type_to_deep_expr` prints `TensorPrec::Var`
+                // anonymously). Trusting `ty.clone()` would carry that
+                // renamed `(t-var t306)` precision, which is NOT in the
+                // call-site `prec_substitutions` (keyed on `p`), tripping
+                // the §5.8.1 monomorphization tripwire downstream. Taking
+                // precision from the operand chain — rooted at the `Load`
+                // nodes that carry the formal param's `(t-var p)` precision,
+                // already resolved to the concrete call-site precision —
+                // sidesteps the rename. This mirrors how tier-1 ops (e.g.
+                // `mul`) already derive their precision from operands.
+                let out_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .filter(|input_ty| axes.len() == input_ty.dims.len())
+                    .map(|input_ty| permuted_tensor_type(&input_ty, &axes))
+                    .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
                     RiscOp::Permute { axes },
                     vec![x],
-                    ty.clone(),
+                    out_ty,
                     self.current_span_id.clone(),
                 )
             }

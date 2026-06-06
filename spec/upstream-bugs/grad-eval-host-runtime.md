@@ -31,6 +31,46 @@ Regression coverage in `crates/chelis-cli/tests/cli.rs`:
 `eval_grad_wrapper_fn_param_form_in_host_runtime`,
 `eval_vmap_in_host_runtime`, plus per-form host-vs-C parity probes.
 
+### Follow-up: precision-polymorphic callees through `grad`
+
+Two follow-ups extended this surface to `grad` through a
+precision-polymorphic callee:
+
+- **chelis#289** (resolved): `grad` over a function whose callee carries
+  a `tensor[..., p]` precision variable monomorphizes `p` to the
+  concrete call-site precision. Coverage:
+  `crates/chelis-compiler-api/tests/issue_289_grad_precision_var_host_eval.rs`
+  and `crates/chelis-cli/tests/issue_289_grad_precision_var.rs`.
+
+- **chelis#319** (resolved): `grad` through an IMPORTED,
+  precision-polymorphic `[s, d, p]` attention verb declared with a
+  SEPARATE `sig` (the canonical School
+  `scaled_dot_product_attention` form — body `permute` + `matmul` +
+  `softmax` + `matmul`) now lowers in host eval identically to the
+  inline-f32 reimplementation. Two compounding root causes, both
+  specific to the separate-`sig` form:
+  1. `chelis-types::annotate_fn_children` inferred a separate-`sig`
+     def's BODY against bare param tvars (the bare `fn` literal carries
+     no inline annotations), so shape-sensitive body ops (`matmul`,
+     `permute`) annotated as bare `(t-var …)` and IR lowering read a
+     rank-0 `default_type()`, panicking in `tier2::lower_matmul`
+     (`expects rank >= 2`). Fixed by seeding the body-inference scope
+     with the declared sig param types.
+  2. The checker renames the sig precision variable `p` when stamping
+     the resolved body types, so the call-site precision substitution
+     (keyed on `p`) missed it and a shape-preserving op (`permute`)
+     tripped the §5.8.1 monomorphization tripwire. Fixed in
+     `chelis-ir::lower`: `permute` takes precision from its operand, and
+     the inline call site binds every body precision variable to the
+     concrete call-site precision when the call is precision-monomorphic.
+
+  Coverage:
+  `crates/chelis-compiler-api/tests/issue_319_grad_crossmodule_precision_poly_attn.rs`
+  (host-eval single-module + true reef cross-module-boundary, with
+  inline-f32 parity and a rank-guard negative case) and
+  `crates/chelis-types/tests/issue_319_separate_sig_body_annotation.rs`
+  (checker-half body-annotation pin).
+
 ## Original deferral rationale (historical, now resolved)
 
 This bug surfaced the host-lane scalar AD gap. The host evaluator did

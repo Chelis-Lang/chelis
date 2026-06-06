@@ -4836,10 +4836,54 @@ fn annotate_fn_children(
 
     let mut param_vg = vg.clone();
     let raw_params = extract_params(&kids[0], &mut param_vg, adt_reg);
+    // issue #319: when the def carries a separate `sig`, the `fn`
+    // literal's params are bare symbols, so the inference above seeds
+    // each with an unconstrained fresh tvar — the body's shape-sensitive
+    // ops (`matmul`, `permute`) then annotate as bare type variables
+    // rather than resolved tensor types. Recovering the declared param
+    // types from `declared_param_type_exprs` and binding them into
+    // `fn_env` lets the recursive body annotation resolve those ops to
+    // their true `tensor[...]` shapes. Without this, IR lowering reads a
+    // rank-0 `default_type()` off a `(t-var ...)` body-node annotation
+    // and `tier2::lower_matmul` panics with `expects rank >= 2`.
+    //
+    // A SHARED `tvar_map`/`dvar_map` is used across every declared param
+    // so a dim/precision variable that recurs across parameters (e.g.
+    // `tensor[s, d, p]` for `q`, `k`, and `v`) maps to the SAME `DimVar`
+    // / `TypeVar` — preserving the inter-parameter shape relationships
+    // (`q: [s, d]`, `kt: [d, s]` ⇒ `matmul(q, kt): [s, s]`) that the
+    // matmul typing rule depends on. `param_vg` (the cloned `VarGen`)
+    // feeds fresh-var allocation so it does not perturb the caller's.
+    let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
+        Some(declared) => {
+            let mut tvar_map: HashMap<String, TypeVar> = HashMap::new();
+            let mut dvar_map: HashMap<String, DimVar> = HashMap::new();
+            declared
+                .iter()
+                .map(|expr| {
+                    if is_wildcard_tvar_expr(expr) {
+                        None
+                    } else {
+                        match deep_type_to_type_inner(
+                            expr,
+                            &mut param_vg,
+                            &mut tvar_map,
+                            &mut dvar_map,
+                        ) {
+                            Type::Error => None,
+                            ty => Some(ty),
+                        }
+                    }
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
     let mut fn_env = env.clone();
     for (index, (name, maybe_ty)) in raw_params.iter().enumerate() {
         let ty = maybe_ty
             .clone()
+            .or_else(|| declared_param_types.get(index).cloned().flatten())
             .or_else(|| param_types.get(index).cloned())
             .unwrap_or(Type::Error);
         fn_env.bind(name.clone(), Scheme::mono(ty));
