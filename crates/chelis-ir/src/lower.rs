@@ -3227,31 +3227,12 @@ impl LowerCtx {
         size: &DimExpr,
     ) -> Option<TensorType> {
         let input_ty = self.dag.get(input)?.output_type.clone();
-        let new_dim = Self::dim_info_from_dim_expr(size)?;
+        let inserted_dim = Self::dim_info_from_dim_expr(size)?;
         let mut dims = input_ty.dims;
         if axis > dims.len() {
             return None;
         }
-        // `Expand` has two shapes (verify.rs C10): a SAME-RANK broadcast
-        // of an existing size-1 axis, or a RANK-INCREASING insertion of a
-        // new axis. When the input already carries a size-1 axis at
-        // `axis`, this is the same-rank case — REPLACE that axis with the
-        // broadcast extent (e.g. `tensor[1] -> tensor[n]` for the
-        // `tensor_full_1d` idiom in #318). Otherwise INSERT a new axis
-        // (e.g. the rank-0 `scalar_to_tensor` source `[] -> [n]`).
-        // Inserting in the same-rank case would wrongly produce a rank-2
-        // `[n, 1]` type that no longer matches the broadcast context. Only
-        // a KNOWN size-1 axis qualifies; a runtime-sized axis is treated
-        // as rank-increasing (the conservative choice).
-        let axis_is_size_one = matches!(
-            dims.get(axis),
-            Some(DimInfo::Lit(1)) | Some(DimInfo::Named(_, Some(1)))
-        );
-        if axis_is_size_one {
-            dims[axis] = new_dim;
-        } else {
-            dims.insert(axis, new_dim);
-        }
+        dims.insert(axis, inserted_dim);
         Some(TensorType {
             dims,
             precision: input_ty.precision,
@@ -6923,17 +6904,25 @@ mod tests {
         );
     }
 
-    /// Same as above but the const source is the rank-1 size-1
-    /// `to_tensor([c])` (`tensor_full_1d`): the expand is a SAME-RANK
-    /// `[1] -> [2]` broadcast. The recovered extent must REPLACE the
-    /// size-1 axis (output `tensor[2]`), never insert-grow to `[2, 1]`
-    /// and never collapse to `[1]`.
+    /// The fix recovers the broadcast EXTENT only; it leaves the
+    /// language's rank/insert rule for `expand` untouched. To prove the
+    /// extent recovery is orthogonal to the rank rule, lower a rank-1
+    /// size-1 source `tensor[1]` with a shape-derived size: `expand([1],
+    /// 0, shape(&x, 0))` with `x: tensor[2]`. The recovered extent at the
+    /// inserted axis must be the concrete `2` (NOT the default `1`), and
+    /// the output must follow the established INSERT semantics
+    /// (`[1] -> [2, 1]`, axis 0 inserted) — the same rule pinned by
+    /// `cli::build_c_linreg_expand_singleton_bias_keeps_rank2_shape` and
+    /// `chelis-compiler-api`'s
+    /// `host_runtime_expand_singleton_input_inserts_not_replicates`.
+    /// #318's real source is rank-0 (`scalar_to_tensor`), so this rank-1
+    /// case only exists to lock that the size fix did not perturb the
+    /// rank rule.
     #[test]
-    fn issue_318_expand_shape_arg_recovers_rank1_source_extent() {
-        // Source: a rank-1 size-1 constant `tensor[1]` (Const standing in
-        // for `to_tensor([c])`'s materialized rank-1 source).
+    fn issue_318_expand_shape_arg_recovers_extent_without_changing_rank_rule() {
+        // Source: a rank-1 size-1 constant `tensor[1]`.
         let expr = r#"
-            (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+            (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 1) (t-prim {} f32))}
                  (var {} expand)
                  (cast {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
                        (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 3.0)
@@ -6951,13 +6940,13 @@ mod tests {
         assert_eq!(
             size,
             DimExpr::Concrete(2),
-            "shape-derived extent must recover 2, not the default 1; got {size:?}",
+            "shape-derived extent must recover 2 at the inserted axis, not the default 1; got {size:?}",
         );
         assert_eq!(
             dims,
-            vec![DimInfo::Lit(2)],
-            "same-rank expand output must be tensor[2] (size-1 axis replaced), \
-             not [2, 1] or the collapsed [1]; got {dims:?}",
+            vec![DimInfo::Lit(2), DimInfo::Lit(1)],
+            "rank rule is unchanged: a rank-1 size-1 source INSERTS axis 0 \
+             ([1] -> [2, 1]); got {dims:?}",
         );
     }
 

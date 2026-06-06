@@ -31,9 +31,19 @@
 //! `f(x) = sum(x * 3.0) = 3.0 * (x0 + x1)`, so the gradient is the
 //! constant `df(x) = [3.0, 3.0]` for any `x`. This file is the
 //! end-to-end acceptance oracle: `check` clean and `eval` runs to the
-//! correct gradient, for BOTH const-source materializations (rank-0
-//! `scalar_to_tensor` and rank-1 `to_tensor([c])`). The IR-level
-//! siblings add the lowering-extent and finite-difference checks.
+//! correct gradient for the canonical rank-0 `scalar_to_tensor`
+//! const-source (what `tensor_full_like` / `tensor_full_1d` build from);
+//! `expand([], 0, shape(x, 0))` INSERTS axis 0 with the recovered extent
+//! → `tensor[n]`. The IR-level siblings add the lowering-extent and
+//! finite-difference checks.
+//!
+//! (A rank-1 `to_tensor([c])` source is intentionally NOT exercised: the
+//! language's `expand` INSERTS rather than replaces, so
+//! `expand([1], 0, n)` is `[n, 1]`, which does not broadcast against a
+//! `tensor[n]` operand — that is not a valid const-broadcast and is not
+//! what #318's downstream uses. See the lowering-rank-rule note in
+//! `chelis-ir/src/lower.rs`'s
+//! `issue_318_expand_shape_arg_recovers_extent_without_changing_rank_rule`.)
 
 use std::fs;
 use std::path::Path;
@@ -47,16 +57,6 @@ use tempfile::tempdir;
 const REPRO_RANK0: &str = "module Repro.GradExpandShape0\n\
 def f(x: tensor[2, f32]) -> f32 = {\n\
   k = expand(scalar_to_tensor(cast(3.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int32)), int32))\n\
-  tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
-}\n\
-def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
-out = df(to_tensor([3.0, 4.0]))\n";
-
-/// rank-1 size-1 source (`tensor_full_1d`): `to_tensor([c])` broadcast by
-/// a SAME-RANK `expand([1], 0, shape(&x, 0))`.
-const REPRO_RANK1: &str = "module Repro.GradExpandShape1\n\
-def f(x: tensor[2, f32]) -> f32 = {\n\
-  k = expand(to_tensor([3.0]), cast(0, int32), cast(shape(&x, cast(0, int32)), int32))\n\
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
@@ -147,14 +147,6 @@ fn issue_318_check_is_clean() {
 #[test]
 fn issue_318_eval_gradient_is_correct() {
     assert_eval_grad_is_3_3(REPRO_RANK0, "repro0", "issue #318 rank-0 source");
-}
-
-/// Both const-source materializations must grad through the shape-derived
-/// `expand`: rank-0 `scalar_to_tensor` AND rank-1 `to_tensor([c])`
-/// (`tensor_full_1d`, a same-rank `[1] -> [2]` broadcast).
-#[test]
-fn issue_318_eval_gradient_rank1_source_is_correct() {
-    assert_eval_grad_is_3_3(REPRO_RANK1, "repro1", "issue #318 rank-1 source");
 }
 
 /// Negative parity: the LITERAL form (the #288 fix) must STILL eval to
