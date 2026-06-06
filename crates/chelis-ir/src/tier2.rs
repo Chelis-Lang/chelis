@@ -831,11 +831,11 @@ pub fn lower_mean(
     // it is unknown at lowering time, so the divisor is built as a runtime
     // count: `sum(ones_like(x), axis)`. The ones tensor carries the same
     // (symbolic) operand type as `x`, so `sum` over `axis` yields the
-    // runtime extent in the reduced shape; the symbolic dim binds from the
-    // input shape at eval time via `bind_symbolic_dims`, the same way the
-    // windowing-op adjoints resolve their shapes post-#291. This carries
-    // the operand's extent instead of demanding a concrete one in IR
-    // lowering.
+    // runtime extent in the reduced shape. The symbolic dim is resolved at
+    // eval time by `bind_symbolic_dims`, which infers the extent from the
+    // input tensor's runtime shape — the `Const`-of-ones then gets its
+    // concrete shape from the bound `output_type`. This carries the
+    // operand's extent instead of demanding a concrete one in IR lowering.
     let divisor = match dim_size(ty, axis) {
         Some(dim_size_val) => add_synth(
             dag,

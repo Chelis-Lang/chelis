@@ -1,37 +1,36 @@
 //! Issue #320: `grad` backward fails for `mean` / `max_reduce` / `gather`
-//! when the reduced/gathered operand's shape is the runtime-derived shape
-//! produced by a `shrink` / `stride` / `reshape` window (the #291
-//! follow-up).
+//! when the reduced/gathered operand is the runtime-derived window produced
+//! by a `shrink` / `stride` / `reshape` chain (the #291 follow-up).
 //!
 //! #291 (PR #301) made the `shrink` and `stride` *movement* adjoints lower
-//! cleanly in isolation: `grad(sum(shrink(x, [0,2]))) = [1,1,0,0]` and
-//! `grad(sum(stride(x, 2))) = [1,0,1,0]` construct and evaluate. Those
-//! adjoints read the forward operand's rank/extent from its `output_type`,
-//! and the runtime evaluator binds any symbolic axes from the input shape
-//! (`bind_symbolic_dims`).
+//! cleanly in isolation. The three verbs that COMPOSE a window and then
+//! REDUCE / GATHER over it had two distinct failures:
 //!
-//! But verbs that COMPOSE a windowing op and then REDUCE or GATHER over the
-//! windowed view still failed because they did not carry the operand's
-//! runtime-derived extent through to IR lowering / the adjoint:
-//!   * `mean`       -> "mean requires a concrete extent for axis 0 ..."
-//!     `lower_mean` divided by a compile-time `Const(axis_size)` and so
-//!     `require_axis_size` PANICKED whenever the reduced axis was a
-//!     runtime-derived `Named(_, None)` dim instead of a literal.
-//!   * `max_reduce` / `gather` carry the operand's rank/extent through the
-//!     reverse-mode adjoint; this file pins that they grad+eval over a
-//!     runtime-derived (symbolic) operand, the same property #291 gave the
-//!     bare windowing ops.
+//!   * `mean` -> "mean requires a concrete extent for axis 0 in IR
+//!     lowering". `tier2::lower_mean` divided by a compile-time
+//!     `Const(axis_size)`, so `require_axis_size` PANICKED whenever the
+//!     reduced axis was a runtime-derived `Named(_, None)` extent. THIS
+//!     FILE pins the `lower_mean` fix (the divisor becomes a runtime count
+//!     `sum(ones_like(x), axis)` for symbolic extents) end to end through
+//!     grad + eval.
 //!
-//! Each verb grads fine on its own over a LITERAL-shaped tensor — the
-//! negative-parity tests below keep that path green.
+//!   * `max_reduce` / `gather` -> "axis 0 is out of range for an operand of
+//!     rank 0". This is a FRONT-END rank-0 collapse: the windowing/stacking
+//!     intermediate lowers to a rank-0 `default_type()` IR node, so
+//!     `normalize_axis` sees rank 0. That fix lives in `lower.rs`
+//!     (`reduction_operand_rank` / `gather_values_rank` +
+//!     `recover_collapsed_operand_type`), and the end-to-end grad+eval
+//!     reproducers are the in-module tests
+//!     `issue_320_grad_eval_windowed_max_reduce_end_to_end` and
+//!     `issue_320_grad_eval_windowed_gather_end_to_end` in `lower.rs` (they
+//!     need the front-end lowerer, which is crate-private).
 //!
-//! The symbolic axis here is `n`, carried by the `x` load, so the runtime
-//! evaluator binds it from the input tensor's shape — the same
-//! `symbolic_bindings` machinery the rest of the IR relies on.
+//! This file therefore owns the `mean` end-to-end coverage plus the
+//! LITERAL-shape negative-parity regression guards for all three verbs.
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
-use chelis_ir::grad::{AdError, grad_dag_checked};
+use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::tier2;
 use chelis_types::types::Prim;
 use std::collections::HashMap;
@@ -188,65 +187,14 @@ fn issue_320_lower_mean_over_literal_extent_still_exact() {
 }
 
 // =====================================================================
-// MAX_REDUCE over a runtime-derived (symbolic) operand.
+// Literal-shape negative parity for max_reduce / gather.
 //
-// The reduced axis is `Named("n", None)` (runtime-derived). The adjoint
-// must carry that extent through `Expand`; the evaluator binds `n` from the
-// input shape. Pins the issue's "carry the forward operand's rank/extent
-// even when those dims are runtime-derived" requirement for max_reduce.
+// These pass on `main` regardless of this change (no lower_mean, no
+// symbolic dims). They are kept ONLY as regression guards that the reduce/
+// gather adjoints still grad+eval over literal shapes; the real #320
+// max_reduce/gather coverage is the front-end end-to-end tests in
+// `lower.rs` (see this file's module docs).
 // =====================================================================
-
-/// Positive (the bug): `grad(max_reduce(window, 0))` over a runtime-derived
-/// operand must CONSTRUCT and route the subgradient to the argmax slot.
-/// `f(x) = max(x)`; `df/dx` is 1 at the unique argmax, 0 elsewhere.
-#[test]
-fn issue_320_grad_through_symbolic_max_reduce_is_exact() {
-    let mut dag = Dag::new();
-    let x = dag.add_node(
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        sym_vec("n"),
-        None,
-    );
-    // `stride(x, 1)` is an identity window producing a runtime-derived
-    // `tensor[n, f32]` view — the operand whose reduced axis is NOT a
-    // literal. This is the #320 windowed-operand condition.
-    let window = dag.add_node(
-        RiscOp::Stride { strides: vec![1] },
-        vec![x],
-        sym_vec("n"),
-        None,
-    );
-    let out = dag.add_node(
-        RiscOp::MaxReduce { axis: 0 },
-        vec![window],
-        scalar_f32(),
-        None,
-    );
-
-    match grad_dag_checked(&dag, out, &[x]) {
-        Ok(_) => {}
-        Err(AdError::NotSupported { op, reason }) => panic!(
-            "grad through max_reduce over a windowed operand must succeed (issue #320); \
-             got rejection op={op}, reason={reason:?}",
-        ),
-    }
-    let result =
-        grad_dag_checked(&dag, out, &[x]).expect("symbolic max_reduce grad must construct");
-    let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
-    inputs.insert(
-        "x".into(),
-        TensorValue::from_vec(vec![4], vec![1.0, 9.0, 3.0, 2.0]),
-    );
-    let vals = eval_tensor(&result.dag, &inputs).expect("symbolic max_reduce grad eval");
-    assert_close(
-        "grad_symbolic_max_reduce",
-        &vals[&grad_x].data,
-        &[0.0, 1.0, 0.0, 0.0],
-    );
-    assert_eq!(vals[&grad_x].shape, vec![4]);
-}
 
 /// Negative parity: `max_reduce` over a LITERAL-shaped operand still grads.
 /// `f(x) = max(x)`, `df/dx` = 1 at argmax.
@@ -268,80 +216,6 @@ fn issue_320_grad_max_reduce_over_literal_shape_still_exact() {
         &vals[&grad_x].data,
         &[0.0, 1.0, 0.0, 0.0],
     );
-}
-
-// =====================================================================
-// GATHER over a runtime-derived (symbolic) operand.
-//
-// The `values` operand axis is `Named("n", None)`. The adjoint scatter-adds
-// the cotangent back into the gathered source slots; the evaluator binds `n`
-// from the input shape. Pins the issue's carry-rank/extent requirement for
-// gather.
-// =====================================================================
-
-/// Positive (the bug): `grad(sum(gather(window, idx, 0)))` over a
-/// runtime-derived `values` operand must CONSTRUCT and scatter-add the
-/// cotangent. `f(x) = x0 + x2` (gather slots 0 and 2), so
-/// `df/dx = [1, 0, 1, 0]`.
-#[test]
-fn issue_320_grad_through_symbolic_gather_is_exact() {
-    let mut dag = Dag::new();
-    let x = dag.add_node(
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        sym_vec("n"),
-        None,
-    );
-    let window = dag.add_node(
-        RiscOp::Stride { strides: vec![1] },
-        vec![x],
-        sym_vec("n"),
-        None,
-    );
-    let indices = dag.add_node(
-        RiscOp::Load { name: "idx".into() },
-        vec![],
-        TensorType {
-            dims: vec![DimInfo::Lit(2)],
-            precision: Prim::Int64,
-        },
-        None,
-    );
-    let gathered = dag.add_node(
-        RiscOp::Gather { axis: 0 },
-        vec![window, indices],
-        lit_vec(2),
-        None,
-    );
-    let out = dag.add_node(
-        RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
-        vec![gathered],
-        scalar_f32(),
-        None,
-    );
-
-    match grad_dag_checked(&dag, out, &[x]) {
-        Ok(_) => {}
-        Err(AdError::NotSupported { op, reason }) => panic!(
-            "grad through gather over a windowed operand must succeed (issue #320); \
-             got rejection op={op}, reason={reason:?}",
-        ),
-    }
-    let result = grad_dag_checked(&dag, out, &[x]).expect("symbolic gather grad must construct");
-    let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
-    inputs.insert(
-        "x".into(),
-        TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
-    );
-    inputs.insert("idx".into(), TensorValue::from_vec(vec![2], vec![0.0, 2.0]));
-    let vals = eval_tensor(&result.dag, &inputs).expect("symbolic gather grad eval");
-    assert_close(
-        "grad_symbolic_gather",
-        &vals[&grad_x].data,
-        &[1.0, 0.0, 1.0, 0.0],
-    );
-    assert_eq!(vals[&grad_x].shape, vec![4]);
 }
 
 /// Negative parity: `gather` over a LITERAL-shaped operand still grads.

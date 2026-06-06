@@ -4975,13 +4975,23 @@ impl LowerCtx {
             "gather" if args.len() == 3 => {
                 let values = self.lower_expr_node(&args[0], "gather values");
                 let indices = self.lower_expr_node(&args[1], "gather indices");
-                let values_rank = self
-                    .dag
-                    .get(values)
-                    .map(|n| n.output_type.dims.len())
-                    .unwrap_or(0);
                 let axis_raw = self.extract_axis_raw(&args[2]);
+                // Issue #320: recover the `values` rank from the ascribed
+                // gather-result type when the `values` operand collapsed to
+                // rank-0 (a windowing/stacking intermediate left untyped),
+                // so `normalize_axis` sees rank>=1.
+                let values_rank = self.gather_values_rank(values, indices, ty);
                 let axis = self.normalize_axis(axis_raw, values_rank, "gather", &args[2]);
+                // Patch the collapsed `values` node to rank>=1 so verify and
+                // the scatter-add adjoint carry the operand's rank/extent.
+                // `gather` preserves element precision, so the recovered
+                // `values` precision is the ascribed result precision.
+                let values_prec = if *ty == Self::default_type() {
+                    Prim::F32
+                } else {
+                    ty.precision
+                };
+                self.recover_collapsed_gather_values_type(values, indices, axis, ty, values_prec);
                 let out_ty = Self::gather_out_ty_from_inputs(&self.dag, values, indices, axis)
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
@@ -5261,20 +5271,44 @@ impl LowerCtx {
             }
             "max_reduce" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "max_reduce input");
+                let axis_raw = self.extract_axis_raw(&args[1]);
+                // Issue #320: recover the operand rank from the ascribed
+                // result type when the operand node collapsed to rank-0
+                // (a windowing/stacking intermediate left untyped), so
+                // `normalize_axis` sees rank>=1 instead of raising the
+                // "operand of rank 0" diagnostic.
+                let operand_rank = self.reduction_operand_rank(x, ty);
+                let axis = self.normalize_axis(axis_raw, operand_rank, "max_reduce", &args[1]);
+                // Patch the collapsed operand node to a rank>=1 type so the
+                // reverse-mode adjoint carries the operand's rank/extent.
+                let precision = {
+                    let x_prec = self
+                        .dag
+                        .get(x)
+                        .map(|node| node.output_type.precision)
+                        .unwrap_or(ty.precision);
+                    if *ty == Self::default_type() {
+                        x_prec
+                    } else {
+                        ty.precision
+                    }
+                };
+                self.recover_collapsed_operand_type(x, axis, &ty.dims, precision);
                 let x_ty = self
                     .dag
                     .get(x)
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let axis_raw = self.extract_axis_raw(&args[1]);
-                let axis = self.normalize_axis(axis_raw, x_ty.dims.len(), "max_reduce", &args[1]);
                 let dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
-                let precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
+                let out_precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
                     x_ty.precision
                 } else {
                     ty.precision
                 };
-                let out_ty = TensorType { dims, precision };
+                let out_ty = TensorType {
+                    dims,
+                    precision: out_precision,
+                };
                 self.dag.add_node(
                     RiscOp::MaxReduce { axis },
                     vec![x],
@@ -5671,6 +5705,143 @@ impl LowerCtx {
             return ascribed_ty.dims.len();
         }
         0
+    }
+
+    /// Issue #320: rank of a reduction's operand, recovered from the
+    /// ascribed reduction-RESULT type when the operand node still carries
+    /// the rank-0 `default_type()` placeholder.
+    ///
+    /// When a windowing/stacking intermediate lowers to a rank-0 IR node,
+    /// `max_reduce`'s `normalize_axis` would otherwise see rank 0 and raise
+    /// "axis 0 is out of range for an operand of rank 0". A reduction
+    /// removes one axis, so the operand rank is the result rank PLUS ONE.
+    /// (`axis_rank` returns the result rank verbatim, which is correct for
+    /// softmax-shaped ops but undercounts a reduction by one.)
+    fn reduction_operand_rank(&self, operand: NodeId, ascribed_result_ty: &TensorType) -> usize {
+        let operand_rank = self
+            .dag
+            .get(operand)
+            .map(|n| n.output_type.dims.len())
+            .unwrap_or(0);
+        if operand_rank > 0 {
+            return operand_rank;
+        }
+        if *ascribed_result_ty != Self::default_type() {
+            return ascribed_result_ty.dims.len() + 1;
+        }
+        0
+    }
+
+    /// Issue #320 (gather sibling): rank of a gather's `values` operand,
+    /// recovered from the ascribed gather-RESULT type when the operand node
+    /// collapsed to rank-0. A gather over `axis` replaces that one values
+    /// axis with the `indices` block, so
+    /// `values_rank = result_rank - indices_rank + 1`.
+    fn gather_values_rank(
+        &self,
+        values: NodeId,
+        indices: NodeId,
+        ascribed_result_ty: &TensorType,
+    ) -> usize {
+        let values_rank = self
+            .dag
+            .get(values)
+            .map(|n| n.output_type.dims.len())
+            .unwrap_or(0);
+        if values_rank > 0 {
+            return values_rank;
+        }
+        if *ascribed_result_ty == Self::default_type() {
+            return 0;
+        }
+        let indices_rank = self
+            .dag
+            .get(indices)
+            .map(|n| n.output_type.dims.len())
+            .unwrap_or(0);
+        ascribed_result_ty
+            .dims
+            .len()
+            .saturating_sub(indices_rank)
+            .saturating_add(1)
+    }
+
+    /// Issue #320 (gather sibling): recover a rank>=1 `values` type for a
+    /// collapsed gather operand by removing the `indices` block at `axis`
+    /// from the ascribed result and re-inserting the gathered axis. The
+    /// gathered axis is a fresh runtime-derived symbolic dim (same rationale
+    /// as `recover_collapsed_operand_type`). No-op when `values` already has
+    /// a usable type.
+    fn recover_collapsed_gather_values_type(
+        &mut self,
+        values: NodeId,
+        indices: NodeId,
+        axis: usize,
+        ascribed_result_ty: &TensorType,
+        precision: Prim,
+    ) {
+        let collapsed = self
+            .dag
+            .get(values)
+            .map(|n| n.output_type.dims.is_empty())
+            .unwrap_or(false);
+        if !collapsed || *ascribed_result_ty == Self::default_type() {
+            return;
+        }
+        let indices_rank = self
+            .dag
+            .get(indices)
+            .map(|n| n.output_type.dims.len())
+            .unwrap_or(0);
+        let result_dims = &ascribed_result_ty.dims;
+        if axis + indices_rank > result_dims.len() {
+            return;
+        }
+        // Non-gathered values dims = result with the indices block removed.
+        let mut non_gathered = Vec::with_capacity(result_dims.len() - indices_rank);
+        non_gathered.extend_from_slice(&result_dims[..axis]);
+        non_gathered.extend_from_slice(&result_dims[axis + indices_rank..]);
+        self.recover_collapsed_operand_type(values, axis, &non_gathered, precision);
+    }
+
+    /// Issue #320: when a reduction/gather operand node is the rank-0
+    /// `default_type()` placeholder, recover a rank>=1 operand type by
+    /// re-inserting the reduced/gathered axis at `axis` into the ascribed
+    /// non-reduced shape, and patch the operand node so both `verify` and
+    /// the reverse-mode adjoint carry the operand's rank/extent. No-op when
+    /// the operand already has a usable (non-placeholder) type.
+    ///
+    /// The re-inserted axis is a fresh runtime-derived symbolic dim
+    /// (`Named(_, None)`): the operand's runtime value carries the true
+    /// extent, and the evaluator binds the symbol through the operand's
+    /// producer chain (`shape_source_for_axis`). A literal would be a
+    /// fabricated guess, so we deliberately stay symbolic.
+    fn recover_collapsed_operand_type(
+        &mut self,
+        operand: NodeId,
+        axis: usize,
+        non_reduced_dims: &[DimInfo],
+        precision: Prim,
+    ) {
+        let collapsed = self
+            .dag
+            .get(operand)
+            .map(|n| n.output_type.dims.is_empty())
+            .unwrap_or(false);
+        if !collapsed || axis > non_reduced_dims.len() {
+            return;
+        }
+        let mut dims = non_reduced_dims.to_vec();
+        dims.insert(
+            axis,
+            DimInfo::Named(format!("_w320_axis_{}", operand.0), None),
+        );
+        let recovered = TensorType { dims, precision };
+        if let Some(node) = self.dag.node_mut(operand) {
+            let op = node.op.clone();
+            let inputs = node.inputs.clone();
+            self.dag.replace_node(operand, op, inputs, recovered);
+        }
     }
 
     /// Normalize a possibly-negative axis literal against a known
@@ -7875,6 +8046,192 @@ mod tests {
             .iter()
             .any(|n| matches!(n.op, RiscOp::MaxReduce { axis: 0 }));
         assert!(found, "expected a MaxReduce{{axis:0}} node");
+    }
+
+    /// Issue #320: a `max_reduce` whose operand node lowered to the rank-0
+    /// `default_type()` placeholder (the windowing/stacking intermediate the
+    /// checker left untyped at the IR node) but whose APP carries the
+    /// checker's reduction-result type `[m]` must recover rank>=1 from the
+    /// ascription instead of raising "axis 0 is out of range for an operand
+    /// of rank 0". The recovered operand carries the reduced axis
+    /// re-inserted at the reduction axis.
+    #[test]
+    fn issue_320_max_reduce_recovers_rank_from_ascription() {
+        // `w` (the stacked operand) carries NO type -> rank-0 node. The
+        // max_reduce app is typed `[m]` (rank 1). Before the fix this
+        // panicked with the rank-0 diagnostic.
+        let src = r#"
+            (def {} w (var {} w))
+            (def {} y
+              (app {type: (t-tensor {} (d-name {} m) (t-prim {} f32))}
+                   (var {} max_reduce) (var {} w) (lit {} 0)))
+        "#;
+        let dag = parse_and_lower_unchecked(src);
+        let mr = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.op, RiscOp::MaxReduce { axis: 0 }))
+            .expect("max_reduce must lower (issue #320)");
+        // Result is the ascribed `[m]`.
+        assert_eq!(mr.output_type.dims.len(), 1, "max_reduce result rank 1");
+        // The operand node was recovered to rank 2 (`[reduced_axis, m]`),
+        // so the reduction axis is in range and the adjoint can carry it.
+        let operand = dag.get(mr.inputs[0]).expect("operand node");
+        assert_eq!(
+            operand.output_type.dims.len(),
+            2,
+            "operand rank must be recovered to result_rank + 1 (issue #320)",
+        );
+    }
+
+    /// Issue #320 end-to-end (max_reduce): a windowed operand that lowers to
+    /// the rank-0 placeholder must grad+eval correctly once the front-end
+    /// recovers its rank. `w = reshape(x, [2,2])` is lowered UNtyped (rank-0
+    /// node) but its runtime value is `[2,2]`; `max_reduce(w, 0)` reduces
+    /// axis 0 (rows), giving the per-column max. The subgradient routes 1 to
+    /// each column's argmax row. With `x = [1,2,4,3]` reshaped row-major to
+    /// `[[1,2],[4,3]]`, both column maxes (4 and 3) are in row 1 -> flat
+    /// indices {2, 3}, so `df/dx = [0, 0, 1, 1]`.
+    #[test]
+    fn issue_320_grad_eval_windowed_max_reduce_end_to_end() {
+        use crate::eval::{TensorValue, eval_tensor};
+        use crate::grad::grad_dag_checked;
+
+        // `w = reshape(x, [2,2])` with NO type on the reshape app -> rank-0
+        // operand node, but a real producer (Reshape over the `x` Load).
+        // `max_reduce(w, 0)` is typed `[2]`; `sum(..., 0)` -> scalar loss.
+        let src = r#"
+            (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+            (def {} w (app {} (var {} reshape) (var {} x)
+                          (app {} (var {} Cons) (lit {} 2)
+                               (app {} (var {} Cons) (lit {} 2) (var {} Nil)))))
+            (def {} m (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                           (var {} max_reduce) (var {} w) (lit {} 0)))
+            (def {} loss (app {type: (t-tensor {} (t-prim {} f32))}
+                              (var {} sum) (var {} m) (lit {} 0)))
+        "#;
+        let dag = parse_and_lower_unchecked(src);
+        // The loss is the scalar `Sum` consuming the `MaxReduce`.
+        let mr_id = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.op, RiscOp::MaxReduce { .. }))
+            .expect("max_reduce node")
+            .id;
+        let loss = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.op, RiscOp::Sum { .. }) && n.inputs.contains(&mr_id))
+            .expect("loss sum node")
+            .id;
+        let x_node = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(&n.op, RiscOp::Load { name } if name.as_str() == "x"))
+            .expect("x load")
+            .id;
+        let result = grad_dag_checked(&dag, loss, &[x_node])
+            .expect("grad through windowed max_reduce must construct (issue #320)");
+        let grad_x = result.grad_nodes[&x_node];
+        let mut inputs = std::collections::HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue::from_vec(vec![4], vec![1.0, 2.0, 4.0, 3.0]),
+        );
+        let vals = eval_tensor(&result.dag, &inputs).expect("windowed max_reduce grad eval");
+        assert_eq!(
+            vals[&grad_x].data,
+            vec![0.0, 0.0, 1.0, 1.0],
+            "subgradient must route to each column's argmax (issue #320)",
+        );
+    }
+
+    /// Issue #320 end-to-end (gather): a windowed `values` operand that
+    /// lowers to the rank-0 placeholder must grad+eval correctly once the
+    /// front-end recovers its rank. `w = reshape(x, [4])` is lowered UNtyped
+    /// (rank-0 node) but its runtime value is `[4]`; `gather(w, idx, 0)` with
+    /// `idx = [0, 2]` selects `w[0]` and `w[2]`. `f(x) = x0 + x2`, so the
+    /// scatter-add adjoint gives `df/dx = [1, 0, 1, 0]`.
+    #[test]
+    fn issue_320_grad_eval_windowed_gather_end_to_end() {
+        use crate::eval::{TensorValue, eval_tensor};
+        use crate::grad::grad_dag_checked;
+
+        let src = r#"
+            (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+            (def {} idx (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int64))} idx))
+            (def {} w (app {} (var {} reshape) (var {} x)
+                          (app {} (var {} Cons) (lit {} 4) (var {} Nil))))
+            (def {} g (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                           (var {} gather) (var {} w) (var {} idx) (lit {} 0)))
+            (def {} loss (app {type: (t-tensor {} (t-prim {} f32))}
+                              (var {} sum) (var {} g) (lit {} 0)))
+        "#;
+        let dag = parse_and_lower_unchecked(src);
+        let g_id = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.op, RiscOp::Gather { .. }))
+            .expect("gather node")
+            .id;
+        let loss = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.op, RiscOp::Sum { .. }) && n.inputs.contains(&g_id))
+            .expect("loss sum node")
+            .id;
+        let x_node = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(&n.op, RiscOp::Load { name } if name.as_str() == "x"))
+            .expect("x load")
+            .id;
+        let result = grad_dag_checked(&dag, loss, &[x_node])
+            .expect("grad through windowed gather must construct (issue #320)");
+        let grad_x = result.grad_nodes[&x_node];
+        let mut inputs = std::collections::HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
+        );
+        inputs.insert(
+            "idx".to_string(),
+            TensorValue::from_vec(vec![2], vec![0.0, 2.0]),
+        );
+        let vals = eval_tensor(&result.dag, &inputs).expect("windowed gather grad eval");
+        assert_eq!(
+            vals[&grad_x].data,
+            vec![1.0, 0.0, 1.0, 0.0],
+            "scatter-add adjoint must route to gathered source slots (issue #320)",
+        );
+    }
+
+    /// Issue #320 gather sibling: a `gather` whose `values` operand lowered
+    /// to the rank-0 placeholder but whose APP carries the checker's gather
+    /// result type must recover the values rank from the ascription instead
+    /// of raising the rank-0 diagnostic.
+    #[test]
+    fn issue_320_gather_recovers_values_rank_from_ascription() {
+        // `values` carries NO type -> rank-0 node. `indices` is `[3]`. The
+        // gather app is typed `[3]` (gather of a rank-1 values over axis 0).
+        let src = r#"
+            (def {} values (var {} values))
+            (def {} indices (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices))
+            (def {} y
+              (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+                   (var {} gather) (var {} values) (var {} indices) (lit {} 0)))
+        "#;
+        let dag = parse_and_lower_unchecked(src);
+        let g = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.op, RiscOp::Gather { axis: 0 }))
+            .expect("gather must lower (issue #320)");
+        let values = dag.get(g.inputs[0]).expect("values operand node");
+        assert!(
+            !values.output_type.dims.is_empty(),
+            "gather values rank must be recovered to >= 1 (issue #320)",
+        );
     }
 
     // --- C5: CmpLt lowering produces Bool ---

@@ -134,6 +134,18 @@ unresolved (chelis#259). The same constraint and diagnostic apply to
 
 **Output dimensions:** The dimension at position `axis` is removed. All other dimensions are preserved.
 
+**Runtime-derived operand rank (chelis#320).** When a reduction
+(`max_reduce`) or `gather` is applied to a windowing/stacking
+intermediate whose IR node lowered without a static tensor type (a
+rank-0 placeholder), the lowering recovers the operand's rank from the
+ascribed result type — for a reduction the operand rank is the result
+rank plus one; for `gather` it is `result_rank - indices_rank + 1` —
+and re-inserts the reduced/gathered axis as a runtime-derived symbolic
+dim. This lets `grad` differentiate a windowed reduce/gather (the
+pooling/im2col pattern) instead of raising "axis out of range for an
+operand of rank 0"; the symbolic axis resolves from the operand's
+runtime shape at evaluation time.
+
 **Accumulator parameter (`sum` only).** The optional `accumulator: prec`
 parameter controls the precision used for the running sum and the precision
 of the output tensor. The default is the operand precision for f32/f64/i32/i64
