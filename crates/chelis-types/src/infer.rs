@@ -6322,6 +6322,27 @@ fn with_macro_provenance(expr: &deep::Expr, message: String) -> String {
     format!("{message} (in expansion of {source})")
 }
 
+// chelis#317 constructor-scope invariant (read before touching the helpers
+// below). The reef name resolver guarantees that every constructor reference
+// which is genuinely *in scope* — declared in the current module, imported by
+// name, or module-qualified — reaches the type checker rewritten to its exact
+// reef-mangled name (`Pkg__Mod__Ctor`), and the matching `deftype` registers
+// that exact name in both the type env and the ADT registry. A bare,
+// un-mangled constructor name therefore arrives at type-check ONLY when the
+// importing module never brought it into scope (a type-only import, or no
+// import at all). The `lookup_terminal_unique` / `lookup_variant_terminal_unique`
+// fuzzy fallbacks are diagnostic-only: they exist so a partially-mangled or
+// out-of-scope name can be *named* in an error, never to bind a reference to a
+// scope. The guards below depend on this: an in-scope constructor is always
+// exact-bound, so rejecting a name that resolves only through the fuzzy
+// fallback (or not at all) cannot reject an in-scope constructor. A future
+// half-mangled producer (mangled `deftype`, bare reference) would violate the
+// invariant and be wrongly rejected here — which is the intended failure mode:
+// a half-mangled program is a structural defect, not a valid reference. The
+// `ir_resolves_consistently_mangled_constructor_names` /
+// `ir_rejects_out_of_scope_terminal_constructor_name` unit tests pin both
+// directions.
+
 /// The terminal (last) segment of a possibly module-qualified or
 /// reef-mangled name. Mirrors `env::terminal_name` / `adt::terminal_name`:
 /// `Pkg__Demo__Adt__Alpha` and `Demo.Adt.Alpha` both have terminal `Alpha`.
@@ -6364,6 +6385,39 @@ fn constructor_out_of_scope(name: &str, env: &Env) -> bool {
     is_constructor_name(name)
         && env.lookup(name).is_none()
         && env.lookup_terminal_unique(name).is_some()
+}
+
+/// Pattern-position counterpart of [`constructor_out_of_scope`]. A constructor
+/// **pattern** head (`| Alpha =>`, `| Alpha { .. } =>`) is in scope only when it
+/// resolves through an *exact* binding — either the type env (`env.lookup`, for
+/// builtins and reef-mangled in-scope constructors) or the ADT registry
+/// (`adt_reg.lookup_variant`, the exact mangled variant key). The terminal-unique
+/// fallbacks (`env.lookup_terminal_unique` / `lookup_variant_terminal_unique`)
+/// are diagnostic-only fuzzy matches, never an in-scope binding.
+///
+/// Returns `true` when `name` is a PascalCase constructor that resolves through
+/// *neither* exact path. This rejects two out-of-scope cases the bare
+/// [`constructor_out_of_scope`] env check misses for patterns (chelis#317):
+///
+///   1. unique fuzzy — exactly one foreign same-terminal variant exists, so a
+///      bare `| Alpha =>` would fuzzy-bind to it; and
+///   2. non-unique / unresolvable — two foreign modules export a same-terminal
+///      `Dup`, so `lookup_*_terminal_unique` returns `None` and the arm would
+///      otherwise push the bare name into `covered_variants` with no scheme and
+///      no diagnostic. Normally that surfaces as `NonExhaustiveMatch`, but a `_`
+///      wildcard arm (`has_wildcard`) suppresses exhaustiveness and the bogus
+///      out-of-scope arm is silently accepted. Rejecting here closes that hole.
+///
+/// Soundness depends on the reef rewriter guaranteeing every genuinely in-scope
+/// constructor reaches type-check exact-bound under its mangled name (see the
+/// module-level note on the terminal-unique fallback). A future half-mangled
+/// producer (mangled deftype, bare reference) would be wrongly rejected here —
+/// which is the intended failure mode: a half-mangled program is a structural
+/// defect, not a valid in-scope reference.
+fn constructor_pattern_out_of_scope(name: &str, env: &Env, adt_reg: &AdtRegistry) -> bool {
+    is_constructor_name(name)
+        && env.lookup(name).is_none()
+        && adt_reg.lookup_variant(name).is_none()
 }
 
 fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> CheckErrorKind {
@@ -7390,6 +7444,61 @@ fn infer_expr(
                     } else {
                         Type::Error
                     }
+                }
+                Some("record") => {
+                    // (record {} Name (kv {} field value) ...): record-shaped
+                    // construction. The type checker does not otherwise infer a
+                    // type for record construction (it lowers through a separate
+                    // IR builder), so this arm exists only to (a) re-enter
+                    // inference on each field value so a nested out-of-scope
+                    // constructor in a field is still diagnosed, and (b) reject an
+                    // out-of-scope record constructor head (chelis#317).
+                    //
+                    // Without this arm a record node fell straight to the unknown-
+                    // tag `_ => Type::Error` branch below, so a type-only import
+                    // that constructs `AdamState { ... }` (the issue's named
+                    // record-constructor regression) checked clean and then
+                    // mis-resolved to a foreign module's mangled tag at runtime —
+                    // the exact silent failure #317 reports, for the construction
+                    // dual of the already-guarded `pat-record` match arm.
+                    let kids = children(list);
+                    for kid in kids.iter().skip(1) {
+                        if let deep::Expr::List(kv, _) = kid
+                            && get_tag(kv) == Some("kv")
+                            && let Some(value) = children(kv).get(1)
+                        {
+                            let _ = infer_expr(
+                                value,
+                                env,
+                                vg,
+                                subst,
+                                adt_reg,
+                                errors,
+                                typed_nodes,
+                                total_nodes,
+                            );
+                        }
+                    }
+                    if let Some(name) = kids.first().and_then(|e| symbol_name(e))
+                        && constructor_out_of_scope(name, env)
+                    {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::UnknownConstructor,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!("unknown constructor: {name}"),
+                            ),
+                            vec![format!(
+                                "Constructor '{name}' is not in scope. Declare it locally or \
+                                 add it to an import (e.g. `import Mod ({name})`)"
+                            )],
+                        ));
+                    }
+                    // Record construction is otherwise type-inferred through the
+                    // IR builder, not here; keep the historical `Type::Error`
+                    // result so an in-scope record constructor's score is
+                    // unchanged (chelis#148 mixed-shape record-call tests).
+                    Type::Error
                 }
                 _ => {
                     // Unknown tag -- try to infer children
@@ -14420,9 +14529,14 @@ fn pattern_bindings(
                     // the construction site is in `infer_var`. Without this the
                     // fuzzy terminal fallback below binds the arm to a foreign
                     // module's tag and the mismatch surfaces only as a runtime
-                    // non-exhaustive match. Skip coverage/binding so the bogus
-                    // arm cannot also mask the real `non-exhaustive` diagnostic.
-                    if constructor_out_of_scope(ctor_name, env) {
+                    // non-exhaustive match. `constructor_pattern_out_of_scope`
+                    // rejects both the unique-fuzzy case and the non-unique /
+                    // unresolvable case; the latter would otherwise push a bare
+                    // name with no scheme into `covered_variants` and be silently
+                    // accepted under a `_` wildcard arm. Skip coverage/binding so
+                    // the bogus arm cannot also mask the real `non-exhaustive`
+                    // diagnostic.
+                    if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
                         errors.push(CheckError::new(
                             CheckErrorKind::UnknownConstructor,
                             with_macro_provenance(
@@ -14520,7 +14634,10 @@ fn pattern_bindings(
                     // `pat-ctor` arm — a record-shaped match against a
                     // constructor that was never imported must be an `unknown
                     // constructor` error, not a fuzzy bind to a foreign tag.
-                    if constructor_out_of_scope(ctor_name, env) {
+                    // `constructor_pattern_out_of_scope` also rejects the
+                    // non-unique / unresolvable case a `_` wildcard arm would
+                    // otherwise silently accept.
+                    if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
                         errors.push(CheckError::new(
                             CheckErrorKind::UnknownConstructor,
                             with_macro_provenance(
@@ -17395,11 +17512,10 @@ mod tests {
 
         let result = infer_ir_program(&exprs);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|error| matches!(error.kind, CheckErrorKind::UnknownConstructor)
-                    && error.message.contains("KVCache")),
+            result.errors.iter().any(|error| matches!(
+                error.kind,
+                CheckErrorKind::UnknownConstructor
+            ) && error.message.contains("KVCache")),
             "expected an UnknownConstructor for the out-of-scope bare `KVCache`, got {:?}",
             result.errors
         );

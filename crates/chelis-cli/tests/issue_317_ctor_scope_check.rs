@@ -269,3 +269,222 @@ fn builtin_option_constructors_check_clean() {
         "no errors expected for builtin Some/None; got {msgs:?} in {combo}"
     );
 }
+
+#[test]
+fn builtin_list_constructors_check_clean() {
+    // chelis#317 review (5c): `Cons`/`Nil` are also bare prelude constructors.
+    // The exact-scope check must accept them at both construction and match
+    // sites, the same as `Some`/`None`.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(
+        &root.join("src/lst.ch"),
+        "module Pkg.Lst\n\
+         def one() -> List[i64] = Cons(cast(1, int64), Nil)\n\
+         def head_or(xs: List[i64]) -> i64 = match xs with { | Cons(h, _) => h | Nil => 0 }\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "lst.ch");
+    let msgs = error_messages(combo);
+    assert_eq!(
+        combo["report"]["score"], 1,
+        "builtin List Cons/Nil constructors must resolve and check clean: {combo}"
+    );
+    assert!(
+        msgs.is_empty(),
+        "no errors expected for builtin Cons/Nil; got {msgs:?} in {combo}"
+    );
+}
+
+// ── RECORD-shaped constructors (chelis#317 review item 3) ───────────────
+
+// A record-shaped ADT whose declaring module exports only the type. The
+// constructor name (`AdamState`) deliberately DIFFERS from the type name
+// (`Adam`): the issue names `Adam`'s `AdamState` record constructor among the
+// regressed cases, and only a distinct-named constructor is genuinely out of
+// scope under a type-only import. (When the constructor shares the type's name,
+// importing the type already brings the identically-mangled constructor into
+// scope, so it is not the bug surface.)
+const REC_ADT: &str = "module Pkg.Rec\n\
+     export (Adam, use)\n\
+     type Adam = | AdamState { rate: int64 }\n\
+     def use(c: Adam) -> i64 = match c with { | AdamState { rate } => rate }\n";
+
+#[test]
+fn type_only_import_then_record_construct_is_unknown_constructor() {
+    // The record-construction dual of the headline defect: importing only the
+    // TYPE `Adam` and then constructing `AdamState { rate: .. }` must be
+    // rejected at check. Record construction lowers through a separate IR
+    // builder and was previously unchecked at type-check, so this site
+    // mis-resolved silently.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("src/rec.ch"), REC_ADT);
+    write_file(
+        &root.join("src/consumer.ch"),
+        "module Pkg.Consumer\n\
+         import Pkg.Rec (Adam)\n\
+         def make() -> Adam = AdamState { rate: cast(7, int64) }\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "consumer.ch");
+    let msgs = error_messages(combo);
+    assert_ne!(
+        combo["report"]["score"], 1,
+        "type-only import then record construct must NOT be a perfect score: {combo}"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("unknown constructor") && m.contains("AdamState")),
+        "constructing an unimported record constructor must be \
+         `unknown constructor: AdamState`; got {msgs:?} in {combo}"
+    );
+}
+
+#[test]
+fn import_record_constructor_by_name_checks_clean() {
+    // Over-rejection guard for the record path: naming the record constructor
+    // in the import brings it into scope, so `AdamState { rate: .. }` resolves
+    // and checks clean.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("src/rec.ch"), REC_ADT);
+    write_file(
+        &root.join("src/consumer.ch"),
+        "module Pkg.Consumer\n\
+         import Pkg.Rec (Adam, AdamState, use)\n\
+         def make() -> i64 = use(AdamState { rate: cast(7, int64) })\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "consumer.ch");
+    let msgs = error_messages(combo);
+    assert_eq!(
+        combo["report"]["score"], 1,
+        "imported-by-name record constructor must resolve and check clean: {combo}"
+    );
+    assert!(
+        msgs.is_empty(),
+        "no errors expected when the record constructor is imported by name; \
+         got {msgs:?} in {combo}"
+    );
+}
+
+// ── Non-unique terminal + wildcard arm (chelis#317 review item 4) ────────
+
+#[test]
+fn ambiguous_foreign_constructor_pattern_under_wildcard_is_rejected() {
+    // Two modules each declare `type Mode = | Dup`, and a consumer imports
+    // NEITHER constructor but matches `| Dup => .. | _ => ..`. The terminal
+    // `Dup` is non-unique, so `lookup_terminal_unique` returns None and the
+    // arm would push a bare unresolved name into the coverage set; the `_`
+    // wildcard then suppresses the would-be `non-exhaustive` diagnostic. The
+    // pattern guard must still reject `Dup` as an unknown constructor — the
+    // reference resolves to neither module's constructor and must not be
+    // silently accepted.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(
+        &root.join("src/one.ch"),
+        "module Pkg.One\n\
+         export (Mode)\n\
+         type Mode = | Dup\n",
+    );
+    write_file(
+        &root.join("src/two.ch"),
+        "module Pkg.Two\n\
+         export (Mode)\n\
+         type Mode = | Dup\n",
+    );
+    write_file(
+        &root.join("src/consumer.ch"),
+        "module Pkg.Consumer\n\
+         import Pkg.One ()\n\
+         import Pkg.Two ()\n\
+         def label(n: i64) -> i64 = match n with { | Dup => 1 | _ => 0 }\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "consumer.ch");
+    let msgs = error_messages(combo);
+    assert_ne!(
+        combo["report"]["score"], 1,
+        "ambiguous foreign constructor pattern under a wildcard must NOT score perfect: {combo}"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("unknown constructor") && m.contains("Dup")),
+        "a non-unique foreign constructor pattern must be `unknown constructor: Dup`, \
+         even under a `_` wildcard arm; got {msgs:?} in {combo}"
+    );
+}
+
+// ── Qualified pattern + nested pattern (chelis#317 review item 5) ────────
+
+#[test]
+fn module_qualified_constructor_pattern_checks_clean() {
+    // Review item 5a: the module-qualified form (#316) is in scope in PATTERN
+    // position too, without naming the constructor in the import list. Pins the
+    // §P2 qualified-pattern claim against over-rejection.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("src/adt.ch"), ADT);
+    write_file(
+        &root.join("src/consumer.ch"),
+        "module Pkg.Consumer\n\
+         import Pkg.Adt (Mode)\n\
+         def relabel(m: Mode) -> i64 = match m with { \
+           | Pkg.Adt.Alpha => 10 | Pkg.Adt.Beta => 11 | Pkg.Adt.Gamma => 12 }\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "consumer.ch");
+    let msgs = error_messages(combo);
+    assert_eq!(
+        combo["report"]["score"], 1,
+        "module-qualified constructor pattern must resolve and check clean: {combo}"
+    );
+    assert!(
+        msgs.is_empty(),
+        "no errors expected for the module-qualified pattern form; got {msgs:?} in {combo}"
+    );
+}
+
+#[test]
+fn nested_out_of_scope_constructor_pattern_is_unknown_constructor() {
+    // Review item 5b: an out-of-scope constructor nested inside an in-scope
+    // constructor's field pattern (`| Some(Alpha) =>`, with `Alpha`
+    // type-only-imported) must still be rejected — verifies the recursive
+    // `pattern_bindings` re-enters the guard on sub-patterns.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("src/adt.ch"), ADT);
+    write_file(
+        &root.join("src/consumer.ch"),
+        "module Pkg.Consumer\n\
+         import Pkg.Adt (Mode)\n\
+         def peek(o: Option[Mode]) -> i64 = match o with { | Some(Alpha) => 1 | _ => 0 }\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "consumer.ch");
+    let msgs = error_messages(combo);
+    assert_ne!(
+        combo["report"]["score"], 1,
+        "nested out-of-scope constructor pattern must NOT score perfect: {combo}"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("unknown constructor") && m.contains("Alpha")),
+        "a nested out-of-scope constructor pattern must be `unknown constructor: Alpha`; \
+         got {msgs:?} in {combo}"
+    );
+}

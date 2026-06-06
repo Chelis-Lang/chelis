@@ -145,10 +145,15 @@ only when the constructor is declared in the current module **or** named in an
 `import` that brings it into unqualified scope. Importing only the enclosing
 **type** is not sufficient: the constructor itself must be named in the import
 list (e.g. `import Pkg.Adt (Mode, Alpha, Beta, Gamma)`). A constructor that is
-not in scope is an `unknown constructor \`X\`` error at `chelis check` with a
-source position — the same way an unbound value is an `unbound variable` — and
-must never silently bind to a same-named constructor declared in another module
-(which would defer the failure to a runtime non-exhaustive match). The
+not in scope is an `unknown constructor \`X\`` error at `chelis check` that
+names the constructor — the same way an unbound value is an `unbound variable`
+(type-checker diagnostics name the offending identifier; they do not yet carry
+a source span) — and must never silently bind to a same-named constructor
+declared in another module (which would defer the failure to a runtime
+non-exhaustive match). This applies to record-shaped constructors
+(`Alpha { ... }`) at both construction and match-pattern sites, and to the
+case where two other modules export a same-named constructor (the reference is
+rejected as unknown, not bound to either). The
 module-qualified forms above (`Pkg.Adt.Alpha`, `| Pkg.Adt.Alpha =>`) remain in
 scope without naming the constructor in the import list, because they name the
 declaring module explicitly.
