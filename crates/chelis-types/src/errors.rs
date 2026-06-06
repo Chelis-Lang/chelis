@@ -21,6 +21,19 @@ pub enum CheckErrorKind {
     DimensionMismatch,
     ArityMismatch,
     UnboundVariable,
+    /// A constructor reference (uppercase-leading name in expression or
+    /// pattern position) names an ADT variant that is not in scope: it is
+    /// neither declared in the current module nor brought into scope by an
+    /// `import` that names it (chelis#317). After reef's module-scoped
+    /// constructor mangling (chelis#157, #316), an in-scope constructor is
+    /// always referenced by its exact (mangled or bare-builtin) name, so a
+    /// bare name that only resolves through the registry's fuzzy
+    /// terminal-segment match is a constructor from another module that the
+    /// importing module never pulled in. Binding it silently bound the
+    /// reference to a foreign tag and deferred the failure to a runtime
+    /// `non-exhaustive match`; this rejects it at `check` instead, the same
+    /// way an `UnboundVariable` rejects an unknown value name.
+    UnknownConstructor,
     NotAFunction,
     NonExhaustiveMatch,
     OccursCheck,
@@ -52,6 +65,7 @@ impl CheckErrorKind {
             CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch => 0.8,
             CheckErrorKind::ArityMismatch => 0.7,
             CheckErrorKind::UnboundVariable => 0.6,
+            CheckErrorKind::UnknownConstructor => 0.6,
             CheckErrorKind::NotAFunction => 0.5,
             CheckErrorKind::TypeMismatch => 0.5,
             CheckErrorKind::NonExhaustiveMatch => 0.7,
