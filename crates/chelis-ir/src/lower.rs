@@ -5406,15 +5406,49 @@ impl LowerCtx {
             "expand" if args.len() >= 2 => {
                 let x = self.lower_expr_node(&args[0], "expand input");
                 let axis = self.extract_usize_value(&args[1]).unwrap_or(0);
-                let size = if args.len() >= 3 {
+                // Try to recover the broadcast extent statically (a bare
+                // int, `(lit ...)`, a `cast`-wrapped int, or a symbolic
+                // dim variable). Issue #288 fixed the literal-size form
+                // `expand(scalar_to_tensor(c), 0, cast(2, int32))`; issue
+                // #318 covers the shape-derived form
+                // `expand(scalar_to_tensor(c), 0, cast(shape(&x, 0), int32))`
+                // that the canonical `tensor_full_like` / `tensor_full_1d`
+                // helper emits. There the size argument is a host-lane
+                // `shape(...)` application, which `extract_dim_expr_value`
+                // cannot read, so the extent must come from the
+                // type-checker's output type at the broadcast axis instead
+                // of silently defaulting to 1.
+                let extracted_size = if args.len() >= 3 {
                     self.extract_dim_expr_value(&args[2])
-                        .unwrap_or(DimExpr::Concrete(1))
                 } else {
-                    DimExpr::Concrete(1)
+                    None
                 };
-                let out_ty = self
-                    .fallback_expand_type(x, axis, &size)
-                    .unwrap_or_else(|| ty.clone());
+                let (size, out_ty) = match extracted_size {
+                    Some(size) => {
+                        let out_ty = self
+                            .fallback_expand_type(x, axis, &size)
+                            .unwrap_or_else(|| ty.clone());
+                        (size, out_ty)
+                    }
+                    // Shape-derived / runtime extent: defer to the
+                    // type-checker's output type. Using `Concrete(1)` here
+                    // would lower a same-shaped `tensor[1]` Expand into a
+                    // larger broadcast context, producing a forward `Mul`
+                    // that mixes `tensor[n]` with `tensor[1]` — the
+                    // `Lit(n) vs Lit(1)` verification failure that surfaced
+                    // only when `grad` verified the backward DAG (#318).
+                    None => {
+                        if let Some(extent) = ty.dims.get(axis) {
+                            (DimExpr::from(extent), ty.clone())
+                        } else {
+                            let size = DimExpr::Concrete(1);
+                            let out_ty = self
+                                .fallback_expand_type(x, axis, &size)
+                                .unwrap_or_else(|| ty.clone());
+                            (size, out_ty)
+                        }
+                    }
+                };
                 self.dag.add_node(
                     RiscOp::Expand { axis, size },
                     vec![x],
