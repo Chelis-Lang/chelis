@@ -33,25 +33,28 @@
 //!
 //! Root cause (lowering, not autodiff): the `expand` size argument is a
 //! host-lane `shape(...)` application, which `extract_dim_expr_value`
-//! cannot read. The lowering silently defaulted the size to `1`, so
-//! `fallback_expand_type` lowered the `expand` to a `tensor[1]` instead
-//! of `tensor[n]`. The forward `mul(x, k)` then mixed `tensor[n]` with
-//! `tensor[1]`; the type checker accepts that via size-1 broadcasting,
-//! but the IR (no implicit broadcasting) does not. The malformed `Mul`
-//! surfaced only when `grad` verified the cloned forward inside the
-//! backward DAG — which is why it looked like an autodiff bug. The fix
-//! recovers the broadcast extent from the type-checker's output type at
-//! the broadcast axis when the size argument is not statically
-//! extractable, so the shape-derived form lowers the same as the literal
-//! form.
+//! cannot read. The lowering silently defaulted the size to `1`, so the
+//! `expand` lowered to a `tensor[1]` instead of `tensor[n]`. The forward
+//! `mul(x, k)` then mixed `tensor[n]` with `tensor[1]`; the type checker
+//! accepts that via size-1 broadcasting, but the IR (no implicit
+//! broadcasting) does not. The malformed `Mul` surfaced only when `grad`
+//! verified the cloned forward inside the backward DAG. The fix recovers
+//! the broadcast extent from the `shape(operand, axis)` argument's
+//! operand dim during lowering (see the lowering-level sibling
+//! `issue_318_expand_shape_size.rs`, which drives REAL Surf lowering and
+//! is the test that detects the lowering failure).
 //!
-//! This file pins the fix at the IR level, independent of the front-end
-//! parser. It builds the forward DAG with a SYMBOLIC (shape-derived)
-//! broadcast extent (`DimExpr::Sym` + `DimInfo::Named(_, None)` output)
-//! and asserts `grad_dag_checked` constructs the backward and
-//! `eval_tensor` yields the correct numeric gradient (`[3, 3]` for the
-//! issue example). The LITERAL form is re-pinned alongside (negative
-//! parity: both forms must construct and agree).
+//! SCOPE OF THIS FILE: it does NOT exercise the lowering fix. It
+//! hand-builds the forward DAG with the broadcast extent ALREADY supplied
+//! (a `DimExpr::Sym` size and a `DimInfo::Named(_, None)` expand output),
+//! so it cannot detect the lowering defect — the lowering sibling and the
+//! CLI end-to-end test own that. What this file pins is that the `grad`
+//! `RiscOp::Expand` adjoint is EXTENT-AGNOSTIC: given a well-formed
+//! forward whose broadcast extent is symbolic (not a `Lit`),
+//! `grad_dag_checked` still constructs the backward and `eval_tensor`
+//! yields the correct numeric gradient (`[3, 3]`), for both const-source
+//! ranks (`[]` and `[1]`). Both reviewers confirmed the adjoint is
+//! correct and unchanged; this is the regression lock for that property.
 
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
