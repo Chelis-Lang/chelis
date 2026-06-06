@@ -906,6 +906,20 @@ mod tests {
             .expect("formatted qualified constructor pattern must re-parse");
     }
 
+    // A module-qualified *type* name (chelis#316) must survive a format round
+    // trip and re-parse.
+    #[test]
+    fn qualified_type_name_round_trips() {
+        let source = "def f(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)\n";
+        let program = crate::parser::parse_str(source).expect("parse");
+        let rendered = format_program(&program);
+        assert!(
+            rendered.contains("Demo.Dropout.Mode"),
+            "qualified type name must render as a dotted path; got: {rendered}"
+        );
+        crate::parser::parse_str(&rendered).expect("formatted qualified type name must re-parse");
+    }
+
     // ── format_source comment preservation (#144) ────────────────
 
     #[test]

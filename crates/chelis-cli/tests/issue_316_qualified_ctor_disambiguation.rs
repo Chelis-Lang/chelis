@@ -222,3 +222,100 @@ fn qualified_constructor_patterns_match_per_module() {
         "no errors expected for the qualified-pattern combo: {combo}"
     );
 }
+
+#[test]
+fn qualified_type_annotation_resolves_per_module() {
+    // The third qualification position: a module-qualified *type* name in an
+    // annotation. `relay` pins its parameter to `Demo.Dropout.Mode` even
+    // though both modules export a `Mode`, and forwards it to that module's
+    // `use`.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("src/dropout.ch"), DROPOUT);
+    write_file(&root.join("src/sd.ch"), SD);
+    write_file(
+        &root.join("src/combo.ch"),
+        "module Demo.Combo\n\
+         import Demo.Dropout ()\n\
+         import Demo.Sd ()\n\
+         def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "combo.ch");
+    let report = &combo["report"];
+    assert_eq!(
+        report["score"], 1,
+        "qualified type annotation must resolve and type-check: {combo}"
+    );
+    assert!(
+        report["errors"]
+            .as_array()
+            .expect("errors array")
+            .is_empty(),
+        "no errors expected for the qualified-type combo: {combo}"
+    );
+}
+
+#[test]
+fn qualified_type_annotation_distinguishes_modules() {
+    // Negative parity for the type feature: a value of `Demo.Dropout.Mode`
+    // passed to `Demo.Sd.use` (which wants `Demo.Sd.Mode`) must be a type
+    // mismatch — proving the qualified annotation resolves to a distinct type,
+    // not a shared/erased one.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("src/dropout.ch"), DROPOUT);
+    write_file(&root.join("src/sd.ch"), SD);
+    write_file(
+        &root.join("src/combo.ch"),
+        "module Demo.Combo\n\
+         import Demo.Dropout ()\n\
+         import Demo.Sd ()\n\
+         def bad(m: Demo.Dropout.Mode) -> i64 = Demo.Sd.use(m)\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "combo.ch");
+    let messages: Vec<String> = combo["report"]["errors"]
+        .as_array()
+        .map(|errs| {
+            errs.iter()
+                .map(|e| e["message"].as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        messages.iter().any(|m| m.contains("type mismatch")
+            && m.contains("Sd__Mode")
+            && m.contains("Dropout__Mode")),
+        "mixing two modules' qualified Mode types must be a mismatch; got {combo}"
+    );
+}
+
+#[test]
+fn qualified_type_to_unexported_name_is_rejected() {
+    // The type position must reject an unknown qualified leaf as loudly as the
+    // expression and pattern positions — not silently accept it as an opaque
+    // type. `Demo.Dropout` exports `Mode`, never `Nope`.
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("src/dropout.ch"), DROPOUT);
+    write_file(
+        &root.join("src/combo.ch"),
+        "module Demo.Combo\n\
+         import Demo.Dropout ()\n\
+         def relay(m: Demo.Dropout.Nope) -> i64 = 0\n",
+    );
+
+    let json = check_package(root);
+    let combo = file_entry(&json, "combo.ch");
+    let blob = combo.to_string();
+    assert!(
+        blob.contains("does not export") && blob.contains("Nope"),
+        "qualified type to an unexported name must be rejected; got {combo}"
+    );
+}
