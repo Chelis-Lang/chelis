@@ -813,7 +813,6 @@ pub fn lower_mean(
     parent_span: Option<&str>,
 ) -> NodeId {
     let red_ty = reduced_type(ty, axis);
-    let dim_size_val = require_axis_size(ty, axis, "mean") as f64;
 
     // sum(x, axis)
     let sum_node = add_synth(
@@ -825,19 +824,51 @@ pub fn lower_mean(
         parent_span,
     );
 
-    // const(dim_size)
-    let size_const = add_synth(
-        dag,
-        RiscOp::Const {
-            value: dim_size_val,
-        },
-        vec![],
-        red_ty.clone(),
-        parent_span,
-    );
+    // The divisor is the reduced-axis extent. When that extent is a
+    // concrete literal the divisor is a compile-time `Const` (the simple
+    // path). When the extent is RUNTIME-DERIVED (a `Named(_, None)` axis
+    // produced by a `shrink`/`stride`/`reshape` window, per issue #320),
+    // it is unknown at lowering time, so the divisor is built as a runtime
+    // count: `sum(ones_like(x), axis)`. The ones tensor carries the same
+    // (symbolic) operand type as `x`, so `sum` over `axis` yields the
+    // runtime extent in the reduced shape; the symbolic dim binds from the
+    // input shape at eval time via `bind_symbolic_dims`, the same way the
+    // windowing-op adjoints resolve their shapes post-#291. This carries
+    // the operand's extent instead of demanding a concrete one in IR
+    // lowering.
+    let divisor = match dim_size(ty, axis) {
+        Some(dim_size_val) => add_synth(
+            dag,
+            RiscOp::Const {
+                value: dim_size_val as f64,
+            },
+            vec![],
+            red_ty.clone(),
+            parent_span,
+        ),
+        None => {
+            // ones shaped exactly like the operand `x` (same symbolic dims).
+            let ones = add_synth(
+                dag,
+                RiscOp::Const { value: 1.0 },
+                vec![],
+                ty.clone(),
+                parent_span,
+            );
+            // sum the ones over `axis` -> the runtime extent, reduced shape.
+            add_synth(
+                dag,
+                RiscOp::sum_default(axis, ty.precision)
+                    .expect("mean count precision should accept reduce_sum"),
+                vec![ones],
+                red_ty.clone(),
+                parent_span,
+            )
+        }
+    };
 
-    // sum / dim_size
-    lower_div(dag, sum_node, size_const, &red_ty, parent_span)
+    // sum / extent
+    lower_div(dag, sum_node, divisor, &red_ty, parent_span)
 }
 
 /// layer_norm(x, gamma, beta) over the last axis.

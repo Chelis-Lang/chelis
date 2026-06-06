@@ -460,7 +460,7 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 | Name | Lowering to RISC |
 |---|---|
 | `matmul(A, B)` | See §4.1 |
-| `mean(x, axis)` | `div(sum(x, axis), const(dim_size))` |
+| `mean(x, axis)` | `div(sum(x, axis), divisor)` where `divisor = const(dim_size)` for a concrete-extent axis, or the runtime count `sum(const(1.0, x.shape), axis)` when the reduced axis is a runtime-derived (`Named(_, None)`) extent (chelis#320) |
 | `softmax(x, axis)` | See §4.2 |
 | `linear(x, w, b)` | `add(matmul(x, w), b)` (with appropriate expand on b) |
 | `cross_entropy(logits, labels)` | See §4.3 |
