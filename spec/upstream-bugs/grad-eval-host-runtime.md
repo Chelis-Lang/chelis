@@ -61,15 +61,26 @@ precision-polymorphic callee:
      (keyed on `p`) missed it and a shape-preserving op (`permute`)
      tripped the §5.8.1 monomorphization tripwire. Fixed in
      `chelis-ir::lower`: `permute` takes precision from its operand, and
-     the inline call site binds every body precision variable to the
-     concrete call-site precision when the call is precision-monomorphic.
+     the inline call site binds every renamed body precision variable to
+     the concrete call-site precision ONLY when the call is FULLY
+     precision-monomorphic — i.e. every formal-parameter precision
+     variable (recovered from the verb's inferred `t-fn` type metadata)
+     resolves to one shared concrete precision. A genuinely
+     heterogeneous call (tensor actuals disagree) or an under-determined
+     precision variable binds nothing and the tripwire / a clean
+     precision-mismatch diagnostic fires, preserving the
+     no-implicit-precision-promotion invariant (§5.8.1).
 
   Coverage:
   `crates/chelis-compiler-api/tests/issue_319_grad_crossmodule_precision_poly_attn.rs`
-  (host-eval single-module + true reef cross-module-boundary, with
-  inline-f32 parity and a rank-guard negative case) and
+  (host-eval single-module + true reef cross-module-boundary grad with
+  inline-f32 parity; masked/causal and output-transpose body shapes;
+  `reshape`/`expand` precision-path forward lowering; a rank-guard
+  negative case; and soundness cases — two-precision-var monomorphic
+  grad, heterogeneous-precision rejection, and distinct-precision
+  non-promotion) and
   `crates/chelis-types/tests/issue_319_separate_sig_body_annotation.rs`
-  (checker-half body-annotation pin).
+  (checker-half body-annotation pin, structural).
 
 ## Original deferral rationale (historical, now resolved)
 

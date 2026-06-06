@@ -4854,6 +4854,21 @@ fn annotate_fn_children(
     // (`q: [s, d]`, `kt: [d, s]` ⇒ `matmul(q, kt): [s, s]`) that the
     // matmul typing rule depends on. `param_vg` (the cloned `VarGen`)
     // feeds fresh-var allocation so it does not perturb the caller's.
+    //
+    // Var-ID overlap is harmless. These freshly-minted `TypeVar`s are
+    // used ONLY to seed `fn_env` for the body-ANNOTATION pass below; the
+    // annotation re-infers each body node's `type:` via
+    // `infer_expr_in_scope`, which runs in its OWN throwaway `Subst`
+    // (`infer_expr_in_scope` creates `Subst::new()`). Nothing from
+    // `param_vg` flows back into the caller's `vg`/`subst` or the
+    // program's global type state, so a `TypeVar(N)` minted here that
+    // happens to collide numerically with a `TypeVar(N)` elsewhere never
+    // unifies the two: the collision is confined to this one node's
+    // annotation scope. (Re-using the already-resolved declared `Fn` type
+    // — as the WS-A7 `infer_def_body_with_sig` inference path does — would
+    // also work, but is not reachable from this post-inference annotation
+    // pass, which has no access to that resolved type or the error
+    // vector.)
     let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
         Some(declared) => {
             let mut tvar_map: HashMap<String, TypeVar> = HashMap::new();

@@ -285,9 +285,265 @@ fn issue_319_negative_rank1_matmul_operand_still_rejected() {
     let src = "def bad(vec: tensor[3, f32], m: tensor[3, 3, f32]) -> tensor[3, f32] = matmul(vec, m)\n\
                out = bad(to_tensor([1.0, 2.0, 3.0]), to_tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]))\n";
     let outcome = try_eval(src);
+    let message = match outcome {
+        Ok(ok) => panic!(
+            "issue #319 negative parity: a rank-1 matmul operand must be rejected, \
+             not silently lowered; got Ok({ok:?})"
+        ),
+        Err(message) => message,
+    };
+    // Fail with the RIGHT reason: the diagnostic must name the rank-≥2
+    // matmul violation (the guard the #319 fix must not paper over), not
+    // some unrelated downstream symptom.
     assert!(
-        outcome.is_err(),
-        "issue #319 negative parity: a rank-1 matmul operand must be rejected, \
-         not silently lowered; got Ok({outcome:?})",
+        message.contains("rank") && message.to_lowercase().contains("matmul"),
+        "issue #319 negative parity: rejection must name the matmul rank-≥2 \
+         violation; got {message}",
     );
+}
+
+// =====================================================================
+// Completeness: additional precision-polymorphic separate-`sig` body
+// shapes the single-matmul-pair `sdpa` test does not reach. Each is a
+// separate-`sig` verb grad'd via the concrete-f32 driver, asserted to
+// produce the SAME gradient as the byte-identical inline-f32 body. This
+// exercises the masked-add / extra-transpose precision paths the
+// School.Nn.Attention.* verbs use.
+// =====================================================================
+
+/// Grad through a precision-poly separate-`sig` verb whose body is
+/// `body`, asserted equal to the inline-f32 reimplementation of the same
+/// body. `sig`/`params`/inputs are supplied so each shape can vary its
+/// arity. The inline form writes concrete-`f32` parameter annotations;
+/// the separate-`sig` form declares precision-var `[..., p]` types in a
+/// standalone `sig`.
+fn assert_separate_sig_grad_matches_inline(
+    label: &str,
+    inline_params: &str,
+    sig: &str,
+    bare_params: &str,
+    body: &str,
+    loss_params: &str,
+    call: &str,
+) {
+    let inline_src = format!(
+        "def verb({inline_params}) = {body}\n\
+         def loss({loss_params}) -> f32 =\n  \
+           tensor_to_scalar(sum(sum(verb({call_args}), cast(0, int32)), cast(0, int32)))\n\
+         out = grad(loss, wrt=(q))({call})\n",
+        call_args = bare_params,
+    );
+    let sep_src = format!(
+        "{sig}\ndef verb({bare_params}) = {body}\n\
+         def loss({loss_params}) -> f32 =\n  \
+           tensor_to_scalar(sum(sum(verb({call_args}), cast(0, int32)), cast(0, int32)))\n\
+         out = grad(loss, wrt=(q))({call})\n",
+        call_args = bare_params,
+    );
+    let inline = out_tensor(&try_eval(&inline_src).unwrap_or_else(|err| {
+        panic!(
+            "issue #319 [{label}] inline-f32 control must grad in host eval: {err}\n{inline_src}"
+        )
+    }));
+    let sep = out_tensor(&try_eval(&sep_src).unwrap_or_else(|err| {
+        panic!(
+            "issue #319 [{label}] separate-sig precision-poly verb must grad in host eval \
+             (no rank error, no monomorphization tripwire): {err}\n{sep_src}"
+        )
+    }));
+    assert_close(&sep, &inline, 1e-6, &format!("issue #319 [{label}] parity"));
+}
+
+#[test]
+fn issue_319_masked_causal_body_grad_matches_inline() {
+    // softmax(add(mul(scores, scale), mask), -1): the masked/causal
+    // attention path — an extra `add` of an `[s, s]` mask before softmax.
+    assert_separate_sig_grad_matches_inline(
+        "masked",
+        "q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32], mask: tensor[s, s, f32]",
+        "sig verb: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, s, p] -> tensor[s, d, p]",
+        "q, k, v, scale, mask",
+        "{\n  kt = permute(k, 1, 0)\n  scores = matmul(q, kt)\n  weights = softmax(add(mul(scores, scale), mask), -1)\n  matmul(weights, v)\n}",
+        "q: tensor[2, 3, f32], k: tensor[2, 3, f32], v: tensor[2, 3, f32], scale: tensor[2, 2, f32], mask: tensor[2, 2, f32]",
+        "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]), to_tensor([[1.0, 0.0], [0.0, 1.0]]), to_tensor([[0.0, 0.0], [0.0, 0.0]])",
+    );
+}
+
+#[test]
+fn issue_319_output_transpose_body_grad_matches_inline() {
+    // Multi-head-style output transpose: an extra `permute` on the
+    // attention output exercises a second transpose-adjoint precision path
+    // in the backward.
+    assert_separate_sig_grad_matches_inline(
+        "out-transpose",
+        "q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32]",
+        "sig verb: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[d, s, p]",
+        "q, k, v, scale",
+        "{\n  kt = permute(k, 1, 0)\n  scores = matmul(q, kt)\n  weights = softmax(mul(scores, scale), -1)\n  o = matmul(weights, v)\n  permute(o, 1, 0)\n}",
+        "q: tensor[2, 3, f32], k: tensor[2, 3, f32], v: tensor[2, 3, f32], scale: tensor[2, 2, f32]",
+        "to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]), to_tensor([[1.0, 0.0], [0.0, 1.0]])",
+    );
+}
+
+// =====================================================================
+// Completeness (non-grad precision path): the `reshape` and `expand`
+// precision paths the sdpa grad bodies never touch. These verbs are
+// precision-polymorphic separate-`sig` and must lower + evaluate with
+// the precision var concretized from the call site — they would trip the
+// §5.8.1 monomorphization tripwire if the `reshape`/`expand` lowering
+// mis-handled the renamed precision var. (Grad through `reshape`/`expand`
+// has its own, #319-unrelated AD limitations — dim pinning and an
+// expand-adjoint dimension-count check — so these pin the precision-
+// lowering path via a forward eval rather than a gradient.)
+// =====================================================================
+
+#[test]
+fn issue_319_reshape_precision_poly_verb_lowers() {
+    let src = "sig flat2d: tensor[s, d, p] -> tensor[six, p]\n\
+               def flat2d(x) = reshape(permute(x, 1, 0), [cast(6, int64)])\n\
+               out = flat2d(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    let result = try_eval(src).unwrap_or_else(|err| {
+        panic!(
+            "issue #319: precision-poly separate-sig `reshape` verb must lower \
+             (no monomorphization tripwire): {err}"
+        )
+    });
+    let out = out_tensor(&result);
+    assert_eq!(out.shape, vec![6], "issue #319 reshape: flattened shape");
+    // permute([[1,2,3],[4,5,6]]) = [[1,4],[2,5],[3,6]], flattened row-major.
+    assert_close(
+        &out,
+        &TensorValue {
+            shape: vec![6],
+            data: vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0],
+        },
+        1e-6,
+        "issue #319 reshape values",
+    );
+}
+
+#[test]
+fn issue_319_expand_precision_poly_verb_lowers() {
+    let src = "sig broadcast: tensor[s, p] -> tensor[s, c, p]\n\
+               def broadcast(b) = expand(b, cast(1, int32), cast(2, int32))\n\
+               out = broadcast(to_tensor([1.0, 2.0]))\n";
+    let result = try_eval(src).unwrap_or_else(|err| {
+        panic!(
+            "issue #319: precision-poly separate-sig `expand` verb must lower \
+             (no monomorphization tripwire): {err}"
+        )
+    });
+    let out = out_tensor(&result);
+    assert_eq!(out.shape, vec![2, 2], "issue #319 expand: broadcast shape");
+    assert_close(
+        &out,
+        &TensorValue {
+            shape: vec![2, 2],
+            data: vec![1.0, 1.0, 2.0, 2.0],
+        },
+        1e-6,
+        "issue #319 expand values",
+    );
+}
+
+// =====================================================================
+// Soundness (red-team caveat 1): the precision-var binding must NOT
+// promote across precisions. It binds body precision vars to the
+// call-site precision ONLY when the call is fully precision-monomorphic.
+// =====================================================================
+
+#[test]
+fn issue_319_two_precision_vars_both_pinned_same_precision_grads() {
+    // A two-precision-var verb (`p` and `w`) whose body cross-precision
+    // op (`add`) unifies them, called with both actuals `f32`. This is
+    // fully precision-monomorphic, so the renamed body precision vars —
+    // including one no longer in a single formal-parameter position after
+    // the `add` unification — concretize to `f32` and the verb grads.
+    let twovar = "sig f: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, w]\n\
+                  def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
+                  def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
+                    tensor_to_scalar(sum(sum(f(q, b), cast(0, int32)), cast(0, int32)))\n\
+                  out = grad(loss, wrt=(q))(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
+    let result = try_eval(twovar).unwrap_or_else(|err| {
+        panic!("issue #319 [two-pvar monomorphic]: must grad when both vars pin to f32: {err}")
+    });
+    let grad = out_tensor(&result);
+    // loss = sum(add(permute_roundtrip(q), b)); d/dq = ones.
+    assert_close(
+        &grad,
+        &TensorValue {
+            shape: vec![2, 3],
+            data: vec![1.0; 6],
+        },
+        1e-6,
+        "issue #319 two-pvar monomorphic grad = ones",
+    );
+}
+
+#[test]
+fn issue_319_heterogeneous_precision_call_is_rejected_not_promoted() {
+    // A verb sharing one precision var `p` across params, called with
+    // genuinely DIFFERENT actual precisions (f32 + f64). The
+    // no-implicit-precision-promotion invariant requires this be REJECTED
+    // (the sig forces both to `p`), never silently forced to one
+    // precision. The rejection must name the precision mismatch.
+    let hetero = "sig f: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p]\n\
+                  def f(a, b) = {\n  at = permute(a, 1, 0)\n  ar = permute(at, 1, 0)\n  add(ar, b)\n}\n\
+                  def use_f(a: tensor[2, 3, f32], b: tensor[2, 3, f64]) -> f32 =\n  \
+                    tensor_to_scalar(sum(sum(f(a, b), cast(0, int32)), cast(0, int32)))\n\
+                  out = use_f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), cast(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), f64))\n";
+    let outcome = try_eval(hetero);
+    let message = match outcome {
+        Ok(ok) => panic!(
+            "issue #319 soundness: a heterogeneous-precision call (f32 vs f64) sharing one \
+             sig precision var must be rejected, not silently promoted; got Ok({ok:?})"
+        ),
+        Err(message) => message,
+    };
+    assert!(
+        message.to_lowercase().contains("precision"),
+        "issue #319 soundness: rejection must name the precision mismatch; got {message}",
+    );
+}
+
+#[test]
+fn issue_319_distinct_precisions_not_force_merged() {
+    // A genuine two-precision verb (`p` f32, `w` f64) whose body keeps the
+    // two precisions distinct (no cross-precision op). The call is NOT
+    // precision-monomorphic, so the fix binds NOTHING and the f64 chain is
+    // preserved (or the tripwire fires) — but f64 is never silently
+    // promoted to f32. Here the f64 input threads through a permute chain
+    // and is dropped; the f32 result must be exact.
+    let distinct = "sig f: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, p]\n\
+                    def f(a, b) = {\n  bt = permute(b, 1, 0)\n  bp = permute(bt, 1, 0)\n  a\n}\n\
+                    def use_f(a: tensor[2, 3, f32], b: tensor[2, 3, f64]) -> f32 =\n  \
+                      tensor_to_scalar(sum(sum(f(a, b), cast(0, int32)), cast(0, int32)))\n\
+                    out = use_f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), cast(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), f64))\n";
+    // The verb type-checks (no cross-precision op). It must NOT silently
+    // promote f64→f32; either it evaluates correctly (f64 preserved in the
+    // dropped chain) or it surfaces a clean diagnostic — never a wrong-
+    // precision Ok. Here the f32 result `sum(a)` = 21.0 is exact.
+    // A clean diagnostic is acceptable; only a silent wrong-precision Ok
+    // is a soundness failure, so we assert exactness ONLY on the Ok path.
+    if let Ok(result) = try_eval(distinct) {
+        let root = result
+            .roots
+            .iter()
+            .find(|r| r.name.as_deref() == Some("out"))
+            .expect("out root");
+        match &root.value {
+            ExecutionValue::Float64 { value } => assert!(
+                (value - 21.0).abs() < 1e-9,
+                "issue #319 distinct-precision: f32 result must be exact (21.0), got {value}",
+            ),
+            ExecutionValue::Tensor { value } => {
+                let s: f64 = value.data.iter().sum();
+                assert!(
+                    (s - 21.0).abs() < 1e-9,
+                    "issue #319 distinct-precision: result must be 21.0, got {s}",
+                );
+            }
+            other => panic!("unexpected out value {other:?}"),
+        }
+    }
 }
