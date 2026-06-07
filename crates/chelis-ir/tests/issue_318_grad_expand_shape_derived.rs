@@ -40,15 +40,18 @@
 //! broadcasting) does not. The malformed `Mul` surfaced only when `grad`
 //! verified the cloned forward inside the backward DAG. The fix recovers
 //! the broadcast extent from the `shape(operand, axis)` argument's
-//! operand dim during lowering (see the lowering-level sibling
-//! `issue_318_expand_shape_size.rs`, which drives REAL Surf lowering and
-//! is the test that detects the lowering failure).
+//! operand dim during lowering (see the lowering-level siblings
+//! `issue_318_expand_shape_arg_*` in `crates/chelis-ir/src/lower.rs`,
+//! which drive the REAL `expand` lowering arm with the exact
+//! `cast(shape(&x, ...), int32)` Deep the Surf idiom emits and are the
+//! tests that detect the lowering failure).
 //!
 //! SCOPE OF THIS FILE: it does NOT exercise the lowering fix. It
 //! hand-builds the forward DAG with the broadcast extent ALREADY supplied
 //! (a `DimExpr::Sym` size and a `DimInfo::Named(_, None)` expand output),
-//! so it cannot detect the lowering defect — the lowering sibling and the
-//! CLI end-to-end test own that. What this file pins is that the `grad`
+//! so it cannot detect the lowering defect — the `lower.rs`
+//! `issue_318_expand_shape_arg_*` units and the CLI end-to-end test own
+//! that. What this file pins is that the `grad`
 //! `RiscOp::Expand` adjoint is EXTENT-AGNOSTIC: given a well-formed
 //! forward whose broadcast extent is symbolic (not a `Lit`),
 //! `grad_dag_checked` still constructs the backward and `eval_tensor`

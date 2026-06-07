@@ -5828,6 +5828,24 @@ impl LowerCtx {
     /// of, NOT from the `expand` node's own output type, which the type
     /// checker has already collapsed to `Lit(1)` via size-1 broadcasting.
     ///
+    /// No dead node accrues for the real idiom. The operand is `&x`
+    /// (`borrow(var x)`) or a bare `var x`; `borrow` lowers via
+    /// [`Self::lower_identity`], which forwards transparently to its inner
+    /// expr without emitting a `Borrow` node (Phase 0 has no such RISC op),
+    /// and the `var` then resolves to the already-bound parameter node
+    /// rather than adding a duplicate. The only mutation is the standard
+    /// cached-binding span append, which keeps the operand region in the
+    /// span-survival audit — reading the type "side-effect-free" off the
+    /// binding would drop that coverage, so lowering is the correct path.
+    /// `issue_318_expand_shape_arg_no_dead_node` is the regression guard.
+    ///
+    /// Out of scope by design: a runtime (non-literal) axis. The recognizer
+    /// [`shape_app_operand_axis`] only matches a static literal axis, so a
+    /// `shape(operand, <expr>)` with a computed axis returns `None` here and
+    /// the caller falls back to the size-1 default — the pre-#318 behavior.
+    /// School's const-broadcast idiom uses literal axes throughout, so this
+    /// is sufficient; a runtime-axis broadcast would need a separate path.
+    ///
     /// Returns `None` when the argument is not a `shape(...)` application,
     /// the axis is out of range, or the operand has no resolvable type —
     /// in which case the caller falls back to its other recovery paths.
@@ -6901,6 +6919,43 @@ mod tests {
             dims,
             vec![DimInfo::Lit(2)],
             "rank-0-source expand output must be tensor[2], not the collapsed tensor[1]; got {dims:?}",
+        );
+    }
+
+    /// Reading the extent from `shape(&x, 0)` must not accrue a dead node
+    /// per `expand`. The size recovery lowers the operand `&x`
+    /// (`borrow(var x)`) only to read its type; `borrow` forwards
+    /// transparently (no `Borrow` RISC op exists) and `var x` resolves to
+    /// the already-bound parameter, so the pre-bound `x` `Load` must remain
+    /// the *only* `Load { name: "x" }` in the DAG — no duplicate operand
+    /// node. The `only_expand` helper alone would not catch a stray node
+    /// (the line-review concern), so assert the count explicitly.
+    #[test]
+    fn issue_318_expand_shape_arg_no_dead_node() {
+        let expr = r#"
+            (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                 (var {} expand)
+                 (app {type: (t-prim {} f32)}
+                      (var {} scalar_to_tensor)
+                      (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
+                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {}
+                       (app {}
+                            (var {} shape)
+                            (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
+                            (cast {} (lit {} 0) (t-prim {} int32)))
+                       (t-prim {} int32)))
+        "#;
+        let dag = lower_with_bound_x(2, expr);
+        let x_loads = dag
+            .nodes()
+            .iter()
+            .filter(|n| matches!(&n.op, RiscOp::Load { name } if name == "x"))
+            .count();
+        assert_eq!(
+            x_loads, 1,
+            "the shape-arg operand `&x` must reuse the bound `x` Load, not \
+             re-materialize it; found {x_loads} `Load {{ name: \"x\" }}` nodes",
         );
     }
 
