@@ -523,27 +523,37 @@ fn issue_319_distinct_precisions_not_force_merged() {
     // promote f64→f32; either it evaluates correctly (f64 preserved in the
     // dropped chain) or it surfaces a clean diagnostic — never a wrong-
     // precision Ok. Here the f32 result `sum(a)` = 21.0 is exact.
-    // A clean diagnostic is acceptable; only a silent wrong-precision Ok
-    // is a soundness failure, so we assert exactness ONLY on the Ok path.
-    if let Ok(result) = try_eval(distinct) {
-        let root = result
-            .roots
-            .iter()
-            .find(|r| r.name.as_deref() == Some("out"))
-            .expect("out root");
-        match &root.value {
-            ExecutionValue::Float64 { value } => assert!(
-                (value - 21.0).abs() < 1e-9,
-                "issue #319 distinct-precision: f32 result must be exact (21.0), got {value}",
-            ),
-            ExecutionValue::Tensor { value } => {
-                let s: f64 = value.data.iter().sum();
-                assert!(
-                    (s - 21.0).abs() < 1e-9,
-                    "issue #319 distinct-precision: result must be 21.0, got {s}",
-                );
+    // A clean PRECISION diagnostic is acceptable; only a silent
+    // wrong-precision Ok is a soundness failure. On the Ok path assert
+    // exactness; on the Err path assert the message is a precision
+    // diagnostic (issue #319 review) so an UNRELATED failure cannot make
+    // this test pass vacuously.
+    match try_eval(distinct) {
+        Ok(result) => {
+            let root = result
+                .roots
+                .iter()
+                .find(|r| r.name.as_deref() == Some("out"))
+                .expect("out root");
+            match &root.value {
+                ExecutionValue::Float64 { value } => assert!(
+                    (value - 21.0).abs() < 1e-9,
+                    "issue #319 distinct-precision: f32 result must be exact (21.0), got {value}",
+                ),
+                ExecutionValue::Tensor { value } => {
+                    let s: f64 = value.data.iter().sum();
+                    assert!(
+                        (s - 21.0).abs() < 1e-9,
+                        "issue #319 distinct-precision: result must be 21.0, got {s}",
+                    );
+                }
+                other => panic!("unexpected out value {other:?}"),
             }
-            other => panic!("unexpected out value {other:?}"),
         }
+        Err(message) => assert!(
+            message.to_lowercase().contains("precision"),
+            "issue #319 distinct-precision: an Err outcome must be a clean precision \
+             diagnostic, not an unrelated failure; got {message}",
+        ),
     }
 }

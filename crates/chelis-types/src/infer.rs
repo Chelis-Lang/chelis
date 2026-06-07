@@ -4855,6 +4855,16 @@ fn annotate_fn_children(
     // matmul typing rule depends on. `param_vg` (the cloned `VarGen`)
     // feeds fresh-var allocation so it does not perturb the caller's.
     //
+    // Why clone rather than thread the caller's `vg` and advance its
+    // counter (which would be collision-free and shrink the argument
+    // below to a sentence): this is a post-inference ANNOTATION pass and
+    // `vg: &VarGen` is borrowed SHARED here — advancing the caller's
+    // counter is not even available without widening the whole annotation
+    // call-chain to `&mut VarGen`, a far larger change for a pass whose
+    // vars never escape. The throwaway clone is the correct local choice;
+    // the confinement argument below is why the resulting ID overlap is
+    // harmless.
+    //
     // Var-ID overlap is harmless. These freshly-minted `TypeVar`s are
     // used ONLY to seed `fn_env` for the body-ANNOTATION pass below; the
     // annotation re-infers each body node's `type:` via

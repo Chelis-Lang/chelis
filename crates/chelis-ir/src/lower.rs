@@ -1100,6 +1100,21 @@ fn fn_type_arg_exprs(fn_expr: &Expr) -> Option<Vec<&Expr>> {
 ///     actual (nothing to monomorphize against).
 fn fully_monomorphic_call_precision(fn_expr: &Expr, actual_types: &[TensorType]) -> Option<Prim> {
     let arg_exprs = fn_type_arg_exprs(fn_expr)?;
+    // Positional-alignment guard (issue #319 review). `actual_types` holds
+    // only the call arguments that lowered to a typed DAG node — the
+    // caller's loop SKIPS a callable (fn-typed) argument and any argument
+    // that did not resolve to a single typed node. When that happens
+    // `actual_types` is shorter than `arg_exprs` (the verb's full
+    // formal-parameter list), and the positional `zip` below would silently
+    // MISALIGN a tensor actual against the wrong formal position. Require an
+    // exact 1:1 correspondence; if any argument was skipped, bind nothing
+    // and let the §5.8.1 tripwire handle the call. The precision-poly verbs
+    // this targets (sdpa/attention) take only tensor parameters, so the
+    // lengths match for every supported case; a verb interleaving tensor
+    // and fn-typed parameters is intentionally out of scope here.
+    if arg_exprs.len() != actual_types.len() {
+        return None;
+    }
     let mut shared: Option<Prim> = None;
     let mut saw_formal_prec_var = false;
     for (arg_expr, actual) in arg_exprs.iter().zip(actual_types.iter()) {
@@ -1155,6 +1170,18 @@ fn fully_monomorphic_call_precision(fn_expr: &Expr, actual_types: &[TensorType])
 /// tripwire) rather than reaching this binding. This preserves the
 /// no-implicit-precision-promotion invariant (spec/04-type-system.md
 /// §5.8.1).
+///
+/// Assumption (issue #319 review): this binds EVERY body precision
+/// variable to the single call-site precision, which assumes every body
+/// precision variable is ultimately tied to a parameter's precision. That
+/// holds for the precision-poly verbs this targets — the only precision
+/// source in an sdpa/attention body is the `q`/`k`/`v` parameters, so a
+/// fully-monomorphic call pins the whole body. A body carrying a
+/// genuinely INDEPENDENT precision variable — e.g. an internal
+/// polymorphic-precision helper not constrained by any parameter — would
+/// be over-constrained by this blanket bind. No such construct arises in
+/// the target verbs; supporting one would need per-variable provenance
+/// tracking rather than a single shared precision, and is out of scope.
 fn formal_precision_var_bindings(
     fn_expr: &Expr,
     body: &Expr,
@@ -4347,6 +4374,19 @@ impl LowerCtx {
         // the no-implicit-precision-promotion invariant for a genuinely
         // heterogeneous or under-determined call — see
         // `formal_precision_var_bindings`.
+        //
+        // Why recover here rather than fix the rename at the source
+        // (issue #319 review): the cleaner fix is for the checker to
+        // preserve the sig's original `p` name through `type_to_deep_expr`
+        // so the name-keyed `tensor_prec_substitutions` above already
+        // matches. But `type_to_deep_expr` prints every `TensorPrec::Var`
+        // anonymously, and threading user-facing sig-var names through the
+        // checker's `Subst`/printing touches ALL polymorphic-type printing
+        // (every verb, every diagnostic), with wide blast radius on
+        // inference and golden output. This recovery is deliberately
+        // localized to the precision-poly verb call path and is removable
+        // wholesale if the checker later preserves the name — at which
+        // point the name-keyed substitution subsumes it.
         for (var_name, prim) in formal_precision_var_bindings(fn_expr, body, &actual_types) {
             self.prec_substitutions.entry(var_name).or_insert(prim);
         }
