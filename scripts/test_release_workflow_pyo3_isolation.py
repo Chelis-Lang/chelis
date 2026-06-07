@@ -20,6 +20,7 @@ lines and confirming `cargo tree -p X` reports no pyo3-dep for each X.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -65,6 +66,10 @@ class ReleaseWorkflowPyo3IsolationTest(unittest.TestCase):
         self.assertIn("chelis-cli", targets)
         self.assertIn("chelis-runtime", targets)
 
+    @unittest.skipUnless(
+        shutil.which("cargo") is not None,
+        "cargo unavailable; skipping the `cargo tree` pyo3 dep-graph oracle",
+    )
     def test_no_release_target_pulls_pyo3(self) -> None:
         targets = extract_release_targets(RELEASE_WORKFLOW)
         self.assertGreater(len(targets), 0, "release.yml has no `cargo build -p` lines to check")
