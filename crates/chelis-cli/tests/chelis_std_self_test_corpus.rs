@@ -25,8 +25,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
-/// Floor on the chelis-std self-test count. Current corpus is ~137 passing
-/// tests across 24 files (ML modules moved to School in 0.4.0); the floor is
+/// Floor on the chelis-std self-test count. Current corpus is ~141 passing
+/// tests across 23 files (ML modules moved to School in 0.4.0); the floor is
 /// set below current to leave headroom while still catching a silent drop.
 const MIN_PASSED: u32 = 120;
 
@@ -52,7 +52,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 #[test]
-#[ignore = "manual gate: ~170s runtime; runs the full 205-test chelis-std self-test corpus under chelis test. Invoke via `cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture`. CI/manual gate; not on the inner-loop budget per CLAUDE.md."]
+#[ignore = "manual gate: ~170s runtime; runs the ~141-test chelis-std self-test corpus under chelis test. Invoke via `cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture`. CI/manual gate; not on the inner-loop budget per CLAUDE.md."]
 fn chelis_std_self_test_corpus_passes_under_chelis_test() {
     // Stage chelis-std into a tempdir so the test does not touch the
     // checked-in package on disk and is isolated from any developer-local

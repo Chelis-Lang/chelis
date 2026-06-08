@@ -3228,8 +3228,7 @@ fn activation_silu_f32(x: f32) -> f32 {
     x * activation_sigmoid_f32(x)
 }
 
-/// `gelu(x)` via the tanh approximation, matching `School.Nn.Gelu`'s
-/// `gelu_scalar` (`packages/chelis-std/src/nn/gelu.ch`):
+/// `gelu(x)` via the tanh approximation, matching `School.Nn.Gelu.gelu_scalar`:
 ///
 ///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
 ///
