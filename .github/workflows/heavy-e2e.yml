@@ -67,3 +67,58 @@ jobs:
       # used.
       - name: Heavy e2e suite
         run: cargo nextest run --workspace --profile nightly
+
+      # The chelis-std in-language self-test corpus (packages/chelis-std/tests/,
+      # run via `chelis test tests/`). Its integration test is #[ignore] (a
+      # ~170s manual gate), so NOTHING in CI exercised it — neither the per-PR
+      # gate nor `--profile nightly` runs ignored tests, and the corpus rotted
+      # silently (chelis#332/#333). Run it explicitly here so a regression in a
+      # chelis-std module surfaces nightly. `if: always()` so it runs even when
+      # the heavy e2e suite above fails (independent signal).
+      - name: chelis-std self-test corpus
+        if: always()
+        run: cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
+
+  # Surface a nightly failure as a tracking issue (opens on failure, closes on
+  # green) so a red nightly is impossible to miss — scheduled-run failures do
+  # not show a red status on main, which is how both nightlies stayed red for
+  # days unnoticed.
+  report:
+    name: Surface nightly status
+    needs: heavy-e2e
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open/close nightly-failure tracking issue
+        uses: actions/github-script@v7
+        env:
+          RESULT: ${{ needs.heavy-e2e.result }}
+        with:
+          script: |
+            const title = 'Nightly failing: Heavy E2E';
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const q = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
+            const found = await github.rest.search.issuesAndPullRequests({ q });
+            const existing = found.data.items.find(i => i.title === title);
+            if (process.env.RESULT === 'failure') {
+              if (existing) {
+                core.info(`Tracking issue #${existing.number} already open.`);
+              } else {
+                const issue = await github.rest.issues.create({
+                  owner, repo, title,
+                  body: `The **Heavy E2E** nightly failed.\n\nRun: ${runUrl}\nCommit: \`${context.sha}\`\n\nAuto-opened on failure; auto-closes when the nightly next passes.`,
+                  labels: ['nightly-failure'],
+                });
+                core.info(`Opened tracking issue #${issue.data.number}.`);
+              }
+            } else if (process.env.RESULT === 'success' && existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Nightly green again — ${runUrl}. Closing.`,
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+              core.info(`Closed tracking issue #${existing.number}.`);
+            }
