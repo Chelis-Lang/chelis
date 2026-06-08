@@ -138,7 +138,32 @@ pattern, and type — a qualified reference whose head names an imported module
 but whose trailing name that module does not export is rejected with a
 `module \`M\` does not export \`N\`` error, not silently accepted.
 
-**Export:** Explicit. If no `export` declaration appears, all top-level `def` and `type` are public. Once any `export` appears, only listed names are public.
+**Constructor scope (unqualified references).** A bare (unqualified)
+constructor reference — at a construction site (`Alpha`, `Alpha(x)`,
+`Alpha { ... }`) or in a `match` **pattern** (`| Alpha => ...`) — is in scope
+only when the constructor is declared in the current module **or** named in an
+`import` that brings it into unqualified scope. Importing only the enclosing
+**type** is not sufficient: the constructor itself must be named in the import
+list (e.g. `import Pkg.Adt (Mode, Alpha, Beta, Gamma)`). A constructor that is
+not in scope is an `unknown constructor \`X\`` error at `chelis check` that
+names the constructor — the same way an unbound value is an `unbound variable`
+(type-checker diagnostics name the offending identifier; they do not yet carry
+a source span) — and must never silently bind to a same-named constructor
+declared in another module (which would defer the failure to a runtime
+non-exhaustive match). This applies to record-shaped constructors
+(`Alpha { ... }`) at both construction and match-pattern sites, and to the
+case where two other modules export a same-named constructor (the reference is
+rejected as unknown, not bound to either). The
+module-qualified forms above (`Pkg.Adt.Alpha`, `| Pkg.Adt.Alpha =>`) remain in
+scope without naming the constructor in the import list, because they name the
+declaring module explicitly.
+
+Naming a constructor in an `import` brings it into scope **even when the
+declaring module's `export` list names only the type**: exporting a type
+auto-exports its constructors (see Export below), so they are importable by
+name regardless of whether they appear in the `export` list.
+
+**Export:** Explicit. If no `export` declaration appears, all top-level `def` and `type` are public. Once any `export` appears, only listed names are public. Exporting a `type` also exports its constructors, so a downstream module can import them by name.
 
 ```
 export (forward, Linear)
