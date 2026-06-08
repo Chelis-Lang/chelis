@@ -292,7 +292,10 @@ impl Printer {
         let Some((tag, _, _)) = canonical_node_parts(list) else {
             return false;
         };
-        matches!(tag, "var" | "lit" | "d-name" | "d-var" | "d-lit" | "t-prim")
+        matches!(
+            tag,
+            "var" | "lit" | "d-name" | "d-var" | "d-lit" | "d-rank" | "t-prim"
+        )
     }
 
     fn force_break_list(&self, list: &List) -> bool {

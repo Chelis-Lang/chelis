@@ -1490,6 +1490,7 @@ fn format_type_expr(ty: &TypeExpr) -> String {
             format!("({items})")
         }
         TypeExpr::Infer(_) => "_".to_string(),
+        TypeExpr::RankSpread(name, _) => format!("..{name}"),
     }
 }
 

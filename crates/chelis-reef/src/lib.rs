@@ -5327,6 +5327,9 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
                 .unwrap_or_else(|| name.clone()),
             *span,
         ),
+        // A rank variable `..r` is local to its def/sig and never a
+        // module-qualified name, so it passes through name resolution as-is.
+        TypeExpr::RankSpread(name, span) => TypeExpr::RankSpread(name.clone(), *span),
         TypeExpr::Tensor(parts, precision, span) => TypeExpr::Tensor(
             parts
                 .iter()

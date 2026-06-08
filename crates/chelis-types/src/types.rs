@@ -16,6 +16,11 @@ pub struct TypeVar(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DimVar(pub u32);
 
+/// A unique identifier for a *rank* variable — a `Dim::Rank` stands for an
+/// entire shape vector (Tier-2 rank polymorphism, `spec/design/rank_polymorphism.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RankVar(pub u32);
+
 /// Numeric precision types.
 ///
 /// The active numeric primitive set is pinned by `spec/04-type-system.md` §1.1:
@@ -224,6 +229,11 @@ pub enum Dim {
     Lit(i64),
     /// Wildcard — unknown/dynamic dimension.
     Wildcard,
+    /// Rank variable — stands for an *entire* shape vector (Tier-2 rank
+    /// polymorphism). Structural invariant: when a `Dim::Rank` appears in a
+    /// tensor's dim list it is the *sole* element of that list. Eliminated by
+    /// monomorphization; no `Dim::Rank` reaches a backend.
+    Rank(RankVar),
 }
 
 /// Tensor element precision slot.
@@ -427,6 +437,9 @@ impl fmt::Display for EffectSet {
 pub struct Scheme {
     pub tvars: Vec<TypeVar>,
     pub dvars: Vec<DimVar>,
+    /// Quantified rank variables (Tier-2 rank polymorphism). Usually empty.
+    #[serde(default)]
+    pub rvars: Vec<RankVar>,
     pub body: Type,
 }
 
@@ -436,6 +449,7 @@ impl Scheme {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: ty,
         }
     }
@@ -643,6 +657,8 @@ mod prim_classification_tests {
 pub struct VarGen {
     next_tvar: u32,
     next_dvar: u32,
+    #[serde(default)]
+    next_rvar: u32,
 }
 
 impl VarGen {
@@ -655,6 +671,13 @@ impl VarGen {
     pub fn fresh_dvar(&mut self) -> DimVar {
         let v = DimVar(self.next_dvar);
         self.next_dvar += 1;
+        v
+    }
+
+    /// Fresh rank variable (Tier-2 rank polymorphism).
+    pub fn fresh_rvar(&mut self) -> RankVar {
+        let v = RankVar(self.next_rvar);
+        self.next_rvar += 1;
         v
     }
 

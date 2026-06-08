@@ -357,6 +357,7 @@ fn format_effect(effect: &EffectExpr) -> String {
 fn format_type(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name, _) => name.clone(),
+        TypeExpr::RankSpread(name, _) => format!("..{name}"),
         TypeExpr::Tensor(parts, precision, _) => {
             let mut elems = parts.iter().map(format_type).collect::<Vec<_>>();
             elems.push(precision.clone());

@@ -1955,6 +1955,13 @@ fn decompile_dim_or_prim(expr: &Expr) -> String {
                     return brief(child);
                 }
             }
+            // Rank variable `(d-rank {} r)` decompiles to the `..r` spread form.
+            Some("d-rank") => {
+                let kids = children(list);
+                if let Some(child) = kids.first() {
+                    return format!("..{}", brief(child));
+                }
+            }
             Some("t-prim") => {
                 return decompile_type_expr(expr);
             }

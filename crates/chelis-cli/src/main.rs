@@ -1895,6 +1895,7 @@ fn wire_inferred_dim(dim: &Dim) -> WireInferredDim {
         Dim::Var(var) => WireInferredDim::Var { id: var.0 },
         Dim::Lit(value) => WireInferredDim::Lit { size: *value },
         Dim::Wildcard => WireInferredDim::Wildcard,
+        Dim::Rank(rank) => WireInferredDim::Rank { id: rank.0 },
     }
 }
 
@@ -1976,6 +1977,7 @@ fn format_cli_dim(dim: &Dim) -> String {
         Dim::Var(var) => format!("d{}", var.0),
         Dim::Lit(value) => value.to_string(),
         Dim::Wildcard => "*".to_string(),
+        Dim::Rank(rank) => format!("..r{}", rank.0),
     }
 }
 

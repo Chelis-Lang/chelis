@@ -50,10 +50,11 @@ const VALID_TAGS: &[&str] = &[
     "t-ref",
     "t-unit",
     "t-tuple",
-    // Dimensions (3)
+    // Dimensions (4)
     "d-name",
     "d-var",
     "d-lit",
+    "d-rank",
     // Transforms (6)
     "grad",
     "vmap",
@@ -124,7 +125,7 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                                 kind: WarningKind::UnknownTag,
                                 offset: span.offset,
                                 message: format!(
-                                    "unknown tag '{tag}'. Not in the 61-tag vocabulary"
+                                    "unknown tag '{tag}'. Not in the 62-tag vocabulary"
                                 ),
                             });
                         } else {

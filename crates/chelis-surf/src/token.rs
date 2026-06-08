@@ -48,6 +48,7 @@ pub enum TokenKind {
     Bar,        // |
     Eq,         // =
     Dot,        // .
+    DotDot,     // .. (rank-variable spread marker)
     At,         // @
     Amp,        // &
     Semicolon,  // ;
