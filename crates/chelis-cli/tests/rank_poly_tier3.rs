@@ -151,14 +151,26 @@ fn multi_axis_reduce_via_composition() {
     assert_clean(&json, "multi-axis reduce over seq and head via composition");
 }
 
-/// `mean` and `max_reduce` are named-axis reductions too (not only `sum`).
+/// `mean` is a named-axis reduction too (not only `sum`) — both lower through
+/// the tensor-DAG backend and build end-to-end.
 #[test]
-fn mean_and_max_reduce_are_name_tracked() {
+fn mean_is_name_tracked() {
     let json = check_json(
-        "def m(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = mean(x, seq)\n\
-         def x(y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = max_reduce(y, seq)\n",
+        "def m(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = mean(x, seq)\n",
     );
-    assert_clean(&json, "mean and max_reduce name-tracked in a ..r body");
+    assert_clean(&json, "mean name-tracked in a ..r body");
+}
+
+/// `max_reduce`/`min_reduce`/`prod_reduce` are NOT yet admitted in a `..r` body:
+/// they route through the host lane in a rank-poly inline and don't compile
+/// (chelis#340), so they are rejected at check time to keep check↔backend in
+/// sync (a check-clean program must build). They remain usable at concrete rank.
+#[test]
+fn max_reduce_in_rank_poly_body_rejected() {
+    let json = check_json(
+        "def m(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = max_reduce(x, seq)\n",
+    );
+    assert_rejected_with(&json, "name-trackable", "max_reduce in a ..r body");
 }
 
 /// Concrete-rank control: a named reduction on a fully-concrete shape (no
@@ -387,22 +399,37 @@ fn parse_printed_tensors(stdout: &str) -> Vec<(String, Vec<usize>, Vec<f64>)> {
 /// ONE rank-poly named-reduce def, called at rank 2 and rank 3, builds and
 /// runs and the backend reduces over the correct (named) `seq` axis at each
 /// rank — the call-site monomorphization + named-axis lowering proof.
+///
+/// CRITICAL: the operands are deliberately NON-SQUARE (the reduced axis size
+/// differs from every surviving axis size). A square operand masks an
+/// axis-mislabel bug in call-site monomorphization (the surviving axis was
+/// renamed to the reduced axis, which only aborts when the sizes differ —
+/// chelis#258 red-team finding). Every distinct size here is load-bearing.
 #[test]
-fn named_reduce_builds_and_runs_at_ranks_2_and_3() {
+fn named_reduce_builds_and_runs_nonsquare_at_ranks_2_3_4() {
     let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def avg_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = mean(x, seq)\n\
          def r2(x: &tensor[seq, hidden, f32]) -> tensor[hidden, f32] = reduce_seq(x)\n\
          def r3(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = reduce_seq(x)\n\
-         out2 = r2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
-         out3 = r3(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n";
-    let backend = build_compile_run(source, "rank_poly_reduce");
+         def r4(x: &tensor[batch, depth, seq, hidden, f32]) -> tensor[batch, depth, hidden, f32] = reduce_seq(x)\n\
+         def m3(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = avg_seq(x)\n\
+         out2 = r2(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         out3 = r3(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
+         out4 = r4(to_tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]]))\n\
+         outm = m3(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+    let backend = build_compile_run(source, "rank_poly_reduce_nonsquare");
     let tensors = parse_printed_tensors(&backend);
 
-    // out2: reduce the `seq` axis (axis 0) of [[1,2],[3,4]] → [1+3, 2+4] = [4, 6].
-    // out3: reduce the `seq` axis (axis 1) of the rank-3 input, per batch:
-    //   batch0 [[1,2],[3,4]] → [4, 6];  batch1 [[5,6],[7,8]] → [12, 14].
+    // out2: seq(=2) reduced from [seq=2, hidden=3] → [hidden=3] = col sums = [5, 7, 9].
+    // out3: seq(=2) reduced from [batch=2, seq=2, hidden=3]:
+    //   b0 [[1,2,3],[4,5,6]] → [5,7,9];  b1 [[7,8,9],[10,11,12]] → [17,19,21].
+    // out4: seq(=2) reduced from [batch=1, depth=1, seq=2, hidden=3] → [1,1,3] = [5,7,9].
+    // outm: mean over seq(=2) of out3's input → [2.5,3.5,4.5 ; 8.5,9.5,10.5].
     let expected: &[(&str, &[usize], &[f64])] = &[
-        ("out2", &[2], &[4.0, 6.0]),
-        ("out3", &[2, 2], &[4.0, 6.0, 12.0, 14.0]),
+        ("out2", &[3], &[5.0, 7.0, 9.0]),
+        ("out3", &[2, 3], &[5.0, 7.0, 9.0, 17.0, 19.0, 21.0]),
+        ("out4", &[1, 1, 3], &[5.0, 7.0, 9.0]),
+        ("outm", &[2, 3], &[2.5, 3.5, 4.5, 8.5, 9.5, 10.5]),
     ];
     for (name, shape, data) in expected {
         let got = tensors

@@ -905,6 +905,12 @@ fn tensor_dim_substitutions(
     formal_params
         .iter()
         .zip(actual_args.iter())
+        // Positionally remapping dims between shapes of DIFFERENT rank is never
+        // correct — `zip` would align unrelated axes. chelis#258: a rank-poly
+        // reduce's rank-2 output formal `[batch, hidden]` paired with a rank-3
+        // actual would bind `hidden -> seq`, corrupting every node's dims in the
+        // specialized body. Only same-rank pairs contribute a substitution.
+        .filter(|(formal, actual)| formal.dims.len() == actual.dims.len())
         .flat_map(|(formal, actual)| formal.dims.iter().zip(actual.dims.iter()))
         .filter_map(|(formal_dim, actual_dim)| match formal_dim {
             DimInfo::Named(name, None) => Some((name.clone(), actual_dim.clone())),

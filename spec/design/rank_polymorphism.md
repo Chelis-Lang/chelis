@@ -104,13 +104,38 @@ soundly, and call-site rank monomorphization (`tensor_rank_substitutions` /
 a rank-poly reduce **build and run** on the C backend with verified numerics.
 Acceptance oracle: `crates/chelis-cli/tests/rank_poly_tier3.rs`.
 
+**Fresh-context red-team pass (PR #337).** A red team built `target/debug/chelis`
+and ran adversarial programs. The checker held on every soundness probe
+(Name↔Lit hard-reject, the adjacent-spread / distinct-anchor fence, the
+Body-Discipline check incl. the chelis#285 sig+inline-return class and
+builtin-name shadowing, and Dim::Var anchors). It found **two backend bugs that
+a square-shaped corpus test masked**:
+
+- **CRITICAL — non-square middle-anchor reduce miscompiled (FIXED).** Call-site
+  specialization renamed the surviving axis to the reduced axis (`hidden→seq`),
+  so `[..pre, seq, ..post]` reduces aborted at runtime whenever the reduced axis
+  size differed from a surviving size. Root cause: `tensor_dim_substitutions`
+  (`crates/chelis-ir/src/lower.rs`) positionally zipped a *different-rank*
+  formal/actual output pair (`remap_tensor_dim_symbols` passes the rank-2 reduce
+  formal against a rank-3 actual), aligning `hidden` with `seq`. Fixed by
+  skipping different-rank pairs in `tensor_dim_substitutions`. The acceptance
+  corpus's build+run test now uses **non-square** operands at ranks 2/3/4 so the
+  mislabel would fail loudly (`named_reduce_builds_and_runs_nonsquare_at_ranks_2_3_4`).
+- **HIGH — `max_reduce`/`min_reduce`/`prod_reduce` in a `..r` body don't compile
+  (mitigated by restriction; chelis#340).** They route through the host scalar
+  lane, which only special-cases `sum`/`mean`. Mitigation: only `sum`/`mean` are
+  admitted as `NameTracked`; the others are **rejected at check time** in a `..r`
+  body so a check-clean program always builds. They remain usable at concrete
+  rank. Re-admission is tracked as chelis#340.
+
 *Known gaps (follow-ups):* the tree-walking `chelis eval` interpreter operates
 on nameless runtime tensors and does not yet resolve a named axis (the type info
 needed for that lives only on the compile/lowering path), so named-axis
 reductions build+run on the C backend but are not yet executable through
-`chelis eval`; the corpus verifies C-backend numerics directly. Expand (`R+1`)
-and a direct variadic-axis surface (`sum(x, seq, head)`) remain follow-ups. The
-positional (integer-axis) reduction path on concrete operands is unchanged.
+`chelis eval` (chelis#338); the corpus verifies C-backend numerics directly.
+`max`/`min`/`prod` reduce in a `..r` body (chelis#340), expand (`R+1`), and a
+direct variadic-axis surface `sum(x, seq, head)` (chelis#339) remain follow-ups.
+The positional (integer-axis) reduction path on concrete operands is unchanged.
 
 ## Why this is needed
 

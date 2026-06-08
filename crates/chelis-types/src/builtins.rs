@@ -200,8 +200,13 @@ pub fn shape_class(name: &str) -> ShapeClass {
         | "bitxor" | "shl" | "shr" | "and" | "or" => ShapeClass::Identity,
         // Named-axis reductions: address the reduced axis by name and drop
         // exactly it, carrying the surviving named axes through (Tier-3 §4.5.3).
-        "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
-        | "argmin_reduce" => ShapeClass::NameTracked,
+        // Restricted to `sum`/`mean`: these lower through the tensor-DAG backend
+        // and build+run end-to-end. `max_reduce`/`min_reduce`/`prod_reduce`/
+        // `argmax_reduce`/`argmin_reduce` route through the host lane in a
+        // rank-poly inline and don't yet compile (chelis#340), so they stay
+        // Rewriting — rejected in a `..r` body — to keep check↔backend in sync
+        // (a check-clean program must build). They remain usable at concrete rank.
+        "sum" | "mean" => ShapeClass::NameTracked,
         // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
         // gather/scatter, and every non-tensor/host builtin.
         _ => ShapeClass::Rewriting,
@@ -1240,15 +1245,7 @@ mod tests {
         // Named-axis reductions are NameTracked (admitted in a `..r` body —
         // the procedural arm is the gate); everything else outside `identity`
         // is Rewriting.
-        let name_tracked: &[&str] = &[
-            "sum",
-            "mean",
-            "max_reduce",
-            "min_reduce",
-            "prod_reduce",
-            "argmax_reduce",
-            "argmin_reduce",
-        ];
+        let name_tracked: &[&str] = &["sum", "mean"];
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
                 ShapeClass::Identity
