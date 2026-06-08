@@ -2261,6 +2261,38 @@ fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
     }
 }
 
+/// Recognize a `shape(operand, axis)` application — possibly wrapped in
+/// one or more `cast(..., int32)` layers — and return its `(operand,
+/// axis)` pair. The axis must be a static literal (bare int, `(lit ...)`,
+/// or `cast`-wrapped int); a runtime axis is not extractable here.
+///
+/// This is the structural recognizer behind the issue #318 fix: the
+/// shape-derived const-broadcast idiom
+/// `expand(scalar_to_tensor(c), 0, shape(&x, cast(0, int32)))` (and the
+/// fully-`cast`-wrapped `cast(shape(&x, ...), int32)` form) carries its
+/// broadcast extent as the runtime dimension of `operand` at `axis`. The
+/// type checker collapses the `expand` *output* dim to `Lit(1)` via
+/// size-1 broadcasting, so the extent must be read from this `shape`
+/// argument's operand, not from the expand node's type.
+fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    // Strip outer `cast(..., int32)` wrappers to reach the `shape` app.
+    if get_tag(list) == Some("cast") {
+        return list.elements.get(2).and_then(shape_app_operand_axis);
+    }
+    if builtin_name(list) != Some("shape") {
+        return None;
+    }
+    // `(app {} (var {} shape) <operand> <axis_arg>)`: operand at index 3,
+    // axis at index 4.
+    let operand = list.elements.get(3)?;
+    let axis = list.elements.get(4).and_then(extract_int_for_dim)?;
+    let axis = usize::try_from(axis).ok()?;
+    Some((operand, axis))
+}
+
 /// If `expr` is `(var {} <name>)`, return `<name>` as a `String`.
 /// Otherwise return `None`. Used by [`LowerCtx::extract_dim_list`] to
 /// recognize symbolic dim entries inside a reshape shape list (issue
@@ -2566,6 +2598,15 @@ impl LoweredValue {
         match self {
             Self::Node(id) => vec![*id],
             Self::Tuple(items) => items.iter().flat_map(Self::flatten_nodes).collect(),
+        }
+    }
+
+    /// The single DAG node id if this value is a `Node`, else `None`
+    /// (e.g. a `Tuple`). The fallible companion to [`Self::expect_node`].
+    fn as_single_node(&self) -> Option<NodeId> {
+        match self {
+            Self::Node(id) => Some(*id),
+            Self::Tuple(_) => None,
         }
     }
 
@@ -5406,8 +5447,29 @@ impl LowerCtx {
             "expand" if args.len() >= 2 => {
                 let x = self.lower_expr_node(&args[0], "expand input");
                 let axis = self.extract_usize_value(&args[1]).unwrap_or(0);
+                // Recover the broadcast extent. Three sources, in order:
+                //
+                //   1. A statically-extractable size (a bare int, `(lit
+                //      ...)`, a `cast`-wrapped int, or a symbolic dim
+                //      variable) — issue #288's literal/symbol form
+                //      `expand(scalar_to_tensor(c), 0, cast(2, int32))`.
+                //
+                //   2. A `shape(operand, axis)` application — issue #318's
+                //      shape-derived form
+                //      `expand(scalar_to_tensor(c), 0, shape(&x, 0))` that
+                //      the canonical `tensor_full_like` / `tensor_full_1d`
+                //      helper emits. The extent is read from `operand`'s
+                //      already-lowered dim at `axis`, NOT from this expand
+                //      node's type: the type checker collapses the expand
+                //      *output* dim to `Lit(1)` via size-1 broadcasting, so
+                //      reading the node type would recover exactly the
+                //      `Lit(1)` that produced the `Lit(n) vs Lit(1)`
+                //      verification failure under `grad`.
+                //
+                //   3. Otherwise default to size 1.
                 let size = if args.len() >= 3 {
                     self.extract_dim_expr_value(&args[2])
+                        .or_else(|| self.dim_expr_from_shape_arg(&args[2]))
                         .unwrap_or(DimExpr::Concrete(1))
                 } else {
                     DimExpr::Concrete(1)
@@ -5756,6 +5818,43 @@ impl LowerCtx {
             .get(name)
             .map(DimExpr::from)
             .unwrap_or_else(|| DimExpr::Sym(name.to_string()))
+    }
+
+    /// Recover a broadcast extent from a `shape(operand, axis)` size
+    /// argument (issue #318). The operand is lowered (idempotently — a
+    /// bound `var` returns its cached DAG node) and the extent is read
+    /// from its `output_type.dims[axis]`. This is the principled fix: the
+    /// extent comes from the operand the program actually asks the shape
+    /// of, NOT from the `expand` node's own output type, which the type
+    /// checker has already collapsed to `Lit(1)` via size-1 broadcasting.
+    ///
+    /// No dead node accrues for the real idiom. The operand is `&x`
+    /// (`borrow(var x)`) or a bare `var x`; `borrow` lowers via
+    /// [`Self::lower_identity`], which forwards transparently to its inner
+    /// expr without emitting a `Borrow` node (Phase 0 has no such RISC op),
+    /// and the `var` then resolves to the already-bound parameter node
+    /// rather than adding a duplicate. The only mutation is the standard
+    /// cached-binding span append, which keeps the operand region in the
+    /// span-survival audit — reading the type "side-effect-free" off the
+    /// binding would drop that coverage, so lowering is the correct path.
+    /// `issue_318_expand_shape_arg_no_dead_node` is the regression guard.
+    ///
+    /// Out of scope by design: a runtime (non-literal) axis. The recognizer
+    /// [`shape_app_operand_axis`] only matches a static literal axis, so a
+    /// `shape(operand, <expr>)` with a computed axis returns `None` here and
+    /// the caller falls back to the size-1 default — the pre-#318 behavior.
+    /// School's const-broadcast idiom uses literal axes throughout, so this
+    /// is sufficient; a runtime-axis broadcast would need a separate path.
+    ///
+    /// Returns `None` when the argument is not a `shape(...)` application,
+    /// the axis is out of range, or the operand has no resolvable type —
+    /// in which case the caller falls back to its other recovery paths.
+    fn dim_expr_from_shape_arg(&mut self, expr: &Expr) -> Option<DimExpr> {
+        let (operand, axis) = shape_app_operand_axis(expr)?;
+        let operand_id = self.lower_expr(operand).as_single_node()?;
+        let operand_ty = self.dag.get(operand_id)?.output_type.clone();
+        let dim = operand_ty.dims.get(axis)?;
+        Some(DimExpr::from(dim))
     }
 
     fn lower_handle_effect(&mut self, elems: &[Expr]) -> LoweredValue {
@@ -6747,6 +6846,224 @@ mod tests {
         assert_eq!(dag.len(), 1);
         assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 1.0 });
         assert!(verify::verify(&dag).is_empty());
+    }
+
+    /// Build a `LowerCtx` with `x: tensor[<size>, f32]` pre-bound to a
+    /// `Load`, lower the Deep `expr`, and return the resulting DAG plus
+    /// the bound `x` node id. Mirrors how the body of a `def f(x) = ...`
+    /// lowers with `x` already a parameter binding — the context the
+    /// issue #318 `shape(&x, ...)` size argument resolves in.
+    fn lower_with_bound_x(size: usize, expr_src: &str) -> Dag {
+        let x_ty = TensorType {
+            dims: vec![DimInfo::Lit(size)],
+            precision: chelis_types::types::Prim::F32,
+        };
+        let mut ctx = LowerCtx::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            LinearityInfo::default(),
+        );
+        let x = ctx
+            .dag
+            .add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
+        ctx.bindings.insert("x".into(), LoweredValue::Node(x));
+        let expr = chelis_deep::parser::parse_str(expr_src).expect("parse expand expr");
+        let _ = ctx.lower_expr(&expr[0]);
+        ctx.dag
+    }
+
+    fn only_expand(dag: &Dag) -> (DimExpr, Vec<DimInfo>) {
+        dag.nodes()
+            .iter()
+            .find_map(|n| match &n.op {
+                RiscOp::Expand { size, .. } => Some((size.clone(), n.output_type.dims.clone())),
+                _ => None,
+            })
+            .expect("an Expand node must be present")
+    }
+
+    /// Issue #318: the SHAPE-DERIVED `expand` size `shape(&x, 0)` must
+    /// recover the broadcast extent from `x`'s already-lowered dim, NOT
+    /// default to size 1. This lowers the exact Deep the Surf idiom
+    /// produces — `expand(scalar_to_tensor(c), 0, cast(shape(&x,
+    /// cast(0,int32)), int32))` — directly through the `expand` lowering
+    /// arm (bypassing the host-routing gate that keeps a `shape`-bearing
+    /// *def* out of standalone DAG lowering), with `x: tensor[2]` bound.
+    /// The recovered extent must be the concrete `2`, and the rank-0
+    /// `scalar_to_tensor` source must yield a `tensor[2]` (rank-increasing)
+    /// expand — never the collapsed `tensor[1]`.
+    #[test]
+    fn issue_318_expand_shape_arg_recovers_rank0_source_extent() {
+        let expr = r#"
+            (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                 (var {} expand)
+                 (app {type: (t-prim {} f32)}
+                      (var {} scalar_to_tensor)
+                      (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
+                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {}
+                       (app {}
+                            (var {} shape)
+                            (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
+                            (cast {} (lit {} 0) (t-prim {} int32)))
+                       (t-prim {} int32)))
+        "#;
+        let dag = lower_with_bound_x(2, expr);
+        let (size, dims) = only_expand(&dag);
+        assert_eq!(
+            size,
+            DimExpr::Concrete(2),
+            "shape-derived extent must recover x's axis-0 size 2, not the default 1; got {size:?}",
+        );
+        assert_eq!(
+            dims,
+            vec![DimInfo::Lit(2)],
+            "rank-0-source expand output must be tensor[2], not the collapsed tensor[1]; got {dims:?}",
+        );
+    }
+
+    /// Reading the extent from `shape(&x, 0)` must not accrue a dead node
+    /// per `expand`. The size recovery lowers the operand `&x`
+    /// (`borrow(var x)`) only to read its type; `borrow` forwards
+    /// transparently (no `Borrow` RISC op exists) and `var x` resolves to
+    /// the already-bound parameter, so the pre-bound `x` `Load` must remain
+    /// the *only* `Load { name: "x" }` in the DAG — no duplicate operand
+    /// node. The `only_expand` helper alone would not catch a stray node
+    /// (the line-review concern), so assert the count explicitly.
+    #[test]
+    fn issue_318_expand_shape_arg_no_dead_node() {
+        let expr = r#"
+            (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                 (var {} expand)
+                 (app {type: (t-prim {} f32)}
+                      (var {} scalar_to_tensor)
+                      (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
+                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {}
+                       (app {}
+                            (var {} shape)
+                            (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
+                            (cast {} (lit {} 0) (t-prim {} int32)))
+                       (t-prim {} int32)))
+        "#;
+        let dag = lower_with_bound_x(2, expr);
+        let x_loads = dag
+            .nodes()
+            .iter()
+            .filter(|n| matches!(&n.op, RiscOp::Load { name } if name == "x"))
+            .count();
+        assert_eq!(
+            x_loads, 1,
+            "the shape-arg operand `&x` must reuse the bound `x` Load, not \
+             re-materialize it; found {x_loads} `Load {{ name: \"x\" }}` nodes",
+        );
+    }
+
+    /// The fix recovers the broadcast EXTENT only; it leaves the
+    /// language's rank/insert rule for `expand` untouched. To prove the
+    /// extent recovery is orthogonal to the rank rule, lower a rank-1
+    /// size-1 source `tensor[1]` with a shape-derived size: `expand([1],
+    /// 0, shape(&x, 0))` with `x: tensor[2]`. The recovered extent at the
+    /// inserted axis must be the concrete `2` (NOT the default `1`), and
+    /// the output must follow the established INSERT semantics
+    /// (`[1] -> [2, 1]`, axis 0 inserted) — the same rule pinned by
+    /// `cli::build_c_linreg_expand_singleton_bias_keeps_rank2_shape` and
+    /// `chelis-compiler-api`'s
+    /// `host_runtime_expand_singleton_input_inserts_not_replicates`.
+    /// #318's real source is rank-0 (`scalar_to_tensor`), so this rank-1
+    /// case only exists to lock that the size fix did not perturb the
+    /// rank rule.
+    #[test]
+    fn issue_318_expand_shape_arg_recovers_extent_without_changing_rank_rule() {
+        // Source: a rank-1 size-1 constant `tensor[1]`.
+        let expr = r#"
+            (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 1) (t-prim {} f32))}
+                 (var {} expand)
+                 (cast {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
+                       (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 3.0)
+                       (t-prim {} f32))
+                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {}
+                       (app {}
+                            (var {} shape)
+                            (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
+                            (cast {} (lit {} 0) (t-prim {} int32)))
+                       (t-prim {} int32)))
+        "#;
+        let dag = lower_with_bound_x(2, expr);
+        let (size, dims) = only_expand(&dag);
+        assert_eq!(
+            size,
+            DimExpr::Concrete(2),
+            "shape-derived extent must recover 2 at the inserted axis, not the default 1; got {size:?}",
+        );
+        assert_eq!(
+            dims,
+            vec![DimInfo::Lit(2), DimInfo::Lit(1)],
+            "rank rule is unchanged: a rank-1 size-1 source INSERTS axis 0 \
+             ([1] -> [2, 1]); got {dims:?}",
+        );
+    }
+
+    /// Negative parity: the extent must track the tensor NAMED in the
+    /// `shape(...)` argument, not the default. Here `x` is bound to
+    /// `tensor[3]`, so `shape(&x, 0)` must recover `3`.
+    #[test]
+    fn issue_318_expand_shape_arg_tracks_named_tensor_size() {
+        let expr = r#"
+            (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
+                 (var {} expand)
+                 (app {type: (t-prim {} f32)}
+                      (var {} scalar_to_tensor)
+                      (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
+                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {}
+                       (app {}
+                            (var {} shape)
+                            (borrow {} (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
+                            (cast {} (lit {} 0) (t-prim {} int32)))
+                       (t-prim {} int32)))
+        "#;
+        let dag = lower_with_bound_x(3, expr);
+        let (size, dims) = only_expand(&dag);
+        assert_eq!(
+            size,
+            DimExpr::Concrete(3),
+            "extent must track the named tensor x's axis-0 size 3; got {size:?}",
+        );
+        assert_eq!(
+            dims,
+            vec![DimInfo::Lit(3)],
+            "expand output must be tensor[3]; got {dims:?}"
+        );
+    }
+
+    /// Negative-parity / regression lock: the LITERAL-size form (the #288
+    /// fix) must still recover the concrete extent through the same arm,
+    /// so the shape-derived recovery did not regress the literal path.
+    #[test]
+    fn issue_318_expand_literal_size_still_recovers_extent() {
+        let expr = r#"
+            (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                 (var {} expand)
+                 (app {type: (t-prim {} f32)}
+                      (var {} scalar_to_tensor)
+                      (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
+                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {} (lit {} 2) (t-prim {} int32)))
+        "#;
+        let dag = lower_with_bound_x(2, expr);
+        let (size, dims) = only_expand(&dag);
+        assert_eq!(
+            size,
+            DimExpr::Concrete(2),
+            "literal size 2 must still extract; got {size:?}"
+        );
+        assert_eq!(
+            dims,
+            vec![DimInfo::Lit(2)],
+            "literal expand output must be tensor[2]; got {dims:?}"
+        );
     }
 
     #[test]
