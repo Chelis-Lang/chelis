@@ -577,6 +577,67 @@ fn rank_poly_composed_identity_builds_and_runs() {
     }
 }
 
+/// Positive `grad` × rank-poly composition — the companion to
+/// `grad_transform_in_rank_poly_body_rejected`. `grad` INSIDE a `..r` body
+/// is rejected by Body Discipline, but differentiating a CONCRETE function
+/// whose body inlines a `..r` rank-poly callee is valid and must build, run,
+/// and yield the correct gradient. When `grad(loss)` is lowered, the grad
+/// sub-context monomorphizes the inlined `sq`'s `(d-rank)` slot to the
+/// concrete caller shape — the rank analogue of issue #289's
+/// precision-through-grad-sub-context path (this exercises the
+/// `subctx.rank_substitutions` seeding added when #286 rebased onto #289).
+/// `d/dx Σ(x²) = 2x`, so the gradient over `[1, 2, 3]` is `[2, 4, 6]`,
+/// asserted on the compiled binary and against the evaluator oracle.
+#[test]
+fn grad_over_rank_poly_callee_builds_runs_and_matches_oracle() {
+    let source = "def sq(x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, x)\n\
+         def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(sq(&x), cast(0, int32)))\n\
+         def dloss(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)\n\
+         out = dloss(to_tensor([1.0, 2.0, 3.0]))\n";
+
+    let backend = build_compile_run(source, "grad_rank_poly_callee");
+    let backend_tensors = parse_printed_tensors(&backend);
+    let (_, shape, data) = backend_tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(shape, &[3], "grad output shape ({backend})");
+    // d/dx of sum(x^2) is 2x; over [1, 2, 3] that is [2, 4, 6].
+    let expected = [2.0, 4.0, 6.0];
+    assert_eq!(data.len(), expected.len(), "grad output len ({backend})");
+    for (i, (g, e)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-6,
+            "grad[{i}]: backend {g} != expected {e} (d/dx sum(x^2) = 2x) ({backend})"
+        );
+    }
+
+    // Backend must agree with the evaluator oracle, value-for-value.
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "grad_rank_poly_callee");
+    // `chelis eval` prints a SINGLE root as a bare `tensor(...)` with no
+    // `name =` prefix (unlike the compiled binary, which names every root),
+    // so normalize it for the shared `name = tensor(...)` parser.
+    let eval_named = if eval.contains(" = tensor(") {
+        eval.clone()
+    } else {
+        format!("out = {}", eval.trim())
+    };
+    let eval_tensors = parse_printed_tensors(&eval_named);
+    let (_, eshape, edata) = eval_tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("evaluator output missing `out`: {eval}"));
+    assert_eq!(shape, eshape, "grad: eval-vs-backend shape disagreement");
+    assert_eq!(data.len(), edata.len(), "grad: eval-vs-backend length");
+    for (i, (b, ev)) in data.iter().zip(edata.iter()).enumerate() {
+        assert!(
+            (b - ev).abs() < 1e-6,
+            "grad[{i}]: eval-vs-backend disagreement: backend {b} vs eval {ev}"
+        );
+    }
+}
+
 /// Negative parity: a body that violates §4.2 shape-identity (`permute`) is
 /// STILL rejected at type-check — call-site rank monomorphization does not
 /// loosen the Body-Discipline gate. The negative paired with the positive

@@ -3458,7 +3458,8 @@ impl LowerCtx {
             // correctly; substitute the resolved primitive into the slot.
             let mut tolerant = prec_subst.clone();
             tolerant.entry(name).or_insert(resolved);
-            if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, &tolerant, rank_subst) {
+            if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, &tolerant, rank_subst)
+            {
                 return tt;
             }
             return Self::default_type();
