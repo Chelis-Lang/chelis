@@ -20,9 +20,10 @@ even though every static type label on the program is internally
 consistent: `preds` is `tensor[2, int64]` (correct post-#230) and
 `refs` is `tensor[2, int64]` (the int64 to_tensor literal). The
 program also passes `chelis check` cleanly. The failure surfaces in
-school PR #52, where `Std.Loss.Metrics.accuracy` builds an int64
-prediction tensor via `argmax_reduce` and tries to match it against
-an int64 labels tensor.
+school PR #52, where `Std.Loss.Metrics.accuracy` (now
+`School.Loss.Metrics.accuracy` after the ML modules moved to the `school`
+library in chelis-std 0.4.0) builds an int64 prediction tensor via
+`argmax_reduce` and tries to match it against an int64 labels tensor.
 
 ## Root cause
 

@@ -192,8 +192,7 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("static inline float chelis_host_silu_f32(float x) {".to_string());
     out.push("    return x * chelis_host_sigmoid_f32(x);".to_string());
     out.push("}".to_string());
-    // GELU tanh-approximation, matching `Std.Nn.Gelu.gelu_scalar` in
-    // `packages/chelis-std/src/nn/gelu.ch` and
+    // GELU tanh-approximation, matching `School.Nn.Gelu.gelu_scalar` and
     // `activation_gelu_f32` in chelis-compiler-api/src/runtime.rs.
     out.push("static inline float chelis_host_gelu_f32(float x) {".to_string());
     out.push("    float c = 0.7978845608028654f;".to_string());

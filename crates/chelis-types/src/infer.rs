@@ -518,7 +518,7 @@ pub fn build_compiled_library_context(
     // arm of `annotate_expr_with_scope` stamps borrow-correct types
     // onto each library def's `(params ...)` node -- the library
     // compile path is exactly where chelis-std's separate-`sig` defs
-    // (`Std.Loss.CrossEntropy.loss` etc.) are annotated.
+    // (`School.Loss.CrossEntropy.loss` etc.) are annotated.
     let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
@@ -6282,7 +6282,7 @@ fn ir_builtin_axis_dim(
 /// through a `(borrow {} <inner>)` wrapper if present.
 ///
 /// Surf source idiomatically passes tensors to shape-sensitive IR
-/// builtins via borrows (e.g. the `Std.Nn.Conv.conv2d_small` sig
+/// builtins via borrows (e.g. the `School.Nn.Conv.conv2d_small` sig
 /// requires `&tensor[...]`). The validator's lookup helpers need to
 /// see through that wrapper to find the underlying tensor type in the
 /// IR type environment; otherwise the dim-concreteness checks in the

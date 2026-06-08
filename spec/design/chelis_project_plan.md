@@ -342,7 +342,8 @@ The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 `3j-pre` → `3j` ∥ `3k` → `3l` → `3f`. `3j-pre` reserves the `chelis-lang` GitHub
 organization, ships a compiler release binary, and expands the standard library surface
 (`Std.Nn` attention/GELU/SiLU/RMSNorm/Conv, `Std.Loss`, `Std.Init`) that both `nautilus`
-and `coral` depend on. `3j` (nautilus) and `3k` (coral) can then overlap — no mutual
+and `coral` depend on (the `Std.Nn.*` / `Std.Loss.*` modules since moved to
+`School.Nn.*` / `School.Loss.*` in chelis-std 0.4.0; `Std.Init` stayed). `3j` (nautilus) and `3k` (coral) can then overlap — no mutual
 dependency. `3l` (shoals) depends on both. `3f` (SKILL.md v2) is intentionally last in
 Phase 3: it needs a real rewrite after the runtime, numeric, tokenization,
 standard-library, and domain-shell surfaces stabilize.
@@ -463,6 +464,9 @@ Shipped.
   training-control additions
 - keep `Std.Nn.Embedding` explicit in the standard library even though it is a thin
   wrapper over `gather`, because it is the natural public entrypoint for NLP models
+  (the embedding wrapper and the `Std.Nn.Embedding` package-import oracle below since
+  moved to `School.Nn.Embedding` in chelis-std 0.4.0; the `gather` primitive stayed in
+  the compiler core)
 - treat this as the last major tensor-language expansion before the data/token pipeline
   becomes the critical path
 - require `chelis check` to reject deterministic literal-driven `3h` value errors
@@ -516,6 +520,10 @@ Shipped.
 
 Standard library modules for real model training and inference:
 
+(The ML modules in this section — `Std.Nn.Generate`, `Std.Optim`, `Std.Schedule` —
+since moved to `School.Nn.Generate` / `School.Optim` / `School.Schedule` in chelis-std
+0.4.0; `Std.Time` and `Std.Decimal` stayed in `chelis-std`.)
+
 - **`Std.Time`:** Date and duration types. Date arithmetic, comparison,
   formatting/parsing (ISO 8601). UTC only in v1.
 - **`Std.Decimal`:** Fixed-point exact arithmetic. Configurable precision, banker's
@@ -546,7 +554,9 @@ Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
     `unsqueeze`, `min`, `prod`, `argmax`, `argmin`
   - `Std.Nn`: `GELU`, `SiLU`, `RMSNorm`, `Conv1d`, `Conv2d`,
     `scaled_dot_product_attention`, multi-head attention, grouped-query attention
+    (since moved to `School.Nn.*` in chelis-std 0.4.0)
   - `Std.Loss`: `KLDivergence`, `BCEWithLogits`, `accuracy`, `perplexity`
+    (since moved to `School.Loss.*` in chelis-std 0.4.0)
   - `Std.Init`: `kaiming_uniform`, `kaiming_normal`, `xavier_uniform`, `xavier_normal`,
     `trunc_normal`
 - acceptance oracle: `cargo test -p chelis-cli --test std_nn_build_acceptance -- --ignored --nocapture`
@@ -580,7 +590,7 @@ Modules ship in three priority tiers.
 | Module | Contents |
 |---|---|
 | `Nautilus.Stats` | Descriptive statistics, correlation, covariance, shrinkage estimators |
-| `Nautilus.Optim` | Convex optimization solvers (QP, SOCP, LP). Differentiable optimization via KKT. NOT `Std.Optim` (neural network optimizers). |
+| `Nautilus.Optim` | Convex optimization solvers (QP, SOCP, LP). Differentiable optimization via KKT. NOT `School.Optim` (neural network optimizers). |
 | `Nautilus.Roots` | Root finding (Newton-Raphson, bisection, Brent) |
 | `Nautilus.ODE` | ODE solvers (Euler, RK4, adaptive step). Composes with `grad` for neural ODE support. |
 
@@ -837,9 +847,10 @@ effects, linearity, macros, vmap, tuples, pipes, scalars, strings, collections,
 iteration, I/O, tokenization, core numeric primitives, package imports, dataframes
 (`coral`, including NaN handling and Parquet), numerical methods (`nautilus`, including
 the nalgebra-backed LinAlg surface), finance (`shoals` overview), and the expanded
-`Std.Nn` surface from `3j-pre` (attention, GELU/SiLU, RMSNorm, Conv1d/2d). Mentions the
-`school` (classical ML) and `darwin` (evolutionary algorithms) shells as post-Phase-3
-stubs. Goes truly last. Validated via `skill_suite.rs`.
+neural-network surface from `3j-pre` (attention, GELU/SiLU, RMSNorm, Conv1d/2d), now
+shipped as `School.Nn.*` in the `school` library (moved out of `chelis-std` in 0.4.0).
+Mentions the `school` (classical ML) and `darwin` (evolutionary algorithms) shells as
+post-Phase-3 stubs. Goes truly last. Validated via `skill_suite.rs`.
 
 Phase 3 success condition:
 

@@ -3228,8 +3228,7 @@ fn activation_silu_f32(x: f32) -> f32 {
     x * activation_sigmoid_f32(x)
 }
 
-/// `gelu(x)` via the tanh approximation, matching `Std.Nn.Gelu`'s
-/// `gelu_scalar` (`packages/chelis-std/src/nn/gelu.ch`):
+/// `gelu(x)` via the tanh approximation, matching `School.Nn.Gelu.gelu_scalar`:
 ///
 ///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
 ///
@@ -3238,7 +3237,7 @@ fn activation_silu_f32(x: f32) -> f32 {
 /// the canonical reference. If/when a `Erf` RISC op is added the
 /// exact form can replace this and both lanes must move together.
 fn activation_gelu_f32(x: f32) -> f32 {
-    // The literal is the f64 value that `Std.Nn.Gelu` and the C-backend
+    // The literal is the f64 value that `School.Nn.Gelu` and the C-backend
     // helper (`0.7978845608028654f` in host_emit.rs) both encode; the
     // explicit cast keeps the f32 round-trip identical to those lanes.
     // `clippy::excessive_precision` complains about the trailing digits
@@ -6670,7 +6669,7 @@ y = matmul(a, b)
     // Pins the closure of the second host-runtime gap from the N2 fix:
     // `chelis test` / `chelis eval` erroring with `unsupported builtin
     // 'expand'` / `'softmax'` when those primitives appear in a test's
-    // dependency graph (Std.Nn.Linear, Std.Nn.Attention, Std.Loss.CrossEntropy).
+    // dependency graph (School.Nn.Linear, School.Nn.Attention, School.Loss.CrossEntropy).
 
     #[test]
     fn host_runtime_expand_inserts_new_leading_axis() {

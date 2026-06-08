@@ -37,7 +37,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.3.0" }}
+chelis-std = {{ version = "0.4.0" }}
 "#,
         ver = chelis_compiler_api::COMPILER_VERSION,
     )
