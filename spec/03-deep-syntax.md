@@ -307,7 +307,7 @@ part of this public vocabulary.
 | `d-name` | `(d-name {} batch)` | Named dimension (concrete) |
 | `d-var` | `(d-var {} a)` | Dimension variable (polymorphic) |
 | `d-lit` | `(d-lit {} 512)` | Literal dimension size |
-| `d-rank` | `(d-rank {} r)` | Rank variable — stands for the *entire* shape vector (Tier-2 rank polymorphism). Must be the **sole** child of its `t-tensor`. |
+| `d-rank` | `(d-rank {} r)` | Rank variable — a name-preserving spread standing for a run of dims (rank polymorphism). Tier-2 uses it as the sole dim child; Tier-3 (§4.5.3) allows it interleaved with concrete anchors (`(t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32))`). A given rank name appears at most once per `t-tensor`. |
 
 ### 2.7 Transforms
 

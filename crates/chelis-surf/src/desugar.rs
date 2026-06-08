@@ -1903,8 +1903,10 @@ fn desugar_type_with_scope(
                     }
                     // Everything else → d-name (concrete)
                     TypeExpr::Named(n, _) => node("d-name", vec![sym(n)]),
-                    // `..r` rank-variable spread → (d-rank {} r). The parser
-                    // already guaranteed it is the sole shape element.
+                    // `..r` rank-variable spread → (d-rank {} r). May be
+                    // interleaved with concrete anchors (Tier-3); a multi-letter
+                    // anchor such as `seq` desugars to `d-name` above, which is
+                    // what the name-preserving split matches on.
                     TypeExpr::RankSpread(n, _) => node("d-rank", vec![sym(n)]),
                     _ => node(
                         "d-var",

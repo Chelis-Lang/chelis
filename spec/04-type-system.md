@@ -596,7 +596,11 @@ that names each rank as a separate variant. A rank-polymorphic
 site) was considered and deferred: the named-dim safety guarantee in
 §4.2 is preferred over the additional flexibility, and the
 reshape-at-the-boundary idiom is cheap enough that current consumers
-absorb it without losing per-tensor named dimensions.
+absorb it without losing per-tensor named dimensions. A *constrained,
+name-preserving* shape spread that does **not** sacrifice that guarantee
+is admitted for top-level tensor signatures by Tier-3 rank polymorphism
+(§4.5.3) — but it remains barred from `List`/ADT element position, so the
+rank-uniform-list guarantee above is unaffected.
 
 ```chelis
 ;; WRONG: rank-1 and rank-2 elements in the same List[tensor[k, f32]]
@@ -695,6 +699,63 @@ alongside `check_declared_dvars_rigid`); the acceptance oracle is
 `crates/chelis-cli/tests/issue_272_list_dim_rigidity.rs` with the
 chelis#218 ergonomics locked by
 `crates/chelis-cli/tests/issue_218_to_tensor_in_grad_body.rs`.
+
+#### 4.5.3 Name-Preserving Rank Polymorphism (Tier-3)
+
+§4.5.1 deferred a shape-vector variable because *rank erasure masks
+transposition bugs*. Tier-3 admits a **constrained, name-preserving** shape
+spread that does not reopen that hole: a rank variable `..r` (the `Dim::Rank`
+spread) binds to the *actual named dims it covers*, so per-axis names are
+retained, not erased, and the surviving axes carry their identity through.
+
+A tensor shape may interleave spreads with concrete **named anchors** — the
+admitted form is `Rank? (Name Rank?)*` (a given spread name appears at most once
+per shape). The headline use is a **named-axis reduction**: a single `def`
+reduces a named axis at any rank, and the checker computes the output shape
+symbolically.
+
+```chelis
+;; reduce the named `seq` axis, keep everything else by name:
+;; def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+;;   tensor[batch, seq, hidden] -> tensor[batch, hidden]
+;;   tensor[a, b, seq, c]       -> tensor[a, b, c]
+```
+
+Multiple axes are reduced by composing single-axis reductions
+(`sum(sum(x, head), seq)`).
+
+**Unification (unitary).** A row shape unifies with a ground shape by locating
+each named anchor uniquely in the ground and binding the spreads to the runs
+between. Because each interior split is fixed by a name, there is one
+most-general unifier:
+
+- A named anchor must occur in the operand **exactly once**; absent, ambiguous,
+  or non-named (a fully-literal operand under the §4.1 Name↔Lit rule) is a
+  **hard error**, never a guessed split.
+- Two spreads with no anchor between them (`tensor[..a, ..b]`) is an
+  *undetermined* split and is rejected at unification — except in an output
+  position (e.g. a reduction's `tensor[..pre, ..post]` result), which is only
+  ever matched against an identical row or expanded after its spreads are bound.
+
+**Soundness (§4.2).** Order is preserved (shapes stay ordered positional
+sequences — never unordered "rows"); the reduced axis is a retained name; and a
+rank-poly def body is restricted by the §4.2 Body-Discipline check to
+*name-trackable* operations only — shape-identity (elementwise) ops and
+named-axis reductions. A *positional* shape-rewriter (`permute`, `reshape`,
+`matmul`, positional `gather`) is rejected inside a `..r` body: its output shape
+is not name-trackable at symbolic rank, so it could hide an untracked
+transposition. This is what keeps the §4.5.1 transposition-safety guarantee
+intact while admitting the deferred flexibility for the reduction case.
+
+Enforcement: the unification arm is `crates/chelis-types/src/unify.rs`
+(`unify_row_against_ground` / `unify_row_against_row`); the named-axis reduction
+arm is `check_reduction_signature` and the discipline check is
+`check_rank_body_discipline` in `crates/chelis-types/src/infer.rs`. Call-site
+**rank monomorphization** (`tensor_rank_substitutions` /
+`extract_rank_var_bindings` in `crates/chelis-ir/src/lower.rs`) substitutes each
+spread's concrete run and resolves the named axis to a positional index at
+lowering, so a rank-poly reduce **builds and runs** on the C backend. The
+acceptance oracle is `crates/chelis-cli/tests/rank_poly_tier3.rs`.
 
 ### 4.6 Property Definitions
 

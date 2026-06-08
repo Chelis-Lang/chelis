@@ -229,9 +229,14 @@ pub enum Dim {
     Lit(i64),
     /// Wildcard — unknown/dynamic dimension.
     Wildcard,
-    /// Rank variable — stands for an *entire* shape vector (Tier-2 rank
-    /// polymorphism). Structural invariant: when a `Dim::Rank` appears in a
-    /// tensor's dim list it is the *sole* element of that list. Eliminated by
+    /// Rank variable — a *name-preserving spread* standing for a run of dims
+    /// (rank polymorphism). Tier-2 used it only as the sole element of a shape
+    /// (`tensor[..r, p]`); Tier-3 allows it interleaved with concrete anchors
+    /// (`tensor[..pre, seq, ..post, p]`). Structural invariant: a given
+    /// `RankVar` appears at most once per tensor dim list, and two spreads are
+    /// never *split* against a ground while both unbound (an undetermined
+    /// boundary — rejected at unification). A spread binds to the actual named
+    /// dims it covers, so names are preserved, not erased. Eliminated by
     /// monomorphization; no `Dim::Rank` reaches a backend.
     Rank(RankVar),
 }

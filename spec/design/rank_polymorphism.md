@@ -83,14 +83,34 @@ This is **Tier 2** of the three-tier analysis on chelis#258:
 |---|---|---|---|
 | 1 | identity (`out = R`) | `&tensor[R, f32] -> tensor[R, f32]` | **SHIPPED** |
 | 2 | constant / erasure (`out = []`) | `&tensor[R, f32] -> tensor[f32]` | **deferred** (no all-reduce primitive — see Implementation Status) |
-| 3 | arithmetic (`out = R±1`, permute) | `&tensor[R ++ [k], f32] -> tensor[R, f32]` | **out of scope** |
+| 3 | arithmetic (named-axis reduction) | `&tensor[..pre, seq, ..post, f32] -> tensor[..pre, ..post, f32]` | **SHIPPED (reduction)** — check + C backend |
 
-Tier 3 (rank arithmetic, `R ++ [k]` concatenation forms) is explicitly
-deferred: it needs non-unitary sequence unification and reopens the §4.2
-transposition-safety tradeoff. The reduce/expand primitives that *do* change
-rank are already covered by procedural inference arms
-(`check_reduction_signature`, `infer.rs:13010`), so users compose them rather
-than authoring rank-arithmetic defs themselves.
+**Tier-3 Update (name-preserving, shipped for reduction).** The original plan
+declared Tier-3 out of scope because the sketched `R ++ [k]` concatenation form
+erases per-axis names and needs non-unitary sequence unification. The *shipped*
+Tier-3 sidesteps both: a spread is **name-preserving** (it binds to the actual
+named dims it covers), and a shape is the alternating form `Rank? (Name Rank?)*`
+where each interior split is fixed by a **named anchor** — so unification stays
+**unitary** (locate each unique named anchor in the operand; bind the spreads
+between). A named-axis reduction (`def reduce_seq(x: &tensor[..pre, seq, ..post,
+f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)`) reduces the named anchor and
+carries the surviving named axes through; multi-axis reduction composes
+single-axis reductions. The §4.2 soundness boundary is preserved by the
+Body-Discipline reframe to *name-trackability* (elementwise + named reductions
+admitted; positional `permute`/`reshape`/`matmul` rejected — not name-trackable
+at symbolic rank). Shipped surface (spec §4.5.3): `chelis check` accepts/rejects
+soundly, and call-site rank monomorphization (`tensor_rank_substitutions` /
+`extract_rank_var_bindings`, with named-axis→index resolution at lowering) lets
+a rank-poly reduce **build and run** on the C backend with verified numerics.
+Acceptance oracle: `crates/chelis-cli/tests/rank_poly_tier3.rs`.
+
+*Known gaps (follow-ups):* the tree-walking `chelis eval` interpreter operates
+on nameless runtime tensors and does not yet resolve a named axis (the type info
+needed for that lives only on the compile/lowering path), so named-axis
+reductions build+run on the C backend but are not yet executable through
+`chelis eval`; the corpus verifies C-backend numerics directly. Expand (`R+1`)
+and a direct variadic-axis surface (`sum(x, seq, head)`) remain follow-ups. The
+positional (integer-axis) reduction path on concrete operands is unchanged.
 
 ## Why this is needed
 

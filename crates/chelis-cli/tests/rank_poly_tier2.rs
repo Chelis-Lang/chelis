@@ -216,12 +216,15 @@ fn permute_in_rank_poly_body_rejected() {
     assert_body_discipline_rejected(&json, "permute", "permute in ..r body");
 }
 
-/// A rank-reducing op (`sum`) is likewise shape-rewriting and rejected.
+/// Tier-3 (§4.5.3) supersedes Tier-2 here: a named-axis reduction is now admitted
+/// in a `..r` body (see `rank_poly_tier3`), but a *positional* axis on a sole
+/// spread `..r` — which has no named anchor to locate — is rejected by the
+/// reduction arm, since a positional index is meaningless at symbolic rank.
 #[test]
-fn reduce_in_rank_poly_body_rejected() {
+fn positional_reduce_on_sole_spread_rejected() {
     let json =
         check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = sum(x, cast(0, int32))\n");
-    assert_body_discipline_rejected(&json, "sum", "sum in ..r body");
+    assert_rejected(&json, "positional sum on a sole ..r spread");
 }
 
 /// `reshape` (the other op that shares `&tv -> tv` with `relu`) is rejected.
@@ -269,14 +272,16 @@ fn user_fn_call_in_rank_poly_body_rejected() {
     assert_rank_rejected(&json, "user-fn call in ..r body");
 }
 
-// ── Negative: the Tier-2/Tier-3 parse boundary ──────────────────────────
+// ── Tier-3 supersedes the old parse boundary ────────────────────────────
 
-/// `..r` adjacent to a concrete dim is Tier-3 rank arithmetic — a parse error,
-/// enforcing the boundary syntactically (not discovered at unification).
+/// `..r` adjacent to a concrete dim is now valid Tier-3 syntax: a rank-poly
+/// identity over `tensor[..r, k]` checks clean. The Tier-2/Tier-3 boundary
+/// moved from parse time to unification, where an *undetermined* split between
+/// two adjacent spreads is rejected (see `rank_poly_tier3`).
 #[test]
-fn rank_var_adjacent_to_concrete_dim_rejected() {
+fn rank_var_adjacent_to_concrete_dim_now_checks_clean() {
     let json = check_json("def f(x: &tensor[..r, k, f32]) -> tensor[..r, k, f32] = relu(x)\n");
-    assert_rejected(&json, "tensor[..r, k] adjacency");
+    assert_clean(&json, "tensor[..r, k] adjacency now valid (Tier-3)");
 }
 
 /// Control: the same activation written WITHOUT `..r` (concrete rank) still
