@@ -4891,6 +4891,10 @@ fn annotate_fn_children(
         Some(declared) => {
             let mut tvar_map: HashMap<String, TypeVar> = HashMap::new();
             let mut dvar_map: HashMap<String, DimVar> = HashMap::new();
+            // Tier-2 rank polymorphism (#286): a `..r` rank var recurring
+            // across params must map to the SAME `RankVar`, so the rvar map
+            // is shared across the declared params exactly like tvar/dvar.
+            let mut rvar_map = HashMap::new();
             declared
                 .iter()
                 .map(|expr| {
@@ -4902,6 +4906,7 @@ fn annotate_fn_children(
                             &mut param_vg,
                             &mut tvar_map,
                             &mut dvar_map,
+                            &mut rvar_map,
                         ) {
                             Type::Error => None,
                             ty => Some(ty),
