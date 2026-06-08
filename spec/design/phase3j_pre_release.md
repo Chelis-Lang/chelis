@@ -20,7 +20,10 @@ The `v0.1.x` line is the shipped Phase 3j-pre compiler surface:
   compiler-vs-interpreter closure follow-ups.
 - Expanded `Std.Nn` surface: RMSNorm, GELU, SiLU, Linear, Conv1d/2d wrappers,
   and `Std.Nn.Attention` (SDPA / grouped-query attention importable surface).
-- Expanded `Std.Loss` and `Std.Init` surface (Kaiming init, etc.).
+  (This `Std.Nn.*` surface since moved to `School.Nn.*` in the `school` library as of
+  chelis-std 0.4.0.)
+- Expanded `Std.Loss` and `Std.Init` surface (Kaiming init, etc.). (`Std.Loss.*` since
+  moved to `School.Loss.*` in chelis-std 0.4.0; `Std.Init` stayed in `chelis-std`.)
 - Reductions: `sum`, `mean`, `max`, `min`, `prod`, `argmax`, `argmin` in IR
   and C backend.
 - C backend host-lane pure-tensor wrapper lowering (Batch 5b fix).

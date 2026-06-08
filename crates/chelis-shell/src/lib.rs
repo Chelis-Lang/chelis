@@ -72,7 +72,7 @@ mod tests {
             },
             compiler: "=0.1.21".to_string(),
             modules: vec![ShellModule {
-                module: "Std.Nn.Linear".to_string(),
+                module: "App.Demo".to_string(),
                 exports: vec![ShellSymbol {
                     name: "forward".to_string(),
                     kind: SymbolKind::Value,

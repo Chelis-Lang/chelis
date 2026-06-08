@@ -2651,7 +2651,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.3.0" }}
+chelis-std = {{ version = "0.4.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -2660,15 +2660,13 @@ chelis-std = {{ version = "0.3.0" }}
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Nn.Embedding (forward)
-
 export (main)
 
 def main(
   ids: tensor[2, 3, int64],
   table: tensor[8, 4, f32]
 ) -> tensor[2, 3, 4, f32] =
-  forward(ids, table)
+  gather(table, ids, 0)
 "#,
     );
 
@@ -3938,11 +3936,11 @@ fn reef_build_emits_shell_and_archive() {
         .args(["reef", "build", pkg.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Built chelis-std 0.3.0"));
+        .stdout(predicate::str::contains("Built chelis-std 0.4.0"));
 
     assert!(pkg.join("reef.lock").exists());
-    assert!(pkg.join("dist/chelis-std-0.3.0.chb").exists());
-    assert!(pkg.join("dist/chelis-std-0.3.0.tar.zst").exists());
+    assert!(pkg.join("dist/chelis-std-0.4.0.chb").exists());
+    assert!(pkg.join("dist/chelis-std-0.4.0.tar.zst").exists());
 }
 
 #[test]
@@ -3973,7 +3971,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.3.0" }}
+chelis-std = {{ version = "0.4.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -3982,16 +3980,17 @@ chelis-std = {{ version = "0.3.0" }}
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Nn.Linear (forward)
-
 export (main)
 
 def main(
   x: tensor[32, 784, f32],
   w: tensor[784, 10, f32],
   b: tensor[10, f32]
-) -> tensor[32, 10, f32] =
-  forward(x, w, b)
+) -> tensor[32, 10, f32] = {
+  bias = expand(&b, 0, shape(&x, cast(0, int32)))
+  wx = matmul(&x, &w)
+  add(wx, bias)
+}
 "#,
     );
 
@@ -4055,7 +4054,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.3.0" }}
+chelis-std = {{ version = "0.4.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -5900,7 +5899,7 @@ ok = test_assert_close_tensor(actual, expected, 0.0001, "silu pointwise")
 #[test]
 fn bucket3_gelu_tanh_approx_runs_in_eval_and_c_lanes() {
     // gelu(0) = 0; gelu(1) ≈ 0.84119; gelu(-1) ≈ -0.15881.
-    // Tanh approximation matches `Std.Nn.Gelu.gelu_scalar` byte-for-byte.
+    // Tanh approximation matches the host-runtime `activation_gelu_f32` helper.
     run_activation_parity(
         "bucket3_gelu",
         r#"

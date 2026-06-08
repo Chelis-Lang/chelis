@@ -341,7 +341,9 @@ Without this cut, users still hit avoidable walls around:
 
 **Standard-library addition unlocked here:**
 
-- `Std.Nn.Embedding` as the explicit named surface over `gather`
+- `Std.Nn.Embedding` as the explicit named surface over `gather` (the `Std.Nn.Embedding`
+  shell module references in this 3h section since moved to `School.Nn.Embedding` in
+  chelis-std 0.4.0; the `gather` primitive itself stayed in the compiler core)
 
 ### Implementation Shape
 
@@ -672,6 +674,8 @@ Pure Chelis standard library module for fixed-point exact arithmetic.
 
 ### Std.Nn.Generate
 
+(Module since moved to `School.Nn.Generate` in chelis-std 0.4.0.)
+
 Autoregressive generation with KV cache management — the core inference pattern for
 generative models. Exposed as the TradeFM analysis showed: generate-one-token-then-
 feed-back is the fundamental inference loop, and doing it manually via `fold` is correct
@@ -711,6 +715,8 @@ generation under `with seed(...)`.
 
 ### Std.Optim (expansion)
 
+(Module since moved to `School.Optim` in chelis-std 0.4.0.)
+
 Add optimizer variants beyond the existing SGD and Adam:
 
 - **AdamW:** Adam with decoupled weight decay. The standard optimizer for modern
@@ -724,6 +730,8 @@ Both are pure Chelis library functions composed from existing tensor operations.
 a small modification of the existing Adam implementation.
 
 ### Std.Schedule
+
+(Module since moved to `School.Schedule` in chelis-std 0.4.0.)
 
 Learning rate scheduling — adjust the learning rate over the course of training.
 
@@ -797,8 +805,10 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 
 `cargo test -p chelis-cli --test std_package_acceptance -- --ignored --nocapture`
 
-This is the owning executable oracle for the currently shipped `Std.Time`,
-`Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate` surface. A later
+This is the owning executable oracle for the 3i-shipped `Std.Time`,
+`Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate` surface (the ML
+modules — `Schedule`, `Optim`, `Nn.Generate` — since moved to `School.*` in chelis-std
+0.4.0). A later
 phase-completion claim still requires a fresh-context red team and any documented manual
 gates.
 
@@ -824,6 +834,10 @@ sub-phase before the parallel shell work.
 ### Std Surface Additions
 
 Pure compiled additions to `chelis-std`. Nothing here requires a new shell.
+
+(Historical record of the 3j-pre surface. The ML modules listed below — `Std.Nn.*`,
+`Std.Loss.*` — since moved to `School.Nn.*` / `School.Loss.*` in chelis-std 0.4.0; the
+tensor/reduction additions stayed in `chelis-std`.)
 
 - **Tensor shape/construction:** `linspace`, `arange`, `stack`, `squeeze`, `unsqueeze`
 - **Reductions:** `min`, `prod`, `argmax`, `argmin`
@@ -1067,7 +1081,7 @@ adjoint tier.
 | Module | Contents | Key Dependencies |
 |---|---|---|
 | `Nautilus.Stats` | Descriptive statistics (variance, skew, kurtosis, median), correlation, covariance, shrinkage estimators | 3h: sort, quantile, einsum |
-| `Nautilus.Optim` | Convex optimization solvers (QP, SOCP, LP). Differentiable optimization via implicit differentiation through KKT conditions. NOT neural network optimizers (those are `Std.Optim`). | `Nautilus.LinAlg`, einsum |
+| `Nautilus.Optim` | Convex optimization solvers (QP, SOCP, LP). Differentiable optimization via implicit differentiation through KKT conditions. NOT neural network optimizers (those are `School.Optim`). | `Nautilus.LinAlg`, einsum |
 | `Nautilus.Roots` | Root finding (Newton-Raphson, bisection, Brent) | scalar math, host control flow |
 | `Nautilus.ODE` | ODE solvers (Euler, RK4, adaptive step). Composes with `grad` for neural ODE support. | cumsum, host control flow |
 
@@ -1635,7 +1649,9 @@ The refreshed skill should teach:
 - dataframe operations (`coral`), including NaN handling and Parquet I/O
 - numerical methods (`nautilus`), including the nalgebra-backed LinAlg surface
 - financial models (`shoals` overview, not exhaustive)
-- expanded `Std.Nn` surface from `3j-pre` (GELU, SiLU, RMSNorm, Conv1d/2d, attention, GQA)
+- expanded neural-network surface from `3j-pre` (GELU, SiLU, RMSNorm, Conv1d/2d,
+  attention, GQA), now shipped as `School.Nn.*` in the `school` library (moved out of
+  `chelis-std` in 0.4.0)
 - `school` (classical ML), `darwin` (evolutionary algorithms), and `hull`
   (executable language specification) shells are named but scoped as stubs; SKILL.md
   mentions them as post-Phase-3 targets only
@@ -1748,6 +1764,7 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 - `concat` / `split`, `diagonal` / `trace`, and `clamp` behave consistently across
   evaluator and compiled paths
 - `Std.Nn.Embedding` exercises the real `gather` path rather than a fake host-side stub
+  (the embedding wrapper since moved to `School.Nn.Embedding` in chelis-std 0.4.0)
 
 **Rust runtime rewrite (`3m`):**
 
@@ -1768,6 +1785,9 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 
 **Standard library expansion (`3i`):**
 
+(The ML modules in this block — `Std.Nn.Generate`, AdamW/LAMB optimizers, schedulers —
+since moved to `School.*` in chelis-std 0.4.0; `Std.Time` / `Std.Decimal` stayed.)
+
 - `Std.Time` and `Std.Decimal` stay standard-library scoped rather than leaking
   compiler-intrinsic assumptions
 - `Std.Nn.Generate` keeps the pure greedy path (`generate`) distinct from the seeded
@@ -1781,6 +1801,9 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
   modules
 
 **Release infrastructure + Std surface expansion (`3j-pre`):**
+
+(The `Std.Nn.*` / `Std.Loss.*` surface validated in this block since moved to
+`School.Nn.*` / `School.Loss.*` in chelis-std 0.4.0; `Std.Init` stayed.)
 
 - `chelis-lang` GitHub organization exists and is reserved
 - compiler release binary builds and downloads cleanly in CI

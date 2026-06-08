@@ -181,7 +181,7 @@ fn stub_sig_argmax_argmin_shape_returns_int64_indices_at_all_arithmetic_input_dt
     }
 }
 
-/// Std.Nn.Conv.conv1d / conv2d_small: production sig shapes with
+/// School.Nn.Conv.conv1d / conv2d_small: production sig shapes with
 /// concrete dims; the precision tvar admits every dtype the sig itself
 /// does not restrict. Surf has no kind-restriction syntax in this
 /// cycle, so the test covers every active dtype rather than only

@@ -81,14 +81,14 @@ One module per file. `module Name` is the first non-comment line. Declarations f
 File path mapping: `module Foo.Bar` lives in `foo/bar.ch` relative to the project root.
 
 ```
-module Std.Nn.Linear
+module School.Nn.Linear
 
 import Std.Tensor (..)
 
 def forward(x, w, b) = add(matmul(x, w), b)
 ```
 
-**⟹** `(module {} std.nn.linear ...)` — module name lowercased and dot-joined in Deep.
+**⟹** `(module {} school.nn.linear ...)` — module name lowercased and dot-joined in Deep.
 
 ### P2: Import / Export
 

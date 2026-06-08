@@ -16,20 +16,12 @@
 //! 5.8.1.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
-}
-
-fn stdlib_path(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/chelis-std")
-        .join(rel)
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("failed to canonicalize {rel}: {e}"))
 }
 
 fn run_build_in(dir: &Path, source: &Path) -> std::process::Output {
@@ -73,46 +65,6 @@ fn gcc_compile_object(work_dir: &Path, c_file: &Path, object: &Path) -> std::pro
 // ============================================================
 // Section A. Production stdlib build acceptance.
 // ============================================================
-
-#[test]
-fn build_stdlib_linear_succeeds() {
-    let dir = tempdir().expect("tempdir");
-    let src = stdlib_path("src/nn/linear.ch");
-    let output = run_build_in(dir.path(), &src);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "WS-A8: chelis build packages/chelis-std/src/nn/linear.ch \
-         must succeed post-monomorphization. stderr={stderr}"
-    );
-    // linear.ch is the canonical case the BLOCKER-class panic blocked
-    // (RT-3 FINDING 7): the standalone polymorphic def must be silently
-    // skipped from emission, never surface the monomorphization
-    // tripwire.
-    assert!(
-        !stderr.contains("monomorphization"),
-        "WS-A8: stderr must not surface the monomorphization tripwire \
-         for production linear.ch. stderr={stderr}"
-    );
-}
-
-#[test]
-fn build_stdlib_attention_succeeds() {
-    let dir = tempdir().expect("tempdir");
-    let src = stdlib_path("src/nn/attention.ch");
-    let output = run_build_in(dir.path(), &src);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "WS-A8: chelis build packages/chelis-std/src/nn/attention.ch \
-         must succeed post-monomorphization. stderr={stderr}"
-    );
-    assert!(
-        !stderr.contains("monomorphization"),
-        "WS-A8: stderr must not surface the monomorphization tripwire \
-         for production attention.ch. stderr={stderr}"
-    );
-}
 
 // ============================================================
 // Section B. Polymorphic sig + concrete call site builds and

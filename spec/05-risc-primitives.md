@@ -37,8 +37,8 @@ Together, the two tiers define everything the compiler has special knowledge of.
 
 Phase `3h` expands the practical primitive surface beyond this initial minimal set with
 `einsum`, `concat` / `split`, `gather` / `scatter`, `where`, `cumsum`, `sort`,
-`diagonal` / `trace`, and `clamp`. `Std.Nn.Embedding` remains the named standard-
-library surface over `gather`.
+`diagonal` / `trace`, and `clamp`. `School.Nn.Embedding` (moved to the `school` library
+in chelis-std 0.4.0) remains the named library surface over `gather`.
 
 For the `3h` additions, Chelis now rejects deterministic literal-driven value errors
 at check time when enough information is concrete in source (for example, statically
