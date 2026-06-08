@@ -4836,10 +4836,79 @@ fn annotate_fn_children(
 
     let mut param_vg = vg.clone();
     let raw_params = extract_params(&kids[0], &mut param_vg, adt_reg);
+    // issue #319: when the def carries a separate `sig`, the `fn`
+    // literal's params are bare symbols, so the inference above seeds
+    // each with an unconstrained fresh tvar — the body's shape-sensitive
+    // ops (`matmul`, `permute`) then annotate as bare type variables
+    // rather than resolved tensor types. Recovering the declared param
+    // types from `declared_param_type_exprs` and binding them into
+    // `fn_env` lets the recursive body annotation resolve those ops to
+    // their true `tensor[...]` shapes. Without this, IR lowering reads a
+    // rank-0 `default_type()` off a `(t-var ...)` body-node annotation
+    // and `tier2::lower_matmul` panics with `expects rank >= 2`.
+    //
+    // A SHARED `tvar_map`/`dvar_map` is used across every declared param
+    // so a dim/precision variable that recurs across parameters (e.g.
+    // `tensor[s, d, p]` for `q`, `k`, and `v`) maps to the SAME `DimVar`
+    // / `TypeVar` — preserving the inter-parameter shape relationships
+    // (`q: [s, d]`, `kt: [d, s]` ⇒ `matmul(q, kt): [s, s]`) that the
+    // matmul typing rule depends on. `param_vg` (the cloned `VarGen`)
+    // feeds fresh-var allocation so it does not perturb the caller's.
+    //
+    // Why clone rather than thread the caller's `vg` and advance its
+    // counter (which would be collision-free and shrink the argument
+    // below to a sentence): this is a post-inference ANNOTATION pass and
+    // `vg: &VarGen` is borrowed SHARED here — advancing the caller's
+    // counter is not even available without widening the whole annotation
+    // call-chain to `&mut VarGen`, a far larger change for a pass whose
+    // vars never escape. The throwaway clone is the correct local choice;
+    // the confinement argument below is why the resulting ID overlap is
+    // harmless.
+    //
+    // Var-ID overlap is harmless. These freshly-minted `TypeVar`s are
+    // used ONLY to seed `fn_env` for the body-ANNOTATION pass below; the
+    // annotation re-infers each body node's `type:` via
+    // `infer_expr_in_scope`, which runs in its OWN throwaway `Subst`
+    // (`infer_expr_in_scope` creates `Subst::new()`). Nothing from
+    // `param_vg` flows back into the caller's `vg`/`subst` or the
+    // program's global type state, so a `TypeVar(N)` minted here that
+    // happens to collide numerically with a `TypeVar(N)` elsewhere never
+    // unifies the two: the collision is confined to this one node's
+    // annotation scope. (Re-using the already-resolved declared `Fn` type
+    // — as the WS-A7 `infer_def_body_with_sig` inference path does — would
+    // also work, but is not reachable from this post-inference annotation
+    // pass, which has no access to that resolved type or the error
+    // vector.)
+    let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
+        Some(declared) => {
+            let mut tvar_map: HashMap<String, TypeVar> = HashMap::new();
+            let mut dvar_map: HashMap<String, DimVar> = HashMap::new();
+            declared
+                .iter()
+                .map(|expr| {
+                    if is_wildcard_tvar_expr(expr) {
+                        None
+                    } else {
+                        match deep_type_to_type_inner(
+                            expr,
+                            &mut param_vg,
+                            &mut tvar_map,
+                            &mut dvar_map,
+                        ) {
+                            Type::Error => None,
+                            ty => Some(ty),
+                        }
+                    }
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
     let mut fn_env = env.clone();
     for (index, (name, maybe_ty)) in raw_params.iter().enumerate() {
         let ty = maybe_ty
             .clone()
+            .or_else(|| declared_param_types.get(index).cloned().flatten())
             .or_else(|| param_types.get(index).cloned())
             .unwrap_or(Type::Error);
         fn_env.bind(name.clone(), Scheme::mono(ty));
