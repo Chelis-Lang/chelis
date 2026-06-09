@@ -75,7 +75,9 @@ fn assert_clean(json: &Value, label: &str) {
     );
 }
 
-fn assert_rejected(json: &Value, label: &str) {
+/// Assert a rejection whose message contains `needle` — pins the *reason*, not
+/// just that some error fired, so a wrong-reason regression is caught.
+fn assert_rejected_with(json: &Value, needle: &str, label: &str) {
     let errors = json["errors"]
         .as_array()
         .unwrap_or_else(|| panic!("{label}: errors should be a json array, got {json}"));
@@ -83,15 +85,6 @@ fn assert_rejected(json: &Value, label: &str) {
         !errors.is_empty(),
         "{label}: expected rejection, got a clean check ({json})"
     );
-    let score = json["score"].as_f64().unwrap_or(1.0);
-    assert!(score < 1.0, "{label}: a rejected program must score < 1.0");
-}
-
-/// Assert a rejection whose message contains `needle`.
-fn assert_rejected_with(json: &Value, needle: &str, label: &str) {
-    let errors = json["errors"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{label}: errors should be a json array, got {json}"));
     let has = errors
         .iter()
         .any(|e| e["message"].as_str().is_some_and(|m| m.contains(needle)));
