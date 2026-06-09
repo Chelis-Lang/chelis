@@ -6579,7 +6579,7 @@ impl LowerCtx {
             raise_lowering_error(
                 format!(
                     "`{op}` reduces named axis `{name}`, but the monomorphized operand has no \
-                     such named axis — internal rank-monomorphization error"
+                     such named axis: internal rank-monomorphization error"
                 ),
                 Some(axis_expr.span()),
                 axis_expr.span_id().map(ToOwned::to_owned),
