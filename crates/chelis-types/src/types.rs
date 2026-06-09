@@ -470,7 +470,7 @@ impl fmt::Display for Type {
             }
             Type::Ref(inner) => write!(f, "&{inner}"),
             Type::Tensor(dims, prec) => {
-                let dim_strs: Vec<String> = dims.iter().map(|d| format!("{d:?}")).collect();
+                let dim_strs: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
                 write!(f, "tensor[{}, {}]", dim_strs.join(", "), prec.render())
             }
             Type::Adt(name, args) if args.is_empty() => write!(f, "{name}"),
@@ -485,6 +485,23 @@ impl fmt::Display for Type {
             }
             Type::Unit => write!(f, "unit"),
             Type::Error => write!(f, "<error>"),
+        }
+    }
+}
+
+impl fmt::Display for Dim {
+    /// User-facing rendering of a tensor dimension, matching the CLI surface
+    /// (`format_cli_dim`): a named dim by its name, a dim variable as `d<id>`, a
+    /// literal by its value, the wildcard as `*`, and a rank spread as `..r<id>`.
+    /// Used by `Type`'s `Display` so diagnostics read `tensor[..r0, seq, ..r1, f32]`
+    /// instead of the internal `Debug` form `Rank(RankVar(0)), Name("seq")`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Dim::Name(name) => write!(f, "{name}"),
+            Dim::Var(v) => write!(f, "d{}", v.0),
+            Dim::Lit(value) => write!(f, "{value}"),
+            Dim::Wildcard => write!(f, "*"),
+            Dim::Rank(r) => write!(f, "..r{}", r.0),
         }
     }
 }

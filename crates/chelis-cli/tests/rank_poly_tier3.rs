@@ -202,7 +202,11 @@ fn declared_return_keeps_reduced_axis_rejected() {
     let json = check_json(
         "def bad(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = sum(x, seq)\n",
     );
-    assert_rejected(&json, "return keeps the reduced `seq` axis");
+    assert_rejected_with(
+        &json,
+        "doesn't match declared signature",
+        "return keeps the reduced `seq` axis",
+    );
 }
 
 /// Reducing an axis the operand does not have is a hard error.
@@ -211,7 +215,11 @@ fn reduce_nonexistent_axis_rejected() {
     let json = check_json(
         "def f(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = sum(x, nope)\n",
     );
-    assert_rejected(&json, "reduce a non-existent axis `nope`");
+    assert_rejected_with(
+        &json,
+        "neither a compile-time constant nor a named axis",
+        "reduce a non-existent axis `nope`",
+    );
 }
 
 /// Name↔Lit hard-reject: a fully-literal caller carries no name to locate the
@@ -272,7 +280,11 @@ fn reshape_in_rank_poly_body_rejected() {
 fn duplicate_spread_name_rejected() {
     let json =
         check_json("def f(x: &tensor[..r, seq, ..r, f32]) -> tensor[..r, f32] = sum(x, seq)\n");
-    assert_rejected(&json, "duplicate spread name `..r`");
+    assert_rejected_with(
+        &json,
+        "distinct rank-spread name",
+        "duplicate spread name `..r`",
+    );
 }
 
 // ── Formatter round-trip ────────────────────────────────────────────────

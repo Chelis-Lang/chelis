@@ -354,8 +354,19 @@ impl Subst {
                 *val = other.apply_dim(val);
             }
         }
+        {
+            // Rank bindings are `Dim::Rank`-free runs (enforced by `bind_rvar`),
+            // so applying `other` is a per-dim `apply_dim`. Omitting this would
+            // silently drop rank substitutions through a compose — a Tier-3
+            // footgun since ranks are now load-bearing.
+            let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
+            for val in self_ranks.values_mut() {
+                *val = val.iter().map(|d| other.apply_dim(d)).collect();
+            }
+        }
         let other_types = other.types_snapshot();
         let other_dims = other.dims_snapshot();
+        let other_ranks = other.ranks_snapshot();
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
             for (k, v) in other_types {
@@ -368,6 +379,15 @@ impl Subst {
                 self_dims.entry(k).or_insert(v);
             }
         }
+        {
+            let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
+            for (k, v) in other_ranks {
+                self_ranks.entry(k).or_insert(v);
+            }
+        }
+        // `deferred_borrow_vars` is intentionally NOT merged: it is a transient
+        // per-def ledger (issue #256), drained after each body's inference, not
+        // part of the substitution's logical content.
     }
 }
 

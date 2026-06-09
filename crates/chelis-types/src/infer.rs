@@ -13548,6 +13548,12 @@ fn check_reduction_signature(
     let axis_exprs = &arg_exprs[1..];
     let has_spread = dims.iter().any(|d| matches!(d, Dim::Rank(_)));
 
+    // NOTE: every reduction builtin's HM scheme is arity-2 (`(input, axis)`),
+    // so `axis_exprs` is currently always a single element — `sum(x, seq)`, not
+    // `sum(x, seq, head)`. The loop below already handles N named axes, but the
+    // variadic surface is arity-gated upstream; admitting it (a dedicated
+    // `infer_reduction_app` dispatcher) is tracked as chelis#339. Multi-axis
+    // reduction today composes single-axis reductions: `sum(sum(x, head), seq)`.
     let mut remove: Vec<usize> = Vec::new();
     if axis_exprs.len() == 1
         && !has_spread
@@ -13625,15 +13631,16 @@ fn check_reduction_signature(
                 }
                 [] => {
                     // Concrete operand: `axis_name` is neither a literal nor a
-                    // named axis of the operand — most often a runtime `int32`
-                    // binding (issue #259). Name the compile-time-constant
-                    // requirement so the diagnostic points at the real cause.
+                    // named axis of the operand. Two causes share this arm — a
+                    // runtime `int32` binding (issue #259) and a mistyped/absent
+                    // axis name — so the message stays neutral between them
+                    // rather than asserting "runtime value".
                     errors.push(CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name} axis must be a compile-time constant or a named axis of the \
-                             operand for the output shape to be inferable, got a runtime value \
-                             `{axis_name}`"
+                            "{name} axis `{axis_name}` is neither a compile-time constant nor a \
+                             named axis of the operand: a reduction axis must be a literal or \
+                             `cast(N, int32)` constant, or the name of an existing axis"
                         ),
                         vec![format!(
                             "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, int32)`, or \

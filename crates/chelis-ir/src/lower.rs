@@ -1380,7 +1380,14 @@ fn extract_rank_var_bindings(expr: &Expr, actual_dims: &[DimInfo]) -> Vec<(Strin
                 match rest.iter().position(|s| !matches!(s, Slot::Spread(_))) {
                     Some(0) => {
                         let Slot::Named(anchor) = &rest[0] else {
-                            return out; // anchor not a d-name: cannot locate
+                            // Anchor not a `d-name` — unlocatable. The checker
+                            // requires a named anchor, so this is unreachable for
+                            // a checked program; fail loud in debug, bail in release.
+                            debug_assert!(
+                                false,
+                                "rank-spread anchor is not a named dim at lowering"
+                            );
+                            return out;
                         };
                         let split = actual_dims[gi..]
                             .iter()
@@ -1391,7 +1398,16 @@ fn extract_rank_var_bindings(expr: &Expr, actual_dims: &[DimInfo]) -> Vec<(Strin
                                 out.push((name.clone(), actual_dims[gi..s].to_vec()));
                                 gi = s;
                             }
-                            None => return out,
+                            None => {
+                                // Anchor absent from the monomorphized actual —
+                                // the checker located it (Name↔Lit etc. were
+                                // rejected), so unreachable for a checked program.
+                                debug_assert!(
+                                    false,
+                                    "rank-spread anchor `{anchor}` absent from monomorphized actual"
+                                );
+                                return out;
+                            }
                         }
                         ri += 1;
                     }
@@ -1400,8 +1416,12 @@ fn extract_rank_var_bindings(expr: &Expr, actual_dims: &[DimInfo]) -> Vec<(Strin
                         gi = n;
                         ri += 1;
                     }
-                    // Two adjacent spreads — never reaches a checked backend.
-                    _ => return out,
+                    // Two adjacent spreads — the undetermined split is rejected at
+                    // unification, so this never reaches a checked backend.
+                    _ => {
+                        debug_assert!(false, "two adjacent rank spreads at lowering");
+                        return out;
+                    }
                 }
             }
             _ => {
@@ -6541,15 +6561,29 @@ impl LowerCtx {
         fallback_rank: usize,
         op: &str,
     ) -> usize {
-        if let Some(name) = bare_var_name(axis_expr)
-            && let Some(node) = self.dag.get(operand)
-            && let Some(idx) = node
-                .output_type
-                .dims
-                .iter()
-                .position(|d| matches!(d, DimInfo::Named(n, _) if *n == name))
-        {
-            return idx;
+        if let Some(name) = bare_var_name(axis_expr) {
+            // A *named* axis (Tier-3 §4.5.3) MUST resolve against the operand's
+            // concrete dims: the checker proved the anchor present and call-site
+            // monomorphization made it concrete here. If it is somehow absent,
+            // fail loudly — falling through to `extract_axis_raw` would return 0
+            // and silently reduce the wrong axis (the repo forbids silent
+            // fallbacks; CLAUDE.md "Do Not Trust Green").
+            if let Some(idx) = self.dag.get(operand).and_then(|node| {
+                node.output_type
+                    .dims
+                    .iter()
+                    .position(|d| matches!(d, DimInfo::Named(n, _) if *n == name))
+            }) {
+                return idx;
+            }
+            raise_lowering_error(
+                format!(
+                    "`{op}` reduces named axis `{name}`, but the monomorphized operand has no \
+                     such named axis — internal rank-monomorphization error"
+                ),
+                Some(axis_expr.span()),
+                axis_expr.span_id().map(ToOwned::to_owned),
+            );
         }
         let raw = self.extract_axis_raw(axis_expr);
         self.normalize_axis(raw, fallback_rank, op, axis_expr)

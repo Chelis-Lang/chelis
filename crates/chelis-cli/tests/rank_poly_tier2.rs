@@ -102,6 +102,21 @@ fn assert_rejected(json: &Value, label: &str) {
     );
 }
 
+/// Assert a rejection whose message contains `needle` — pins the *reason*, not
+/// just that some error fired, so a wrong-reason regression is caught.
+fn assert_rejected_with(json: &Value, needle: &str, label: &str) {
+    let errors = json["errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: errors should be a json array, got {json}"));
+    let has = errors
+        .iter()
+        .any(|e| e["message"].as_str().is_some_and(|m| m.contains(needle)));
+    assert!(
+        has,
+        "{label}: expected a rejection mentioning {needle:?}, got {errors:?}"
+    );
+}
+
 /// A Body-Discipline rejection citing the rank-polymorphic def (used for the
 /// non-`app` bypass routes — transforms, computed callees, user-fn calls).
 fn assert_rank_rejected(json: &Value, label: &str) {
@@ -224,7 +239,11 @@ fn permute_in_rank_poly_body_rejected() {
 fn positional_reduce_on_sole_spread_rejected() {
     let json =
         check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = sum(x, cast(0, int32))\n");
-    assert_rejected(&json, "positional sum on a sole ..r spread");
+    assert_rejected_with(
+        &json,
+        "positional integer axis",
+        "positional sum on a sole ..r spread",
+    );
 }
 
 /// `reshape` (the other op that shares `&tv -> tv` with `relu`) is rejected.
