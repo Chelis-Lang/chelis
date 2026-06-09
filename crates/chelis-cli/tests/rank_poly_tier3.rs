@@ -565,9 +565,10 @@ fn eval_resolves_named_axis_issue_repro() {
 /// `min_reduce`, and `prod_reduce` are included because at concrete rank they
 /// are checkable and buildable (the chelis#340 Body-Discipline rejection
 /// applies only inside `..r` bodies). `argmax_reduce`/`argmin_reduce` are
-/// deliberately absent: the C backend mis-prints their int64 output (an
-/// unrelated pre-existing backend bug; eval is correct), so the agreement
-/// oracle cannot include them yet.
+/// deliberately absent: the C backend mis-prints their int64 output as a
+/// reinterpreted f32 bit pattern (chelis#347, pre-existing and orthogonal;
+/// eval is correct), so the agreement oracle cannot include them yet. Fold
+/// them in when #347 closes.
 /// Operand is non-square (batch=2, seq=3) per the #258 red-team finding.
 #[test]
 fn concrete_rank_named_reduce_eval_matches_backend() {

@@ -110,13 +110,12 @@ type). `grad` over a tensor-output reduce def is check-rejected (scalar rule).
    NO AI-authorship trailers (commit hook rejects). Don't commit
    `packages/chelis-std/reef.lock`. Rebase on `main` if anything landed.
    macOS Smoke is the authoritative CI oracle; Linux jobs flake on disk-full.
-5. **File a NEW issue: argmax/argmin C-backend output bug** (found while
-   probing, orthogonal to #338 — reproduces with a plain int axis):
-   `def am(x: &tensor[batch, seq, f32]) -> tensor[batch, int64] = argmax_reduce(x, 1)`
-   → backend prints `data=[1065353216.0, 0.0]` (f32 bit-pattern of 1.0
-   reinterpreted); eval correctly prints `[1.0, 0.0]`. This is why
-   argmax/argmin are excluded from the tier-3 agreement test (comment in the
-   test points here).
+5. **DONE — filed as chelis#347**: argmax/argmin C-backend output bug
+   (orthogonal to #338, reproduces with a plain int axis; backend prints the
+   f32 bit-pattern `1065353216.0` where eval correctly prints `[1.0, 0.0]`).
+   The tier-3 agreement test excludes argmax/argmin with a pointer to #347.
+   The #345 bisect verdict was also posted:
+   https://github.com/Chelis-Lang/chelis/issues/345#issuecomment-4664095524
 6. Optional cleanup: the #345 bisect agent left worktree
    `.claude/worktrees/agent-a5859ff13513aa89f` (contains an untracked `.venv`
    symlink) — `git worktree remove --force` it. Probe scratch lives in
