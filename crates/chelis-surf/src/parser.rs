@@ -2070,22 +2070,30 @@ impl Parser {
                         });
                     }
                 };
-                // Tier-2 boundary (spec/design/rank_polymorphism.md): a rank
-                // variable `..r` stands for the entire shape, so it must be the
-                // sole dimension. `tensor[..r, k, f32]` (R adjacent to concrete
-                // dims) is Tier-3 rank arithmetic and is rejected at parse time.
-                if items.iter().any(|d| matches!(d, TypeExpr::RankSpread(..))) && items.len() != 1 {
-                    return Err(ParseError::Expected {
-                        expected: "rank variable `..r` must be the entire shape; \
-                                   `..r` adjacent to concrete dimensions is Tier-3 \
-                                   rank arithmetic, not supported"
-                            .into(),
-                        found: format!(
-                            "tensor with {} dims including a rank variable",
-                            items.len()
-                        ),
-                        offset: self.current_offset(),
-                    });
+                // Rank polymorphism (spec/design/rank_polymorphism.md): a `..r`
+                // spread is a name-preserving run of dims and may be interleaved
+                // with concrete anchors (`tensor[..pre, seq, ..post, f32]` —
+                // Tier-3). The only parse-time fence is that a spread name may
+                // not repeat within one tensor shape (it would bind the same run
+                // twice). Two *adjacent* spreads are allowed syntactically: they
+                // occur in a reduction's output type `tensor[..pre, ..post]`. An
+                // undetermined adjacent-spread *split* is rejected later at
+                // unification, where an output position (sound) is distinguished
+                // from an input split (non-unitary).
+                let mut seen_spreads: Vec<&str> = Vec::new();
+                for d in &items {
+                    if let TypeExpr::RankSpread(n, _) = d {
+                        if seen_spreads.contains(&n.as_str()) {
+                            return Err(ParseError::Expected {
+                                expected: "a distinct rank-spread name; the same `..r` may \
+                                           not appear twice in one tensor shape"
+                                    .into(),
+                                found: format!("repeated rank spread `..{n}`"),
+                                offset: self.current_offset(),
+                            });
+                        }
+                        seen_spreads.push(n);
+                    }
                 }
                 Ok(TypeExpr::Tensor(items, prec_name, tok.span.merge(end.span)))
             }
@@ -3212,15 +3220,37 @@ mod tests {
     }
 
     #[test]
-    fn rank_spread_adjacent_to_concrete_dim_is_parse_error() {
-        // Tier-3 boundary: `..r` may not sit next to other dims.
+    fn rank_spread_adjacent_to_concrete_dim_parses() {
+        // Tier-3: `..r` interleaved with concrete anchors is now valid syntax
+        // (`tensor[..pre, seq, ..post, f32]`); the boundary moved to unification.
+        let decls =
+            p("def f(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = x");
+        let Decl::FunDef {
+            ret_ty: Some(ret), ..
+        } = &decls[0]
+        else {
+            panic!("expected fun def, got {:?}", decls[0]);
+        };
+        match ret {
+            TypeExpr::Tensor(dims, _, _) => {
+                assert_eq!(
+                    dims.len(),
+                    2,
+                    "two adjacent spreads in the reduce output type"
+                );
+                assert!(matches!(&dims[0], TypeExpr::RankSpread(n, _) if n == "pre"));
+                assert!(matches!(&dims[1], TypeExpr::RankSpread(n, _) if n == "post"));
+            }
+            _ => panic!("expected Tensor return type, got {ret:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_rank_spread_name_is_parse_error() {
+        // The one parse-time fence: a spread name may not repeat in one shape.
         assert!(
-            parse_str("x: tensor[..r, k, f32] = x").is_err(),
-            "tensor[..r, k, f32] must be a parse error (Tier-3 rank arithmetic)"
-        );
-        assert!(
-            parse_str("x: tensor[k, ..r, f32] = x").is_err(),
-            "tensor[k, ..r, f32] must be a parse error (Tier-3 rank arithmetic)"
+            parse_str("x: tensor[..r, seq, ..r, f32] = x").is_err(),
+            "a repeated `..r` in one tensor shape must be a parse error"
         );
     }
 

@@ -163,7 +163,12 @@ impl Subst {
     fn resolve_rvar(&self, start: RankVar) -> Vec<Dim> {
         let map = self.ranks.lock().expect("subst.ranks poisoned");
         let mut current = start;
-        loop {
+        // Bound the alias chase. A chain cannot exceed the number of bound
+        // ranks; a pathological cyclic alias (e.g. a swapped `..a`/`..b`
+        // return sig that aliases a:=b and b:=a) is broken here by returning
+        // the current rank rather than looping forever.
+        let max_steps = map.len() + 1;
+        for _ in 0..max_steps {
             match map.get(&current) {
                 None => return vec![Dim::Rank(current)],
                 Some(bound) => match bound.as_slice() {
@@ -173,6 +178,7 @@ impl Subst {
                 },
             }
         }
+        vec![Dim::Rank(current)]
     }
 
     /// Issue #256: record a borrow site whose inner type was still an
@@ -348,8 +354,19 @@ impl Subst {
                 *val = other.apply_dim(val);
             }
         }
+        {
+            // Rank bindings are `Dim::Rank`-free runs (enforced by `bind_rvar`),
+            // so applying `other` is a per-dim `apply_dim`. Omitting this would
+            // silently drop rank substitutions through a compose — a Tier-3
+            // footgun since ranks are now load-bearing.
+            let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
+            for val in self_ranks.values_mut() {
+                *val = val.iter().map(|d| other.apply_dim(d)).collect();
+            }
+        }
         let other_types = other.types_snapshot();
         let other_dims = other.dims_snapshot();
+        let other_ranks = other.ranks_snapshot();
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
             for (k, v) in other_types {
@@ -362,6 +379,15 @@ impl Subst {
                 self_dims.entry(k).or_insert(v);
             }
         }
+        {
+            let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
+            for (k, v) in other_ranks {
+                self_ranks.entry(k).or_insert(v);
+            }
+        }
+        // `deferred_borrow_vars` is intentionally NOT merged: it is a transient
+        // per-def ledger (issue #256), drained after each body's inference, not
+        // part of the substitution's logical content.
     }
 }
 
@@ -411,39 +437,42 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
         // Tensor types
         (Type::Tensor(dims1, p1), Type::Tensor(dims2, p2)) => {
             unify_tensor_prec(p1, p2, subst)?;
-            // Tier-2 rank polymorphism: a `Dim::Rank` stands for the *entire*
-            // shape vector (the sole dim by construction). Resolve any
-            // sole-rank shape through its current binding, then bind or unify.
-            // Because `R` only ever stands for the whole shape, this stays
-            // unitary — there is one most-general binding (Tier 3 would lose
-            // this). See `spec/design/rank_polymorphism.md` §Unification.
-            let d1 = resolve_rank_shape(dims1, subst);
-            let d2 = resolve_rank_shape(dims2, subst);
-            match (d1.as_slice(), d2.as_slice()) {
-                ([Dim::Rank(r1)], [Dim::Rank(r2)]) => {
-                    if r1 != r2 {
-                        subst.insert_rank(*r1, vec![Dim::Rank(*r2)]);
+            // Rank polymorphism: a `Dim::Rank` is a *name-preserving spread*
+            // standing for a run of dims. A shape is `Rank? (Name Rank?)*`
+            // (no two spreads adjacent). Resolve both shapes (expanding any
+            // bound spread to its run), then dispatch on how many spreads each
+            // side carries. With at most one spread per gap and a named anchor
+            // locating each interior split, unification stays unitary — there
+            // is one most-general binding. See
+            // `spec/design/rank_polymorphism.md` §Unification.
+            let d1 = resolve_shape(dims1, subst);
+            let d2 = resolve_shape(dims2, subst);
+            let s1 = d1.iter().filter(|d| matches!(d, Dim::Rank(_))).count();
+            let s2 = d2.iter().filter(|d| matches!(d, Dim::Rank(_))).count();
+            match (s1, s2) {
+                // Both ground (Tier-1 / fully-monomorphic): length + element-wise.
+                (0, 0) => {
+                    if d1.len() != d2.len() {
+                        return Err(TypeError {
+                            kind: TypeErrorKind::DimensionMismatch,
+                            message: format!(
+                                "tensor rank mismatch: {} dims vs {} dims",
+                                d1.len(),
+                                d2.len()
+                            ),
+                        });
                     }
-                    return Ok(());
+                    for (a, b) in d1.iter().zip(d2.iter()) {
+                        unify_dim(a, b, subst)?;
+                    }
+                    Ok(())
                 }
-                ([Dim::Rank(r)], _) => return bind_rvar(*r, &d2, subst),
-                (_, [Dim::Rank(r)]) => return bind_rvar(*r, &d1, subst),
-                _ => {}
+                // Exactly one side carries spreads: split the ground side.
+                (_, 0) => unify_row_against_ground(&d1, &d2, subst),
+                (0, _) => unify_row_against_ground(&d2, &d1, subst),
+                // Both carry spreads: only structurally-identical rows unify.
+                (_, _) => unify_row_against_row(&d1, &d2, subst),
             }
-            if d1.len() != d2.len() {
-                return Err(TypeError {
-                    kind: TypeErrorKind::DimensionMismatch,
-                    message: format!(
-                        "tensor rank mismatch: {} dims vs {} dims",
-                        d1.len(),
-                        d2.len()
-                    ),
-                });
-            }
-            for (a, b) in d1.iter().zip(d2.iter()) {
-                unify_dim(a, b, subst)?;
-            }
-            Ok(())
         }
 
         // ADT types
@@ -618,24 +647,207 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
     Ok(())
 }
 
-/// If `dims` is a sole `Dim::Rank`, resolve it through its current binding
-/// (expanding to the bound shape, or staying `[Dim::Rank(r)]` while unbound);
-/// otherwise return the dims unchanged. Used by the rank-unification arm.
-fn resolve_rank_shape(dims: &[Dim], subst: &Subst) -> Vec<Dim> {
-    if let [Dim::Rank(r)] = dims {
-        subst.resolve_rvar(*r)
-    } else {
-        dims.to_vec()
+/// Fully resolve a tensor's dim list under the current substitution: each
+/// bound `Dim::Rank` expands to the run it stands for and every other dim is
+/// `apply_dim`'d; an unbound (or terminal-rank) spread stays a `Dim::Rank`.
+/// This is the per-shape form of `Subst::apply`'s tensor arm, used by the
+/// rank-unification dispatch so a row shape arrives with only *unbound*
+/// spreads interleaved among concrete dims.
+fn resolve_shape(dims: &[Dim], subst: &Subst) -> Vec<Dim> {
+    let mut out = Vec::with_capacity(dims.len());
+    for d in dims {
+        match d {
+            Dim::Rank(r) => {
+                for rd in subst.resolve_rvar(*r) {
+                    out.push(subst.apply_dim(&rd));
+                }
+            }
+            _ => out.push(subst.apply_dim(d)),
+        }
+    }
+    out
+}
+
+/// The shared diagnostic for an undetermined split between two adjacent
+/// rank spreads (the non-unitary case the decidable fragment excludes).
+fn adjacent_spread_error() -> TypeError {
+    TypeError {
+        kind: TypeErrorKind::DimensionMismatch,
+        message: "two adjacent rank spreads cannot be split against a concrete shape; the \
+                  boundary between them is undetermined (outside the decidable fragment, \
+                  spec/04-type-system.md \u{00a7}4.5.3)"
+            .to_string(),
     }
 }
 
-/// Bind a rank variable to a concrete shape vector, with an occurs-check:
-/// the rank must not appear within its own binding.
+/// Unify a *row* shape (≥1 spread, no two spreads adjacent) against a *ground*
+/// shape (no spreads). Walks the row left to right: a fixed anchor matches the
+/// ground positionally; a spread is bound to the run of ground dims up to the
+/// next anchor, located by that anchor's name (the §4.2 name-preserving rule).
+/// Each interior split anchor must be a `Dim::Name` present **exactly once** in
+/// the remaining ground — a missing, ambiguous, or non-named anchor is a hard
+/// error, never a guessed split. With one spread per gap and named splits,
+/// every split point is forced, so this is unitary.
+fn unify_row_against_ground(
+    row: &[Dim],
+    ground: &[Dim],
+    subst: &mut Subst,
+) -> Result<(), TypeError> {
+    let n = ground.len();
+    let mut gi = 0usize; // ground cursor
+    let mut ri = 0usize; // row cursor
+    while ri < row.len() {
+        match &row[ri] {
+            Dim::Rank(r) => {
+                let rest = &row[ri + 1..];
+                match rest.iter().position(|d| !matches!(d, Dim::Rank(_))) {
+                    // The spread is immediately followed by a named anchor:
+                    // locate that name in the remaining ground to fix the split.
+                    Some(0) => {
+                        let name = match &rest[0] {
+                            Dim::Name(s) => s,
+                            other => {
+                                return Err(TypeError {
+                                    kind: TypeErrorKind::DimensionMismatch,
+                                    message: format!(
+                                        "rank-spread anchor must be a named dimension to locate the \
+                                         split, got {other:?} (spec/04-type-system.md \u{00a7}4.5.3)"
+                                    ),
+                                });
+                            }
+                        };
+                        let hits: Vec<usize> = (gi..n)
+                            .filter(|&j| matches!(&ground[j], Dim::Name(g) if g == name))
+                            .collect();
+                        match hits.as_slice() {
+                            [split] => {
+                                bind_rvar(*r, &ground[gi..*split], subst)?;
+                                gi = *split;
+                            }
+                            [] => {
+                                return Err(TypeError {
+                                    kind: TypeErrorKind::DimensionMismatch,
+                                    message: format!(
+                                        "rank-spread operand carries no named `{name}` axis; a \
+                                         fully-literal or differently-named operand cannot locate \
+                                         the axis (spec/04-type-system.md \u{00a7}4.5.3)"
+                                    ),
+                                });
+                            }
+                            many => {
+                                return Err(TypeError {
+                                    kind: TypeErrorKind::DimensionMismatch,
+                                    message: format!(
+                                        "named axis `{name}` is ambiguous: it appears {} times in \
+                                         the operand shape (spec/04-type-system.md \u{00a7}4.5.3)",
+                                        many.len()
+                                    ),
+                                });
+                            }
+                        }
+                        ri += 1;
+                    }
+                    // A second spread sits between this spread and the next
+                    // anchor (or runs to the end): the split between two
+                    // adjacent spreads is undetermined — the non-unitary case.
+                    Some(_) => {
+                        return Err(adjacent_spread_error());
+                    }
+                    None if rest.is_empty() => {
+                        // Trailing spread: absorb the rest of the ground.
+                        bind_rvar(*r, &ground[gi..n], subst)?;
+                        gi = n;
+                        ri += 1;
+                    }
+                    None => {
+                        // `rest` is one or more further spreads with no anchor.
+                        return Err(adjacent_spread_error());
+                    }
+                }
+            }
+            anchor => {
+                if gi >= n {
+                    return Err(TypeError {
+                        kind: TypeErrorKind::DimensionMismatch,
+                        message: format!(
+                            "tensor rank too small: the rank-spread shape has more fixed anchor \
+                             dimensions than the operand's {n} dimensions"
+                        ),
+                    });
+                }
+                unify_dim(anchor, &ground[gi], subst)?;
+                gi += 1;
+                ri += 1;
+            }
+        }
+    }
+    if gi != n {
+        return Err(TypeError {
+            kind: TypeErrorKind::DimensionMismatch,
+            message: format!(
+                "tensor shape mismatch: {} operand dimension(s) left unmatched after the \
+                 rank-spread shape was consumed",
+                n - gi
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Unify two row shapes that *both* carry spreads. Restricted to
+/// structurally-identical rows (same length, same per-position kind): spreads
+/// alias pairwise, named anchors unify by name. Two rows with a *different*
+/// anchor structure are associative/string unification (not unitary) and are
+/// rejected — the body of a rank-poly def only ever produces an identical-row
+/// self-check, and call sites are row-vs-ground.
+fn unify_row_against_row(d1: &[Dim], d2: &[Dim], subst: &mut Subst) -> Result<(), TypeError> {
+    if d1.len() != d2.len() {
+        return Err(TypeError {
+            kind: TypeErrorKind::DimensionMismatch,
+            message: format!(
+                "cannot unify rank-spread shapes with differing anchor structure ({} vs {} slots); \
+                 two spreads with an undetermined split are outside the decidable fragment \
+                 (spec/04-type-system.md \u{00a7}4.5.3)",
+                d1.len(),
+                d2.len()
+            ),
+        });
+    }
+    for (a, b) in d1.iter().zip(d2.iter()) {
+        match (a, b) {
+            (Dim::Rank(r1), Dim::Rank(r2)) => {
+                if r1 != r2 {
+                    subst.insert_rank(*r1, vec![Dim::Rank(*r2)]);
+                }
+            }
+            (Dim::Rank(_), _) | (_, Dim::Rank(_)) => {
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: "cannot unify a rank spread against a concrete dimension; the two \
+                              rank-spread shapes have differing structure \
+                              (spec/04-type-system.md \u{00a7}4.5.3)"
+                        .to_string(),
+                });
+            }
+            _ => unify_dim(a, b, subst)?,
+        }
+    }
+    Ok(())
+}
+
+/// Bind a rank variable to a concrete shape *run*, with an occurs/nesting
+/// check: the bound run must be `Dim::Rank`-free. A run containing any spread
+/// would either make the rank infinite (its own occurrence) or smuggle a
+/// second spread into a single spread's binding (the non-unitary case).
+/// Rank-to-rank aliasing is handled separately by `unify_row_against_row`.
 fn bind_rvar(r: RankVar, dims: &[Dim], subst: &mut Subst) -> Result<(), TypeError> {
-    if dims.iter().any(|d| matches!(d, Dim::Rank(r2) if *r2 == r)) {
+    if let Some(bad) = dims.iter().find(|d| matches!(d, Dim::Rank(_))) {
         return Err(TypeError {
             kind: TypeErrorKind::OccursCheck,
-            message: format!("infinite rank: r{} occurs in {dims:?}", r.0),
+            message: format!(
+                "rank variable r{} cannot bind to a shape containing a rank spread ({bad:?})",
+                r.0
+            ),
         });
     }
     subst.insert_rank(r, dims.to_vec());
@@ -809,6 +1021,208 @@ mod tests {
         assert!(
             unify(&t1, &t2, &mut s).is_err(),
             "f32 vs int32 precision must fail even with a rank var"
+        );
+    }
+
+    // chelis#258 Tier-3 rank polymorphism: name-preserving multi-spread
+    // unification (`tensor[..pre, seq, ..post]`).
+
+    fn name(n: &str) -> Dim {
+        Dim::Name(n.into())
+    }
+
+    #[test]
+    fn unify_rank_middle_split_preserves_names() {
+        // `tensor[..pre, seq, ..post]` vs `tensor[batch, seq, hidden]` splits
+        // at the unique named anchor: pre:=[batch], post:=[hidden]. The output
+        // `tensor[..pre, ..post]` then carries the surviving names through.
+        let mut g = var_gen();
+        let (pre, post) = (g.fresh_rvar(), g.fresh_rvar());
+        let mut s = Subst::new();
+        let row = Type::Tensor(
+            vec![Dim::Rank(pre), name("seq"), Dim::Rank(post)],
+            tprec(Prim::F32),
+        );
+        let ground = Type::Tensor(
+            vec![name("batch"), name("seq"), name("hidden")],
+            tprec(Prim::F32),
+        );
+        assert!(unify(&row, &ground, &mut s).is_ok());
+        let out = Type::Tensor(vec![Dim::Rank(pre), Dim::Rank(post)], tprec(Prim::F32));
+        assert_eq!(
+            s.apply(&out),
+            Type::Tensor(vec![name("batch"), name("hidden")], tprec(Prim::F32)),
+            "output drops `seq`, keeps batch/hidden by name"
+        );
+    }
+
+    #[test]
+    fn unify_rank_multi_anchor_split() {
+        // Two named anchors, three spreads: `[..a, seq, ..b, head, ..c]`.
+        let mut g = var_gen();
+        let (a, b, c) = (g.fresh_rvar(), g.fresh_rvar(), g.fresh_rvar());
+        let mut s = Subst::new();
+        let row = Type::Tensor(
+            vec![
+                Dim::Rank(a),
+                name("seq"),
+                Dim::Rank(b),
+                name("head"),
+                Dim::Rank(c),
+            ],
+            tprec(Prim::F32),
+        );
+        let ground = Type::Tensor(
+            vec![
+                name("batch"),
+                name("seq"),
+                name("kv"),
+                name("head"),
+                name("dim"),
+            ],
+            tprec(Prim::F32),
+        );
+        assert!(unify(&row, &ground, &mut s).is_ok());
+        let out = Type::Tensor(
+            vec![Dim::Rank(a), Dim::Rank(b), Dim::Rank(c)],
+            tprec(Prim::F32),
+        );
+        assert_eq!(
+            s.apply(&out),
+            Type::Tensor(
+                vec![name("batch"), name("kv"), name("dim")],
+                tprec(Prim::F32)
+            ),
+        );
+    }
+
+    #[test]
+    fn unify_rank_anchor_absent_rejected() {
+        let mut g = var_gen();
+        let (pre, post) = (g.fresh_rvar(), g.fresh_rvar());
+        let mut s = Subst::new();
+        let row = Type::Tensor(
+            vec![Dim::Rank(pre), name("seq"), Dim::Rank(post)],
+            tprec(Prim::F32),
+        );
+        let ground = Type::Tensor(vec![name("batch"), name("hidden")], tprec(Prim::F32));
+        let err = unify(&row, &ground, &mut s).unwrap_err();
+        assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
+        assert!(
+            err.message.contains("no named `seq` axis"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn unify_rank_anchor_ambiguous_rejected() {
+        let mut g = var_gen();
+        let (pre, post) = (g.fresh_rvar(), g.fresh_rvar());
+        let mut s = Subst::new();
+        let row = Type::Tensor(
+            vec![Dim::Rank(pre), name("seq"), Dim::Rank(post)],
+            tprec(Prim::F32),
+        );
+        let ground = Type::Tensor(vec![name("seq"), name("x"), name("seq")], tprec(Prim::F32));
+        let err = unify(&row, &ground, &mut s).unwrap_err();
+        assert!(err.message.contains("ambiguous"), "{}", err.message);
+    }
+
+    #[test]
+    fn unify_rank_literal_operand_rejected() {
+        // Name↔Lit hazard: a fully-literal operand carries no name to locate
+        // the anchor — hard reject, never a guessed reduction.
+        let mut g = var_gen();
+        let (pre, post) = (g.fresh_rvar(), g.fresh_rvar());
+        let mut s = Subst::new();
+        let row = Type::Tensor(
+            vec![Dim::Rank(pre), name("seq"), Dim::Rank(post)],
+            tprec(Prim::F32),
+        );
+        let ground = Type::Tensor(
+            vec![Dim::Lit(2), Dim::Lit(768), Dim::Lit(4)],
+            tprec(Prim::F32),
+        );
+        let err = unify(&row, &ground, &mut s).unwrap_err();
+        assert!(
+            err.message.contains("no named `seq` axis"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn unify_rank_too_small_rejected() {
+        // Two leading anchors but a rank-1 operand: not enough dims.
+        let mut g = var_gen();
+        let r = g.fresh_rvar();
+        let mut s = Subst::new();
+        let row = Type::Tensor(vec![name("a"), name("b"), Dim::Rank(r)], tprec(Prim::F32));
+        let ground = Type::Tensor(vec![name("a")], tprec(Prim::F32));
+        let err = unify(&row, &ground, &mut s).unwrap_err();
+        assert!(err.message.contains("rank too small"), "{}", err.message);
+    }
+
+    #[test]
+    fn unify_two_adjacent_spreads_rejected() {
+        // Two adjacent spreads split against a ground is undetermined.
+        let mut g = var_gen();
+        let (a, b) = (g.fresh_rvar(), g.fresh_rvar());
+        let mut s = Subst::new();
+        let row = Type::Tensor(vec![Dim::Rank(a), Dim::Rank(b)], tprec(Prim::F32));
+        let ground = Type::Tensor(vec![name("x"), name("y")], tprec(Prim::F32));
+        let err = unify(&row, &ground, &mut s).unwrap_err();
+        assert!(
+            err.message.contains("two adjacent rank spreads"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn unify_identical_rows_ok() {
+        // The body output `[..pre, ..post]` vs the declared return
+        // `[..pre, ..post]` (same vars) is the identical-row self-check.
+        let mut g = var_gen();
+        let (pre, post) = (g.fresh_rvar(), g.fresh_rvar());
+        let mut s = Subst::new();
+        let row = Type::Tensor(
+            vec![Dim::Rank(pre), name("seq"), Dim::Rank(post)],
+            tprec(Prim::F32),
+        );
+        assert!(unify(&row, &row.clone(), &mut s).is_ok());
+    }
+
+    #[test]
+    fn unify_distinct_anchor_rows_rejected() {
+        let mut g = var_gen();
+        let (a, b) = (g.fresh_rvar(), g.fresh_rvar());
+        let mut s = Subst::new();
+        let r1 = Type::Tensor(
+            vec![Dim::Rank(a), name("seq"), Dim::Rank(b)],
+            tprec(Prim::F32),
+        );
+        let r2 = Type::Tensor(
+            vec![Dim::Rank(a), name("head"), Dim::Rank(b)],
+            tprec(Prim::F32),
+        );
+        assert!(unify(&r1, &r2, &mut s).is_err());
+    }
+
+    #[test]
+    fn unify_trailing_anchor_by_name() {
+        // `[..pre, seq]` vs `[a, b, seq]`: pre:=[a,b], seq at the tail.
+        let mut g = var_gen();
+        let pre = g.fresh_rvar();
+        let mut s = Subst::new();
+        let row = Type::Tensor(vec![Dim::Rank(pre), name("seq")], tprec(Prim::F32));
+        let ground = Type::Tensor(vec![name("a"), name("b"), name("seq")], tprec(Prim::F32));
+        assert!(unify(&row, &ground, &mut s).is_ok());
+        let out = Type::Tensor(vec![Dim::Rank(pre)], tprec(Prim::F32));
+        assert_eq!(
+            s.apply(&out),
+            Type::Tensor(vec![name("a"), name("b")], tprec(Prim::F32)),
         );
     }
 

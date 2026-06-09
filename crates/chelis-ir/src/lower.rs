@@ -905,6 +905,12 @@ fn tensor_dim_substitutions(
     formal_params
         .iter()
         .zip(actual_args.iter())
+        // Positionally remapping dims between shapes of DIFFERENT rank is never
+        // correct — `zip` would align unrelated axes. chelis#258: a rank-poly
+        // reduce's rank-2 output formal `[batch, hidden]` paired with a rank-3
+        // actual would bind `hidden -> seq`, corrupting every node's dims in the
+        // specialized body. Only same-rank pairs contribute a substitution.
+        .filter(|(formal, actual)| formal.dims.len() == actual.dims.len())
         .flat_map(|(formal, actual)| formal.dims.iter().zip(actual.dims.iter()))
         .filter_map(|(formal_dim, actual_dim)| match formal_dim {
             DimInfo::Named(name, None) => Some((name.clone(), actual_dim.clone())),
@@ -1257,27 +1263,25 @@ fn tensor_rank_substitutions(
         let Some(formal_expr) = formal_expr else {
             continue;
         };
-        if let Some(var_name) = extract_rank_var_name(formal_expr) {
-            // First-binding-wins: when a rank var appears in more than one
-            // param (e.g. `add2(x: &tensor[..r], y: &tensor[..r])`), every
-            // occurrence binds to the SAME concrete dim vector because the type
-            // checker already unified them before lowering (the rank-var
-            // unification arm forces every `..r` position to one shape). So the
-            // first actual's dims are authoritative; later params agree by
-            // construction and `or_insert_with` correctly keeps the first.
-            // The debug_assert is a tripwire for a future inconsistency (a
-            // checker regression that let two `..r` positions diverge).
+        // Tier-3: a formal may carry several spreads interleaved with named
+        // anchors (`&tensor[..pre, seq, ..post]`); each binds to the run of the
+        // actual's concrete dims it covers, located by the anchors. A sole
+        // `(d-rank {} r)` binds to the whole shape (Tier-2). First-binding-wins:
+        // a rank var appearing in more than one param binds to the same run
+        // because the checker already unified them; the debug_assert is the
+        // tripwire for a checker regression that let two positions diverge.
+        for (var_name, run) in extract_rank_var_bindings(formal_expr, &actual.dims) {
             match subst.entry(var_name) {
                 std::collections::hash_map::Entry::Occupied(existing) => {
                     debug_assert_eq!(
                         existing.get(),
-                        &actual.dims,
+                        &run,
                         "rank-var bound to two distinct concrete shapes at one \
                          call site: the type checker should have rejected this",
                     );
                 }
                 std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(actual.dims.clone());
+                    slot.insert(run);
                 }
             }
         }
@@ -1285,63 +1289,148 @@ fn tensor_rank_substitutions(
     subst
 }
 
-/// Pull the rank-var name out of a tensor type expression whose shape is a
-/// sole `(d-rank {} r)` slot. Returns `Some(name)` when the tensor's only dim
-/// child is `(d-rank {} name)` (the structural invariant from
-/// spec/design/rank_polymorphism.md: a `Dim::Rank` is always the sole element
-/// of its dim list); returns `None` for a concrete-shape tensor or a
-/// non-tensor expression.
+/// Bind each rank-var spread in a (possibly anchored, Tier-3) tensor-type
+/// formal to the run of the actual's concrete dims it covers, located by the
+/// named anchors between spreads — the lowering twin of the checker's
+/// `unify_row_against_ground`. A sole `(d-rank {} r)` binds to the whole shape
+/// (Tier-2). Returns one `(name, run)` per spread; an empty vec when the formal
+/// has no spread, is not a tensor, or its anchors cannot be located (a checked
+/// program never hits the last case — the bail keeps lowering panic-free).
 ///
-/// Strips a leading `(t-ref {} ...)` wrapper so a `&tensor[..r, p]` parameter
-/// is treated the same as `tensor[..r, p]` for substitution purposes — the
-/// borrow is irrelevant to rank monomorphization (mirrors
-/// [`extract_precision_var_name`]).
-fn extract_rank_var_name(expr: &Expr) -> Option<String> {
+/// Strips a leading `(t-ref {} ...)` wrapper so a `&tensor[..]` parameter is
+/// treated the same as `tensor[..]` (the borrow is irrelevant to rank
+/// monomorphization, mirroring [`extract_precision_var_name`]).
+fn extract_rank_var_bindings(expr: &Expr, actual_dims: &[DimInfo]) -> Vec<(String, Vec<DimInfo>)> {
     let stripped = if let Expr::List(list, _) = expr
         && list.elements.len() >= 3
         && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
         && tag == "t-ref"
     {
-        list.elements.get(2)?
+        match list.elements.get(2) {
+            Some(inner) => inner,
+            None => return Vec::new(),
+        }
     } else {
         expr
     };
     let Expr::List(list, _) = stripped else {
-        return None;
+        return Vec::new();
     };
-    if list.elements.len() < 3 {
-        return None;
-    }
-    let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0] else {
-        return None;
+    let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first() else {
+        return Vec::new();
     };
-    if tag != "t-tensor" {
-        return None;
+    if tag != "t-tensor" || list.elements.len() < 3 {
+        return Vec::new();
     }
     // Children after tag+meta are dim nodes followed by the precision node.
-    // A rank-var tensor is exactly `(t-tensor {} (d-rank {} r) (t-prim/.. {} p))`:
-    // one dim child, which is `(d-rank {} name)`.
     let children = &list.elements[2..];
-    if children.len() != 2 {
-        return None;
+    if children.len() < 2 {
+        return Vec::new();
     }
-    let Expr::List(dim_list, _) = &children[0] else {
-        return None;
-    };
-    if dim_list.elements.len() < 3 {
-        return None;
+    let dim_nodes = &children[..children.len() - 1];
+
+    // Classify each dim slot: a spread (`d-rank`), a named anchor (`d-name`),
+    // or "other" (`d-lit`/`d-var` — positional anchors matched element-wise,
+    // never used to locate a split).
+    enum Slot {
+        Spread(String),
+        Named(String),
+        Other,
     }
-    let Expr::Atom(Atom::Symbol(dim_tag), _) = &dim_list.elements[0] else {
-        return None;
-    };
-    if dim_tag != "d-rank" {
-        return None;
+    let slots: Vec<Slot> = dim_nodes
+        .iter()
+        .map(|d| {
+            let Expr::List(dl, _) = d else {
+                return Slot::Other;
+            };
+            let Some(Expr::Atom(Atom::Symbol(dtag), _)) = dl.elements.first() else {
+                return Slot::Other;
+            };
+            let payload = match dl.elements.get(2) {
+                Some(Expr::Atom(Atom::Symbol(s), _)) => Some(s.clone()),
+                _ => None,
+            };
+            match (dtag.as_str(), payload) {
+                ("d-rank", Some(n)) => Slot::Spread(n),
+                ("d-name", Some(n)) => Slot::Named(n),
+                _ => Slot::Other,
+            }
+        })
+        .collect();
+
+    if !slots.iter().any(|s| matches!(s, Slot::Spread(_))) {
+        return Vec::new();
     }
-    if let Expr::Atom(Atom::Symbol(name), _) = &dim_list.elements[2] {
-        Some(name.clone())
-    } else {
-        None
+
+    // Walk the slots against the actual dims, exactly as the checker's
+    // `unify_row_against_ground` does: a spread followed by a named anchor binds
+    // to the run up to that anchor (located by name); a trailing spread absorbs
+    // the rest; other dims consume one actual dim positionally.
+    let n = actual_dims.len();
+    let mut out: Vec<(String, Vec<DimInfo>)> = Vec::new();
+    let mut gi = 0usize;
+    let mut ri = 0usize;
+    while ri < slots.len() {
+        if gi > n {
+            return out;
+        }
+        match &slots[ri] {
+            Slot::Spread(name) => {
+                let rest = &slots[ri + 1..];
+                match rest.iter().position(|s| !matches!(s, Slot::Spread(_))) {
+                    Some(0) => {
+                        let Slot::Named(anchor) = &rest[0] else {
+                            // Anchor not a `d-name` — unlocatable. The checker
+                            // requires a named anchor, so this is unreachable for
+                            // a checked program; fail loud in debug, bail in release.
+                            debug_assert!(
+                                false,
+                                "rank-spread anchor is not a named dim at lowering"
+                            );
+                            return out;
+                        };
+                        let split = actual_dims[gi..]
+                            .iter()
+                            .position(|d| matches!(d, DimInfo::Named(g, _) if g == anchor))
+                            .map(|p| gi + p);
+                        match split {
+                            Some(s) => {
+                                out.push((name.clone(), actual_dims[gi..s].to_vec()));
+                                gi = s;
+                            }
+                            None => {
+                                // Anchor absent from the monomorphized actual —
+                                // the checker located it (Name↔Lit etc. were
+                                // rejected), so unreachable for a checked program.
+                                debug_assert!(
+                                    false,
+                                    "rank-spread anchor `{anchor}` absent from monomorphized actual"
+                                );
+                                return out;
+                            }
+                        }
+                        ri += 1;
+                    }
+                    None if rest.is_empty() => {
+                        out.push((name.clone(), actual_dims[gi..n].to_vec()));
+                        gi = n;
+                        ri += 1;
+                    }
+                    // Two adjacent spreads — the undetermined split is rejected at
+                    // unification, so this never reaches a checked backend.
+                    _ => {
+                        debug_assert!(false, "two adjacent rank spreads at lowering");
+                        return out;
+                    }
+                }
+            }
+            _ => {
+                gi += 1;
+                ri += 1;
+            }
+        }
     }
+    out
 }
 
 pub fn top_level_expr_is_lowered(
@@ -5619,9 +5708,8 @@ impl LowerCtx {
                     .get(x)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let axis_raw = self.extract_axis_raw(&args[1]);
                 let rank = self.axis_rank(x, ty);
-                let axis = self.normalize_axis(axis_raw, rank, "mean", &args[1]);
+                let axis = self.resolve_reduce_axis(&args[1], x, rank, "mean");
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_mean(&mut self.dag, x, axis, &x_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
@@ -5769,8 +5857,7 @@ impl LowerCtx {
                     .get(x)
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let axis_raw = self.extract_axis_raw(&args[1]);
-                let axis = self.normalize_axis(axis_raw, x_ty.dims.len(), "sum", &args[1]);
+                let axis = self.resolve_reduce_axis(&args[1], x, x_ty.dims.len(), "sum");
                 let operand_prec = self
                     .dag
                     .get(x)
@@ -5841,14 +5928,13 @@ impl LowerCtx {
             }
             "max_reduce" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "max_reduce input");
-                let axis_raw = self.extract_axis_raw(&args[1]);
                 // Issue #320: recover the operand rank from the ascribed
                 // result type when the operand node collapsed to rank-0
                 // (a windowing/stacking intermediate left untyped), so
                 // `normalize_axis` sees rank>=1 instead of raising the
                 // "operand of rank 0" diagnostic.
                 let operand_rank = self.reduction_operand_rank(x, ty);
-                let axis = self.normalize_axis(axis_raw, operand_rank, "max_reduce", &args[1]);
+                let axis = self.resolve_reduce_axis(&args[1], x, operand_rank, "max_reduce");
                 // Patch the collapsed operand node to a rank>=1 type so the
                 // reverse-mode adjoint carries the operand's rank/extent.
                 let precision = {
@@ -5955,8 +6041,7 @@ impl LowerCtx {
                     .get(x)
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let axis_raw = self.extract_axis_raw(&args[1]);
-                let axis = self.normalize_axis(axis_raw, x_ty.dims.len(), name, &args[1]);
+                let axis = self.resolve_reduce_axis(&args[1], x, x_ty.dims.len(), name);
                 let dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
                 let precision = if any_wildcard_dim(&ty.dims) || *ty == Self::default_type() {
                     x_ty.precision
@@ -6463,6 +6548,47 @@ impl LowerCtx {
     }
 
     /// Normalize a possibly-negative axis literal against a known
+    /// Resolve a reduction axis to a positional index against the operand
+    /// node's concrete dims. A *named* axis (`sum(x, seq)`, Tier-3 §4.5.3) is
+    /// looked up by name: call-site rank monomorphization has already made the
+    /// operand dims concrete by the time a rank-poly body is lowered, so the
+    /// name resolves to a fixed index. A non-name (integer / `cast`) axis takes
+    /// the existing `extract_axis_raw` + `normalize_axis` path.
+    fn resolve_reduce_axis(
+        &self,
+        axis_expr: &Expr,
+        operand: NodeId,
+        fallback_rank: usize,
+        op: &str,
+    ) -> usize {
+        if let Some(name) = bare_var_name(axis_expr) {
+            // A *named* axis (Tier-3 §4.5.3) MUST resolve against the operand's
+            // concrete dims: the checker proved the anchor present and call-site
+            // monomorphization made it concrete here. If it is somehow absent,
+            // fail loudly — falling through to `extract_axis_raw` would return 0
+            // and silently reduce the wrong axis (the repo forbids silent
+            // fallbacks; CLAUDE.md "Do Not Trust Green").
+            if let Some(idx) = self.dag.get(operand).and_then(|node| {
+                node.output_type
+                    .dims
+                    .iter()
+                    .position(|d| matches!(d, DimInfo::Named(n, _) if *n == name))
+            }) {
+                return idx;
+            }
+            raise_lowering_error(
+                format!(
+                    "`{op}` reduces named axis `{name}`, but the monomorphized operand has no \
+                     such named axis: internal rank-monomorphization error"
+                ),
+                Some(axis_expr.span()),
+                axis_expr.span_id().map(ToOwned::to_owned),
+            );
+        }
+        let raw = self.extract_axis_raw(axis_expr);
+        self.normalize_axis(raw, fallback_rank, op, axis_expr)
+    }
+
     /// operand `rank`. A negative axis `a` means `rank + a` (so `-1`
     /// is the last axis). An axis still out of `0..rank` after
     /// normalization is a clean lowering diagnostic, never a panic --
@@ -9164,26 +9290,57 @@ mod tests {
             .expect("one expr")
     }
 
-    /// `extract_rank_var_name` recognises a sole `(d-rank {} r)` shape, strips
-    /// a `(t-ref)` wrapper, and returns the rank-var name; a concrete-shape
-    /// tensor and a rank-var ADJACENT to a concrete dim both yield `None`.
+    /// `extract_rank_var_bindings` binds a sole `(d-rank {} r)` to the whole
+    /// actual shape (Tier-2), strips a `(t-ref)` wrapper, and returns nothing
+    /// for a concrete-shape tensor.
     #[test]
-    fn extract_rank_var_name_recognises_sole_rank_slot() {
+    fn extract_rank_var_bindings_sole_spread() {
+        let actual = vec![DimInfo::Named("a".into(), None), DimInfo::Lit(4)];
+
         let bare = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
-        assert_eq!(extract_rank_var_name(&bare), Some("r".to_string()));
+        assert_eq!(
+            extract_rank_var_bindings(&bare, &actual),
+            vec![("r".to_string(), actual.clone())]
+        );
 
         let borrowed = parse_type_expr("(t-ref {} (t-tensor {} (d-rank {} rr) (t-prim {} f32)))");
-        assert_eq!(extract_rank_var_name(&borrowed), Some("rr".to_string()));
+        assert_eq!(
+            extract_rank_var_bindings(&borrowed, &actual),
+            vec![("rr".to_string(), actual.clone())]
+        );
 
         let concrete =
             parse_type_expr("(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))");
-        assert_eq!(extract_rank_var_name(&concrete), None);
+        assert!(extract_rank_var_bindings(&concrete, &actual).is_empty());
+    }
 
-        // Adjacency (`tensor[..r, k]`) is rejected at parse time, but if a
-        // malformed slot ever reached here it must NOT register as a sole
-        // rank var — only a single-dim list qualifies.
-        let adjacent = parse_type_expr("(t-tensor {} (d-rank {} r) (d-lit {} 4) (t-prim {} f32))");
-        assert_eq!(extract_rank_var_name(&adjacent), None);
+    /// Tier-3: a `(d-rank {} pre) (d-name {} seq) (d-rank {} post)` formal splits
+    /// the actual at the named anchor `seq` — `pre` and `post` bind to the runs
+    /// on either side, the lowering twin of `unify_row_against_ground`.
+    #[test]
+    fn extract_rank_var_bindings_anchored_split() {
+        let formal = parse_type_expr(
+            "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+        );
+        let actual = vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Named("seq".into(), None),
+            DimInfo::Named("hidden".into(), None),
+        ];
+        let bindings = extract_rank_var_bindings(&formal, &actual);
+        assert_eq!(
+            bindings,
+            vec![
+                (
+                    "pre".to_string(),
+                    vec![DimInfo::Named("batch".into(), None)]
+                ),
+                (
+                    "post".to_string(),
+                    vec![DimInfo::Named("hidden".into(), None)]
+                ),
+            ]
+        );
     }
 
     /// `tensor_rank_substitutions` binds a formal `(d-rank {} r)` param to the

@@ -165,23 +165,30 @@ pub const BUILTIN_NAMES: &[&str] = &[
 pub enum ShapeClass {
     /// Output shape provably equals an input shape with no axis reordering —
     /// pure elementwise ops (the precision may change, e.g. comparisons).
-    /// The only class admitted inside a rank-polymorphic (`..r`) body.
+    /// Always admitted inside a rank-polymorphic (`..r`) body.
     Identity,
-    /// Rewrites/reorders the shape, is axis- or shape-parameterized, reduces
-    /// rank, or is a non-tensor/host op. Forbidden inside a rank-poly body:
-    /// against an opaque `R` there are no named axes left to catch a
-    /// transposition/reshape (§4.2).
+    /// Shape-changing but *name-tracked*: the op addresses axes by name and the
+    /// procedural inference arm computes a symbolic output that carries the
+    /// surviving named axes through (named-axis reductions, Tier-3 §4.5.3).
+    /// Admitted inside a rank-poly body — the procedural arm is the real gate:
+    /// it rejects a non-existent/ambiguous axis or a positional index at
+    /// symbolic rank, so no transposition can slip past.
+    NameTracked,
+    /// Rewrites/reorders the shape positionally, is shape-parameterized, or is a
+    /// non-tensor/host op whose output shape is *not* name-trackable at symbolic
+    /// rank. Forbidden inside a rank-poly body: against an opaque spread there
+    /// are no named axes left to catch a transposition/reshape (§4.2).
     Rewriting,
 }
 
 /// Classify a builtin's shape semantics for the Body-Discipline check.
 ///
-/// The Identity arm is an explicit allowlist; everything else falls through to
-/// `Rewriting`. That default is the safe direction — a builtin that is not
-/// *provably* shape-identity is rejected inside a rank-poly body, so a missed
-/// classification can only over-reject, never open a §4.2 hole. The
-/// `shape_class_identity_set_is_pinned` test pins the Identity set so any change
-/// is deliberate.
+/// `Identity` and `NameTracked` are explicit allowlists; everything else falls
+/// through to `Rewriting`. That default is the safe direction — a builtin that
+/// is not *provably* shape-identity or name-tracked is rejected inside a
+/// rank-poly body, so a missed classification can only over-reject, never open
+/// a §4.2 hole. The `shape_class_identity_set_is_pinned` test pins the sets so
+/// any change is deliberate.
 pub fn shape_class(name: &str) -> ShapeClass {
     match name {
         // Pure elementwise — output shape == input shape (precision may change
@@ -191,7 +198,16 @@ pub fn shape_class(name: &str) -> ShapeClass {
         | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "not" | "clamp" | "uniform_like"
         | "where" | "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "cmplt" | "bitand" | "bitor"
         | "bitxor" | "shl" | "shr" | "and" | "or" => ShapeClass::Identity,
-        // Reductions, reshapes, permutes, matmul/conv, axis-indexed ops,
+        // Named-axis reductions: address the reduced axis by name and drop
+        // exactly it, carrying the surviving named axes through (Tier-3 §4.5.3).
+        // Restricted to `sum`/`mean`: these lower through the tensor-DAG backend
+        // and build+run end-to-end. `max_reduce`/`min_reduce`/`prod_reduce`/
+        // `argmax_reduce`/`argmin_reduce` route through the host lane in a
+        // rank-poly inline and don't yet compile (chelis#340), so they stay
+        // Rewriting — rejected in a `..r` body — to keep check↔backend in sync
+        // (a check-clean program must build). They remain usable at concrete rank.
+        "sum" | "mean" => ShapeClass::NameTracked,
+        // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
         // gather/scatter, and every non-tensor/host builtin.
         _ => ShapeClass::Rewriting,
     }
@@ -1226,9 +1242,15 @@ mod tests {
             "and",
             "or",
         ];
+        // Named-axis reductions are NameTracked (admitted in a `..r` body —
+        // the procedural arm is the gate); everything else outside `identity`
+        // is Rewriting.
+        let name_tracked: &[&str] = &["sum", "mean"];
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
                 ShapeClass::Identity
+            } else if name_tracked.contains(name) {
+                ShapeClass::NameTracked
             } else {
                 ShapeClass::Rewriting
             };
@@ -1238,16 +1260,18 @@ mod tests {
                 "builtin `{name}` shape-class drifted from the pinned set"
             );
         }
-        // Spot-check the dangerous ones are NOT identity (the §4.2 traps).
-        for op in [
-            "permute", "reshape", "expand", "matmul", "sum", "gather", "conv2d",
-        ] {
+        // Spot-check the positional shape-rewriters stay Rewriting (the §4.2
+        // traps): a positional index is meaningless at symbolic rank.
+        for op in ["permute", "reshape", "expand", "matmul", "gather", "conv2d"] {
             assert_eq!(
                 shape_class(op),
                 ShapeClass::Rewriting,
                 "`{op}` must be Rewriting"
             );
         }
+        // And the named reductions are admitted as NameTracked.
+        assert_eq!(shape_class("sum"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("mean"), ShapeClass::NameTracked);
     }
 
     #[test]

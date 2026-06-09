@@ -197,30 +197,46 @@ def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] =
 
 ### P3b: Rank Variables (`..r`)
 
-A **rank variable** `..r` stands for an *entire* shape vector rather than a single
-dimension, letting one `def` be generic over tensor *rank* in the two positions
-that are sound under §4.2 (identity and erasure). See
+A **rank variable** `..r` is a *name-preserving spread* standing for a run of
+dimensions, letting one `def` be generic over tensor *rank*. It binds (by
+unification) to the actual named dims it covers, so per-axis names are
+preserved, not erased. See
 [`spec/design/rank_polymorphism.md`](design/rank_polymorphism.md) for the full
-design and soundness boundary.
+design and soundness boundary, including §4.5.3 (named-axis reduction).
+
+**Tier-2 (identity):** `..r` as the sole shape element — one def, every rank:
 
 ```
 def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
-def sum_all(x: &tensor[..r, f32]) -> tensor[f32] = sum(x, 0)
+```
+
+**Tier-3 (name-preserving rank arithmetic, §4.5.3):** `..r` may be interleaved
+with concrete **named anchors** (`tensor[..pre, seq, ..post, f32]`). A
+named-axis reduction drops the named anchor and carries the surrounding spreads
+through — one def reduces a named axis at any rank:
+
+```
+def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ```
 
 **⟹**
 ```
-(defsig {} relu_forward (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))
-                                 (t-tensor {} (d-rank {} r) (t-prim {} f32))))
+(defsig {} reduce_seq
+  (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))
+           (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-prim {} f32))))
 ```
 
-`..r` is introduced contextually (like a sig dim variable — no `[..r]` quantifier
-needed) and must be the **sole** shape element. `tensor[..r, k, f32]` (a rank
-variable adjacent to concrete dimensions) is **Tier-3 rank arithmetic** and is a
-**parse error** — this is where the Tier-2/Tier-3 boundary is enforced
-syntactically. A `def` whose signature mentions `..r` is additionally restricted
-by the §4.2 Body-Discipline check (it may call only shape-identity or
-shape-erasing operations, never shape-rewriting ones like `permute`/`reshape`).
+`..r` is introduced contextually (like a sig dim variable — no `[..r]`
+quantifier needed). A spread name may not repeat within one tensor shape (a
+**parse error**). A reduction names the axis it removes by the anchor's name
+(`sum(x, seq)`); multiple axes are reduced by composing single-axis reductions
+(`sum(sum(x, head), seq)`). The reduced axis must be a **named** anchor present
+exactly once in the operand — a fully-literal or differently-named operand is
+rejected (the Name↔Lit boundary, §4.5.3). A `def` whose signature mentions `..r`
+is restricted by the §4.2 Body-Discipline check to *name-trackable* operations:
+shape-identity (elementwise) ops and named-axis reductions only — never a
+positional shape-rewriter like `permute`/`reshape` (meaningless at symbolic
+rank).
 
 ### P4: Type Signatures
 

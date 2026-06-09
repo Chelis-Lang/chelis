@@ -6996,11 +6996,15 @@ fn collect_user_def_names(items: &[&deep::Expr]) -> HashSet<String> {
     out
 }
 
-/// Walk a rank-polymorphic def's body and reject any call that is not a
-/// shape-identity (elementwise) builtin. Against an opaque rank `..r` there are
-/// no named axes left to catch a transposition/reshape, so a shape-rewriting
-/// op — or a user/non-builtin call not proven rank-safe — would silently break
-/// §4.2 transposition safety (spec/design/rank_polymorphism.md §Soundness Boundary).
+/// Walk a rank-polymorphic def's body and reject any call whose output shape is
+/// not *name-trackable* at symbolic rank. Admitted: shape-identity (elementwise)
+/// builtins and named-axis reductions (the procedural arm verifies those drop a
+/// named axis and carry the rest through). Rejected: positional shape-rewriting
+/// builtins (`permute`/`reshape`/`matmul`/…), and any user/non-builtin/computed
+/// callee not proven rank-safe — against a spread `..r` there are no named axes
+/// left to catch an untracked transposition/reshape, so admitting one would
+/// silently break §4.2 transposition safety (spec/design/rank_polymorphism.md
+/// §Soundness Boundary).
 fn check_rank_body_discipline(
     def_name: &str,
     expr: &deep::Expr,
@@ -7044,19 +7048,29 @@ fn check_rank_body_discipline(
                     vec![],
                 ));
             }
-            // Identity builtin — the only admissible call. OK.
+            // Identity (elementwise) or NameTracked (named-axis reduction)
+            // builtin — admissible. For a NameTracked op the procedural
+            // inference arm (`check_reduction_signature`) is the real gate: it
+            // verifies the reduced axis is a named axis of the operand and
+            // computes a symbolic output that carries the surviving named axes
+            // through, rejecting a positional index at symbolic rank or a
+            // non-existent axis. So no untracked transposition can slip past.
             Some(name)
                 if builtins::BUILTIN_NAMES.contains(&name)
-                    && builtins::shape_class(name) == builtins::ShapeClass::Identity => {}
-            // A named builtin that rewrites shape.
+                    && matches!(
+                        builtins::shape_class(name),
+                        builtins::ShapeClass::Identity | builtins::ShapeClass::NameTracked
+                    ) => {}
+            // A named builtin that rewrites shape positionally (not name-tracked).
             Some(name) if builtins::BUILTIN_NAMES.contains(&name) => {
                 errors.push(CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "rank-polymorphic def `{def_name}` may not call shape-rewriting builtin \
-                         `{name}`: against an opaque rank `..r` there are no named axes left to \
-                         catch a transposition or reshape (spec/04-type-system.md \u{00a7}4.2). A \
-                         `..r` body may call only shape-identity (elementwise) operations."
+                         `{name}`: it is not name-trackable at symbolic rank, so against a spread \
+                         `..r` there are no named axes left to catch a transposition or reshape \
+                         (spec/04-type-system.md \u{00a7}4.2). A `..r` body may call shape-identity \
+                         (elementwise) operations and named-axis reductions only."
                     ),
                     vec![format!(
                         "remove the `{name}` call from the rank-polymorphic body, or use \
@@ -8166,14 +8180,31 @@ fn infer_app(
         typed_nodes,
         total_nodes,
     );
+    // A reduction's axis argument may name a *dimension* of the operand
+    // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
+    // *value*. Like `expand`'s symbolic size arg below, such a name is typed as
+    // an axis (`int32`) rather than inferred as a value — otherwise the
+    // name-resolution pass would report a spurious `unbound variable`. The
+    // actual name is read back from the arg expr in `check_reduction_signature`.
+    let is_named_reduction = matches!(
+        func_name.as_deref(),
+        Some(
+            "sum"
+                | "mean"
+                | "max_reduce"
+                | "min_reduce"
+                | "prod_reduce"
+                | "argmax_reduce"
+                | "argmin_reduce"
+        )
+    );
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
         .map(|(index, arg)| {
-            if matches!(func_name.as_deref(), Some("expand"))
-                && index == 2
-                && symbolic_dim_ref_name(arg).is_some()
-            {
+            let is_expand_size = matches!(func_name.as_deref(), Some("expand")) && index == 2;
+            let is_reduction_axis = is_named_reduction && index >= 1;
+            if (is_expand_size || is_reduction_axis) && symbolic_dim_ref_name(arg).is_some() {
                 Type::Prim(Prim::Int32)
             } else {
                 infer_expr(
@@ -13483,7 +13514,7 @@ fn check_reduction_signature(
     subst: &mut Subst,
     errors: &mut Vec<CheckError>,
 ) -> Type {
-    if arg_tys.len() != 2 {
+    if arg_tys.len() < 2 {
         return Type::Error;
     }
 
@@ -13501,18 +13532,35 @@ fn check_reduction_signature(
         }
     };
 
-    // Negative axes index from the end (`-1` is the last axis), per
-    // spec/05-risc-primitives.md and the formula examples that already
-    // use `axis=-1`. `normalize_static_axis` maps `rank + axis` and
-    // bounds-checks; gather/scatter use the same helper, so reductions
-    // stay consistent with them and with IR lowering's `normalize_axis`.
+    // Resolve which axis (or axes) the reduction removes. Two modes:
     //
-    // Issue #216: cast-aware so reductions like `sum(x, cast(-1, int32))`
-    // or `max_reduce(x, cast(7, int32))` surface the bounds diagnostic
-    // at infer time rather than slipping through to host-runtime defense.
-    let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
-        Some(raw) => match normalize_static_axis(dims.len(), raw) {
-            Some(axis) => axis,
+    //  * Positional (legacy): a single compile-time-constant integer axis on a
+    //    *concrete-rank* operand (`sum(x, 0)` / `sum(x, cast(-1, int32))`).
+    //    `normalize_static_axis` handles negative indexing and bounds (issue
+    //    #216), consistent with gather/scatter and IR lowering's
+    //    `normalize_axis`.
+    //
+    //  * Named (Tier-3, spec/04-type-system.md §4.5.3): one or more axes named by
+    //    the dimension they remove (`sum(x, seq)` / `sum(x, seq, head)`). Named
+    //    axes are the only valid form on a rank-spread operand — a positional
+    //    index is meaningless at symbolic rank — and they preserve the
+    //    surviving named axes in the output.
+    let axis_exprs = &arg_exprs[1..];
+    let has_spread = dims.iter().any(|d| matches!(d, Dim::Rank(_)));
+
+    // NOTE: every reduction builtin's HM scheme is arity-2 (`(input, axis)`),
+    // so `axis_exprs` is currently always a single element — `sum(x, seq)`, not
+    // `sum(x, seq, head)`. The loop below already handles N named axes, but the
+    // variadic surface is arity-gated upstream; admitting it (a dedicated
+    // `infer_reduction_app` dispatcher) is tracked as chelis#339. Multi-axis
+    // reduction today composes single-axis reductions: `sum(sum(x, head), seq)`.
+    let mut remove: Vec<usize> = Vec::new();
+    if axis_exprs.len() == 1
+        && !has_spread
+        && let Some(raw) = extract_int_for_dim(&axis_exprs[0])
+    {
+        match normalize_static_axis(dims.len(), raw) {
+            Some(axis) => remove.push(axis),
             None => {
                 errors.push(CheckError::new(
                     CheckErrorKind::DimensionMismatch,
@@ -13524,39 +13572,106 @@ fn check_reduction_signature(
                 ));
                 return Type::Error;
             }
-        },
-        // Issue #259: the input is a concrete tensor (we are past the
-        // `Var | Error` guard above), so the only thing standing between
-        // here and a resolved output shape is the axis. When the axis arg
-        // is not a compile-time constant (a function-parameter `int32`
-        // rather than a literal or `cast(N, int32)`), `extract_int_for_dim`
-        // returns `None` and we cannot know *which* dimension is removed,
-        // so the output shape is undeterminable. Pre-fix this arm returned
-        // the still-unresolved `Type::Var(out)` from `tensor_reduce_to_out`,
-        // which then leaked downstream and surfaced as a misleading
-        // `borrow requires tensor or tensor-carrying input, got ?N`
-        // diagnostic at the next borrow site. Emit a targeted diagnostic
-        // at the reduction call site naming the real root cause instead.
-        None => {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "{name} axis must be a compile-time constant for the output \
-                     shape to be inferable, got {}",
-                    describe_axis_arg(arg_exprs.get(1)),
-                ),
-                vec![format!(
-                    "Pass a literal axis (e.g. `{name}(x, 0)`) or a `cast(N, int32)` \
-                     literal. The reduced axis index selects which dimension is \
-                     removed, so it must be known at compile time."
-                )],
-            ));
-            return Type::Error;
         }
-    };
+    } else {
+        for ax in axis_exprs {
+            // A positional integer that reaches the named path: either the
+            // operand is rank-spread (index meaningless at symbolic rank) or it
+            // is mixed with other axes. Direct the user to name each axis.
+            if extract_int_for_dim(ax).is_some() {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "{name}: a positional integer axis is only valid as the single axis of a \
+                         concrete-rank operand; on a rank-spread operand or for multiple axes, \
+                         name each axis (e.g. `{name}(x, seq)` or `{name}(x, seq, head)`) so it \
+                         is located by name (spec/04-type-system.md \u{00a7}4.5.3)"
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+            // Issue #259: a non-literal, non-name axis (a runtime `int32`
+            // binding) cannot determine which dimension is removed; emit the
+            // targeted compile-time-constant diagnostic rather than leaking an
+            // unresolved output type downstream.
+            let Some(axis_name) = symbolic_dim_ref_name(ax) else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "{name} axis must be a compile-time constant or a named axis of the \
+                         operand, got {}",
+                        describe_axis_arg(Some(ax)),
+                    ),
+                    vec![format!(
+                        "Pass a literal axis (e.g. `{name}(x, 0)`) on a concrete-rank operand, or \
+                         name the axis (e.g. `{name}(x, seq)`) to reduce by name."
+                    )],
+                ));
+                return Type::Error;
+            };
+            let hits: Vec<usize> = dims
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| matches!(d, Dim::Name(n) if n == axis_name))
+                .map(|(i, _)| i)
+                .collect();
+            match hits.as_slice() {
+                [i] => remove.push(*i),
+                [] if has_spread => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name}: rank-spread operand has no named `{axis_name}` axis to \
+                             reduce (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                [] => {
+                    // Concrete operand: `axis_name` is neither a literal nor a
+                    // named axis of the operand. Two causes share this arm — a
+                    // runtime `int32` binding (issue #259) and a mistyped/absent
+                    // axis name — so the message stays neutral between them
+                    // rather than asserting "runtime value".
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name} axis `{axis_name}` is neither a compile-time constant nor a \
+                             named axis of the operand: a reduction axis must be a literal or \
+                             `cast(N, int32)` constant, or the name of an existing axis"
+                        ),
+                        vec![format!(
+                            "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, int32)`, or \
+                             name an existing axis of the operand (e.g. `{name}(x, seq)`)."
+                        )],
+                    ));
+                    return Type::Error;
+                }
+                _ => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name}: named axis `{axis_name}` is ambiguous; it appears more than \
+                             once in the operand shape"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+            }
+        }
+    }
 
+    // Build the output by dropping the selected axes (descending so earlier
+    // indices stay valid). Surviving named/spread dims keep identity and order.
     let mut out_dims = dims;
-    out_dims.remove(axis);
+    remove.sort_unstable();
+    remove.dedup();
+    for &idx in remove.iter().rev() {
+        out_dims.remove(idx);
+    }
 
     // RT-2 fixup B1: per spec/04-type-system.md §5.7.1, the result
     // precision of `reduce_sum` follows the §5.7.1 table — int8/int16
