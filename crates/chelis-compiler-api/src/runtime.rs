@@ -5,7 +5,7 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
-use chelis_ir::lower::{top_level_lowering_map, try_lower_subexpr_program};
+use chelis_ir::lower::{top_level_lowering_map, try_lower_subexpr_program, type_expr_has_rank_var};
 use chelis_ir::tier2;
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, types::Prim};
 
@@ -235,6 +235,11 @@ pub(crate) enum RuntimeValue {
     MappedFile(Vec<u8>),
     Closure {
         params: Vec<String>,
+        /// Declared Deep type expression per param, when the `(fn ...)`
+        /// carried checker-annotated `{type: ...}` param metadata.
+        /// Consulted by the chelis#338 named-axis routing to recover a
+        /// frame binding's static tensor type (named dims) at eval time.
+        param_types: Vec<Option<Expr>>,
         body: Expr,
         env: HashMap<String, RuntimeValue>,
     },
@@ -513,6 +518,9 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
 
     let mut ctx = EvalContext {
         bindings: HashMap::new(),
+        binding_types: HashMap::new(),
+        named_axis_route_cache: HashMap::new(),
+        named_axis_route_visiting: HashSet::new(),
         top_level_defs,
         type_env,
         adt_fields,
@@ -708,6 +716,18 @@ pub(crate) fn lookup_runtime_value_for_root(
 
 struct EvalContext<'a> {
     bindings: HashMap<String, RuntimeValue>,
+    /// Declared/static Deep type expression for names in `bindings`,
+    /// maintained in lockstep with `bindings` (saved/swapped/restored at
+    /// every frame boundary). Every locally-bound name gets a key here:
+    /// `Some(ty)` when a declared or checker-annotated type is known,
+    /// `None` otherwise. The explicit `None` marker matters: it masks a
+    /// same-named top-level `type_env` entry so a local shadow is never
+    /// typed with the outer binding's type (chelis#338 named-axis routing).
+    binding_types: HashMap<String, Option<Expr>>,
+    /// Memoized per-def result of [`Self::def_requires_named_axis_routing`].
+    named_axis_route_cache: HashMap<String, bool>,
+    /// Cycle guard for the recursive routing detection walk.
+    named_axis_route_visiting: HashSet<String>,
     top_level_defs: HashMap<String, Expr>,
     /// Combined library + new-code Deep type-env. Threaded into
     /// [`chelis_ir::lower::lower_subexpr_program`] when the host runtime
@@ -1084,12 +1104,18 @@ impl<'a> EvalContext<'a> {
             .filter_map(runtime_param_name)
             .map(str::to_string)
             .collect::<Vec<_>>();
+        let param_types = children(params_list)
+            .iter()
+            .filter(|param| runtime_param_name(param).is_some())
+            .map(|param| param_decl_type_expr(param).cloned())
+            .collect::<Vec<_>>();
         let body = kids
             .get(1)
             .ok_or_else(|| "fn missing body".to_string())?
             .clone();
         Ok(RuntimeValue::Closure {
             params,
+            param_types,
             body,
             env: self
                 .bindings
@@ -1105,6 +1131,22 @@ impl<'a> EvalContext<'a> {
         let func = kids
             .first()
             .ok_or_else(|| "app missing function".to_string())?;
+
+        // chelis#338 site A: a reduction whose axis argument is a bare
+        // `(var name)` names a *dimension* of the operand, not a runtime
+        // value (spec/04-type-system.md SS4.5.3); the checker admits only
+        // int-literal or named axes, so a bare var here is always a named
+        // axis. It must be intercepted BEFORE generic argument evaluation
+        // (which would fail with `unknown runtime name`) and routed
+        // through IR lowering, where name -> index resolution lives.
+        if let Some(reduce_name) = builtin_name(func)
+            && REDUCTION_BUILTIN_NAMES.contains(&reduce_name)
+            && kids.len() >= 3
+            && kids[2..].iter().any(|axis| var_name(axis).is_some())
+        {
+            return self.eval_named_axis_reduction_app(reduce_name, kids);
+        }
+
         let args = kids[1..]
             .iter()
             .map(|arg| self.eval_expr(arg))
@@ -1137,8 +1179,31 @@ impl<'a> EvalContext<'a> {
             return self.eval_builtin(name, &args);
         }
 
+        // chelis#338 site B: a call to a top-level def whose body needs
+        // named-axis routing (it reduces a named axis directly, or calls
+        // a rank-polymorphic def that does). Route the call through IR
+        // lowering at this boundary, where the callee's declared (named)
+        // param types are available, exactly as `chelis build` calls a
+        // signature-typed compiled function. Falls through to ordinary
+        // interpretation when no routing strategy applies; the body's own
+        // reduction then hits site A with frame-typed bindings.
+        if let Some(callee) = var_name(func)
+            && !self.bindings.contains_key(callee)
+            && !self.tensor_bindings.contains_key(callee)
+            && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
+            && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some("fn"))
+            && self.def_requires_named_axis_routing(&resolved)
+            && let Some(routed) = self.try_named_axis_def_call(&resolved, &def_expr, kids, &args)?
+        {
+            return Ok(routed);
+        }
+
+        let arg_type_exprs = kids[1..]
+            .iter()
+            .map(|arg| self.static_type_expr_of(arg))
+            .collect::<Vec<_>>();
         let callable = self.eval_expr(func)?;
-        self.apply_resolved_callable(callable, args)
+        self.apply_resolved_callable_with_arg_types(callable, args, &arg_type_exprs)
     }
 
     fn eval_if(&mut self, list: &List) -> Result<RuntimeValue, String> {
@@ -1167,17 +1232,26 @@ impl<'a> EvalContext<'a> {
             return Err("let bindings malformed".to_string());
         }
         let saved = self.bindings.clone();
+        let saved_types = self.binding_types.clone();
         let bind_kids = children(bind_list);
         let mut index = 0;
         while index + 1 < bind_kids.len() {
             let name = symbol_name(&bind_kids[index])
                 .ok_or_else(|| "let binding must bind a name".to_string())?;
+            // Record the bound expr's static type (checker-annotated
+            // `{type: ...}` on the value expr, or the source binding's
+            // known type for a bare var) so chelis#338 named-axis routing
+            // can recover named dims for let-bound tensors. The explicit
+            // `None` insert masks any same-named top-level type.
+            let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
             let value = self.eval_expr(&bind_kids[index + 1])?;
+            self.binding_types.insert(name.to_string(), static_ty);
             self.bindings.insert(name.to_string(), value);
             index += 2;
         }
         let body = self.eval_expr(kids.get(1).ok_or_else(|| "let missing body".to_string())?)?;
         self.bindings = saved;
+        self.binding_types = saved_types;
         Ok(body)
     }
 
@@ -1226,44 +1300,122 @@ impl<'a> EvalContext<'a> {
                 continue;
             }
             let saved = self.bindings.clone();
+            let saved_types = self.binding_types.clone();
+            // Pattern-bound names carry no declared types; insert `None`
+            // markers afterwards so they shadow rather than leak an outer
+            // same-named binding's type into the arm body (chelis#338).
             if pattern_matches(
                 &scrutinee,
                 &arm_kids[0],
                 &mut self.bindings,
                 &self.adt_fields,
             )? {
+                for name in self.bindings.keys() {
+                    if !saved.contains_key(name) {
+                        self.binding_types.insert(name.clone(), None);
+                    }
+                }
                 let value = self.eval_expr(&arm_kids[2]);
                 self.bindings = saved;
+                self.binding_types = saved_types;
                 return value;
             }
             self.bindings = saved;
+            self.binding_types = saved_types;
         }
         Err("non-exhaustive runtime match".to_string())
     }
 
     fn eval_pipe(&mut self, list: &List) -> Result<RuntimeValue, String> {
         let kids = children(list);
-        let mut value = self.eval_expr(
-            kids.first()
-                .ok_or_else(|| "pipe missing head".to_string())?,
-        )?;
+        let head = kids
+            .first()
+            .ok_or_else(|| "pipe missing head".to_string())?;
+        // Thread the piped value's static type into each stage's
+        // synthesized `__chelis_pipe` param (which carries no annotation
+        // of its own; the annotated AST leaves pipe lambdas as
+        // unresolved type vars) so a named-axis reduction in any stage
+        // can recover the operand's named dims (chelis#338). The type
+        // starts from the head expression and propagates through
+        // shape-preserving (Identity) builtin stages and def stages
+        // with concrete declared return types; any other stage drops it.
+        let mut value_ty = self.static_type_expr_of(head);
+        let mut value = self.eval_expr(head)?;
         for stage in kids.iter().skip(1) {
-            value = self.apply_callable(stage, vec![value])?;
+            let next_ty = self.pipe_stage_output_type(stage, value_ty.as_ref());
+            value = self.apply_callable(stage, vec![value], &[value_ty])?;
+            value_ty = next_ty;
         }
         Ok(value)
+    }
+
+    /// Static output type of a pipe stage, for threading the piped
+    /// value's type across stages (chelis#338): the stage body's own
+    /// concrete checker annotation when present, else the incoming
+    /// type when the stage applies a shape-preserving (Identity-class)
+    /// builtin, else a called def's declared return type. Anything
+    /// else is unknown and drops the thread.
+    fn pipe_stage_output_type(&self, stage: &Expr, input_ty: Option<&Expr>) -> Option<Expr> {
+        // A no-extra-arg stage stays a bare `(var f)`; a stage with
+        // bound args is synthesized as
+        // `(fn {..} (params {} __chelis_pipe) (app {..} (var f) args...))`.
+        if let Some(callee) = var_name(stage) {
+            return self.callee_output_type(callee, input_ty);
+        }
+        let Expr::List(stage_list, _) = stage else {
+            return None;
+        };
+        if tag(stage_list) != Some("fn") {
+            return None;
+        }
+        let body = children(stage_list).get(1)?;
+        // The body's own checker annotation wins when it is concrete
+        // (pipe lambdas are typically left as unresolved `t-var`s).
+        if let Some(ty) = self.static_type_expr_of(body)
+            && !matches!(&ty, Expr::List(ty_list, _) if tag(ty_list) == Some("t-var"))
+        {
+            return Some(ty);
+        }
+        let Expr::List(body_list, _) = body else {
+            return None;
+        };
+        if tag(body_list) != Some("app") {
+            return None;
+        }
+        let callee = children(body_list).first().and_then(var_name)?;
+        self.callee_output_type(callee, input_ty)
+    }
+
+    /// Output type of applying `callee` to a value of type `input_ty`:
+    /// the input type for shape-preserving (Identity-class) builtins,
+    /// or a top-level def's declared return type.
+    fn callee_output_type(&self, callee: &str, input_ty: Option<&Expr>) -> Option<Expr> {
+        if chelis_types::shape_class(callee) == chelis_types::ShapeClass::Identity {
+            return input_ty.cloned();
+        }
+        let (resolved, _) = self.lookup_top_level_def(callee)?;
+        let sig = self.type_env.get(&resolved)?;
+        let Expr::List(sig_list, _) = sig else {
+            return None;
+        };
+        if tag(sig_list) != Some("t-fn") {
+            return None;
+        }
+        children(sig_list).last().cloned()
     }
 
     fn apply_callable(
         &mut self,
         stage: &Expr,
         args: Vec<RuntimeValue>,
+        arg_type_exprs: &[Option<Expr>],
     ) -> Result<RuntimeValue, String> {
         if let Some(name) = builtin_name(stage) {
             return self.eval_builtin(name, &args);
         }
         match self.eval_expr(stage)? {
             value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => {
-                self.apply_resolved_callable(value, args)
+                self.apply_resolved_callable_with_arg_types(value, args, arg_type_exprs)
             }
             other => Err(format!("pipe stage is not callable: {other:?}")),
         }
@@ -1274,8 +1426,27 @@ impl<'a> EvalContext<'a> {
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
+        self.apply_resolved_callable_with_arg_types(callable, args, &[])
+    }
+
+    /// Like [`Self::apply_resolved_callable`], but additionally records a
+    /// static Deep type expression per argument into the callee frame's
+    /// `binding_types` (chelis#338 named-axis routing). The closure's own
+    /// declared param type wins; `arg_type_exprs` fills the gap for
+    /// synthesized params with no annotation (e.g. `__chelis_pipe`).
+    fn apply_resolved_callable_with_arg_types(
+        &mut self,
+        callable: RuntimeValue,
+        args: Vec<RuntimeValue>,
+        arg_type_exprs: &[Option<Expr>],
+    ) -> Result<RuntimeValue, String> {
         match callable {
-            RuntimeValue::Closure { params, body, env } => {
+            RuntimeValue::Closure {
+                params,
+                param_types,
+                body,
+                env,
+            } => {
                 if params.len() != args.len() {
                     return Err(format!(
                         "closure expected {} args, got {}",
@@ -1284,12 +1455,20 @@ impl<'a> EvalContext<'a> {
                     ));
                 }
                 let saved = self.bindings.clone();
+                let saved_types = std::mem::take(&mut self.binding_types);
                 self.bindings = env;
-                for (param, arg) in params.into_iter().zip(args) {
+                for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
+                    let declared = param_types
+                        .get(index)
+                        .cloned()
+                        .flatten()
+                        .or_else(|| arg_type_exprs.get(index).cloned().flatten());
+                    self.binding_types.insert(param.clone(), declared);
                     self.bindings.insert(param, arg);
                 }
                 let value = self.eval_expr(&body);
                 self.bindings = saved;
+                self.binding_types = saved_types;
                 value
             }
             RuntimeValue::Transform {
@@ -1480,6 +1659,414 @@ impl<'a> EvalContext<'a> {
         } else {
             Ok(RuntimeValue::Tuple(packed))
         }
+    }
+
+    /// chelis#338: does evaluating a call to `resolved_name` require
+    /// routing through IR lowering because a *named-axis* reduction is
+    /// involved? True when the def's body contains a reduction whose
+    /// axis argument is a bare `(var name)`, or when it references a
+    /// rank-polymorphic def that does. References through defs with
+    /// concrete signatures do NOT propagate the flag: the interpreter
+    /// descends and routes at the deeper call boundary instead, which
+    /// keeps host constructs (print, lists, ...) in the host lane,
+    /// mirroring how `chelis build` structures the host/tensor split.
+    fn def_requires_named_axis_routing(&mut self, resolved_name: &str) -> bool {
+        if let Some(&cached) = self.named_axis_route_cache.get(resolved_name) {
+            return cached;
+        }
+        if !self
+            .named_axis_route_visiting
+            .insert(resolved_name.to_string())
+        {
+            return false;
+        }
+        let result = self.def_requires_named_axis_routing_uncached(resolved_name);
+        self.named_axis_route_visiting.remove(resolved_name);
+        self.named_axis_route_cache
+            .insert(resolved_name.to_string(), result);
+        result
+    }
+
+    fn def_requires_named_axis_routing_uncached(&mut self, resolved_name: &str) -> bool {
+        let Some(body) = self.top_level_defs.get(resolved_name).cloned() else {
+            return false;
+        };
+        let mut hit = false;
+        let mut vars: Vec<String> = Vec::new();
+        scan_expr_for_named_axis_reduction(&body, &mut hit, &mut vars);
+        if hit {
+            return true;
+        }
+        for name in vars {
+            let Some((referenced, _)) = self.lookup_top_level_def(&name) else {
+                continue;
+            };
+            if referenced == resolved_name {
+                continue;
+            }
+            let rank_poly_sig = self
+                .type_env
+                .get(&referenced)
+                .map(type_expr_has_rank_var)
+                .unwrap_or(false);
+            if rank_poly_sig && self.def_requires_named_axis_routing(&referenced) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Best-effort static Deep type expression for an expression in the
+    /// current frame: the checker's own `{type: ...}` annotation on the
+    /// node, else (for a var) the frame binding's declared type, else
+    /// the top-level type-env entry. A local binding with an unknown
+    /// type masks any same-named top-level entry (explicit `None`
+    /// marker in `binding_types`), so a shadow is never mistyped.
+    fn static_type_expr_of(&self, expr: &Expr) -> Option<Expr> {
+        match expr {
+            Expr::MetaExpr(meta, _) => {
+                if let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type") {
+                    return Some(ty.clone());
+                }
+                self.static_type_expr_of(&meta.expr)
+            }
+            Expr::List(list, _) => {
+                if let Some(meta) = get_meta(list)
+                    && let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type")
+                {
+                    return Some(ty.clone());
+                }
+                if tag(list) == Some("var")
+                    && let Some(name) = children(list).first().and_then(symbol_name)
+                {
+                    if let Some(declared) = self.binding_types.get(name) {
+                        return declared.clone();
+                    }
+                    if let Some(ty) = self.type_env.get(name) {
+                        return Some(ty.clone());
+                    }
+                    if let Some((resolved, _)) = self.lookup_top_level_def(name)
+                        && let Some(ty) = self.type_env.get(&resolved)
+                    {
+                        return Some(ty.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// chelis#338 site A: evaluate a reduction whose axis argument is a
+    /// named axis by routing `(app <reduce> <operand> <axes...>)`
+    /// through IR lowering + the forward DAG evaluator. The operand is
+    /// evaluated by the interpreter first (so nested def calls, pipes,
+    /// and lets keep host semantics), then staged as a typed
+    /// placeholder whose `TensorType` comes from the operand
+    /// expression's static type. Lowering resolves the axis name
+    /// against those named dims exactly as the C backend does
+    /// (`resolve_reduce_axis`).
+    fn eval_named_axis_reduction_app(
+        &mut self,
+        reduce_name: &str,
+        kids: &[Expr],
+    ) -> Result<RuntimeValue, String> {
+        let operand_expr = kids
+            .get(1)
+            .ok_or_else(|| format!("{reduce_name} missing operand"))?;
+        let axis_list = kids[2..]
+            .iter()
+            .filter_map(var_name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let Some(operand_ty_expr) = self.static_type_expr_of(operand_expr) else {
+            return Err(format!(
+                "named-axis reduction `{reduce_name}(.., {axis_list})` cannot be evaluated \
+                 here: the operand has no statically known tensor type in the host runtime, \
+                 so the named axis cannot be resolved to an index (chelis#338). Bind the \
+                 operand to a parameter or binding with a declared tensor type."
+            ));
+        };
+        let operand = match self.eval_expr(operand_expr)? {
+            RuntimeValue::Tensor(tensor) => tensor,
+            other => {
+                return Err(format!(
+                    "{reduce_name} expects a tensor operand, got {other:?}"
+                ));
+            }
+        };
+        let operand_type =
+            declared_tensor_type_for_value(&operand_ty_expr, &operand).map_err(|err| {
+                format!(
+                    "named-axis reduction `{reduce_name}(.., {axis_list})` cannot be \
+                     evaluated here: {err} (chelis#338)"
+                )
+            })?;
+        let span = Span::new(0, 0);
+        let placeholder = "__chelis_named_axis_operand";
+        let mut app_elements = vec![
+            Expr::Atom(Atom::Symbol("app".to_string()), span),
+            Expr::Map(MetaMap::default(), span),
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Symbol("var".to_string()), span),
+                        Expr::Map(MetaMap::default(), span),
+                        Expr::Atom(Atom::Symbol(reduce_name.to_string()), span),
+                    ],
+                },
+                span,
+            ),
+            make_var_with_type(placeholder, &operand_type, span),
+        ];
+        app_elements.extend(kids[2..].iter().cloned());
+        let app_expr = Expr::List(
+            List {
+                elements: app_elements,
+            },
+            span,
+        );
+        let scoped = HashMap::from([(placeholder.to_string(), operand_type)]);
+        let staged = HashMap::from([(placeholder.to_string(), operand.value.clone())]);
+        self.route_named_axis_expr(&app_expr, scoped, staged, reduce_name)
+            .map_err(NamedAxisRouteError::into_message)
+    }
+
+    /// chelis#338 site B: route a call to a def that requires named-axis
+    /// routing through IR lowering at this call boundary, staging the
+    /// already-evaluated arguments as typed placeholders. Placeholder
+    /// types come from the callee's declared formal param types (the
+    /// boundary `chelis build` uses when the host lane calls a
+    /// signature-typed compiled function); a rank-polymorphic or
+    /// missing formal falls back to the argument expression's static
+    /// type. Returns `Ok(None)` when no routing strategy applies (an
+    /// unmarshalable argument, an untypeable tensor arg, or a body that
+    /// does not lower): the caller then interprets the call normally
+    /// and the body's reduction is handled at site A with frame-typed
+    /// bindings, so terminal failures stay loud rather than silent.
+    fn try_named_axis_def_call(
+        &mut self,
+        resolved_name: &str,
+        def_expr: &Expr,
+        kids: &[Expr],
+        args: &[RuntimeValue],
+    ) -> Result<Option<RuntimeValue>, String> {
+        let span = Span::new(0, 0);
+        let mut scoped: HashMap<String, TensorType> = HashMap::with_capacity(args.len());
+        let mut staged: HashMap<String, IrTensorValue> = HashMap::with_capacity(args.len());
+        let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + args.len());
+        app_elements.push(Expr::Atom(Atom::Symbol("app".to_string()), span));
+        app_elements.push(Expr::Map(MetaMap::default(), span));
+        app_elements.push(Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("var".to_string()), span),
+                    Expr::Map(MetaMap::default(), span),
+                    Expr::Atom(Atom::Symbol(resolved_name.to_string()), span),
+                ],
+            },
+            span,
+        ));
+        for (index, value) in args.iter().enumerate() {
+            let placeholder = format!("__chelis_named_reduce_arg_{index}");
+            let (tensor_value, tensor_ty) = match value {
+                RuntimeValue::Tensor(tensor) => {
+                    let from_formal = param_type_expr_at(def_expr, index)
+                        .and_then(|formal| declared_tensor_type_for_value(formal, tensor).ok());
+                    let resolved_ty = match from_formal {
+                        Some(ty) => ty,
+                        None => {
+                            let from_arg = kids
+                                .get(1 + index)
+                                .and_then(|arg_expr| self.static_type_expr_of(arg_expr))
+                                .and_then(|ty_expr| {
+                                    declared_tensor_type_for_value(&ty_expr, tensor).ok()
+                                });
+                            match from_arg {
+                                Some(ty) => ty,
+                                None => return Ok(None),
+                            }
+                        }
+                    };
+                    (tensor.value.clone(), resolved_ty)
+                }
+                RuntimeValue::Scalar(_) | RuntimeValue::Bool(_) => {
+                    runtime_value_to_dag_input(value, Some(def_expr), index)?
+                }
+                _ => return Ok(None),
+            };
+            app_elements.push(make_var_with_type(&placeholder, &tensor_ty, span));
+            scoped.insert(placeholder.clone(), tensor_ty);
+            staged.insert(placeholder, tensor_value);
+        }
+        let app_expr = Expr::List(
+            List {
+                elements: app_elements,
+            },
+            span,
+        );
+        match self.route_named_axis_expr(&app_expr, scoped, staged, resolved_name) {
+            Ok(value) => Ok(Some(
+                self.unwrap_declared_scalar_return(resolved_name, value)?,
+            )),
+            // Not lowerable (host-shaped body): deterministic ladder,
+            // fall back to interpretation; site A handles the body's
+            // reduction or fails loudly.
+            Err(NamedAxisRouteError::NotLowerable(_)) => Ok(None),
+            Err(NamedAxisRouteError::Fatal(message)) => Err(message),
+        }
+    }
+
+    /// Shared chelis#338 routing core: lower `routed_expr` with the
+    /// staged placeholder types + the merged type-env + the full def
+    /// table (the same universe `apply_transform` uses), forward-eval
+    /// the DAG, and pack the roots back into a `RuntimeValue`.
+    fn route_named_axis_expr(
+        &mut self,
+        routed_expr: &Expr,
+        scoped_types: HashMap<String, TensorType>,
+        staged_inputs: HashMap<String, IrTensorValue>,
+        context_label: &str,
+    ) -> Result<RuntimeValue, NamedAxisRouteError> {
+        self.pre_resolve_top_level_value_refs(routed_expr)
+            .map_err(NamedAxisRouteError::Fatal)?;
+        let program_defs = self.top_level_defs.clone();
+        if let Some(name) = find_reachable_host_only_builtin_call(routed_expr, &program_defs) {
+            return Err(NamedAxisRouteError::NotLowerable(format!(
+                "host runtime: named-axis routing of `{context_label}` reaches host-runtime-only \
+                 builtin `{name}`, which has no RISC DAG lowering \
+                 (spec/05-risc-primitives.md SS3.6)"
+            )));
+        }
+        let dag = try_lower_subexpr_program(
+            routed_expr,
+            scoped_types,
+            self.type_env.clone(),
+            program_defs,
+        )
+        .map_err(|diagnostic| {
+            NamedAxisRouteError::NotLowerable(format!(
+                "host runtime could not lower the named-axis `{context_label}` call for \
+                 evaluation (chelis#338): {diagnostic}"
+            ))
+        })?;
+        let roots: Vec<NodeId> = dag.roots().to_vec();
+        if roots.is_empty() {
+            return Err(NamedAxisRouteError::Fatal(format!(
+                "host runtime: named-axis `{context_label}` lowering produced no roots"
+            )));
+        }
+        let tensor_bindings = self.tensor_bindings;
+        let host_bindings = &self.bindings;
+        let values = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
+            staged_inputs
+                .get(name)
+                .cloned()
+                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+                .or_else(|| match host_bindings.get(name) {
+                    Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
+                    _ => None,
+                })
+        })
+        .map_err(|err| {
+            NamedAxisRouteError::Fatal(format!(
+                "host runtime named-axis `{context_label}` evaluation failed: {err}"
+            ))
+        })?;
+        let mut packed: Vec<RuntimeValue> = Vec::with_capacity(roots.len());
+        for root in &roots {
+            let tensor = values.get(root).cloned().ok_or_else(|| {
+                NamedAxisRouteError::Fatal(format!(
+                    "host runtime: missing root {} in named-axis eval output",
+                    root.0
+                ))
+            })?;
+            let precision = dag
+                .get(*root)
+                .map(|node| node.output_type.precision)
+                .unwrap_or(Prim::F32);
+            packed.push(RuntimeValue::Tensor(RuntimeTensorValue {
+                value: tensor,
+                precision,
+            }));
+        }
+        if packed.len() == 1 {
+            Ok(packed.pop().expect("checked length"))
+        } else {
+            Ok(RuntimeValue::Tuple(packed))
+        }
+    }
+
+    /// A routed def declared to return a scalar (`-> f32` etc.) comes
+    /// back from the DAG as a rank-0 tensor; convert it so downstream
+    /// host arithmetic sees the declared scalar type.
+    fn unwrap_declared_scalar_return(
+        &self,
+        resolved_name: &str,
+        value: RuntimeValue,
+    ) -> Result<RuntimeValue, String> {
+        let RuntimeValue::Tensor(ref tensor) = value else {
+            return Ok(value);
+        };
+        if !tensor.value.shape.is_empty() {
+            return Ok(value);
+        }
+        let Some(Expr::List(sig_list, _)) = self.type_env.get(resolved_name) else {
+            return Ok(value);
+        };
+        if tag(sig_list) != Some("t-fn") {
+            return Ok(value);
+        }
+        let Some(ret) = children(sig_list).last() else {
+            return Ok(value);
+        };
+        let is_prim_return =
+            matches!(ret, Expr::List(ret_list, _) if tag(ret_list) == Some("t-prim"));
+        if !is_prim_return {
+            return Ok(value);
+        }
+        let Some(prim) = extract_prim_from_type_expr(ret) else {
+            return Ok(value);
+        };
+        if !(prim.is_float() || prim.is_integer()) {
+            return Ok(value);
+        }
+        let scalar_value = tensor
+            .value
+            .data
+            .first()
+            .copied()
+            .ok_or_else(|| "rank-0 tensor with no data in named-axis result".to_string())?;
+        let bits = ScalarBits::from_f64_as(prim, scalar_value)?;
+        RuntimeValue::scalar(prim, bits)
+    }
+
+    /// Force any top-level *value* bindings referenced (transitively
+    /// through def bodies) by a routed expression to be evaluated
+    /// before DAG evaluation, so the strict load callback can serve
+    /// them from `bindings` (the lowerer emits `Load(name)` for such
+    /// free names).
+    fn pre_resolve_top_level_value_refs(&mut self, root: &Expr) -> Result<(), String> {
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut vars: Vec<String> = Vec::new();
+        collect_var_names(root, &mut vars);
+        while let Some(name) = vars.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let Some((resolved, body)) = self.lookup_top_level_def(&name) else {
+                continue;
+            };
+            if !visited.insert(resolved.clone()) && resolved != name {
+                continue;
+            }
+            if matches!(&body, Expr::List(body_list, _) if tag(body_list) == Some("fn")) {
+                collect_var_names(&body, &mut vars);
+            } else {
+                let _ = self.resolve_top_level(&resolved)?;
+            }
+        }
+        Ok(())
     }
 
     fn eval_cast(&mut self, list: &List) -> Result<RuntimeValue, String> {
@@ -5587,21 +6174,10 @@ fn runtime_value_to_dag_input(
     }
 }
 
-/// Best-effort lookup of `(fn ...)` param[index]'s primitive precision
-/// from its `type` metadata.
-fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
-    let Expr::List(list, _) = fn_expr else {
-        return None;
-    };
-    if tag(list) != Some("fn") {
-        return None;
-    }
-    let params = children(list).first()?;
-    let Expr::List(params_list, _) = params else {
-        return None;
-    };
-    let param = children(params_list).get(index)?;
-    let ty_expr = match param {
+/// The declared `{type: ...}` metadata on a single `(params ...)` child
+/// (a `(x {type: T})` list or a MetaExpr-wrapped symbol).
+fn param_decl_type_expr(param: &Expr) -> Option<&Expr> {
+    match param {
         Expr::List(param_list, _) => match param_list.elements.get(1) {
             Some(Expr::Map(meta, _)) => meta
                 .entries
@@ -5616,8 +6192,28 @@ fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
             .find(|(key, _)| key == "type")
             .map(|(_, value)| value),
         _ => None,
-    }?;
-    extract_prim_from_type_expr(ty_expr)
+    }
+}
+
+/// `(fn ...)` param[index]'s declared type expression, if annotated.
+fn param_type_expr_at(fn_expr: &Expr, index: usize) -> Option<&Expr> {
+    let Expr::List(list, _) = fn_expr else {
+        return None;
+    };
+    if tag(list) != Some("fn") {
+        return None;
+    }
+    let params = children(list).first()?;
+    let Expr::List(params_list, _) = params else {
+        return None;
+    };
+    param_decl_type_expr(children(params_list).get(index)?)
+}
+
+/// Best-effort lookup of `(fn ...)` param[index]'s primitive precision
+/// from its `type` metadata.
+fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
+    extract_prim_from_type_expr(param_type_expr_at(fn_expr, index)?)
 }
 
 fn extract_prim_from_type_expr(expr: &Expr) -> Option<Prim> {
@@ -5821,6 +6417,208 @@ fn as_list(expr: &Expr) -> Option<&List> {
 /// error like an out-of-range axis on a phantom rank-0 operand. See
 /// spec/05-risc-primitives.md §3.6.
 const HOST_ONLY_BUILTIN_NAMES: &[&str] = &["tensor_scan"];
+
+/// Reduction builtins whose axis argument may be a *named axis*: a bare
+/// `(var name)` naming a dimension of the operand rather than an
+/// integer index (Tier-3 rank polymorphism, spec/04-type-system.md
+/// §4.5.3). The checker admits only int-literal or named axes for these
+/// (`check_reduction_signature`), so at eval time a bare-var axis is
+/// always a named axis, never a runtime value reference.
+const REDUCTION_BUILTIN_NAMES: &[&str] = &[
+    "sum",
+    "mean",
+    "max_reduce",
+    "min_reduce",
+    "prod_reduce",
+    "argmax_reduce",
+    "argmin_reduce",
+];
+
+/// Error split for the chelis#338 named-axis routing core, so callers
+/// can distinguish "this expression does not lower to the tensor DAG"
+/// (site B falls back to ordinary interpretation, where site A handles
+/// the inner reduction) from genuine post-lowering failures (always
+/// terminal). This keeps the strategy ladder deterministic without a
+/// silent catch-all fallback.
+enum NamedAxisRouteError {
+    /// The expression has no tensor-DAG lowering (host-shaped body,
+    /// host-only builtin, ...). Recoverable by interpretation.
+    NotLowerable(String),
+    /// Lowering succeeded but DAG evaluation or packing failed.
+    Fatal(String),
+}
+
+impl NamedAxisRouteError {
+    fn into_message(self) -> String {
+        match self {
+            NamedAxisRouteError::NotLowerable(message) | NamedAxisRouteError::Fatal(message) => {
+                message
+            }
+        }
+    }
+}
+
+/// Is this list an `(app <reduce> <operand> <axes...>)` whose callee is
+/// a reduction builtin with at least one bare-var (named) axis?
+fn app_reduces_named_axis(list: &List) -> bool {
+    if tag(list) != Some("app") {
+        return false;
+    }
+    let kids = children(list);
+    let Some(callee) = kids.first().and_then(var_name) else {
+        return false;
+    };
+    if !REDUCTION_BUILTIN_NAMES.contains(&callee) {
+        return false;
+    }
+    kids.len() >= 3 && kids[2..].iter().any(|axis| var_name(axis).is_some())
+}
+
+/// Walk a Deep expr looking for a named-axis reduction app, collecting
+/// every `(var name)` reference on the way so the caller can follow
+/// them into def bodies (mirrors [`scan_expr_for_host_only`]).
+fn scan_expr_for_named_axis_reduction(expr: &Expr, hit: &mut bool, vars: &mut Vec<String>) {
+    if *hit {
+        return;
+    }
+    match expr {
+        Expr::MetaExpr(meta, _) => scan_expr_for_named_axis_reduction(&meta.expr, hit, vars),
+        Expr::List(list, _) => {
+            if app_reduces_named_axis(list) {
+                *hit = true;
+                return;
+            }
+            if tag(list) == Some("var")
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                vars.push(name.to_string());
+            }
+            for child in &list.elements {
+                scan_expr_for_named_axis_reduction(child, hit, vars);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect every `(var name)` reference in a Deep expr (no early exit).
+fn collect_var_names(expr: &Expr, vars: &mut Vec<String>) {
+    match expr {
+        Expr::MetaExpr(meta, _) => collect_var_names(&meta.expr, vars),
+        Expr::List(list, _) => {
+            if tag(list) == Some("var")
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                vars.push(name.to_string());
+            }
+            for child in &list.elements {
+                collect_var_names(child, vars);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Strip `t-ref` wrappers (and MetaExpr shells) off a Deep type expr.
+fn strip_type_wrappers(ty_expr: &Expr) -> &Expr {
+    match ty_expr {
+        Expr::List(list, _) if tag(list) == Some("t-ref") => children(list)
+            .first()
+            .map(strip_type_wrappers)
+            .unwrap_or(ty_expr),
+        Expr::MetaExpr(meta, _) => strip_type_wrappers(&meta.expr),
+        _ => ty_expr,
+    }
+}
+
+/// Resolve a declared/static Deep type expression against a runtime
+/// tensor's shape, producing the concrete `TensorType` (named dims with
+/// sizes filled in) used to stage the tensor as a typed DAG input for
+/// chelis#338 named-axis routing. Rank-polymorphic types (`d-rank`
+/// spreads) are rejected: a spread cannot be split against a bare
+/// runtime shape (the split is ambiguous; only the checker's
+/// name-anchored unification may do it).
+fn declared_tensor_type_for_value(
+    ty_expr: &Expr,
+    tensor: &RuntimeTensorValue,
+) -> Result<TensorType, String> {
+    let stripped = strip_type_wrappers(ty_expr);
+    let Expr::List(list, _) = stripped else {
+        return Err("the static type is not a tensor type".to_string());
+    };
+    match tag(list) {
+        Some("t-tensor") => {}
+        Some("t-prim") if tensor.value.shape.is_empty() => {
+            return Ok(TensorType {
+                dims: vec![],
+                precision: extract_prim_from_type_expr(stripped).unwrap_or(tensor.precision),
+            });
+        }
+        other => {
+            return Err(format!(
+                "the static type `{}` is not a tensor type",
+                other.unwrap_or("?")
+            ));
+        }
+    }
+    let kids = children(list);
+    let Some((prim_expr, dim_exprs)) = kids.split_last() else {
+        return Err("malformed t-tensor type (no children)".to_string());
+    };
+    let precision = extract_prim_from_type_expr(prim_expr).unwrap_or(tensor.precision);
+    let shape = &tensor.value.shape;
+    if dim_exprs
+        .iter()
+        .any(|d| matches!(d, Expr::List(dim_list, _) if tag(dim_list) == Some("d-rank")))
+    {
+        return Err(
+            "the operand's declared type is rank-polymorphic (contains a `..spread`), \
+             which cannot be split against a runtime shape"
+                .to_string(),
+        );
+    }
+    if dim_exprs.len() != shape.len() {
+        return Err(format!(
+            "declared rank {} does not match runtime rank {}",
+            dim_exprs.len(),
+            shape.len()
+        ));
+    }
+    let mut dims = Vec::with_capacity(shape.len());
+    for (dim_expr, &size) in dim_exprs.iter().zip(shape.iter()) {
+        let Expr::List(dim_list, _) = dim_expr else {
+            return Err("malformed tensor dimension in static type".to_string());
+        };
+        match tag(dim_list) {
+            Some("d-name") => {
+                let name = children(dim_list)
+                    .first()
+                    .and_then(symbol_name)
+                    .ok_or_else(|| "malformed d-name dimension".to_string())?;
+                dims.push(DimInfo::Named(name.to_string(), Some(size)));
+            }
+            Some("d-lit") => {
+                let lit = children(dim_list)
+                    .first()
+                    .and_then(int_value)
+                    .ok_or_else(|| "malformed d-lit dimension".to_string())?;
+                if lit < 0 || lit as usize != size {
+                    return Err(format!(
+                        "declared dimension {lit} does not match runtime size {size}"
+                    ));
+                }
+                dims.push(DimInfo::Lit(size));
+            }
+            other => {
+                return Err(format!(
+                    "unsupported dimension form `{}` in static type",
+                    other.unwrap_or("?")
+                ));
+            }
+        }
+    }
+    Ok(TensorType { dims, precision })
+}
 
 /// Walk a Deep `Expr` collecting (a) the first directly-applied
 /// host-only builtin (`(app {} (var <name>) ...)`) and (b) the names

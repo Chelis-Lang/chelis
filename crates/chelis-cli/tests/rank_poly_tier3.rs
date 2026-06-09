@@ -26,6 +26,7 @@
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
+use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
@@ -307,10 +308,12 @@ fn anchored_spread_survives_fmt_round_trip() {
 // the caller's concrete shape for each spread, and the named axis `seq` is
 // resolved to a positional index at lowering (where the operand's named dims
 // are available). The output value is verified directly against the hand-
-// computed reduction. (The nameless tree-walking `chelis eval` interpreter
-// cannot resolve a named axis — that needs the type info present only on the
-// compile/lowering path — so this asserts the C-backend numerics directly
-// rather than via an eval oracle.)
+// computed reduction AND against the `chelis eval` oracle: since chelis#338,
+// the host runtime routes a def call that requires named-axis resolution
+// through the same `lower_subexpr_program` + forward-DAG-eval lane the C
+// backend uses (see `apply_named_axis_def_call` in
+// crates/chelis-compiler-api/src/runtime.rs), so eval-vs-backend agreement
+// is restored for the Tier-3 surface.
 
 fn build_compile_run(source: &str, name: &str) -> String {
     let dir = tempdir().expect("tempdir");
@@ -370,6 +373,87 @@ fn build_compile_run(source: &str, name: &str) -> String {
         String::from_utf8_lossy(&run.stderr)
     );
     String::from_utf8(run.stdout).expect("utf-8 stdout")
+}
+
+/// Run `chelis eval --file` and return its stdout (the evaluator oracle the
+/// backend must agree with, per the backend-numerics discipline).
+fn eval_stdout(dir: &Path, source: &str, name: &str) -> String {
+    let src = dir.join(format!("{name}.ch"));
+    fs::write(&src, source).expect("write source");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "eval",
+            "--file",
+            src.to_str().unwrap(),
+            "--allow-style-violations",
+        ])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "rank-poly named-reduce eval must succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf-8 stdout")
+}
+
+/// Run `chelis eval --file` expecting failure; return stderr for message pins.
+fn eval_stderr_expecting_failure(dir: &Path, source: &str, name: &str) -> String {
+    let src = dir.join(format!("{name}.ch"));
+    fs::write(&src, source).expect("write source");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "eval",
+            "--file",
+            src.to_str().unwrap(),
+            "--allow-style-violations",
+        ])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        !output.status.success(),
+        "eval was expected to fail; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8(output.stderr).expect("utf-8 stderr")
+}
+
+/// Assert every backend-printed tensor has an eval twin within 1e-6 (the
+/// Tier-2 eval-vs-backend agreement oracle, unblocked for Tier-3 by #338).
+fn assert_eval_agrees_with_backend(source: &str, name: &str, backend: &str) {
+    let backend_tensors = parse_printed_tensors(backend);
+    assert!(
+        !backend_tensors.is_empty(),
+        "{name}: backend printed no tensors: {backend}"
+    );
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, name);
+    let eval_tensors = parse_printed_tensors(&eval);
+    for (tensor_name, shape, data) in &backend_tensors {
+        let e = eval_tensors
+            .iter()
+            .find(|(n, _, _)| n == tensor_name)
+            .unwrap_or_else(|| panic!("evaluator output missing `{tensor_name}`: {eval}"));
+        assert_eq!(
+            shape, &e.1,
+            "{tensor_name}: eval-vs-backend shape disagreement"
+        );
+        assert_eq!(
+            data.len(),
+            e.2.len(),
+            "{tensor_name}: eval-vs-backend length"
+        );
+        for (i, (b, ev)) in data.iter().zip(e.2.iter()).enumerate() {
+            assert!(
+                (b - ev).abs() < 1e-6,
+                "{tensor_name}[{i}]: eval-vs-backend disagreement: backend {b} vs eval {ev}"
+            );
+        }
+    }
 }
 
 fn parse_printed_tensors(stdout: &str) -> Vec<(String, Vec<usize>, Vec<f64>)> {
@@ -450,4 +534,194 @@ fn named_reduce_builds_and_runs_nonsquare_at_ranks_2_3_4() {
             );
         }
     }
+
+    // Backend must agree with the evaluator oracle, value-for-value (#338).
+    assert_eval_agrees_with_backend(source, "rank_poly_reduce_nonsquare", &backend);
+}
+
+/// The exact chelis#338 repro: a rank-poly named reduce called through a
+/// concrete-rank caller evaluates under `chelis eval` and yields the same
+/// numerics the C backend produces ([[1,2],[3,4]] summed over `seq` ->
+/// [3, 7]). Before #338 this errored with "unknown runtime name `seq`".
+#[test]
+fn eval_resolves_named_axis_issue_repro() {
+    let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def use2(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = reduce_seq(x)\n\
+         out = use2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n";
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "issue_338_repro");
+    // A single-root program prints the bare value (no `out = ` prefix);
+    // pin the exact line: shape AND the issue's expected numerics.
+    assert_eq!(
+        eval.trim(),
+        "tensor(shape=[2], data=[3.0, 7.0])",
+        "issue #338 repro: eval must yield the backend's numerics"
+    );
+}
+
+/// Named-axis reductions at CONCRETE rank (no spread anywhere) share the same
+/// eval gap and the same fix: the def call routes through the lowering lane,
+/// which resolves `seq` against the declared (named) param dims. `max_reduce`,
+/// `min_reduce`, and `prod_reduce` are included because at concrete rank they
+/// are checkable and buildable (the chelis#340 Body-Discipline rejection
+/// applies only inside `..r` bodies). `argmax_reduce`/`argmin_reduce` are
+/// deliberately absent: the C backend mis-prints their int64 output (an
+/// unrelated pre-existing backend bug; eval is correct), so the agreement
+/// oracle cannot include them yet.
+/// Operand is non-square (batch=2, seq=3) per the #258 red-team finding.
+#[test]
+fn concrete_rank_named_reduce_eval_matches_backend() {
+    let source = "def sum_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq)\n\
+         def max_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = max_reduce(x, seq)\n\
+         def min_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = min_reduce(x, seq)\n\
+         def prod_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = prod_reduce(x, seq)\n\
+         outs = sum_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         outx = max_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         outn = min_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         outp = prod_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    let backend = build_compile_run(source, "concrete_named_reduce");
+    let tensors = parse_printed_tensors(&backend);
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("outs", &[2], &[6.0, 15.0]),
+        ("outx", &[2], &[3.0, 6.0]),
+        ("outn", &[2], &[1.0, 4.0]),
+        ("outp", &[2], &[6.0, 120.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "concrete_named_reduce", &backend);
+}
+
+/// Eval-vs-backend parity on every host/tensor-lane boundary shape the
+/// chelis#338 routing has to handle, in one program (one build + one eval):
+///
+///   - `lp`:   a def with an unmarshalable `List` param alongside the tensor
+///             (the def-call boundary declines; the body's reduction routes
+///             at the reduction site with the frame param's declared type)
+///   - `tl`:   a named-axis reduction directly at a top-level root (operand
+///             typed from the type-env entry of an earlier root)
+///   - `blk`:  a block body whose reduction operand is a local `let` binding
+///             (typed from the checker's annotation on the bound expr)
+///   - `al`:   a local closure alias of a concrete wrapper (`g = use2`;
+///             rank-poly callee routed with the argument's static type)
+///   - `pp`:   a pipe whose first stage reduces (`x |> sum(seq)`) inside a def
+///   - `tp`:   a root-level pipe chaining a bare Identity stage before the
+///             reduction (`y |> relu |> sum(seq)`; the piped type threads
+///             through shape-preserving stages)
+///   - `outt`: a routed def declared to return a scalar (`-> f32`)
+///   - `gr`:   `grad` over a scalar-output def whose body reduces by name
+#[test]
+fn named_axis_eval_parity_corners() {
+    let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def use2(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = reduce_seq(x)\n\
+         def lp(x: &tensor[batch, seq, f32], ys: List[f32]) -> tensor[batch, f32] = sum(x, seq)\n\
+         def id2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x)\n\
+         def blk(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = {\n\
+           y = relu(x)\n\
+           sum(y, seq)\n\
+         }\n\
+         def al(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = {\n\
+           g = use2\n\
+           g(x)\n\
+         }\n\
+         def pp(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = x |> sum(seq)\n\
+         def total(x: &tensor[seq, f32]) -> f32 = tensor_to_scalar(sum(x, seq))\n\
+         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out_lp = lp(to_tensor([[1.0, 2.0], [3.0, 4.0]]), [1.0, 2.0])\n\
+         out_tl = sum(y, seq)\n\
+         out_blk = blk(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out_al = al(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out_pp = pp(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out_tp = y |> relu |> sum(seq)\n\
+         outt = total(to_tensor([1.0, 2.0, 3.0]))\n\
+         gr = grad(total)(to_tensor([1.0, 2.0, 3.0]))\n";
+    let backend = build_compile_run(source, "named_axis_parity_corners");
+    let tensors = parse_printed_tensors(&backend);
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out_lp", &[2], &[3.0, 7.0]),
+        ("out_tl", &[2], &[3.0, 7.0]),
+        ("out_blk", &[2], &[3.0, 7.0]),
+        ("out_al", &[2], &[3.0, 7.0]),
+        ("out_pp", &[2], &[3.0, 7.0]),
+        ("out_tp", &[2], &[3.0, 7.0]),
+        ("gr", &[3], &[1.0, 1.0, 1.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    // The scalar-return root prints as a plain scalar line, outside the
+    // tensor parser: pin it on both lanes directly.
+    assert!(
+        backend.contains("outt = 6"),
+        "backend must print the scalar return: {backend}"
+    );
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "named_axis_parity_corners");
+    assert!(
+        eval.contains("outt = 6"),
+        "eval must print the scalar return: {eval}"
+    );
+    assert_eval_agrees_with_backend(source, "named_axis_parity_corners", &backend);
+}
+
+/// Known residual gap, pinned: a *shape-rewriting* pipe stage (`permute`)
+/// between the typed head and the named reduction drops the threaded type
+/// (only Identity-class stages and def stages propagate it), so eval declines
+/// with the targeted chelis#338 diagnostic while the backend builds and runs.
+/// If this test starts failing because eval learned to handle it, delete the
+/// decline assertion and fold the case into the parity corners above.
+#[test]
+fn pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap() {
+    let source = "def id2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x)\n\
+         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out = y |> permute(1, 0) |> sum(seq)\n";
+    // Backend lane: green (permute carries the names through lowering).
+    let backend = build_compile_run(source, "pipe_rewriting_gap");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![2], "backend shape ({backend})");
+    // permute flips to [seq, batch]; reducing `seq` (now axis 0) still
+    // sums the same elements per batch: [1+2, 3+4].
+    for (i, e) in [3.0, 7.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e}",
+            out.2[i]
+        );
+    }
+    // Eval lane: targeted decline, never the bare `unknown runtime name`.
+    let dir = tempdir().expect("tempdir");
+    let stderr = eval_stderr_expecting_failure(dir.path(), source, "pipe_rewriting_gap");
+    assert!(
+        stderr.contains("chelis#338") && stderr.contains("statically known tensor type"),
+        "expected the targeted named-axis decline diagnostic, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown runtime name"),
+        "the pre-#338 error must not resurface: {stderr}"
+    );
 }
