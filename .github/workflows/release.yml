@@ -83,6 +83,11 @@ jobs:
     # GLIBC_2.39 requirement (Rust std's weak pidfd refs) and refuses to
     # load on anything older (#330).
     container: debian:11
+    # Container jobs default `run:` steps to `sh`, which rejects
+    # `set -o pipefail` and `${VAR::8}`; debian:11 ships bash.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Install build prerequisites
         run: |
