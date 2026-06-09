@@ -74,6 +74,99 @@ jobs:
             chelis-*-linux-x86_64.tar.gz
             chelis-*-linux-x86_64.tar.gz.sha256
 
+  build-linux-x86_64-glibc231:
+    name: Build chelis (linux-x86_64, glibc 2.31)
+    runs-on: ubuntu-latest
+    # Debian 11 ships glibc 2.31. Building inside it caps the binary's glibc
+    # verneed records at 2.31, so the tarball loads on Debian 11/12 and
+    # Ubuntu 20.04+. The default ubuntu-latest build records a hard
+    # GLIBC_2.39 requirement (Rust std's weak pidfd refs) and refuses to
+    # load on anything older (#330).
+    container: debian:11
+    steps:
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Assert glibc 2.31 build environment
+        run: |
+          set -euo pipefail
+          ldd --version | head -1
+          ldd --version | head -1 | grep -F '2.31'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build chelis-cli (release)
+        run: cargo build --release -p chelis-cli
+
+      - name: Build chelis-runtime staticlib (release)
+        run: cargo build --release -p chelis-runtime
+
+      # Runs the built binary inside the glibc-2.31 container, proving the
+      # shipped artifact actually loads and works on the oldest supported
+      # glibc — the exact failure mode of #330.
+      - name: Release binary test fixture
+        run: |
+          set -euo pipefail
+          (cd crates/chelis-cli/tests/fixtures/release_pipe_stage && ../../../../../target/release/chelis test tests)
+
+      - name: Strip binary
+        run: strip target/release/chelis
+
+      - name: Assert no glibc requirement above 2.31
+        run: |
+          set -euo pipefail
+          max_req="$(objdump -T target/release/chelis | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          echo "max glibc requirement: ${max_req}"
+          test "$(printf 'GLIBC_2.31\n%s\n' "${max_req}" | sort -V | tail -1)" = "GLIBC_2.31"
+
+      - name: Verify binary runs
+        run: ./target/release/chelis --help || ./target/release/chelis help || true
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stage tarball contents
+        run: |
+          set -euo pipefail
+          staging="chelis-${{ steps.version.outputs.version }}-linux-x86_64-glibc2.31"
+          mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
+          cp target/release/chelis "$staging/bin/"
+          cp target/release/libchelis_runtime.a "$staging/lib/"
+          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
+          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
+          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
+          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
+          cp README.md "$staging/"
+          cp LICENSE "$staging/"
+          tar czf "${staging}.tar.gz" "$staging"
+          sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          ls -la "${staging}.tar.gz"*
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: chelis-linux-x86_64-glibc2.31
+          path: |
+            chelis-*-linux-x86_64-glibc2.31.tar.gz
+            chelis-*-linux-x86_64-glibc2.31.tar.gz.sha256
+
   build-darwin-arm64:
     name: Build chelis (darwin-arm64)
     runs-on: macos-latest
@@ -155,7 +248,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build-linux-x86_64, build-darwin-arm64]
+    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
     runs-on: ubuntu-latest
     steps:
       - name: Download staged artifacts

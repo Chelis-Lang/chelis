@@ -43,13 +43,22 @@ limitations section).
 Release is driven by `.github/workflows/release.yml`:
 
 - **Trigger:** pushing a tag matching `v*` to `origin/main`.
-- **Platforms:** `ubuntu-latest` for `linux-x86_64` and `macos-latest` for `darwin-arm64`.
+- **Platforms:** `ubuntu-latest` for `linux-x86_64`, a `debian:11` container on
+  `ubuntu-latest` for `linux-x86_64-glibc2.31`, and `macos-latest` for
+  `darwin-arm64`.
 - **Build:** `cargo build --release -p chelis-cli`.
 - **Packaging:** each release stages the stripped `chelis` binary, `libchelis_runtime.a`,
   `chelis_runtime.h`, `chelis_blas.h`, `README.md`, and `LICENSE` into a platform tarball.
 - **Artifacts:** releases attach
-  `chelis-<version>-linux-x86_64.tar.gz` and
+  `chelis-<version>-linux-x86_64.tar.gz`,
+  `chelis-<version>-linux-x86_64-glibc2.31.tar.gz`, and
   `chelis-<version>-darwin-arm64.tar.gz`, each with a sibling `.sha256` file.
+- **glibc floor (#330):** the default `linux-x86_64` build inherits a hard
+  `GLIBC_2.39` verneed requirement from the `ubuntu-latest` toolchain and
+  fails to load on older distros. The `-glibc2.31` variant is built inside a
+  `debian:11` container (glibc 2.31); the job asserts the build environment's
+  glibc, runs the release fixture test inside that container, and asserts the
+  packaged binary requests no glibc symbol version above 2.31.
 - **Publish:** build jobs upload artifacts and a final `softprops/action-gh-release@v2`
   step attaches them to the tag.
 

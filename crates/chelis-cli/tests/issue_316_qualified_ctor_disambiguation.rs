@@ -30,11 +30,16 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
-const REEF_TOML: &str = "[package]\n\
-     name = \"demo\"\n\
-     version = \"0.1.0\"\n\
-     compiler = \"=0.7.23\"\n\
-     module_prefix = \"Demo\"\n";
+fn reef_toml() -> String {
+    format!(
+        "[package]\n\
+         name = \"demo\"\n\
+         version = \"0.1.0\"\n\
+         compiler = \"={ver}\"\n\
+         module_prefix = \"Demo\"\n",
+        ver = chelis_compiler_api::COMPILER_VERSION,
+    )
+}
 
 const DROPOUT: &str = "module Demo.Dropout\n\
      export (Mode, Train, Eval, use)\n\
@@ -76,7 +81,7 @@ fn qualified_constructor_references_disambiguate_same_named_modes() {
     // through a qualified path, so the two `Mode` ADTs coexist in one build.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/dropout.ch"), DROPOUT);
     write_file(&root.join("src/sd.ch"), SD);
     write_file(
@@ -111,7 +116,7 @@ fn unqualified_import_of_both_modes_is_still_ambiguous() {
     // at qualification — exactly the path the headline test then takes.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/dropout.ch"), DROPOUT);
     write_file(&root.join("src/sd.ch"), SD);
     write_file(
@@ -142,7 +147,7 @@ fn qualified_reference_to_unexported_name_is_rejected() {
     // pattern and type position — see the tests below).
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/dropout.ch"), DROPOUT);
     write_file(
         &root.join("src/combo.ch"),
@@ -168,7 +173,7 @@ fn qualified_pattern_to_unexported_name_is_rejected() {
     // export.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/dropout.ch"), DROPOUT);
     write_file(
         &root.join("src/combo.ch"),
@@ -195,7 +200,7 @@ fn qualified_constructor_patterns_match_per_module() {
     // no qualified *type* annotation is needed.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/dropout.ch"), DROPOUT);
     write_file(&root.join("src/sd.ch"), SD);
     write_file(
@@ -231,7 +236,7 @@ fn qualified_type_annotation_resolves_per_module() {
     // `use`.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/dropout.ch"), DROPOUT);
     write_file(&root.join("src/sd.ch"), SD);
     write_file(
@@ -266,7 +271,7 @@ fn qualified_type_annotation_distinguishes_modules() {
     // not a shared/erased one.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/dropout.ch"), DROPOUT);
     write_file(&root.join("src/sd.ch"), SD);
     write_file(
@@ -302,7 +307,7 @@ fn qualified_type_to_unexported_name_is_rejected() {
     // type. `Demo.Dropout` exports `Mode`, never `Nope`.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/dropout.ch"), DROPOUT);
     write_file(
         &root.join("src/combo.ch"),

@@ -36,11 +36,16 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
-const REEF_TOML: &str = "[package]\n\
-     name = \"adt\"\n\
-     version = \"0.1.0\"\n\
-     compiler = \"=0.7.23\"\n\
-     module_prefix = \"Pkg\"\n";
+fn reef_toml() -> String {
+    format!(
+        "[package]\n\
+         name = \"adt\"\n\
+         version = \"0.1.0\"\n\
+         compiler = \"={ver}\"\n\
+         module_prefix = \"Pkg\"\n",
+        ver = chelis_compiler_api::COMPILER_VERSION,
+    )
+}
 
 // The declaring module exports only `(Mode, classify)`. Exporting the TYPE
 // auto-exports its constructors (Alpha/Beta/Gamma), so a consumer may import
@@ -94,7 +99,7 @@ fn type_only_import_then_construct_is_unknown_constructor() {
     // `check` as an unknown constructor, NOT pass clean and fail at runtime.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/adt.ch"), ADT);
     write_file(
         &root.join("src/consumer.ch"),
@@ -124,7 +129,7 @@ fn type_only_import_then_match_pattern_is_unknown_constructor() {
     // deferred to a runtime non-exhaustive match.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/adt.ch"), ADT);
     write_file(
         &root.join("src/consumer.ch"),
@@ -157,7 +162,7 @@ fn import_by_name_construct_and_match_checks_clean() {
     // then resolve and `check` clean.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/adt.ch"), ADT);
     write_file(
         &root.join("src/consumer.ch"),
@@ -188,7 +193,7 @@ fn local_constructor_construct_and_match_checks_clean() {
     // constructors.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(
         &root.join("src/local.ch"),
         "module Pkg.Local\n\
@@ -218,7 +223,7 @@ fn module_qualified_constructor_checks_clean() {
     // chelis#317 guard must not reject it.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/adt.ch"), ADT);
     write_file(
         &root.join("src/consumer.ch"),
@@ -248,7 +253,7 @@ fn builtin_option_constructors_check_clean() {
     // out of scope.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(
         &root.join("src/opt.ch"),
         "module Pkg.Opt\n\
@@ -277,7 +282,7 @@ fn builtin_list_constructors_check_clean() {
     // sites, the same as `Some`/`None`.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(
         &root.join("src/lst.ch"),
         "module Pkg.Lst\n\
@@ -321,7 +326,7 @@ fn type_only_import_then_record_construct_is_unknown_constructor() {
     // mis-resolved silently.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/rec.ch"), REC_ADT);
     write_file(
         &root.join("src/consumer.ch"),
@@ -352,7 +357,7 @@ fn import_record_constructor_by_name_checks_clean() {
     // and checks clean.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/rec.ch"), REC_ADT);
     write_file(
         &root.join("src/consumer.ch"),
@@ -389,7 +394,7 @@ fn ambiguous_foreign_constructor_pattern_under_wildcard_is_rejected() {
     // silently accepted.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(
         &root.join("src/one.ch"),
         "module Pkg.One\n\
@@ -434,7 +439,7 @@ fn module_qualified_constructor_pattern_checks_clean() {
     // §P2 qualified-pattern claim against over-rejection.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/adt.ch"), ADT);
     write_file(
         &root.join("src/consumer.ch"),
@@ -465,7 +470,7 @@ fn nested_out_of_scope_constructor_pattern_is_unknown_constructor() {
     // `pattern_bindings` re-enters the guard on sub-patterns.
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    write_file(&root.join("reef.toml"), REEF_TOML);
+    write_file(&root.join("reef.toml"), &reef_toml());
     write_file(&root.join("src/adt.ch"), ADT);
     write_file(
         &root.join("src/consumer.ch"),
