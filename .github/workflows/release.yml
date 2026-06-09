@@ -99,11 +99,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # `head -1` would SIGPIPE ldd under pipefail (racy exit 141);
+      # awk consumes its whole input.
       - name: Assert glibc 2.31 build environment
         run: |
           set -euo pipefail
-          ldd --version | head -1
-          ldd --version | head -1 | grep -F '2.31'
+          ldd --version | awk 'NR==1'
+          ldd --version | awk 'NR==1' | grep -F '2.31'
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
