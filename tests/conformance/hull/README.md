@@ -98,7 +98,7 @@ deliberate compiler-semantics change:
        --export-jsonl <hull>/corpus/scratch/export_corpus.jsonl \
        --hull-known-conservative <hull>/corpus/known_conservative.json \
        --chelis-bin "$(pwd)/target/release/chelis" \
-       --hull-commit <hull-commit> --chelis-version 0.7.23
+       --hull-commit <hull-commit> --chelis-version 0.7.24
    ```
 3. Re-run the gate (step "the acceptance oracle" above) and the unit tests; the
    `git diff` on this directory is the reviewable corpus refresh.

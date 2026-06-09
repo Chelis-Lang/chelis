@@ -6,6 +6,67 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.24] — 2026-06-09
+
+### Added
+
+- **Tier-2 rank polymorphism — identity tier (#258, #286)**: `..r`
+  rank-variable spread syntax (`d-rank` Deep node), `Dim::Rank` with
+  unitary rank unification, and the Body Discipline, so a single `def`
+  is generic over tensor rank for identity/erasure shapes (the
+  relu/silu/gelu activation family and full reduces as one def each).
+- **Tier-3 name-preserving rank polymorphism — named-axis reduction
+  (#258, #337)**: a single `def` reduces a named axis at any rank and
+  the surviving named axes carry through symbolically, e.g.
+  `def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) ->
+  tensor[..pre, ..post, f32] = sum(x, seq)`. Includes call-site rank
+  monomorphization and named-axis lowering on the C backend.
+- **Module-qualified constructor references and patterns (#316, #321,
+  #322)**: `Mod.Ctor` parses and resolves in expressions and in match
+  patterns, completing the #157 cross-module constructor surface.
+- **glibc 2.31 linux-x86_64 release variant (#330)**: the release
+  workflow now also builds `chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz`
+  in a Debian 11 container, so the linux binary loads on any glibc >=
+  2.31. The default ubuntu-latest build carries a hard `GLIBC_2.39`
+  verneed record and fails to load on older distros (Debian 11/12,
+  Ubuntu 20.04/22.04).
+
+### Changed
+
+- **chelis-std 0.4.0 — ML modules cut to School (#331)**: the
+  `Std.Nn.*`, `Std.Loss.*`, `Std.Optim`, and `Std.Schedule` modules are
+  removed from chelis-std; they live on in the standalone School ML
+  library under the `School.*` prefix. Init/Io/Tensor/Sort/Scan/
+  Process/Decimal/Test/Time/Tokenizer are unchanged. The bundle
+  embedded in the chelis binary is regenerated at 0.4.0.
+- **CI (#332, #328)**: the chelis-std self-test corpus now runs
+  nightly, and a red nightly opens a `nightly-failure` tracking issue
+  (closed again on green); Linux jobs reclaim runner disk to stop
+  intermittent link/build failures.
+
+### Fixed
+
+- **Out-of-scope cross-module constructor is a check-time error (#317,
+  #327)**: referencing another module's constructor without importing
+  it — at construction sites, applied heads, record literals, and match
+  patterns — is rejected with `UnknownConstructor` at check instead of
+  silently mis-resolving through the terminal-segment fallback and
+  surfacing as a runtime non-exhaustive match.
+- **grad through a cross-module precision-polymorphic attention verb
+  (#319, #326)**: separate-`sig` def bodies now infer against the
+  declared sig param types (not bare type variables), and renamed body
+  precision variables bind to the call-site precision only when the
+  call is fully precision-monomorphic, preserving the
+  no-implicit-promotion invariant.
+- **grad through windowed mean / max_reduce / gather (#320, #325)**:
+  runtime-extent mean divisor and collapsed-operand rank recovery.
+- **grad backward for shape-derived expand-of-scalar broadcast (#318,
+  #324)**.
+- **chelis-std softmax self-test rank mismatch (#332)**:
+  `test_softmax_normalizes_to_one` compared a rank-0 sum against a
+  rank-1 expectation, failing the file's typecheck; the unimplementable
+  `Std.Tensor.Reduce` self-test is quarantined as #333.
+
 ## [0.7.23] — 2026-06-04
 
 ### Added
