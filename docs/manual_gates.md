@@ -110,6 +110,7 @@ assertion failures unless an explicit different success condition is given.
 - [`phase_oracles.md`](phase_oracles.md) — every numbered phase with its acceptance oracle command
 - [`/AGENTS.md`](../AGENTS.md) / [`/CLAUDE.md`](../CLAUDE.md) — the agent contract that makes this index mandatory; see "Manual Gates" section
 - [`local_hip_environment.md`](local_hip_environment.md) — local ROCm/HIP runbook for HIP manual gates
+- [`local_macos_environment.md`](local_macos_environment.md) — macOS first-exec (syspolicyd) wedge runbook; preflight probe `scripts/preflight_exec_probe.py`
 - [`spec/design/phase1a_kernel_codegen.md`](../spec/design/phase1a_kernel_codegen.md) — owning HIP gate spec
 - [`spec/design/chelis_phase2_plan.md`](../spec/design/chelis_phase2_plan.md) — Phase 2 manual gate descriptions
 - [`spec/design/chelis_phase3_plan.md`](../spec/design/chelis_phase3_plan.md) — Phase 3 manual gate descriptions
