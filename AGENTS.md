@@ -180,6 +180,30 @@ Default-gate discipline:
 Phase-specific manual gates must be called out explicitly when they are not part of the
 default workspace run.
 
+## Build Concurrency And Process Hygiene
+
+- Concurrent agents or subagents that build or test MUST use an isolated target
+  directory: set `CARGO_TARGET_DIR=target/agents/<name>`, or use a separate git
+  worktree with its own `target/`. A relative `CARGO_TARGET_DIR` resolves
+  against the invocation cwd, not the workspace root, so run cargo from the
+  repo root or use an absolute path. Never share the primary `target/` with a
+  session that may be building concurrently; cargo's target-dir lock serializes
+  the builds and feature/profile differences invalidate each other's caches.
+- Before building, list orphaned cargo/rustc/cargo-nextest/chelis processes with
+  `python3 scripts/reap_orphans.py` and reap them with
+  `python3 scripts/reap_orphans.py --kill`. Review the dry-run listing first:
+  ppid==1 cannot distinguish an abandoned build from a deliberately detached
+  one (`nohup cargo build` you are still tailing). Run it from the checkout
+  whose `target/` you are about to use; scoping is per-checkout. Orphaned runs
+  keep burning CPU and hold the cargo lock across sessions.
+- Contention diagnostic: several unrelated tests FAILing at near-identical
+  wall-clock times (for example all ~217s, nextest's slow-kill) means CPU
+  starvation, not code breakage. Measured 2026-06-10: the 25-test
+  `rank_poly_tier3` suite took 2,434s under contention vs 24s on a quiet
+  machine. Re-run on a quiet machine before treating those as real failures.
+- Recommended inner loop: `cargo nextest run -p <crate> --test <file>` compiles
+  only that test target.
+
 ## Local HIP Environment
 
 This workstation has a reconciled AMD/ROCm HIP setup, so HIP manual gates are locally
