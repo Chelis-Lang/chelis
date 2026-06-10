@@ -1233,26 +1233,31 @@ impl<'a> EvalContext<'a> {
         }
         let saved = self.bindings.clone();
         let saved_types = self.binding_types.clone();
-        let bind_kids = children(bind_list);
-        let mut index = 0;
-        while index + 1 < bind_kids.len() {
-            let name = symbol_name(&bind_kids[index])
-                .ok_or_else(|| "let binding must bind a name".to_string())?;
-            // Record the bound expr's static type (checker-annotated
-            // `{type: ...}` on the value expr, or the source binding's
-            // known type for a bare var) so chelis#338 named-axis routing
-            // can recover named dims for let-bound tensors. The explicit
-            // `None` insert masks any same-named top-level type.
-            let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
-            let value = self.eval_expr(&bind_kids[index + 1])?;
-            self.binding_types.insert(name.to_string(), static_ty);
-            self.bindings.insert(name.to_string(), value);
-            index += 2;
-        }
-        let body = self.eval_expr(kids.get(1).ok_or_else(|| "let missing body".to_string())?)?;
+        // Restore both frame maps on every exit path (including bind or
+        // body evaluation errors) so a caught-and-continued error can
+        // never leak partial binds or stale binding types.
+        let result = (|| {
+            let bind_kids = children(bind_list);
+            let mut index = 0;
+            while index + 1 < bind_kids.len() {
+                let name = symbol_name(&bind_kids[index])
+                    .ok_or_else(|| "let binding must bind a name".to_string())?;
+                // Record the bound expr's static type (checker-annotated
+                // `{type: ...}` on the value expr, or the source binding's
+                // known type for a bare var) so chelis#338 named-axis routing
+                // can recover named dims for let-bound tensors. The explicit
+                // `None` insert masks any same-named top-level type.
+                let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
+                let value = self.eval_expr(&bind_kids[index + 1])?;
+                self.binding_types.insert(name.to_string(), static_ty);
+                self.bindings.insert(name.to_string(), value);
+                index += 2;
+            }
+            self.eval_expr(kids.get(1).ok_or_else(|| "let missing body".to_string())?)
+        })();
         self.bindings = saved;
         self.binding_types = saved_types;
-        Ok(body)
+        result
     }
 
     fn eval_tuple_get(&mut self, list: &List) -> Result<RuntimeValue, String> {
@@ -1639,26 +1644,11 @@ impl<'a> EvalContext<'a> {
         })?;
 
         // Pack roots back into a RuntimeValue.
-        let mut packed: Vec<RuntimeValue> = Vec::with_capacity(roots.len());
-        for root in &roots {
-            let tensor = values
-                .get(root)
-                .cloned()
-                .ok_or_else(|| format!("host runtime: missing root {} in eval output", root.0))?;
-            let precision = dag
-                .get(*root)
-                .map(|node| node.output_type.precision)
-                .unwrap_or(Prim::F32);
-            packed.push(RuntimeValue::Tensor(RuntimeTensorValue {
-                value: tensor,
-                precision,
-            }));
-        }
-        if packed.len() == 1 {
-            Ok(packed.pop().expect("checked length"))
-        } else {
-            Ok(RuntimeValue::Tuple(packed))
-        }
+        let kind_label = match kind {
+            TransformKind::Grad => "grad",
+            TransformKind::Vmap => "vmap",
+        };
+        pack_dag_roots(&dag, &roots, &values, kind_label)
     }
 
     /// chelis#338: does evaluating a call to `resolved_name` require
@@ -1973,28 +1963,7 @@ impl<'a> EvalContext<'a> {
                 "host runtime named-axis `{context_label}` evaluation failed: {err}"
             ))
         })?;
-        let mut packed: Vec<RuntimeValue> = Vec::with_capacity(roots.len());
-        for root in &roots {
-            let tensor = values.get(root).cloned().ok_or_else(|| {
-                NamedAxisRouteError::Fatal(format!(
-                    "host runtime: missing root {} in named-axis eval output",
-                    root.0
-                ))
-            })?;
-            let precision = dag
-                .get(*root)
-                .map(|node| node.output_type.precision)
-                .unwrap_or(Prim::F32);
-            packed.push(RuntimeValue::Tensor(RuntimeTensorValue {
-                value: tensor,
-                precision,
-            }));
-        }
-        if packed.len() == 1 {
-            Ok(packed.pop().expect("checked length"))
-        } else {
-            Ok(RuntimeValue::Tuple(packed))
-        }
+        pack_dag_roots(&dag, &roots, &values, context_label).map_err(NamedAxisRouteError::Fatal)
     }
 
     /// A routed def declared to return a scalar (`-> f32` etc.) comes
@@ -2062,7 +2031,12 @@ impl<'a> EvalContext<'a> {
             }
             if matches!(&body, Expr::List(body_list, _) if tag(body_list) == Some("fn")) {
                 collect_var_names(&body, &mut vars);
-            } else {
+            } else if !self.resolving_top_levels.iter().any(|n| n == &resolved) {
+                // Skip a binding currently being resolved (this walk is
+                // syntactic and may reach the in-flight root through a
+                // dead branch); forcing it would raise a spurious
+                // "cyclic top-level" error. If the lowered DAG genuinely
+                // needs the value, the strict load callback reports it.
                 let _ = self.resolve_top_level(&resolved)?;
             }
         }
@@ -6214,6 +6188,40 @@ fn param_type_expr_at(fn_expr: &Expr, index: usize) -> Option<&Expr> {
 /// from its `type` metadata.
 fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
     extract_prim_from_type_expr(param_type_expr_at(fn_expr, index)?)
+}
+
+/// Pack forward-evaluated DAG roots into a `RuntimeValue` (single root
+/// becomes a Tensor, several become a Tuple), with precision pulled
+/// from each root node's output type. Shared by the grad/vmap
+/// transform lane and the chelis#338 named-axis routing lane.
+fn pack_dag_roots(
+    dag: &Dag,
+    roots: &[NodeId],
+    values: &HashMap<NodeId, IrTensorValue>,
+    context_label: &str,
+) -> Result<RuntimeValue, String> {
+    let mut packed: Vec<RuntimeValue> = Vec::with_capacity(roots.len());
+    for root in roots {
+        let tensor = values.get(root).cloned().ok_or_else(|| {
+            format!(
+                "host runtime: missing root {} in {context_label} eval output",
+                root.0
+            )
+        })?;
+        let precision = dag
+            .get(*root)
+            .map(|node| node.output_type.precision)
+            .unwrap_or(Prim::F32);
+        packed.push(RuntimeValue::Tensor(RuntimeTensorValue {
+            value: tensor,
+            precision,
+        }));
+    }
+    if packed.len() == 1 {
+        Ok(packed.pop().expect("checked length"))
+    } else {
+        Ok(RuntimeValue::Tuple(packed))
+    }
 }
 
 fn extract_prim_from_type_expr(expr: &Expr) -> Option<Prim> {
