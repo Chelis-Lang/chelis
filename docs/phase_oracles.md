@@ -168,6 +168,7 @@ Track) are post-v1 extensions and do not appear here.
 - [`manual_gates.md`](manual_gates.md) — every `#[ignore]`'d test with its manual command and prerequisite
 - [`/AGENTS.md`](../AGENTS.md) / [`/CLAUDE.md`](../CLAUDE.md) — the agent contract that makes this index mandatory
 - [`local_hip_environment.md`](local_hip_environment.md) — local ROCm/HIP runbook for HIP manual gates
+- [`local_macos_environment.md`](local_macos_environment.md) — macOS first-exec (syspolicyd) wedge runbook; preflight probe `scripts/preflight_exec_probe.py`
 - [`spec/design/chelis_project_plan.md`](../spec/design/chelis_project_plan.md) — top-level phase ledger
 - [`spec/design/chelis_phase3_plan.md`](../spec/design/chelis_phase3_plan.md) — detailed Phase 3 implementation plan
 - [`spec/design/chelis_metal_backend_plan.md`](../spec/design/chelis_metal_backend_plan.md) — Phase M Metal backend
