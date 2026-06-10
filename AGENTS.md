@@ -184,13 +184,18 @@ default workspace run.
 
 - Concurrent agents or subagents that build or test MUST use an isolated target
   directory: set `CARGO_TARGET_DIR=target/agents/<name>`, or use a separate git
-  worktree with its own `target/`. Never share the primary `target/` with a
+  worktree with its own `target/`. A relative `CARGO_TARGET_DIR` resolves
+  against the invocation cwd, not the workspace root, so run cargo from the
+  repo root or use an absolute path. Never share the primary `target/` with a
   session that may be building concurrently; cargo's target-dir lock serializes
   the builds and feature/profile differences invalidate each other's caches.
 - Before building, list orphaned cargo/rustc/cargo-nextest/chelis processes with
   `python3 scripts/reap_orphans.py` and reap them with
-  `python3 scripts/reap_orphans.py --kill`. Orphaned runs keep burning CPU and
-  hold the cargo lock across sessions.
+  `python3 scripts/reap_orphans.py --kill`. Review the dry-run listing first:
+  ppid==1 cannot distinguish an abandoned build from a deliberately detached
+  one (`nohup cargo build` you are still tailing). Run it from the checkout
+  whose `target/` you are about to use; scoping is per-checkout. Orphaned runs
+  keep burning CPU and hold the cargo lock across sessions.
 - Contention diagnostic: several unrelated tests FAILing at near-identical
   wall-clock times (for example all ~217s, nextest's slow-kill) means CPU
   starvation, not code breakage. Measured 2026-06-10: the 25-test

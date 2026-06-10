@@ -13,14 +13,26 @@ What it considers:
 
   - processes whose executable basename is one of `cargo`, `rustc`,
     `cargo-nextest`, or `chelis` AND whose command line or working
-    directory references this repo checkout;
-  - processes whose command line references this repo's `target/`
+    directory references this repo checkout (path-boundary matched, so
+    a sibling checkout like `<repo>-165` never matches);
+  - processes whose EXECUTABLE lives in this repo's `target/`
     directory (nextest-spawned test binaries have arbitrary names but
     run from `target/`).
 
 An installed `chelis` running elsewhere (e.g. a different project's
-workload) is deliberately NOT matched: its command line does not
+workload) is deliberately NOT matched when its command line does not
 mention this repo and its cwd is outside it.
+
+Known limitations (review the dry-run listing before `--kill`):
+
+  - ppid==1 cannot distinguish an abandoned build from a DELIBERATELY
+    detached one (`nohup cargo build` you are still tailing) - both
+    classify ORPHANED;
+  - an installed `chelis` working on another project but LAUNCHED from
+    a shell cwd'd into this repo is matched, and killed if detached;
+  - scoping is per-checkout: run from a worktree, the script does not
+    see the main checkout's orphans (and vice versa) - run it from the
+    checkout whose `target/` you are about to use.
 
 A matched process is classified ORPHANED when:
 
@@ -145,6 +157,40 @@ def _path_is_under(path: str, root: Path) -> bool:
         return False
 
 
+def _command_mentions_path(command: str, path_str: str) -> bool:
+    """Path-boundary-aware containment check. A raw substring test would
+    let a sibling checkout match (`<repo>-165` contains `<repo>`), and
+    this script sends SIGKILL, so `path_str` counts only when followed
+    by a path separator, whitespace, a quote, or end-of-string."""
+    start = 0
+    while True:
+        idx = command.find(path_str, start)
+        if idx == -1:
+            return False
+        end = idx + len(path_str)
+        if end == len(command) or command[end] in "/ \t\"'=:,;":
+            return True
+        start = idx + 1
+
+
+def current_command(pid: int) -> str | None:
+    """The pid's command line right now, formatted identically to the
+    snapshot's command field, or None if the process is gone. Used to
+    re-verify identity immediately before signaling (PID reuse guard)."""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-ww", "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    command = result.stdout.strip()
+    return command or None
+
+
 def match_repo_processes(
     procs: list[ProcInfo],
     repo_root: Path,
@@ -166,13 +212,16 @@ def match_repo_processes(
         if proc.pid == own_pid:
             continue
         is_tool = proc.basename in BUILD_TOOL_NAMES
-        mentions_repo = repo_str in proc.command
+        mentions_repo = _command_mentions_path(proc.command, repo_str)
         if is_tool and mentions_repo:
             matched.append(proc)
             continue
-        if mentions_repo and target_str in proc.command:
-            # nextest-spawned test binaries: arbitrary basenames, but
-            # they run from this repo's target/ directory.
+        # nextest-spawned test binaries: arbitrary basenames, but their
+        # EXECUTABLE lives in this repo's target/ directory. Keyed on
+        # the first command token so a `tail -f .../target/...` or a
+        # manual `gcc .../target/.../out.c` is never matched.
+        executable = proc.command.split(None, 1)[0] if proc.command else ""
+        if executable.startswith(target_str + os.sep):
             matched.append(proc)
             continue
         if is_tool:
@@ -217,10 +266,20 @@ def terminate(
     grace_seconds: float = DEFAULT_GRACE_SECONDS,
     kill_fn: Callable[[int, int], None] = os.kill,
     sleep_fn: Callable[[float], None] = time.sleep,
+    expected: dict[int, str] | None = None,
+    command_lookup: Callable[[int], str | None] = current_command,
 ) -> list[int]:
     """SIGTERM every pid, wait `grace_seconds`, then SIGKILL survivors.
     Returns the pids that needed SIGKILL. `kill_fn`/`sleep_fn` are
-    injectable for tests; no real signals are sent in the test suite."""
+    injectable for tests; no real signals are sent in the test suite.
+
+    `expected` maps pid -> the command line recorded when the pid was
+    classified. When provided, each pid's identity is re-verified via
+    `command_lookup` immediately before EVERY signal (TERM and the
+    post-grace KILL): a pid whose command no longer matches has exited
+    and been reused, and is skipped rather than signaled. The snapshot
+    can be seconds stale and PID churn is highest exactly in the
+    contention scenarios this script targets."""
 
     def send(pid: int, sig: int) -> bool:
         """True if the signal was delivered (process still exists)."""
@@ -233,14 +292,27 @@ def terminate(
             print(f"reap_orphans: no permission to signal pid {pid}", file=sys.stderr)
             return False
 
-    termed = [pid for pid in pids if send(pid, signal.SIGTERM)]
+    def identity_holds(pid: int) -> bool:
+        if expected is None:
+            return True
+        live = command_lookup(pid)
+        if live is not None and live == expected.get(pid):
+            return True
+        print(
+            f"reap_orphans: pid {pid} no longer matches its snapshot; skipping",
+            file=sys.stderr,
+        )
+        return False
+
+    termed = [pid for pid in pids if identity_holds(pid) and send(pid, signal.SIGTERM)]
     if not termed:
         return []
     sleep_fn(grace_seconds)
     killed: list[int] = []
     for pid in termed:
-        # Probe with signal 0; if still alive, escalate to SIGKILL.
-        if send(pid, 0) and send(pid, signal.SIGKILL):
+        # Re-verify identity, then probe with signal 0; if still alive,
+        # escalate to SIGKILL.
+        if identity_holds(pid) and send(pid, 0) and send(pid, signal.SIGKILL):
             killed.append(pid)
     return killed
 
@@ -310,7 +382,8 @@ def main(argv: list[str]) -> int:
         return 0
     pids = sorted(orphaned)
     print(f"reap_orphans: sending SIGTERM to {pids} (grace {args.grace:g}s)")
-    killed = terminate(pids, grace_seconds=args.grace)
+    expected = {proc.pid: proc.command for proc in matched if proc.pid in orphaned}
+    killed = terminate(pids, grace_seconds=args.grace, expected=expected)
     if killed:
         print(f"reap_orphans: SIGKILLed survivors {killed}")
     print(f"reap_orphans: done; {len(pids)} orphan(s) reaped.")

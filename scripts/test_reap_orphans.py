@@ -100,6 +100,38 @@ class MatchRepoProcessesTests(unittest.TestCase):
         matched = reap.match_repo_processes(procs, reap.REPO_ROOT, _no_cwd)
         self.assertEqual([p.pid for p in matched], [11])
 
+    def test_sibling_checkout_path_does_not_match(self):
+        # Review H1 regression: `<repo>-165` CONTAINS `<repo>` as a raw
+        # substring; the boundary-aware matcher must not claim it. A
+        # detached overnight build in a sibling checkout must never be
+        # reaped by this checkout's hygiene step.
+        # The cmdline no longer decides, so the cwd lookup legitimately
+        # runs next; the sibling checkout's cwd settles it as foreign.
+        procs = [
+            _proc(70, 1, f"cargo build --manifest-path {REPO}-165/Cargo.toml"),
+            _proc(71, 1, f"rustc --out-dir {REPO}-202/target/debug/deps lib.rs"),
+        ]
+        matched = reap.match_repo_processes(
+            procs, reap.REPO_ROOT, lambda pid: f"{REPO}-165"
+        )
+        self.assertEqual(matched, [])
+
+    def test_repo_path_at_end_of_command_matches(self):
+        procs = [_proc(72, 5, f"cargo-nextest nextest list {REPO}")]
+        matched = reap.match_repo_processes(procs, reap.REPO_ROOT, _no_cwd)
+        self.assertEqual([p.pid for p in matched], [72])
+
+    def test_target_path_in_arguments_only_does_not_match(self):
+        # Review L1 regression: only a process whose EXECUTABLE lives in
+        # target/ is a repo test binary; a tail or gcc that merely names
+        # a target/ path in its arguments is not build activity.
+        procs = [
+            _proc(73, 1, f"tail -f {REPO}/target/nextest/ci/junit.xml"),
+            _proc(74, 1, f"gcc -O2 {REPO}/target/out/prog.c -o /tmp/prog"),
+        ]
+        matched = reap.match_repo_processes(procs, reap.REPO_ROOT, _no_cwd)
+        self.assertEqual(matched, [])
+
     def test_build_tool_with_repo_cwd_matches(self):
         # `cargo nextest run -p chelis-cli` from inside the repo never
         # mentions the repo path on its command line; the cwd lookup is
@@ -199,6 +231,54 @@ class TerminateTests(unittest.TestCase):
             ],
         )
 
+    def test_identity_mismatch_skips_the_signal_entirely(self):
+        # Review M1 regression (PID reuse): a pid whose live command no
+        # longer matches the classification snapshot must receive NO
+        # signal at all.
+        calls = []
+        killed = reap.terminate(
+            [80],
+            kill_fn=lambda pid, sig: calls.append((pid, sig)),
+            sleep_fn=lambda s: None,
+            expected={80: "cargo build --manifest-path /repo/Cargo.toml"},
+            command_lookup=lambda pid: "/usr/bin/ssh important-host",
+        )
+        self.assertEqual(killed, [])
+        self.assertEqual(calls, [])
+
+    def test_identity_recheck_before_sigkill(self):
+        # Identity holds at TERM time but the pid is reused during the
+        # grace period: SIGKILL must be withheld.
+        command = "cargo build --manifest-path /repo/Cargo.toml"
+        lookups = iter([command, "/usr/bin/ssh important-host"])
+        calls = []
+        killed = reap.terminate(
+            [81],
+            grace_seconds=1.0,
+            kill_fn=lambda pid, sig: calls.append((pid, sig)),
+            sleep_fn=lambda s: None,
+            expected={81: command},
+            command_lookup=lambda pid: next(lookups),
+        )
+        self.assertEqual(killed, [])
+        self.assertEqual(calls, [(81, signal.SIGTERM)])
+
+    def test_matching_identity_proceeds_to_escalation(self):
+        command = "cargo build --manifest-path /repo/Cargo.toml"
+        calls = []
+        killed = reap.terminate(
+            [82],
+            grace_seconds=1.0,
+            kill_fn=lambda pid, sig: calls.append((pid, sig)),
+            sleep_fn=lambda s: None,
+            expected={82: command},
+            command_lookup=lambda pid: command,
+        )
+        self.assertEqual(killed, [82])
+        self.assertEqual(
+            calls, [(82, signal.SIGTERM), (82, 0), (82, signal.SIGKILL)]
+        )
+
     def test_already_dead_pids_skip_the_grace_sleep(self):
         def kill_fn(pid, sig):
             raise ProcessLookupError
@@ -284,8 +364,8 @@ class ListingAndCliTests(unittest.TestCase):
         original_terminate = reap.terminate
         terminations = []
 
-        def fake_terminate(pids, grace_seconds):
-            terminations.append((pids, grace_seconds))
+        def fake_terminate(pids, grace_seconds, expected=None):
+            terminations.append((pids, grace_seconds, expected))
             return []
 
         reap.ps_snapshot = lambda: snapshot
@@ -298,7 +378,12 @@ class ListingAndCliTests(unittest.TestCase):
             reap.ps_snapshot = original_snapshot
             reap.terminate = original_terminate
         self.assertEqual(rc, 0)
-        self.assertEqual(terminations, [([97, 98], 3.0)])
+        # main must thread the snapshot commands through so terminate can
+        # re-verify pid identity before signaling (PID-reuse guard).
+        self.assertEqual(
+            terminations,
+            [([97, 98], 3.0, {97: orphan_a.command, 98: orphan_b.command})],
+        )
 
     def test_main_kill_with_no_orphans_is_a_no_op(self):
         shell = _proc(100, 1, "-zsh")
