@@ -128,14 +128,52 @@ a square-shaped corpus test masked**:
   body so a check-clean program always builds. They remain usable at concrete
   rank. Re-admission is tracked as chelis#340.
 
-*Known gaps (follow-ups):* the tree-walking `chelis eval` interpreter operates
-on nameless runtime tensors and does not yet resolve a named axis (the type info
-needed for that lives only on the compile/lowering path), so named-axis
-reductions build+run on the C backend but are not yet executable through
-`chelis eval` (chelis#338); the corpus verifies C-backend numerics directly.
-`max`/`min`/`prod` reduce in a `..r` body (chelis#340), expand (`R+1`), and a
-direct variadic-axis surface `sum(x, seq, head)` (chelis#339) remain follow-ups.
-The positional (integer-axis) reduction path on concrete operands is unchanged.
+*Eval support (chelis#338, FIXED).* The tree-walking `chelis eval` interpreter
+operates on nameless runtime tensors, so it cannot resolve a named axis by
+itself; the fix routes named-axis work through the same
+`lower_subexpr_program` + forward-DAG-eval lane that `grad`/`vmap` already
+used, so name->index resolution happens in IR lowering exactly as the C
+backend does it. Two routing sites in
+`crates/chelis-compiler-api/src/runtime.rs`: a call to a def that *requires*
+routing (its body reduces a named axis directly, or calls a rank-polymorphic
+def that does) is routed at the def-call boundary with placeholders typed
+from the callee's declared formal param types (mirroring how the build host
+lane calls a signature-typed compiled function); a reduction app reached in
+interpreted code is routed at the reduction site with the operand staged as
+a placeholder typed from its static type (the checker's `{type: ...}`
+annotation, the frame binding's declared type, or the top-level type-env
+entry; pipes thread the piped type through Identity-class stages). The
+strategy ladder is deterministic: a def-call route that does not apply or
+does not lower falls back to ordinary interpretation where the reduction
+site handles it, and terminal failures emit a targeted chelis#338
+diagnostic, never the old `unknown runtime name` error. The Tier-3 corpus
+now asserts eval-vs-backend agreement (the Tier-2 oracle) at ranks 2/3/4
+with non-square operands, plus a parity-corners suite
+(`named_axis_eval_parity_corners`). Pinned residuals (eval declines with a
+targeted chelis#338 diagnostic while the backend builds; never wrong
+numerics): a shape-rewriting pipe stage (e.g. `|> permute(1, 0) |>
+sum(seq)`, `pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap`); a
+match-pattern-bound operand (`match_pattern_operand_is_a_pinned_gap`);
+closure-captured free tensor vars and unannotated HOF lambda params share
+the same decline class (untested corners, same diagnostic).
+
+*Elementwise output-type fix (chelis#346 red team).* The unary and Tier-2
+elementwise lowering arms (neg/recip/exp/log/sin/sqrt/cos/tan/atan/abs/
+floor/ceil/sub/relu/sigmoid/tanh/silu/gelu/div) took their output type
+from the body's `{type: ...}` annotation, whose symbolic dims survive
+rank-poly inlining unsubstituted. Consequences inside a `..r` body:
+`sum(exp(x), seq)` reduced the WRONG axis under the #338 eval routing,
+the relu variant aborted on a DAG shape assert, and the C backend had
+been emitting garbage for the same programs since #337 (masked because
+the corpus elementwise test was check-only). All arms now derive output
+dims from the lowered operand via `elementwise_out_ty`, the contract the
+Tier-1 binary arms already used; pinned executable at
+`unary_elementwise_reduce_in_rank_poly_body_builds_runs_and_evals`.
+
+*Known gaps (follow-ups):* `max`/`min`/`prod` reduce in a `..r` body
+(chelis#340), expand (`R+1`), and a direct variadic-axis surface
+`sum(x, seq, head)` (chelis#339) remain follow-ups. The positional
+(integer-axis) reduction path on concrete operands is unchanged.
 
 ## Why this is needed
 

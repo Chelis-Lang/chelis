@@ -5373,14 +5373,11 @@ impl LowerCtx {
             }
             "neg" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "neg input");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let node =
                     self.dag
                         .add_node(RiscOp::Neg, vec![x], out_ty, self.current_span_id.clone());
@@ -5391,14 +5388,11 @@ impl LowerCtx {
             // `div(const(1), x)` round-trip.
             "recip" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "recip input");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let node =
                     self.dag
                         .add_node(RiscOp::Recip, vec![x], out_ty, self.current_span_id.clone());
@@ -5513,42 +5507,32 @@ impl LowerCtx {
             "sub" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "sub lhs");
                 let b = self.lower_expr_node(&args[1], "sub rhs");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(a)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                // Elementwise: operand-derived dims, not the annotation's
+                // (stale symbolics inside rank-poly inline bodies; see
+                // chelis#346 red-team F1). Matches the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_sub(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
             "relu" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "relu input");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_relu(&mut self.dag, x, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "sigmoid" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "sigmoid input");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_sigmoid(&mut self.dag, x, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
@@ -5558,42 +5542,33 @@ impl LowerCtx {
             // Mirrors the relu/sigmoid pattern above.
             "tanh" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "tanh input");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_tanh(&mut self.dag, x, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "silu" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "silu input");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_silu(&mut self.dag, x, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "gelu" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "gelu input");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(x)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                // Elementwise: output dims always come from the lowered
+                // operand (the annotation's dims can be stale symbolics
+                // inside a rank-poly inline body; see chelis#346 red-team
+                // F1/F3). Same contract as the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_gelu(&mut self.dag, x, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
@@ -5601,14 +5576,10 @@ impl LowerCtx {
             "div" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "div lhs");
                 let b = self.lower_expr_node(&args[1], "div rhs");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(a)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                // Elementwise: operand-derived dims, not the annotation's
+                // (stale symbolics inside rank-poly inline bodies; see
+                // chelis#346 red-team F1). Matches the Tier-1 binary arms.
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_div(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[a, b])
@@ -6856,14 +6827,11 @@ impl LowerCtx {
     /// C4: Enforce float-only for transcendental ops (exp, log, sin, sqrt).
     /// If the input is not float, produce a Const(0) error placeholder.
     fn lower_transcendental(&mut self, op: RiscOp, x: NodeId, ty: &TensorType) -> NodeId {
-        let out_ty = if *ty == Self::default_type() {
-            self.dag
-                .get(x)
-                .map(|n| n.output_type.clone())
-                .unwrap_or_else(|| ty.clone())
-        } else {
-            ty.clone()
-        };
+        // Elementwise: output dims come from the lowered operand, not the
+        // annotation (whose dims can be stale symbolics inside a rank-poly
+        // inline body; chelis#346 red-team F1: `sum(exp(x), seq)` reduced
+        // the wrong axis). Same contract as the Tier-1 binary arms.
+        let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
         let input_prec = self
             .dag
             .get(x)
