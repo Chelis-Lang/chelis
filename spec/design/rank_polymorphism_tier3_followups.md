@@ -22,10 +22,18 @@ Follow-up status:
   `crates/chelis-compiler-api/src/runtime.rs` (def-call boundary with
   formal-typed placeholders; reduction site with a static-typed operand
   placeholder). The Tier-3 corpus now runs the eval-vs-backend agreement
-  oracle at ranks 2/3/4 (non-square) plus a parity-corners suite; the one
-  pinned residual is a shape-rewriting pipe stage before a named reduce
-  (`pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap`). See the
-  "Eval support" note in `spec/design/rank_polymorphism.md`.
+  oracle at ranks 2/3/4 (non-square) plus a parity-corners suite. The red
+  team also surfaced (and the same PR fixed) a lowering bug shared with the
+  C backend: unary/Tier-2 elementwise arms stamped annotation-derived
+  output types that stay symbolic inside a rank-poly inline, so
+  `sum(exp(x), seq)`-class bodies miscomputed on BOTH lanes (backend
+  garbage since #337, masked by a check-only corpus test; now executable
+  and pinned). Pinned decline-not-wrong residuals: a shape-rewriting pipe
+  stage and a match-pattern-bound operand
+  (`pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap`,
+  `match_pattern_operand_is_a_pinned_gap`). See the "Eval support" and
+  "Elementwise output-type fix" notes in
+  `spec/design/rank_polymorphism.md`.
 - **#340** — `max_reduce`/`min_reduce`/`prod_reduce`/`argmax`/`argmin` in a `..r`
   body (they route through the host scalar lane and don't compile; currently
   *rejected at check time* to keep check↔backend in sync).

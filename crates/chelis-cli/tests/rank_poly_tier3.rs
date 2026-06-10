@@ -425,6 +425,13 @@ fn eval_stderr_expecting_failure(dir: &Path, source: &str, name: &str) -> String
 /// Assert every backend-printed tensor has an eval twin within 1e-6 (the
 /// Tier-2 eval-vs-backend agreement oracle, unblocked for Tier-3 by #338).
 fn assert_eval_agrees_with_backend(source: &str, name: &str, backend: &str) {
+    assert_eval_agrees_with_backend_tol(source, name, backend, 1e-6);
+}
+
+/// Tolerance-parameterized agreement oracle: the backend computes f32,
+/// eval computes f64, so transcendental outputs need a looser absolute
+/// tolerance than the 1e-6 used for exact-arithmetic corpora.
+fn assert_eval_agrees_with_backend_tol(source: &str, name: &str, backend: &str, tol: f64) {
     let backend_tensors = parse_printed_tensors(backend);
     assert!(
         !backend_tensors.is_empty(),
@@ -449,7 +456,7 @@ fn assert_eval_agrees_with_backend(source: &str, name: &str, backend: &str) {
         );
         for (i, (b, ev)) in data.iter().zip(e.2.iter()).enumerate() {
             assert!(
-                (b - ev).abs() < 1e-6,
+                (b - ev).abs() < tol,
                 "{tensor_name}[{i}]: eval-vs-backend disagreement: backend {b} vs eval {ev}"
             );
         }
@@ -684,6 +691,161 @@ fn named_axis_eval_parity_corners() {
         "eval must print the scalar return: {eval}"
     );
     assert_eval_agrees_with_backend(source, "named_axis_parity_corners", &backend);
+}
+
+/// chelis#346 red-team blocker (F1/F2/F3): a UNARY elementwise op inside a
+/// `..r` body before the named reduce must build, run, and eval with
+/// agreeing numerics. Before the elementwise output-type fix, the unary
+/// lowering arms took their output type from the body's `{type: ...}`
+/// annotation, whose symbolic dims survive rank-poly inlining
+/// unsubstituted: under eval `sum(exp(x), seq)` silently reduced the WRONG
+/// axis (batch instead of seq), the relu variant aborted on a DAG shape
+/// assert, and the C backend emitted garbage rank-0 output (pre-existing
+/// since #337, masked because the corpus elementwise test was check-only).
+/// Binary elementwise (`mul`) was already correct via
+/// `elementwise_out_ty`; this pins the unary arms on the same contract.
+/// Shape [2,3,4]: every axis size distinct (square operands mask
+/// axis-mislabel bugs). exp inputs stay small so f32-vs-f64 agreement
+/// holds at 1e-5 absolute tolerance.
+#[test]
+fn unary_elementwise_reduce_in_rank_poly_body_builds_runs_and_evals() {
+    let source = "def core_exp(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(exp(x), seq)\n\
+         def core_relu(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(relu(x), seq)\n\
+         def core_neg(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(neg(x), seq)\n\
+         def m_exp(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = core_exp(x)\n\
+         def m_relu(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = core_relu(x)\n\
+         def m_neg(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = core_neg(x)\n\
+         out_exp = m_exp(to_tensor([[[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8], [0.9, 1.0, 1.1, 1.2]], [[0.2, 0.4, 0.6, 0.8], [1.0, 0.1, 0.3, 0.5], [0.7, 0.9, 1.1, 0.2]]]))\n\
+         out_relu = m_relu(to_tensor([[[-1.0, 2.0, -3.0, 4.0], [5.0, -6.0, 7.0, -8.0], [9.0, 10.0, -11.0, 12.0]], [[13.0, -14.0, 15.0, -16.0], [-17.0, 18.0, -19.0, 20.0], [21.0, -22.0, 23.0, -24.0]]]))\n\
+         out_neg = m_neg(to_tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]]))\n";
+    let backend = build_compile_run(source, "unary_elementwise_rank_poly");
+    let tensors = parse_printed_tensors(&backend);
+    // Hand-computed (exact arithmetic) for relu and neg; exp pinned by
+    // shape + cross-lane agreement below.
+    // relu: negatives zeroed, then sum over seq (axis 1):
+    //   b0: [0+5+9, 2+0+10, 0+7+0, 4+0+12]   = [14, 12, 7, 16]
+    //   b1: [13+0+21, 0+18+0, 15+0+23, 0+20+0] = [34, 18, 38, 20]
+    // neg: -(sum over seq):
+    //   b0: -[15, 18, 21, 24]; b1: -[51, 54, 57, 60]
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        (
+            "out_relu",
+            &[2, 4],
+            &[14.0, 12.0, 7.0, 16.0, 34.0, 18.0, 38.0, 20.0],
+        ),
+        (
+            "out_neg",
+            &[2, 4],
+            &[-15.0, -18.0, -21.0, -24.0, -51.0, -54.0, -57.0, -60.0],
+        ),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    let exp_out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out_exp")
+        .unwrap_or_else(|| panic!("backend output missing `out_exp`: {backend}"));
+    assert_eq!(
+        exp_out.1,
+        vec![2, 4],
+        "out_exp: backend shape must be [batch=2, hidden=4] ({backend})"
+    );
+    // e^0.1 + e^0.5 + e^0.9 = 5.21349...: pins that the REDUCED axis is seq.
+    assert!(
+        (exp_out.2[0] - 5.213_495_24).abs() < 1e-4,
+        "out_exp[0]: backend {} != e^0.1+e^0.5+e^0.9 (wrong axis reduced?)",
+        exp_out.2[0]
+    );
+    assert_eval_agrees_with_backend_tol(source, "unary_elementwise_rank_poly", &backend, 1e-5);
+}
+
+/// chelis#346 red-team F5: a wrapper whose sig uses a single-letter dim
+/// (surf desugars `a` to a dim VARIABLE `d-var`, not a named `d-name`)
+/// must still route under eval: the staged placeholder monomorphizes the
+/// var from the runtime shape exactly as a build call site binds it.
+/// Spec SS4.2's own examples write `tensor[a, b, ...]` sigs, so this is a
+/// realistic user shape, and before the fix it declined while build ran.
+#[test]
+fn dim_var_formal_routes_and_matches_backend() {
+    let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def w(x: &tensor[a, seq, hidden, f32]) -> tensor[a, hidden, f32] = reduce_seq(x)\n\
+         out = w(to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]]))\n";
+    let backend = build_compile_run(source, "dim_var_formal");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![2, 2], "backend shape ({backend})");
+    for (i, e) in [9.0, 12.0, 27.0, 30.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e}",
+            out.2[i]
+        );
+    }
+    // Single-root program: eval prints the bare value (no `out = `
+    // prefix), so pin the exact line rather than the named-tensor parser.
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stdout(dir.path(), source, "dim_var_formal");
+    assert_eq!(
+        eval.trim(),
+        "tensor(shape=[2, 2], data=[9.0, 12.0, 27.0, 30.0])",
+        "dim-var formal: eval must route and match the backend"
+    );
+}
+
+/// Known residual gap, pinned (chelis#346 red-team F6): a match-pattern
+/// binding feeding a named reduce declines under eval with the targeted
+/// chelis#338 diagnostic (pattern bindings carry no declared types), while
+/// the backend builds and runs. Decline-not-wrong, like the permute-pipe
+/// gap below; fold into the parity corners when pattern bindings learn
+/// their checked types.
+#[test]
+fn match_pattern_operand_is_a_pinned_gap() {
+    let source = "type Box =\n\
+         \x20\x20| Wrap(tensor[batch, seq, f32])\n\
+         def h(b: Box) -> tensor[batch, f32] = {\n\
+         \x20\x20match b with {\n\
+         \x20\x20\x20\x20| Wrap(v) => sum(v, seq)\n\
+         \x20\x20}\n\
+         }\n\
+         out = h(Wrap(to_tensor([[1.0, 2.0], [3.0, 4.0]])))\n";
+    let backend = build_compile_run(source, "match_pattern_gap");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![2], "backend shape ({backend})");
+    for (i, e) in [3.0, 7.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e}",
+            out.2[i]
+        );
+    }
+    let dir = tempdir().expect("tempdir");
+    let stderr = eval_stderr_expecting_failure(dir.path(), source, "match_pattern_gap");
+    assert!(
+        stderr.contains("chelis#338") && stderr.contains("statically known tensor type"),
+        "expected the targeted named-axis decline diagnostic, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown runtime name"),
+        "the pre-#338 error must not resurface: {stderr}"
+    );
 }
 
 /// Known residual gap, pinned: a *shape-rewriting* pipe stage (`permute`)

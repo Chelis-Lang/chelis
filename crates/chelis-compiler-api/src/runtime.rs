@@ -6617,6 +6617,12 @@ fn declared_tensor_type_for_value(
                 }
                 dims.push(DimInfo::Lit(size));
             }
+            // A dim VARIABLE (surf desugars single-lowercase-letter dims
+            // like `tensor[a, seq, f32]` to `d-var`): at this staged
+            // boundary the runtime shape monomorphizes it, exactly as a
+            // build call site binds it. It carries no anchor name, so a
+            // concrete Lit is the faithful staging (chelis#346 red-team F5).
+            Some("d-var") => dims.push(DimInfo::Lit(size)),
             other => {
                 return Err(format!(
                     "unsupported dimension form `{}` in static type",

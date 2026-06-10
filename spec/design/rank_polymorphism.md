@@ -149,10 +149,26 @@ site handles it, and terminal failures emit a targeted chelis#338
 diagnostic, never the old `unknown runtime name` error. The Tier-3 corpus
 now asserts eval-vs-backend agreement (the Tier-2 oracle) at ranks 2/3/4
 with non-square operands, plus a parity-corners suite
-(`named_axis_eval_parity_corners`). One pinned residual: a shape-rewriting
-pipe stage (e.g. `|> permute(1, 0) |> sum(seq)`) drops the threaded type and
-eval declines while the backend builds
-(`pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap`).
+(`named_axis_eval_parity_corners`). Pinned residuals (eval declines with a
+targeted chelis#338 diagnostic while the backend builds; never wrong
+numerics): a shape-rewriting pipe stage (e.g. `|> permute(1, 0) |>
+sum(seq)`, `pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap`); a
+match-pattern-bound operand (`match_pattern_operand_is_a_pinned_gap`);
+closure-captured free tensor vars and unannotated HOF lambda params share
+the same decline class (untested corners, same diagnostic).
+
+*Elementwise output-type fix (chelis#346 red team).* The unary and Tier-2
+elementwise lowering arms (neg/recip/exp/log/sin/sqrt/cos/tan/atan/abs/
+floor/ceil/sub/relu/sigmoid/tanh/silu/gelu/div) took their output type
+from the body's `{type: ...}` annotation, whose symbolic dims survive
+rank-poly inlining unsubstituted. Consequences inside a `..r` body:
+`sum(exp(x), seq)` reduced the WRONG axis under the #338 eval routing,
+the relu variant aborted on a DAG shape assert, and the C backend had
+been emitting garbage for the same programs since #337 (masked because
+the corpus elementwise test was check-only). All arms now derive output
+dims from the lowered operand via `elementwise_out_ty`, the contract the
+Tier-1 binary arms already used; pinned executable at
+`unary_elementwise_reduce_in_rank_poly_body_builds_runs_and_evals`.
 
 *Known gaps (follow-ups):* `max`/`min`/`prod` reduce in a `..r` body
 (chelis#340), expand (`R+1`), and a direct variadic-axis surface
