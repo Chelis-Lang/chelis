@@ -607,21 +607,21 @@ fn concrete_rank_named_reduce_eval_matches_backend() {
 /// Eval-vs-backend parity on every host/tensor-lane boundary shape the
 /// chelis#338 routing has to handle, in one program (one build + one eval):
 ///
-///   - `lp`:   a def with an unmarshalable `List` param alongside the tensor
-///             (the def-call boundary declines; the body's reduction routes
-///             at the reduction site with the frame param's declared type)
-///   - `tl`:   a named-axis reduction directly at a top-level root (operand
-///             typed from the type-env entry of an earlier root)
-///   - `blk`:  a block body whose reduction operand is a local `let` binding
-///             (typed from the checker's annotation on the bound expr)
-///   - `al`:   a local closure alias of a concrete wrapper (`g = use2`;
-///             rank-poly callee routed with the argument's static type)
-///   - `pp`:   a pipe whose first stage reduces (`x |> sum(seq)`) inside a def
-///   - `tp`:   a root-level pipe chaining a bare Identity stage before the
-///             reduction (`y |> relu |> sum(seq)`; the piped type threads
-///             through shape-preserving stages)
-///   - `outt`: a routed def declared to return a scalar (`-> f32`)
-///   - `gr`:   `grad` over a scalar-output def whose body reduces by name
+/// - `lp`: a def with an unmarshalable `List` param alongside the tensor
+///   (the def-call boundary declines; the body's reduction routes at the
+///   reduction site with the frame param's declared type)
+/// - `tl`: a named-axis reduction directly at a top-level root (operand
+///   typed from the type-env entry of an earlier root)
+/// - `blk`: a block body whose reduction operand is a local `let` binding
+///   (typed from the checker's annotation on the bound expr)
+/// - `al`: a local closure alias of a concrete wrapper (`g = use2`;
+///   rank-poly callee routed with the argument's static type)
+/// - `pp`: a pipe whose first stage reduces (`x |> sum(seq)`) inside a def
+/// - `tp`: a root-level pipe chaining a bare Identity stage before the
+///   reduction (`y |> relu |> sum(seq)`; the piped type threads through
+///   shape-preserving stages)
+/// - `outt`: a routed def declared to return a scalar (`-> f32`)
+/// - `gr`: `grad` over a scalar-output def whose body reduces by name
 #[test]
 fn named_axis_eval_parity_corners() {
     let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
