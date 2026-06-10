@@ -17,8 +17,9 @@ compiles it with `cc`, and execs the result under a timeout.
 Exit codes:
     0   first exec completed; prints `exec ok (N ms)`
     1   first exec timed out; first-exec assessment appears wedged
-    2   the probe could not run (`cc` missing or compile failed) — an
-        environment problem, not a wedge verdict
+    2   the probe could not run (`cc` missing, compile failed, probe
+        not executable, or probe exited non-zero) — an environment
+        problem, not a wedge verdict
 
 Usage:
     python3 scripts/preflight_exec_probe.py                # default 15s timeout
@@ -99,6 +100,10 @@ def exec_probe(binary: Path, timeout_seconds: float) -> float | None:
         )
     except subprocess.TimeoutExpired:
         return None
+    except OSError as err:
+        # Exec refused outright (e.g. noexec TMPDIR, permissions): an
+        # environment problem, not a wedge verdict.
+        raise RuntimeError(f"probe binary could not be executed: {err}") from err
     elapsed_ms = (time.monotonic() - start) * 1000.0
     if result.returncode != 0:
         raise RuntimeError(

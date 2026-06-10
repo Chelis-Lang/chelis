@@ -69,6 +69,16 @@ class SuccessPathTests(unittest.TestCase):
         self.assertIsNotNone(elapsed_ms)
         self.assertGreaterEqual(elapsed_ms, 0.0)
 
+    def test_unexecutable_probe_is_env_error_not_wedge(self):
+        # A refused exec (noexec TMPDIR, stripped permissions) is an
+        # environment problem: it must surface as the RuntimeError ->
+        # exit-2 lane, never crash or masquerade as the exit-1 wedge.
+        with tempfile.TemporaryDirectory() as td:
+            binary = probe.compile_probe(Path(td))
+            binary.chmod(0o644)
+            with self.assertRaises(RuntimeError):
+                probe.exec_probe(binary, timeout_seconds=5.0)
+
 
 class WedgeClassificationTests(unittest.TestCase):
     def test_exec_probe_classifies_timeout_as_wedged(self):

@@ -93,9 +93,9 @@ In order of preference:
 
 ## CI Is the Fallback Oracle
 
-When local exec is wedged, do not block on the local run: per the agent
-contract (`AGENTS.md` / `CLAUDE.md`), the `macos-smoke` CI job runs the full
-workspace on macOS and is the authoritative macOS signal. Push the branch and
+When local exec is wedged, do not block on the local run: the
+`macos-smoke` CI job (`.github/workflows/ci.yml`) runs the full workspace
+test suite on macOS and serves as the macOS signal. Push the branch and
 let CI serve as the oracle, noting in the PR or phase docs that local
 validation was blocked by this failure mode.
 
@@ -104,14 +104,16 @@ validation was blocked by this failure mode.
 `scripts/preflight_exec_probe.py` is the documented manual command for this
 runbook. It:
 
-- writes a trivial C file into a private temp dir, compiles it with `cc`, and
-  execs the result with a configurable timeout (`--timeout`, default 15
-  seconds);
+- writes a trivial C file into a private temp dir, compiles it with `cc`
+  (the compile stage carries its own 120s timeout, so a hung toolchain is
+  also bounded), and execs the result with a configurable timeout
+  (`--timeout`, default 15 seconds);
 - exits 0 and prints `exec ok (N ms)` when the first exec completes;
 - exits 1 with a warning pointing at this runbook when the first exec times
   out (the wedge classification);
-- exits 2 when the probe could not run at all (`cc` missing or the compile
-  failed) — an environment problem, not a wedge verdict;
+- exits 2 when the probe could not run at all (`cc` missing, the compile
+  failed, the probe binary was not executable, or it exited non-zero) — an
+  environment problem, not a wedge verdict;
 - always cleans up its temp dir, so it is safe to run from anywhere.
 
 Tests: `scripts/test_preflight_exec_probe.py`
