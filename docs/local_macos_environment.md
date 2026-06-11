@@ -3,9 +3,18 @@
 This repository is also developed from a macOS (darwin-arm64) workstation. The
 default toolchain works without special setup, but there is one recurring local
 failure mode worth a runbook: macOS first-exec assessment (`syspolicyd` /
-Gatekeeper) can enter an error loop that makes **freshly linked binaries hang
-on their first exec**. Every `cargo build` produces fresh binaries, so this
-poisons exactly the edit-build-test loop.
+Gatekeeper) can degrade and make **freshly linked binaries hang or stall on
+their first exec**. Every `cargo build` produces fresh binaries, so this
+poisons exactly the edit-build-test loop. Two variants have been observed
+(chelis#356 tracks the investigation):
+
+- **Variant A - hard wedge**: an error loop in `syspolicyd`; first execs hang
+  indefinitely.
+- **Variant B - silent slow assessment**: no error log lines at all, but each
+  fresh binary waits minutes before being admitted. Volume-induced: it has
+  been reproduced on a 28-minute-old boot, triggered by a mass first-exec
+  burst (workspace `clippy --all-targets` + `cargo nextest run --workspace`,
+  ~130 fresh test binaries). **A reboot is a reprieve, not a fix.**
 
 ## Quick reference (is first-exec wedged right now?)
 
@@ -22,9 +31,15 @@ Expected when healthy:
 exec ok (42 ms)
 ```
 
-If it instead exits 1 with a "first-exec assessment appears wedged" warning,
-local exec results are unreliable. Apply the mitigations below and use CI as
-the oracle in the meantime.
+If it instead exits 1 ("appears wedged", Variant A) or 3 ("admitting
+binaries slowly", Variant B; first exec succeeded but took longer than
+`--warn-ms`, default 2000 ms), local exec results are unreliable. Apply the
+mitigations below and use CI as the oracle in the meantime.
+
+A passing probe is a point-in-time result, not a session clearance:
+degradation is volume-induced and can begin under a later build burst
+(observed: probe at 377 ms immediately post-boot; minutes-long stalls within
+the hour once a workspace build mass-launched fresh binaries).
 
 The sections below explain the symptom, the diagnosis, and the mitigations;
 read them when the loop looks wedged, not on the happy path.
@@ -46,7 +61,7 @@ read them when the loop looks wedged, not on the happy path.
 
 ## Diagnosis
 
-Two checks distinguish this from a code or harness regression:
+Three checks distinguish this from a code or harness regression:
 
 1. Inspect the `syspolicyd` log stream:
 
@@ -54,7 +69,7 @@ Two checks distinguish this from a code or harness regression:
    log show --predicate 'process == "syspolicyd"' --last 5m
    ```
 
-   The wedge shows up as an error loop with these exact signatures:
+   Variant A shows up as an error loop with these exact signatures:
 
    ```text
    Unable to initialize qtn_proc: 3
@@ -62,6 +77,7 @@ Two checks distinguish this from a code or harness regression:
    ```
 
    Observed against `syspolicyd` PID 289 on darwin-arm64, 2026-06-10.
+   **Variant B logs nothing** - a quiet log does not rule this out.
 
 2. Sample a hung process:
 
@@ -69,9 +85,22 @@ Two checks distinguish this from a code or harness regression:
    sample <pid>
    ```
 
-   A wedged first-exec is parked in `_dyld_start` — it never reached the
+   A stalled first-exec is parked in `_dyld_start` — it never reached the
    program's own code. If the sample shows frames inside the test binary
    instead, the hang is not this failure mode.
+
+3. Check CPU accounting (Variant B's clearest fingerprint):
+
+   ```sh
+   ps -p <pid> -o etime,cputime   # minutes of etime, ~0:00.01 cputime
+   ps -p $(pgrep -x syspolicyd) -o %cpu,cputime
+   ```
+
+   Stalled binaries accumulate essentially zero CPU while `syspolicyd` runs
+   sustained 50-80% CPU. Measured 2026-06-11: an 84 MB Rust test binary took
+   15-21 minutes to admit; small clang-compiled C binaries cleared in ~0.2 s
+   (admission cost correlates with binary size); the assessment queue kept
+   draining (syspolicyd busy) long after all exec load stopped.
 
 ## Mitigations
 
@@ -88,8 +117,24 @@ In order of preference:
    cargo nextest run -p <crate> -- --test-threads=1
    ```
 
-3. **Reboot.** Assumed reliable: it restarts `syspolicyd` and clears the error
-   loop. Use this when the wait-or-serialize options are not viable.
+3. **Avoid mass first-exec bursts.** Do not run full-workspace nextest
+   locally during heavy agent sessions on this machine; the macOS Smoke CI
+   job is the workspace oracle (next section). Single-binary work
+   (`chelis` CLI on an already-assessed build, clippy, fmt, lint) is
+   unaffected.
+4. **Reboot.** Clears the current backlog, but is a reprieve, not a fix:
+   Variant B has been reproduced within an hour of a fresh boot under
+   first-exec volume.
+5. **Candidate durable fix (UNVERIFIED, tracked in chelis#356): Developer
+   Tools exemption.** macOS exempts processes spawned by apps listed under
+   System Settings > Privacy & Security > Developer Tools from the
+   first-run malware scan. Enable it for the terminal hosting the dev/agent
+   sessions (GUI toggle, or `sudo spctl developer-mode enable-terminal`,
+   then restart the terminal). Verification protocol once enabled: run the
+   preflight probe, then a deliberate burst (`cargo nextest run -p
+   chelis-compiler-api` after a `touch` rebuild) and compare admission
+   behavior; report the result on chelis#356 and update this runbook from
+   UNVERIFIED to verified/refuted.
 
 ## CI Is the Fallback Oracle
 
@@ -108,12 +153,16 @@ runbook. It:
   (the compile stage carries its own 120s timeout, so a hung toolchain is
   also bounded), and execs the result with a configurable timeout
   (`--timeout`, default 15 seconds);
-- exits 0 and prints `exec ok (N ms)` when the first exec completes;
+- exits 0 and prints `exec ok (N ms)` when the first exec completes
+  promptly;
 - exits 1 with a warning pointing at this runbook when the first exec times
-  out (the wedge classification);
+  out (Variant A, the wedge classification);
+- exits 3 with a warning when the first exec succeeds but takes longer than
+  `--warn-ms` (default 2000 ms; Variant B, slow admission - healthy first
+  execs are well under one second);
 - exits 2 when the probe could not run at all (`cc` missing, the compile
   failed, the probe binary was not executable, or it exited non-zero) — an
-  environment problem, not a wedge verdict;
+  environment problem, not a degradation verdict;
 - always cleans up its temp dir, so it is safe to run from anywhere.
 
 Tests: `scripts/test_preflight_exec_probe.py`

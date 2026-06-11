@@ -203,6 +203,12 @@ default workspace run.
   machine. Re-run on a quiet machine before treating those as real failures.
 - Recommended inner loop: `cargo nextest run -p <crate> --test <file>` compiles
   only that test target.
+- macOS workstation only: first-exec assessment can degrade under mass
+  fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
+  Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
+  slow) before trusting the gate's workspace nextest stage locally; when
+  degraded, fall back to CI (macOS Smoke) for that stage per
+  [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
 
 ## Local HIP Environment
 

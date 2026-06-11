@@ -45,6 +45,9 @@ probe = _load_module()
 # A payload that outlives any short test timeout: used to exercise the
 # wedge classification without depending on an actually wedged machine.
 SLEEPER_SOURCE = "#include <unistd.h>\nint main(void) { sleep(60); return 0; }\n"
+BRIEF_SLEEPER_SOURCE = (
+    "#include <unistd.h>\nint main(void) { usleep(200000); return 0; }\n"
+)
 
 
 def _probe_temp_dirs() -> set[str]:
@@ -104,6 +107,35 @@ class WedgeClassificationTests(unittest.TestCase):
         message = err.getvalue()
         self.assertIn("appears wedged", message)
         self.assertIn(probe.RUNBOOK, message)
+
+    def test_main_slow_admission_exits_three_and_names_356(self):
+        # The silent degradation variant (chelis#356): the exec SUCCEEDS
+        # but takes longer than --warn-ms. Must be distinguishable from
+        # both healthy (0) and wedged (1) for automation.
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch.object(probe, "PROBE_SOURCE", BRIEF_SLEEPER_SOURCE):
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = probe.main(["--timeout", "30", "--warn-ms", "50"])
+        self.assertEqual(rc, probe.EXIT_SLOW)
+        self.assertEqual(out.getvalue(), "")
+        message = err.getvalue()
+        self.assertIn("admitting binaries slowly", message)
+        self.assertIn("chelis#356", message)
+        self.assertIn(probe.RUNBOOK, message)
+
+    def test_fast_exec_under_default_threshold_is_ok_not_slow(self):
+        out = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = probe.main([])
+        self.assertEqual(rc, probe.EXIT_OK)
+        self.assertIn("exec ok", out.getvalue())
+
+    def test_non_positive_warn_ms_is_rejected(self):
+        with self.assertRaises(SystemExit) as ctx:
+            probe.parse_args(["--warn-ms", "0"])
+        self.assertEqual(ctx.exception.code, 2)
 
     def test_compile_failure_is_env_error_not_wedge(self):
         out = io.StringIO()
