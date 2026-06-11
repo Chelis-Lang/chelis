@@ -268,6 +268,18 @@ class ListAnnotationTests(unittest.TestCase):
         self.assertIn("cargo nextest run -p <crate>", lines[-1])
 
 
+    def test_quoted_diff_paths_still_derive_their_crate(self):
+        # core.quotePath wraps non-ASCII filenames in quotes in
+        # `git diff --name-only` output; the prefix match must still
+        # see the crate dir (PR #362 review finding 1: this was the one
+        # path that erred toward silent exclusion).
+        diff_output = '"crates/legacy-dir/tests/caf\\303\\251_corpus.rs"\n'
+        paths = gate.changed_paths_from_git(diff_output, "")
+        self.assertEqual(paths, ["crates/legacy-dir/tests/caf\\303\\251_corpus.rs"])
+        crates = gate.changed_crates(paths, {"crates/legacy-dir": "chelis-renamed"})
+        self.assertEqual(crates, ["chelis-renamed"])
+
+
 class LocalMainTests(unittest.TestCase):
     """Drive `gate.main(["--local"])` end to end with canned git output
     and a recorded `run_commands`, so no subprocess ever runs."""

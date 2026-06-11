@@ -167,7 +167,13 @@ def changed_paths_from_git(diff_output: str, status_output: str) -> list[str]:
     (`R  old -> new`) contribute both sides."""
     paths: list[str] = []
     for line in diff_output.splitlines():
-        line = line.strip()
+        # git quotes paths containing non-ASCII/quote/backslash bytes
+        # (core.quotePath); strip the quotes so the member-dir prefix
+        # match still sees the path. Mirrors the porcelain branch below;
+        # without this a committed-only change to such a file silently
+        # excludes its crate from the --local nextest stage (PR #362
+        # review finding 1).
+        line = line.strip().strip('"')
         if line:
             paths.append(line)
     for line in status_output.splitlines():
