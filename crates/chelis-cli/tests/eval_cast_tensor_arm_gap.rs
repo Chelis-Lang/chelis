@@ -3,7 +3,7 @@
 //!
 //! ## Background
 //!
-//! `crates/chelis-compiler-api/src/runtime.rs::eval_cast` matches on the
+//! `crates/chelis-compiler-api/src/runtime/eval.rs::eval_cast` matches on the
 //! runtime value but has no `RuntimeValue::Tensor` arm. The catch-all
 //! `Err(format!("unsupported cast from {other:?}"))` fires for any tensor
 //! input, so `chelis eval --file` errors out even though `chelis check` and

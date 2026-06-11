@@ -1,7 +1,7 @@
 //! Issue #185 host-runtime acceptance (Group A — Unary RISC primitives).
 //!
 //! `BUILTIN_NAMES` accepts every name in this group but the host runtime
-//! evaluator (`crates/chelis-compiler-api/src/runtime.rs::eval_builtin`)
+//! evaluator (`crates/chelis-compiler-api/src/runtime/eval.rs::eval_builtin`)
 //! was missing dispatch arms. Each test below exercises one builtin
 //! end-to-end through the eval entry point and pins the exact output
 //! against the IR evaluator's reference math.

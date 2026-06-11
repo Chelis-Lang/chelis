@@ -3,7 +3,7 @@
 //!
 //! CBackend-CastMemcpy (0.7.6 red-team v2 closeout). Parallel to PR #59,
 //! which fixed `eval_cast` in the host runtime
-//! (`crates/chelis-compiler-api/src/runtime.rs::eval_cast`). The C backend
+//! (`crates/chelis-compiler-api/src/runtime/eval.rs::eval_cast`). The C backend
 //! has the same shape of gap at `crates/chelis-backend-c/src/emit.rs`
 //! around line 2858: `emit_cast` writes
 //! `memcpy(dst, src, n * sizeof(float))` regardless of source and target

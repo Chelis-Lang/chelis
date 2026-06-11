@@ -738,7 +738,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     // Bucket 3 activation parity: `tanh`, `silu`, `gelu` are pointwise
     // tensor unops with the same `∀D,p. tensor[D,p] → tensor[D,p]`
     // signature shape as `relu`/`sigmoid`. Their host-runtime and
-    // C-backend lowerings live in `chelis-compiler-api/src/runtime.rs`
+    // C-backend lowerings live in `chelis-compiler-api/src/runtime/host_ops.rs`
     // and `chelis-backend-c/src/host_emit.rs` respectively.
     tensor_unop("tanh", &mut env, &mut vg);
     tensor_unop("silu", &mut env, &mut vg);

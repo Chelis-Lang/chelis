@@ -5726,7 +5726,7 @@ fn target_metal_rejects_cpu_resource_region() {
 // These tests close the IR-evaluator/C-backend gap surfaced as
 // `unsupported builtin \`relu\` in host runtime` (and siblings). For each
 // activation we run a small program through both `chelis eval` (the
-// in-process IR evaluator dispatched in `chelis-compiler-api/src/runtime.rs`)
+// in-process IR evaluator dispatched in `chelis-compiler-api/src/runtime/eval.rs`)
 // and `chelis build --target c` (whose generated code uses the
 // `chelis_host_*_f32` helpers in `chelis-backend-c/src/host_emit.rs`).
 //
@@ -6972,7 +6972,7 @@ fn check_single_file_keeps_legacy_report_shape() {
 // evaluator (the same machinery the C backend uses) so the two lanes
 // agree on programs that pass `chelis check`.
 //
-// See `crates/chelis-compiler-api/src/runtime.rs::apply_transform` for
+// See `crates/chelis-compiler-api/src/runtime/transforms.rs::apply_transform` for
 // the implementation, and `spec/upstream-bugs/grad-eval-host-runtime.md`
 // for the canonical repro / closure reference.
 
