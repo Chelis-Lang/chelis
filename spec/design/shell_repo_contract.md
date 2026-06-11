@@ -66,11 +66,28 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
   `--pins-only`, wired as a `hard-rule-guard` step in
   [`ci.yml`](https://github.com/Chelis-Lang/school/blob/main/.github/workflows/ci.yml).
 - Toolchain installs go through a checked-in installer that reads the reef
-  pin and refreshes the managed symlink (School:
-  `scripts/install_chelis_toolchain.py`). Never vendor or build the
-  compiler inside a shell; never hand-symlink; consume the released tarball
-  (CI auth via a `CHELIS_RELEASE_TOKEN`-style PAT with `contents: read` on
-  every private dep the shell consumes).
+  pin (School: `scripts/install_chelis_toolchain.py`). Never vendor or
+  build the compiler inside a shell; never hand-symlink; consume the
+  released tarball (CI auth via a `CHELIS_RELEASE_TOKEN`-style PAT with
+  `contents: read` on every private dep the shell consumes).
+- **Per-repo toolchain resolution; installs have no machine-global side
+  effects.** Toolchains install side-by-side
+  (`~/.local/share/chelis/<ver>/`), and the PATH entrypoint resolves the
+  version **at invocation time from the invoking repo's reef pin** (env
+  override → nearest `reef.toml` walking up from CWD → an explicitly
+  recorded default used only outside packages). Installing a toolchain
+  MUST NOT repoint the machine default — a fixed
+  symlink-to-the-last-installed-version makes bare `chelis` run the wrong
+  toolchain for every *other* repo on the machine wherever the reef pin
+  guard doesn't reach (single-file `fmt`/`check`, `eval`, editor
+  integrations, scripts). A resolved-but-not-installed version is a loud
+  error, never a silent fallback to another version. School exemplar: the
+  pin-resolving launcher written by
+  [`scripts/install_chelis_toolchain.py`](https://github.com/Chelis-Lang/school/blob/main/scripts/install_chelis_toolchain.py).
+  This requirement is the *behavior*, not the script: when first-party
+  `chelisup` (chelis#164 — whose proposal already specifies the
+  reef-pin-honoring shim) ships, shells satisfy it via `chelisup` and
+  retire their per-repo launchers.
 - **Python is uv-managed, never the system installation** (this surfaces the
   monorepo `AGENTS.md` §Scripting Language Policy for shells): repo scripts
   are stdlib-only and invoked via `python3`/`uv run --python X.Y`; any
@@ -270,7 +287,7 @@ both the bootstrap checklist and the conformance self-audit.
 | 2 | `reef.toml` exact pin = latest validation-clean release | MUST | §2 | `reef.toml` |
 | 3 | Workflow env pins in every toolchain-installing workflow | MUST | §2 | `.github/workflows/{ci,release}.yml` |
 | 4 | Offline pin-consistency CI guard | MUST | §2 | `audit_workarounds.py --pins-only` (ci.yml guard) |
-| 5 | Toolchain installer script | MUST | §2 | `scripts/install_chelis_toolchain.py` |
+| 5 | Toolchain installer + pin-resolving launcher (no global-default side effects) | MUST | §2 | `scripts/install_chelis_toolchain.py` |
 | 6 | uv-only Python (stdlib scripts; uv projects for dep-bearing harnesses) | MUST | §2 | `parity/pyproject.toml` |
 | 7 | `docs/CHELIS_SURFACE.md` (domain-relevant subset, @pin/@upstream) | MUST | §3 | `docs/CHELIS_SURFACE.md` |
 | 8 | `docs/UPSTREAM_BUGS.md` (sections + cadence) | MUST | §4 | `docs/UPSTREAM_BUGS.md` |
