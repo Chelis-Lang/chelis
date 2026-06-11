@@ -6,6 +6,63 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.25] — 2026-06-11
+
+### Fixed
+
+- **`chelis eval` named-axis reductions (#338, PR #346)**: the host
+  runtime routes named-axis work through the IR lowering + forward-DAG
+  lane (the grad/vmap machinery), restoring the eval-vs-backend
+  agreement invariant for the Tier-3 surface. The Tier-3 corpus now
+  runs the full agreement oracle at ranks 2/3/4 with non-square
+  operands plus a parity-corners suite (List params, top-level
+  reductions, let-blocks, closure aliases, pipes, scalar returns,
+  grad over named-reduce defs).
+- **Elementwise output types in rank-polymorphic inline bodies
+  (PR #346)**: unary and Tier-2 elementwise lowering arms took their
+  output type from body annotations whose symbolic dims survive
+  rank-poly inlining unsubstituted; `sum(exp(x), seq)`-class bodies
+  silently miscompiled on BOTH lanes (C backend garbage since #337,
+  wrong-axis eval numerics). All arms now derive output dims from the
+  lowered operand (`elementwise_out_ty`), pinned executable.
+- **Grad through symbolic-dim sig wrappers (#345, PR #363)**: the
+  0.7.24 regression ICE ("symbolic dim referenced by a non-Load node")
+  is fixed and pinned by an 8-row regression matrix (sig/inline/
+  quantifier/shim wrappers, gelu, rank-2) verified failing on the
+  0.7.24 baseline. The `dag.rs` guard now also scans op-internal
+  symbolic refs (`Expand::size`, `Reshape::new_shape`, `BlasMatmul`
+  dims), which immediately caught and fixed a stale-`Sym` producer in
+  `actualize_tensor_helper_types`. Downstream: unblocks School from
+  its `=0.7.23` pin (re-probe of the #318/#319/#320 surfaces).
+
+### Added
+
+- **`gate.py --local` (#360, PR #362)**: official local/CI gate split.
+  Local pre-push runs workspace clippy, fmt, `chelis lint`, and
+  per-crate nextest derived from changed paths (manifest-accurate
+  package mapping); the workspace suite is CI-owned (macOS Smoke
+  authoritative).
+- **Downstream shell-repo contract (PR #361)**:
+  `spec/design/shell_repo_contract.md`, normative for every shell in
+  the ecosystem table (pin hygiene with offline consistency guards,
+  `CHELIS_SURFACE.md` capability inventories, upstream-issue
+  discipline with the narrowing-citation rule, expected-to-fail
+  blocker probes, negative-test sidecars, pin-bump checklist), with
+  `Chelis-Lang/school` as the reference implementation.
+- **Dev-environment tooling (#348/#349/#356, PRs #354/#355/#358)**:
+  build-concurrency contract + `scripts/reap_orphans.py`; macOS
+  first-exec assessment runbook (`docs/local_macos_environment.md`)
+  + `scripts/preflight_exec_probe.py` with slow-admission detection
+  (exit 3); verified Developer Tools exemption as the durable
+  workstation fix.
+
+### Changed
+
+- **`chelis-compiler-api` runtime split (#350, PR #357)**: the
+  8,018-line `runtime.rs` is now `runtime/{mod,eval,named_axis,
+  transforms,host_ops,tests}.rs`; mechanical move (verified by
+  line-multiset proof), no behavior change.
+
 ## [0.7.24] — 2026-06-09
 
 ### Added
