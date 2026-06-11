@@ -352,9 +352,9 @@ Current shared skill set:
 
 ## Downstream Shell Contract
 
-Downstream shell repos (`nautilus`, `coral`, `school`, and the rest of the
-canonical-reference §Shell Ecosystem table) inherit this `AGENTS.md`
-verbatim AND must satisfy
+Downstream shell repos (every repo in the canonical-reference §Shell
+Ecosystem table) inherit this `AGENTS.md` verbatim (machine-local
+environment sections excepted; see the contract §1) AND must satisfy
 [`spec/design/shell_repo_contract.md`](spec/design/shell_repo_contract.md):
 pin hygiene with a mechanical multi-location consistency guard, a
 per-shell `docs/CHELIS_SURFACE.md` capability inventory, the

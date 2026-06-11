@@ -35,7 +35,12 @@ not a hypothetical.
   so Claude-style and Codex-style entry points cannot drift.
 - `AGENTS.md` declares: upstream of truth is `Chelis-Lang/chelis`, whose
   monorepo `AGENTS.md` applies **verbatim** unless explicitly overridden,
-  and this contract applies in full.
+  and this contract applies in full. Machine-local environment sections of
+  the monorepo `AGENTS.md` (the HIP workstation runbook, the macOS
+  first-exec notes, workstation-specific measurements and their runbooks)
+  describe the monorepo development workstation and are excepted from
+  verbatim inheritance: they bind only where the named environment
+  actually exists.
 - `AGENTS.md` contains at minimum these sections: **Repo Identity**,
   **Toolchain Policy**, **Pin Bump Checklist** (§7), an **Upstream Bugs**
   pointer (§4), and the **Scaffolding Drift Rule** (§10).
