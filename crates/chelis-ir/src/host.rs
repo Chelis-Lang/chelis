@@ -6152,6 +6152,7 @@ fn actualize_tensor_helper_types(
         .iter()
         .map(|node| node.id)
         .collect::<Vec<_>>();
+    let mut synthetic_renames = HashMap::<String, crate::dag::DimInfo>::new();
     for id in node_ids {
         let Some(node) = actualized.get(id).cloned() else {
             continue;
@@ -6162,12 +6163,37 @@ fn actualize_tensor_helper_types(
         if !synthetic_dims(&node.output_type) || node.output_type.dims.len() != actual.dims.len() {
             continue;
         }
+        // Record which minted `dN` alias each output axis resolved to,
+        // so op-internal references to the same alias can be renamed in
+        // lockstep below.
+        for (old_dim, new_dim) in node.output_type.dims.iter().zip(actual.dims.iter()) {
+            if let crate::dag::DimInfo::Named(name, None) = old_dim
+                && synthetic_dim(old_dim)
+                && old_dim != new_dim
+            {
+                synthetic_renames
+                    .entry(name.clone())
+                    .or_insert_with(|| new_dim.clone());
+            }
+        }
         actualized.replace_node(id, node.op, node.inputs, actual.clone());
         if let Some(reusable_input) = node.reusable_input {
             actualized.set_reusable_input(id, reusable_input);
         }
     }
-    actualized
+    if synthetic_renames.is_empty() {
+        return actualized;
+    }
+    // chelis#345 (op-internal half): `replace_node` above rewrites
+    // OUTPUT types only, leaving op-internal fields (`Expand::size`,
+    // `Reshape::new_shape`, `BlasMatmul` dims) holding the stale minted
+    // names — the mixed state (`type: [Named("n")]` next to
+    // `size: Sym("d47")`) that `dag::symbolic_occurrences`' Bucket 4d
+    // sweep rejects because no Load declares the alias. Apply the
+    // collected renames to every dim reference so the helper DAG stays
+    // internally consistent. Non-synthetic (user-facing) names are
+    // never in the map and pass through untouched.
+    crate::lower::apply_dim_substitutions(&actualized, &synthetic_renames)
 }
 
 fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
@@ -7854,5 +7880,173 @@ mod tests {
                 "node retained synthetic dims: {node:?}"
             );
         }
+    }
+
+    /// chelis#345 (op-internal half): actualization rewrote OUTPUT
+    /// types via `replace_node` but left `node.op` untouched, so an
+    /// `Expand { size: Sym("dN") }` kept the stale checker-minted name
+    /// after its output dim had been rewritten to the user-facing
+    /// symbol. The Bucket 4d sweep in `dag.rs::symbolic_occurrences`
+    /// panics on exactly that mixed state (no Load declares `dN`), and
+    /// before the fix the `grad(residual, wrt=(theta))` host-wrapper
+    /// canary in `chelis-cli/tests/cli.rs`
+    /// (`build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds`)
+    /// tripped it. Pin that op-internal fields are renamed in lockstep
+    /// with output dims — and, negative parity, that user-facing
+    /// (non-`dN`) sizes are left alone.
+    #[test]
+    fn tensor_helper_actualization_rewrites_op_internal_expand_sizes() {
+        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+
+        let n = DimInfo::Named("n".into(), None);
+        let d47 = DimInfo::Named("d47".into(), None);
+        let mut dag = Dag::new();
+        // Load typed with the minted alias; the scope knows the
+        // user-facing symbol.
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![d47.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // Scalar upstream gradient, as the Sum adjoint produces.
+        let g = dag.add_node(
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // The Sum adjoint's expand-back: size and output dim both carry
+        // the minted alias.
+        let expanded_g = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Sym("d47".into()),
+            },
+            vec![g],
+            TensorType {
+                dims: vec![d47.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let root = dag.add_node(
+            RiscOp::Mul,
+            vec![expanded_g, x],
+            TensorType {
+                dims: vec![d47],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(root);
+
+        let mut scope = HashMap::new();
+        scope.insert(
+            "x".into(),
+            HostType::Tensor(TensorType {
+                dims: vec![n.clone()],
+                precision: Prim::F32,
+            }),
+        );
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        let expand = actualized.get(expanded_g).expect("expand node");
+        assert_eq!(
+            expand.output_type.dims,
+            vec![n],
+            "expand output dim must actualize to the user-facing symbol"
+        );
+        assert_eq!(
+            expand.op,
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Sym("n".into()),
+            },
+            "op-internal Expand size must be renamed in lockstep with \
+             the output dim (chelis#345); a stale `d47` is an undeclared \
+             identifier downstream"
+        );
+        // The whole helper must satisfy the Bucket 4d guard: no
+        // symbolic reference (output OR op-internal) without a
+        // declaring Load.
+        let _ = crate::dag::symbolic_occurrences(&actualized);
+    }
+
+    /// Negative parity for the rename: user-facing (non-minted) Expand
+    /// sizes must survive actualization untouched.
+    #[test]
+    fn tensor_helper_actualization_leaves_user_facing_expand_sizes_alone() {
+        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+
+        let batch = DimInfo::Named("batch".into(), None);
+        let mut dag = Dag::new();
+        let g = dag.add_node(
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let expanded = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Sym("batch".into()),
+            },
+            vec![g],
+            TensorType {
+                dims: vec![batch.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![batch.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let root = dag.add_node(
+            RiscOp::Mul,
+            vec![expanded, x],
+            TensorType {
+                dims: vec![batch],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(root);
+
+        let mut scope = HashMap::new();
+        scope.insert(
+            "x".into(),
+            HostType::Tensor(TensorType {
+                dims: vec![DimInfo::Named("batch".into(), None)],
+                precision: Prim::F32,
+            }),
+        );
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        let expand = actualized.get(expanded).expect("expand node");
+        assert_eq!(
+            expand.op,
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Sym("batch".into()),
+            },
+            "user-facing symbolic sizes are not synthetic and must not \
+             be rewritten"
+        );
     }
 }
