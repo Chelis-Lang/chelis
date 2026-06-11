@@ -125,8 +125,8 @@ In order of preference:
 4. **Reboot.** Clears the current backlog, but is a reprieve, not a fix:
    Variant B has been reproduced within an hour of a fresh boot under
    first-exec volume.
-5. **Candidate durable fix (UNVERIFIED, tracked in chelis#356): Developer
-   Tools exemption.** macOS exempts processes spawned by apps listed under
+5. **Durable fix (VERIFIED on this workstation 2026-06-11, chelis#356):
+   Developer Tools exemption.** macOS exempts processes spawned by apps listed under
    System Settings > Privacy & Security > Developer Tools from the
    first-run malware scan. The app that needs the exemption is the
    RESPONSIBLE APP for the session's processes - NOT necessarily
@@ -147,8 +147,34 @@ In order of preference:
    protocol once enabled: re-check the ancestry, run the preflight probe,
    then a deliberate burst (`cargo nextest run -p chelis-compiler-api`
    after a `touch` rebuild) and compare admission behavior against the
-   chelis#356 baselines; report on chelis#356 and update this runbook from
-   UNVERIFIED to verified/refuted.
+   chelis#356 baselines; report on chelis#356.
+
+   Verification result (2026-06-11, VS Code exempted + fully relaunched):
+   a touch-rebuild of chelis-compiler-api followed by its suite admitted
+   ~25 fresh test binaries and ran 264 tests in 1.05 s (vs 223 s wall for
+   ONE binary the night before); the full-workspace burst (~130 fresh
+   binaries, the canonical degradation trigger) ran 1,141+ tests with
+   zero admission stalls while `syspolicyd` fell from 86% to ~8% CPU
+   during the mass-exec phase. Heavyweight end-to-end tests were slow
+   under CPU contention but always progressing (real accumulated CPU,
+   never parked in `_dyld_start`).
+
+   Security trade-off of the exemption (understand before enabling):
+   processes spawned by the exempted apps skip the Gatekeeper/XProtect
+   FIRST-LAUNCH malware assessment of unsigned/un-notarized executables.
+   For locally compiled artifacts this loses almost nothing (the scan is
+   signature-based; freshly built binaries match no signature). The real
+   residual risk is DOWNLOADED prebuilt binaries run from the exempted
+   shells (npm/pip postinstall payloads, `curl | sh` installers, binaries
+   committed to repos): known malware that the first-exec scan would have
+   flagged now runs immediately, with only slower background XProtect
+   scans behind it. Background/behavioral XProtect, quarantine attributes,
+   TCC prompts, and SIP all remain active; non-exempted apps are
+   unaffected. Reasonable trade for a development workstation; not
+   recommended on a general-purpose machine. The exemption is
+   per-responsible-app and machine-local: nothing in this repo can
+   enforce or verify it, so the volume-reduction practice (CI owns the
+   workspace suite; see chelis#360) remains the primary discipline.
 
 ## CI Is the Fallback Oracle
 
