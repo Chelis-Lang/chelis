@@ -376,3 +376,19 @@ Current shared skill set:
 - `backend-numerics`
 - `example-corpus`
 - `cli-surface`
+
+## Downstream Shell Contract
+
+Downstream shell repos (every repo in the canonical-reference §Shell
+Ecosystem table) inherit this `AGENTS.md` verbatim (machine-local
+environment sections excepted; see the contract §1) AND must satisfy
+[`spec/design/shell_repo_contract.md`](spec/design/shell_repo_contract.md):
+pin hygiene with a mechanical multi-location consistency guard, a
+per-shell `docs/CHELIS_SURFACE.md` capability inventory, the
+narrowing-citation rule (every workaround cites `chelis#NNN` at the site —
+file upstream, never silently work around), expected-to-fail blocker
+probes under `tests_blocked/` re-run at every pin bump, negative-test
+sidecars, vendored shared skills, and uv-managed Python. The contract
+names `Chelis-Lang/school` as its reference implementation. Changes to the
+contract land here first and propagate to every shell per its scaffolding
+drift rule.
