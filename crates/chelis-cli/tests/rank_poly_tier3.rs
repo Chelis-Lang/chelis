@@ -312,7 +312,7 @@ fn anchored_spread_survives_fmt_round_trip() {
 // the host runtime routes a def call that requires named-axis resolution
 // through the same `lower_subexpr_program` + forward-DAG-eval lane the C
 // backend uses (see `apply_named_axis_def_call` in
-// crates/chelis-compiler-api/src/runtime.rs), so eval-vs-backend agreement
+// crates/chelis-compiler-api/src/runtime/named_axis.rs), so eval-vs-backend agreement
 // is restored for the Tier-3 surface.
 
 fn build_compile_run(source: &str, name: &str) -> String {

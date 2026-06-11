@@ -183,7 +183,7 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("}".to_string());
     // Bucket 3 activation parity: `tanh`, `silu`, `gelu` mirror their
     // IR-evaluator counterparts in
-    // `crates/chelis-compiler-api/src/runtime.rs`. All math runs
+    // `crates/chelis-compiler-api/src/runtime/host_ops.rs`. All math runs
     // through `float` so the two lanes agree byte-for-byte (modulo
     // documented float ulp tolerance).
     out.push("static inline float chelis_host_tanh_f32(float x) {".to_string());
@@ -193,7 +193,7 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("    return x * chelis_host_sigmoid_f32(x);".to_string());
     out.push("}".to_string());
     // GELU tanh-approximation, matching `School.Nn.Gelu.gelu_scalar` and
-    // `activation_gelu_f32` in chelis-compiler-api/src/runtime.rs.
+    // `activation_gelu_f32` in chelis-compiler-api/src/runtime/host_ops.rs.
     out.push("static inline float chelis_host_gelu_f32(float x) {".to_string());
     out.push("    float c = 0.7978845608028654f;".to_string());
     out.push("    float k = 0.044715f;".to_string());

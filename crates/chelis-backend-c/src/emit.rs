@@ -4534,7 +4534,7 @@ impl CEmitter {
     // int32<->int64, ...). See
     // `docs/investigations/cbackend_cast_memcpy_diagnosis.md`. The host
     // runtime parallel was fixed in PR #59
-    // (`crates/chelis-compiler-api/src/runtime.rs::cast_tensor_value` /
+    // (`crates/chelis-compiler-api/src/runtime/host_ops.rs::cast_tensor_value` /
     // `convert_scalar_data`); this site mirrors those semantics in emitted
     // C.
     //
