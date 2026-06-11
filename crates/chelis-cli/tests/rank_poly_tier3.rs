@@ -311,7 +311,7 @@ fn anchored_spread_survives_fmt_round_trip() {
 // computed reduction AND against the `chelis eval` oracle: since chelis#338,
 // the host runtime routes a def call that requires named-axis resolution
 // through the same `lower_subexpr_program` + forward-DAG-eval lane the C
-// backend uses (see `apply_named_axis_def_call` in
+// backend uses (see `try_named_axis_def_call` in
 // crates/chelis-compiler-api/src/runtime/named_axis.rs), so eval-vs-backend agreement
 // is restored for the Tier-3 surface.
 

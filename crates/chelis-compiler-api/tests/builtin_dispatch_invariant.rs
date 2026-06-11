@@ -59,7 +59,11 @@ fn extracted_dispatched_names() -> HashSet<String> {
     let after_start = start + "fn eval_builtin".len();
     let end = [
         "\nfn ",
+        "\npub fn ",
+        "\npub(super) fn ",
+        "\npub(crate) fn ",
         "\n    fn ",
+        "\n    pub fn ",
         "\n    pub(super) fn ",
         "\n    pub(crate) fn ",
     ]
