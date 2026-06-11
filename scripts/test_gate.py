@@ -104,13 +104,22 @@ class StageUnionTests(unittest.TestCase):
 
 class ListOutputTests(unittest.TestCase):
     def test_list_prints_canonical_full_list(self):
+        # Each command line is `<command>  # <local-vs-ci annotation>`
+        # (chelis#360); the command part must still be exactly the
+        # canonical full list, in order. Standalone `#`-comment lines
+        # (the --local dynamic-stage note) are not commands.
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = gate.main(["--list"])
         self.assertEqual(rc, 0)
-        printed = buf.getvalue().strip().splitlines()
+        printed = [
+            line
+            for line in buf.getvalue().strip().splitlines()
+            if not line.startswith("#")
+        ]
+        commands = [line.split("  # ")[0] for line in printed]
         expected = [gate.render(c) for c in gate.full_command_list()]
-        self.assertEqual(printed, expected)
+        self.assertEqual(commands, expected)
 
     def test_list_includes_chelis_lint_check(self):
         # Regression guard: the historical `AGENTS.md` gate omitted
