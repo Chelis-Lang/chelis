@@ -1,10 +1,10 @@
 # Lines of Code Report
 
-Generated: 2026-06-10 21:57 UTC
+Generated: 2026-06-11 04:48 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 386 | 146,773 | 19,493 | 54,992 | 221,258 | Compiler, CLI, runtime, backends, type checker |
+| Rust | 391 | 146,848 | 19,493 | 55,003 | 221,344 | Compiler, CLI, runtime, backends, type checker |
 | C | 13 | 33,483 | 325 | 755 | 34,563 | Generated runtime, headers |
 | JSON | 28 | 9,274 | 0 | 3,181 | 12,455 | Package metadata, test fixtures |
 | Python | 46 | 6,190 | 1,799 | 1,910 | 9,899 | PyO3 bindings, tools, benchmarks |
@@ -19,4 +19,4 @@ Generated: 2026-06-10 21:57 UTC
 | Tree-sitter Queries (.scm) | 2 | 102 | 0 | 6 | 108 | Syntax highlighting for Surf and Deep |
 | Markdown | 206 | 0 | 20,184 | 9,755 | 29,939 | Specs, design docs, plans |
 | __generated__ | 1 | 0 | 0 | 0 | 0 |  |
-| **Total** | **2,312** | **201,870** | **42,345** | **70,995** | **315,210** | |
+| **Total** | **2,317** | **201,945** | **42,345** | **71,006** | **315,296** | |
