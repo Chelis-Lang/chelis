@@ -156,17 +156,38 @@ canonical list:
 
 ```sh
 python3 scripts/gate.py --list
-# cargo build --workspace --all-targets
-# cargo clippy --workspace --all-targets -- -D warnings
-# cargo fmt --all -- --check
-# cargo run -p chelis-cli --bin chelis --quiet -- lint --check .
-# cargo nextest run --workspace --profile ci
+# cargo build --workspace --all-targets  # ci-owned
+# cargo clippy --workspace --all-targets -- -D warnings  # local + ci
+# cargo fmt --all -- --check  # local + ci
+# cargo run -p chelis-cli --bin chelis --quiet -- lint --check .  # local + ci
+# cargo nextest run --workspace --profile ci  # ci-owned
+# # --local also runs: cargo nextest run -p <crate> for each crate changed vs origin/main
 ```
 
 The gate runs `cargo nextest run` (CI's actual runner), not `cargo test
 --workspace`, and includes `chelis lint --check .` (the §8.6 / §12
 naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
 and docs CI jobs are out of scope for this script by design.
+
+Local pre-push gate (chelis#360):
+
+```sh
+python3 scripts/gate.py --local
+```
+
+`--local` runs the developer pre-push subset: workspace clippy
+(`-D warnings`, compile-only), `cargo fmt --check`,
+`chelis lint --check .`, and `cargo nextest run -p <crate>` for each
+crate changed vs `origin/main` (committed diff plus uncommitted work;
+owning packages are resolved from each member's `Cargo.toml`, not the
+directory name). The derived crate list is always printed; "no crate
+changes detected" means the per-crate stage was skipped, not silently
+empty. The workspace nextest stage is CI-owned: run `--local` before
+pushing, open a draft PR early, and let CI (macOS Smoke is the
+authoritative workspace oracle) run the full suite. See
+[`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+for why the workspace suite does not belong in the local loop on
+macOS.
 
 Default-gate discipline:
 
