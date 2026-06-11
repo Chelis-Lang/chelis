@@ -15,11 +15,20 @@ exec right now?" It writes a trivial C file into a private temp dir,
 compiles it with `cc`, and execs the result under a timeout.
 
 Exit codes:
-    0   first exec completed; prints `exec ok (N ms)`
+    0   first exec completed promptly; prints `exec ok (N ms)`
     1   first exec timed out; first-exec assessment appears wedged
     2   the probe could not run (`cc` missing, compile failed, probe
         not executable, or probe exited non-zero) — an environment
         problem, not a wedge verdict
+    3   first exec completed but took longer than `--warn-ms`
+        (default 2000): assessment is admitting binaries slowly — the
+        silent degradation variant (chelis#356). Multi-binary test
+        runs will crawl even though single execs eventually succeed.
+
+A passing probe is a point-in-time result, NOT a session clearance:
+degradation is volume-induced and can begin minutes later once a mass
+of freshly built binaries hits assessment (observed: probe at 377 ms,
+stalls within the hour under a workspace build burst — chelis#356).
 
 Usage:
     python3 scripts/preflight_exec_probe.py                # default 15s timeout
@@ -45,6 +54,9 @@ COMPILE_TIMEOUT_SECONDS = 120.0
 EXIT_OK = 0
 EXIT_WEDGED = 1
 EXIT_ENV = 2
+EXIT_SLOW = 3
+
+DEFAULT_WARN_MS = 2000.0
 
 # The probe payload: the smallest program whose successful exit proves
 # the binary was assessed and ran.
@@ -126,7 +138,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description=(
             "Compile and first-exec a trivial binary to detect the macOS "
             "syspolicyd first-exec wedge. Exit 0 = exec ok, 1 = wedged, "
-            f"2 = probe could not run. Runbook: {RUNBOOK}."
+            "2 = probe could not run, 3 = exec ok but slow (assessment "
+            f"degrading). Runbook: {RUNBOOK}."
         ),
     )
     p.add_argument(
@@ -137,6 +150,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "How long to wait for the first exec before classifying the "
             "machine as wedged (default: %(default)s)."
+        ),
+    )
+    p.add_argument(
+        "--warn-ms",
+        type=positive_float,
+        default=DEFAULT_WARN_MS,
+        metavar="MS",
+        help=(
+            "First-exec latency above which the machine is classified as "
+            "slowly admitting (exit 3), even though the exec succeeded "
+            "(default: %(default)s). A healthy first exec is well under "
+            "one second."
         ),
     )
     return p.parse_args(argv)
@@ -169,6 +194,18 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return EXIT_WEDGED
+    if elapsed_ms > args.warn_ms:
+        print(
+            (
+                f"preflight_exec_probe: WARNING: first exec succeeded but "
+                f"took {elapsed_ms:.0f} ms (threshold {args.warn_ms:g} ms). "
+                f"First-exec assessment is admitting binaries slowly (the "
+                f"silent degradation variant, chelis#356); multi-binary "
+                f"test runs will crawl. See {RUNBOOK}."
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_SLOW
     print(f"exec ok ({elapsed_ms:.0f} ms)")
     return EXIT_OK
 
