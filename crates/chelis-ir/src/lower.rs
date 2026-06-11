@@ -816,7 +816,19 @@ pub fn remap_tensor_dim_symbols(
     if substitutions.is_empty() {
         return dag.clone();
     }
+    apply_dim_substitutions(dag, &substitutions)
+}
 
+/// Rewrite every symbolic-dim reference in `dag` through
+/// `substitutions`: node OUTPUT types and the op-internal fields that
+/// carry dims (`Expand::size`, `Reshape::new_shape`,
+/// `BlasMatmul::{batch_dims, m, n, k}`). Rewriting only output types
+/// while op fields keep the stale names produces the chelis#345 mixed
+/// state (`Load: n` next to `Expand { size: Sym("dN") }`) that the
+/// Bucket 4d sweep in `dag::symbolic_occurrences` panics on. Shared by
+/// [`remap_tensor_dim_symbols`] (call-site formal/actual remapping) and
+/// `host::actualize_tensor_helper_types` (synthetic `dN` actualization).
+pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &HashMap<String, DimInfo>) -> Dag {
     fn rewrite_dim_info(dim: &DimInfo, substitutions: &HashMap<String, DimInfo>) -> DimInfo {
         match dim {
             DimInfo::Named(name, None) => substitutions
@@ -859,17 +871,17 @@ pub fn remap_tensor_dim_symbols(
         output_type.dims = output_type
             .dims
             .iter()
-            .map(|dim| rewrite_dim_info(dim, &substitutions))
+            .map(|dim| rewrite_dim_info(dim, substitutions))
             .collect();
         let op = match node.op {
             RiscOp::Expand { axis, size } => RiscOp::Expand {
                 axis,
-                size: rewrite_dim_expr(&size, &substitutions),
+                size: rewrite_dim_expr(&size, substitutions),
             },
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape
                     .iter()
-                    .map(|dim| rewrite_dim_info(dim, &substitutions))
+                    .map(|dim| rewrite_dim_info(dim, substitutions))
                     .collect(),
             },
             RiscOp::BlasMatmul {
@@ -881,11 +893,11 @@ pub fn remap_tensor_dim_symbols(
             } => RiscOp::BlasMatmul {
                 batch_dims: batch_dims
                     .iter()
-                    .map(|dim| rewrite_dim_expr(dim, &substitutions))
+                    .map(|dim| rewrite_dim_expr(dim, substitutions))
                     .collect(),
-                m: rewrite_dim_expr(&m, &substitutions),
-                n: rewrite_dim_expr(&n, &substitutions),
-                k: rewrite_dim_expr(&k, &substitutions),
+                m: rewrite_dim_expr(&m, substitutions),
+                n: rewrite_dim_expr(&n, substitutions),
+                k: rewrite_dim_expr(&k, substitutions),
                 accumulator,
             },
             other => other,
