@@ -128,12 +128,26 @@ In order of preference:
 5. **Candidate durable fix (UNVERIFIED, tracked in chelis#356): Developer
    Tools exemption.** macOS exempts processes spawned by apps listed under
    System Settings > Privacy & Security > Developer Tools from the
-   first-run malware scan. Enable it for the terminal hosting the dev/agent
-   sessions (GUI toggle, or `sudo spctl developer-mode enable-terminal`,
-   then restart the terminal). Verification protocol once enabled: run the
-   preflight probe, then a deliberate burst (`cargo nextest run -p
-   chelis-compiler-api` after a `touch` rebuild) and compare admission
-   behavior; report the result on chelis#356 and update this runbook from
+   first-run malware scan. The app that needs the exemption is the
+   RESPONSIBLE APP for the session's processes - NOT necessarily
+   Terminal.app. Identify it by walking the process ancestry to the app
+   directly under launchd:
+
+   ```sh
+   P=$$; while [ "$P" != "1" ]; do ps -o pid=,comm= -p $P; P=$(ps -o ppid= -p $P | tr -d ' '); done
+   ```
+
+   For sessions in a VS Code integrated terminal the chain ends at
+   `Visual Studio Code`, so VS Code is the app to exempt (the
+   `spctl developer-mode enable-terminal` CLI variant targets Terminal.app
+   and does not help there). After toggling, FULLY quit and relaunch the
+   responsible app (Cmd+Q; a new terminal tab is not enough). Before
+   toggling, record whether the app was ALREADY exempted - if degradation
+   occurred while exempted, the fix is refuted for that app. Verification
+   protocol once enabled: re-check the ancestry, run the preflight probe,
+   then a deliberate burst (`cargo nextest run -p chelis-compiler-api`
+   after a `touch` rebuild) and compare admission behavior against the
+   chelis#356 baselines; report on chelis#356 and update this runbook from
    UNVERIFIED to verified/refuted.
 
 ## CI Is the Fallback Oracle
