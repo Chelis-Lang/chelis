@@ -399,3 +399,46 @@ fn issue_345_negative_sig_dim_mismatch_is_type_error_not_ice() {
         "negative case must fail as a TYPE error, not the #345 ICE; stderr={stderr}",
     );
 }
+
+#[test]
+fn issue_345_negative_sig_dim_mismatch_via_eval_lane_is_type_error_not_ice() {
+    // Review #363 N4: the check-only negative fires pre-lowering by
+    // construction; this variant goes through the SAME eval entry point
+    // as the positive rows, so a future regression that lets the
+    // mismatch reach grad lowering trips this assert instead of hiding
+    // behind the check-stage pin. The root would exercise lowering if
+    // the checker ever stopped rejecting.
+    let source = "module Repro.Issue345NegEval\n\
+         sig relu_fwd: tensor[a, f32] -> tensor[a, f32]\n\
+         def relu_fwd(x) = relu(x)\n\
+         def f(x: tensor[2, f32]) -> tensor[3, f32] = relu_fwd(x)\n\
+         out = f(to_tensor([1.0, 2.0]))\n";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("issue345_neg_eval.ch");
+    write_file(&path, source);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "eval",
+            "--file",
+            path.to_str().unwrap(),
+            "--allow-style-violations",
+        ])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        !output.status.success(),
+        "mismatched concrete dims through the symbolic sig must fail under eval",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("doesn't match declared signature"),
+        "expected the signature-mismatch reason on the eval lane, got: {stderr}",
+    );
+    assert!(
+        !stderr.contains("symbolic dim") && !stderr.contains("internal compiler error"),
+        "eval-lane negative must fail as a TYPE error, not the #345 ICE; stderr={stderr}",
+    );
+}

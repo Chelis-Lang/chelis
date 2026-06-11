@@ -6171,9 +6171,23 @@ fn actualize_tensor_helper_types(
                 && synthetic_dim(old_dim)
                 && old_dim != new_dim
             {
-                synthetic_renames
-                    .entry(name.clone())
-                    .or_insert_with(|| new_dim.clone());
+                match synthetic_renames.entry(name.clone()) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(new_dim.clone());
+                    }
+                    std::collections::hash_map::Entry::Occupied(existing) => {
+                        // A single checker dim-var has a single extent in
+                        // a well-typed program; a conflicting re-bind
+                        // means the helper DAG was already inconsistent.
+                        // Fail loudly in debug rather than renaming op
+                        // fields with the wrong extent (review #363 N1).
+                        debug_assert_eq!(
+                            existing.get(),
+                            new_dim,
+                            "synthetic dim `{name}` resolved to conflicting actuals"
+                        );
+                    }
+                }
             }
         }
         actualized.replace_node(id, node.op, node.inputs, actual.clone());
@@ -6396,6 +6410,11 @@ fn should_prefer_inferred_app_type(explicit: &HostType, inferred: &HostType) -> 
 }
 
 fn host_type_has_synthetic_tensor_dims(ty: &HostType) -> bool {
+    // Known exposure (review #363 N5, pre-existing): a USER dim literally
+    // named `d2` matches this minted-name heuristic and would be treated
+    // as synthetic. The checker's dim-var minting owns the `d<digits>`
+    // namespace today; if user-facing single-letter+digit dims ever
+    // matter, the minting needs a reserved prefix instead.
     fn synthetic_dim_name(name: &str) -> bool {
         let mut chars = name.chars();
         matches!(chars.next(), Some('d')) && chars.all(|ch| ch.is_ascii_digit())
