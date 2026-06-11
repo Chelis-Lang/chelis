@@ -174,7 +174,13 @@ In order of preference:
    recommended on a general-purpose machine. The exemption is
    per-responsible-app and machine-local: nothing in this repo can
    enforce or verify it, so the volume-reduction practice (CI owns the
-   workspace suite; see chelis#360) remains the primary discipline.
+   workspace suite; see chelis#360) remains the primary discipline. The
+   division of labor, post-verification: single binaries on a healthy
+   queue always admitted in milliseconds, and the inner loop only ever
+   suffered as collateral damage of mass bursts - so CI-first removes the
+   common trigger, while the exemption removes the failure mode
+   (degradation caused by anything else on the machine, or by a
+   discipline slip, no longer stalls this workflow).
 
 ## CI Is the Fallback Oracle
 
