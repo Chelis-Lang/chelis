@@ -248,13 +248,28 @@ fn issue_272_bare_heterogeneous_list_without_annotation_still_type_checks() {
 // =================================================================
 
 #[test]
-fn issue_272_join_concrete_head_absorbs_wildcard_tail_type_checks() {
+fn issue_272_join_concrete_head_absorbs_wildcard_tail_rejects_via_273_guard() {
     // `[tensor[2], tensor[*]]` under a rigid-`k` return.
-    //   BEFORE: join -> Wildcard (old `_ => Wildcard`); no list-uniformity
-    //           check existed, so the wildcard element was accepted. ACCEPT.
-    //   AFTER:  join -> Lit(2) (head wins); element is concrete, not a
-    //           wildcard, so the #272 check does not fire. Still ACCEPT.
-    // Same verdict, but the inferred element dim tightened from `*` to `2`.
+    //   BEFORE #272: join -> Wildcard (old `_ => Wildcard`); no
+    //           list-uniformity check existed, so the wildcard element
+    //           was accepted. ACCEPT.
+    //   AFTER #272: join -> Lit(2) (head wins); element is concrete, not
+    //           a wildcard, so the #272 wildcard check did not fire, and
+    //           the return-only `k` was outside the rigidity guard's
+    //           param-position scope. Still ACCEPT.
+    //   AFTER #273: the join still resolves the element to Lit(2), but
+    //           the sig-unify then pins the return-only `k := 2` — a
+    //           concrete dim flowing from parameter `a`'s declared
+    //           annotation. That is precisely the #273 input-coupling
+    //           (`def f[k](a: tensor[2, f32]) -> tensor[k, f32] = a`
+    //           wrapped in a list), so the return-position rigidity
+    //           guard now rejects it. REJECT (DimensionMismatch); see
+    //           issue_273_return_dvar_rigidity.rs for the non-list
+    //           parity case and spec/04-type-system.md §4.4.1.
+    // The head-bias property itself (concrete head absorbs wildcard
+    // tail, producing a concrete element rather than a wildcard) is
+    // still observable: the diagnostic is the #273 return-position PIN
+    // to Lit(2), not the #272 wildcard-element error.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("concrete_head_wildcard_tail.ch");
     write_file(
@@ -262,11 +277,20 @@ fn issue_272_join_concrete_head_absorbs_wildcard_tail_type_checks() {
         "def f[k](a: tensor[2, f32], b: tensor[*, f32]) -> List[tensor[k, f32]] = [a, b]\n",
     );
     let json = run_check(&path);
-    let errs = error_messages(&json);
+    let kinds = error_kinds(&json);
+    let msgs = error_messages(&json);
     assert!(
-        errs.is_empty(),
-        "a concrete head dim must absorb a wildcard tail and keep the list \
-         element concrete (so it satisfies rigid `k`); got {errs:?}",
+        kinds.iter().any(|k| k == "DimensionMismatch"),
+        "the head-biased join resolves the element to Lit(2), which pins \
+         the return-only rigid `k` to a parameter dim; the #273 guard \
+         must reject with DimensionMismatch; got {msgs:?}",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("return") && m.contains("Lit(2)")),
+        "the diagnostic must be the #273 return-position pin to Lit(2) \
+         (NOT the #272 wildcard-element error), proving the join kept \
+         the concrete head; got {msgs:?}",
     );
 }
 

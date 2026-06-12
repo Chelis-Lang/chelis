@@ -7265,6 +7265,12 @@ fn infer_top_level(
                 }
             }
             check_declared_dvars_rigid(&declared_dvars, subst, errors);
+            // chelis#273: the param-position guard above never sees a dim
+            // parameter that occurs only in the return type, so a body
+            // could silently pin a return-only rigid dim. Reject the
+            // input-coupled pins/collapses while keeping the legitimate
+            // output-inferred uses (hello_tensor-style) green.
+            check_return_only_dvars_rigid(&decl_ty, &declared_dvars, subst, errors);
             // Tier-2 rank-polymorphism Body Discipline
             // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
             // a def whose signature mentions a rank variable `..r` may call only
@@ -14248,6 +14254,115 @@ fn check_declared_dvars_rigid(
             }
         } else {
             seen.insert(resolved, *dv);
+        }
+    }
+}
+
+/// chelis#273 return-position rigidity guard.
+///
+/// `check_declared_dvars_rigid` collects declared dim parameters from
+/// the signature's *parameter* positions only, so a dim parameter
+/// appearing **only in the return type** was never checked and the body
+/// could silently pin it (`def f[k](a: tensor[2, f32]) ->
+/// tensor[k, f32] = a` pinned `k := 2`).
+///
+/// A return-only dim parameter is not fully rigid, though: the body is
+/// the only place the output dimension can come from (Chelis has no
+/// explicit dim application; callers instantiate dims by unification
+/// against *arguments*, which never mention a return-only dim). The
+/// legitimate **output-inferred** uses must stay green
+/// (spec/04-type-system.md §4.4.1):
+///
+/// - the body leaves the dim var unbound (a clean, generalizable dim,
+///   e.g. variable-fed `to_tensor`), or
+/// - the body resolves it to a **body-internal** concrete dim
+///   (`examples/hello_tensor.ch`: `def main() -> tensor[n, f32]` whose
+///   body builds a `tensor[3, f32]`); the registered scheme then
+///   resolves to the produced dim.
+///
+/// What is rejected is **input coupling** — the body deriving the
+/// promised-independent output dim from the caller-visible parameter
+/// world:
+///
+/// - `Dim::Var -> Dim::Lit` pin where the literal equals the
+///   post-unification resolution of a dimension occurring in a declared
+///   parameter position, or
+/// - collapse with a distinct *param-position* declared dim parameter
+///   (either binding orientation).
+///
+/// Two return-only dim parameters collapsing with each other are
+/// tolerated (both are output-inferred; no caller-visible coupling).
+/// Known residual: coupling through a named symbolic dim
+/// (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x` binds
+/// `m := Name("batch")`) is not flagged — `Dim::Name` unifies
+/// permissively by design (chelis#219) and no declared dim parameter
+/// participates.
+fn check_return_only_dvars_rigid(
+    decl_ty: &Type,
+    param_dvars: &[DimVar],
+    subst: &Subst,
+    errors: &mut Vec<CheckError>,
+) {
+    let Type::Fn(decl_params, decl_ret) = decl_ty else {
+        return;
+    };
+    let ret_only: Vec<DimVar> = crate::env::free_dvars(decl_ret)
+        .into_iter()
+        .filter(|dv| !param_dvars.contains(dv))
+        .collect();
+    if ret_only.is_empty() {
+        return;
+    }
+    // Every dimension occurring in a declared parameter position,
+    // resolved through the post-body substitution.
+    let mut param_dims: Vec<Dim> = Vec::new();
+    for t in decl_params {
+        crate::env::collect_dims(t, &mut param_dims);
+    }
+    let resolved_param_dims: Vec<Dim> = param_dims.iter().map(|d| subst.apply_dim(d)).collect();
+    for dv in &ret_only {
+        let resolved = subst.apply_dim(&Dim::Var(*dv));
+        if let Dim::Lit(n) = resolved {
+            if resolved_param_dims.contains(&Dim::Lit(n)) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "return-position dim parameter d{} was pinned to concrete \
+                         Lit({n}) flowing from a declared parameter dimension: a dim \
+                         parameter that appears only in the return type promises an \
+                         output dimension the body must not derive from the inputs \
+                         (spec/04-type-system.md \u{00a7}4.4.1)",
+                        dv.0
+                    ),
+                    vec![
+                        "Name the input dimension in the return type (reuse the \
+                         parameter's dim parameter or literal) if the output \
+                         genuinely tracks an input dimension, or fix the body so the \
+                         output dimension does not depend on the input dims"
+                            .to_string(),
+                    ],
+                ));
+            }
+        } else if let Some(pdv) = param_dvars
+            .iter()
+            .find(|pdv| subst.apply_dim(&Dim::Var(**pdv)) == resolved)
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "return-position dim parameter d{} was unified with the distinct \
+                     declared dim parameter d{} from a parameter position: declared \
+                     dim parameters are rigid and must remain distinct \
+                     (spec/04-type-system.md \u{00a7}4.4.1)",
+                    dv.0, pdv.0
+                ),
+                vec![
+                    "Use the same dim parameter in both positions if the return \
+                     dimension is meant to equal the input's, or fix the body so the \
+                     declared dims stay independent"
+                        .to_string(),
+                ],
+            ));
         }
     }
 }
