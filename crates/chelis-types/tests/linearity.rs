@@ -91,13 +91,15 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 
 #[test]
 fn explicit_borrow_does_not_satisfy_owned_parameter() {
+    // Fixture renamed from `take` for chelis#353: `take` is a builtin
+    // name and bare shadowing defs are now rejected at declaration time.
     let errors = typecheck_surf(
         r#"
-def take(x: tensor[4, f32]): tensor[4, f32] = x
+def grab(x: tensor[4, f32]): tensor[4, f32] = x
 
 def bad(x: tensor[4, f32]): tensor[4, f32] =
   {
-    take(&x)
+    grab(&x)
   }
 "#,
     )

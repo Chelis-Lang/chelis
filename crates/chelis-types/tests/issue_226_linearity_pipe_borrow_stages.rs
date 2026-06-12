@@ -125,13 +125,15 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] = {
 fn pipe_into_user_consuming_function_still_consumes() {
     // A user-defined function whose first parameter is owned-linear
     // (`tensor[4, f32]`, not `&tensor[...]`) consumes its argument by
-    // signature. The pipe must propagate that — `x |> take` consumes
+    // signature. The pipe must propagate that — `x |> grab` consumes
     // `x`, and a later `add(x, y)` must trip `UseAfterConsume`.
+    // (Fixture renamed from `take` for chelis#353: `take` is a builtin
+    // name and bare shadowing defs are now rejected at declaration time.)
     let errors = check_surf(
         r#"
-def take(t: tensor[4, f32]) -> tensor[4, f32] = t
+def grab(t: tensor[4, f32]) -> tensor[4, f32] = t
 def bad(x: tensor[4, f32]) -> tensor[4, f32] = {
-  y = x |> take
+  y = x |> grab
   add(x, y)
 }
 "#,

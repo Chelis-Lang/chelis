@@ -159,9 +159,11 @@ fn def_with_no_quantifier_list_unbound_precision_errors() {
 fn def_mixed_dim_and_precision_quantifiers_accepted() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("mixed.ch");
+    // Fixture renamed from `take` for chelis#353: `take` is a builtin
+    // name and bare shadowing defs are now rejected at declaration time.
     write_file(
         &path,
-        "def take[batch, seq, hidden, p](x: &tensor[batch, seq, hidden, p]) \
+        "def grab[batch, seq, hidden, p](x: &tensor[batch, seq, hidden, p]) \
          -> &tensor[batch, seq, hidden, p] = x\n",
     );
 
@@ -190,8 +192,8 @@ fn def_quantifier_precision_tvar_typechecks_at_every_arithmetic_dtype() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("wsa6_dtype_matrix.ch");
         let src = format!(
-            "def take[n, p](xs: &tensor[n, p]) -> &tensor[n, p] = xs\n\
-             def use_at_dtype(xs: &tensor[3, {dtype}]) -> &tensor[3, {dtype}] = take(xs)\n"
+            "def grab[n, p](xs: &tensor[n, p]) -> &tensor[n, p] = xs\n\
+             def use_at_dtype(xs: &tensor[3, {dtype}]) -> &tensor[3, {dtype}] = grab(xs)\n"
         );
         write_file(&path, &src);
         let json = run_json_check(&path);

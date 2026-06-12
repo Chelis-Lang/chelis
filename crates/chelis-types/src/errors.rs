@@ -56,6 +56,19 @@ pub enum CheckErrorKind {
     /// dependent borrow semantics. Reject the collision at declaration
     /// time instead.
     DuplicateDefinition,
+    /// A top-level `def` or `sig` (Deep `defsig`) reuses a name from the
+    /// closed builtin vocabulary (`BUILTIN_NAMES`). Call sites are
+    /// dispatched builtin-first by name in both the host evaluator
+    /// (`runtime/host_ops.rs::builtin_name`) and IR lowering
+    /// (`lower.rs`), so a user definition with a builtin name can never
+    /// be reached by name: pre-fix, the chelis#353 reproducer
+    /// (`def sum`) checked clean, hit the builtin's arity error under
+    /// eval, and segfaulted on the C backend. Rejected at declaration
+    /// time instead (spec/04-type-system.md §8.6). Reef package modules
+    /// are unaffected: their decls are internal-name-rewritten
+    /// (`pkg__...`) before the checker runs, and their call sites are
+    /// rewritten with them.
+    BuiltinShadowing,
     Other,
 }
 
@@ -78,6 +91,7 @@ impl CheckErrorKind {
             CheckErrorKind::CycleDetected => 0.9,
             CheckErrorKind::UnsupportedTensorPrecision => 0.8,
             CheckErrorKind::DuplicateDefinition => 0.9,
+            CheckErrorKind::BuiltinShadowing => 0.9,
             CheckErrorKind::Other => 0.5,
         }
     }

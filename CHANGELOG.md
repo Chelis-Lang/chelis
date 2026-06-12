@@ -6,6 +6,22 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Builtin-shadowing defs rejected at check time (#353)**: a top-level
+  `def` or `sig` whose name appears in the closed builtin vocabulary
+  (`def sum`, `sig relu: ...`) is now a hard front-end error
+  (`BuiltinShadowing`, spec/04-type-system.md §8.6) on every lane.
+  Pre-fix the reproducer checked clean, hit the builtin's arity error
+  under eval (call dispatch is builtin-first by name), and segfaulted
+  on the C backend. The rejection derives from the same
+  `BUILTIN_NAMES` table the evaluator and IR lowering dispatch on, so
+  the sets cannot drift; reef package modules are exempt by
+  construction (their decls are internal-name-rewritten before
+  checking, so a package-scoped `def sum` still resolves to the user
+  def). Style-gate bypasses (`--allow-style-violations`,
+  `CHELIS_STYLE_GATE_DISABLE`) do not unlock it.
+
 ## [0.7.25] — 2026-06-11
 
 ### Fixed
