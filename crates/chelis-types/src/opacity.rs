@@ -85,6 +85,11 @@ pub(crate) struct OpacityContextData {
     /// Name of the top-level decl currently being inferred (message
     /// location context per the D-CHECK error contract).
     pub current_decl: Option<String>,
+    /// While true, `check_ctor_reference` is a no-op: `infer_app`
+    /// sets this around its callee inference so a positional
+    /// constructor application reports ONE violation (constructor
+    /// application), not a second one for the callee `var` node.
+    pub suppress_ctor_reference: bool,
     /// Program-shape metadata (exports, bindings, producer text).
     pub meta: OpacityModuleMeta,
 }
@@ -94,6 +99,7 @@ impl OpacityContextData {
         Self {
             current_module: None,
             current_decl: None,
+            suppress_ctor_reference: false,
             meta,
         }
     }
@@ -135,11 +141,154 @@ pub(crate) fn set_current_item(module: Option<String>, decl: Option<String>) {
 
 /// Run `f` against the installed context, or return `None` when no
 /// context is installed (enforcement disabled for this pass).
-// Consumed by the Unit 5 inference hooks; installed ahead of them so
-// the drivers and the registry land as one reviewable unit.
-#[allow(dead_code)]
 pub(crate) fn with_context<R>(f: impl FnOnce(&OpacityContextData) -> R) -> Option<R> {
     OPACITY_CONTEXT.with(|cell| cell.borrow().as_ref().map(f))
+}
+
+/// Suppress `check_ctor_reference` for the duration of the returned
+/// guard (see `OpacityContextData::suppress_ctor_reference`).
+pub(crate) fn suppress_ctor_reference_check() -> CtorSuppressGuard {
+    let previous = OPACITY_CONTEXT.with(|cell| {
+        let mut borrowed = cell.borrow_mut();
+        match borrowed.as_mut() {
+            Some(data) => {
+                let prev = data.suppress_ctor_reference;
+                data.suppress_ctor_reference = true;
+                prev
+            }
+            None => false,
+        }
+    });
+    CtorSuppressGuard { previous }
+}
+
+pub(crate) struct CtorSuppressGuard {
+    previous: bool,
+}
+
+impl Drop for CtorSuppressGuard {
+    fn drop(&mut self) {
+        let previous = self.previous;
+        OPACITY_CONTEXT.with(|cell| {
+            if let Some(data) = cell.borrow_mut().as_mut() {
+                data.suppress_ctor_reference = previous;
+            }
+        });
+    }
+}
+
+// ── Inference hooks (RFC D-CHECK rejection set) ──────────────────
+
+/// Core rejection: `adt_name` was constructed/inspected via `action`
+/// in the current module. Pushes an `OpaqueTypeViolation` and returns
+/// true when the ADT is opaque and the current module is not its
+/// defining module. No-op without an installed context (annotation
+/// passes) so the drivers stay the single source of violations.
+pub(crate) fn check_opaque_use(
+    action: OpaqueAction,
+    adt_name: &str,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+) -> bool {
+    let Some(def) = adt_reg.lookup(adt_name) else {
+        return false;
+    };
+    if !def.opaque {
+        return false;
+    }
+    // A `None` defining module already carried the named-module
+    // declaration error; do not cascade per-use violations onto it.
+    let Some(defining) = def.defining_module.as_deref() else {
+        return false;
+    };
+    let error = with_context(|ctx| {
+        if ctx.current_module.as_deref() == Some(defining) {
+            None
+        } else {
+            Some(violation_error(ctx, action, adt_name, defining))
+        }
+    })
+    .flatten();
+    match error {
+        Some(error) => {
+            errors.push(error);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Bare-constructor-reference rejection (the constructor binding
+/// itself is hidden): fires when `name` resolves to a constructor of
+/// an out-of-module opaque ADT. Suppressed under `infer_app`'s callee
+/// guard so positional application reports once.
+pub(crate) fn check_ctor_reference(
+    name: &str,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+) -> bool {
+    let suppressed = with_context(|ctx| ctx.suppress_ctor_reference).unwrap_or(false);
+    if suppressed {
+        return false;
+    }
+    let Some((adt_name, _variant)) = adt_reg
+        .lookup_variant(name)
+        .or_else(|| adt_reg.lookup_variant_terminal_unique(name))
+    else {
+        return false;
+    };
+    let adt_name = adt_name.to_string();
+    check_opaque_use(OpaqueAction::CtorReference, &adt_name, adt_reg, errors)
+}
+
+/// The sixth rejection (RT-0 C2, broadened in RFC v3): a reference to
+/// an unexported binding of an opaque-defining module whose signature
+/// mentions the opaque type. `ty` is the reference's resolved type
+/// (declared or inferred scheme instantiation). Names without module
+/// attribution in the context metadata are never flagged (fail-open
+/// for unattributable names; see `OpacityModuleMeta::bindings`).
+pub(crate) fn check_unexported_reference(
+    name: &str,
+    ty: &Type,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+) -> bool {
+    let error = with_context(|ctx| {
+        let def_mod = ctx.meta.bindings.get(name)?;
+        if ctx.current_module.as_deref() == Some(def_mod.as_str()) {
+            return None;
+        }
+        if ctx
+            .meta
+            .exports
+            .get(def_mod)
+            .is_some_and(|set| set.contains(name))
+        {
+            return None;
+        }
+        // Deterministic order: smallest opaque type name first.
+        let mut opaque_types: Vec<&str> = adt_reg
+            .defs
+            .values()
+            .filter(|def| def.opaque && def.defining_module.as_deref() == Some(def_mod.as_str()))
+            .map(|def| def.name.as_str())
+            .collect();
+        opaque_types.sort_unstable();
+        for type_name in opaque_types {
+            if type_mentions_adt(ty, type_name, adt_reg) {
+                return Some(unexported_reference_error(ctx, name, type_name, def_mod));
+            }
+        }
+        None
+    })
+    .flatten();
+    match error {
+        Some(error) => {
+            errors.push(error);
+            true
+        }
+        None => false,
+    }
 }
 
 // ── Module identity (D-CHECK `module_key`) ───────────────────────
@@ -232,7 +381,6 @@ fn mentions_inner(
 /// `crates/chelis-types/tests/opaque_types.rs` for the byte-exact
 /// contract tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by the Unit 5 inference hooks
 pub(crate) enum OpaqueAction {
     RecordConstruction,
     CtorApplication,
@@ -281,7 +429,6 @@ fn producers_for(data: &OpacityContextData, type_name: &str) -> String {
 
 /// Build the pinned violation error for a construction/inspection
 /// rejection (everything except the sixth rejection).
-#[allow(dead_code)] // consumed by the Unit 5 inference hooks
 pub(crate) fn violation_error(
     data: &OpacityContextData,
     action: OpaqueAction,
@@ -310,7 +457,6 @@ pub(crate) fn violation_error(
 /// Build the pinned violation error for the sixth rejection: an
 /// out-of-module reference to an unexported binding of the defining
 /// module whose signature mentions the opaque type.
-#[allow(dead_code)] // consumed by the Unit 5 inference hooks
 pub(crate) fn unexported_reference_error(
     data: &OpacityContextData,
     binding: &str,
@@ -333,6 +479,29 @@ pub(crate) fn unexported_reference_error(
         vec![format!(
             "obtain `{type_name}` values through the exported producers of `{defining_module}`"
         )],
+    )
+}
+
+/// Build the fail-closed violation for a deferred `access` /
+/// `record-update` whose target type was NEVER pinned by the end of
+/// the def (let-generalization makes an unannotated accessor lambda
+/// polymorphic, so a later caller instantiates fresh variables and
+/// the original target can launder an opaque value through it).
+/// Mirrors the deferred-borrow ledger's never-pinned rejection; only
+/// emitted when the check unit declares at least one opaque type.
+pub(crate) fn unresolved_target_error(
+    data: &OpacityContextData,
+    action: OpaqueAction,
+) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::OpaqueTypeViolation,
+        format!(
+            "{}: {} an unresolved target type cannot be verified against opaque type \
+             boundaries; annotate the target so the checker can resolve it",
+            location_context(data),
+            action.phrase(),
+        ),
+        vec!["add a type annotation to the accessed parameter or binding".to_string()],
     )
 }
 

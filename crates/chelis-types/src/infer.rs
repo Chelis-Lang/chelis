@@ -2281,16 +2281,56 @@ fn validate_deferred_borrow_vars(
 
 /// RFC D-CHECK: drain the deferred-access ledger after a def body's
 /// inference completes and re-check each recorded target variable
-/// against the final substitution. The opacity rejection itself lands
-/// with the Unit 5 hooks; the drain keeps per-def attribution exact
-/// and prevents one def's deferrals from leaking into the next,
+/// against the final substitution: a target pinned to an
+/// out-of-module opaque ADT (e.g. an unannotated lambda parameter
+/// pinned by a later call) is rejected with the same action text as
+/// the typed path. Draining per def keeps attribution exact and
+/// prevents one def's deferrals from leaking into the next,
 /// mirroring `validate_deferred_borrow_vars`.
 fn validate_deferred_opaque_uses(
     subst: &Subst,
-    _adt_reg: &AdtRegistry,
-    _errors: &mut Vec<CheckError>,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
 ) {
-    let _deferred = subst.take_deferred_opaque_uses();
+    let mut any_opaque_in_scope: Option<bool> = None;
+    for (tv, use_kind) in subst.take_deferred_opaque_uses() {
+        let resolved = subst.apply(&Type::Var(tv));
+        let mut peeled = &resolved;
+        while let Type::Ref(inner) = peeled {
+            peeled = inner.as_ref();
+        }
+        let action = match use_kind {
+            crate::unify::DeferredOpaqueUse::Access => crate::opacity::OpaqueAction::FieldAccess,
+            crate::unify::DeferredOpaqueUse::RecordUpdate => {
+                crate::opacity::OpaqueAction::RecordUpdate
+            }
+        };
+        match peeled {
+            Type::Adt(adt_name, _) => {
+                crate::opacity::check_opaque_use(action, adt_name, adt_reg, errors);
+            }
+            // Never pinned: let-generalization makes an unannotated
+            // accessor polymorphic, so callers instantiate FRESH
+            // variables and the recorded one stays unbound -- a
+            // laundering channel for opaque values. Mirror the
+            // deferred-borrow ledger's never-pinned rejection,
+            // fail-closed, scoped to check units that declare any
+            // opaque type so opaque-free programs keep the lenient
+            // status quo.
+            Type::Var(_) => {
+                let opaque_in_scope = *any_opaque_in_scope
+                    .get_or_insert_with(|| adt_reg.defs.values().any(|def| def.opaque));
+                if opaque_in_scope
+                    && let Some(error) = crate::opacity::with_context(|ctx| {
+                        crate::opacity::unresolved_target_error(ctx, action)
+                    })
+                {
+                    errors.push(error);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
@@ -6759,37 +6799,65 @@ fn build_opacity_meta(
     // Declared signature types (from `defsig` nodes) for producer
     // display; keyed by binding name like `meta.bindings`.
     let mut declared_sigs: HashMap<String, Type> = HashMap::new();
+    // Pass 1: export sets. Lexical `(export ...)` nodes attribute to
+    // their module wrapper; package-linked exports arrive as
+    // top-level nodes whose names carry the reef internal-name stem
+    // (the reef rewrite emits them with internal names), so each
+    // exported name self-attributes through its stem.
     for (module, item) in items {
         let deep::Expr::List(list, _) = item else {
             continue;
         };
+        if get_tag(list) != Some("export") {
+            continue;
+        }
+        for child in children(list) {
+            let Some(name) = symbol_name(child) else {
+                continue;
+            };
+            let target = match module {
+                Some(module) => Some(module.clone()),
+                None => crate::opacity::reef_module_stem(name),
+            };
+            if let Some(target) = target {
+                meta.exports
+                    .entry(target)
+                    .or_default()
+                    .insert(name.to_string());
+            }
+        }
+    }
+    // Pass 2: binding -> module attribution and declared sigs.
+    // Stem-attributed (package-linked) bindings are recorded only
+    // when their module's export set is known: without it, the sixth
+    // rejection's no-export-decl-means-sealed rule would reject
+    // legitimately exported producers in pipelines that strip Export
+    // decls (fail-open for unattributable names by design).
+    for (module, item) in items {
+        let deep::Expr::List(list, _) = item else {
+            continue;
+        };
+        if !matches!(get_tag(list), Some("def") | Some("defsig")) {
+            continue;
+        }
         let kids = children(list);
-        match get_tag(list) {
-            Some("export") => {
-                if let Some(module) = module {
-                    let entry = meta.exports.entry(module.clone()).or_default();
-                    for child in kids {
-                        if let Some(name) = symbol_name(child) {
-                            entry.insert(name.to_string());
-                        }
-                    }
-                }
-            }
-            Some("def") | Some("defsig") => {
-                if let Some(module) = module
-                    && let Some(name) = kids.first().and_then(symbol_name)
-                {
-                    meta.bindings.insert(name.to_string(), module.clone());
-                    if get_tag(list) == Some("defsig")
-                        && let Some(ty_expr) = kids.get(1)
-                    {
-                        let ty =
-                            deep_type_to_resolved_type(ty_expr, vg, adt_reg, &mut HashMap::new());
-                        declared_sigs.insert(name.to_string(), ty);
-                    }
-                }
-            }
-            _ => {}
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let target = match module {
+            Some(module) => Some(module.clone()),
+            None => crate::opacity::reef_module_stem(name)
+                .filter(|stem| meta.exports.contains_key(stem)),
+        };
+        let Some(target) = target else {
+            continue;
+        };
+        meta.bindings.insert(name.to_string(), target);
+        if get_tag(list) == Some("defsig")
+            && let Some(ty_expr) = kids.get(1)
+        {
+            let ty = deep_type_to_resolved_type(ty_expr, vg, adt_reg, &mut HashMap::new());
+            declared_sigs.insert(name.to_string(), ty);
         }
     }
     // Producer enumeration per opaque type: exported bindings of the
@@ -7251,7 +7319,7 @@ fn infer_expr(
         deep::Expr::List(list, _) => {
             let tag = get_tag(list);
             match tag {
-                Some("var") => infer_var(list, env, vg, subst, errors),
+                Some("var") => infer_var(list, env, vg, subst, adt_reg, errors),
                 Some("lit") => infer_lit(list, vg, adt_reg, errors),
                 Some("app") => infer_app(
                     list,
@@ -7619,6 +7687,7 @@ fn infer_var(
     env: &mut Env,
     vg: &mut VarGen,
     subst: &Subst,
+    adt_reg: &AdtRegistry,
     errors: &mut Vec<CheckError>,
 ) -> Type {
     let kids = children(list);
@@ -7629,7 +7698,16 @@ fn infer_var(
         {
             let scheme = scheme.clone();
             let ty = env.instantiate(&scheme, vg);
-            subst.apply(&ty)
+            let resolved = subst.apply(&ty);
+            // RFC D-CHECK: a bare reference to an out-of-module
+            // opaque constructor is hidden, and an out-of-module
+            // reference to an unexported binding whose signature
+            // mentions an opaque type is the sixth rejection. Both
+            // return the true type so no error cascades.
+            if !crate::opacity::check_ctor_reference(name, adt_reg, errors) {
+                crate::opacity::check_unexported_reference(name, &resolved, adt_reg, errors);
+            }
+            resolved
         } else {
             errors.push(CheckError::new(
                 CheckErrorKind::UnboundVariable,
@@ -7749,7 +7827,25 @@ fn infer_lit(
     if let Some(meta) = meta {
         for (key, val) in &meta.entries {
             if key == "type" {
-                return deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new());
+                let resolved = deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new());
+                // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
+                // metadata on a literal outside the defining module
+                // forges an opaque value. Reachable from BOTH
+                // surfaces: Surf expression ascription
+                // (`0.5 : Probability`) and block-binding ascription
+                // desugar to exactly this metadata (RT-0), so the
+                // gate is not scoped to `.dp` ingestion.
+                // `deep_type_to_resolved_type` expands transparent
+                // aliases, so `0.5 : P2` cannot launder the gate.
+                if let Type::Adt(adt_name, _) = &resolved {
+                    crate::opacity::check_opaque_use(
+                        crate::opacity::OpaqueAction::LitForge,
+                        adt_name,
+                        adt_reg,
+                        errors,
+                    );
+                }
+                return resolved;
             }
         }
     }
@@ -7910,6 +8006,25 @@ fn infer_app(
     // fields" error when EVERY same-named variant in scope is record-
     // shaped, which is the original single-package case the error was
     // written for.
+    // RFC D-CHECK: positional application of an out-of-module opaque
+    // constructor is rejected (one violation per call site; the
+    // callee `var`'s constructor-reference check is suppressed below
+    // so the application does not double-report). Inference continues
+    // so the call still yields its true type.
+    if let Some(ref fname) = ctor_lookup_name
+        && let Some((adt_name, _)) = adt_reg
+            .lookup_variant_preferring_shape(fname, CallShape::Positional)
+            .or_else(|| adt_reg.lookup_variant_terminal_unique(fname))
+    {
+        let adt_name = adt_name.to_string();
+        crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::CtorApplication,
+            &adt_name,
+            adt_reg,
+            errors,
+        );
+    }
+
     if let Some(ref fname) = ctor_lookup_name
         && let Some((_adt_name, variant)) = adt_reg
             .lookup_variant_preferring_shape(fname, CallShape::Positional)
@@ -7928,16 +8043,21 @@ fn infer_app(
         return Type::Error;
     }
 
-    let func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let func_ty = {
+        let _ctor_guard = ctor_lookup_name
+            .as_ref()
+            .map(|_| crate::opacity::suppress_ctor_reference_check());
+        infer_expr(
+            &kids[0],
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        )
+    };
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
@@ -14113,6 +14233,15 @@ fn infer_match(
             if arm_kids.len() >= 3 {
                 let mut arm_env = env.clone();
                 let pat = &arm_kids[0];
+                // RFC D-CHECK exhaustiveness fix (RT-0 verified false
+                // positives): a TOP-LEVEL irrefutable arm covers the
+                // match -- a bare `pat-var`, or a `pat-as` whose
+                // inner pattern is irrefutable. Nested `pat-var`
+                // keeps not-covering so exhaustiveness is not
+                // weakened on ordinary ADTs.
+                if top_level_arm_is_irrefutable(pat) {
+                    has_wildcard = true;
+                }
                 pattern_bindings(
                     pat,
                     &scrutinee_ty,
@@ -14176,6 +14305,22 @@ fn infer_match(
     result_ty.unwrap_or(Type::Error)
 }
 
+/// True for arm patterns that match every value of the scrutinee:
+/// `pat-var`, `pat-wild`, and `pat-as` wrapping an irrefutable inner
+/// pattern (`q @ x`). Applies at the ARM level only.
+fn top_level_arm_is_irrefutable(pat: &deep::Expr) -> bool {
+    let deep::Expr::List(list, _) = pat else {
+        return false;
+    };
+    match get_tag(list) {
+        Some("pat-var") | Some("pat-wild") => true,
+        Some("pat-as") => children(list)
+            .get(1)
+            .is_some_and(top_level_arm_is_irrefutable),
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pattern_bindings(
     pat: &deep::Expr,
@@ -14208,6 +14353,22 @@ fn pattern_bindings(
             "pat-ctor" => {
                 if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
                     covered_variants.push(ctor_name.to_string());
+
+                    // RFC D-CHECK: constructor pattern match on an
+                    // out-of-module opaque type is rejected; binding
+                    // inference continues so no error cascades.
+                    if let Some((adt_name, _)) = adt_reg
+                        .lookup_variant(ctor_name)
+                        .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name))
+                    {
+                        let adt_name = adt_name.to_string();
+                        crate::opacity::check_opaque_use(
+                            crate::opacity::OpaqueAction::PatCtor,
+                            &adt_name,
+                            adt_reg,
+                            errors,
+                        );
+                    }
 
                     // Look up constructor in env and decompose
                     if let Some(scheme) = env
@@ -14278,6 +14439,18 @@ fn pattern_bindings(
                     let variant_info = adt_reg
                         .lookup_variant(ctor_name)
                         .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name));
+                    // RFC D-CHECK: record pattern match on an
+                    // out-of-module opaque type is rejected; binding
+                    // inference continues so no error cascades.
+                    if let Some((adt_name, _)) = variant_info {
+                        let adt_name = adt_name.to_string();
+                        crate::opacity::check_opaque_use(
+                            crate::opacity::OpaqueAction::PatRecord,
+                            &adt_name,
+                            adt_reg,
+                            errors,
+                        );
+                    }
                     let declared_field_names: Vec<Option<String>> = variant_info
                         .map(|(_, vi)| vi.fields.iter().map(|(n, _)| n.clone()).collect())
                         .unwrap_or_default();
@@ -14769,6 +14942,16 @@ fn infer_record(
         ));
         return Type::Error;
     };
+    // RFC D-CHECK: record construction of an out-of-module opaque
+    // type is rejected; inference continues so the literal still
+    // yields its true type (no cascades).
+    crate::opacity::check_opaque_use(
+        crate::opacity::OpaqueAction::RecordConstruction,
+        adt_name,
+        adt_reg,
+        errors,
+    );
+
     let declared_field_names: Vec<Option<String>> =
         variant.fields.iter().map(|(n, _)| n.clone()).collect();
     let known_field_set: HashSet<&str> = declared_field_names
@@ -14941,6 +15124,15 @@ fn infer_access(
     }
     match resolved {
         Type::Adt(ref adt_name, _) => {
+            // RFC D-CHECK: field access on an out-of-module opaque
+            // type is rejected; inference continues so the access
+            // still yields its true field type (no cascades).
+            crate::opacity::check_opaque_use(
+                crate::opacity::OpaqueAction::FieldAccess,
+                adt_name,
+                adt_reg,
+                errors,
+            );
             let Some(variant) = single_record_variant(adt_reg, adt_name) else {
                 // Multi-variant or positional-field ADT: field access
                 // is not defined for it; conservative status quo
@@ -15051,6 +15243,15 @@ fn infer_record_update(
     }
     match resolved {
         Type::Adt(ref adt_name, _) => {
+            // RFC D-CHECK: record update of an out-of-module opaque
+            // type is rejected; inference continues and returns the
+            // target's true type (no cascades).
+            crate::opacity::check_opaque_use(
+                crate::opacity::OpaqueAction::RecordUpdate,
+                adt_name,
+                adt_reg,
+                errors,
+            );
             let Some(variant) = single_record_variant(adt_reg, adt_name) else {
                 return Type::Error;
             };
@@ -15132,6 +15333,44 @@ fn infer_cast(
     );
     let resolved = subst.apply(&expr_ty);
 
+    // RFC D-CHECK cast gates: cast-into an out-of-module opaque type
+    // (both Deep target shapes, `t-prim` and `t-adt`, with aliases
+    // expanded) and cast-out of an out-of-module opaque value. Each
+    // pushes one OpaqueTypeViolation and returns the TRUE type of the
+    // expression so no error cascades; inside the defining module the
+    // existing cast semantics (including `CastNonTensor` for ADT
+    // sources) are unchanged.
+    if let Some(target_adt) = cast_target_adt_name(&kids[1], adt_reg) {
+        if crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::CastInto,
+            &target_adt,
+            adt_reg,
+            errors,
+        ) {
+            return Type::Adt(target_adt, Vec::new());
+        }
+    } else {
+        let mut peeled = &resolved;
+        while let Type::Ref(inner) = peeled {
+            peeled = inner.as_ref();
+        }
+        if let Type::Adt(source_adt, _) = peeled {
+            let source_adt = source_adt.clone();
+            if crate::opacity::check_opaque_use(
+                crate::opacity::OpaqueAction::CastOut,
+                &source_adt,
+                adt_reg,
+                errors,
+            ) {
+                return match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new())
+                {
+                    Type::Prim(p) => Type::Prim(p),
+                    _ => Type::Error,
+                };
+            }
+        }
+    }
+
     // kids[1] = (t-prim {} new_precision)
     // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2, unsigned
     // integer types (u8/u16/u32/u64 and the uint8/uint16/uint32/uint64
@@ -15176,6 +15415,35 @@ fn infer_cast(
             Type::Error
         }
     }
+}
+
+/// The nominal ADT a cast target names, if any: `(t-adt {} Name)` or
+/// a `(t-prim {} Name)` whose name is not a primitive but resolves in
+/// the ADT registry, with transparent aliases expanded to the nominal
+/// entry. Returns `None` for genuine primitive targets.
+fn cast_target_adt_name(expr: &deep::Expr, adt_reg: &AdtRegistry) -> Option<String> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    let name = children(list).first().and_then(symbol_name)?;
+    match get_tag(list) {
+        Some("t-adt") => {}
+        Some("t-prim") => {
+            if Prim::parse_name(name).is_some() {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    if adt_reg.lookup(name).is_some() {
+        return Some(name.to_string());
+    }
+    if let Some(alias) = adt_reg.resolve_alias(name)
+        && let Type::Adt(target, _) = &alias.body
+    {
+        return Some(target.clone());
+    }
+    None
 }
 
 /// Extract the symbol-name from a `(t-prim {} <name>)` Deep node so a

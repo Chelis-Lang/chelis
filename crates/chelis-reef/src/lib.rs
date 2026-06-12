@@ -4726,7 +4726,28 @@ fn rewrite_module_decls(
     let mut out = Vec::new();
     for decl in &module.decls {
         match decl {
-            Decl::Import { .. } | Decl::Export { .. } => {}
+            Decl::Import { .. } => {}
+            // Export decls survive the rewrite with internal names so
+            // the checker-enforced opacity layer (RFC D-CHECK sixth
+            // rejection / producer enumeration) can recover each
+            // module's export set from the linked decl stream; they
+            // desugar to inert `(export ...)` Deep nodes. Names that
+            // do not resolve to a module decl pass through unmapped
+            // (the resolver tolerated unknown exports by dropping
+            // them before; an inert unmapped symbol is equivalent).
+            Decl::Export { names, span } => out.push(Decl::Export {
+                names: names
+                    .iter()
+                    .map(|name| {
+                        resolver
+                            .own_names
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| name.clone())
+                    })
+                    .collect(),
+                span: *span,
+            }),
             Decl::Module { .. } => unreachable!("module wrappers already stripped"),
             _ => out.push(rewrite_decl(
                 decl,

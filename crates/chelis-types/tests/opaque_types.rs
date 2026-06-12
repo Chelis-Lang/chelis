@@ -391,15 +391,13 @@ def leak(x: f32) -> f32 = {
 #[test]
 fn outside_module_field_access_on_deferred_lambda_param_rejected() {
     // The access target is an unannotated lambda parameter whose type
-    // is still a Var when the access is inferred; the call `f(p)`
-    // later pins it to the opaque type. D-CHECK requires a
-    // deferred-access ledger (mirroring the deferred-borrow ledger)
-    // re-checked at def-level resolution.
+    // is still a Var when the access is inferred; the pipe stage
+    // application (`p |> fn (q) -> q.value` means the lambda applied
+    // to `p`) pins it to the opaque type later in the def. D-CHECK
+    // requires a deferred-access ledger (mirroring the
+    // deferred-borrow ledger) re-checked at def-level resolution.
     let outside = "module Agent.Strategy
-def leak(p: Probability) -> f32 = {
-  f = fn (q) -> q.value
-  f(p)
-}
+def leak(p: Probability) -> f32 = p |> fn (q) -> q.value
 ";
     let exprs = deep_of_surf(&[PROB_MODULE, outside]);
     assert_single_violation(
@@ -408,6 +406,37 @@ def leak(p: Probability) -> f32 = {
             "in def `leak`: field access on opaque type `Probability` outside its \
              defining module `stats.prob`; exported producers of `stats.prob`: {PROB_PRODUCERS}"
         ),
+    );
+}
+
+#[test]
+fn outside_module_let_generalized_accessor_rejected_fail_closed() {
+    // Let-polymorphism generalizes `f = fn (q) -> q.value` BEFORE the
+    // call `f(p)` runs, so the call instantiates fresh type variables
+    // and the recorded access target is never pinned -- a laundering
+    // channel for opaque values through a polymorphic accessor. The
+    // ledger mirrors the deferred-borrow precedent and rejects
+    // never-pinned targets fail-closed (scoped to check units that
+    // declare an opaque type).
+    let outside = "module Agent.Strategy
+def leak(p: Probability) -> f32 = {
+  f = fn (q) -> q.value
+  f(p)
+}
+";
+    let exprs = deep_of_surf(&[PROB_MODULE, outside]);
+    let errors = errors_ir(&exprs);
+    let violations = opaque_violations(&errors);
+    assert_eq!(
+        violations.len(),
+        1,
+        "expected exactly one fail-closed OpaqueTypeViolation, got: {errors:?}"
+    );
+    assert_eq!(
+        violations[0].message,
+        "in def `leak`: field access on an unresolved target type cannot be verified \
+         against opaque type boundaries; annotate the target so the checker can resolve it",
+        "pinned fail-closed message mismatch"
     );
 }
 
