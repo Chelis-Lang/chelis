@@ -19,6 +19,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(rules::surf_test_name_prefix::SurfTestNamePrefix),
         Box::new(rules::surf_def_arrow_form::SurfDefArrowForm),
         Box::new(rules::no_em_dash_in_public_strings::NoEmDashInPublicStrings),
+        Box::new(rules::opaque_domain_construction::OpaqueDomainConstruction),
     ]
 }
 

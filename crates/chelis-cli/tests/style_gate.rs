@@ -45,6 +45,29 @@ fn check_fails_on_lint_violation() {
         .stderr(predicates::str::contains("surf-value-snake-case"));
 }
 
+/// Package-level lint walks all Surf files, builds the opaque-type catalog,
+/// and rejects direct construction from another module.
+#[test]
+fn lint_check_fails_on_cross_file_opaque_domain_construction() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("whale.ch"),
+        "module Whale.Types\n@chelis_opaque\ntype Probability =\n  | Probability { value: f32 }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("agent.ch"),
+        "module Agent.Strategy\ndef bad(x: f32) -> Probability = Probability { value: x }\n",
+    )
+    .unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["lint", "--check", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("opaque-domain-construction"));
+}
+
 /// Blocking lint rules added to the registry also participate in the
 /// built-in style gate.
 #[test]
@@ -177,6 +200,44 @@ fn validate_deep_fails_on_deep_lint_violation() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("deep-user-symbol-charset"));
+}
+
+/// The style gate enforces opaque domain construction discipline for
+/// generated Deep as well as Surf.
+#[test]
+fn validate_deep_fails_on_opaque_domain_construction() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("opaque_forge.dp");
+    fs::write(
+        &path,
+        "(module {} whale.types\n  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (record {} Probability (kv {} value (lit {type: (t-prim {} f32)} 2.0))))\n",
+    )
+    .unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("opaque-domain-construction"));
+}
+
+/// Untyped Deep record updates fail closed when opaque domain types are
+/// in scope outside their defining module.
+#[test]
+fn validate_deep_fails_on_untyped_opaque_record_update() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("opaque_untyped_update.dp");
+    fs::write(
+        &path,
+        "(module {} whale.types\n  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))\n",
+    )
+    .unwrap();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("opaque-domain-construction"));
 }
 
 /// The validate gate can be bypassed with the same emergency flag.

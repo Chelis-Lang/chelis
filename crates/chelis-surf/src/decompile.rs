@@ -1357,12 +1357,25 @@ fn decompile_deftype(list: &List) -> String {
 
     let variants: Vec<String> = kids.iter().skip(2).map(decompile_variant).collect();
 
-    if variants.is_empty() {
+    let rendered = if variants.is_empty() {
         format!("type {name}{param_str}")
     } else {
         let variant_lines: Vec<String> = variants.iter().map(|v| format!("| {v}")).collect();
         format!("type {name}{param_str} =\n  {}", variant_lines.join("\n  "))
+    };
+    if has_true_meta(list, "chelis_opaque") {
+        format!("@chelis_opaque\n{rendered}")
+    } else {
+        rendered
     }
+}
+
+fn has_true_meta(list: &List, key: &str) -> bool {
+    meta(list).is_some_and(|meta| {
+        meta.entries.iter().any(|(entry_key, value)| {
+            entry_key == key && matches!(value, Expr::Atom(Atom::Bool(true), _))
+        })
+    })
 }
 
 fn decompile_variant(expr: &Expr) -> String {

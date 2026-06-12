@@ -2070,11 +2070,13 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             name,
             params,
             variants,
+            chelis_opaque,
             span: s,
         } => WireSurfDecl::TypeDef {
             name: name.clone(),
             params: params.clone(),
             variants: variants.iter().map(wire_variant).collect(),
+            chelis_opaque: *chelis_opaque,
             span: span(*s),
         },
         Decl::TypeAlias {

@@ -12,4 +12,3 @@ shell_sha256 = "109f355d81feebcee54d3511a7da58d8142e9055e1e9b7c7c6efecbd4f83ea0f
 [dependencies.source]
 kind = "bundled"
 compiler_version = "0.7.25"
-

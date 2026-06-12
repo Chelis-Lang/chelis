@@ -374,6 +374,7 @@ fn build_top_level_index_decl(text: &str, decl: &Decl, index: &mut TopLevelIndex
             params,
             variants,
             span,
+            ..
         } => {
             let mut hover = format!("type {}{}", name, format_type_params(params));
             if !variants.is_empty() {
