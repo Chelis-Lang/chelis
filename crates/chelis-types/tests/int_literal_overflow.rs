@@ -44,8 +44,13 @@ fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
         "diagnostic must suggest the i64 suffix workaround; got: {messages:?}"
     );
     assert!(
-        messages.iter().any(|m| m.contains("cast(2147483648, i64)")),
-        "diagnostic must suggest the explicit cast workaround; got: {messages:?}"
+        messages
+            .iter()
+            .any(|m| m.contains("cast(2147483648, int64)")),
+        "diagnostic must suggest the explicit cast workaround spelled \
+         with the prec type name `int64` (the `i64` spelling is only \
+         the literal suffix and is not a valid cast target); got: \
+         {messages:?}"
     );
     assert!(
         messages
@@ -110,7 +115,7 @@ fn cast_to_int32_of_out_of_range_literal_still_rejected() {
 /// hit the D1 path on the inner literal — so this test pins the
 /// expected behavior. If the negation path produces the same out-of-
 /// range diagnostic, that is documented here as the implementation
-/// surface (the user-facing workaround is `cast(N, i64)`).
+/// surface (the user-facing workaround is `cast(N, int64)`).
 #[test]
 fn literal_i32_min_minus_one_overflows_with_spec_5_3_diagnostic() {
     // `-2147483649` = -(2^31 + 1) is out of i32 range on the negative
