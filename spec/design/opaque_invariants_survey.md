@@ -31,8 +31,9 @@ clean (score 1, zero errors).
   (`crates/chelis-surf/src/desugar.rs:1230`); cast out of any ADT
   already errors (`CastNonTensor`, `infer.rs:14503-14510`).
 - `infer_lit` honors arbitrary `{type: (t-adt ...)}` metadata
-  (`infer.rs:7490-7496`) — a Deep-only forge path the checker must
-  gate.
+  (`infer.rs:7490-7496`) — a forge path the checker must gate.
+  (Superseded detail — see §11a: NOT Deep-only; Surf expression and
+  block-binding ascriptions desugar to the same lit metadata.)
 - Constructors are env-bound function schemes
   (`crates/chelis-types/src/adt.rs:203-219`); positional application
   of a record-shaped constructor already errors with "must use named

@@ -7,6 +7,19 @@ commits, and red-team reports. Changing a frozen decision requires a
 version bump and an explicit note in the owning PR.
 
 Version history:
+- v3: RT-0 fix-verification residuals. Sixth rejection broadened to
+  signature-mentions-T (closes the unexported caller-receives HOF
+  residual and makes "fully sealed" accurate); escape-site lint made
+  two-level (complete egress enumeration with provenance labels) and
+  extended to T-producing function values, with the indirect-callee
+  fail-closed rule and the one-hop laundering shape added to RT-3's
+  required attacks; signature rejection re-scoped by polarity
+  (caller-receives only — consumption positions are legal, restoring
+  D-INJECT's record-binder support); the invariant-only scoping
+  cliff reconciled explicitly; W6 flagship invariant pinned as a
+  tolerance band with exact float `==` documented as
+  Tier-C-starves-by-design; Inf-narrowing of the decode pre-check
+  documented; D-SYNTAX example wrapped in a named module.
 - v2: RT-0 fixes. Closes the two CRITICAL soundness holes (C2:
   sixth rejection for unexported-producer references; C1: exported
   signatures with caller-receives occurrences of the type are
@@ -87,31 +100,50 @@ quotable form, for downstream admission manifests that cite the
 composed guarantee:
 
 > Producer obligations mechanically cover every value of the type
-> returned across the module boundary. Values the defining module
+> returned across the module boundary. Values of the type — and
+> function values capable of producing it — that the defining module
 > passes outward as call arguments are covered by module audit, not
-> by machine-discharged obligations; the advisory
-> `opaque-escape-site` lint enumerates exactly those sites.
+> by machine-discharged obligations. The advisory
+> `opaque-escape-site` lint enumerates every such site, labeled by
+> local provenance; transitive flows within the module are the
+> audit's responsibility.
 
-The `opaque-escape-site` lint (D-LINT) is provenance-aware locally:
-it flags in-module argument-egress sites where the passed value is
-not locally traceable to a producer call or to a type-T input of the
-enclosing function — i.e., where it traces to a raw construction or
-a representation update. RT-3's soundness suite must include an
-adversarial leak through argument egress and confirm the lint
-surfaces it. The designed follow-up (out of V1 scope, queued):
-provenance-triggered escape obligations — only raw-construction-
-traced arguments carry them — bundled with the HOF extension, since
-both are the same escape-analysis family.
+The `opaque-escape-site` lint (D-LINT) enumerates **every**
+in-module argument-egress site — a call passing a value of the type,
+or a function value capable of producing it (the bare constructor, a
+closure whose return type contains it), to an out-of-module callee —
+at two levels: **note** for sites locally attested (the value traces
+to a producer call or a type-T input of the enclosing function) and
+**warning** for unattested sites (the value traces to a raw
+construction or representation update). The enumeration is complete;
+the provenance labels direct the audit. A call through a
+function-typed value of unknown provenance (a function parameter, a
+stored closure) counts as out-of-module — fail-closed. Local
+attestation is one-hop by design: a helper `g(p: T) = outside.f(p)`
+attests its own egress, and the audit follows callers of `g` —
+transitive flows are precisely what the module audit owns. RT-3's
+soundness suite must include adversarial leaks through argument
+egress in BOTH shapes — the naive direct leak and the one-hop
+laundered leak through an attested helper — and confirm the lint's
+enumeration surfaces the audit path for each. The designed follow-up
+(out of V1 scope, queued): provenance-triggered escape obligations —
+only raw-construction-traced arguments carry them — bundled with the
+HOF extension, since both are the same escape-analysis family.
 
 Red teams attack this argument as stated, not a reconstruction.
 
 ## 2. D-SYNTAX: surface syntax
 
 ```
+module Stats.Prob
+
 @opaque
 @invariant(p) p.value >= 0.0 and p.value <= 1.0
 type Probability = | Probability { value: f32 }
 ```
+
+(The enclosing named module is required — see D-CHECK; `@opaque`
+outside a named module is a declaration error.)
 
 - `@opaque` (renamed from the baseline's `@chelis_opaque`; the
   baseline is unreleased, so no alias or deprecation period).
@@ -180,14 +212,22 @@ language semantics, like `type`/`eff`/`lin`):
   forging — reachable from BOTH surfaces: Surf expression ascription
   (`0.5 : Probability`) and block-binding ascription desugar to
   exactly this lit metadata, so the gate must not be scoped to `.dp`
-  ingestion; and the **sixth rejection** (RT-0 C2): an out-of-module
-  reference to an *unexported* def of an opaque-defining module
-  whose result type contains the opaque type. The sixth rejection
+  ingestion; and the **sixth rejection** (RT-0 C2, broadened in v3):
+  an out-of-module reference to an *unexported* binding of an
+  opaque-defining module whose **signature mentions the opaque
+  type** — in the result, in any parameter, in function-typed
+  parameter domains, or as a non-function binding's type. The
+  broad scope (signature-mentions-T, not just result-contains-T)
+  closes the unexported caller-receives HOF channel: an unexported
+  `with_t(f: T -> f32) -> f32` must not be callable from outside, or
+  it hands caller code unobligated values while being held to a
+  weaker standard than its exported twin. The sixth rejection
   applies to all opaque types (not only invariant-carrying ones) so
   that adding an invariant later does not change which references
-  are legal; a module with no `export` decl is fully sealed (zero
-  callable producers — the `unreachable-producer` advisory flags
-  this).
+  are legal for *other modules'* code; a module with no `export`
+  decl is fully sealed for every T-mentioning binding (the
+  `unreachable-producer` advisory flags an opaque type left with
+  zero exported producers).
 - `@opaque` requires a named enclosing module (declaration error
   otherwise; RT-0 M6). Top-level code outside any module shares one
   anonymous module key per check unit, which would make the
@@ -303,15 +343,30 @@ contains the type in a produced position.
   any unsupported container (record, list, function type, generics
   other than Option) is an error naming the producer. Never a
   silent skip — one uncovered producer collapses D-SOUND.
-- **Signature rejection (RT-0 C1 shape 1):** for invariant-carrying
-  opaque types, an exported signature containing the type in a
-  caller-receives position — the domain of a function-typed
-  parameter, or any unsupported container anywhere in the signature
-  — is a declaration error naming the function and the channel.
-  Plain type-T parameters remain legal (update-shape inputs; the
-  induction covers them). Scoped to invariant-carrying types: the
-  channel only breaks assumption injection, and plain opacity is
-  unaffected by it.
+- **Signature rejection (RT-0 C1 shape 1; polarity-scoped in v3):**
+  for invariant-carrying opaque types, exported signature positions
+  are judged by which side receives the value:
+  - *Produced positions* (the return side): decompose-or-reject per
+    the rules above.
+  - *Caller-receives positions* (the domain of a function-typed
+    parameter, transitively): declaration error naming the function
+    and the channel — the module would hand caller-supplied code
+    unobligated values.
+  - *Module-receives positions* (plain type-T parameters, record
+    parameters with T fields, caller-implemented function parameters
+    whose RETURN contains T): **legal**. Outside code can only
+    assemble these from legally obtained values, so the induction
+    covers them — and D-INJECT's support for T nested in record
+    binders depends on record parameters staying legal.
+  Scoped to invariant-carrying types: the channel only breaks
+  assumption injection, and plain opacity is unaffected by it. The
+  scoping asymmetry with the sixth rejection is deliberate and
+  reconciled as follows: the sixth rejection's all-opaque scope
+  protects *other modules'* code from a semantics cliff when an
+  invariant is added; the signature rejection's errors land in the
+  defining module's own declarations, where adding `@invariant` is
+  the author's own act of strengthening the type's contract and is
+  expected to impose new conditions on the module's exported API.
 - Exported **non-function bindings** whose type contains the type
   are producers too (RT-0 L4): the obligation is that the invariant
   holds of the constant value.
@@ -458,8 +513,24 @@ fixed seed. User-precondition rejection sampling keeps its existing
 semantics and exhaustion behavior (`Error`) — the two failure modes
 stay distinguishable.
 
-The flagship simplex example (W6) must verify under injection
-without starving; it is the acceptance probe for this decision.
+**Exact float equality starves by design (RT-0 NEW-1).** Validation
+is strict — no epsilon semantics anywhere, because epsilon-validated
+samples would weaken exactly the soundness that validation provides.
+Consequently an invariant using exact `==` over float fields is
+nearly unsatisfiable as a float predicate: step 1 starves
+geometrically and step 2 starves too, since even a correct
+normalize-style producer emits sums merely *near* the target. This
+is treated as a defect of the invariant, not the generator: the
+documented idiom for float aggregates is a tolerance band over a
+module constant (`sum >= 1.0 - eps and sum <= 1.0 + eps`), which a
+correct producer satisfies at high rate under constructor-based
+proposals. The `==` advisory (D-WF) points at this section; the
+starvation diagnostic for equality-shaped predicates names Tier B
+(real semantics) as the only verification route.
+
+The flagship simplex example (W6) uses the tolerance-band invariant
+and must verify under injection without starving; it is the
+acceptance probe for this decision.
 
 ## 14. D-DECODE: decode revalidation
 
@@ -476,6 +547,11 @@ any payload containing a NaN or infinite value in a numeric
 representation field BEFORE predicate evaluation, restoring
 unconditional fail-closed behavior. Predicate evaluation error
 (division by zero, domain errors) also fails the decode (D-WF).
+The pre-check deliberately narrows types whose invariants would
+legitimately admit infinities (e.g. a log-probability field wanting
+`-Inf`): such representations are outside V1's decodable class. Any
+future relaxation must re-derive fail-closed semantics for the
+admitted non-finite values rather than silently reopening H1.
 
 V1 reality (survey §7): no external ADT payload codec exists yet.
 V1 therefore ships: `revalidate_adt_value` in the evaluator
