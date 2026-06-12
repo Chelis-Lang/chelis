@@ -416,6 +416,20 @@ impl<'a> EvalContext<'a> {
             return self.eval_named_axis_reduction_app(reduce_name, kids);
         }
 
+        // chelis#339 site A twin: a named-axis EXPAND app — the axis slot
+        // is a bare `(var name)` naming the *inserted* axis (and the
+        // optional fourth arg names the anchor). Same interception, same
+        // routing lane: IR lowering resolves the insertion point against
+        // the operand's named dims. The positional form (integer axis,
+        // possibly with a symbolic size) keeps the host path.
+        if let Some(expand_name) = builtin_name(func)
+            && expand_name == "expand"
+            && kids.len() >= 4
+            && var_name(&kids[2]).is_some()
+        {
+            return self.eval_named_axis_reduction_app(expand_name, kids);
+        }
+
         let args = kids[1..]
             .iter()
             .map(|arg| self.eval_expr(arg))

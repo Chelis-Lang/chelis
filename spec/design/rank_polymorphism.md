@@ -83,7 +83,7 @@ This is **Tier 2** of the three-tier analysis on chelis#258:
 |---|---|---|---|
 | 1 | identity (`out = R`) | `&tensor[R, f32] -> tensor[R, f32]` | **SHIPPED** |
 | 2 | constant / erasure (`out = []`) | `&tensor[R, f32] -> tensor[f32]` | **deferred** (no all-reduce primitive — see Implementation Status) |
-| 3 | arithmetic (named-axis reduction) | `&tensor[..pre, seq, ..post, f32] -> tensor[..pre, ..post, f32]` | **SHIPPED (reduction)** — check + C backend |
+| 3 | arithmetic (named-axis reduction) | `&tensor[..pre, seq, ..post, f32] -> tensor[..pre, ..post, f32]` | **SHIPPED (reduction `R−1` + expand `R+1`)** — check + C backend |
 
 **Tier-3 Update (name-preserving, shipped for reduction).** The original plan
 declared Tier-3 out of scope because the sketched `R ++ [k]` concatenation form
@@ -216,10 +216,38 @@ surviving d-vars, a leading d-var, a mixed d-var/d-name formal, and
 closures without declared param types, nested `vmap`, and unreadable
 axis literals fall back to the old `Lit`-dim marshalling.
 
+*Named-axis expand, `R+1` (chelis#339, SHIPPED).* The inverse arithmetic
+direction: `expand(x, new, size)` inserts a trailing named axis and
+`expand(x, new, size, anchor)` inserts immediately before an existing
+named anchor (spec §4.5.3). Unification stays unitary — the insertion
+point is an end of the row or a position fixed by a named anchor located
+uniquely in the operand; insertion strictly inside an opaque spread has
+no anchor and stays rejected (the computed output row never places the
+new axis there, so a declared result demanding it fails row
+unification). `shape_class("expand")` is now `NameTracked`, with the
+procedural arm (`check_expand_signature`) as the real gate: positional
+insert axes at symbolic rank, absent/ambiguous anchors, and inserted
+names that collide with an existing axis are hard errors. The 4-arg
+anchored form bypasses the arity-3 HM scheme through the
+`infer_expand_app` dispatcher (the `infer_permute_app` pattern).
+Lowering resolves the named insertion point against the monomorphized
+operand dims (trailing → operand rank; anchored → the anchor's index,
+loud error if absent) and stamps the inserted dim as
+`Named(name, Some(size))` so later by-name ops in the same body can
+find it. The chelis#338 eval routing treats a named-axis expand app
+exactly like a named-axis reduction app (site A interception + site B
+def-call routing). Acceptance lives in
+`crates/chelis-cli/tests/rank_poly_tier3.rs` (insert-at-end /
+insert-by-anchor positive on both lanes incl. `grad`/`vmap`, plus the
+negative parity suite).
+
 *Known gaps (follow-ups):* `max`/`min`/`prod` reduce in a `..r` body
-(chelis#340), expand (`R+1`), and a direct variadic-axis surface
-`sum(x, seq, head)` (chelis#339) remain follow-ups. The positional
-(integer-axis) reduction path on concrete operands is unchanged.
+(chelis#340) and a direct variadic-axis surface `sum(x, seq, head)`
+(chelis#339 Part 2) remain follow-ups. Leading-end insertion into a row
+that *begins with a spread* (`tensor[..rest]` with the new axis first)
+is not expressible — only trailing or anchored insertion is. The
+positional (integer-axis) reduction and expand paths on concrete
+operands are unchanged.
 
 ## Why this is needed
 

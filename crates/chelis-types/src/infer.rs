@@ -7125,13 +7125,15 @@ fn check_rank_body_discipline(
                     vec![],
                 ));
             }
-            // Identity (elementwise) or NameTracked (named-axis reduction)
-            // builtin — admissible. For a NameTracked op the procedural
-            // inference arm (`check_reduction_signature`) is the real gate: it
-            // verifies the reduced axis is a named axis of the operand and
+            // Identity (elementwise) or NameTracked (named-axis reduction /
+            // named-axis expand) builtin — admissible. For a NameTracked op
+            // the procedural inference arm (`check_reduction_signature` /
+            // `check_expand_signature`) is the real gate: it verifies the
+            // addressed axis is name-anchored against the operand and
             // computes a symbolic output that carries the surviving named axes
             // through, rejecting a positional index at symbolic rank or a
-            // non-existent axis. So no untracked transposition can slip past.
+            // non-existent/ambiguous/duplicate axis name. So no untracked
+            // transposition can slip past.
             Some(name)
                 if builtins::BUILTIN_NAMES.contains(&name)
                     && matches!(
@@ -7147,7 +7149,8 @@ fn check_rank_body_discipline(
                          `{name}`: it is not name-trackable at symbolic rank, so against a spread \
                          `..r` there are no named axes left to catch a transposition or reshape \
                          (spec/04-type-system.md \u{00a7}4.2). A `..r` body may call shape-identity \
-                         (elementwise) operations and named-axis reductions only."
+                         (elementwise) operations, named-axis reductions, and named-axis expand \
+                         only."
                     ),
                     vec![format!(
                         "remove the `{name}` call from the rank-polymorphic body, or use \
@@ -8188,6 +8191,25 @@ fn infer_app(
         );
     }
 
+    // chelis#339: the anchored named-axis expand form `expand(x, new, size,
+    // anchor)` carries four arguments, but the builtin HM scheme is arity-3
+    // (`(&tensor, int32, int32) -> out`), so it would hit the generic arity
+    // check before the procedural arm. Dispatch it here (the
+    // `infer_permute_app` pattern); 2-/3-arg expand keeps the generic path,
+    // which reaches `check_expand_signature` with the scheme intact.
+    if matches!(func_name.as_deref(), Some("expand")) && kids.len() >= 5 {
+        return infer_expand_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
     if matches!(
         func_name.as_deref(),
         Some(
@@ -8290,9 +8312,24 @@ fn infer_app(
         .iter()
         .enumerate()
         .map(|(index, arg)| {
-            let is_expand_size = matches!(func_name.as_deref(), Some("expand")) && index == 2;
+            // `expand` axis slots that may carry a dim NAME instead of a bound
+            // value: the size (index 2, §4.7.2 form 2) and — chelis#339
+            // named-axis expand — the inserted-axis name (index 1). The
+            // inserted-axis slot is scope-discriminated: a name bound in the
+            // value environment is a *runtime value* (the issue #259 class,
+            // `expand(&x, ax, 4)` with `ax: int32`), not a dim name, and must
+            // keep flowing through ordinary inference into the
+            // compile-time-constant rejection. The 4-arg anchored form routes
+            // through `infer_expand_app` instead and never reaches this loop.
+            let is_expand = matches!(func_name.as_deref(), Some("expand"));
+            let is_expand_size = is_expand && index == 2;
+            let is_expand_inserted_name = is_expand
+                && index == 1
+                && symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none());
             let is_reduction_axis = is_named_reduction && index >= 1;
-            if (is_expand_size || is_reduction_axis) && symbolic_dim_ref_name(arg).is_some() {
+            if (is_expand_size || is_expand_inserted_name || is_reduction_axis)
+                && symbolic_dim_ref_name(arg).is_some()
+            {
                 Type::Prim(Prim::Int32)
             } else {
                 infer_expr(
@@ -9021,8 +9058,22 @@ fn infer_app(
                         );
                     }
                     "expand" => {
-                        result_ty =
-                            check_expand_signature(&kids[1..], &arg_tys, &result_ty, subst, errors);
+                        // chelis#339: the axis slot is a dim NAME (the
+                        // named-axis insert form) only when it is not bound in
+                        // the value environment — a bound `int32` var is the
+                        // issue #259 runtime-value class instead.
+                        let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
+                            symbolic_dim_ref_name(arg)
+                                .is_some_and(|name| env.lookup(name).is_none())
+                        });
+                        result_ty = check_expand_signature(
+                            &kids[1..],
+                            &arg_tys,
+                            &result_ty,
+                            axis_is_dim_name,
+                            subst,
+                            errors,
+                        );
                     }
                     "layer_norm" => {
                         result_ty =
@@ -11549,6 +11600,109 @@ fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// chelis#339: infer the 4-arg anchored named-axis expand form
+/// `expand(x, new, size, anchor)` (spec/04-type-system.md §4.5.3). The
+/// builtin scheme is arity-3, so this form bypasses the generic HM arity
+/// check (the `infer_permute_app` pattern). The `new` and `anchor` slots
+/// carry dimension *names*, not bound values — like a named reduction
+/// axis they are typed as `int32` axes rather than inferred, and
+/// `check_expand_signature` reads the actual names back from the arg
+/// exprs.
+fn infer_expand_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() != 5 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "expand expects (tensor, axis, size) or the named-axis form \
+                 (tensor, name, size, anchor), got {} arguments",
+                kids.len() - 1
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let arg_tys: Vec<Type> = kids[1..]
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            // The name/size/anchor slots may carry dim names; a name bound in
+            // the value environment is a runtime value instead (issue #259
+            // scope discrimination, as in the generic-path exemption).
+            if index >= 1
+                && symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
+            {
+                Type::Prim(Prim::Int32)
+            } else {
+                infer_expr(
+                    arg,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                )
+            }
+        })
+        .collect();
+    if arg_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Type::Error;
+    }
+    // The size slot must still be an int32 (a literal, a symbolic dim, or a
+    // runtime int32 expression — §4.7.2); a non-int size is a type error the
+    // arity-3 scheme would otherwise have caught.
+    let size_ty = subst.apply(&arg_tys[2]);
+    match size_ty {
+        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("expand expects an int32 size, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    }
+
+    let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
+        symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
+    });
+    let result_ty = Type::Var(vg.fresh_tvar());
+    check_expand_signature(
+        &kids[1..],
+        &arg_tys,
+        &result_ty,
+        axis_is_dim_name,
+        subst,
+        errors,
+    )
+}
+
 fn infer_permute_app(
     list: &deep::List,
     env: &mut Env,
@@ -13849,10 +14003,11 @@ fn check_expand_signature(
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
+    axis_is_dim_name: bool,
     subst: &mut Subst,
     errors: &mut Vec<CheckError>,
 ) -> Type {
-    if arg_tys.len() != 3 {
+    if arg_tys.len() != 3 && arg_tys.len() != 4 {
         return Type::Error;
     }
 
@@ -13869,6 +14024,62 @@ fn check_expand_signature(
             return Type::Error;
         }
     };
+
+    let has_spread = input_dims.iter().any(|d| matches!(d, Dim::Rank(_)));
+
+    // chelis#339 named-axis expand (spec/04-type-system.md §4.5.3): when the
+    // axis argument is a dimension NAME rather than an integer, the call
+    // inserts a new named axis — at the trailing end (3-arg form) or
+    // immediately before an existing named anchor (4-arg form). This is the
+    // only valid expand form on a rank-spread operand. `axis_is_dim_name` is
+    // scope-discriminated by the caller: a bare var bound in the value
+    // environment is a runtime value (issue #259), not a dim name, and falls
+    // through to the compile-time-constant rejection below.
+    if axis_is_dim_name
+        && arg_exprs.get(1).and_then(extract_int_for_dim).is_none()
+        && let Some(new_name) = arg_exprs.get(1).and_then(symbolic_dim_ref_name)
+    {
+        return check_named_expand_signature(
+            new_name,
+            arg_exprs,
+            &input_dims,
+            has_spread,
+            input_prec,
+            result_ty,
+            subst,
+            errors,
+        );
+    }
+
+    // From here on the call is the positional concrete-rank form. A fourth
+    // (anchor) argument is only meaningful in the named-axis form.
+    if arg_exprs.len() == 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            "expand takes a fourth (anchor) argument only in the named-axis form \
+             `expand(x, new, size, anchor)`, where `new` names the inserted axis \
+             (spec/04-type-system.md \u{00a7}4.5.3)"
+                .to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    // A positional index is meaningless at symbolic rank: against a spread
+    // there is no fixed position to insert at. Mirror the reduction arm —
+    // name the inserted axis instead.
+    if has_spread {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            "expand: a positional integer axis is only valid on a concrete-rank \
+             operand; on a rank-spread operand, name the inserted axis (e.g. \
+             `expand(x, one, 1)` for a trailing insert, or `expand(x, c, n, seq)` \
+             to insert before the named `seq` anchor) so the insertion point stays \
+             name-anchored (spec/04-type-system.md \u{00a7}4.5.3)"
+                .to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
 
     // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
     // axis/size reach the non-negative-axis and positive-size checks at
@@ -13997,6 +14208,138 @@ fn check_expand_signature(
         }
     };
 
+    if let Err(te) = unify(result_ty, &canonical, subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+    subst.apply(&canonical)
+}
+
+/// The named-axis expand arm (chelis#339, spec/04-type-system.md §4.5.3):
+/// insert a new axis named `new_name` into the operand's row form — at the
+/// trailing end (3-arg form) or immediately before the named `anchor` axis
+/// (4-arg form). Insertion is unitary: the position is an end of the row or
+/// fixed by an anchor located uniquely in the operand; everything else is a
+/// hard error, never a guessed placement. The inserted dim enters the
+/// symbolic output as `Dim::Name`, so declared results refer to it by name
+/// and call-site monomorphization carries it through.
+#[allow(clippy::too_many_arguments)]
+fn check_named_expand_signature(
+    new_name: &str,
+    arg_exprs: &[deep::Expr],
+    input_dims: &[Dim],
+    has_spread: bool,
+    input_prec: TensorPrec,
+    result_ty: &Type,
+    subst: &mut Subst,
+    errors: &mut Vec<CheckError>,
+) -> Type {
+    // The inserted name must not collide with an existing named axis: a
+    // duplicate dim name would make every later by-name lookup (reduction,
+    // anchor location) ambiguous.
+    if input_dims
+        .iter()
+        .any(|d| matches!(d, Dim::Name(n) if n == new_name))
+    {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "expand: inserted axis `{new_name}` already names an axis of the operand; \
+                 a duplicate dim name would make later by-name axis lookups ambiguous \
+                 (spec/04-type-system.md \u{00a7}4.5.3). Pick a fresh name for the inserted \
+                 axis."
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    // A literal size must be positive, the same rule as the positional form.
+    // Symbolic and runtime int32 sizes carry no static extent to validate —
+    // the inserted dim is the NAME `new_name` either way (only lowering
+    // consumes the extent).
+    if let Some(size) = arg_exprs.get(2).and_then(extract_int_for_dim)
+        && size <= 0
+    {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!("expand requires positive size, got {size}"),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    // Resolve the insertion point: before the unique named anchor (4-arg
+    // form) or at the trailing end of the row (3-arg form).
+    let insert_at = match arg_exprs.get(3) {
+        Some(anchor_expr) => {
+            let Some(anchor) = symbolic_dim_ref_name(anchor_expr) else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "expand anchor must name an existing axis of the operand, got {} \
+                         (spec/04-type-system.md \u{00a7}4.5.3)",
+                        describe_axis_arg(arg_exprs.get(3)),
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            };
+            let hits: Vec<usize> = input_dims
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| matches!(d, Dim::Name(n) if n == anchor))
+                .map(|(i, _)| i)
+                .collect();
+            match hits.as_slice() {
+                [i] => *i,
+                [] if has_spread => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand: rank-spread operand has no named `{anchor}` axis to \
+                             anchor the insertion; insertion strictly inside an opaque \
+                             spread has no anchor and is rejected \
+                             (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                [] => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand anchor `{anchor}` is not a named axis of the operand: \
+                             the named-axis form inserts at the trailing end or immediately \
+                             before an existing named anchor (spec/04-type-system.md \
+                             \u{00a7}4.5.3)"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                _ => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand: anchor `{anchor}` is ambiguous; it appears more than \
+                             once in the operand shape (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+            }
+        }
+        None => input_dims.len(),
+    };
+
+    // Symbolic output: insert into the row form. Surviving dims (spreads
+    // included) keep identity and order; the new axis is a named dim.
+    let mut out_dims = input_dims.to_vec();
+    out_dims.insert(insert_at, Dim::Name(new_name.to_string()));
+    let canonical = Type::Tensor(out_dims, input_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
         errors.push(te.into());
         return Type::Error;
