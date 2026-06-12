@@ -177,6 +177,37 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
     )
 }
 
+/// Synthesize `(app {} (var {} fname) <operand> <axis>)` — one stage of the
+/// chelis#339 variadic named-axis reduction desugar. `sum(x, seq, head)`
+/// lowers as the documented composition `sum(sum(x, head), seq)`: each
+/// synthesized 2-arg stage resolves its named axis against its own operand's
+/// dims, so the result is order-insensitive.
+fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -> Expr {
+    let zero_span = Span::new(0, 0);
+    let callee = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("var".to_string()), zero_span),
+                Expr::Map(MetaMap::default(), zero_span),
+                Expr::Atom(Atom::Symbol(fname.to_string()), zero_span),
+            ],
+        },
+        zero_span,
+    );
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("app".to_string()), zero_span),
+                Expr::Map(MetaMap::default(), zero_span),
+                callee,
+                operand,
+                axis,
+            ],
+        },
+        app_span,
+    )
+}
+
 fn expr_diagnostic_location(expr: &Expr) -> (Option<Span>, Option<String>) {
     (Some(expr.span()), expr.span_id().map(ToOwned::to_owned))
 }
@@ -5833,6 +5864,23 @@ impl LowerCtx {
             // table) but the IR Sum node outputs the f32 accumulator
             // and we must insert a Cast back to the operand precision
             // to recover the user-facing tensor type.
+            // chelis#339 Part 2: variadic named-axis reduction
+            // (`sum(x, seq, head)`, spec §4.5.3). Desugar to the documented
+            // composition — innermost stage reduces the LAST listed axis —
+            // and recurse; each 2-arg stage resolves its named axis against
+            // its own operand's dims, so the result is order-insensitive.
+            // Only bare-name axes reach this arm (the checker rejects
+            // positional integers in the variadic form); anything else falls
+            // through to the 2-arg arms or the generic fallback.
+            "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
+                if args.len() >= 3 && args[1..].iter().all(|a| bare_var_name(a).is_some()) =>
+            {
+                let mut expr = args[0].clone();
+                for axis in args[1..].iter().rev() {
+                    expr = synth_reduction_app(func_name, expr, axis.clone(), app_span);
+                }
+                self.lower_expr_node(&expr, "variadic named-axis reduction")
+            }
             "sum" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "sum input");
                 let x_ty = self
@@ -6104,7 +6152,65 @@ impl LowerCtx {
             }
             "expand" if args.len() >= 2 => {
                 let x = self.lower_expr_node(&args[0], "expand input");
-                let axis = self.extract_usize_value(&args[1]).unwrap_or(0);
+                // chelis#339 named-axis expand (spec §4.5.3): when the axis
+                // argument is a dimension NAME, the insertion point is
+                // resolved against the monomorphized operand dims — the
+                // trailing end (3-arg form) or the index of the named anchor
+                // (4-arg form), mirroring `resolve_reduce_axis`. A bare name
+                // never falls through to the positional path: `extract_
+                // usize_value` would return None and the old `unwrap_or(0)`
+                // would silently insert at axis 0 (the repo forbids silent
+                // fallbacks).
+                let named_insert = if self.extract_usize_value(&args[1]).is_some() {
+                    None
+                } else {
+                    bare_var_name(&args[1])
+                };
+                // chelis#339: the inserted name must not collide with an axis
+                // of the MONOMORPHIZED operand. The checker rejects visible
+                // collisions, but a rank spread (or a single-letter dim var,
+                // which lowers to `Named` with its source letter) at the call
+                // boundary can cover an axis whose name the symbolic check
+                // cannot see; with a duplicate name in the dims, every later
+                // by-name lookup (`resolve_reduce_axis`,
+                // `resolve_expand_anchor`) is first-hit and would silently
+                // pick the wrong axis. Fail loudly instead.
+                if let Some(name) = &named_insert
+                    && let Some(node) = self.dag.get(x)
+                    && node
+                        .output_type
+                        .dims
+                        .iter()
+                        .any(|d| matches!(d, DimInfo::Named(n, _) if n == name))
+                {
+                    // FATAL: a plain lowering diagnostic is absorbed by the
+                    // host-fallback path, which would emit the def as a host
+                    // call referencing the axis names as undeclared C
+                    // identifiers — garbage C, not a loud failure.
+                    raise_fatal_lowering_error(
+                        format!(
+                            "`expand` inserts an axis named `{name}`, but the monomorphized \
+                             operand already carries an axis named `{name}` (a rank spread or \
+                             single-letter dim var at the call boundary can cover an axis name \
+                             the symbolic checker cannot see); later by-name axis lookups would \
+                             silently resolve to the wrong axis. Rename the inserted axis \
+                             (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        Some(args[1].span()),
+                        args[1].span_id().map(ToOwned::to_owned),
+                    );
+                }
+                let axis = match &named_insert {
+                    Some(_) => match args.get(3).and_then(bare_var_name) {
+                        Some(anchor) => self.resolve_expand_anchor(&args[3], x, &anchor),
+                        None => self
+                            .dag
+                            .get(x)
+                            .map(|node| node.output_type.dims.len())
+                            .unwrap_or(0),
+                    },
+                    None => self.extract_usize_value(&args[1]).unwrap_or(0),
+                };
                 // Recover the broadcast extent. Three sources, in order:
                 //
                 //   1. A statically-extractable size (a bare int, `(lit
@@ -6132,8 +6238,26 @@ impl LowerCtx {
                 } else {
                     DimExpr::Concrete(1)
                 };
+                // For a named insert, the new dim carries the inserted NAME
+                // (with its concrete extent when the size is static) so a
+                // later by-name op in the same body — `sum(expand(x, c, k), c)`
+                // — can locate it. A symbolic size keeps the size symbol's
+                // DimInfo (it must be declared by a Load; the inserted name
+                // would be an undeclared symbol for the C codegen).
+                let named_dim = match (&named_insert, &size) {
+                    (Some(name), DimExpr::Concrete(n)) => {
+                        Some(DimInfo::Named(name.clone(), Some(*n)))
+                    }
+                    _ => None,
+                };
                 let out_ty = self
                     .fallback_expand_type(x, axis, &size)
+                    .map(|mut t| {
+                        if let Some(dim) = named_dim {
+                            t.dims[axis] = dim;
+                        }
+                        t
+                    })
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
                     RiscOp::Expand { axis, size },
@@ -6570,6 +6694,36 @@ impl LowerCtx {
         }
         let raw = self.extract_axis_raw(axis_expr);
         self.normalize_axis(raw, fallback_rank, op, axis_expr)
+    }
+
+    /// Resolve a named-axis expand ANCHOR (chelis#339, Tier-3 §4.5.3) to the
+    /// positional insertion index against the operand node's monomorphized
+    /// dims — the lowering twin of `check_named_expand_signature`'s anchor
+    /// location, mirroring [`Self::resolve_reduce_axis`]. The checker proved
+    /// the anchor present and unique; if it is somehow absent here, fail
+    /// loudly — silently inserting at a default axis would broadcast along
+    /// the wrong dimension (the repo forbids silent fallbacks).
+    fn resolve_expand_anchor(&self, anchor_expr: &Expr, operand: NodeId, anchor: &str) -> usize {
+        if let Some(idx) = self.dag.get(operand).and_then(|node| {
+            node.output_type
+                .dims
+                .iter()
+                .position(|d| matches!(d, DimInfo::Named(n, _) if n.as_str() == anchor))
+        }) {
+            return idx;
+        }
+        // FATAL: a plain lowering diagnostic is absorbed by the host-fallback
+        // path (garbage C referencing the anchor as an undeclared identifier),
+        // which is exactly the silent-fallback class this error exists to
+        // prevent.
+        raise_fatal_lowering_error(
+            format!(
+                "`expand` inserts before named anchor `{anchor}`, but the monomorphized \
+                 operand has no such named axis: internal rank-monomorphization error"
+            ),
+            Some(anchor_expr.span()),
+            anchor_expr.span_id().map(ToOwned::to_owned),
+        );
     }
 
     /// operand `rank`. A negative axis `a` means `rank + a` (so `-1`

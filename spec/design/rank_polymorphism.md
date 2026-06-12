@@ -83,7 +83,7 @@ This is **Tier 2** of the three-tier analysis on chelis#258:
 |---|---|---|---|
 | 1 | identity (`out = R`) | `&tensor[R, f32] -> tensor[R, f32]` | **SHIPPED** |
 | 2 | constant / erasure (`out = []`) | `&tensor[R, f32] -> tensor[f32]` | **deferred** (no all-reduce primitive — see Implementation Status) |
-| 3 | arithmetic (named-axis reduction) | `&tensor[..pre, seq, ..post, f32] -> tensor[..pre, ..post, f32]` | **SHIPPED (reduction)** — check + C backend |
+| 3 | arithmetic (named-axis reduction) | `&tensor[..pre, seq, ..post, f32] -> tensor[..pre, ..post, f32]` | **SHIPPED (reduction `R−1` + expand `R+1`)** — check + C backend |
 
 **Tier-3 Update (name-preserving, shipped for reduction).** The original plan
 declared Tier-3 out of scope because the sketched `R ++ [k]` concatenation form
@@ -216,10 +216,81 @@ surviving d-vars, a leading d-var, a mixed d-var/d-name formal, and
 closures without declared param types, nested `vmap`, and unreadable
 axis literals fall back to the old `Lit`-dim marshalling.
 
+*Named-axis expand, `R+1` (chelis#339, SHIPPED).* The inverse arithmetic
+direction: `expand(x, new, size)` inserts a trailing named axis and
+`expand(x, new, size, anchor)` inserts immediately before an existing
+named anchor (spec §4.5.3). Unification stays unitary — the insertion
+point is an end of the row or a position fixed by a named anchor located
+uniquely in the operand; insertion strictly inside an opaque spread has
+no anchor and stays rejected (the computed output row never places the
+new axis there, so a declared result demanding it fails row
+unification). `shape_class("expand")` is now `NameTracked`, with the
+procedural arm (`check_expand_signature`) as the real gate: positional
+insert axes at symbolic rank, absent/ambiguous anchors, inserted
+names that collide with an existing axis, and non-literal sizes (the
+named insert requires a positive compile-time literal size — a
+symbolic or runtime size has no extent to stamp onto the inserted
+named dim) are hard errors. The collision rule extends to call-site
+rank monomorphization: when the inserted name survives into the result
+row, a caller whose spread binds an axis of the same name is rejected
+at check time (the introduced-name rule in `unify.rs`). The 4-arg
+anchored form bypasses the arity-3 HM scheme through the
+`infer_expand_app` dispatcher (the `infer_permute_app` pattern).
+Lowering resolves the named insertion point against the monomorphized
+operand dims (trailing → operand rank; anchored → the anchor's index,
+fatal error if absent — a plain lowering diagnostic would be absorbed
+by the host fallback) and stamps the inserted dim as
+`Named(name, Some(size))` so later by-name ops in the same body can
+find it; an inserted name already present in the monomorphized operand
+dims is a fatal lowering error at the expand site (see Known gaps). The chelis#338 eval routing treats a named-axis expand app
+exactly like a named-axis reduction app (site A interception + site B
+def-call routing). Acceptance lives in
+`crates/chelis-cli/tests/rank_poly_tier3.rs` (insert-at-end /
+insert-by-anchor positive on both lanes incl. `grad`/`vmap`, plus the
+negative parity suite).
+
+*Variadic named-axis reduction (chelis#339 Part 2, SHIPPED).*
+`sum(x, seq, head)` reduces several named axes in one call, equivalent
+to the documented composition and order-insensitive. The arity-2
+reduction schemes are bypassed by an `infer_reduction_app` dispatcher;
+`check_reduction_signature`'s named loop validates every axis
+(positional integers, unknown names, ambiguity, and duplicates are hard
+errors — duplicates are never silently deduplicated). Defined for the
+value reductions (`sum`/`mean`/`max_reduce`/`min_reduce`/`prod_reduce`;
+mean-of-means equals the joint mean under uniform weights); the
+index-returning `argmax_reduce`/`argmin_reduce` get a targeted
+no-variadic-form rejection. Lowering desugars the variadic app to the
+nested 2-arg composition (`synth_reduction_app`), so the C backend,
+eval routing, `grad`, and `vmap` all ride the existing single-axis
+lanes — inheriting their behavior unchanged, including one pre-existing
+gap (below). Body-Discipline admission in a `..r` body is unchanged
+(`sum`/`mean` only, chelis#340). Acceptance: the `variadic_*` suite in
+`crates/chelis-cli/tests/rank_poly_tier3.rs`.
+
 *Known gaps (follow-ups):* `max`/`min`/`prod` reduce in a `..r` body
-(chelis#340), expand (`R+1`), and a direct variadic-axis surface
-`sum(x, seq, head)` (chelis#339) remain follow-ups. The positional
-(integer-axis) reduction path on concrete operands is unchanged.
+(chelis#340) remains a follow-up (single-axis and variadic alike).
+Leading-end insertion into a row that *begins with a spread*
+(`tensor[..rest]` with the new axis first) is not expressible — only
+trailing or anchored insertion is. Two expand-collision flavors are
+check-clean but fail **loudly** at build/eval (fatal lowering error at
+the expand site, pinned by
+`named_expand_body_internal_collision_fails_loud_not_silent` and
+`named_expand_dvar_letter_collision_fails_loud`): (a) the inserted name
+is consumed inside the body (insert + reduce), so the signature carries
+no trace the call-site rule could reject; (b) the operand signature
+uses a single-letter dim *var* whose source letter equals the inserted
+name — d-vars lower to `Named` with their source letter, a collision
+the checker (which sees an anonymous `Dim::Var`) cannot represent.
+Rejecting these at check time needs body-aware call-site re-checking or
+α-fresh d-var lowering, respectively. PRE-EXISTING (chelis#383; verified on main at
+d786744, untouched by chelis#339): `vmap` over a def chaining TWO named
+reduces to a scalar ICEs on the dag.rs symbolic-dim guard when the
+vmapped operand is a top-level *binding* (`vmap(f)(y)`; an inline
+literal operand and single-stage reduces are fine) — the
+chelis#346/#351 annotation-dims family in a lane those fixes did not
+cover; the variadic form desugars to that composition and inherits the
+gap unchanged. The positional (integer-axis) reduction and expand paths
+on concrete operands are unchanged.
 
 ## Why this is needed
 

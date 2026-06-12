@@ -12,10 +12,11 @@ use super::*;
 
 impl<'a> EvalContext<'a> {
     /// chelis#338: does evaluating a call to `resolved_name` require
-    /// routing through IR lowering because a *named-axis* reduction is
+    /// routing through IR lowering because a *named-axis* op is
     /// involved? True when the def's body contains a reduction whose
-    /// axis argument is a bare `(var name)`, or when it references a
-    /// rank-polymorphic def that does. References through defs with
+    /// axis argument is a bare `(var name)` — or a named-axis expand
+    /// (chelis#339), whose axis slot names the inserted axis — or when
+    /// it references a rank-polymorphic def that does. References through defs with
     /// concrete signatures do NOT propagate the flag: the interpreter
     /// descends and routes at the deeper call boundary instead, which
     /// keeps host constructs (print, lists, ...) in the host lane,
@@ -108,7 +109,8 @@ impl<'a> EvalContext<'a> {
     }
 
     /// chelis#338 site A: evaluate a reduction whose axis argument is a
-    /// named axis by routing `(app <reduce> <operand> <axes...>)`
+    /// named axis — or a chelis#339 named-axis expand — by routing
+    /// `(app <op> <operand> <axes...>)`
     /// through IR lowering + the forward DAG evaluator. The operand is
     /// evaluated by the interpreter first (so nested def calls, pipes,
     /// and lets keep host semantics), then staged as a typed
@@ -131,7 +133,7 @@ impl<'a> EvalContext<'a> {
             .join(", ");
         let Some(operand_ty_expr) = self.static_type_expr_of(operand_expr) else {
             return Err(format!(
-                "named-axis reduction `{reduce_name}(.., {axis_list})` cannot be evaluated \
+                "named-axis `{reduce_name}(.., {axis_list})` cannot be evaluated \
                  here: the operand has no statically known tensor type in the host runtime, \
                  so the named axis cannot be resolved to an index (chelis#338). Bind the \
                  operand to a parameter or binding with a declared tensor type."
@@ -148,7 +150,7 @@ impl<'a> EvalContext<'a> {
         let operand_type =
             declared_tensor_type_for_value(&operand_ty_expr, &operand).map_err(|err| {
                 format!(
-                    "named-axis reduction `{reduce_name}(.., {axis_list})` cannot be \
+                    "named-axis `{reduce_name}(.., {axis_list})` cannot be \
                      evaluated here: {err} (chelis#338)"
                 )
             })?;
@@ -494,9 +496,25 @@ fn app_reduces_named_axis(list: &List) -> bool {
     kids.len() >= 3 && kids[2..].iter().any(|axis| var_name(axis).is_some())
 }
 
-/// Walk a Deep expr looking for a named-axis reduction app, collecting
-/// every `(var name)` reference on the way so the caller can follow
-/// them into def bodies (mirrors [`scan_expr_for_host_only`]).
+/// chelis#339 twin: is this an `(app expand <operand> <name> <size>
+/// <anchor?>)` named-axis expand — the axis slot is a bare `(var name)`
+/// naming the inserted axis? (The positional form with an integer axis,
+/// possibly carrying a symbolic *size*, is NOT a named-axis app and
+/// keeps the host path.)
+fn app_expands_named_axis(list: &List) -> bool {
+    if tag(list) != Some("app") {
+        return false;
+    }
+    let kids = children(list);
+    let Some(callee) = kids.first().and_then(var_name) else {
+        return false;
+    };
+    callee == "expand" && kids.len() >= 4 && kids.get(2).and_then(var_name).is_some()
+}
+
+/// Walk a Deep expr looking for a named-axis reduction or expand app,
+/// collecting every `(var name)` reference on the way so the caller can
+/// follow them into def bodies (mirrors [`scan_expr_for_host_only`]).
 fn scan_expr_for_named_axis_reduction(expr: &Expr, hit: &mut bool, vars: &mut Vec<String>) {
     if *hit {
         return;
@@ -504,7 +522,7 @@ fn scan_expr_for_named_axis_reduction(expr: &Expr, hit: &mut bool, vars: &mut Ve
     match expr {
         Expr::MetaExpr(meta, _) => scan_expr_for_named_axis_reduction(&meta.expr, hit, vars),
         Expr::List(list, _) => {
-            if app_reduces_named_axis(list) {
+            if app_reduces_named_axis(list) || app_expands_named_axis(list) {
                 *hit = true;
                 return;
             }

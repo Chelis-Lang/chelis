@@ -281,6 +281,580 @@ fn duplicate_spread_name_rejected() {
     );
 }
 
+// ── Named-axis expand (R+1, chelis#339) ─────────────────────────────────
+// The inverse arithmetic direction (spec/04-type-system.md §4.5.3):
+// `expand(x, new, size)` inserts a trailing named axis; the 4-arg
+// `expand(x, new, size, anchor)` inserts immediately before an existing
+// named anchor. Insertion strictly inside an opaque spread has no anchor
+// and stays rejected.
+
+/// Trailing insert: ONE rank-poly def appends a named axis at any rank, and
+/// concrete-rank callers at ranks 1/2/3 all monomorphize cleanly.
+#[test]
+fn named_expand_trailing_callable_at_ranks_1_2_3() {
+    let json = check_json(
+        "def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = expand(x, one, 1)\n\
+         def use1(x: &tensor[seq, f32]) -> tensor[seq, one, f32] = add_axis(x)\n\
+         def use2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, one, f32] = add_axis(x)\n\
+         def use3(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, seq, hidden, one, f32] = add_axis(x)\n",
+    );
+    assert_clean(&json, "named trailing expand callable at ranks 1-3");
+}
+
+/// Anchored insert: the new axis lands immediately before the named anchor,
+/// monomorphized at two distinct concrete shapes with the anchor at
+/// DIFFERENT positions (leading and interior).
+#[test]
+fn named_expand_by_anchor_callable_at_two_anchor_positions() {
+    let json = check_json(
+        "def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = expand(x, c, 5, seq)\n\
+         def use_lead(x: &tensor[seq, hidden, f32]) -> tensor[c, seq, hidden, f32] = widen(x)\n\
+         def use_mid(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, c, seq, hidden, f32] = widen(x)\n",
+    );
+    assert_clean(&json, "anchored expand at leading and interior anchors");
+}
+
+/// Leading-end insert via a leading named anchor: a row that BEGINS with a
+/// named anchor admits insertion before it (the spec's leading-end rule).
+#[test]
+fn named_expand_leading_via_leading_anchor() {
+    let json = check_json(
+        "def lead(x: &tensor[seq, ..rest, f32]) -> tensor[c, seq, ..rest, f32] = expand(x, c, 2, seq)\n\
+         def use(x: &tensor[seq, hidden, f32]) -> tensor[c, seq, hidden, f32] = lead(x)\n",
+    );
+    assert_clean(&json, "leading insert via leading named anchor");
+}
+
+/// Concrete-rank control: the named forms also work without any spread, and
+/// compose with the named reduction (reduce the just-inserted axis by name).
+#[test]
+fn named_expand_concrete_rank_clean() {
+    let json = check_json(
+        "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, c, seq, f32] = expand(x, c, 4, seq)\n\
+         def g(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, one, f32] = expand(x, one, 1)\n",
+    );
+    assert_clean(&json, "concrete-rank named expand (trailing + anchored)");
+}
+
+/// NEGATIVE: insertion strictly inside an opaque spread has no anchor. The
+/// computed output row places the new axis only at an end or at an anchor,
+/// so a declared result demanding `[..lo, c, ..hi]` from `[..rest]` fails
+/// row unification and is rejected (spec §4.5.3).
+#[test]
+fn named_expand_inside_opaque_spread_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[..rest, f32]) -> tensor[..lo, c, ..hi, f32] = expand(x, c, 4)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "doesn't match declared signature",
+        "insertion strictly inside an opaque spread",
+    );
+}
+
+/// NEGATIVE: the anchor must be a named axis of the operand. A rank-spread
+/// operand with no such axis is a hard error naming the §4.5.3 rule.
+#[test]
+fn named_expand_absent_anchor_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = expand(x, c, 5, nope)\n",
+    );
+    assert_rejected_with(&json, "nope", "anchor `nope` absent from the operand row");
+}
+
+/// NEGATIVE: an ambiguous anchor (appears more than once in the operand) is
+/// rejected rather than silently picking an occurrence.
+#[test]
+fn named_expand_ambiguous_anchor_rejected() {
+    let json = check_json(
+        "def f(x: &tensor[seq, mid, seq, f32]) -> tensor[seq, mid, c, seq, f32] = expand(x, c, 2, seq)\n",
+    );
+    assert_rejected_with(&json, "ambiguous", "anchor `seq` appears twice");
+}
+
+/// NEGATIVE: the inserted name must not collide with an existing axis name —
+/// a duplicate dim name would make every later by-name lookup ambiguous.
+#[test]
+fn named_expand_duplicate_inserted_name_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, seq, f32] = expand(x, seq, 5)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "already names an axis",
+        "inserted name collides with existing `seq` axis",
+    );
+}
+
+/// NEGATIVE: a positional (integer) insert axis on a rank-spread operand is
+/// meaningless at symbolic rank — concrete-rank only, like reductions.
+#[test]
+fn named_expand_positional_axis_on_spread_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = expand(x, 0, 1)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "positional",
+        "positional insert axis on a rank-spread operand",
+    );
+}
+
+/// NEGATIVE (chelis#339 red team): the inserted name collides with an axis
+/// the caller's rank spread covers, and the collision is visible in the
+/// SIGNATURE (the inserted name survives into the result row). The symbolic
+/// collision check inside the def cannot see it; the call-site
+/// introduced-name rule must reject it — otherwise the monomorphized result
+/// carries `chan` twice with extents 2 and 5 (`[chan, chan, seq]` believed
+/// `[2, 2, 3]`, actual `[2, 5, 3]`).
+#[test]
+fn named_expand_spread_covered_collision_rejected_at_check() {
+    let json = check_json(
+        "def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, chan, seq, ..post, f32] = expand(x, chan, 5, seq)\n\
+         def use_col(x: &tensor[chan, seq, f32]) -> tensor[chan, chan, seq, f32] = widen(x)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "collides with an inserted axis name",
+        "anchored insert: spread covers the inserted name at the call site",
+    );
+}
+
+/// NEGATIVE twin for the trailing form: `add_axis` called with an operand
+/// whose leading axis is already named `one`.
+#[test]
+fn named_expand_trailing_spread_covered_collision_rejected_at_check() {
+    let json = check_json(
+        "def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = expand(x, one, 1)\n\
+         def use_col(x: &tensor[one, seq, f32]) -> tensor[one, seq, one, f32] = add_axis(x)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "collides with an inserted axis name",
+        "trailing insert: spread covers the inserted name at the call site",
+    );
+}
+
+/// PINNED GAP + loudness lock (chelis#339 red team): when the inserted name
+/// is consumed INSIDE the body (insert + reduce-by-name), the signature
+/// carries no trace of it, so the check stays clean and the collision only
+/// materializes at call-site rank monomorphization. Both lanes must fail
+/// LOUDLY — before the lowering guard this silently reduced the WRONG axis
+/// (backend printed shape [5, 3] against a declared `[chan, seq]` = [2, 3]).
+/// If the check ever learns to reject this at check time, fold this into the
+/// check-rejection tests above.
+#[test]
+fn named_expand_body_internal_collision_fails_loud_not_silent() {
+    let source = "def wr(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = sum(expand(x, chan, 5, seq), chan)\n\
+         def use_col(x: &tensor[chan, seq, f32]) -> tensor[chan, seq, f32] = wr(x)\n\
+         y = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         out = use_col(y)\n";
+    // The check is clean — the gap this test pins.
+    assert_clean(&check_json(source), "body-internal collision checks clean");
+    // Build lane: the fatal expand-site lowering guard, never garbage C and
+    // never a silent wrong-axis reduce.
+    let stderr = build_expecting_failure(source, "body_internal_collision");
+    assert!(
+        stderr.contains("already carries an axis named `chan`"),
+        "expected the expand-site collision diagnostic, got: {stderr}"
+    );
+    // Eval lane: loud failure (the #338 routing decline or the collision
+    // guard, depending on staging), never a silent wrong shape.
+    let dir = tempdir().expect("tempdir");
+    let eval_stderr = eval_stderr_expecting_failure(dir.path(), source, "body_internal_collision");
+    assert!(
+        eval_stderr.contains("chan"),
+        "expected a loud named-axis failure mentioning the colliding axis, got: {eval_stderr}"
+    );
+}
+
+/// PINNED GAP + loudness lock (chelis#339 red team): a single-letter dim VAR
+/// in the operand signature lowers to `Named` with its source letter, so an
+/// inserted axis with the same letter collides at IR level even though the
+/// checker (which sees an anonymous `Dim::Var`) stays clean. Must fail loudly
+/// in both lanes — the declared result `[c, seq, c]` would otherwise carry
+/// extents 2 and 4 under one name.
+#[test]
+fn named_expand_dvar_letter_collision_fails_loud() {
+    let source = "def f(x: &tensor[c, seq, f32]) -> tensor[c, seq, c, f32] = expand(x, c, 4)\n\
+         y = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         out = f(y)\n";
+    assert_clean(&check_json(source), "d-var letter collision checks clean");
+    let stderr = build_expecting_failure(source, "dvar_letter_collision");
+    assert!(
+        stderr.contains("already carries an axis named `c`"),
+        "expected the expand-site collision diagnostic, got: {stderr}"
+    );
+    let dir = tempdir().expect("tempdir");
+    let eval_stderr = eval_stderr_expecting_failure(dir.path(), source, "dvar_letter_collision");
+    assert!(
+        eval_stderr.contains("already carries an axis named `c`"),
+        "expected the expand-site collision diagnostic in eval, got: {eval_stderr}"
+    );
+}
+
+/// NEGATIVE (chelis#339 red team): the named-insert size must be a
+/// compile-time literal. A symbolic-dim size loses the inserted NAME at
+/// lowering (the same-body `sum(.., chan)` then cannot locate it and the
+/// emitted C referenced the raw symbol), and a runtime int32 size produced a
+/// silent shape-0 tensor in the backend. Both are rejected at check time.
+#[test]
+fn named_expand_size_must_be_compile_time_literal() {
+    let symbolic = check_json(
+        "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = sum(expand(x, chan, batch), chan)\n",
+    );
+    assert_rejected_with(
+        &symbolic,
+        "compile-time literal size",
+        "symbolic-dim size in the named insert form",
+    );
+    let runtime = check_json(
+        "def f(x: &tensor[seq, f32], k: int32) -> tensor[seq, chan, f32] = expand(x, chan, k)\n",
+    );
+    assert_rejected_with(
+        &runtime,
+        "compile-time literal size",
+        "runtime int32 size in the named insert form",
+    );
+}
+
+/// CONTROL (chelis#339 red team): a visible leading anchor with a
+/// trailing-spread-covered axis of the SAME name is legal and must keep
+/// reducing the visible (leftmost) anchor — this pins the first-hit
+/// resolution a naive multiple-hits ambiguity guard would break.
+#[test]
+fn named_reduce_visible_anchor_with_spread_covered_duplicate_stays_correct() {
+    let source = "def f(x: &tensor[seq, ..rest, f32]) -> tensor[..rest, f32] = sum(x, seq)\n\
+         def use_dup(x: &tensor[seq, hidden, seq, f32]) -> tensor[hidden, seq, f32] = f(x)\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]]])\n\
+         out = use_dup(y)\n";
+    let backend = build_compile_run(source, "visible_anchor_dup");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![3, 2], "backend shape ({backend})");
+    for (i, e) in [11.0, 22.0, 33.0, 44.0, 55.0, 66.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e}",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "visible_anchor_dup", &backend);
+}
+
+/// The named-expand def builds, compiles, runs, and the backend agrees with
+/// the eval oracle — trailing insert at ranks 1 and 2, anchored insert at two
+/// anchor positions, all NON-SQUARE so an axis mislabel fails loudly, plus a
+/// size>1 broadcast (expand replicates data along the new axis).
+#[test]
+fn named_expand_builds_runs_and_evals() {
+    let source = "def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = expand(x, one, 1)\n\
+         def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = expand(x, c, 3, seq)\n\
+         def a1(x: &tensor[seq, f32]) -> tensor[seq, one, f32] = add_axis(x)\n\
+         def a2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, one, f32] = add_axis(x)\n\
+         def w_lead(x: &tensor[seq, hidden, f32]) -> tensor[c, seq, hidden, f32] = widen(x)\n\
+         def w_mid(x: &tensor[batch, seq, f32]) -> tensor[batch, c, seq, f32] = widen(x)\n\
+         out1 = a1(to_tensor([1.0, 2.0, 3.0]))\n\
+         out2 = a2(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         outl = w_lead(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         outm = w_mid(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    let backend = build_compile_run(source, "named_expand_builds_runs");
+    let tensors = parse_printed_tensors(&backend);
+    // out1: [seq=3] -> [3, 1], data unchanged.
+    // out2: [batch=2, seq=3] -> [2, 3, 1], data unchanged.
+    // outl: [seq=2, hidden=2] -> [c=3, 2, 2]: 3 copies of the input.
+    // outm: [batch=2, seq=3] -> [2, c=3, 3]: per batch row, 3 copies.
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out1", &[3, 1], &[1.0, 2.0, 3.0]),
+        ("out2", &[2, 3, 1], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        (
+            "outl",
+            &[3, 2, 2],
+            &[1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0],
+        ),
+        (
+            "outm",
+            &[2, 3, 3],
+            &[
+                1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0,
+                5.0, 6.0,
+            ],
+        ),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "named_expand_builds_runs", &backend);
+}
+
+/// Transform lanes over the new capability: `grad` through a named expand
+/// (the broadcast adjoint sums over the inserted axis -> gradient = size
+/// copies) and `vmap` over a def that calls the rank-poly named-expand def,
+/// both eval-vs-backend pinned.
+#[test]
+fn named_expand_under_grad_and_vmap_evals_and_matches_backend() {
+    let source = "def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = expand(x, c, 3, seq)\n\
+         def inner(x: &tensor[seq, f32]) -> tensor[c, seq, f32] = widen(x)\n\
+         def total(x: &tensor[seq, f32]) -> f32 = tensor_to_scalar(sum(sum(widen(x), c), seq))\n\
+         out = vmap(inner)(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         gr = grad(total)(to_tensor([1.0, 2.0]))\n";
+    assert_clean(&check_json(source), "expand grad/vmap matrix checks clean");
+    let backend = build_compile_run(source, "named_expand_grad_vmap");
+    let tensors = parse_printed_tensors(&backend);
+    // out: per batch slice [seq=2] -> [c=3, seq=2] (3 copies).
+    // gr: total = 3 * sum(x), so d/dx = 3 everywhere.
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        (
+            "out",
+            &[2, 3, 2],
+            &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 3.0, 4.0],
+        ),
+        ("gr", &[2], &[3.0, 3.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "named_expand_grad_vmap", &backend);
+}
+
+/// The anchored 4-arg sig survives `chelis fmt` (round-trip + idempotence +
+/// re-checks clean), mirroring the reduction round-trip invariant.
+#[test]
+fn named_expand_survives_fmt_round_trip() {
+    let src = "def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = expand(x, c, 5, seq)\n";
+    let once = fmt_stdout(src);
+    assert!(
+        once.contains("..pre") && once.contains("expand(x, c, 5, seq)"),
+        "fmt must preserve the named-expand call, got:\n{once}"
+    );
+    let twice = fmt_stdout(&once);
+    assert_eq!(once, twice, "chelis fmt must be idempotent on named expand");
+    assert_clean(&check_json(&once), "formatted named expand re-checks clean");
+}
+
+/// TOP-LEVEL named-axis apps (no def-call boundary): the eval lane's site-A
+/// interception must route a bare `expand(y, one, 1)` / `expand(y, c, 3,
+/// seq)` / variadic `sum(y, batch, seq)` root through IR lowering — the
+/// def-call tests above only exercise site B, so a site-A regression would
+/// otherwise be invisible. Both lanes pinned value-for-value.
+#[test]
+fn top_level_named_expand_and_variadic_sum_eval_match_backend() {
+    let source = "def id2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x)\n\
+         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out_t = expand(y, one, 1)\n\
+         out_a = expand(y, c, 3, seq)\n\
+         out_vr = sum(y, batch, seq)\n";
+    let backend = build_compile_run(source, "top_level_named_axis_ops");
+    let tensors = parse_printed_tensors(&backend);
+    // out_t: trailing insert -> [2, 2, 1], data unchanged.
+    // out_a: c=3 inserted before seq (axis 1) -> [2, 3, 2], rows tripled.
+    // out_vr: all-axes variadic sum -> rank-0 [/* 10 */].
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out_t", &[2, 2, 1], &[1.0, 2.0, 3.0, 4.0]),
+        (
+            "out_a",
+            &[2, 3, 2],
+            &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 3.0, 4.0],
+        ),
+        ("out_vr", &[], &[10.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "top_level_named_axis_ops", &backend);
+}
+
+// ── Variadic named-axis reduction (chelis#339 Part 2) ───────────────────
+// `sum(x, seq, head)` reduces several named axes in one call, equivalent
+// to the documented composition `sum(sum(x, head), seq)` and
+// order-insensitive. Defined for the value reductions
+// (sum/mean/max_reduce/min_reduce/prod_reduce); NOT for the
+// index-returning argmax/argmin (composition is ill-defined).
+
+/// Variadic `sum`/`mean` check clean at concrete rank AND in a rank-poly
+/// body, in both axis orders.
+#[test]
+fn variadic_reduce_checks_clean() {
+    let json = check_json(
+        "def two(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, seq, head)\n\
+         def two_rev(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, head, seq)\n\
+         def rp(x: &tensor[..a, seq, ..b, head, ..c, f32]) -> tensor[..a, ..b, ..c, f32] = sum(x, seq, head)\n\
+         def use_rp(x: &tensor[batch, seq, kv, head, feat, f32]) -> tensor[batch, kv, feat, f32] = rp(x)\n\
+         def m2(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = mean(x, seq, head)\n",
+    );
+    assert_clean(&json, "variadic named reduce checks clean");
+}
+
+/// Variadic ≡ composed, numerically, on BOTH lanes: `sum(x, seq, head)`
+/// equals `sum(sum(x, head), seq)` and the axis order does not matter.
+/// `mean` and `max_reduce` ride along (mean-of-means == joint mean with
+/// uniform weights; max is idempotent across orders). Non-square [2,3,4]
+/// so an axis mislabel fails loudly.
+#[test]
+fn variadic_reduce_builds_runs_and_evals() {
+    let source = "def direct(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, seq, head)\n\
+         def swapped(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, head, seq)\n\
+         def composed(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(sum(x, head), seq)\n\
+         def mboth(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = mean(x, seq, head)\n\
+         def xboth(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = max_reduce(x, seq, head)\n\
+         def rp(x: &tensor[..a, seq, ..b, head, ..c, f32]) -> tensor[..a, ..b, ..c, f32] = sum(x, seq, head)\n\
+         def use_rp(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = rp(x)\n\
+         def tot(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(x, seq, head))\n\
+         def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(x, seq, head))\n\
+         y = to_tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]])\n\
+         out_d = direct(y)\n\
+         out_s = swapped(y)\n\
+         out_c = composed(y)\n\
+         out_m = mboth(y)\n\
+         out_x = xboth(y)\n\
+         out_r = use_rp(y)\n\
+         gr = grad(tot)(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out_v = vmap(vinner)(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n";
+    // NOTE on `out_v`: the vmap probe deliberately uses an INLINE literal
+    // operand. `vmap(vinner)(y)` with the shared top-level `y` binding hits
+    // a PRE-EXISTING dag.rs symbolic-dim ICE on main (verified at d786744
+    // with the explicit composition `sum(sum(x, head), seq)` — vmap +
+    // binding-typed Load + a two-stage named reduce; the chelis#346/#351
+    // annotation-dims family in a lane those fixes did not cover). The
+    // variadic surface desugars to that same composition, so it inherits
+    // the gap unchanged; see the chelis#339 PR for the boundary analysis.
+    let backend = build_compile_run(source, "variadic_reduce");
+    let tensors = parse_printed_tensors(&backend);
+    // Per batch slice (3x4): b0 sums 1..=12 = 78; b1 sums 13..=24 = 222.
+    // mean = sum/12; max = last element (24 in b1, 12 in b0).
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out_d", &[2], &[78.0, 222.0]),
+        ("out_s", &[2], &[78.0, 222.0]),
+        ("out_c", &[2], &[78.0, 222.0]),
+        ("out_m", &[2], &[6.5, 18.5]),
+        ("out_x", &[2], &[12.0, 24.0]),
+        ("out_r", &[2], &[78.0, 222.0]),
+        // grad of the all-axes sum is ones, and vmap over the variadic
+        // scalar reduce yields the per-slice sums (the #351 lesson: pin
+        // transform lanes on new rank-poly capability from day one).
+        ("gr", &[2, 2], &[1.0, 1.0, 1.0, 1.0]),
+        ("out_v", &[2], &[10.0, 26.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "variadic_reduce", &backend);
+}
+
+/// NEGATIVE: a duplicate axis name in the variadic list is rejected, never
+/// silently deduplicated.
+#[test]
+fn variadic_reduce_duplicate_axis_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq, seq)\n",
+    );
+    assert_rejected_with(&json, "duplicate", "duplicate axis `seq` in variadic sum");
+}
+
+/// NEGATIVE: an unknown axis name in the variadic list is rejected.
+#[test]
+fn variadic_reduce_unknown_axis_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, seq, nope)\n",
+    );
+    assert_rejected_with(&json, "nope", "unknown axis `nope` in variadic sum");
+}
+
+/// NEGATIVE: positional integers are not admitted in the variadic form —
+/// each axis must be named.
+#[test]
+fn variadic_reduce_positional_axes_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, 1, 2)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "positional",
+        "positional integer axes in variadic sum",
+    );
+}
+
+/// NEGATIVE: index-returning reductions have no variadic form — an index
+/// along one axis is not composable with a second reduction.
+#[test]
+fn variadic_argmax_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, int64] = argmax_reduce(x, seq, head)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "index-returning",
+        "variadic argmax_reduce has no defined semantics",
+    );
+}
+
+/// NEGATIVE arity pins: the variadic dispatcher must not soften existing
+/// wrong-arity rejections — a 1-arg `sum` and an over-applied non-reduction
+/// builtin (`relu(x, y)`) still fail.
+#[test]
+fn variadic_dispatcher_preserves_arity_errors() {
+    let json = check_json("def bad(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x)\n");
+    let errors = json["errors"].as_array().expect("errors array");
+    assert!(
+        !errors.is_empty(),
+        "1-arg sum must still be rejected, got clean: {json}"
+    );
+    let json2 = check_json(
+        "def bad2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x, x)\n",
+    );
+    let errors2 = json2["errors"].as_array().expect("errors array");
+    assert!(
+        !errors2.is_empty(),
+        "over-applied relu must still be rejected, got clean: {json2}"
+    );
+}
+
 // ── Formatter round-trip ────────────────────────────────────────────────
 
 /// The anchored multi-spread sig survives `chelis fmt`: `..pre`/`..post` are
@@ -373,6 +947,35 @@ fn build_compile_run(source: &str, name: &str) -> String {
         String::from_utf8_lossy(&run.stderr)
     );
     String::from_utf8(run.stdout).expect("utf-8 stdout")
+}
+
+/// Run `chelis build --target c` expecting failure; return stderr so the
+/// caller can pin the diagnostic (the loudness lock for monomorphization-time
+/// collisions that the checker cannot see).
+fn build_expecting_failure(source: &str, name: &str) -> String {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    fs::write(&src, source).expect("write source");
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run chelis build");
+    assert!(
+        !build.status.success(),
+        "build was expected to fail; stdout: {}",
+        String::from_utf8_lossy(&build.stdout)
+    );
+    String::from_utf8(build.stderr).expect("utf-8 build stderr")
 }
 
 /// Run `chelis eval --file` and return its stdout (the evaluator oracle the

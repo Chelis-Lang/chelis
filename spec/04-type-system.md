@@ -804,8 +804,22 @@ symbolically.
 ;;   tensor[a, b, seq, c]       -> tensor[a, b, c]
 ```
 
-Multiple axes are reduced by composing single-axis reductions
-(`sum(sum(x, head), seq)`).
+Multiple **named** axes may be reduced in one call — the variadic form
+`sum(x, seq, head)` (chelis#339) — or by composing single-axis reductions
+(`sum(sum(x, head), seq)`); the two are equivalent, and the variadic form is
+order-insensitive (`sum(x, head, seq)` produces the same result). The variadic
+form is defined for the value reductions `sum`, `mean`, `max_reduce`,
+`min_reduce`, and `prod_reduce` (for `mean`, reducing axes one at a time with
+uniform weights equals the joint mean). It is **not** defined for the
+index-returning reductions `argmax_reduce`/`argmin_reduce`: an index along one
+axis is not composable with a second reduction, so a variadic call on those is
+a hard error. Every axis in a variadic call must be a *named* axis (a
+positional integer is only valid as the single axis of a concrete-rank
+operand), each name must resolve per the rules above, and a **duplicate** axis
+name in the list is a hard error. Inside a `..r` body the Body-Discipline
+admission is unchanged (`sum`/`mean` only, chelis#340). At lowering the
+variadic call desugars to the composition, innermost stage reducing the last
+listed axis.
 
 **Unification (unitary).** A row shape unifies with a ground shape by locating
 each named anchor uniquely in the ground and binding the spreads to the runs
@@ -820,19 +834,85 @@ most-general unifier:
   position (e.g. a reduction's `tensor[..pre, ..post]` result), which is only
   ever matched against an identical row or expanded after its spreads are bound.
 
+**Named-axis expand (`R+1`).** The inverse arithmetic direction: `expand`
+inserts a *named* axis in a rank-polymorphic way when its axis argument is a
+dimension name rather than an integer. Two call forms are admitted
+(chelis#339):
+
+```chelis
+;; insert a trailing named axis (the new axis goes after every existing axis):
+;; def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = expand(x, one, 1)
+;; insert immediately BEFORE an existing named anchor (4-arg form):
+;; def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32]
+;;   = expand(x, c, 5, seq)
+```
+
+- `expand(x, new, size)` — `new` is a bare dimension name: insert a new
+  **trailing** axis named `new` with extent `size`. The symbolic output is the
+  operand's row form with `new` appended.
+- `expand(x, new, size, anchor)` — additionally name an **anchor**, an existing
+  named axis of the operand; the new axis is inserted immediately *before* the
+  anchor. Leading-end insertion is expressible exactly when the row begins with
+  a named anchor (`tensor[first, ..rest]` + `expand(x, c, k, first)`); a row
+  that begins with a spread has no leading anchor and admits trailing or
+  anchored insertion only.
+
+Both forms keep unification unitary: the insertion point is either an end of
+the row or a position fixed by a named anchor located uniquely in the operand.
+Hard errors (`DimensionMismatch`, never a guessed placement):
+
+- the inserted name already names an axis of the operand (a duplicate dim name
+  would make every later by-name lookup ambiguous). This holds through
+  call-site rank monomorphization too: when the inserted name survives into
+  the result row, a caller whose spread-covered axes include that name is
+  rejected at check time (the introduced-name rule in `unify.rs`); when the
+  inserted name is consumed inside the body (insert + reduce), or the
+  collision comes from a single-letter dim *var* whose source letter matches,
+  the check cannot see it and the collision surfaces as a **fatal lowering
+  error** at build/eval — loud, never a silent wrong-axis resolution;
+- the anchor is absent from the operand's row, or ambiguous (appears more than
+  once);
+- a *positional* (integer) insert axis on a rank-spread operand — an index is
+  meaningless at symbolic rank, so the positional form is concrete-rank only;
+- insertion *strictly inside* an opaque spread has no anchor and is not
+  expressible: the computed output row places the new axis only at an end or
+  at an anchor, so a declared result such as `tensor[..lo, c, ..hi, f32]` from
+  an operand `tensor[..rest, f32]` fails row unification (differing anchor
+  structure) and is rejected.
+
+The inserted axis is a *named* dim: declared result types refer to it by name
+(`tensor[..rest, one, f32]`). A bare identifier in the axis slot is read as a
+dimension name only when it is **not bound in the value environment**: a bound
+`int32` variable is a runtime value and keeps the compile-time-constant
+rejection (issue #259) — `expand(x, ax, 4)` with `ax: int32` is still an
+error, never a trailing insert of an axis named `ax`. The `size` argument
+must be a **positive compile-time literal** (a bare int or `cast(N, int32)`):
+the inserted axis's extent is stamped onto the new named dim at lowering, and
+a symbolic-dim or runtime int32 size has no stampable extent (the eval lane
+cannot stage it and the C backend would reference an undeclared dim symbol),
+so those forms are rejected at check time. The positional concrete-rank
+`expand` forms (§4.7.2, insert-or-set) are unchanged and keep the three
+§4.7.2 size forms. At lowering, the named insertion point
+is resolved against the monomorphized operand dims (trailing → operand rank;
+anchored → the anchor's index), mirroring named-axis reduction.
+
 **Soundness (§4.2).** Order is preserved (shapes stay ordered positional
 sequences — never unordered "rows"); the reduced axis is a retained name; and a
 rank-poly def body is restricted by the §4.2 Body-Discipline check to
-*name-trackable* operations only — shape-identity (elementwise) ops and
-named-axis reductions. A *positional* shape-rewriter (`permute`, `reshape`,
-`matmul`, positional `gather`) is rejected inside a `..r` body: its output shape
-is not name-trackable at symbolic rank, so it could hide an untracked
-transposition. This is what keeps the §4.5.1 transposition-safety guarantee
-intact while admitting the deferred flexibility for the reduction case.
+*name-trackable* operations only — shape-identity (elementwise) ops,
+named-axis reductions, and named-axis expand. A *positional* shape-rewriter
+(`permute`, `reshape`, `matmul`, positional `gather`) is rejected inside a
+`..r` body: its output shape is not name-trackable at symbolic rank, so it
+could hide an untracked transposition. For the name-tracked ops the procedural
+inference arm is the real gate: it rejects a positional index at symbolic rank
+and a non-existent/ambiguous/duplicate axis name, so no transposition can slip
+past. This is what keeps the §4.5.1 transposition-safety guarantee intact while
+admitting the deferred flexibility for the reduction and expand cases.
 
 Enforcement: the unification arm is `crates/chelis-types/src/unify.rs`
 (`unify_row_against_ground` / `unify_row_against_row`); the named-axis reduction
-arm is `check_reduction_signature` and the discipline check is
+arm is `check_reduction_signature`, the named-axis expand arm is
+`check_expand_signature`, and the discipline check is
 `check_rank_body_discipline` in `crates/chelis-types/src/infer.rs`. Call-site
 **rank monomorphization** (`tensor_rank_substitutions` /
 `extract_rank_var_bindings` in `crates/chelis-ir/src/lower.rs`) substitutes each
@@ -865,7 +945,10 @@ dimension that is only known at run time. The relevant built-ins are:
   the axis-bounds check). The result is a runtime scalar, not a symbolic
   dim reference.
 - `expand(x, axis, size)`: insert or set a dimension at position `axis`
-  with width `size`.
+  with width `size`. When `axis` is a dimension *name* instead of an
+  integer, the call is the named-axis expand form (§4.5.3): it inserts a
+  new named axis at the trailing end, or — with a fourth `anchor`
+  argument — immediately before an existing named axis.
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
   `shape_list`, a `List<Int64>`.
 

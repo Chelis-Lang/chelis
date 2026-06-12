@@ -206,7 +206,13 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // rank-poly inline and don't yet compile (chelis#340), so they stay
         // Rewriting — rejected in a `..r` body — to keep check↔backend in sync
         // (a check-clean program must build). They remain usable at concrete rank.
-        "sum" | "mean" => ShapeClass::NameTracked,
+        //
+        // Named-axis expand (chelis#339, the R+1 inverse): `expand` addresses
+        // its insertion point by name (trailing end, or before a named anchor)
+        // and the procedural arm (`check_expand_signature`) computes the
+        // symbolic output row, rejecting positional axes at symbolic rank —
+        // the same gate structure as the reductions.
+        "sum" | "mean" | "expand" => ShapeClass::NameTracked,
         // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
         // gather/scatter, and every non-tensor/host builtin.
         _ => ShapeClass::Rewriting,
@@ -1242,10 +1248,10 @@ mod tests {
             "and",
             "or",
         ];
-        // Named-axis reductions are NameTracked (admitted in a `..r` body —
-        // the procedural arm is the gate); everything else outside `identity`
-        // is Rewriting.
-        let name_tracked: &[&str] = &["sum", "mean"];
+        // Named-axis reductions and named-axis expand are NameTracked
+        // (admitted in a `..r` body — the procedural arm is the gate);
+        // everything else outside `identity` is Rewriting.
+        let name_tracked: &[&str] = &["sum", "mean", "expand"];
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
                 ShapeClass::Identity
@@ -1262,16 +1268,20 @@ mod tests {
         }
         // Spot-check the positional shape-rewriters stay Rewriting (the §4.2
         // traps): a positional index is meaningless at symbolic rank.
-        for op in ["permute", "reshape", "expand", "matmul", "gather", "conv2d"] {
+        for op in ["permute", "reshape", "matmul", "gather", "conv2d"] {
             assert_eq!(
                 shape_class(op),
                 ShapeClass::Rewriting,
                 "`{op}` must be Rewriting"
             );
         }
-        // And the named reductions are admitted as NameTracked.
+        // And the named-axis ops are admitted as NameTracked. `expand`
+        // moved from Rewriting in chelis#339: its procedural arm now
+        // rejects positional axes at symbolic rank, so admitting it in a
+        // `..r` body cannot hide a transposition.
         assert_eq!(shape_class("sum"), ShapeClass::NameTracked);
         assert_eq!(shape_class("mean"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("expand"), ShapeClass::NameTracked);
     }
 
     #[test]
