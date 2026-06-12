@@ -1,6 +1,6 @@
 //! Tensor-aware evaluator for the Phase 0 RISC DAG.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dag::{
     Dag, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, TensorType,
@@ -168,6 +168,7 @@ fn resolve_load_inputs<F>(
     dag: &Dag,
     live: Option<&[bool]>,
     strict_loads: bool,
+    symbolic_dim_load_inputs: &HashSet<&str>,
     mut load_input: F,
 ) -> Result<HashMap<String, TensorValue>, String>
 where
@@ -175,14 +176,17 @@ where
 {
     let mut inputs = HashMap::new();
     for node in dag.nodes() {
-        if let Some(mask) = live
-            && !mask[node.id.0]
-        {
-            continue;
-        }
         let RiscOp::Load { name } = &node.op else {
             continue;
         };
+        let is_live = live.is_none_or(|mask| mask[node.id.0]);
+        // A dead Load is still resolved when its type may declare a
+        // symbolic dim a live node needs (chelis#351) — but its absence
+        // is never a strict-load error; only inference may complain
+        // about it, with the dim-targeted message.
+        if !is_live && !symbolic_dim_load_inputs.contains(name.as_str()) {
+            continue;
+        }
         if inputs.contains_key(name.as_str()) {
             continue;
         }
@@ -190,7 +194,9 @@ where
             Some(value) => {
                 inputs.insert(name.as_str().to_string(), value);
             }
-            None if strict_loads => return Err(format!("missing required input `{name}`")),
+            None if strict_loads && is_live => {
+                return Err(format!("missing required input `{name}`"));
+            }
             None => {}
         }
     }
@@ -939,8 +945,7 @@ fn eval_tensor_internal<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    let resolved_inputs = resolve_load_inputs(dag, live, strict_loads, &mut load_input)?;
-    let bound_dag = if dag
+    let needs_symbolic_binding = dag
         .nodes()
         .iter()
         .any(|node| matches!(&node.op, RiscOp::Expand { size, .. } if !size.is_concrete()))
@@ -955,7 +960,47 @@ where
                 .iter()
                 .any(|dim| matches!(dim, DimInfo::Named(_, None))),
             _ => false,
-        }) {
+        });
+    // chelis#351: symbolic-dim inference reads shapes from the Loads
+    // that `symbolic_occurrences` nominates as each dim's declaring
+    // inputs — and such a Load can be DEAD under the roots' live mask
+    // while the dim itself is live (e.g. `vmap(grad(f))` where the
+    // gradient is constant in `x`: the backward DAG never consumes the
+    // `x` Load, but its `Expand { size: Sym(..) }` still needs the dim
+    // bound from `x`'s shape). Resolve named-dim-typed Loads even when
+    // masked off (a superset of the nominated occurrence labels, which
+    // always point at a Load carrying the symbol in its dims),
+    // tolerating absence: if a needed one is genuinely unavailable,
+    // `infer_symbolic_bindings_from_inputs` reports the targeted
+    // "missing required input ... for symbolic dimension" error
+    // instead of the strict-load one.
+    let symbolic_dim_load_inputs: HashSet<&str> = if needs_symbolic_binding && live.is_some() {
+        dag.nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::Load { name }
+                    if node
+                        .output_type
+                        .dims
+                        .iter()
+                        .any(|dim| matches!(dim, DimInfo::Named(_, _))) =>
+                {
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let resolved_inputs = resolve_load_inputs(
+        dag,
+        live,
+        strict_loads,
+        &symbolic_dim_load_inputs,
+        &mut load_input,
+    )?;
+    let bound_dag = if needs_symbolic_binding {
         let bindings = infer_symbolic_bindings_from_inputs(dag, &resolved_inputs)?;
         bind_symbolic_dims(dag, &bindings)?
     } else {
@@ -1670,6 +1715,85 @@ mod tests {
         assert_eq!(
             vals[&live],
             TensorValue::from_vec(vec![3], vec![2.0, 4.0, 6.0])
+        );
+    }
+
+    /// chelis#351: a Load can be DEAD under the roots' live mask while a
+    /// live node still needs a symbolic dim that only that Load
+    /// declares (`vmap(grad(f))` where the gradient is constant in the
+    /// input: the backward DAG never consumes `x`, but its
+    /// `Expand { size: Sym(n) }` must bind `n` from `x`'s shape).
+    /// The occurrence input is resolved despite the mask, and the dim
+    /// binds from its shape.
+    #[test]
+    fn eval_root_scoped_strict_resolves_dead_load_for_symbolic_dim() {
+        let mut dag = Dag::new();
+        let sym_ty = TensorType {
+            dims: vec![DimInfo::Named("n".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty.clone(),
+            None,
+        );
+        let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let ones = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Sym("n".to_string()),
+            },
+            vec![one],
+            sym_ty,
+            None,
+        );
+
+        let vals = eval_tensor_roots_with_strict(&dag, &[ones], |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![3], vec![5.0, 6.0, 7.0])),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            vals[&ones],
+            TensorValue::from_vec(vec![3], vec![1.0, 1.0, 1.0]),
+            "`n` must bind to 3 from the dead `x` Load's runtime shape"
+        );
+    }
+
+    /// Negative parity for the dead-load resolution above: when the
+    /// declaring occurrence input is genuinely unavailable, the failure
+    /// is the dim-targeted inference error — never a silent default
+    /// shape and never the bare strict-load error (the Load is dead, so
+    /// strict mode has no claim on it).
+    #[test]
+    fn eval_root_scoped_strict_missing_dead_symbolic_load_is_dim_error() {
+        let mut dag = Dag::new();
+        let sym_ty = TensorType {
+            dims: vec![DimInfo::Named("n".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty.clone(),
+            None,
+        );
+        let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let ones = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Sym("n".to_string()),
+            },
+            vec![one],
+            sym_ty,
+            None,
+        );
+
+        let err = eval_tensor_roots_with_strict(&dag, &[ones], |_| None).unwrap_err();
+        assert!(
+            err.contains("missing required input `x` for symbolic dimension `n`"),
+            "expected the dim-targeted inference error, got: {err}"
         );
     }
 

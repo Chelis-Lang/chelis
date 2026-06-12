@@ -44,9 +44,38 @@ impl<'a> EvalContext<'a> {
             _ => None,
         };
 
+        // chelis#351: in the vmap lane, marshalling the batched actuals
+        // with bare Lit dims loses the callee's declared dim names. The
+        // inlined body keeps its formal named dims (e.g. a Tier-3
+        // rank-poly named reduce's surviving `hidden`), and vmap's rank
+        // shift (batched actual = formal rank + 1) defeats the same-rank
+        // formal/actual remap at the transform boundary — so the name
+        // stays unbound, no Load declares it, and
+        // `dag::symbolic_occurrences` ICEs. Type the placeholder from
+        // the callee's declared formals instead (the chelis#338/#346
+        // pattern for plain def calls): the vmap axis stays `Lit`, the
+        // mapped axes carry the formal's names with runtime sizes, and
+        // the symbolic-dim machinery binds the body's names against the
+        // placeholder Load. Best-effort: any unresolved shape falls back
+        // to the Lit-dim marshalling below.
+        let vmap_formals = match kind {
+            TransformKind::Vmap => {
+                resolve_transform_fn_for_formals(transform_expr, &self.top_level_defs)
+            }
+            TransformKind::Grad => None,
+        };
+
         for (index, value) in args.iter().enumerate() {
             let placeholder = format!("__chelis_xform_arg_{index}");
-            let (tensor_value, tensor_type) = runtime_value_to_dag_input(value, fn_expr, index)?;
+            let (tensor_value, mut tensor_type) =
+                runtime_value_to_dag_input(value, fn_expr, index)?;
+            if let (Some((callee_fn, Some(axis))), RuntimeValue::Tensor(tensor)) =
+                (&vmap_formals, value)
+                && let Some(formal) = param_type_expr_at(callee_fn, index)
+                && let Ok(refined) = vmap_lane_placeholder_type(formal, tensor, *axis)
+            {
+                tensor_type = refined;
+            }
             placeholder_tensors.insert(placeholder.clone(), tensor_value);
             placeholder_names.push(placeholder);
             placeholder_types.push(tensor_type);
@@ -237,6 +266,107 @@ pub(super) fn runtime_value_to_dag_input(
             "grad/vmap argument {index} must be a tensor or scalar, got {other:?}"
         )),
     }
+}
+
+/// chelis#351: resolve a transform target's underlying `(fn ...)`
+/// expression — the source of its declared formal param types — plus
+/// the vmap batching axis when the wrapper chain contains exactly one
+/// `vmap`. Follows `(var name)` references through `defs` and descends
+/// through `grad` wrappers (grad does not change argument shapes), so
+/// `vmap(inner)`, `vmap(grad(total))`, and alias chains all resolve.
+/// Returns `None` for anything else — closures injected from
+/// `captured_env` carry no declared param types, nested `vmap` adds a
+/// second batch axis this synthesis does not model, and an unreadable
+/// axis literal must not be guessed at. The caller then falls back to
+/// Lit-dim placeholder marshalling (the pre-#351 behavior).
+fn resolve_transform_fn_for_formals<'a>(
+    expr: &'a Expr,
+    defs: &'a HashMap<String, Expr>,
+) -> Option<(&'a Expr, Option<usize>)> {
+    let mut current = expr;
+    let mut vmap_axis: Option<usize> = None;
+    let mut visited: HashSet<&str> = HashSet::new();
+    loop {
+        let Expr::List(list, _) = current else {
+            return None;
+        };
+        match tag(list) {
+            Some("fn") => return Some((current, vmap_axis)),
+            Some("var") => {
+                let name = children(list).first().and_then(symbol_name)?;
+                if !visited.insert(name) {
+                    return None;
+                }
+                current = defs.get(name)?;
+            }
+            Some("grad") => {
+                current = children(list).first()?;
+            }
+            Some("vmap") => {
+                if vmap_axis.is_some() {
+                    return None;
+                }
+                let kids = children(list);
+                let axis = match kids.get(1) {
+                    Some(axis_expr) => static_usize_value(axis_expr)?,
+                    None => 0,
+                };
+                vmap_axis = Some(axis);
+                current = kids.first()?;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Static non-negative int literal: a bare int atom, `(lit {} n)`, or a
+/// `cast(n, int32)` wrapper (mirrors the lowerer's
+/// `extract_usize_value` shapes for the vmap axis argument).
+fn static_usize_value(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Atom(Atom::Int(n), _) => usize::try_from(*n).ok(),
+        Expr::List(list, _) => match tag(list)? {
+            "lit" => match children(list).first()? {
+                Expr::Atom(Atom::Int(n), _) => usize::try_from(*n).ok(),
+                _ => None,
+            },
+            "cast" => static_usize_value(children(list).first()?),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// chelis#351: type a vmap-lane tensor placeholder from the callee's
+/// declared formal. The batched actual carries one extra axis at
+/// `axis` (the vmap axis); that axis stays `Lit` (it is the mapped
+/// axis, not one of the callee's dims), and the remaining axes are
+/// typed against the formal exactly as the chelis#338 def-call
+/// boundary types its placeholders — except that `d-var` dims are
+/// staged as `Named(name, Some(size))` rather than `Lit`: the vmap
+/// rank shift skips the same-rank remap that concretizes the body's
+/// d-var names in the plain-call/grad lanes, so the names can only
+/// bind through the placeholder Load. Errs (caller falls back to Lit
+/// dims) when the axis is out of range or the formal does not type the
+/// unbatched view — e.g. a broadcast argument the lowering passes
+/// through unbatched, or a rank-poly (`..spread`) formal.
+fn vmap_lane_placeholder_type(
+    formal: &Expr,
+    tensor: &RuntimeTensorValue,
+    axis: usize,
+) -> Result<TensorType, String> {
+    let shape = &tensor.value.shape;
+    if axis >= shape.len() {
+        return Err(format!(
+            "vmap axis {axis} is out of range for a rank-{} actual",
+            shape.len()
+        ));
+    }
+    let mut unbatched = shape.clone();
+    let batch = unbatched.remove(axis);
+    let mut ty = declared_tensor_type_for_shape(formal, &unbatched, tensor.precision, true)?;
+    ty.dims.insert(axis, DimInfo::Lit(batch));
+    Ok(ty)
 }
 
 /// The declared `{type: ...}` metadata on a single `(params ...)` child
