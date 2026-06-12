@@ -558,9 +558,21 @@ fn strip_type_wrappers(ty_expr: &Expr) -> &Expr {
 /// spreads) are rejected: a spread cannot be split against a bare
 /// runtime shape (the split is ambiguous; only the checker's
 /// name-anchored unification may do it).
-fn declared_tensor_type_for_value(
+pub(super) fn declared_tensor_type_for_value(
     ty_expr: &Expr,
     tensor: &RuntimeTensorValue,
+) -> Result<TensorType, String> {
+    declared_tensor_type_for_shape(ty_expr, &tensor.value.shape, tensor.precision)
+}
+
+/// Shape-slice core of [`declared_tensor_type_for_value`], shared with
+/// the chelis#351 vmap-lane placeholder synthesis (which types the
+/// UNBATCHED view of a batched actual against the callee's formal, so
+/// it has a bare shape rather than a whole `RuntimeTensorValue`).
+pub(super) fn declared_tensor_type_for_shape(
+    ty_expr: &Expr,
+    shape: &[usize],
+    fallback_precision: Prim,
 ) -> Result<TensorType, String> {
     let stripped = strip_type_wrappers(ty_expr);
     let Expr::List(list, _) = stripped else {
@@ -568,10 +580,10 @@ fn declared_tensor_type_for_value(
     };
     match tag(list) {
         Some("t-tensor") => {}
-        Some("t-prim") if tensor.value.shape.is_empty() => {
+        Some("t-prim") if shape.is_empty() => {
             return Ok(TensorType {
                 dims: vec![],
-                precision: extract_prim_from_type_expr(stripped).unwrap_or(tensor.precision),
+                precision: extract_prim_from_type_expr(stripped).unwrap_or(fallback_precision),
             });
         }
         other => {
@@ -585,8 +597,7 @@ fn declared_tensor_type_for_value(
     let Some((prim_expr, dim_exprs)) = kids.split_last() else {
         return Err("malformed t-tensor type (no children)".to_string());
     };
-    let precision = extract_prim_from_type_expr(prim_expr).unwrap_or(tensor.precision);
-    let shape = &tensor.value.shape;
+    let precision = extract_prim_from_type_expr(prim_expr).unwrap_or(fallback_precision);
     if dim_exprs
         .iter()
         .any(|d| matches!(d, Expr::List(dim_list, _) if tag(dim_list) == Some("d-rank")))

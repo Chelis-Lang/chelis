@@ -693,6 +693,102 @@ fn named_axis_eval_parity_corners() {
     assert_eval_agrees_with_backend(source, "named_axis_parity_corners", &backend);
 }
 
+/// chelis#351 (the #346 red-team F4 finding): `vmap` over a def that calls a
+/// Tier-3 rank-poly named reduce checks clean and runs correctly on the C
+/// backend, but `chelis eval` died with the dag.rs symbolic-dim ICE
+/// ("symbolic dim `hidden` is referenced by a non-Load node"). Root cause:
+/// `apply_transform` marshalled the batched actual as a placeholder with
+/// all-Lit dims, while the inlined callee body kept its formal named dims —
+/// vmap's rank shift (batched actual = formal rank + 1) defeats the same-rank
+/// formal/actual remap (`tensor_dim_substitutions`, chelis#258 filter), so
+/// `hidden` stayed unbound and no Load declared it. The fix types the
+/// placeholder from the callee's declared formals (the chelis#338/#346
+/// pattern for plain def calls): the batch axis stays Lit, the mapped axes
+/// carry the formal's names, and the symbolic-dim machinery binds the body's
+/// surviving names against the placeholder Load.
+///
+/// Matrix, all pinned eval-vs-backend:
+/// - `out`: the issue reproducer (vmap over a rank-poly named-reduce callee)
+/// - `outc`: control — vmap over a CONCRETE named reduce (worked before; must
+///   keep working through the formal-typed placeholder path)
+/// - `gr`: grad over a rank-poly named-reduce callee (same-rank remap already
+///   concretized the dims; pinned so the lanes stay in lockstep)
+/// - `gs`: vmap(grad(...)) over the same callee — the vmap rank shift hit the
+///   identical guard (`Expand { size: Sym("hidden") }`), fixed by the same
+///   placeholder typing
+#[test]
+fn vmap_over_rank_poly_named_reduce_evals_and_matches_backend() {
+    let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def inner(x: &tensor[seq, hidden, f32]) -> tensor[hidden, f32] = reduce_seq(x)\n\
+         def total(x: &tensor[seq, hidden, f32]) -> f32 = tensor_to_scalar(sum(reduce_seq(x), hidden))\n\
+         def sum_seq(x: &tensor[seq, f32]) -> f32 = tensor_to_scalar(sum(x, seq))\n\
+         out = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
+         outc = vmap(sum_seq)(to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))\n\
+         gr = grad(total)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
+         gs = vmap(grad(total))(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+    assert_clean(
+        &check_json(source),
+        "#351 vmap rank-poly matrix checks clean",
+    );
+    let backend = build_compile_run(source, "vmap_rank_poly_named_reduce");
+    let tensors = parse_printed_tensors(&backend);
+    // out: per batch slice, sum over seq(=2) of [seq=2, hidden=3]:
+    //   b0 [[1,2,3],[4,5,6]] -> [5,7,9];  b1 [[7,8,9],[10,11,12]] -> [17,19,21].
+    // outc: row sums of [[1,2],[3,4],[5,6]] = [3,7,11] (the issue's control).
+    // gr: d(sum of all elements)/dx = ones, shape [seq=2, hidden=3].
+    // gs: gr vmapped over batch(=2) = ones, shape [2,2,3].
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out", &[2, 3], &[5.0, 7.0, 9.0, 17.0, 19.0, 21.0]),
+        ("outc", &[3], &[3.0, 7.0, 11.0]),
+        ("gr", &[2, 3], &[1.0; 6]),
+        ("gs", &[2, 2, 3], &[1.0; 12]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "vmap_rank_poly_named_reduce", &backend);
+}
+
+/// Negative parity for chelis#351: a vmapped callee whose declared formal
+/// CONFLICTS with the marshalled actual (declared `4` vs runtime `3`) must
+/// stay a `DimensionMismatch` rejection on both surfaces — check rejects, and
+/// eval surfaces the type error — never the dag.rs symbolic-dim ICE and never
+/// a silent wrong answer. (The guard itself is untouched by the #351 fix; its
+/// own positive/negative pins live in `chelis-ir/src/dag.rs` tests and the
+/// #345 matrix in `issue_345_grad_dim_subst.rs`.)
+#[test]
+fn vmap_callee_dim_conflict_stays_rejected_not_ice() {
+    let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def inner(x: &tensor[seq, 4, f32]) -> tensor[4, f32] = reduce_seq(x)\n\
+         out = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+    assert_rejected_with(
+        &check_json(source),
+        "dimension mismatch",
+        "#351 negative: conflicting concrete dim through the vmapped callee",
+    );
+    let dir = tempdir().expect("tempdir");
+    let stderr = eval_stderr_expecting_failure(dir.path(), source, "vmap_dim_conflict");
+    assert!(
+        stderr.contains("DimensionMismatch") || stderr.contains("dimension mismatch"),
+        "eval must surface the dimension mismatch, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("internal compiler error"),
+        "the dag.rs symbolic-dim ICE must not resurface: {stderr}"
+    );
+}
+
 /// chelis#346 red-team blocker (F1/F2/F3): a UNARY elementwise op inside a
 /// `..r` body before the named reduce must build, run, and eval with
 /// agreeing numerics. Before the elementwise output-type fix, the unary

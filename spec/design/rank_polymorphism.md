@@ -170,6 +170,35 @@ dims from the lowered operand via `elementwise_out_ty`, the contract the
 Tier-1 binary arms already used; pinned executable at
 `unary_elementwise_reduce_in_rank_poly_body_builds_runs_and_evals`.
 
+*Vmap-lane placeholder typing (chelis#351, the #346 red team's F4,
+FIXED).* `vmap` over a def that calls a rank-poly named reduce checked
+clean and ran correctly on the C backend, but `chelis eval` ICEd on the
+dag.rs symbolic-dim guard ("symbolic dim `hidden` is referenced by a
+non-Load node"): the grad/vmap transform lane (`apply_transform`)
+marshalled the batched actual as a placeholder with bare `Lit` dims,
+while the inlined callee body kept its formal named dims — and vmap's
+rank shift (batched actual = formal rank + 1) defeats the same-rank
+formal/actual remap (`tensor_dim_substitutions`' chelis#258 guard), so
+the surviving name stayed unbound with no Load declaring it. The fix
+adopts the chelis#338 def-call pattern in the vmap lane: the placeholder
+is typed from the callee's declared formals (the vmap axis stays `Lit`;
+the mapped axes carry the formal's names with runtime sizes), so the
+symbolic-dim machinery binds the body's names against the placeholder
+Load. `vmap(grad(f))` additionally needed the IR evaluator to resolve a
+symbolic-dim-declaring Load even when it is dead under the roots' live
+mask (a gradient constant in `x` never consumes the `x` Load, but its
+`Expand { size: Sym(..) }` still binds from `x`'s shape); absence of
+such an input stays an error, now always the dim-targeted one. The grad
+lane needed no placeholder change (same-rank remap already concretizes
+the dims) and is pinned. Eval-vs-backend agreement for the reproducer,
+the concrete-reduce control, `grad`, and `vmap(grad(...))` is pinned at
+`vmap_over_rank_poly_named_reduce_evals_and_matches_backend`, with
+negative parity (a conflicting concrete dim through the vmapped callee
+stays a `DimensionMismatch`, never the ICE) at
+`vmap_callee_dim_conflict_stays_rejected_not_ice`. Best-effort scope:
+closures without declared param types, nested `vmap`, and unreadable
+axis literals fall back to the old `Lit`-dim marshalling.
+
 *Known gaps (follow-ups):* `max`/`min`/`prod` reduce in a `..r` body
 (chelis#340), expand (`R+1`), and a direct variadic-axis surface
 `sum(x, seq, head)` (chelis#339) remain follow-ups. The positional
