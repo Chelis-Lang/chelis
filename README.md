@@ -11,10 +11,23 @@ machines and the compiler.
 
 ## Prerequisites
 
-**Rust toolchain** (stable, with rustfmt and clippy):
+**Rust toolchain.** Install [rustup](https://rustup.rs) (the Rust toolchain
+installer) if you do not already have it:
+
 ```sh
-rustup default stable
-rustup component add rustfmt clippy
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+The repo pins its toolchain in `rust-toolchain.toml` (stable, with rustfmt
+and clippy components); rustup installs all of it automatically on the first
+`cargo` invocation, so no `rustup default` or `rustup component add` step is
+needed.
+
+**cargo-nextest** (the test runner CI and `scripts/gate.py` use; plain
+`cargo` does not include it):
+
+```sh
+cargo install cargo-nextest --locked
 ```
 
 **C toolchain** (for the C backend):
@@ -64,11 +77,19 @@ system Python may not match the chelis-tools version constraint.
 Install Python dependencies into the uv venv as needed:
 
 ```sh
-uv pip install -e py            # chelis-tools (gate, loc-report, skill-eval, ...)
+uv pip install -e py            # chelis-tools (loc-report, skill-eval, ...)
 uv pip install -e bindings/python # chelis Python bindings (optional)
 ```
 
+`scripts/gate.py` itself is stdlib-only: it needs the 3.11+ interpreter
+but no pip installs.
+
 ## Build
+
+**The uv venv is a hard prerequisite for `cargo build` on every platform**:
+`chelis-python` links against `libpython`, and the PyO3 link step fails
+with an obscure linker error if `.venv/` does not exist. Run
+`uv venv --python 3.11` (see Prerequisites) before your first build.
 
 ```sh
 cargo build --workspace
@@ -77,6 +98,36 @@ cargo test --workspace
 
 `cargo test --workspace` covers the compiler, evaluator, backend, and spec
 regressions.
+
+The `chelis` binary referenced throughout the docs is built from this
+workspace, not installed separately:
+
+```sh
+cargo build -p chelis-cli
+target/debug/chelis --help
+# or, without a separate build step:
+cargo run -p chelis-cli --bin chelis -- --help
+```
+
+Before pushing, run the local pre-push gate (chelis#360). `scripts/gate.py`
+is the single source of truth for the per-PR gate; CI runs the same
+commands:
+
+```sh
+.venv/bin/python scripts/gate.py --list   # print the canonical command list
+.venv/bin/python scripts/gate.py --local  # developer pre-push subset
+```
+
+`--local` runs workspace clippy, `cargo fmt --check`,
+`chelis lint --check .`, and per-crate nextest for the crates changed vs
+`origin/main`. The full workspace nextest stage is CI-owned: open a
+draft PR early and let CI (macOS Smoke is the authoritative workspace
+oracle) run the full suite; see
+[`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+for why that suite does not belong in the local loop on macOS. The gate
+needs Python 3.11+ (it uses `tomllib`), which is why the examples use
+`.venv/bin/python`: the stock macOS `python3` is 3.9 and fails with
+`ModuleNotFoundError: No module named 'tomllib'`.
 
 `chelis build`, `chelis check`, `chelis validate`, and `chelis eval --file`
 each enforce a built-in **style gate** (`chelis fmt --check` plus the
@@ -91,10 +142,10 @@ For real downstream proof against Nautilus without going through release
 artifacts or GitHub Actions, build a local compiler binary and run:
 
 ```sh
-python3 scripts/nautilus_local_gate.py baseline
-python3 scripts/nautilus_local_gate.py tensor-grad
-python3 scripts/nautilus_local_gate.py tensor-fold
-python3 scripts/nautilus_local_gate.py eval-imports
+.venv/bin/python scripts/nautilus_local_gate.py baseline
+.venv/bin/python scripts/nautilus_local_gate.py tensor-grad
+.venv/bin/python scripts/nautilus_local_gate.py tensor-fold
+.venv/bin/python scripts/nautilus_local_gate.py eval-imports
 ```
 
 See [scripts/README.md](scripts/README.md) for the local downstream gate
