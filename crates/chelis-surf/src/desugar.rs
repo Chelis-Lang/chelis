@@ -1284,9 +1284,47 @@ impl DesugarCtx {
                 // becomes a no-op precision-confirm at the type level
                 // (tensor[N, p] cast to p), which `infer_cast` accepts
                 // because the precision matches.
+                //
+                // Issue #308: the same position-4 rule applies to a bare
+                // scalar numeric literal. `cast(1.1, f64)` binds the
+                // decimal `1.1` AT f64 — it is NOT "narrow to the §5.3
+                // f32 default, then widen", which materializes the
+                // f32-truncation signature `1.100000023841858` in every
+                // value lane that honors the lit's type meta (the IR
+                // Const lowering, the runtime evaluator). Suffixed
+                // literals (spec §5.5) keep their explicit suffix
+                // binding; `cast(1.1f32, f64)` still means "widen this
+                // f32 value". A float literal under an integer target
+                // keeps the default-then-truncate behavior because a
+                // decimal cannot bind at an integer type.
                 let inner = match e.as_ref() {
                     Expr::List(items, _) => {
                         self.desugar_list_as_tensor_literal(items, prec, local_fn_params)
+                    }
+                    Expr::Lit(lit, span) if scalar_literal_adopts_cast_target(lit, prec) => {
+                        attach_span_metadata(
+                            adopted_scalar_literal(lit, prec, /* negate = */ false),
+                            *span,
+                        )
+                    }
+                    // Mirror of the RT-2 P2 sign-fold in
+                    // `desugar_tensor_literal_item`: the parser turns
+                    // `-1.1` into `Unary(Neg, Lit(Float(1.1)))`. Fold
+                    // the sign into the adopted literal so `cast(-1.1,
+                    // f64)` binds `-1.1` at f64.
+                    Expr::Unary(UnaryOp::Neg, neg_inner, span)
+                        if matches!(
+                            neg_inner.as_ref(),
+                            Expr::Lit(lit, _) if scalar_literal_adopts_cast_target(lit, prec)
+                        ) =>
+                    {
+                        let Expr::Lit(lit, _) = neg_inner.as_ref() else {
+                            unreachable!("guarded by the matches! above");
+                        };
+                        attach_span_metadata(
+                            adopted_scalar_literal(lit, prec, /* negate = */ true),
+                            *span,
+                        )
                     }
                     other => self.desugar_expr_with_scope(other, local_fn_params),
                 };
@@ -1510,6 +1548,63 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
             "lit",
             meta_with_type(node("t-prim", vec![sym("string")])),
             vec![deep::Expr::Atom(deep::Atom::Str(s.clone()), sp())],
+        ),
+    }
+}
+
+/// Position 4 (spec §5.6 / §P10b) admission test for a bare scalar
+/// literal under `cast(literal, p)` (issue #308). An unsuffixed numeric
+/// literal adopts the cast target when the binding is meaningful:
+///
+///   * float literal + float target (`f32`/`f64`/`bf16`/`f16`) — the
+///     decimal binds at `p` (single rounding, no round-trip through the
+///     §5.3 f32 default);
+///   * int literal + integer target (`int8`..`int64`) — the value binds
+///     at `p`, which is what makes the documented out-of-int32-range
+///     escape hatch `cast(N, int64)` actually work (and routes the
+///     int8/int16 forms through `infer_lit`'s contextual range check);
+///   * int literal + float target — the integer binds at `p` exactly.
+///
+/// Everything else keeps the §5.3 default-then-convert behavior:
+/// suffixed literals bind at their suffix (§5.5), float→integer keeps
+/// truncation semantics, and bool/string targets are not numeric
+/// binding precisions.
+fn scalar_literal_adopts_cast_target(lit: &Literal, prec: &str) -> bool {
+    let float_target = matches!(prec, "f32" | "f64" | "bf16" | "f16");
+    let int_target = matches!(prec, "int8" | "int16" | "int32" | "int64");
+    match lit {
+        Literal::Float(_) => float_target,
+        Literal::Int(_) => float_target || int_target,
+        _ => false,
+    }
+}
+
+/// Build the adopted-literal Deep node for a scalar literal under
+/// `cast(literal, p)`. Mirrors `desugar_tensor_literal_item`'s lit
+/// construction (including the RT-2 P2 sign fold via `negate`). Only
+/// called for literals admitted by `scalar_literal_adopts_cast_target`.
+fn adopted_scalar_literal(lit: &Literal, prec: &str, negate: bool) -> deep::Expr {
+    let ty_meta = meta_with_type(node("t-prim", vec![sym(prec)]));
+    match lit {
+        Literal::Int(n) => {
+            let value = if negate { -*n } else { *n };
+            node_meta(
+                "lit",
+                ty_meta,
+                vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
+            )
+        }
+        Literal::Float(f) => {
+            let value = if negate { -*f } else { *f };
+            node_meta(
+                "lit",
+                ty_meta,
+                vec![deep::Expr::Atom(deep::Atom::Float(value), sp())],
+            )
+        }
+        other => unreachable!(
+            "adopted_scalar_literal called for non-numeric literal {other:?}; \
+             scalar_literal_adopts_cast_target must gate callers"
         ),
     }
 }
@@ -2601,6 +2696,99 @@ mod tests {
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (var {} x) (t-prim {} bf16))"
+        );
+    }
+
+    // --- Position 4 (spec §5.6 / §P10b) for bare scalar literals ---
+    //
+    // `cast(literal, p)` binds the literal AT `p`, not at the §5.3
+    // default narrowed-then-converted. Issue #308: `cast(1.1, f64)`
+    // previously desugared to `(cast (lit {type: f32} 1.1) f64)`, so
+    // every value lane that honors the lit's type meta materialized
+    // f32(1.1) and then widened — the f32-truncation signature
+    // `1.100000023841858` instead of exact f64 `1.1`.
+
+    #[test]
+    fn cast_of_float_literal_adopts_target_precision() {
+        let expr = Expr::Cast(Box::new(float_lit(1.1)), "f64".to_string(), s());
+        assert_eq!(
+            print_expr(&desugar_expr(&expr)),
+            "(cast {} (lit {type: (t-prim {} f64)} 1.1) (t-prim {} f64))"
+        );
+    }
+
+    #[test]
+    fn cast_of_negative_float_literal_folds_sign_and_adopts() {
+        // Mirror of the RT-2 P2 sign-fold in contextual tensor literals:
+        // the parser produces `Unary(Neg, Lit(1.1))` for `-1.1`.
+        let expr = Expr::Cast(
+            Box::new(Expr::Unary(UnaryOp::Neg, Box::new(float_lit(1.1)), s())),
+            "f64".to_string(),
+            s(),
+        );
+        assert_eq!(
+            print_expr(&desugar_expr(&expr)),
+            "(cast {} (lit {type: (t-prim {} f64)} -1.1) (t-prim {} f64))"
+        );
+    }
+
+    #[test]
+    fn cast_of_int_literal_adopts_integer_target() {
+        // The documented §5.3 escape hatch for out-of-int32-range
+        // literals: `cast(3000000000, int64)` must bind the literal at
+        // int64 so `infer_lit` does not range-check it against int32.
+        let expr = Expr::Cast(Box::new(int_lit(3_000_000_000)), "int64".to_string(), s());
+        assert_eq!(
+            print_expr(&desugar_expr(&expr)),
+            "(cast {} (lit {type: (t-prim {} int64)} 3000000000) (t-prim {} int64))"
+        );
+    }
+
+    #[test]
+    fn cast_of_int_literal_adopts_float_target() {
+        let expr = Expr::Cast(Box::new(int_lit(5)), "f64".to_string(), s());
+        assert_eq!(
+            print_expr(&desugar_expr(&expr)),
+            "(cast {} (lit {type: (t-prim {} f64)} 5) (t-prim {} f64))"
+        );
+    }
+
+    #[test]
+    fn cast_of_float_literal_to_integer_does_not_adopt() {
+        // Negative parity: a float literal cannot "adopt" an integer
+        // type — `cast(1.9, int32)` keeps the §5.3 f32 default on the
+        // literal and truncates at the cast, exactly as before.
+        let expr = Expr::Cast(Box::new(float_lit(1.9)), "int32".to_string(), s());
+        assert_eq!(
+            print_expr(&desugar_expr(&expr)),
+            "(cast {} (lit {type: (t-prim {} f32)} 1.9) (t-prim {} int32))"
+        );
+    }
+
+    #[test]
+    fn cast_of_suffixed_literal_does_not_adopt() {
+        // Negative parity: a typed-suffix literal binds at exactly its
+        // suffix precision (spec §5.5); `cast(1.1f32, f64)` means
+        // "widen this f32 value", not "re-bind the decimal at f64".
+        let expr = Expr::Cast(
+            Box::new(Expr::Lit(Literal::TypedFloat(1.1, LiteralSuffix::F32), s())),
+            "f64".to_string(),
+            s(),
+        );
+        assert_eq!(
+            print_expr(&desugar_expr(&expr)),
+            "(cast {} (lit {type: (t-prim {} f32)} 1.1) (t-prim {} f64))"
+        );
+    }
+
+    #[test]
+    fn cast_of_literal_to_bool_does_not_adopt() {
+        // Negative parity: bool is not a numeric binding precision for
+        // a numeric literal; keep the default-typed literal + cast.
+        let expr = Expr::Cast(Box::new(int_lit(1)), "bool".to_string(), s());
+        assert_eq!(
+            print_expr(&desugar_expr(&expr)),
+            "(cast {} (lit {type: (t-prim {} int32)} 1) (t-prim {} bool))"
         );
     }
 

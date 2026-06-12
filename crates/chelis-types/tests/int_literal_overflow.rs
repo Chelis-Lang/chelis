@@ -69,6 +69,42 @@ fn literal_i32_max_does_not_trip_d1_range_diagnostic() {
     );
 }
 
+/// Issue #308 sibling: the explicit-cast escape hatch the D1
+/// diagnostic itself recommends must actually work. `cast(N, int64)`
+/// binds the literal at int64 (spec §5.6 position 4 applied to a bare
+/// scalar literal), so the int32 range check does not fire. Before
+/// the #308 desugar fix, the literal kept the int32 default inside
+/// the cast and this exact form was rejected with the same diagnostic
+/// that suggested it.
+#[test]
+fn cast_wrapped_out_of_i32_range_literal_checks_cleanly() {
+    let src = "def main -> int64 = cast(2147483648, int64)";
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    assert!(
+        res.is_ok(),
+        "spec §5.3 + §5.6: cast(2147483648, int64) is the documented \
+         escape hatch and must type-check cleanly; got: {:?}",
+        res.err().map(|e| e.errors)
+    );
+}
+
+/// Negative-parity twin for the escape hatch: wrapping the literal in
+/// a cast to a type it still does not fit (int32 itself) must keep the
+/// range diagnostic — the adoption rule re-binds the literal at the
+/// target, it does not bypass range checking.
+#[test]
+fn cast_to_int32_of_out_of_range_literal_still_rejected() {
+    let src = "def main -> int32 = cast(2147483648, int32)";
+    let deep = surf_to_deep(src);
+    let res = check_ir_program(&deep);
+    assert!(
+        res.is_err(),
+        "cast(2147483648, int32) must still be diagnosed: the literal \
+         re-binds at int32 and 2^31 is out of int32 range"
+    );
+}
+
 /// Lower-bound twin: `-2147483648` = i32::MIN fits exactly. The
 /// negation in Surf is parsed as `(neg 2147483648)` which would itself
 /// hit the D1 path on the inner literal — so this test pins the

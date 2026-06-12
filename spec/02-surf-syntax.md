@@ -713,6 +713,14 @@ positions is exactly:
 4. the first argument of an explicit `cast(literal, p)` expression — the
    literals bind at `p`
 
+Position 4 applies to a bare scalar numeric literal as well as to a
+tensor-literal body (issue #308): `cast(1.1, f64)` binds the decimal at
+`f64` directly (the desugarer emits `(lit {type: (t-prim {} f64)} 1.1)`),
+not "narrow to the f32 default, then widen". Suffixed literals keep their
+suffix binding (§P10a; `cast(1.1f32, f64)` widens the f32 value), and a
+float literal under an integer `p` keeps default-then-truncate cast
+semantics. See `spec/04-type-system.md` §5.6 for the full statement.
+
 Outside this closed set, numeric literals in a tensor body fall back to the
 §P10 literal defaults: integer literals to `int32`, float literals to `f32`.
 A bare `[1, 2, 3]` in an unannotated top-level binding evaluates to

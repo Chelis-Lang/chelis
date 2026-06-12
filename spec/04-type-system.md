@@ -1065,6 +1065,20 @@ exactly:
 4. the first argument of a `cast(literal, p)` expression, where `p` is a
    precision type literal — the literal body adopts `p`
 
+Position 4 applies to a **bare scalar numeric literal** as well as to a
+tensor-literal body (issue #308). `cast(1.1, f64)` binds the decimal `1.1`
+at `f64` — exactly `0x3ff199999999999a` — it does NOT narrow to the §5.3
+`f32` default and then widen (which would yield the f32-truncation value
+`1.100000023841858`). Likewise `cast(3000000000, int64)` binds the literal
+at `int64`, which is what makes the §5.3 out-of-int32-range escape hatch
+work. The adoption re-binds the literal at `p` and the §5.6 range checks
+apply at `p`: `cast(2147483648, int32)` is still a range error. Adoption
+is limited to unsuffixed numeric literals with a numeric `p` of matching
+kind: a suffixed literal binds at its suffix (§5.5; `cast(1.1f32, f64)`
+widens the f32 value), and a float literal under an integer `p` keeps the
+default-then-truncate cast semantics because a decimal cannot bind at an
+integer type.
+
 Outside this closed set, numeric literals in a tensor body fall back to the
 §5.3 literal defaults: integer literals to `int32`, float literals to `f32`.
 
