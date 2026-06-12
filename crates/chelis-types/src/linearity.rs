@@ -530,23 +530,21 @@ impl Checker {
                 // the value is structurally shared, not destroyed.
                 // Mirror the `check_let` path
                 // (`linearity.rs:397-407`) by tagging the consume
-                // with a `"binding `name` at offset N"` description.
-                // That feeds the PR #29 `read_or_error` tolerance
-                // (`linearity.rs:644`), letting subsequent borrow
+                // with a `"binding `name` at <site>"` description and
+                // `ConsumeKind::Aliasing`. The kind feeds the PR #29
+                // `read_or_error` tolerance (typed via `ConsumeKind`
+                // since Linearity-F1), letting subsequent borrow
                 // reads of the original variable succeed. Without
                 // this branch the body would fall through to
                 // `check_expr -> consume_var_expr(generic_site)` and
-                // tag the consume with `"use at offset N"`, which
-                // the tolerance does not match.
+                // record a `Structural` consume, which the tolerance
+                // does not match.
                 if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
                     self.consume_var_expr(
                         body,
                         scope,
                         ConsumeSite {
-                            description: format!(
-                                "binding `{name}` at offset {}",
-                                body.span().offset
-                            ),
+                            description: format!("binding `{name}` {}", diag_site(body)),
                             kind: ConsumeKind::Aliasing,
                         },
                     );
@@ -790,10 +788,7 @@ impl Checker {
                         value,
                         scope,
                         ConsumeSite {
-                            description: format!(
-                                "binding `{name}` at offset {}",
-                                value.span().offset
-                            ),
+                            description: format!("binding `{name}` {}", diag_site(value)),
                             kind: ConsumeKind::Aliasing,
                         },
                     );
@@ -862,7 +857,7 @@ impl Checker {
             // consume the outer `c` at closure-creation time, so a
             // later borrow-read of `c` outside the closure trips
             // `UseAfterConsume` with the diagnostic "was already
-            // consumed by closure capture at offset N". The probe
+            // consumed by closure capture at <site>". The probe
             // reuses `infer::param_has_consuming_use` so the consume
             // classification stays aligned with what
             // `param_has_consuming_use_inner` already enforces for
@@ -884,7 +879,7 @@ impl Checker {
                 outer_scope.consume(
                     &name,
                     ConsumeSite {
-                        description: format!("closure capture at offset {}", expr.span().offset),
+                        description: format!("closure capture {}", diag_site(expr)),
                         kind: ConsumeKind::Structural,
                     },
                 );
@@ -952,7 +947,7 @@ impl Checker {
                 &kids[0],
                 scope,
                 ConsumeSite {
-                    description: format!("match scrutinee at offset {}", kids[0].span().offset),
+                    description: format!("match scrutinee {}", diag_site(&kids[0])),
                     kind: ConsumeKind::Structural,
                 },
             );
@@ -1068,8 +1063,8 @@ impl Checker {
                     with_macro_provenance(
                         expr,
                         format!(
-                            "variable `{target}` was already consumed by {description}; later use at offset {} is invalid",
-                            expr.span().offset
+                            "variable `{target}` was already consumed by {description}; later use {} is invalid",
+                            diag_site(expr)
                         ),
                     ),
                     vec![format!(
@@ -1106,8 +1101,8 @@ impl Checker {
                     with_macro_provenance(
                         expr,
                         format!(
-                            "variable `{name}` (from a destructured binding) was already consumed by {description}; later use at offset {} is invalid",
-                            expr.span().offset
+                            "variable `{name}` (from a destructured binding) was already consumed by {description}; later use {} is invalid",
+                            diag_site(expr)
                         ),
                     ),
                     vec![format!(
@@ -1174,9 +1169,9 @@ impl Checker {
         let message = with_macro_provenance(
             expr,
             format!(
-                "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
+                "variable `{name}` was already consumed by {}; later use {} is invalid",
                 description,
-                expr.span().offset
+                diag_site(expr)
             ),
         );
         let suggestion =
@@ -1189,8 +1184,7 @@ impl Checker {
     }
 
     fn invalid_borrow(&mut self, expr: &Expr, message: &str) {
-        let formatted =
-            with_macro_provenance(expr, format!("{message} (offset {})", expr.span().offset));
+        let formatted = with_macro_provenance(expr, format!("{message} ({})", diag_site(expr)));
         self.push_diagnostic(CheckError::new(
             CheckErrorKind::InvalidBorrow,
             formatted,
@@ -1678,6 +1672,42 @@ fn type_metadata(expr: &Expr) -> Option<&Expr> {
     }
 }
 
+/// Render the source site of `expr` for linearity diagnostics.
+///
+/// Desugared Surf nodes carry their source location as `span:
+/// "surf:a..b"` METADATA (`chelis_surf::desugar::attach_span_metadata`);
+/// their STRUCTURAL span is the desugarer's zero placeholder. Reading
+/// the structural span made every linearity diagnostic on Surf-derived
+/// code print the constant `offset 0` — unlocalizable in a multi-file
+/// unit, which is how chelis#329's package-wide
+/// `InvalidBorrow (offset 0)` report came to be misattributed to a
+/// grad-helper collision. Prefer the metadata (rendered `at
+/// surf:a..b`, matching `infer.rs::validator_span_suffix`); fall back
+/// to the structural offset only for fully synthesized nodes that
+/// carry no span entry (e.g. desugared pipe-stage lambdas).
+fn diag_site(expr: &Expr) -> String {
+    match span_metadata_id(expr) {
+        Some(id) => format!("at {id}"),
+        None => format!("at offset {}", expr.span().offset),
+    }
+}
+
+/// Extract the `span: "surf:a..b"` metadata entry, when present.
+fn span_metadata_id(expr: &Expr) -> Option<&str> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    match list.elements.get(1) {
+        Some(Expr::Map(MetaMap { entries }, _)) => {
+            entries.iter().find_map(|(key, value)| match value {
+                Expr::Atom(Atom::Str(id), _) if key == "span" => Some(id.as_str()),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
     match param {
         Expr::Atom(Atom::Symbol(name), _) => Some((name.as_str(), None)),
@@ -2006,21 +2036,21 @@ fn app_site(expr: &Expr, list: &List) -> ConsumeSite {
         .map(|name| format!("call to `{name}`"))
         .unwrap_or_else(|| "call".to_string());
     ConsumeSite {
-        description: format!("{name} at offset {}", expr.span().offset),
+        description: format!("{name} {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
     }
 }
 
 fn generic_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
-        description: format!("use at offset {}", expr.span().offset),
+        description: format!("use {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
     }
 }
 
 fn realize_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
-        description: format!("realize at offset {}", expr.span().offset),
+        description: format!("realize {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
     }
 }
@@ -2028,16 +2058,16 @@ fn realize_site(expr: &Expr) -> ConsumeSite {
 fn pipe_site(current: &Expr, stage: &Expr) -> ConsumeSite {
     ConsumeSite {
         description: format!(
-            "pipe into stage at offset {} from offset {}",
-            stage.span().offset,
-            current.span().offset
+            "pipe into stage {} from {}",
+            diag_site(stage),
+            diag_site(current)
         ),
         kind: ConsumeKind::Structural,
     }
 }
 
 fn borrow_site(expr: &Expr) -> String {
-    format!("borrow at offset {}", expr.span().offset)
+    format!("borrow {}", diag_site(expr))
 }
 
 fn expr_scope_end(expr: &Expr) -> usize {
