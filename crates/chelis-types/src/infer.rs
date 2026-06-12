@@ -6797,6 +6797,7 @@ fn collect_all_declarations(
     errors: &mut Vec<CheckError>,
 ) {
     report_duplicate_defs(items, errors);
+    report_builtin_shadowing(items, errors);
     for expr in items {
         collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Aliases);
     }
@@ -6844,6 +6845,82 @@ fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
                 )],
             ));
         }
+    }
+}
+
+/// Reject a top-level `def` or `defsig` whose name appears in the closed
+/// builtin vocabulary (chelis#353, spec/04-type-system.md §8.6).
+///
+/// Call sites are dispatched builtin-first by name in both the host
+/// evaluator (`runtime/host_ops.rs::builtin_name`) and IR lowering
+/// (`lower.rs::builtin_name`); both import `BUILTIN_NAMES`, the same
+/// table consulted here, so the rejected set and the dispatched set
+/// cannot drift. A user definition with a builtin name is therefore
+/// unreachable by name: pre-fix, `def sum` checked clean, hit the
+/// builtin's arity error under eval, and segfaulted on the C backend —
+/// three lanes, three different answers. Rejecting the declaration here,
+/// in the collection chokepoint every checker entry point shares, makes
+/// all lanes agree on the same diagnostic.
+///
+/// Deliberately narrow scope:
+/// - Reef package modules never reach this check with bare names: reef
+///   rewrites package decls to internal `pkg__...` names (and rewrites
+///   their call sites with them) before the checker runs, so a package
+///   `def sum` is allowed and genuinely dispatches to the user def (the
+///   stdlib's `Std.Decimal.normalize` / `Std.Test.fail` rely on this).
+/// - Function parameters and block-locals may reuse builtin names: they
+///   bind values, not call-site dispatch, and shadow harmlessly on every
+///   lane.
+///
+/// An inline-annotated `def` desugars to a `defsig` AND a `def` with the
+/// same name; report once per name, as the `def` (what the user wrote).
+fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+    let decl_name = |expr: &deep::Expr, tag: &str| -> Option<String> {
+        let deep::Expr::List(list, _) = expr else {
+            return None;
+        };
+        if get_tag(list) != Some(tag) {
+            return None;
+        }
+        children(list)
+            .first()
+            .and_then(symbol_name)
+            .filter(|name| builtins::BUILTIN_NAMES.contains(name))
+            .map(str::to_string)
+    };
+
+    let def_names: HashSet<String> = items
+        .iter()
+        .filter_map(|expr| decl_name(expr, "def"))
+        .collect();
+
+    let mut reported: HashSet<String> = HashSet::new();
+    for expr in items {
+        let Some(name) = decl_name(expr, "def").or_else(|| decl_name(expr, "defsig")) else {
+            continue;
+        };
+        if !reported.insert(name.clone()) {
+            continue;
+        }
+        let decl_kw = if def_names.contains(&name) {
+            "def"
+        } else {
+            "sig"
+        };
+        errors.push(CheckError::new(
+            CheckErrorKind::BuiltinShadowing,
+            format!(
+                "`{decl_kw} {name}` shadows the builtin function `{name}`: user `def`/`sig` \
+                 declarations may not reuse builtin names (spec/04-type-system.md \u{00a7}8.6). \
+                 Calls to `{name}` always dispatch to the builtin under eval and lowering, so \
+                 the shadowing declaration can never be reached by name."
+            ),
+            vec![format!(
+                "rename `{name}` (e.g. `{name}2` or `my_{name}`); inside a reef package \
+                 module the name is allowed because package declarations are \
+                 internal-name-rewritten before checking"
+            )],
+        ));
     }
 }
 

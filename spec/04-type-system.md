@@ -1646,3 +1646,45 @@ another `deftype Foo` nor with a `typealias Foo = ...`, and user code cannot
 re-declare a prelude type name (e.g. `Option`, `List`). Collisions are
 rejected at declaration time as `DuplicateDefinition`. This rule is what
 makes the §8.4 carrier set well-defined when keyed on the bare ADT name.
+
+### 8.6 Builtin-Name Shadowing
+
+A top-level `def` or `sig` whose name appears in the closed builtin function
+vocabulary (`BUILTIN_NAMES` in `crates/chelis-types/src/builtins.rs`) is
+rejected at declaration time as `BuiltinShadowing`, before inference runs.
+
+Rationale: call sites are dispatched builtin-first by name in both the host
+evaluator and IR lowering, so a user definition that shadows a builtin name
+can never be reached by name. Pre-rule, the checker resolved such calls to
+the user signature while eval and the backends resolved them to the builtin —
+three lanes, three different answers (chelis#353: `def sum` checked clean,
+failed with the builtin's arity error under eval, and segfaulted on the C
+backend). The rejection reads the same `BUILTIN_NAMES` table the evaluator
+dispatch and IR lowering import, so the rejected set and the dispatched set
+cannot drift.
+
+Scope:
+
+- The rule binds to top-level `def` and `defsig` declarations after module
+  flattening, including load-style top-level bindings (`sum = ...` desugars
+  to a `def`), in every lane that runs the type checker (`check`, `eval`,
+  `build`, `test`, `cost`). `chelis validate` is a syntax-grammar lane that
+  does not run the type checker and therefore does not surface this (or any
+  other) semantic rejection. It is a semantic rejection, not a style-gate
+  rule: `--allow-style-violations` and `CHELIS_STYLE_GATE_DISABLE=1` do not
+  bypass it.
+- Reef package modules are exempt by construction: package declarations are
+  internal-name-rewritten (`pkg__<package>__<module>__<name>`) before the
+  checker runs and their call sites are rewritten with them, so a
+  package-scoped `def sum` neither collides with the builtin table nor
+  mis-dispatches — inside a package the user def genuinely wins (the
+  stdlib's `Std.Decimal.normalize` and `Std.Test.fail` rely on this).
+- Function parameters and block-local bindings may reuse builtin names: they
+  bind values, not call-site dispatch, and shadow harmlessly on every lane.
+  Known residual asymmetry: *calling* a function-typed parameter or local
+  named like a builtin still dispatches builtin-first under eval (a loud
+  eval-time error) while the C backend compiles the call correctly; that
+  gap is documented here rather than rejected, because rejecting it would
+  break programs the backend lane compiles and runs correctly today.
+- Builtin-adjacent reserved keywords (`cast`, `grad`, `vmap`, ...) are not
+  part of `BUILTIN_NAMES`; a `def cast` is already a parse error.
