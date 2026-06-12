@@ -119,11 +119,12 @@ fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
     dir
 }
 
-/// Compile the emitted `<stem>.c` (which carries its own `main()` driving
-/// the top-level bindings) against the runtime static lib, run it, and
-/// return stdout. The compile assertion (cc exit 0, default flags) is the
-/// #352 contract invariant: emitted C must compile cleanly.
-fn compile_and_run_emitted(build_dir: &Path, kernel_c: &Path) -> String {
+/// Compile the emitted `<stem>.c` against the runtime static lib without
+/// asserting on the outcome. Returns the compiler `Output` and the path the
+/// binary lands at on success. Split out of `compile_and_run_emitted` so
+/// the known-gap pins below can assert that compilation FAILS with the
+/// pinned diagnostic instead of panicking inside the helper.
+fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, PathBuf) {
     let canonical = target_debug_dir().join("libchelis_runtime.a");
     ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
 
@@ -144,6 +145,15 @@ fn compile_and_run_emitted(build_dir: &Path, kernel_c: &Path) -> String {
         ])
         .output()
         .expect("invoke C compiler");
+    (compile, bin)
+}
+
+/// Compile the emitted `<stem>.c` (which carries its own `main()` driving
+/// the top-level bindings) against the runtime static lib, run it, and
+/// return stdout. The compile assertion (cc exit 0, default flags) is the
+/// #352 contract invariant: emitted C must compile cleanly.
+fn compile_and_run_emitted(build_dir: &Path, kernel_c: &Path) -> String {
+    let (compile, bin) = compile_emitted(build_dir, kernel_c);
     assert!(
         compile.status.success(),
         "emitted C for a def capturing a top-level binding must compile \
@@ -518,5 +528,137 @@ out = f(to_tensor([3.0, 4.0]))\n";
         host_source.contains("= w;"),
         "sanity: the host function still references the captured binding; \
          emitted=\n{host_source}",
+    );
+}
+
+/// KNOWN GAP (pre-existing #352 residue, found by the #376 review; NOT
+/// introduced or fixed by #376): a host-lane def capturing a top-level
+/// SCALAR binding still emits uncompilable C. Root cause differs from the
+/// tensor case #376 fixed: the DAG lane claims the binding
+/// (`skip_for_lowered` in `chelis-ir`'s host lowering), so it never reaches
+/// `HostProgram::globals` and the hoist pass never sees it -- generated
+/// `main()` contains no binding for `c` at all and the def body's bare name
+/// dangles. `chelis eval` computes the same program correctly, so this is
+/// the remaining backend-side eval-vs-backend parity hole of the #352
+/// class. When the lowering fix lands this pin fails; replace it with a
+/// compile-run-eval agreement assertion like the tensor arms above.
+#[test]
+fn issue_352_scalar_capture_still_uncompilable_gap() {
+    let source = "c = 2.5\n\
+def f(x: f32) -> f32 = (x + c)\n\
+out = f(1.0)\n";
+
+    let build = chelis_build_c(source, "scalarcap");
+    let (compile, _) = compile_emitted(build.path(), &build.path().join("scalarcap.c"));
+    assert!(
+        !compile.status.success(),
+        "pinned gap unexpectedly fixed: scalar-capture C now compiles; \
+         promote this pin to a compile-run-eval agreement assertion",
+    );
+    let stderr = String::from_utf8_lossy(&compile.stderr);
+    assert!(
+        stderr.contains("undeclared"),
+        "pinned gap changed shape: expected an undeclared-identifier \
+         diagnostic for the captured scalar `c`; compiler stderr={stderr:?}",
+    );
+
+    // The eval side of the parity gap is already correct.
+    let eval_out = chelis_eval(source, "scalarcap");
+    assert_eq!(
+        binding_line(&eval_out, "out"),
+        "out = tensor(shape=[], data=[3.5])",
+        "eval must keep computing the scalar-capture program correctly",
+    );
+}
+
+/// KNOWN GAP (pre-existing class, found by the #376 review; NOT introduced
+/// or fixed by #376): `vmap` over a def that captures a top-level binding.
+/// The #376 hoist makes the emitted C COMPILE (pre-fix it failed with the
+/// same undeclared-identifier break as the headline), but the vmap-lane
+/// helper types the captured input as BATCHED -- it validates `w` at rank 2
+/// while `main()` passes the rank-1 binding, so the binary aborts at
+/// runtime. `chelis eval` fails on the same program for the eval-side
+/// reason already pinned by `issue_352_grad_over_capturing_def_eval_gap`
+/// (the host-runtime transform lane does not serve captured bindings).
+/// Both failure shapes are pinned so either side's fix surfaces here.
+#[test]
+fn issue_352_vmap_over_capturing_def_gap() {
+    let source = "w = to_tensor([10.0, 20.0])\n\
+def dot_w(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
+def fv(xs: tensor[3, 2, f32]) -> tensor[3, f32] = xs |> vmap(dot_w, axis=0)\n\
+out = fv(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
+
+    let build = chelis_build_c(source, "vmapcap");
+    let (compile, bin) = compile_emitted(build.path(), &build.path().join("vmapcap.c"));
+    assert!(
+        compile.status.success(),
+        "the #376 hoist must keep the vmap-over-capture program COMPILING; \
+         compiler stderr=\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+    );
+
+    let run = StdCommand::new(&bin).output().expect("run emitted binary");
+    assert!(
+        !run.status.success(),
+        "pinned gap unexpectedly fixed: vmap-over-capture binary now runs; \
+         promote this pin to an exact-output + eval agreement assertion",
+    );
+    let run_stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run_stderr.contains("expected rank 2, got 1"),
+        "pinned gap changed shape: the vmap helper batched the captured \
+         input (rank-2 validation vs the rank-1 binding); stderr={run_stderr:?}",
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let src_path = dir.path().join("vmapcap.ch");
+    fs::write(&src_path, source).expect("write .ch source");
+    let eval = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .current_dir(dir.path())
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", src_path.to_str().unwrap()])
+        .output()
+        .expect("invoke chelis eval");
+    assert!(
+        !eval.status.success(),
+        "eval side of the gap is also broken"
+    );
+    let eval_stderr = String::from_utf8_lossy(&eval.stderr);
+    assert!(
+        eval_stderr.contains("missing required input `w`"),
+        "pinned eval-side vmap-capture gap changed shape: stderr={eval_stderr:?}",
+    );
+}
+
+/// KNOWN GAP (pre-existing class, found by the #376 review; NOT introduced
+/// by #376): top-level binding names are emitted verbatim into C with no
+/// sanitization layer. A binding named `main` passes `chelis check`, and
+/// when captured by a def the #376 hoist emits `static chelis_tensor* main;`
+/// which collides with the generated `int main(void)`. This is NOT a
+/// regression: pre-#376 the same program failed cc with the undeclared-
+/// identifier break instead, and a binding named a C keyword (`register`)
+/// breaks even uncaptured on both sides of #376 (`main()` locals also use
+/// verbatim names). Pinned so a future identifier-sanitization or
+/// check-time rejection surfaces here.
+#[test]
+fn issue_352_captured_binding_named_main_emits_illegal_c_gap() {
+    let source = "main = to_tensor([10.0, 20.0])\n\
+def f(x: tensor[2, f32]) -> tensor[2, f32] = add(x, main)\n\
+out = f(to_tensor([1.0, 2.0]))\n";
+
+    let build = chelis_build_c(source, "mainname");
+    let (compile, _) = compile_emitted(build.path(), &build.path().join("mainname.c"));
+    assert!(
+        !compile.status.success(),
+        "pinned gap unexpectedly fixed: a captured binding named `main` now \
+         compiles; promote this pin to a compile-run-eval agreement \
+         assertion (or to a check-time rejection assertion)",
+    );
+    assert!(
+        String::from_utf8_lossy(&compile.stderr).contains("main"),
+        "pinned gap changed shape: expected the `main` symbol collision in \
+         the compiler diagnostic; stderr={:?}",
+        String::from_utf8_lossy(&compile.stderr),
     );
 }
