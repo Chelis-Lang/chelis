@@ -221,7 +221,10 @@ language semantics, like `type`/`eff`/`lin`):
   closes the unexported caller-receives HOF channel: an unexported
   `with_t(f: T -> f32) -> f32` must not be callable from outside, or
   it hands caller code unobligated values while being held to a
-  weaker standard than its exported twin. The sixth rejection
+  weaker standard than its exported twin. "Mentions" means
+  containment chased through named type definitions, not a syntactic
+  scan: an unexported `helper() -> MyRecord` where the non-opaque
+  `MyRecord` carries a T field mentions T. The sixth rejection
   applies to all opaque types (not only invariant-carrying ones) so
   that adding an invariant later does not change which references
   are legal for *other modules'* code; a module with no `export`
@@ -267,12 +270,14 @@ the typing judgment is the guarantee.
 
 New advisory lints: `opaque-without-invariant` (note),
 `unreachable-producer` (opaque type with no exported producers), and
-`opaque-escape-site` (RT-0 C1 shape 2; see D-SOUND): flags in-module
-argument-egress sites — calls passing a value of the opaque type to
-an out-of-module callee — where the value is not locally traceable
-to a producer call or a type-T input of the enclosing function.
-Local dataflow only; no prove machinery; the audit surface for the
-explicit trust caveat.
+`opaque-escape-site` (RT-0 C1 shape 2). The escape-site lint's
+contract is defined once, in D-SOUND §1, and that definition is
+authoritative: complete enumeration of every in-module
+argument-egress site — values of the type AND function values
+capable of producing it — at two levels (note for locally-attested
+provenance, warning for unattested), with indirect callees treated
+as out-of-module (fail-closed). Local dataflow only; no prove
+machinery; the audit surface for the explicit trust caveat.
 
 ## 6. D-WF: invariant well-formedness (declaration-time)
 
