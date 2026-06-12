@@ -597,7 +597,7 @@ dimension to the caller-visible input world. Both of the following are
 ;; and the scheme resolves n := 3; no input dimension is involved.
 ```
 
-Two deliberate boundaries of this rule:
+Three deliberate boundaries of this rule:
 
 - a body-internal concrete pin whose literal does *not* occur in any
   declared parameter position is tolerated even when the def has
@@ -610,6 +610,17 @@ Two deliberate boundaries of this rule:
   (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x`, which binds
   `m` to `batch`) is not flagged: `Dim::Name` unifies permissively by
   design (chelis#219) and no declared dim parameter participates.
+  (When a param-position declared dim parameter *also* resolves to the
+  same name — e.g. `def f[n, m](x: tensor[n, f32],
+  y: tensor[batch, f32]) -> tensor[m, f32] = add(x, y)` binds both `n`
+  and `m` to `batch` — the collapse rule above does fire, because the
+  two declared dim parameters now share a resolution.);
+- coupling through a *wildcard* param dim is invisible
+  (`def f[k](b: tensor[*, f32]) -> tensor[k, f32] = b` is accepted):
+  the wildcard unifies permissively without binding (§4.5), so `k`
+  stays unbound and generalizes even though the returned value's
+  runtime dimension is the input's. This is the pre-existing §4.5
+  wildcard permissiveness, not a new tolerance of this rule.
 
 Enforcement is `check_return_only_dvars_rigid` in
 `crates/chelis-types/src/infer.rs`, run at the same def-vs-signature

@@ -272,3 +272,31 @@ fn issue_273_body_internal_pin_not_coinciding_with_params_type_checks() {
          tolerance and must type-check; got {errs:?}",
     );
 }
+
+// =================================================================
+// POSITIVE boundary lock: input coupling through a Wildcard param dim
+// is invisible to the guard (spec §4.4.1 boundary three). `unify_dim`
+// treats Wildcard as a permissive matches-anything sentinel that never
+// binds a dim var (§4.5), so returning a `tensor[*]` parameter leaves
+// the return-only `k` unbound and it generalizes — even though the
+// returned value's runtime dimension is the input's. This is the
+// pre-existing §4.5 wildcard permissiveness (#39/#218 lineage), not a
+// new tolerance introduced by the #273 guard. If this verdict ever
+// flips, it must be a conscious spec change to §4.4.1/§4.5, not
+// silent drift.
+// =================================================================
+
+#[test]
+fn issue_273_wildcard_param_passthrough_boundary_type_checks() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("wildcard_passthrough.ch");
+    write_file(&path, "def f[k](b: tensor[*, f32]) -> tensor[k, f32] = b\n");
+    let json = run_check(&path);
+    let errs = error_messages(&json);
+    assert!(
+        errs.is_empty(),
+        "wildcard-param pass-through is the documented §4.4.1 boundary \
+         (Wildcard never binds a dim var, so the return-only `k` stays \
+         unbound and generalizes) and must type-check; got {errs:?}",
+    );
+}
