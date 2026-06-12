@@ -528,9 +528,9 @@ impl Parser {
         let (keyword, _) = self.expect_ident()?;
         match keyword.as_str() {
             "property" => self.parse_property_decl_after_at(start),
-            "chelis_opaque" => self.parse_chelis_opaque_type_decl(start),
+            "opaque" => self.parse_opaque_type_decl(start),
             _ => Err(ParseError::Expected {
-                expected: "`property` or `chelis_opaque` after `@`".into(),
+                expected: "`property` or `opaque` after `@`".into(),
                 found: keyword,
                 offset: self.current_offset(),
             }),
@@ -589,10 +589,10 @@ impl Parser {
         })
     }
 
-    fn parse_chelis_opaque_type_decl(&mut self, start: Span) -> Result<Decl, ParseError> {
+    fn parse_opaque_type_decl(&mut self, start: Span) -> Result<Decl, ParseError> {
         if *self.peek() != TokenKind::Type {
             return Err(ParseError::Expected {
-                expected: "`type` declaration after `@chelis_opaque`".into(),
+                expected: "`type` declaration after `@opaque`".into(),
                 found: format!("{:?}", self.peek()),
                 offset: self.current_offset(),
             });
@@ -609,11 +609,11 @@ impl Parser {
                 name,
                 params,
                 variants,
-                chelis_opaque: true,
+                opaque: true,
                 span: start.merge(span),
             }),
             _ => Err(ParseError::Expected {
-                expected: "ADT type declaration after `@chelis_opaque`".into(),
+                expected: "ADT type declaration after `@opaque`".into(),
                 found: "type alias".into(),
                 offset: start.offset,
             }),
@@ -849,7 +849,7 @@ impl Parser {
         self.parse_type_decl_with_opaque(false)
     }
 
-    fn parse_type_decl_with_opaque(&mut self, chelis_opaque: bool) -> Result<Decl, ParseError> {
+    fn parse_type_decl_with_opaque(&mut self, opaque: bool) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Type
         let (name, _) = self.expect_type_ident()?;
         let params = if *self.peek() == TokenKind::LBracket {
@@ -873,7 +873,7 @@ impl Parser {
                 name,
                 params,
                 variants,
-                chelis_opaque,
+                opaque,
                 span: start.merge(last_span),
             })
         } else {

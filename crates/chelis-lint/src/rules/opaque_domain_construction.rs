@@ -1,5 +1,5 @@
 //! Rule `opaque-domain-construction` — domain types marked
-//! `chelis_opaque: true` may only be materialized by code in their defining
+//! `opaque: true` may only be materialized by code in their defining
 //! module. This is the lint half of the proven-constructor discipline used by
 //! downstream domain shells: admitted code must call the constructors whose
 //! postconditions are proved, not write the representation directly.
@@ -34,7 +34,7 @@ impl Rule for OpaqueDomainConstruction {
     }
 
     fn summary(&self) -> &str {
-        "types marked chelis_opaque may not be directly constructed, record-updated, or cast into outside their defining module"
+        "types marked opaque may not be directly constructed, record-updated, or cast into outside their defining module"
     }
 
     fn check(&self, ctx: &Context<'_>) -> Vec<Violation> {
@@ -109,11 +109,7 @@ fn collect_surf_opaque_decls(
             surf::Decl::Module { name, decls, .. } => {
                 collect_surf_opaque_decls(decls, Some(name.clone()), out);
             }
-            surf::Decl::TypeDef {
-                name,
-                chelis_opaque,
-                ..
-            } if *chelis_opaque => out.push(OpaqueType {
+            surf::Decl::TypeDef { name, opaque, .. } if *opaque => out.push(OpaqueType {
                 name: name.clone(),
                 module: module.clone(),
             }),
@@ -303,7 +299,7 @@ fn collect_deep_opaque_expr(expr: &deep::Expr, module: Option<String>, out: &mut
                 collect_deep_opaque_expr(child, module_name.clone(), out);
             }
         }
-        Some("deftype") if meta_bool(list, "chelis_opaque") => {
+        Some("deftype") if meta_bool(list, "opaque") => {
             if let Some(name) = children(list).first().and_then(sym_str) {
                 out.push(OpaqueType {
                     name: name.to_string(),
@@ -587,7 +583,7 @@ mod tests {
     fn allows_constructor_inside_defining_module() {
         let src = r#"
 module Whale.Types
-@chelis_opaque
+@opaque
 type Probability = | Probability { value: f32 }
 def probability(x: f32) -> Probability = Probability { value: x }
 "#;
@@ -598,7 +594,7 @@ def probability(x: f32) -> Probability = Probability { value: x }
     fn rejects_constructor_outside_defining_module() {
         let whale = r#"
 module Whale.Types
-@chelis_opaque
+@opaque
 type Probability = | Probability { value: f32 }
 "#;
         let agent = r#"
@@ -615,7 +611,7 @@ def bad(x: f32) -> Probability = Probability { value: x }
     fn rejects_deep_record_update_when_type_metadata_names_opaque_type() {
         let src = r#"
 (module {} whale.types
-  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
+  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
   (record-update {type: (t-adt {} Probability)} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
 "#;
@@ -628,7 +624,7 @@ def bad(x: f32) -> Probability = Probability { value: x }
     fn rejects_untyped_deep_record_update_outside_opaque_defining_module() {
         let src = r#"
 (module {} whale.types
-  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
+  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
   (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
 "#;
@@ -645,7 +641,7 @@ def bad(x: f32) -> Probability = Probability { value: x }
     fn rejects_deep_cast_into_opaque_type() {
         let src = r#"
 (module {} whale.types
-  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
+  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
   (cast {} (var {} x) (t-adt {} Probability)))
 "#;

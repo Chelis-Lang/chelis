@@ -52,7 +52,7 @@ fn lint_check_fails_on_cross_file_opaque_domain_construction() {
     let dir = tempdir().unwrap();
     fs::write(
         dir.path().join("whale.ch"),
-        "module Whale.Types\n@chelis_opaque\ntype Probability =\n  | Probability { value: f32 }\n",
+        "module Whale.Types\n@opaque\ntype Probability =\n  | Probability { value: f32 }\n",
     )
     .unwrap();
     fs::write(
@@ -210,7 +210,7 @@ fn validate_deep_fails_on_opaque_domain_construction() {
     let path = dir.path().join("opaque_forge.dp");
     fs::write(
         &path,
-        "(module {} whale.types\n  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (record {} Probability (kv {} value (lit {type: (t-prim {} f32)} 2.0))))\n",
+        "(module {} whale.types\n  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (record {} Probability (kv {} value (lit {type: (t-prim {} f32)} 2.0))))\n",
     )
     .unwrap();
     Command::cargo_bin("chelis")
@@ -229,7 +229,7 @@ fn validate_deep_fails_on_untyped_opaque_record_update() {
     let path = dir.path().join("opaque_untyped_update.dp");
     fs::write(
         &path,
-        "(module {} whale.types\n  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))\n",
+        "(module {} whale.types\n  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))\n",
     )
     .unwrap();
     Command::cargo_bin("chelis")

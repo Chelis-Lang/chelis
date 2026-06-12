@@ -167,7 +167,7 @@ fn format_decl(decl: &Decl) -> String {
             name,
             params,
             variants,
-            chelis_opaque,
+            opaque,
             ..
         } => {
             let params = format_type_params(params);
@@ -181,8 +181,8 @@ fn format_decl(decl: &Decl) -> String {
                     .join("\n  | ");
                 format!("type {name}{params} =\n  | {variants}")
             };
-            if *chelis_opaque {
-                format!("@chelis_opaque\n{body}")
+            if *opaque {
+                format!("@opaque\n{body}")
             } else {
                 body
             }

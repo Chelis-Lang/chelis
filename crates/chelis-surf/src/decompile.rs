@@ -1363,8 +1363,8 @@ fn decompile_deftype(list: &List) -> String {
         let variant_lines: Vec<String> = variants.iter().map(|v| format!("| {v}")).collect();
         format!("type {name}{param_str} =\n  {}", variant_lines.join("\n  "))
     };
-    if has_true_meta(list, "chelis_opaque") {
-        format!("@chelis_opaque\n{rendered}")
+    if has_true_meta(list, "opaque") {
+        format!("@opaque\n{rendered}")
     } else {
         rendered
     }

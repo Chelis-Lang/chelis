@@ -253,10 +253,10 @@ part of this public vocabulary.
 | `field` | `(field {} name type-expr)` | Named field in variant |
 | `defdim` | `(defdim {} name)` | Dimension name declaration |
 
-`deftype` may carry `chelis_opaque: true` metadata:
+`deftype` may carry `opaque: true` metadata:
 
 ```lisp
-(deftype {chelis_opaque: true} Probability ()
+(deftype {opaque: true} Probability ()
   (variant {} Probability (field {} value (t-prim {} f32))))
 ```
 

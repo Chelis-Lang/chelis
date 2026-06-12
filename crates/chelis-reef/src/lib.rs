@@ -4903,7 +4903,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             name,
             params,
             variants,
-            chelis_opaque,
+            opaque,
             span,
         } => Decl::TypeDef {
             name: internal_name(package, module, name),
@@ -4912,7 +4912,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
                 .iter()
                 .map(|variant| rewrite_variant(variant, resolver))
                 .collect(),
-            chelis_opaque: *chelis_opaque,
+            opaque: *opaque,
             span: *span,
         },
         Decl::TypeAlias {
@@ -5033,7 +5033,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             name,
             params,
             variants,
-            chelis_opaque,
+            opaque,
             span,
         } => Decl::TypeDef {
             name: name.clone(),
@@ -5042,7 +5042,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
                 .iter()
                 .map(|variant| rewrite_variant(variant, resolver))
                 .collect(),
-            chelis_opaque: *chelis_opaque,
+            opaque: *opaque,
             span: *span,
         },
         Decl::TypeAlias {

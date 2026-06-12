@@ -29,7 +29,7 @@ pub enum Decl {
         name: String,
         params: Vec<String>,
         variants: Vec<Variant>,
-        chelis_opaque: bool,
+        opaque: bool,
         span: Span,
     },
     TypeAlias {

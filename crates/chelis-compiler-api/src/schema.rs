@@ -485,7 +485,7 @@ pub enum WireSurfDecl {
         name: String,
         params: Vec<String>,
         variants: Vec<WireVariant>,
-        chelis_opaque: bool,
+        opaque: bool,
         span: Span,
     },
     TypeAlias {

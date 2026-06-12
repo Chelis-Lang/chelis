@@ -1132,7 +1132,7 @@ to point at a documented rule that explicitly carves out the case.
 
 ### 12.1 Opaque Domain Construction
 
-Types marked with `chelis_opaque: true` metadata participate in a
+Types marked with `opaque: true` metadata participate in a
 verified-constructor discipline. Outside the defining module, code must
 obtain values of that type through exported constructor functions rather
 than materializing the representation directly.

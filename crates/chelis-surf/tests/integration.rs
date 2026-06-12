@@ -71,13 +71,13 @@ fn roundtrip_property_decl_desugars_to_property_metadata() {
 #[test]
 fn opaque_type_decl_desugars_to_metadata() {
     let source = r#"
-@chelis_opaque
+@opaque
 type Probability = | Probability { value: f32 }
 "#;
     let decls = surf_parse(source).expect("opaque type parses");
     let deep_exprs = desugar_program(&decls);
     let deep_text = print_canonical(&deep_exprs);
-    assert!(deep_text.contains("chelis_opaque: true"));
+    assert!(deep_text.contains("opaque: true"));
     assert!(deep_text.contains("Probability"));
     deep_parse_strict(&deep_text).expect("opaque type Deep validates");
 }
