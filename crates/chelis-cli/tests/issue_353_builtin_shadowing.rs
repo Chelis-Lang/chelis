@@ -294,6 +294,48 @@ fn issue_353_near_miss_names_check_eval_build_clean() {
     }
 }
 
+/// Spec §8.6 lane inventory, executable: the rejection binds in every
+/// lane that runs the type checker — `cost` included — while
+/// `chelis validate` is a syntax-grammar lane that never runs the type
+/// checker and therefore does not surface this (or any other) semantic
+/// rejection. Pinning both directions keeps the spec's lane list honest:
+/// if `validate` ever grows a checker pass, this test fails and §8.6
+/// must be updated with it.
+#[test]
+fn issue_353_cost_rejects_and_validate_is_syntax_only() {
+    let tmp = write_tempfile("issue353-lanes2-", REPRO);
+    let path = tmp.path().to_str().expect("path utf8");
+
+    let cost = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["cost", path])
+        .output()
+        .expect("run chelis cost");
+    let cost_stderr = String::from_utf8_lossy(&cost.stderr).to_string();
+    assert!(
+        !cost.status.success(),
+        "cost lane runs the checker and must reject; stderr={cost_stderr}"
+    );
+    assert!(
+        cost_stderr.contains("shadows the builtin"),
+        "cost lane must surface the shadowing diagnostic; stderr={cost_stderr}"
+    );
+
+    let validate = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["validate", "--surf", path])
+        .output()
+        .expect("run chelis validate");
+    assert!(
+        validate.status.success(),
+        "validate is a syntax-grammar lane (no type checker) and must \
+         accept the grammatically valid reproducer; stderr={}",
+        String::from_utf8_lossy(&validate.stderr)
+    );
+}
+
 /// Reef package carve-out: a package-scoped `def sum` stays accepted.
 /// Reef rewrites package decl names to internal `pkg__...` names (and
 /// rewrites their call sites with them) before the checker runs, so a

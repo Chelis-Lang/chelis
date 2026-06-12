@@ -1653,10 +1653,12 @@ Scope:
 
 - The rule binds to top-level `def` and `defsig` declarations after module
   flattening, including load-style top-level bindings (`sum = ...` desugars
-  to a `def`), in every front-end lane (`check`, `eval`, `build`, `test`,
-  `validate`). It is a semantic rejection, not a style-gate rule:
-  `--allow-style-violations` and `CHELIS_STYLE_GATE_DISABLE=1` do not bypass
-  it.
+  to a `def`), in every lane that runs the type checker (`check`, `eval`,
+  `build`, `test`, `cost`). `chelis validate` is a syntax-grammar lane that
+  does not run the type checker and therefore does not surface this (or any
+  other) semantic rejection. It is a semantic rejection, not a style-gate
+  rule: `--allow-style-violations` and `CHELIS_STYLE_GATE_DISABLE=1` do not
+  bypass it.
 - Reef package modules are exempt by construction: package declarations are
   internal-name-rewritten (`pkg__<package>__<module>__<name>`) before the
   checker runs and their call sites are rewritten with them, so a
