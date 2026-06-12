@@ -221,6 +221,37 @@ fn collect_dvars(ty: &Type, vars: &mut Vec<DimVar>) {
     }
 }
 
+/// Collect every dimension occurring in tensor positions of `ty`,
+/// in traversal order, duplicates preserved. Used by the chelis#273
+/// return-position rigidity guard to compare a return-only declared
+/// dim parameter's resolution against the dims of the declared
+/// parameter positions.
+pub fn collect_dims(ty: &Type, dims: &mut Vec<Dim>) {
+    match ty {
+        Type::Tensor(ds, _) => {
+            dims.extend(ds.iter().cloned());
+        }
+        Type::Fn(args, ret) => {
+            for a in args {
+                collect_dims(a, dims);
+            }
+            collect_dims(ret, dims);
+        }
+        Type::Ref(inner) => collect_dims(inner, dims),
+        Type::Adt(_, args) => {
+            for a in args {
+                collect_dims(a, dims);
+            }
+        }
+        Type::Tuple(ts) => {
+            for t in ts {
+                collect_dims(t, dims);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Collect all free rank variables in a type (Tier-2 rank polymorphism).
 pub fn free_rvars(ty: &Type) -> Vec<RankVar> {
     let mut vars = Vec::new();

@@ -553,6 +553,69 @@ dim variable is genuinely bound to a concrete dimension.
 ;; tensor[n, f32]; n and m are distinct rigid dim parameters.
 ```
 
+#### 4.4.1 Return-Only Dim Parameters (chelis#273)
+
+A declared dim parameter that appears **only in the return type** has a
+different relationship to the body than a param-position one. Chelis has
+no explicit dimension application: callers instantiate dim parameters by
+unification against *arguments*, and an argument never mentions a
+return-only dim. The body is therefore the only place the output
+dimension can come from, and a return-only dim parameter is
+**output-inferred** rather than fully rigid. Two body behaviors are
+legitimate:
+
+- the body leaves the dim var unbound — a clean, generalizable
+  dimension (e.g. a variable-fed `to_tensor` whose shape is genuinely
+  unknown), or
+- the body resolves it to a **body-internal** concrete dimension; the
+  registered scheme then resolves to the produced dim. This is the
+  `examples/hello_tensor.ch` shape: `def main() -> tensor[n, f32]`
+  whose body builds a `tensor[3, f32]`.
+
+What the body must **not** do is couple the promised-independent output
+dimension to the caller-visible input world. Both of the following are
+`DimensionMismatch` type errors:
+
+- **input-coupled pin**: the return-only dim parameter resolves to a
+  concrete literal that occurs (after unification) in a declared
+  parameter position;
+- **input-coupled collapse**: the return-only dim parameter unifies with
+  a distinct param-position declared dim parameter.
+
+```scheme
+;; def f[k](a: tensor[2, f32]): tensor[k, f32] = a
+;; TYPE ERROR: the body pins the return-only dim parameter k to the
+;; parameter's concrete Lit(2); the signature promised an output
+;; dimension the body does not derive from the inputs.
+
+;; def f[n, m](x: tensor[n, f32]): tensor[m, f32] = x
+;; TYPE ERROR: the return-only dim parameter m collapses with the
+;; param-position dim parameter n.
+
+;; def make(): tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
+;; OK: output-inferred. The body produces a body-internal tensor[3, f32]
+;; and the scheme resolves n := 3; no input dimension is involved.
+```
+
+Two deliberate boundaries of this rule:
+
+- a body-internal concrete pin whose literal does *not* occur in any
+  declared parameter position is tolerated even when the def has
+  parameters (`def f(x: tensor[2, f32]) -> tensor[k, f32] =
+  to_tensor([1.0, 2.0, 3.0])` is accepted with `k := 3`) — the guard
+  compares resolved dimensions, not provenance, so a body-internal
+  literal that happens to *equal* a parameter dim is conservatively
+  rejected, and one that differs is conservatively accepted;
+- coupling through a *named* symbolic dim
+  (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x`, which binds
+  `m` to `batch`) is not flagged: `Dim::Name` unifies permissively by
+  design (chelis#219) and no declared dim parameter participates.
+
+Enforcement is `check_return_only_dvars_rigid` in
+`crates/chelis-types/src/infer.rs`, run at the same def-vs-signature
+reconciliation point as the §4.4 param-position guard; the acceptance
+oracle is `crates/chelis-cli/tests/issue_273_return_dvar_rigidity.rs`.
+
 ### 4.5 The Wildcard Dimension
 
 `(d-name {} *)` represents an unknown/dynamic dimension. Produced by operations where the compiler cannot statically determine the dimension:
@@ -680,11 +743,20 @@ and are locked by dedicated tests so a future change is a conscious one:
   resolves the joined axis to whatever the *head* (the element being
   prepended, i.e. the earlier list position) resolves to. So
   `[tensor[2, f32], tensor[*, f32]]` joins to element `tensor[2, f32]`
-  (the concrete head absorbs the wildcard tail) and type-checks against
-  `List[tensor[k, f32]]`, whereas the reordered
+  (the concrete head absorbs the wildcard tail), whereas the reordered
   `[tensor[*, f32], tensor[2, f32]]` joins to `tensor[*, f32]` (the
-  wildcard head erases the concrete tail) and is **rejected**. Element
-  ordering therefore changes the verdict. Genuinely-mismatched *concrete*
+  wildcard head erases the concrete tail). Under a `def f[k](a:
+  tensor[2, f32], b: tensor[*, f32]) -> List[tensor[k, f32]]`
+  annotation **both orderings are now rejected**, but through different
+  guards: the concrete-element ordering pins the return-only `k` to the
+  parameter's `Lit(2)` and trips the §4.4.1 return-position rigidity
+  check (chelis#273 — parity with the non-list
+  `def f[k](a: tensor[2, f32]) -> tensor[k, f32] = a`), while the
+  wildcard-element ordering trips the join-origin-wildcard uniformity
+  check below. The head bias itself is still observable in *which*
+  diagnostic fires. (Before chelis#273 the concrete-element ordering
+  type-checked, because the return-only `k` was outside the rigidity
+  guard's param-position scope.) Genuinely-mismatched *concrete*
   heads/tails still widen to `*` regardless of order (the ragged-axis
   arm).
 - **The uniformity check is single-level.** It compares the declared and
