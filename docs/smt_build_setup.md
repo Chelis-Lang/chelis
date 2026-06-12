@@ -44,13 +44,13 @@ triggers the cvc5 source build (~2-5 minutes on first compile, cached thereafter
 
 ## CI Configuration
 
-CI images need the build prerequisites above. Add to the CI Dockerfile or
-workflow:
-
-```yaml
-- name: Install cvc5 build deps
-  run: apt-get install -y cmake g++ libclang-dev git
-```
+The `smt-build` job in `.github/workflows/ci.yml` installs the
+prerequisites above, runs `cargo build -p chelis-cli --features smt`,
+and runs the smt-gated chelis-prove suite (`cargo test -p chelis-prove
+--features smt`). It is a non-gate job (rule-id GATE-SCOPE-SMT in
+`scripts/test_gate.py`): out of `scripts/gate.py` scope by design,
+like the sanitizer job, because cvc5 builds from source and is not a
+per-PR developer-loop prerequisite.
 
 ## Downstream Impact
 

@@ -51,6 +51,13 @@ NON_GATE_JOBS = {
     "backend-sanitizers",
     "no-ai-authorship",
     "docs",
+    # Rule-id: GATE-SCOPE-SMT -- the smt-build job compiles the
+    # cvc5-backed `smt` feature and runs the smt-gated chelis-prove
+    # suite. cvc5 builds from source (cmake/g++/libclang) and is not a
+    # per-PR developer-loop prerequisite, so it is out of gate.py
+    # scope by design, like backend-sanitizers. Runbook:
+    # docs/smt_build_setup.md.
+    "smt-build",
 }
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
