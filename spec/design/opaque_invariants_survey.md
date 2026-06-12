@@ -225,6 +225,46 @@ weakened elsewhere.
   it to `NON_GATE_JOBS` in `scripts/test_gate.py` (the explicit,
   reviewable exclusion set; precedent: `GATE-SCOPE-CONFORMANCE`).
 
+## 11a. RT-0 addendum (2026-06-12, probes in /tmp/rt0)
+
+The RT-0 fresh-context red team verified the survey's execution
+claims and corrected or extended the following; RFC v2 carries the
+resulting decisions:
+
+- **Export is unenforced end-to-end** (RFC C2): an out-of-module
+  call to an *unexported* `internal_make : f32 -> Probability`
+  scores 1 today. Reef's same-package resolver exposes all symbols
+  (`chelis-reef/src/lib.rs:4667-4670`). → sixth rejection (D-CHECK).
+- **Argument egress** (RFC C1): the producer set audits result
+  types only; exported HOF callback domains and in-module calls
+  passing T outward are unobligated channels. → signature rejection
+  (D-PRODUCER) + explicit TCB with `opaque-escape-site` lint
+  (D-SOUND/D-LINT).
+- **Cast surface correction** (supersedes §1's description): Surf
+  has no `x as T` expression form; the surface form is
+  `cast(x, prec)` (`parser.rs:1159-1214`) and an uppercase target is
+  a parse error — cast-into-ADT is inexpressible from Surf today.
+  Both Deep cast shapes (`t-prim`/`t-adt` target) pass clean today,
+  so the Deep-side gate in D-CHECK is still required.
+- **Lit-forge is reachable from Surf**: expression ascription
+  (`0.5 : Probability`) and block-binding ascription desugar via
+  `inject_type_metadata` (`desugar.rs:1287-1291`) to
+  `(lit {type: (t-adt {} Probability)} 0.5)` and the checker honors
+  it (score 1). The forge gate covers both surfaces.
+- **Exhaustiveness claims now verified** (probes): bare `| x =>`
+  arm AND `| q @ x =>` arm false-positive `NonExhaustiveMatch`;
+  `| q @ _ =>` covers. The W1 fix covers both irrefutable shapes.
+- **Duplicate same-name `deftype` across modules** is rejected
+  (`DuplicateDefinition`) — protects nominal opacity keying;
+  registry insert is otherwise last-write-wins (`adt.rs:253`).
+  W1 locks the rejection with a test.
+- **`if` ⇒ ite already exists** in the Tier B lowering
+  (`prove.rs:1787`); the new Tier B work is record beta-reduction
+  and case-of-known-constructor only.
+- Sig-only defsigs type-check without bodies (out-of-module: the
+  import shape, harmless; in defining module with T-producing
+  return: covered-or-rejected at obligation collection).
+
 ## 12. Differential corpus reality
 
 The Hull conformance corpus (`tests/conformance/hull/`, 1494 frozen

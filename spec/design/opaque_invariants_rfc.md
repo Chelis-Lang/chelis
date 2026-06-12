@@ -1,10 +1,27 @@
 # RFC: Opaque Types With Declared Invariants (Option 1.5)
 
-Version: 1 (frozen). Survey evidence:
+Version: 2 (frozen). Survey evidence:
 [`opaque_invariants_survey.md`](opaque_invariants_survey.md).
 Decisions carry stable IDs (`D-*`) for citation in workstream briefs,
 commits, and red-team reports. Changing a frozen decision requires a
 version bump and an explicit note in the owning PR.
+
+Version history:
+- v2: RT-0 fixes. Closes the two CRITICAL soundness holes (C2:
+  sixth rejection for unexported-producer references; C1: exported
+  signatures with caller-receives occurrences of the type are
+  declaration errors; argument egress handled by the explicit-TCB
+  model with a provenance-aware escape-site lint). Repairs the NaN
+  fail-closed claim (representation sanity pre-check), corrects the
+  lit-forge surface labeling (reachable from Surf ascription),
+  whitelists `sum` over fixed-shape tensor fields, makes Tier C
+  generation tiered-and-validated (dissolving the constructor-trust
+  circularity), relocates the Tier B lowering home, widens the
+  exhaustiveness fix to `pat-as`-wrapped irrefutable arms, requires
+  a named module for `@opaque`, and pins the smaller RT-0 items
+  (sig-only defs, exported constants, recursive container
+  decomposition, whitelist consolidation, duplicate-deftype lock).
+- v1: initial frozen contract.
 
 ## 0. Feature statement
 
@@ -51,10 +68,40 @@ induction over value provenance:
   call's arguments are themselves provenance-traced).
 - **Side conditions.** (a) The producer set must be complete —
   see D-PRODUCER's covered-or-rejected rule; one uncovered producer
-  collapses the induction. (b) No value may enter from outside the
-  program without revalidation — see D-DECODE. (c) In-module code is
+  collapses the induction. Completeness requires both that
+  unexported producers are unreachable from outside (the sixth
+  rejection, D-CHECK) and that exported signatures cannot hand
+  caller-supplied code unobligated values (the signature rejection,
+  D-PRODUCER). (b) No value may enter from outside the program
+  without revalidation — see D-DECODE. (c) In-module code is
   unconstrained by construction; the guarantee quantifies over
   out-of-module provenance only.
+
+**The explicit trust caveat (argument egress).** Return-egress is
+mechanically obligated; argument egress is not: in-module code that
+passes a value of the type as an argument to an out-of-module callee
+is trusted not to leak an invariant-violating value through that
+channel. This is the residual of the classic abstract-type trust
+model after derived obligations mechanize the output boundary. The
+quotable form, for downstream admission manifests that cite the
+composed guarantee:
+
+> Producer obligations mechanically cover every value of the type
+> returned across the module boundary. Values the defining module
+> passes outward as call arguments are covered by module audit, not
+> by machine-discharged obligations; the advisory
+> `opaque-escape-site` lint enumerates exactly those sites.
+
+The `opaque-escape-site` lint (D-LINT) is provenance-aware locally:
+it flags in-module argument-egress sites where the passed value is
+not locally traceable to a producer call or to a type-T input of the
+enclosing function — i.e., where it traces to a raw construction or
+a representation update. RT-3's soundness suite must include an
+adversarial leak through argument egress and confirm the lint
+surfaces it. The designed follow-up (out of V1 scope, queued):
+provenance-triggered escape obligations — only raw-construction-
+traced arguments carry them — bundled with the HOF extension, since
+both are the same escape-analysis family.
 
 Red teams attack this argument as stated, not a reconstruction.
 
@@ -127,19 +174,41 @@ language semantics, like `type`/`eff`/`lin`):
   `pat-ctor`; field `access` (typed targets now, deferred-variable
   ledger for targets resolved later in the def, mirroring the
   deferred-borrow ledger); `record-update` (Deep-only form);
-  cast-into (both the Surf `(t-prim {} Name)` desugar shape and the
-  Deep `(t-adt ...)` shape) and cast-out; `lit {type: (t-adt ...)}`
-  forging (Deep-only).
+  cast-into and cast-out (Deep `cast` with `t-prim` or `t-adt`
+  targets — Surf has no cast-into-ADT surface form today, but the
+  Deep gate is required regardless); `lit {type: (t-adt ...)}`
+  forging — reachable from BOTH surfaces: Surf expression ascription
+  (`0.5 : Probability`) and block-binding ascription desugar to
+  exactly this lit metadata, so the gate must not be scoped to `.dp`
+  ingestion; and the **sixth rejection** (RT-0 C2): an out-of-module
+  reference to an *unexported* def of an opaque-defining module
+  whose result type contains the opaque type. The sixth rejection
+  applies to all opaque types (not only invariant-carrying ones) so
+  that adding an invariant later does not change which references
+  are legal; a module with no `export` decl is fully sealed (zero
+  callable producers — the `unreachable-producer` advisory flags
+  this).
+- `@opaque` requires a named enclosing module (declaration error
+  otherwise; RT-0 M6). Top-level code outside any module shares one
+  anonymous module key per check unit, which would make the
+  enforcement boundary collide across combined sources; requiring a
+  named module removes the ambiguity. Duplicate same-name `deftype`
+  across modules is already rejected (`DuplicateDefinition`); W1
+  locks that rejection with a test as an opacity invariant, since
+  the registry insert is otherwise last-write-wins.
 - Error contract (agent-grade): the message names the type, the
   defining module, and the exported producers of that module with
   signatures; location context is message-embedded (def name).
   True spans in `CheckError` are out of scope (schema change),
   explicitly flagged.
 - Exhaustiveness: outside code may match an opaque scrutinee only
-  with irrefutable patterns. The top-level irrefutable `pat-var` arm
-  false positive is verified empirically (expected-fail test first)
-  and fixed at the arm level only; nested `pat-var` keeps
-  not-covering.
+  with irrefutable patterns. The top-level irrefutable arm false
+  positive is now verified (RT-0 probes): a bare `| x =>` arm AND a
+  `pat-as`-wrapped `| q @ x =>` arm both false-positive
+  `NonExhaustiveMatch`, while `| q @ _ =>` covers. The fix covers
+  both irrefutable shapes — top-level `pat-var` and `pat-as` whose
+  inner pattern is irrefutable — at the arm level only; nested
+  `pat-var` keeps not-covering.
 - Macro expansion attributes to the call-site module (survey §3):
   fail-closed, documented, tested.
 - Aliases and imports resolve to the nominal registry entry; opacity
@@ -150,9 +219,20 @@ language semantics, like `type`/`eff`/`lin`):
 `opaque-domain-construction` is kept as defense-in-depth: per-file,
 no type context, fast editor/agent feedback, and its fail-closed
 untyped-`record-update` check complements the checker's deferral.
-spec/01 §12.1 is rewritten to name the checker as the authoritative
-gate. The lint is fast feedback; the typing judgment is the
-guarantee.
+The W1 rename rekeys the rule from `chelis_opaque`/`@chelis_opaque`
+to `opaque`/`@opaque` in the same change set (unmigrated it would
+silently never fire — RT-0 M7). spec/01 §12.1 is rewritten to name
+the checker as the authoritative gate. The lint is fast feedback;
+the typing judgment is the guarantee.
+
+New advisory lints: `opaque-without-invariant` (note),
+`unreachable-producer` (opaque type with no exported producers), and
+`opaque-escape-site` (RT-0 C1 shape 2; see D-SOUND): flags in-module
+argument-egress sites — calls passing a value of the opaque type to
+an out-of-module callee — where the value is not locally traceable
+to a producer call or a type-T input of the enclosing function.
+Local dataflow only; no prove machinery; the audit surface for the
+explicit trust caveat.
 
 ## 6. D-WF: invariant well-formedness (declaration-time)
 
@@ -163,14 +243,23 @@ parser-level twins for best-effort Surf diagnostics:
 - Representation: exactly one record-shaped variant; every field in
   the V1 value class — scalar prims, fixed-shape numeric tensors
   (all dims literal), or nested single-variant records of those.
-- Predicate grammar (pure and total by construction): literals, the
-  binder and its field projections, arithmetic (`+ - * /`),
-  comparisons, `and/or/not`, `if`, whitelisted
-  `abs/min/max/sqrt/exp/log/sin/cos`, and references to in-module
-  zero-argument constant defs whose bodies are themselves in-grammar.
-  Anything else — general calls, `match`, lambdas, tensor ops,
-  effects — is a declaration error. Free references outside
-  {binder} ∪ {in-module constants} are declaration errors.
+- Predicate grammar: literals, the binder and its field projections,
+  arithmetic (`+ - * /`), comparisons, `and/or/not`, `if`,
+  whitelisted `abs/min/max/sqrt/exp/log/sin/cos`, `sum` over a
+  tensor-typed binder field whose shape is fully literal (RT-0 M1 —
+  required by the simplex flagship; the classifier and Tier B
+  lowering expand it to finitely many scalar terms), and references
+  to in-module zero-argument constant defs whose bodies are
+  themselves in-grammar. Anything else — general calls, `match`,
+  lambdas, other tensor ops, effects — is a declaration error. Free
+  references outside {binder} ∪ {in-module constants} are
+  declaration errors.
+- "Pure" is by construction; "total" is not (RT-0 M3): `/`,
+  `log`, and `sqrt` are partial or non-finite on parts of their
+  domain. Pinned semantics for predicate evaluation error or
+  non-finite results: at decode, the decode fails; in Tier C
+  sampling, the candidate sample is rejected; in Tier B, real
+  semantics apply and the `arith_model` caveat covers the gap.
 - The predicate must be boolean-shaped at the top.
 - Equality (`==`) in predicates draws an advisory warning (tier
   epsilon mismatch; see D-STARVE for the generation consequence).
@@ -189,8 +278,12 @@ recomputation). Classification: comparisons/boolean connectives over
 affine arithmetic ⇒ Linear; a product of two non-constant subterms ⇒
 Polynomial; any whitelisted transcendental ⇒ Transcendental; any
 out-of-grammar node ⇒ Opaque. Binder field projections classify as
-variables. `From<PredAmenability> for SmtAmenability` lives in
-chelis-prove (keeps the existing tide surface stable).
+variables; `sum` over a literal-shape tensor field expands to its
+scalar terms before classification. `From<PredAmenability> for
+SmtAmenability` lives in chelis-prove (keeps the existing tide
+surface stable). chelis-pred exports the canonical
+transcendental/intrinsic whitelist; `chelis-prove`'s inlineability
+module consumes it rather than keeping a second copy (RT-0 L5).
 
 ## 8. D-PRODUCER: the producer set (covered-or-rejected)
 
@@ -202,21 +295,43 @@ contains the type in a produced position.
   types (the check pipeline runs before obligation collection), not
   only declared signatures — an unannotated exported def cannot
   escape the set.
-- Supported decomposition: Direct; inside `Option[...]` (the
-  standard failure-carrying wrapper, a builtin ADT); tuple
-  components (each position).
+- Supported decomposition, applied **recursively**: Direct; inside
+  `Option[...]` (the standard failure-carrying wrapper, a builtin
+  ADT); tuple components. Compositions like `Option[(T, f32)]` and
+  `Option[Option[T]]` decompose; anything else rejects.
 - **Covered-or-rejected:** a return type containing the type through
-  any unsupported container (record, list, function type, nested
-  generic other than Option) is an error naming the producer. Never
-  a silent skip — one uncovered producer collapses D-SOUND.
+  any unsupported container (record, list, function type, generics
+  other than Option) is an error naming the producer. Never a
+  silent skip — one uncovered producer collapses D-SOUND.
+- **Signature rejection (RT-0 C1 shape 1):** for invariant-carrying
+  opaque types, an exported signature containing the type in a
+  caller-receives position — the domain of a function-typed
+  parameter, or any unsupported container anywhere in the signature
+  — is a declaration error naming the function and the channel.
+  Plain type-T parameters remain legal (update-shape inputs; the
+  induction covers them). Scoped to invariant-carrying types: the
+  channel only breaks assumption injection, and plain opacity is
+  unaffected by it.
+- Exported **non-function bindings** whose type contains the type
+  are producers too (RT-0 L4): the obligation is that the invariant
+  holds of the constant value.
+- A **sig-only def** (defsig with no body) in the defining module
+  whose result contains the type is covered-or-rejected: error at
+  obligation collection (no body to prove). An out-of-module
+  sig-only declaring the type's return remains legal — that is what
+  imports look like, and it can materialize no values.
 - Update-shaped functions (type in params and result) fall out of
   the same rule; their input assumption is D-INJECT.
-- Explicit module with no `export` decl ⇒ zero producers (legal;
-  the advisory `unreachable-producer` lint flags an opaque type
-  with no exported producers). Bare-script files (no module
-  wrapper) ⇒ all top-level defs are producers-eligible.
+- Explicit module with no `export` decl ⇒ zero producers, and the
+  sixth rejection (D-CHECK) makes the type fully sealed — internal
+  producers are not callable from outside, keeping the premise of
+  the next bullet true. The advisory `unreachable-producer` lint
+  flags an opaque type with no exported producers. `@opaque`
+  requires a named module (D-CHECK), so there is no bare-script
+  producer rule.
 - Internal functions carry no obligations; their outputs escape only
-  through exported ones.
+  through exported ones — a premise the sixth rejection enforces
+  rather than assumes (RT-0 C2).
 
 ## 9. D-OBLIG: obligation synthesis and output
 
@@ -259,15 +374,28 @@ def probability(x: f32) -> Option[Probability] =
 ```
 
 Tier B lowering gains, in addition to the existing function-call
-inlining: record beta-reduction (`Access` over a reduced `Record`
-substitutes the field expression), `if` ⇒ SMT ite, and
-case-of-known-constructor reduction (the obligation's `match` over an
-inlined `if guard then Some(...) else None` reduces per branch). The
-acceptance bar: a guarded-Option constructor's derived obligation
-proves with `proof_tier:"smt"` for linear-arithmetic invariants.
-Residual irreducible `match` bodies fall to Tier C (documented).
-Clamping constructors proving at SMT tier is necessary but not
-sufficient — the consuming use case bans them.
+inlining and `if` ⇒ ite (which already exists — RT-0 L2): record
+beta-reduction (`Access` over a reduced `Record` substitutes the
+field expression) and case-of-known-constructor reduction (the
+obligation's `match` over an inlined `if guard then Some(...) else
+None` reduces per branch). The acceptance bar: a guarded-Option
+constructor's derived obligation proves with `proof_tier:"smt"` for
+linear-arithmetic invariants. Residual irreducible `match` bodies
+fall to Tier C (documented). Clamping constructors proving at SMT
+tier is necessary but not sufficient — the consuming use case bans
+them.
+
+**Lowering home (RT-0 M4):** the Surf→SMT lowering machinery —
+including the existing inlining and the new reductions — relocates
+into `chelis-prove` as part of the D-PARITY consolidation, so the
+CLI and tide paths share one lowering. The parity test asserts not
+just the same obligation set but the same `proof_tier` per
+obligation across surfaces.
+
+For invariant-carrying types whose representation includes
+fixed-shape tensor fields, Tier B flattening expands tensor fields
+to per-element solver variables, capped (total scalar count ≤ 64)
+— beyond the cap the property falls to Tier C.
 
 SMT proofs are over the reals; runtime arithmetic is floating-point.
 smt-tier artifacts carry `arith_model: "real"` (additive), and
@@ -292,38 +420,62 @@ preconditions.
 - Injection applies only to invariant-carrying opaque types; never
   to non-opaque or invariant-free types (test-locked).
 
-## 13. D-STARVE: generator strategy per invariant shape
+## 13. D-STARVE: tiered, validated generation
 
-Classified at design time, not discovered empirically:
+Binder generation for invariant-carrying opaque types is tiered, and
+every accepted sample is validated against the predicate regardless
+of how it was proposed — generation methods are proposal
+distributions, never trust sources:
 
-- **Inequality-shaped predicates** (no equality atoms over the
-  binder): per-binder rejection sampling. Budget:
-  `--invariant-min-rate <f64>` (default `0.01`); when the observed
-  satisfaction rate falls below the floor, the property aborts as
-  `Unsupported` (exit 2) with a generator-starvation diagnostic
-  naming the type, accepted/attempted counts, rate, floor, the
-  predicate's shape classification, and the recommended route.
-  `--invariant-min-rate 0.0` disables the classification (legacy
-  exhaustion ⇒ `Error` path preserved). Deterministic under a fixed
-  seed.
-- **Equality-constrained / measure-near-zero predicates** (any `==`
-  atom over binder fields, e.g. a simplex's sum-to-one): rejection
-  sampling is structurally starved (acceptance ~ε). These route to
-  Tier B where the property lowers; for Tier C,
-  **constructor-based generation** is in scope: binder samples are
-  produced by evaluating the module's exported producers on sampled
-  raw inputs (Option-unwrapping failures). Sound under D-SOUND —
-  producers are obligation-checked — and that dependency is stated
-  here for red-team attack.
-- The flagship simplex example (W6) must verify under injection
-  without starving; it is the acceptance probe for this decision.
+1. **Rejection sampling** of the representation against the
+   predicate, within budget.
+2. **On starvation, constructor-based generation**: candidate binder
+   values are produced by evaluating the module's exported producers
+   on sampled raw inputs (Option-unwrapping failures) — a smarter
+   proposal distribution for predicates whose satisfying set is
+   measure-near-zero under independent component sampling (equality
+   atoms, near-zero-width bands; the simplex's sum-to-one is the
+   flagship case). Each generated sample is still checked against
+   the predicate before acceptance, so a buggy producer costs
+   sampling efficiency, never soundness — this removes any ordering
+   dependency between producer obligations and generation (RT-0 M2).
+   A degenerate producer (constant output) yields full acceptance
+   with zero domain coverage; the diagnostic reports distinct-sample
+   counts so this is visible.
+3. **Both starved ⇒ `Unsupported`** (exit 2) with a
+   generator-starvation diagnostic naming the type,
+   accepted/attempted counts per method, rate, floor, the
+   predicate's syntactic shape classification (equality atoms /
+   band widths — recorded to explain the starvation, and to skip
+   straight to step 2 when obvious), and the recommended route
+   (Tier B where the property lowers; a richer producer set
+   otherwise).
+
+Budget: `--invariant-min-rate <f64>` (default `0.01`) floors step 1;
+`--invariant-min-rate 0.0` disables the starvation classification
+(legacy exhaustion ⇒ `Error` path preserved). Deterministic under a
+fixed seed. User-precondition rejection sampling keeps its existing
+semantics and exhaustion behavior (`Error`) — the two failure modes
+stay distinguishable.
+
+The flagship simplex example (W6) must verify under injection
+without starving; it is the acceptance probe for this decision.
 
 ## 14. D-DECODE: decode revalidation
 
 No codec or deserialization path may materialize a value of an
 invariant-carrying opaque type without checking the invariant at
 decode time. Decode of a violating payload is a failure, never a
-repair. NaN comparisons are false, so NaN payloads fail closed.
+repair.
+
+**Representation sanity pre-check (RT-0 H1).** "NaN comparisons are
+false" does NOT make NaN payloads fail closed for all in-grammar
+predicates: `not (p.value > 1.0)` is *true* on NaN, and `p.value !=
+5.0` is true on NaN under IEEE semantics. Decode therefore rejects
+any payload containing a NaN or infinite value in a numeric
+representation field BEFORE predicate evaluation, restoring
+unconditional fail-closed behavior. Predicate evaluation error
+(division by zero, domain errors) also fails the decode (D-WF).
 
 V1 reality (survey §7): no external ADT payload codec exists yet.
 V1 therefore ships: `revalidate_adt_value` in the evaluator
@@ -355,3 +507,9 @@ reference support is an out-of-repo follow-up, not claimed.
   the new forms (locked by the existing suites plus D-CORPUS).
 - The feature ships in a minor release; downstream consumers pin to
   it explicitly.
+- Tooling output discloses representation contents (`chelis eval`
+  prints constructor and fields; Tier C counterexamples print
+  representation values). Disclosure-only: none of these outputs are
+  re-importable as typed values (eval bindings are tensors-only), so
+  opacity's construction guarantee is unaffected. Documented so the
+  guarantee is not over-read as secrecy.
