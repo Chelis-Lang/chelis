@@ -43,6 +43,14 @@ pub enum CheckErrorKind {
     /// dependent borrow semantics. Reject the collision at declaration
     /// time instead.
     DuplicateDefinition,
+    /// RFC D-CHECK (spec/design/opaque_invariants_rfc.md): a type
+    /// declared `@opaque` was constructed, inspected, forged, or
+    /// reached through an unexported binding outside its defining
+    /// module, or `@opaque` was declared outside a named module. The
+    /// message names the type, the defining module, and the exported
+    /// producers with signatures; location context is the enclosing
+    /// def name embedded in the message.
+    OpaqueTypeViolation,
     Other,
 }
 
@@ -64,6 +72,7 @@ impl CheckErrorKind {
             CheckErrorKind::CycleDetected => 0.9,
             CheckErrorKind::UnsupportedTensorPrecision => 0.8,
             CheckErrorKind::DuplicateDefinition => 0.9,
+            CheckErrorKind::OpaqueTypeViolation => 0.8,
             CheckErrorKind::Other => 0.5,
         }
     }

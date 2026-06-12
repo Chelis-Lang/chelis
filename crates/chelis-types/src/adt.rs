@@ -23,6 +23,15 @@ pub struct AdtDef {
     pub name: String,
     pub type_params: Vec<String>,
     pub variants: Vec<VariantInfo>,
+    /// True when the `deftype` carried `opaque: true` metadata
+    /// (RFC D-CHECK): construction and inspection are checker-gated
+    /// to the defining module.
+    pub opaque: bool,
+    /// Module identity recorded at `deftype` registration: the
+    /// lexical `(module ...)` key, or the reef internal-name stem for
+    /// package-linked declarations. `None` for top-level declarations
+    /// outside any module (illegal for opaque types, D-CHECK).
+    pub defining_module: Option<String>,
 }
 
 /// A type alias definition extracted from a `typealias` node.
@@ -69,11 +78,16 @@ impl AdtRegistry {
 
     /// Register an ADT from a deftype Deep node.
     /// `children` should be the children after tag+metadata: name, type_params_list, variant...
+    /// `opaque` is the `opaque: true` metadata flag and
+    /// `defining_module` the module identity computed by the caller
+    /// (RFC D-CHECK); both are recorded on the [`AdtDef`].
     /// Returns constructor schemes to add to the type environment.
     pub fn register_deftype(
         &mut self,
         children: &[deep::Expr],
         vg: &mut VarGen,
+        opaque: bool,
+        defining_module: Option<String>,
     ) -> Vec<(String, Scheme)> {
         // children[0] = name (symbol)
         // children[1] = type params list like (a) or (a b) -- a bare list of symbols wrapped in parens
@@ -231,6 +245,8 @@ impl AdtRegistry {
                 name,
                 type_params,
                 variants,
+                opaque,
+                defining_module,
             },
         );
 

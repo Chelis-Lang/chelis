@@ -271,8 +271,9 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // First pass: collect deftype and defsig declarations. Descend through
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
+    let items = top_level_decl_items_with_modules(exprs);
     collect_all_declarations(
-        &top_level_decl_items(exprs),
+        &items,
         &mut env,
         &mut vg,
         &mut subst,
@@ -280,10 +281,23 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
         &mut errors,
     );
 
+    // Checker-enforced opacity (RFC D-CHECK): install the per-run
+    // context so the inference hooks see module identity, exports,
+    // and producer text. Dropped at the end of this function.
+    let opacity_meta = build_opacity_meta(&items, &adt_reg, &mut vg);
+    let _opacity_guard = crate::opacity::install_opacity_context(
+        crate::opacity::OpacityContextData::from_meta(opacity_meta),
+    );
+
     // Second pass: infer def bodies. Same module-descent rationale as the
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
-    for expr in top_level_decl_items(exprs) {
+    for (module, expr) in &items {
+        let decl_name = top_level_decl_name(expr);
+        crate::opacity::set_current_item(
+            crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+            decl_name.map(str::to_string),
+        );
         infer_top_level(
             expr,
             &mut env,
@@ -298,6 +312,7 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
         // now-complete substitution (see `validate_deferred_borrow_vars`).
         validate_deferred_borrow_vars(&subst, &adt_reg, &mut errors);
     }
+    crate::opacity::set_current_item(None, None);
 
     // Third pass: reject tensor types whose element precision isn't supported
     // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
@@ -427,6 +442,7 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
         adt_reg: state.adt_reg,
         ir_types: library_ir_annotated,
         library_def_names,
+        opacity: state.opacity,
     }))
 }
 
@@ -533,6 +549,7 @@ pub fn build_compiled_library_context(
         adt_reg: state.adt_reg,
         ir_types: library_ir_annotated.clone(),
         library_def_names,
+        opacity: state.opacity,
     });
 
     // Build the CheckedProgram with the same `annotated_type_env` shape
@@ -660,6 +677,7 @@ pub fn build_compiled_library_context_with_base(
         adt_reg: state.adt_reg,
         ir_types: combined_ir_annotated,
         library_def_names,
+        opacity: state.opacity,
     });
 
     // The CheckedProgram carries this layer's annotated bodies plus a
@@ -915,13 +933,24 @@ fn infer_ir_program_with_state(
     // Descend through `(module {} name ...)` wrappers: every idiomatic
     // Surf source wraps its declarations in `module X`, and without
     // flattening none of the walkers below see any def/defsig/deftype.
+    let items = top_level_decl_items_with_modules(exprs);
     collect_all_declarations(
-        &top_level_decl_items(exprs),
+        &items,
         &mut state.env,
         &mut state.var_gen,
         &mut state.subst,
         &mut state.adt_reg,
         &mut errors,
+    );
+
+    // Checker-enforced opacity (RFC D-CHECK): accumulate this phase's
+    // program-shape metadata into the persistent state (so the
+    // stacked library/new-code paths keep library exports visible)
+    // and install the per-run context for the inference hooks.
+    let phase_meta = build_opacity_meta(&items, &state.adt_reg, &mut state.var_gen);
+    state.opacity.merge_from(&phase_meta);
+    let _opacity_guard = crate::opacity::install_opacity_context(
+        crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
 
     for (name, ty_expr) in new_ir_types {
@@ -941,12 +970,17 @@ fn infer_ir_program_with_state(
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
-    for expr in top_level_decl_items(exprs) {
+    for (module, expr) in &items {
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
         } else {
             None
         };
+        let decl_name = top_level_decl_name(expr);
+        crate::opacity::set_current_item(
+            crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+            decl_name.map(str::to_string),
+        );
         infer_top_level(
             expr,
             &mut state.env,
@@ -968,6 +1002,7 @@ fn infer_ir_program_with_state(
         // prevents one def's deferrals from leaking into the next.
         validate_deferred_borrow_vars(&state.subst, &state.adt_reg, &mut errors);
     }
+    crate::opacity::set_current_item(None, None);
 
     for warning in chelis_deep::validate::validate(exprs) {
         errors.push(CheckError::new(
@@ -1382,6 +1417,42 @@ fn top_level_decl_items(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
     let mut out = Vec::new();
     for expr in exprs {
         push(expr, &mut out);
+    }
+    out
+}
+
+/// Like [`top_level_decl_items`] but pairs each flattened item with
+/// its enclosing lexical module key: nested `(module ...)` names
+/// joined with `.`, `None` for items outside any wrapper. This is the
+/// module-identity source for checker-enforced opacity (RFC D-CHECK);
+/// reef package-linked items carry no wrapper and key through their
+/// internal-name stem instead (see `opacity::module_key_for_item`).
+fn top_level_decl_items_with_modules(exprs: &[deep::Expr]) -> Vec<(Option<String>, &deep::Expr)> {
+    fn push<'a>(
+        expr: &'a deep::Expr,
+        prefix: Option<&str>,
+        out: &mut Vec<(Option<String>, &'a deep::Expr)>,
+    ) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("module")
+        {
+            // `(module {} name children...)` — skip tag, meta, name.
+            let name = list.elements.get(2).and_then(symbol_name);
+            let key = match (prefix, name) {
+                (Some(p), Some(n)) => Some(format!("{p}.{n}")),
+                (None, Some(n)) => Some(n.to_string()),
+                (p, None) => p.map(str::to_string),
+            };
+            for child in list.elements.iter().skip(3) {
+                push(child, key.as_deref(), out);
+            }
+            return;
+        }
+        out.push((prefix.map(str::to_string), expr));
+    }
+    let mut out = Vec::new();
+    for expr in exprs {
+        push(expr, None, &mut out);
     }
     out
 }
@@ -4419,7 +4490,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     // name silently misses. See `infer_program` for the parallel
     // iteration.
     collect_all_declarations(
-        &top_level_decl_items(exprs),
+        &top_level_decl_items_with_modules(exprs),
         &mut env,
         &mut vg,
         &mut subst,
@@ -4503,7 +4574,7 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
     // declarations; mirrors the `infer_program` shape and the parallel
     // fix in `annotate_ir_program`. (closes #181)
     collect_all_declarations(
-        &top_level_decl_items(exprs),
+        &top_level_decl_items_with_modules(exprs),
         &mut state.env,
         &mut state.var_gen,
         &mut state.subst,
@@ -6307,6 +6378,16 @@ fn get_meta(list: &deep::List) -> Option<&deep::MetaMap> {
     None
 }
 
+/// True when a `deftype` node carries `opaque: true` metadata
+/// (RFC D-META; the key is unprefixed language semantics).
+fn deftype_opaque_meta(list: &deep::List) -> bool {
+    get_meta(list).is_some_and(|meta| {
+        meta.entries.iter().any(|(key, value)| {
+            key == "opaque" && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
+        })
+    })
+}
+
 /// Extract a symbol name from an Expr.
 fn symbol_name(expr: &deep::Expr) -> Option<&str> {
     match expr {
@@ -6606,25 +6687,134 @@ enum DeclPhase {
 }
 
 /// Run the two-phase declaration collection over `items` (already flattened
-/// past `module` wrappers): register all type aliases, then everything else.
+/// past `module` wrappers, each paired with its lexical module key):
+/// register all type aliases, then everything else.
 fn collect_all_declarations(
-    items: &[&deep::Expr],
+    items: &[(Option<String>, &deep::Expr)],
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
     errors: &mut Vec<CheckError>,
 ) {
-    for expr in items {
-        collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Aliases);
+    for (module, expr) in items {
+        collect_declarations(
+            expr,
+            module.as_deref(),
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            DeclPhase::Aliases,
+        );
     }
-    for expr in items {
-        collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Rest);
+    for (module, expr) in items {
+        collect_declarations(
+            expr,
+            module.as_deref(),
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            DeclPhase::Rest,
+        );
     }
 }
 
+/// Build the program-shape opacity metadata (RFC D-CHECK) from the
+/// flattened `(module key, item)` list: per-module export sets, the
+/// top-level binding -> module map, and the formatted "exported
+/// producers with signatures" entries per opaque type used by the
+/// violation error contract. Runs after declaration collection so the
+/// registry already carries every `deftype`'s `opaque` flag and
+/// defining module.
+fn build_opacity_meta(
+    items: &[(Option<String>, &deep::Expr)],
+    adt_reg: &AdtRegistry,
+    vg: &mut VarGen,
+) -> crate::opacity::OpacityModuleMeta {
+    let mut meta = crate::opacity::OpacityModuleMeta::default();
+    // Declared signature types (from `defsig` nodes) for producer
+    // display; keyed by binding name like `meta.bindings`.
+    let mut declared_sigs: HashMap<String, Type> = HashMap::new();
+    for (module, item) in items {
+        let deep::Expr::List(list, _) = item else {
+            continue;
+        };
+        let kids = children(list);
+        match get_tag(list) {
+            Some("export") => {
+                if let Some(module) = module {
+                    let entry = meta.exports.entry(module.clone()).or_default();
+                    for child in kids {
+                        if let Some(name) = symbol_name(child) {
+                            entry.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+            Some("def") | Some("defsig") => {
+                if let Some(module) = module
+                    && let Some(name) = kids.first().and_then(symbol_name)
+                {
+                    meta.bindings.insert(name.to_string(), module.clone());
+                    if get_tag(list) == Some("defsig")
+                        && let Some(ty_expr) = kids.get(1)
+                    {
+                        let ty =
+                            deep_type_to_resolved_type(ty_expr, vg, adt_reg, &mut HashMap::new());
+                        declared_sigs.insert(name.to_string(), ty);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Producer enumeration per opaque type: exported bindings of the
+    // defining module whose declared RESULT type mentions the type
+    // (containment chased through named type definitions).
+    for (adt_name, def) in &adt_reg.defs {
+        if !def.opaque {
+            continue;
+        }
+        let Some(module) = &def.defining_module else {
+            continue;
+        };
+        let Some(export_set) = meta.exports.get(module) else {
+            continue;
+        };
+        let mut entries: std::collections::BTreeSet<String> = Default::default();
+        for name in export_set {
+            if meta.bindings.get(name) != Some(module) {
+                continue;
+            }
+            let Some(sig) = declared_sigs.get(name) else {
+                continue;
+            };
+            let result = match sig {
+                Type::Fn(_, ret) => ret.as_ref(),
+                other => other,
+            };
+            if crate::opacity::type_mentions_adt(result, adt_name, adt_reg) {
+                entries.insert(format!("{name}: {sig}"));
+            }
+        }
+        if !entries.is_empty() {
+            meta.producer_entries
+                .entry(adt_name.clone())
+                .or_default()
+                .extend(entries);
+        }
+    }
+    meta
+}
+
+#[allow(clippy::too_many_arguments)]
 fn collect_declarations(
     expr: &deep::Expr,
+    lexical_module: Option<&str>,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -6675,7 +6865,26 @@ fn collect_declarations(
                 ));
                 return;
             }
-            let ctors = adt_reg.register_deftype(kids, vg);
+            // RFC D-CHECK: record opacity + module identity on the
+            // registered AdtDef. The module key is the lexical
+            // wrapper when present, else the reef internal-name stem
+            // of the deftype's own (rewritten) name. `@opaque`
+            // requires a named module (RT-0 M6): a top-level opaque
+            // declaration has no module identity, which would make
+            // the enforcement boundary collide across combined
+            // sources.
+            let opaque = deftype_opaque_meta(list);
+            let defining_module = crate::opacity::module_key_for_item(
+                lexical_module,
+                kids.first().and_then(symbol_name),
+            );
+            if opaque
+                && defining_module.is_none()
+                && let Some(name) = kids.first().and_then(symbol_name)
+            {
+                errors.push(crate::opacity::unmoduled_opaque_error(name));
+            }
+            let ctors = adt_reg.register_deftype(kids, vg, opaque, defining_module);
             for (name, scheme) in ctors {
                 env.bind(name, scheme);
             }

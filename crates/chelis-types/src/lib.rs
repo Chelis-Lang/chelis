@@ -7,6 +7,7 @@ pub mod errors;
 pub mod fitness;
 pub mod infer;
 pub mod linearity;
+pub(crate) mod opacity;
 pub(crate) mod pipe_stage;
 pub mod types;
 pub mod unify;
