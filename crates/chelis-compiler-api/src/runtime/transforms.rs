@@ -342,7 +342,11 @@ fn static_usize_value(expr: &Expr) -> Option<usize> {
 /// `axis` (the vmap axis); that axis stays `Lit` (it is the mapped
 /// axis, not one of the callee's dims), and the remaining axes are
 /// typed against the formal exactly as the chelis#338 def-call
-/// boundary types its placeholders. Errs (caller falls back to Lit
+/// boundary types its placeholders — except that `d-var` dims are
+/// staged as `Named(name, Some(size))` rather than `Lit`: the vmap
+/// rank shift skips the same-rank remap that concretizes the body's
+/// d-var names in the plain-call/grad lanes, so the names can only
+/// bind through the placeholder Load. Errs (caller falls back to Lit
 /// dims) when the axis is out of range or the formal does not type the
 /// unbatched view — e.g. a broadcast argument the lowering passes
 /// through unbatched, or a rank-poly (`..spread`) formal.
@@ -360,7 +364,7 @@ fn vmap_lane_placeholder_type(
     }
     let mut unbatched = shape.clone();
     let batch = unbatched.remove(axis);
-    let mut ty = declared_tensor_type_for_shape(formal, &unbatched, tensor.precision)?;
+    let mut ty = declared_tensor_type_for_shape(formal, &unbatched, tensor.precision, true)?;
     ty.dims.insert(axis, DimInfo::Lit(batch));
     Ok(ty)
 }

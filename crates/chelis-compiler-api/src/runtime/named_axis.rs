@@ -562,17 +562,25 @@ pub(super) fn declared_tensor_type_for_value(
     ty_expr: &Expr,
     tensor: &RuntimeTensorValue,
 ) -> Result<TensorType, String> {
-    declared_tensor_type_for_shape(ty_expr, &tensor.value.shape, tensor.precision)
+    declared_tensor_type_for_shape(ty_expr, &tensor.value.shape, tensor.precision, false)
 }
 
 /// Shape-slice core of [`declared_tensor_type_for_value`], shared with
 /// the chelis#351 vmap-lane placeholder synthesis (which types the
 /// UNBATCHED view of a batched actual against the callee's formal, so
 /// it has a bare shape rather than a whole `RuntimeTensorValue`).
+///
+/// `name_dim_vars` selects the staging for `d-var` dims (`tensor[a, ..]`):
+/// `false` stages them as concrete `Lit`s (the chelis#346 F5 decision —
+/// correct wherever the same-rank formal/actual remap concretizes the
+/// body's names); `true` stages them as `Named(name, Some(size))`, for
+/// the vmap lane where the rank shift skips that remap and the body's
+/// d-var names can only bind through the placeholder Load (chelis#351).
 pub(super) fn declared_tensor_type_for_shape(
     ty_expr: &Expr,
     shape: &[usize],
     fallback_precision: Prim,
+    name_dim_vars: bool,
 ) -> Result<TensorType, String> {
     let stripped = strip_type_wrappers(ty_expr);
     let Expr::List(list, _) = stripped else {
@@ -643,8 +651,19 @@ pub(super) fn declared_tensor_type_for_shape(
             // A dim VARIABLE (surf desugars single-lowercase-letter dims
             // like `tensor[a, seq, f32]` to `d-var`): at this staged
             // boundary the runtime shape monomorphizes it, exactly as a
-            // build call site binds it. It carries no anchor name, so a
-            // concrete Lit is the faithful staging (chelis#346 red-team F5).
+            // build call site binds it. In the same-rank lanes it carries
+            // no anchor name, so a concrete Lit is the faithful staging
+            // (chelis#346 red-team F5). In the vmap lane the rank shift
+            // skips the formal/actual remap that would concretize the
+            // body's d-var names, so the name must instead bind through
+            // the placeholder Load — exactly like a d-name (chelis#351).
+            Some("d-var") if name_dim_vars => {
+                let name = children(dim_list)
+                    .first()
+                    .and_then(symbol_name)
+                    .ok_or_else(|| "malformed d-var dimension".to_string())?;
+                dims.push(DimInfo::Named(name.to_string(), Some(size)));
+            }
             Some("d-var") => dims.push(DimInfo::Lit(size)),
             other => {
                 return Err(format!(

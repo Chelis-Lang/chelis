@@ -760,6 +760,119 @@ fn vmap_over_rank_poly_named_reduce_evals_and_matches_backend() {
     assert_eval_agrees_with_backend(source, "vmap_rank_poly_named_reduce", &backend);
 }
 
+/// chelis#351 second flavor (found by the #371 review red team): the SAME
+/// vmap-lane ICE reproduced with dim-VAR formals (`tensor[a, seq, f32]` —
+/// surf desugars single-letter dims to `d-var`). The original fix staged
+/// d-vars as `Lit` (the chelis#346 F5 decision, correct for the same-rank
+/// plain-call/grad lanes where `tensor_dim_substitutions` concretizes the
+/// body's names), but vmap's rank shift skips that remap, so the body's
+/// `Named("a", None)` stayed unbound and the dag.rs guard panicked — check
+/// clean, backend correct, eval ICE: exactly the #351 symptom. The vmap lane
+/// now stages d-vars as `Named(name, Some(size))` so they bind through the
+/// placeholder Load like d-names; the plain-call lane keeps Lit staging
+/// (pinned by `dim_var_formal_routes_and_matches_backend`).
+///
+/// Matrix, all pinned eval-vs-backend:
+/// - `outa`: two d-vars surviving the named reduce (`[a, seq, b]` -> `[a, b]`)
+/// - `outb`: one LEADING d-var (`[a, seq]` -> `[a]`; position before the
+///   reduce axis is what the d-name reproducer did not cover)
+/// - `outm`: mixed d-var + d-name formal (`[a, seq, hidden]` -> `[a, hidden]`)
+/// - `gv`: vmap(grad(...)) over a d-var formal (gradient 2x, non-constant)
+#[test]
+fn vmap_over_dim_var_formal_named_reduce_evals_and_matches_backend() {
+    let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def inner2(x: &tensor[a, seq, b, f32]) -> tensor[a, b, f32] = reduce_seq(x)\n\
+         def inner1(x: &tensor[a, seq, f32]) -> tensor[a, f32] = reduce_seq(x)\n\
+         def innerm(x: &tensor[a, seq, hidden, f32]) -> tensor[a, hidden, f32] = reduce_seq(x)\n\
+         def totalv(x: &tensor[a, seq, f32]) -> f32 = tensor_to_scalar(sum(reduce_seq(x * x), 0))\n\
+         outa = vmap(inner2)(to_tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], [[[13.0, 14.0, 15.0], [16.0, 17.0, 18.0]], [[19.0, 20.0, 21.0], [22.0, 23.0, 24.0]]]]))\n\
+         outb = vmap(inner1)(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n\
+         outm = vmap(innerm)(to_tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]], [[[13.0, 14.0, 15.0], [16.0, 17.0, 18.0]], [[19.0, 20.0, 21.0], [22.0, 23.0, 24.0]]]]))\n\
+         gv = vmap(grad(totalv))(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n";
+    assert_clean(&check_json(source), "#351 vmap dim-var matrix checks clean");
+    let backend = build_compile_run(source, "vmap_dim_var_named_reduce");
+    let tensors = parse_printed_tensors(&backend);
+    // outa/outm: per batch slice [a=2, seq=2, b|hidden=3], sum over seq:
+    //   b0 -> [[5,7,9],[17,19,21]];  b1 -> [[29,31,33],[41,43,45]].
+    // outb: per batch slice [a=2, seq=2], sum over seq (axis 1):
+    //   [[1,2],[3,4]] -> [3,7];  [[5,6],[7,8]] -> [11,15].
+    // gv: d(sum of squares)/dx = 2x per slice.
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        (
+            "outa",
+            &[2, 2, 3],
+            &[
+                5.0, 7.0, 9.0, 17.0, 19.0, 21.0, 29.0, 31.0, 33.0, 41.0, 43.0, 45.0,
+            ],
+        ),
+        ("outb", &[2, 2], &[3.0, 7.0, 11.0, 15.0]),
+        (
+            "outm",
+            &[2, 2, 3],
+            &[
+                5.0, 7.0, 9.0, 17.0, 19.0, 21.0, 29.0, 31.0, 33.0, 41.0, 43.0, 45.0,
+            ],
+        ),
+        (
+            "gv",
+            &[2, 2, 2],
+            &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0],
+        ),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "vmap_dim_var_named_reduce", &backend);
+}
+
+/// chelis#351 non-zero-axis arm: `vmap(f, 1)` over the named rank-poly callee
+/// must route through the same formal-typed placeholder synthesis (the batch
+/// `Lit` is inserted at the vmap axis, between the formal's named dims), with
+/// eval-vs-backend agreement. Before the fix this ICEd like the axis-0 form.
+#[test]
+fn vmap_axis_one_over_rank_poly_named_reduce_evals_and_matches_backend() {
+    let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+         def inner(x: &tensor[seq, hidden, f32]) -> tensor[hidden, f32] = reduce_seq(x)\n\
+         out = vmap(inner, 1)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
+         outz = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
+    assert_clean(&check_json(source), "#351 vmap axis-1 checks clean");
+    let backend = build_compile_run(source, "vmap_axis1_rank_poly");
+    let tensors = parse_printed_tensors(&backend);
+    // out: batch axis 1 (size 2); unbatched slices are x[:, b, :] typed
+    // [seq=2, hidden=3], summed over seq:
+    //   b0: [1,2,3]+[7,8,9] = [8,10,12];  b1: [4,5,6]+[10,11,12] = [14,16,18].
+    // outz: the axis-0 twin on the same data (the issue reproducer's values).
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out", &[3, 2], &[8.0, 14.0, 10.0, 16.0, 12.0, 18.0]),
+        ("outz", &[2, 3], &[5.0, 7.0, 9.0, 17.0, 19.0, 21.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "vmap_axis1_rank_poly", &backend);
+}
+
 /// Negative parity for chelis#351: a vmapped callee whose declared formal
 /// CONFLICTS with the marshalled actual (declared `4` vs runtime `3`) must
 /// stay a `DimensionMismatch` rejection on both surfaces — check rejects, and

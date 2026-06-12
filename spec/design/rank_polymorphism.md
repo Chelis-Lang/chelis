@@ -195,7 +195,24 @@ the concrete-reduce control, `grad`, and `vmap(grad(...))` is pinned at
 `vmap_over_rank_poly_named_reduce_evals_and_matches_backend`, with
 negative parity (a conflicting concrete dim through the vmapped callee
 stays a `DimensionMismatch`, never the ICE) at
-`vmap_callee_dim_conflict_stays_rejected_not_ice`. Best-effort scope:
+`vmap_callee_dim_conflict_stays_rejected_not_ice`.
+
+The #371 review red team found the same ICE in a second flavor: dim-VAR
+formals (`tensor[a, seq, f32]`; surf desugars single-letter dims to
+`d-var`). The chelis#346 F5 decision stages d-vars as concrete `Lit`s,
+which is faithful wherever the same-rank formal/actual remap
+concretizes the body's names — but vmap's rank shift skips that remap,
+so the body's `Named("a", None)` stayed unbound and the guard panicked
+(check clean, backend correct, eval ICE: the #351 symptom exactly). In
+the vmap lane only, d-vars are now staged as `Named(name, Some(size))`
+so they bind through the placeholder Load exactly like d-names; the
+plain-call lane keeps `Lit` staging (pinned by
+`dim_var_formal_routes_and_matches_backend`). Pinned eval-vs-backend at
+`vmap_over_dim_var_formal_named_reduce_evals_and_matches_backend` (two
+surviving d-vars, a leading d-var, a mixed d-var/d-name formal, and
+`vmap(grad(...))` with a non-constant gradient) and
+`vmap_axis_one_over_rank_poly_named_reduce_evals_and_matches_backend`
+(non-zero vmap axis through the same synthesis). Best-effort scope:
 closures without declared param types, nested `vmap`, and unreadable
 axis literals fall back to the old `Lit`-dim marshalling.
 
