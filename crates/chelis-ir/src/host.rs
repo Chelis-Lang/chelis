@@ -6393,11 +6393,77 @@ fn infer_app_expr_host_type(
             }));
         }
     }
+    // Issue #308: `scalar_to_tensor` result precision must follow the
+    // operand's *float* precision. The coarse host lane collapses f32
+    // and f64 scalars into a single `HostType::Float64`, so the
+    // arg-ty-based fallback below cannot distinguish them and defaults
+    // to f32 — mis-typing an f64 const-broadcast
+    // (`scalar_to_tensor(cast(c, f64))`) as `Tensor(F32)`, which makes
+    // the C emitter select `chelis_scalar_tensor_from_f32` (4-byte
+    // storage) for an f64 value. Recover the precision from the Deep
+    // operand itself (checker annotation or explicit cast target)
+    // while it is still visible.
+    if name == "scalar_to_tensor"
+        && let Some(arg) = kids.get(1)
+        && let Some(precision) = expr_scalar_float_precision(arg)
+    {
+        return Some(HostType::Tensor(TensorType {
+            dims: vec![],
+            precision,
+        }));
+    }
     let arg_tys = kids[1..]
         .iter()
         .map(|arg| expr_host_type(arg, program, scope))
         .collect::<Vec<_>>();
     infer_builtin_host_type_from_arg_tys(name, &arg_tys)
+}
+
+/// Issue #308: recover the float precision of a scalar Deep expression
+/// for `scalar_to_tensor` result typing. Reads, in order:
+///
+///   1. the checker's `type` meta when it is a float `(t-prim {} p)`;
+///   2. an explicit `(cast {} _ (t-prim {} p))` target when `p` is a
+///      float precision.
+///
+/// Returns `None` for integer/bool operands (the coarse
+/// `infer_builtin_host_type_from_arg_tys` arms already type those
+/// correctly) and when the precision is not recoverable — in that case
+/// the caller falls back to the coarse f32 default, which the C emit
+/// dispatch and the consuming tensor-helper Load both share, so the
+/// write and read sides stay consistent even in the fallback.
+fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim> {
+    if let Expr::MetaExpr(meta, _) = expr {
+        return expr_scalar_float_precision(&meta.expr);
+    }
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    let prim_of_t_prim = |type_expr: &Expr| -> Option<chelis_types::types::Prim> {
+        let Expr::List(inner, _) = type_expr else {
+            return None;
+        };
+        if tag(inner) != Some("t-prim") {
+            return None;
+        }
+        children(inner)
+            .first()
+            .and_then(symbol_name)
+            .and_then(chelis_types::types::Prim::parse_name)
+    };
+    if let Some(Expr::Map(meta, _)) = list.elements.get(1)
+        && let Some((_, type_expr)) = meta.entries.iter().find(|(key, _)| key == "type")
+        && let Some(prim) = prim_of_t_prim(type_expr)
+    {
+        return prim.is_float().then_some(prim);
+    }
+    if tag(list) == Some("cast")
+        && let Some(target) = children(list).get(1)
+        && let Some(prim) = prim_of_t_prim(target)
+    {
+        return prim.is_float().then_some(prim);
+    }
+    None
 }
 
 fn should_prefer_inferred_app_type(explicit: &HostType, inferred: &HostType) -> bool {
@@ -7142,6 +7208,17 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             }),
             _ => Some(HostType::Float64),
         },
+        // Issue #308: `HostType::Float64` classifies BOTH f32 and f64
+        // host scalars, so this coarse arm cannot recover the true
+        // operand precision and defaults the float case to f32 (the
+        // IR `Const` default for unsuffixed float literals). The
+        // Deep-level `infer_app_expr_host_type` `scalar_to_tensor` arm
+        // overrides this with the real precision (checker annotation
+        // or explicit `cast(_, p)` target) whenever the Deep operand
+        // is still visible; this fallback only decides when nothing
+        // upstream knew better, and then both the C emit dispatch and
+        // the consuming tensor-helper Load share the same f32 answer,
+        // so storage width stays consistent.
         "scalar_to_tensor" => match arg_tys.first() {
             Some(HostType::Int64) => Some(HostType::Tensor(TensorType {
                 dims: vec![],
@@ -7537,6 +7614,111 @@ mod tests {
         assert!(
             !host_program_uses_builtin(&host, "process_run"),
             "host_program_uses_builtin must be false for a read_file-only program"
+        );
+    }
+
+    // ── Issue #308: scalar_to_tensor operand-precision plumbing ──
+    //
+    // `HostType::Float64` collapses f32 and f64, so the Deep-level
+    // `infer_app_expr_host_type` must recover the operand precision
+    // before the coarse arg-ty fallback erases it to f32.
+
+    fn parse_deep_app(src: &str) -> Expr {
+        chelis_deep::parser::parse_str(src)
+            .expect("parse failed")
+            .into_iter()
+            .next()
+            .expect("one expr")
+    }
+
+    fn infer_scalar_to_tensor_host_type(arg_src: &str) -> Option<HostType> {
+        let app = parse_deep_app(&format!("(app {{}} (var {{}} scalar_to_tensor) {arg_src})"));
+        let Expr::List(list, _) = &app else {
+            panic!("app expr must be a list");
+        };
+        // Empty checked program: the arm under test must not depend on
+        // program-level lookups for the precision recovery.
+        let program = surf_check("unrelated = 1\n");
+        infer_app_expr_host_type(list, &program, &HashMap::new())
+    }
+
+    #[test]
+    fn scalar_to_tensor_infers_f64_from_cast_target() {
+        // The #308 reproducer shape: `scalar_to_tensor(cast(1.1, f64))`
+        // with NO checker annotation on the app or the cast — the cast
+        // target alone must drive the result precision.
+        let inferred = infer_scalar_to_tensor_host_type(
+            "(cast {} (lit {type: (t-prim {} f32)} 1.1) (t-prim {} f64))",
+        );
+        assert_eq!(
+            inferred,
+            Some(HostType::Tensor(TensorType {
+                dims: vec![],
+                precision: Prim::F64,
+            })),
+            "scalar_to_tensor(cast(_, f64)) must infer a rank-0 f64 tensor",
+        );
+    }
+
+    #[test]
+    fn scalar_to_tensor_infers_f64_from_checker_annotation() {
+        let inferred = infer_scalar_to_tensor_host_type("(var {type: (t-prim {} f64)} c)");
+        assert_eq!(
+            inferred,
+            Some(HostType::Tensor(TensorType {
+                dims: vec![],
+                precision: Prim::F64,
+            })),
+            "scalar_to_tensor of an f64-annotated operand must infer a rank-0 f64 tensor",
+        );
+    }
+
+    #[test]
+    fn scalar_to_tensor_keeps_f32_default_for_f32_operand() {
+        // Negative parity (pins the #300/#306 f32 path): an f32 operand
+        // — whether via cast target or bare default literal — must keep
+        // the rank-0 f32 result so `chelis_scalar_tensor_from_f32`
+        // storage and the consuming helper's f32 read stay paired.
+        for arg_src in [
+            "(cast {} (lit {type: (t-prim {} f32)} 2.5) (t-prim {} f32))",
+            "(lit {type: (t-prim {} f32)} 2.5)",
+        ] {
+            let inferred = infer_scalar_to_tensor_host_type(arg_src);
+            assert_eq!(
+                inferred,
+                Some(HostType::Tensor(TensorType {
+                    dims: vec![],
+                    precision: Prim::F32,
+                })),
+                "scalar_to_tensor({arg_src}) must keep the f32 default",
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_to_tensor_float_recovery_does_not_hijack_integer_operands() {
+        // Negative parity: the #308 float-precision recovery must not
+        // claim integer operands. At this Deep-expr layer a
+        // cast-wrapped int infers `None` (pre-#308 behavior:
+        // `expr_host_type` does not see through `cast`, so the coarse
+        // fallback gets `Unknown` and abstains); the Int64 tensor
+        // typing happens post-lowering via `host_expr_type` on the
+        // lowered operand and the `infer_builtin_host_type_from_arg_tys`
+        // Int64 arm.
+        let inferred = infer_scalar_to_tensor_host_type(
+            "(cast {} (lit {type: (t-prim {} int32)} 3) (t-prim {} int32))",
+        );
+        assert_eq!(
+            inferred, None,
+            "integer operands must fall through unchanged (no float hijack)",
+        );
+        // The coarse arm still owns the lowered-lane integer answer.
+        assert_eq!(
+            infer_builtin_host_type_from_arg_tys("scalar_to_tensor", &[HostType::Int64]),
+            Some(HostType::Tensor(TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            })),
         );
     }
 

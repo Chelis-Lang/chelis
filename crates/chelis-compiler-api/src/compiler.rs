@@ -3775,10 +3775,18 @@ b: tensor[2, f32] = b
 
     #[test]
     fn eval_rejects_negative_shape_axis_with_signed_diagnostic() {
+        // The -1 is laundered through runtime arithmetic (`0 - 1`) so
+        // the checker cannot see it and the runtime `shape` arm owns
+        // the rejection. The original form `cast(-1, int32)` stopped
+        // exercising this path with issue #308: the desugarer now
+        // folds the sign into the literal (spec §5.6 position 4), so
+        // the binding takes the same tensor lane the positive-literal
+        // form `cast(1, int32)` always took, and the axis arrives as a
+        // rank-0 tensor rather than a host int scalar.
         let error = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-axis = tensor_to_scalar(scalar_to_tensor(cast(-1, int32)))
+axis = tensor_to_scalar(scalar_to_tensor(cast(0 - 1, int32)))
 bad = shape(scalar_to_tensor(cast(3, int64)), axis)
 "#
             .to_string(),

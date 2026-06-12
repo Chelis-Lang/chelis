@@ -7922,17 +7922,22 @@ fn infer_lit(
             && (*n < lo || *n > hi)
         {
             // The int32 default path keeps the WS-A0 D1 message
-            // shape (i64 suffix + cast(_, i64) hint) so existing
+            // shape (i64 suffix + cast(_, int64) hint) so existing
             // diagnostics-pinning tests stay green; the int8/int16
             // contextual paths cite §5.6 + §5.3 because the
             // narrowing came from contextual inference, not the
-            // default.
+            // default. The cast hint spells the prec type name
+            // `int64` (§1.1) — `i64` is only the literal-suffix
+            // spelling (§5.5) and is not a valid `cast` target, so
+            // recommending `cast({n}, i64)` would send the user to a
+            // form that re-fires this same diagnostic (issue #308
+            // review fix).
             if dtype == "int32" {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!(
                         "literal {n} out of range for default int32; use the `i64` \
-                         suffix (`{n}i64`) or an explicit cast({n}, i64) \
+                         suffix (`{n}i64`) or an explicit cast({n}, int64) \
                          (spec/04-type-system.md §5.3, §5.5)"
                     ),
                     vec![format!(
@@ -7986,7 +7991,7 @@ fn infer_lit(
                         CheckErrorKind::TypeMismatch,
                         format!(
                             "literal {n} out of range for default int32; use the \
-                             `{n}i64` literal suffix or an explicit cast({n}, i64) \
+                             `{n}i64` literal suffix or an explicit cast({n}, int64) \
                              (spec/04-type-system.md §5.3, §5.5)"
                         ),
                         vec![format!(
