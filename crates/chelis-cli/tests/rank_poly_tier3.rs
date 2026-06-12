@@ -400,6 +400,151 @@ fn named_expand_positional_axis_on_spread_rejected() {
     );
 }
 
+/// NEGATIVE (chelis#339 red team): the inserted name collides with an axis
+/// the caller's rank spread covers, and the collision is visible in the
+/// SIGNATURE (the inserted name survives into the result row). The symbolic
+/// collision check inside the def cannot see it; the call-site
+/// introduced-name rule must reject it — otherwise the monomorphized result
+/// carries `chan` twice with extents 2 and 5 (`[chan, chan, seq]` believed
+/// `[2, 2, 3]`, actual `[2, 5, 3]`).
+#[test]
+fn named_expand_spread_covered_collision_rejected_at_check() {
+    let json = check_json(
+        "def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, chan, seq, ..post, f32] = expand(x, chan, 5, seq)\n\
+         def use_col(x: &tensor[chan, seq, f32]) -> tensor[chan, chan, seq, f32] = widen(x)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "collides with an inserted axis name",
+        "anchored insert: spread covers the inserted name at the call site",
+    );
+}
+
+/// NEGATIVE twin for the trailing form: `add_axis` called with an operand
+/// whose leading axis is already named `one`.
+#[test]
+fn named_expand_trailing_spread_covered_collision_rejected_at_check() {
+    let json = check_json(
+        "def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = expand(x, one, 1)\n\
+         def use_col(x: &tensor[one, seq, f32]) -> tensor[one, seq, one, f32] = add_axis(x)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "collides with an inserted axis name",
+        "trailing insert: spread covers the inserted name at the call site",
+    );
+}
+
+/// PINNED GAP + loudness lock (chelis#339 red team): when the inserted name
+/// is consumed INSIDE the body (insert + reduce-by-name), the signature
+/// carries no trace of it, so the check stays clean and the collision only
+/// materializes at call-site rank monomorphization. Both lanes must fail
+/// LOUDLY — before the lowering guard this silently reduced the WRONG axis
+/// (backend printed shape [5, 3] against a declared `[chan, seq]` = [2, 3]).
+/// If the check ever learns to reject this at check time, fold this into the
+/// check-rejection tests above.
+#[test]
+fn named_expand_body_internal_collision_fails_loud_not_silent() {
+    let source = "def wr(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = sum(expand(x, chan, 5, seq), chan)\n\
+         def use_col(x: &tensor[chan, seq, f32]) -> tensor[chan, seq, f32] = wr(x)\n\
+         y = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         out = use_col(y)\n";
+    // The check is clean — the gap this test pins.
+    assert_clean(&check_json(source), "body-internal collision checks clean");
+    // Build lane: the fatal expand-site lowering guard, never garbage C and
+    // never a silent wrong-axis reduce.
+    let stderr = build_expecting_failure(source, "body_internal_collision");
+    assert!(
+        stderr.contains("already carries an axis named `chan`"),
+        "expected the expand-site collision diagnostic, got: {stderr}"
+    );
+    // Eval lane: loud failure (the #338 routing decline or the collision
+    // guard, depending on staging), never a silent wrong shape.
+    let dir = tempdir().expect("tempdir");
+    let eval_stderr = eval_stderr_expecting_failure(dir.path(), source, "body_internal_collision");
+    assert!(
+        eval_stderr.contains("chan"),
+        "expected a loud named-axis failure mentioning the colliding axis, got: {eval_stderr}"
+    );
+}
+
+/// PINNED GAP + loudness lock (chelis#339 red team): a single-letter dim VAR
+/// in the operand signature lowers to `Named` with its source letter, so an
+/// inserted axis with the same letter collides at IR level even though the
+/// checker (which sees an anonymous `Dim::Var`) stays clean. Must fail loudly
+/// in both lanes — the declared result `[c, seq, c]` would otherwise carry
+/// extents 2 and 4 under one name.
+#[test]
+fn named_expand_dvar_letter_collision_fails_loud() {
+    let source = "def f(x: &tensor[c, seq, f32]) -> tensor[c, seq, c, f32] = expand(x, c, 4)\n\
+         y = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
+         out = f(y)\n";
+    assert_clean(&check_json(source), "d-var letter collision checks clean");
+    let stderr = build_expecting_failure(source, "dvar_letter_collision");
+    assert!(
+        stderr.contains("already carries an axis named `c`"),
+        "expected the expand-site collision diagnostic, got: {stderr}"
+    );
+    let dir = tempdir().expect("tempdir");
+    let eval_stderr = eval_stderr_expecting_failure(dir.path(), source, "dvar_letter_collision");
+    assert!(
+        eval_stderr.contains("already carries an axis named `c`"),
+        "expected the expand-site collision diagnostic in eval, got: {eval_stderr}"
+    );
+}
+
+/// NEGATIVE (chelis#339 red team): the named-insert size must be a
+/// compile-time literal. A symbolic-dim size loses the inserted NAME at
+/// lowering (the same-body `sum(.., chan)` then cannot locate it and the
+/// emitted C referenced the raw symbol), and a runtime int32 size produced a
+/// silent shape-0 tensor in the backend. Both are rejected at check time.
+#[test]
+fn named_expand_size_must_be_compile_time_literal() {
+    let symbolic = check_json(
+        "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = sum(expand(x, chan, batch), chan)\n",
+    );
+    assert_rejected_with(
+        &symbolic,
+        "compile-time literal size",
+        "symbolic-dim size in the named insert form",
+    );
+    let runtime = check_json(
+        "def f(x: &tensor[seq, f32], k: int32) -> tensor[seq, chan, f32] = expand(x, chan, k)\n",
+    );
+    assert_rejected_with(
+        &runtime,
+        "compile-time literal size",
+        "runtime int32 size in the named insert form",
+    );
+}
+
+/// CONTROL (chelis#339 red team): a visible leading anchor with a
+/// trailing-spread-covered axis of the SAME name is legal and must keep
+/// reducing the visible (leftmost) anchor — this pins the first-hit
+/// resolution a naive multiple-hits ambiguity guard would break.
+#[test]
+fn named_reduce_visible_anchor_with_spread_covered_duplicate_stays_correct() {
+    let source = "def f(x: &tensor[seq, ..rest, f32]) -> tensor[..rest, f32] = sum(x, seq)\n\
+         def use_dup(x: &tensor[seq, hidden, seq, f32]) -> tensor[hidden, seq, f32] = f(x)\n\
+         y = to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]]])\n\
+         out = use_dup(y)\n";
+    let backend = build_compile_run(source, "visible_anchor_dup");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![3, 2], "backend shape ({backend})");
+    for (i, e) in [11.0, 22.0, 33.0, 44.0, 55.0, 66.0].iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e}",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "visible_anchor_dup", &backend);
+}
+
 /// The named-expand def builds, compiles, runs, and the backend agrees with
 /// the eval oracle — trailing insert at ranks 1 and 2, anchored insert at two
 /// anchor positions, all NON-SQUARE so an axis mislabel fails loudly, plus a
@@ -802,6 +947,35 @@ fn build_compile_run(source: &str, name: &str) -> String {
         String::from_utf8_lossy(&run.stderr)
     );
     String::from_utf8(run.stdout).expect("utf-8 stdout")
+}
+
+/// Run `chelis build --target c` expecting failure; return stderr so the
+/// caller can pin the diagnostic (the loudness lock for monomorphization-time
+/// collisions that the checker cannot see).
+fn build_expecting_failure(source: &str, name: &str) -> String {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    fs::write(&src, source).expect("write source");
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run chelis build");
+    assert!(
+        !build.status.success(),
+        "build was expected to fail; stdout: {}",
+        String::from_utf8_lossy(&build.stdout)
+    );
+    String::from_utf8(build.stderr).expect("utf-8 build stderr")
 }
 
 /// Run `chelis eval --file` and return its stdout (the evaluator oracle the

@@ -862,7 +862,14 @@ the row or a position fixed by a named anchor located uniquely in the operand.
 Hard errors (`DimensionMismatch`, never a guessed placement):
 
 - the inserted name already names an axis of the operand (a duplicate dim name
-  would make every later by-name lookup ambiguous);
+  would make every later by-name lookup ambiguous). This holds through
+  call-site rank monomorphization too: when the inserted name survives into
+  the result row, a caller whose spread-covered axes include that name is
+  rejected at check time (the introduced-name rule in `unify.rs`); when the
+  inserted name is consumed inside the body (insert + reduce), or the
+  collision comes from a single-letter dim *var* whose source letter matches,
+  the check cannot see it and the collision surfaces as a **fatal lowering
+  error** at build/eval — loud, never a silent wrong-axis resolution;
 - the anchor is absent from the operand's row, or ambiguous (appears more than
   once);
 - a *positional* (integer) insert axis on a rank-spread operand — an index is
@@ -879,8 +886,13 @@ dimension name only when it is **not bound in the value environment**: a bound
 `int32` variable is a runtime value and keeps the compile-time-constant
 rejection (issue #259) — `expand(x, ax, 4)` with `ax: int32` is still an
 error, never a trailing insert of an axis named `ax`. The `size` argument
-keeps the three §4.7.2 forms; a literal size must be positive. The positional
-concrete-rank `expand` forms (§4.7.2, insert-or-set) are unchanged. At lowering, the named insertion point
+must be a **positive compile-time literal** (a bare int or `cast(N, int32)`):
+the inserted axis's extent is stamped onto the new named dim at lowering, and
+a symbolic-dim or runtime int32 size has no stampable extent (the eval lane
+cannot stage it and the C backend would reference an undeclared dim symbol),
+so those forms are rejected at check time. The positional concrete-rank
+`expand` forms (§4.7.2, insert-or-set) are unchanged and keep the three
+§4.7.2 size forms. At lowering, the named insertion point
 is resolved against the monomorphized operand dims (trailing → operand rank;
 anchored → the anchor's index), mirroring named-axis reduction.
 

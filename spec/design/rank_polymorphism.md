@@ -226,15 +226,23 @@ no anchor and stays rejected (the computed output row never places the
 new axis there, so a declared result demanding it fails row
 unification). `shape_class("expand")` is now `NameTracked`, with the
 procedural arm (`check_expand_signature`) as the real gate: positional
-insert axes at symbolic rank, absent/ambiguous anchors, and inserted
-names that collide with an existing axis are hard errors. The 4-arg
+insert axes at symbolic rank, absent/ambiguous anchors, inserted
+names that collide with an existing axis, and non-literal sizes (the
+named insert requires a positive compile-time literal size — a
+symbolic or runtime size has no extent to stamp onto the inserted
+named dim) are hard errors. The collision rule extends to call-site
+rank monomorphization: when the inserted name survives into the result
+row, a caller whose spread binds an axis of the same name is rejected
+at check time (the introduced-name rule in `unify.rs`). The 4-arg
 anchored form bypasses the arity-3 HM scheme through the
 `infer_expand_app` dispatcher (the `infer_permute_app` pattern).
 Lowering resolves the named insertion point against the monomorphized
 operand dims (trailing → operand rank; anchored → the anchor's index,
-loud error if absent) and stamps the inserted dim as
+fatal error if absent — a plain lowering diagnostic would be absorbed
+by the host fallback) and stamps the inserted dim as
 `Named(name, Some(size))` so later by-name ops in the same body can
-find it. The chelis#338 eval routing treats a named-axis expand app
+find it; an inserted name already present in the monomorphized operand
+dims is a fatal lowering error at the expand site (see Known gaps). The chelis#338 eval routing treats a named-axis expand app
 exactly like a named-axis reduction app (site A interception + site B
 def-call routing). Acceptance lives in
 `crates/chelis-cli/tests/rank_poly_tier3.rs` (insert-at-end /
@@ -263,7 +271,18 @@ gap (below). Body-Discipline admission in a `..r` body is unchanged
 (chelis#340) remains a follow-up (single-axis and variadic alike).
 Leading-end insertion into a row that *begins with a spread*
 (`tensor[..rest]` with the new axis first) is not expressible — only
-trailing or anchored insertion is. PRE-EXISTING (verified on main at
+trailing or anchored insertion is. Two expand-collision flavors are
+check-clean but fail **loudly** at build/eval (fatal lowering error at
+the expand site, pinned by
+`named_expand_body_internal_collision_fails_loud_not_silent` and
+`named_expand_dvar_letter_collision_fails_loud`): (a) the inserted name
+is consumed inside the body (insert + reduce), so the signature carries
+no trace the call-site rule could reject; (b) the operand signature
+uses a single-letter dim *var* whose source letter equals the inserted
+name — d-vars lower to `Named` with their source letter, a collision
+the checker (which sees an anonymous `Dim::Var`) cannot represent.
+Rejecting these at check time needs body-aware call-site re-checking or
+α-fresh d-var lowering, respectively. PRE-EXISTING (chelis#383; verified on main at
 d786744, untouched by chelis#339): `vmap` over a def chaining TWO named
 reduces to a scalar ICEs on the dag.rs symbolic-dim guard when the
 vmapped operand is a top-level *binding* (`vmap(f)(y)`; an inline

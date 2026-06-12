@@ -14382,13 +14382,28 @@ fn check_named_expand_signature(
         return Type::Error;
     }
 
-    // A literal size must be positive, the same rule as the positional form.
-    // Symbolic and runtime int32 sizes carry no static extent to validate —
-    // the inserted dim is the NAME `new_name` either way (only lowering
-    // consumes the extent).
-    if let Some(size) = arg_exprs.get(2).and_then(extract_int_for_dim)
-        && size <= 0
-    {
+    // The named-insert size must be a positive compile-time literal (a bare
+    // int or `cast(N, int32)`). A symbolic-dim or runtime int32 size cannot
+    // be stamped onto the inserted named dim at lowering: the eval lane has
+    // no extent to stage and the C backend would emit an undeclared dim
+    // symbol (silent shape-0 output) — both verified failure modes, so the
+    // checker rejects the form outright rather than letting a check-clean
+    // program break downstream (chelis#339).
+    let Some(size) = arg_exprs.get(2).and_then(extract_int_for_dim) else {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "expand: the named-axis insert form requires a compile-time literal size \
+                 (a literal or `cast(N, int32)` constant), got {}; the inserted axis's \
+                 extent must be stampable onto the new named dim at lowering \
+                 (spec/04-type-system.md \u{00a7}4.5.3)",
+                describe_axis_arg(arg_exprs.get(2)),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    };
+    if size <= 0 {
         errors.push(CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!("expand requires positive size, got {size}"),

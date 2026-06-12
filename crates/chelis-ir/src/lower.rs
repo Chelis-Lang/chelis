@@ -6166,6 +6166,40 @@ impl LowerCtx {
                 } else {
                     bare_var_name(&args[1])
                 };
+                // chelis#339: the inserted name must not collide with an axis
+                // of the MONOMORPHIZED operand. The checker rejects visible
+                // collisions, but a rank spread (or a single-letter dim var,
+                // which lowers to `Named` with its source letter) at the call
+                // boundary can cover an axis whose name the symbolic check
+                // cannot see; with a duplicate name in the dims, every later
+                // by-name lookup (`resolve_reduce_axis`,
+                // `resolve_expand_anchor`) is first-hit and would silently
+                // pick the wrong axis. Fail loudly instead.
+                if let Some(name) = &named_insert
+                    && let Some(node) = self.dag.get(x)
+                    && node
+                        .output_type
+                        .dims
+                        .iter()
+                        .any(|d| matches!(d, DimInfo::Named(n, _) if n == name))
+                {
+                    // FATAL: a plain lowering diagnostic is absorbed by the
+                    // host-fallback path, which would emit the def as a host
+                    // call referencing the axis names as undeclared C
+                    // identifiers — garbage C, not a loud failure.
+                    raise_fatal_lowering_error(
+                        format!(
+                            "`expand` inserts an axis named `{name}`, but the monomorphized \
+                             operand already carries an axis named `{name}` (a rank spread or \
+                             single-letter dim var at the call boundary can cover an axis name \
+                             the symbolic checker cannot see); later by-name axis lookups would \
+                             silently resolve to the wrong axis. Rename the inserted axis \
+                             (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        Some(args[1].span()),
+                        args[1].span_id().map(ToOwned::to_owned),
+                    );
+                }
                 let axis = match &named_insert {
                     Some(_) => match args.get(3).and_then(bare_var_name) {
                         Some(anchor) => self.resolve_expand_anchor(&args[3], x, &anchor),
@@ -6678,7 +6712,11 @@ impl LowerCtx {
         }) {
             return idx;
         }
-        raise_lowering_error(
+        // FATAL: a plain lowering diagnostic is absorbed by the host-fallback
+        // path (garbage C referencing the anchor as an undeclared identifier),
+        // which is exactly the silent-fallback class this error exists to
+        // prevent.
+        raise_fatal_lowering_error(
             format!(
                 "`expand` inserts before named anchor `{anchor}`, but the monomorphized \
                  operand has no such named axis: internal rank-monomorphization error"

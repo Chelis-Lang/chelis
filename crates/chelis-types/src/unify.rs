@@ -431,7 +431,14 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
             for (a1, a2) in args1.iter().zip(args2.iter()) {
                 unify(a1, a2, subst)?;
             }
-            unify(ret1, ret2, subst)
+            unify(ret1, ret2, subst)?;
+            // chelis#339: after the signature's rank spreads are bound, a
+            // result-introduced axis name (a named-axis expand insert) must
+            // not also be covered by a spread binding — the monomorphized
+            // result row would carry the same dim name twice with two
+            // different extents, making every later by-name lookup ambiguous.
+            check_introduced_name_rank_collision(args1, ret1, subst)?;
+            check_introduced_name_rank_collision(args2, ret2, subst)
         }
 
         // Tensor types
@@ -666,6 +673,84 @@ fn resolve_shape(dims: &[Dim], subst: &Subst) -> Vec<Dim> {
         }
     }
     out
+}
+
+/// chelis#339 named-axis expand: a signature whose result rows *introduce* an
+/// axis name (present in a result tensor row but in no parameter row — the
+/// expand-inserted axis) must not have that same name covered by one of its
+/// rank-spread bindings at this unification. The symbolic collision check in
+/// `check_named_expand_signature` can only see the visible row; a caller
+/// whose spread-covered axes include the inserted name would otherwise
+/// monomorphize to a result row carrying the same dim name twice with two
+/// different extents — every later by-name axis lookup becomes ambiguous and
+/// the declared type misstates the runtime shape. Hard error, never a guessed
+/// alias (spec/04-type-system.md §4.5.3).
+fn check_introduced_name_rank_collision(
+    args: &[Type],
+    ret: &Type,
+    subst: &Subst,
+) -> Result<(), TypeError> {
+    fn collect(ty: &Type, names: &mut Vec<String>, rvars: &mut Vec<RankVar>) {
+        match ty {
+            Type::Tensor(dims, _) => {
+                for d in dims {
+                    match d {
+                        Dim::Name(n) => names.push(n.clone()),
+                        Dim::Rank(r) => rvars.push(*r),
+                        _ => {}
+                    }
+                }
+            }
+            Type::Ref(inner) => collect(inner, names, rvars),
+            Type::Fn(fn_args, fn_ret) => {
+                for a in fn_args {
+                    collect(a, names, rvars);
+                }
+                collect(fn_ret, names, rvars);
+            }
+            _ => {}
+        }
+    }
+
+    let mut ret_names = Vec::new();
+    let mut ret_rvars = Vec::new();
+    collect(ret, &mut ret_names, &mut ret_rvars);
+    if ret_names.is_empty() || ret_rvars.is_empty() {
+        return Ok(());
+    }
+    let mut param_names = Vec::new();
+    let mut param_rvars = Vec::new();
+    for a in args {
+        collect(a, &mut param_names, &mut param_rvars);
+    }
+    let introduced: Vec<&String> = ret_names
+        .iter()
+        .filter(|n| !param_names.contains(n))
+        .collect();
+    if introduced.is_empty() {
+        return Ok(());
+    }
+    for rv in ret_rvars {
+        for bound in resolve_shape(&[Dim::Rank(rv)], subst) {
+            if let Dim::Name(n) = &bound
+                && introduced.contains(&n)
+            {
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: format!(
+                        "rank-spread monomorphization collides with an inserted axis name: the \
+                         spread binds an operand axis named `{n}`, but the callee's result also \
+                         introduces an axis named `{n}` (a named-axis expand insert); the \
+                         monomorphized result would carry the same dim name twice with two \
+                         different extents, making later by-name axis lookups ambiguous \
+                         (spec/04-type-system.md \u{00a7}4.5.3). Rename the inserted axis or \
+                         the operand axis."
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The shared diagnostic for an undetermined split between two adjacent
