@@ -512,6 +512,204 @@ fn named_expand_survives_fmt_round_trip() {
     assert_clean(&check_json(&once), "formatted named expand re-checks clean");
 }
 
+/// TOP-LEVEL named-axis apps (no def-call boundary): the eval lane's site-A
+/// interception must route a bare `expand(y, one, 1)` / `expand(y, c, 3,
+/// seq)` / variadic `sum(y, batch, seq)` root through IR lowering — the
+/// def-call tests above only exercise site B, so a site-A regression would
+/// otherwise be invisible. Both lanes pinned value-for-value.
+#[test]
+fn top_level_named_expand_and_variadic_sum_eval_match_backend() {
+    let source = "def id2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x)\n\
+         y = id2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out_t = expand(y, one, 1)\n\
+         out_a = expand(y, c, 3, seq)\n\
+         out_vr = sum(y, batch, seq)\n";
+    let backend = build_compile_run(source, "top_level_named_axis_ops");
+    let tensors = parse_printed_tensors(&backend);
+    // out_t: trailing insert -> [2, 2, 1], data unchanged.
+    // out_a: c=3 inserted before seq (axis 1) -> [2, 3, 2], rows tripled.
+    // out_vr: all-axes variadic sum -> rank-0 [/* 10 */].
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out_t", &[2, 2, 1], &[1.0, 2.0, 3.0, 4.0]),
+        (
+            "out_a",
+            &[2, 3, 2],
+            &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 3.0, 4.0],
+        ),
+        ("out_vr", &[], &[10.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        assert_eq!(got.2.len(), data.len(), "{name}: backend len ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "top_level_named_axis_ops", &backend);
+}
+
+// ── Variadic named-axis reduction (chelis#339 Part 2) ───────────────────
+// `sum(x, seq, head)` reduces several named axes in one call, equivalent
+// to the documented composition `sum(sum(x, head), seq)` and
+// order-insensitive. Defined for the value reductions
+// (sum/mean/max_reduce/min_reduce/prod_reduce); NOT for the
+// index-returning argmax/argmin (composition is ill-defined).
+
+/// Variadic `sum`/`mean` check clean at concrete rank AND in a rank-poly
+/// body, in both axis orders.
+#[test]
+fn variadic_reduce_checks_clean() {
+    let json = check_json(
+        "def two(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, seq, head)\n\
+         def two_rev(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, head, seq)\n\
+         def rp(x: &tensor[..a, seq, ..b, head, ..c, f32]) -> tensor[..a, ..b, ..c, f32] = sum(x, seq, head)\n\
+         def use_rp(x: &tensor[batch, seq, kv, head, feat, f32]) -> tensor[batch, kv, feat, f32] = rp(x)\n\
+         def m2(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = mean(x, seq, head)\n",
+    );
+    assert_clean(&json, "variadic named reduce checks clean");
+}
+
+/// Variadic ≡ composed, numerically, on BOTH lanes: `sum(x, seq, head)`
+/// equals `sum(sum(x, head), seq)` and the axis order does not matter.
+/// `mean` and `max_reduce` ride along (mean-of-means == joint mean with
+/// uniform weights; max is idempotent across orders). Non-square [2,3,4]
+/// so an axis mislabel fails loudly.
+#[test]
+fn variadic_reduce_builds_runs_and_evals() {
+    let source = "def direct(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, seq, head)\n\
+         def swapped(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, head, seq)\n\
+         def composed(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(sum(x, head), seq)\n\
+         def mboth(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = mean(x, seq, head)\n\
+         def xboth(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = max_reduce(x, seq, head)\n\
+         def rp(x: &tensor[..a, seq, ..b, head, ..c, f32]) -> tensor[..a, ..b, ..c, f32] = sum(x, seq, head)\n\
+         def use_rp(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = rp(x)\n\
+         def tot(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(x, seq, head))\n\
+         def vinner(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(x, seq, head))\n\
+         y = to_tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]])\n\
+         out_d = direct(y)\n\
+         out_s = swapped(y)\n\
+         out_c = composed(y)\n\
+         out_m = mboth(y)\n\
+         out_x = xboth(y)\n\
+         out_r = use_rp(y)\n\
+         gr = grad(tot)(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+         out_v = vmap(vinner)(to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]))\n";
+    // NOTE on `out_v`: the vmap probe deliberately uses an INLINE literal
+    // operand. `vmap(vinner)(y)` with the shared top-level `y` binding hits
+    // a PRE-EXISTING dag.rs symbolic-dim ICE on main (verified at d786744
+    // with the explicit composition `sum(sum(x, head), seq)` — vmap +
+    // binding-typed Load + a two-stage named reduce; the chelis#346/#351
+    // annotation-dims family in a lane those fixes did not cover). The
+    // variadic surface desugars to that same composition, so it inherits
+    // the gap unchanged; see the chelis#339 PR for the boundary analysis.
+    let backend = build_compile_run(source, "variadic_reduce");
+    let tensors = parse_printed_tensors(&backend);
+    // Per batch slice (3x4): b0 sums 1..=12 = 78; b1 sums 13..=24 = 222.
+    // mean = sum/12; max = last element (24 in b1, 12 in b0).
+    let expected: &[(&str, &[usize], &[f64])] = &[
+        ("out_d", &[2], &[78.0, 222.0]),
+        ("out_s", &[2], &[78.0, 222.0]),
+        ("out_c", &[2], &[78.0, 222.0]),
+        ("out_m", &[2], &[6.5, 18.5]),
+        ("out_x", &[2], &[12.0, 24.0]),
+        ("out_r", &[2], &[78.0, 222.0]),
+        // grad of the all-axes sum is ones, and vmap over the variadic
+        // scalar reduce yields the per-slice sums (the #351 lesson: pin
+        // transform lanes on new rank-poly capability from day one).
+        ("gr", &[2, 2], &[1.0, 1.0, 1.0, 1.0]),
+        ("out_v", &[2], &[10.0, 26.0]),
+    ];
+    for (name, shape, data) in expected {
+        let got = tensors
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        assert_eq!(&got.1, shape, "{name}: backend shape mismatch ({backend})");
+        for (i, (g, e)) in got.2.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "{name}[{i}]: backend {g} != expected {e} ({backend})"
+            );
+        }
+    }
+    assert_eval_agrees_with_backend(source, "variadic_reduce", &backend);
+}
+
+/// NEGATIVE: a duplicate axis name in the variadic list is rejected, never
+/// silently deduplicated.
+#[test]
+fn variadic_reduce_duplicate_axis_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq, seq)\n",
+    );
+    assert_rejected_with(&json, "duplicate", "duplicate axis `seq` in variadic sum");
+}
+
+/// NEGATIVE: an unknown axis name in the variadic list is rejected.
+#[test]
+fn variadic_reduce_unknown_axis_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, seq, nope)\n",
+    );
+    assert_rejected_with(&json, "nope", "unknown axis `nope` in variadic sum");
+}
+
+/// NEGATIVE: positional integers are not admitted in the variadic form —
+/// each axis must be named.
+#[test]
+fn variadic_reduce_positional_axes_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, f32] = sum(x, 1, 2)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "positional",
+        "positional integer axes in variadic sum",
+    );
+}
+
+/// NEGATIVE: index-returning reductions have no variadic form — an index
+/// along one axis is not composable with a second reduction.
+#[test]
+fn variadic_argmax_rejected() {
+    let json = check_json(
+        "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, int64] = argmax_reduce(x, seq, head)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "index-returning",
+        "variadic argmax_reduce has no defined semantics",
+    );
+}
+
+/// NEGATIVE arity pins: the variadic dispatcher must not soften existing
+/// wrong-arity rejections — a 1-arg `sum` and an over-applied non-reduction
+/// builtin (`relu(x, y)`) still fail.
+#[test]
+fn variadic_dispatcher_preserves_arity_errors() {
+    let json = check_json("def bad(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x)\n");
+    let errors = json["errors"].as_array().expect("errors array");
+    assert!(
+        !errors.is_empty(),
+        "1-arg sum must still be rejected, got clean: {json}"
+    );
+    let json2 = check_json(
+        "def bad2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x, x)\n",
+    );
+    let errors2 = json2["errors"].as_array().expect("errors array");
+    assert!(
+        !errors2.is_empty(),
+        "over-applied relu must still be rejected, got clean: {json2}"
+    );
+}
+
 // ── Formatter round-trip ────────────────────────────────────────────────
 
 /// The anchored multi-spread sig survives `chelis fmt`: `..pre`/`..post` are

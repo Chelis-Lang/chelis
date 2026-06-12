@@ -804,8 +804,22 @@ symbolically.
 ;;   tensor[a, b, seq, c]       -> tensor[a, b, c]
 ```
 
-Multiple axes are reduced by composing single-axis reductions
-(`sum(sum(x, head), seq)`).
+Multiple **named** axes may be reduced in one call — the variadic form
+`sum(x, seq, head)` (chelis#339) — or by composing single-axis reductions
+(`sum(sum(x, head), seq)`); the two are equivalent, and the variadic form is
+order-insensitive (`sum(x, head, seq)` produces the same result). The variadic
+form is defined for the value reductions `sum`, `mean`, `max_reduce`,
+`min_reduce`, and `prod_reduce` (for `mean`, reducing axes one at a time with
+uniform weights equals the joint mean). It is **not** defined for the
+index-returning reductions `argmax_reduce`/`argmin_reduce`: an index along one
+axis is not composable with a second reduction, so a variadic call on those is
+a hard error. Every axis in a variadic call must be a *named* axis (a
+positional integer is only valid as the single axis of a concrete-rank
+operand), each name must resolve per the rules above, and a **duplicate** axis
+name in the list is a hard error. Inside a `..r` body the Body-Discipline
+admission is unchanged (`sum`/`mean` only, chelis#340). At lowering the
+variadic call desugars to the composition, innermost stage reducing the last
+listed axis.
 
 **Unification (unitary).** A row shape unifies with a ground shape by locating
 each named anchor uniquely in the ground and binding the spreads to the runs

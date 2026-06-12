@@ -241,13 +241,37 @@ def-call routing). Acceptance lives in
 insert-by-anchor positive on both lanes incl. `grad`/`vmap`, plus the
 negative parity suite).
 
+*Variadic named-axis reduction (chelis#339 Part 2, SHIPPED).*
+`sum(x, seq, head)` reduces several named axes in one call, equivalent
+to the documented composition and order-insensitive. The arity-2
+reduction schemes are bypassed by an `infer_reduction_app` dispatcher;
+`check_reduction_signature`'s named loop validates every axis
+(positional integers, unknown names, ambiguity, and duplicates are hard
+errors — duplicates are never silently deduplicated). Defined for the
+value reductions (`sum`/`mean`/`max_reduce`/`min_reduce`/`prod_reduce`;
+mean-of-means equals the joint mean under uniform weights); the
+index-returning `argmax_reduce`/`argmin_reduce` get a targeted
+no-variadic-form rejection. Lowering desugars the variadic app to the
+nested 2-arg composition (`synth_reduction_app`), so the C backend,
+eval routing, `grad`, and `vmap` all ride the existing single-axis
+lanes — inheriting their behavior unchanged, including one pre-existing
+gap (below). Body-Discipline admission in a `..r` body is unchanged
+(`sum`/`mean` only, chelis#340). Acceptance: the `variadic_*` suite in
+`crates/chelis-cli/tests/rank_poly_tier3.rs`.
+
 *Known gaps (follow-ups):* `max`/`min`/`prod` reduce in a `..r` body
-(chelis#340) and a direct variadic-axis surface `sum(x, seq, head)`
-(chelis#339 Part 2) remain follow-ups. Leading-end insertion into a row
-that *begins with a spread* (`tensor[..rest]` with the new axis first)
-is not expressible — only trailing or anchored insertion is. The
-positional (integer-axis) reduction and expand paths on concrete
-operands are unchanged.
+(chelis#340) remains a follow-up (single-axis and variadic alike).
+Leading-end insertion into a row that *begins with a spread*
+(`tensor[..rest]` with the new axis first) is not expressible — only
+trailing or anchored insertion is. PRE-EXISTING (verified on main at
+d786744, untouched by chelis#339): `vmap` over a def chaining TWO named
+reduces to a scalar ICEs on the dag.rs symbolic-dim guard when the
+vmapped operand is a top-level *binding* (`vmap(f)(y)`; an inline
+literal operand and single-stage reduces are fine) — the
+chelis#346/#351 annotation-dims family in a lane those fixes did not
+cover; the variadic form desugars to that composition and inherits the
+gap unchanged. The positional (integer-axis) reduction and expand paths
+on concrete operands are unchanged.
 
 ## Why this is needed
 

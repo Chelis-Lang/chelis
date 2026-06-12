@@ -177,6 +177,37 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
     )
 }
 
+/// Synthesize `(app {} (var {} fname) <operand> <axis>)` — one stage of the
+/// chelis#339 variadic named-axis reduction desugar. `sum(x, seq, head)`
+/// lowers as the documented composition `sum(sum(x, head), seq)`: each
+/// synthesized 2-arg stage resolves its named axis against its own operand's
+/// dims, so the result is order-insensitive.
+fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -> Expr {
+    let zero_span = Span::new(0, 0);
+    let callee = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("var".to_string()), zero_span),
+                Expr::Map(MetaMap::default(), zero_span),
+                Expr::Atom(Atom::Symbol(fname.to_string()), zero_span),
+            ],
+        },
+        zero_span,
+    );
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("app".to_string()), zero_span),
+                Expr::Map(MetaMap::default(), zero_span),
+                callee,
+                operand,
+                axis,
+            ],
+        },
+        app_span,
+    )
+}
+
 fn expr_diagnostic_location(expr: &Expr) -> (Option<Span>, Option<String>) {
     (Some(expr.span()), expr.span_id().map(ToOwned::to_owned))
 }
@@ -5833,6 +5864,23 @@ impl LowerCtx {
             // table) but the IR Sum node outputs the f32 accumulator
             // and we must insert a Cast back to the operand precision
             // to recover the user-facing tensor type.
+            // chelis#339 Part 2: variadic named-axis reduction
+            // (`sum(x, seq, head)`, spec §4.5.3). Desugar to the documented
+            // composition — innermost stage reduces the LAST listed axis —
+            // and recurse; each 2-arg stage resolves its named axis against
+            // its own operand's dims, so the result is order-insensitive.
+            // Only bare-name axes reach this arm (the checker rejects
+            // positional integers in the variadic form); anything else falls
+            // through to the 2-arg arms or the generic fallback.
+            "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
+                if args.len() >= 3 && args[1..].iter().all(|a| bare_var_name(a).is_some()) =>
+            {
+                let mut expr = args[0].clone();
+                for axis in args[1..].iter().rev() {
+                    expr = synth_reduction_app(func_name, expr, axis.clone(), app_span);
+                }
+                self.lower_expr_node(&expr, "variadic named-axis reduction")
+            }
             "sum" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "sum input");
                 let x_ty = self

@@ -8210,6 +8210,39 @@ fn infer_app(
         );
     }
 
+    // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
+    // The reduction HM schemes are arity-2 (`(input, axis)`), so a 3+-arg
+    // call would hit the generic arity check before the reduction arm;
+    // dispatch it here. `check_reduction_signature`'s named loop handles N
+    // axes (rejecting positional integers, unknown names, and duplicates).
+    // The index-returning reductions are routed too, so they get a targeted
+    // no-variadic-form rejection instead of a generic arity error.
+    if matches!(
+        func_name.as_deref(),
+        Some(
+            "sum"
+                | "mean"
+                | "max_reduce"
+                | "min_reduce"
+                | "prod_reduce"
+                | "argmax_reduce"
+                | "argmin_reduce"
+        )
+    ) && kids.len() >= 4
+    {
+        return infer_reduction_app(
+            list,
+            func_name.as_deref().unwrap(),
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
     if matches!(
         func_name.as_deref(),
         Some(
@@ -11599,7 +11632,83 @@ fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
     }
 }
 
+/// chelis#339 Part 2: infer a variadic named-axis reduction
+/// `sum(x, seq, head)` (spec/04-type-system.md §4.5.3). The reduction HM
+/// schemes are arity-2, so the 3+-arg form bypasses the generic arity
+/// check (the `infer_permute_app` pattern); the existing
+/// `check_reduction_signature` named loop validates every axis and
+/// computes the symbolic output. The variadic form is defined for the
+/// value reductions only — `argmax_reduce`/`argmin_reduce` produce
+/// indices along ONE axis, which a second reduction cannot compose, so
+/// they are rejected here with a targeted diagnostic.
 #[allow(clippy::too_many_arguments)]
+fn infer_reduction_app(
+    list: &deep::List,
+    fname: &str,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    if fname == "argmax_reduce" || fname == "argmin_reduce" {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "{fname} is an index-returning reduction and has no variadic \
+                 named-axis form: an index along one axis is not composable with a \
+                 second reduction (spec/04-type-system.md \u{00a7}4.5.3). Reduce one \
+                 axis at a time."
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let kids = children(list);
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let arg_tys: Vec<Type> = kids[1..]
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            // Axis slots carry dimension names, typed as axes (`int32`)
+            // rather than inferred as values — the named-reduction exemption
+            // from the generic path.
+            if index >= 1 && symbolic_dim_ref_name(arg).is_some() {
+                Type::Prim(Prim::Int32)
+            } else {
+                infer_expr(
+                    arg,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                )
+            }
+        })
+        .collect();
+    if arg_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Type::Error;
+    }
+
+    let result_ty = Type::Var(vg.fresh_tvar());
+    check_reduction_signature(fname, &kids[1..], &arg_tys, &result_ty, subst, errors)
+}
+
 /// chelis#339: infer the 4-arg anchored named-axis expand form
 /// `expand(x, new, size, anchor)` (spec/04-type-system.md §4.5.3). The
 /// builtin scheme is arity-3, so this form bypasses the generic HM arity
@@ -11608,6 +11717,7 @@ fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
 /// axis they are typed as `int32` axes rather than inferred, and
 /// `check_expand_signature` reads the actual names back from the arg
 /// exprs.
+#[allow(clippy::too_many_arguments)]
 fn infer_expand_app(
     list: &deep::List,
     env: &mut Env,
@@ -11703,6 +11813,7 @@ fn infer_expand_app(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn infer_permute_app(
     list: &deep::List,
     env: &mut Env,
@@ -13790,12 +13901,12 @@ fn check_reduction_signature(
     let axis_exprs = &arg_exprs[1..];
     let has_spread = dims.iter().any(|d| matches!(d, Dim::Rank(_)));
 
-    // NOTE: every reduction builtin's HM scheme is arity-2 (`(input, axis)`),
-    // so `axis_exprs` is currently always a single element — `sum(x, seq)`, not
-    // `sum(x, seq, head)`. The loop below already handles N named axes, but the
-    // variadic surface is arity-gated upstream; admitting it (a dedicated
-    // `infer_reduction_app` dispatcher) is tracked as chelis#339. Multi-axis
-    // reduction today composes single-axis reductions: `sum(sum(x, head), seq)`.
+    // The reduction HM schemes are arity-2, but the variadic named-axis form
+    // (`sum(x, seq, head)`, chelis#339) reaches this arm through the
+    // `infer_reduction_app` dispatcher with N axis exprs; the loop below
+    // resolves each named axis and rejects positional integers, unknown
+    // names, ambiguity, and duplicates. Composition
+    // (`sum(sum(x, head), seq)`) remains equivalent and order-insensitive.
     let mut remove: Vec<usize> = Vec::new();
     if axis_exprs.len() == 1
         && !has_spread
@@ -13859,7 +13970,23 @@ fn check_reduction_signature(
                 .map(|(i, _)| i)
                 .collect();
             match hits.as_slice() {
-                [i] => remove.push(*i),
+                [i] => {
+                    // chelis#339: a duplicate axis name in the variadic list
+                    // is a hard error, never a silent deduplication.
+                    if remove.contains(i) {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "{name}: duplicate reduction axis `{axis_name}`; each named \
+                                 axis may appear at most once in a variadic reduction \
+                                 (spec/04-type-system.md \u{00a7}4.5.3)"
+                            ),
+                            vec![],
+                        ));
+                        return Type::Error;
+                    }
+                    remove.push(*i);
+                }
                 [] if has_spread => {
                     errors.push(CheckError::new(
                         CheckErrorKind::DimensionMismatch,
@@ -13907,10 +14034,11 @@ fn check_reduction_signature(
     }
 
     // Build the output by dropping the selected axes (descending so earlier
-    // indices stay valid). Surviving named/spread dims keep identity and order.
+    // indices stay valid). Surviving named/spread dims keep identity and
+    // order. Duplicates were rejected loudly above (chelis#339), so no
+    // silent dedup happens here.
     let mut out_dims = dims;
     remove.sort_unstable();
-    remove.dedup();
     for &idx in remove.iter().rev() {
         out_dims.remove(idx);
     }
