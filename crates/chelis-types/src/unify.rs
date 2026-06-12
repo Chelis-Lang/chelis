@@ -74,6 +74,26 @@ pub struct Subst {
     /// by the inference driver, and never part of a persisted context.
     #[serde(skip)]
     deferred_borrow_vars: Mutex<Vec<TypeVar>>,
+    /// RFC D-CHECK deferred-access ledger, mirroring
+    /// `deferred_borrow_vars`: `access`/`record-update` sites whose
+    /// target type was still an unresolved `Type::Var` when inference
+    /// ran (e.g. an unannotated lambda parameter pinned only by a
+    /// later call). The driver drains these per def and re-checks each
+    /// against the final substitution so a target pinned to an opaque
+    /// ADT defined in another module is still rejected. Not
+    /// serialized: transient per-pass bookkeeping.
+    #[serde(skip)]
+    deferred_opaque_uses: Mutex<Vec<(TypeVar, DeferredOpaqueUse)>>,
+}
+
+/// Which deferred use shape registered a ledger entry (determines the
+/// violation action text at validation time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeferredOpaqueUse {
+    /// `(access target field)` with an unresolved target.
+    Access,
+    /// `(record-update target kv...)` with an unresolved target.
+    RecordUpdate,
 }
 
 impl Clone for Subst {
@@ -85,6 +105,12 @@ impl Clone for Subst {
                 self.deferred_borrow_vars
                     .lock()
                     .expect("subst.deferred_borrow_vars poisoned")
+                    .clone(),
+            ),
+            deferred_opaque_uses: Mutex::new(
+                self.deferred_opaque_uses
+                    .lock()
+                    .expect("subst.deferred_opaque_uses poisoned")
                     .clone(),
             ),
         }
@@ -154,6 +180,27 @@ impl Subst {
                 .deferred_borrow_vars
                 .lock()
                 .expect("subst.deferred_borrow_vars poisoned"),
+        )
+    }
+
+    /// RFC D-CHECK: record an `access`/`record-update` site whose
+    /// target type was still an unresolved `Type::Var` when inference
+    /// ran. See the `deferred_opaque_uses` field doc.
+    pub fn record_deferred_opaque_use(&self, v: TypeVar, use_kind: DeferredOpaqueUse) {
+        self.deferred_opaque_uses
+            .lock()
+            .expect("subst.deferred_opaque_uses poisoned")
+            .push((v, use_kind));
+    }
+
+    /// Drain the deferred-access ledger; called once per def body's
+    /// inference by the driver, mirroring `take_deferred_borrow_vars`.
+    pub fn take_deferred_opaque_uses(&self) -> Vec<(TypeVar, DeferredOpaqueUse)> {
+        std::mem::take(
+            &mut *self
+                .deferred_opaque_uses
+                .lock()
+                .expect("subst.deferred_opaque_uses poisoned"),
         )
     }
 

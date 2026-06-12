@@ -311,6 +311,9 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
         // Issue #256 round 2: re-check each deferred borrow against the
         // now-complete substitution (see `validate_deferred_borrow_vars`).
         validate_deferred_borrow_vars(&subst, &adt_reg, &mut errors);
+        // D-CHECK: drain the per-def deferred-access ledger (see
+        // `validate_deferred_opaque_uses`).
+        validate_deferred_opaque_uses(&subst, &adt_reg, &mut errors);
     }
     crate::opacity::set_current_item(None, None);
 
@@ -1001,6 +1004,9 @@ fn infer_ir_program_with_state(
         // substitution. Draining per-def keeps error attribution local and
         // prevents one def's deferrals from leaking into the next.
         validate_deferred_borrow_vars(&state.subst, &state.adt_reg, &mut errors);
+        // D-CHECK: drain the per-def deferred-access ledger (see
+        // `validate_deferred_opaque_uses`).
+        validate_deferred_opaque_uses(&state.subst, &state.adt_reg, &mut errors);
     }
     crate::opacity::set_current_item(None, None);
 
@@ -2271,6 +2277,20 @@ fn validate_deferred_borrow_vars(
             ));
         }
     }
+}
+
+/// RFC D-CHECK: drain the deferred-access ledger after a def body's
+/// inference completes and re-check each recorded target variable
+/// against the final substitution. The opacity rejection itself lands
+/// with the Unit 5 hooks; the drain keeps per-def attribution exact
+/// and prevents one def's deferrals from leaking into the next,
+/// mirroring `validate_deferred_borrow_vars`.
+fn validate_deferred_opaque_uses(
+    subst: &Subst,
+    _adt_reg: &AdtRegistry,
+    _errors: &mut Vec<CheckError>,
+) {
+    let _deferred = subst.take_deferred_opaque_uses();
 }
 
 fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
@@ -7304,6 +7324,36 @@ fn infer_expr(
                     total_nodes,
                 ),
                 Some("tuple-get") => infer_tuple_get(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                ),
+                Some("record") => infer_record(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                ),
+                Some("access") => infer_access(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                ),
+                Some("record-update") => infer_record_update(
                     list,
                     env,
                     vg,
@@ -14639,6 +14689,414 @@ fn infer_tuple_get(
             errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("expected tuple type, got {resolved}"),
+                vec![],
+            ));
+            Type::Error
+        }
+    }
+}
+
+/// Resolve a record head name to its constructor. The head is a
+/// variant name (`Probability { ... }`); when it names a transparent
+/// type alias instead, resolve through the alias to the nominal ADT
+/// and use that ADT's same-named variant (alias transparency,
+/// spec/02; this is also what keeps alias laundering from bypassing
+/// opacity, RFC D-CHECK). Returns the canonical constructor name.
+fn resolve_record_head<'a>(
+    head: &'a str,
+    adt_reg: &'a AdtRegistry,
+) -> Option<(&'a str, &'a crate::adt::VariantInfo, String)> {
+    if let Some((adt_name, variant)) = adt_reg
+        .lookup_variant_preferring_shape(head, CallShape::Record)
+        .or_else(|| adt_reg.lookup_variant_terminal_unique(head))
+    {
+        return Some((adt_name, variant, variant.name.clone()));
+    }
+    // Alias head: `type P2 = Probability` makes `P2 { ... }` mean
+    // `Probability { ... }`.
+    let alias = adt_reg.resolve_alias(head)?;
+    if let Type::Adt(target, _) = &alias.body {
+        let (adt_name, variant) = adt_reg.lookup_variant(target)?;
+        return Some((adt_name, variant, variant.name.clone()));
+    }
+    None
+}
+
+/// Infer `(record {} Ctor (kv {} field value)...)` — named-field
+/// record construction (RFC D-CHECK prerequisite inference; closes
+/// the latent bogus-field hole: unknown fields are now TypeMismatch
+/// errors instead of silently untyped).
+#[allow(clippy::too_many_arguments)]
+fn infer_record(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    let Some(head) = kids.first().and_then(symbol_name) else {
+        return Type::Error;
+    };
+
+    let Some((adt_name, variant, ctor_name)) = resolve_record_head(head, adt_reg) else {
+        // Infer field values so nested errors still surface, then
+        // reject the unknown constructor.
+        for kv_expr in kids.iter().skip(1) {
+            if let deep::Expr::List(kv_list, _) = kv_expr
+                && get_tag(kv_list) == Some("kv")
+                && let Some(value) = children(kv_list).get(1)
+            {
+                infer_expr(
+                    value,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                );
+            }
+        }
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!("unknown record constructor `{head}`"),
+            vec![format!("declare `type {head} = | {head} {{ ... }}`")],
+        ));
+        return Type::Error;
+    };
+    let declared_field_names: Vec<Option<String>> =
+        variant.fields.iter().map(|(n, _)| n.clone()).collect();
+    let known_field_set: HashSet<&str> = declared_field_names
+        .iter()
+        .filter_map(|n| n.as_deref())
+        .collect();
+
+    // Instantiate the resolved ADT's constructor directly from its
+    // registry definition (the issue #181 pat-record intent, made
+    // collision-proof): the name-keyed env holds ONE scheme per
+    // constructor name, so same-named constructors from colliding
+    // ADTs (chelis#148) would dispatch the field types to whichever
+    // deftype registered last.
+    let (instantiated_arg_types, instantiated_ret) = match adt_reg.lookup(adt_name) {
+        Some(adt_def) => instantiate_variant_of(adt_def, variant, vg),
+        None => (Vec::new(), Type::Error),
+    };
+
+    for kv_expr in kids.iter().skip(1) {
+        let deep::Expr::List(kv_list, _) = kv_expr else {
+            continue;
+        };
+        if get_tag(kv_list) != Some("kv") {
+            continue;
+        }
+        let kv_kids = children(kv_list);
+        let (Some(field_name), Some(value)) =
+            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
+        else {
+            continue;
+        };
+        let value_ty = infer_expr(
+            value,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+        if known_field_set.contains(field_name) {
+            let pos = declared_field_names
+                .iter()
+                .position(|n| n.as_deref() == Some(field_name));
+            if let Some(field_ty) = pos.and_then(|i| instantiated_arg_types.get(i))
+                && let Err(te) = unify(&value_ty, field_ty, subst)
+            {
+                errors.push(te.into());
+            }
+        } else {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("unknown record field '{field_name}' in construction of {ctor_name}"),
+                vec![format!(
+                    "known fields: {:?}",
+                    declared_field_names
+                        .iter()
+                        .filter_map(|f| f.as_deref())
+                        .collect::<Vec<_>>()
+                )],
+            ));
+        }
+    }
+
+    subst.apply(&instantiated_ret)
+}
+
+/// The single record-shaped variant of an ADT, when it has exactly
+/// one variant and every field is named — the representation idiom
+/// `access`/`record-update` resolve against.
+fn single_record_variant<'a>(
+    adt_reg: &'a AdtRegistry,
+    adt_name: &str,
+) -> Option<&'a crate::adt::VariantInfo> {
+    let def = adt_reg.lookup(adt_name)?;
+    if def.variants.len() != 1 {
+        return None;
+    }
+    let variant = &def.variants[0];
+    (!variant.fields.is_empty() && variant.fields.iter().all(|(n, _)| n.is_some()))
+        .then_some(variant)
+}
+
+/// Instantiate `variant` of `adt_def` with fresh type variables:
+/// returns the per-field types and the ADT result type with the
+/// def's registration-time param vars renamed fresh. Bypasses the
+/// name-keyed env so same-named constructors from colliding ADTs
+/// (chelis#148) cannot cross-wire field types.
+fn instantiate_variant_of(
+    adt_def: &crate::adt::AdtDef,
+    variant: &crate::adt::VariantInfo,
+    vg: &mut VarGen,
+) -> (Vec<Type>, Type) {
+    let map: HashMap<TypeVar, Type> = adt_def
+        .param_vars
+        .iter()
+        .map(|tv| (*tv, vg.fresh_type()))
+        .collect();
+    let args: Vec<Type> = variant
+        .fields
+        .iter()
+        .map(|(_, t)| crate::adt::substitute_alias_type(t, &map))
+        .collect();
+    let ret = Type::Adt(
+        adt_def.name.clone(),
+        adt_def
+            .param_vars
+            .iter()
+            .map(|tv| map.get(tv).cloned().expect("map covers param_vars"))
+            .collect(),
+    );
+    (args, ret)
+}
+
+/// Instantiate the single record variant of the ADT named by
+/// `target_ty` and unify the instantiated result with the target,
+/// returning the per-field types aligned with `variant.fields` so
+/// they reflect the target's concrete type arguments.
+fn instantiated_field_types(
+    adt_name: &str,
+    variant: &crate::adt::VariantInfo,
+    target_ty: &Type,
+    adt_reg: &AdtRegistry,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+) -> Vec<Type> {
+    let Some(adt_def) = adt_reg.lookup(adt_name) else {
+        return Vec::new();
+    };
+    let (args, ret) = instantiate_variant_of(adt_def, variant, vg);
+    let _ = unify(&ret, target_ty, subst);
+    args
+}
+
+/// Infer `(access {} target field)` — record field access (RFC
+/// D-CHECK prerequisite inference).
+#[allow(clippy::too_many_arguments)]
+fn infer_access(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() < 2 {
+        return Type::Error;
+    }
+    let target_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let Some(field_name) = symbol_name(&kids[1]) else {
+        return Type::Error;
+    };
+    // Peel borrow layers: an `&T` target reads through the borrow.
+    let mut resolved = subst.apply(&target_ty);
+    while let Type::Ref(inner) = resolved {
+        resolved = *inner;
+    }
+    match resolved {
+        Type::Adt(ref adt_name, _) => {
+            let Some(variant) = single_record_variant(adt_reg, adt_name) else {
+                // Multi-variant or positional-field ADT: field access
+                // is not defined for it; conservative status quo
+                // (silently untyped) to keep the blast radius of the
+                // new inference at the single-record idiom.
+                return Type::Error;
+            };
+            let pos = variant
+                .fields
+                .iter()
+                .position(|(n, _)| n.as_deref() == Some(field_name));
+            let Some(pos) = pos else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("unknown record field '{field_name}' on {adt_name}"),
+                    vec![format!(
+                        "known fields: {:?}",
+                        variant
+                            .fields
+                            .iter()
+                            .filter_map(|(n, _)| n.as_deref())
+                            .collect::<Vec<_>>()
+                    )],
+                ));
+                return Type::Error;
+            };
+            let field_types =
+                instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
+            match field_types.get(pos) {
+                Some(ty) => subst.apply(ty),
+                None => Type::Error,
+            }
+        }
+        Type::Var(tv) => {
+            // Target not yet pinned (e.g. unannotated lambda param):
+            // register in the deferred-access ledger so a later pin to
+            // an out-of-module opaque ADT is still rejected at
+            // def-level resolution (D-CHECK). The result type keeps
+            // the conservative status quo.
+            subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::Access);
+            Type::Error
+        }
+        // Conservative status quo for non-record targets: `access` on
+        // tensors/prims/tuples stays silently untyped in W1 rather
+        // than newly rejecting shapes the corpus may rely on.
+        _ => Type::Error,
+    }
+}
+
+/// Infer `(record-update {} target (kv {} field value)...)` — Deep
+/// functional record update (RFC D-CHECK prerequisite inference).
+#[allow(clippy::too_many_arguments)]
+fn infer_record_update(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.is_empty() {
+        return Type::Error;
+    }
+    let target_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    // Infer the update values regardless of target resolution so
+    // nested errors surface exactly once.
+    let mut kv_pairs: Vec<(&str, Type)> = Vec::new();
+    for kv_expr in kids.iter().skip(1) {
+        let deep::Expr::List(kv_list, _) = kv_expr else {
+            continue;
+        };
+        if get_tag(kv_list) != Some("kv") {
+            continue;
+        }
+        let kv_kids = children(kv_list);
+        let (Some(field_name), Some(value)) =
+            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
+        else {
+            continue;
+        };
+        let value_ty = infer_expr(
+            value,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+        kv_pairs.push((field_name, value_ty));
+    }
+    let mut resolved = subst.apply(&target_ty);
+    while let Type::Ref(inner) = resolved {
+        resolved = *inner;
+    }
+    match resolved {
+        Type::Adt(ref adt_name, _) => {
+            let Some(variant) = single_record_variant(adt_reg, adt_name) else {
+                return Type::Error;
+            };
+            let field_types =
+                instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
+            for (field_name, value_ty) in &kv_pairs {
+                let pos = variant
+                    .fields
+                    .iter()
+                    .position(|(n, _)| n.as_deref() == Some(*field_name));
+                match pos {
+                    Some(pos) => {
+                        if let Some(field_ty) = field_types.get(pos)
+                            && let Err(te) = unify(value_ty, field_ty, subst)
+                        {
+                            errors.push(te.into());
+                        }
+                    }
+                    None => {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!("unknown record field '{field_name}' on {adt_name}"),
+                            vec![format!(
+                                "known fields: {:?}",
+                                variant
+                                    .fields
+                                    .iter()
+                                    .filter_map(|(n, _)| n.as_deref())
+                                    .collect::<Vec<_>>()
+                            )],
+                        ));
+                    }
+                }
+            }
+            subst.apply(&resolved)
+        }
+        Type::Var(tv) => {
+            subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::RecordUpdate);
+            // The update returns the target's (still-unresolved) type.
+            Type::Var(tv)
+        }
+        Type::Error => Type::Error,
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("record-update requires a record-typed target, got {other}"),
                 vec![],
             ));
             Type::Error

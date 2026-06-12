@@ -22,6 +22,14 @@ pub struct VariantInfo {
 pub struct AdtDef {
     pub name: String,
     pub type_params: Vec<String>,
+    /// The fresh `TypeVar`s allocated for `type_params` at
+    /// registration, in the same order. Variant field types reference
+    /// these vars, so storing them lets call sites instantiate a
+    /// SPECIFIC ADT's constructor without going through the
+    /// name-keyed env (where same-named constructors from colliding
+    /// ADTs overwrite each other, chelis#148).
+    #[serde(default)]
+    pub param_vars: Vec<TypeVar>,
     pub variants: Vec<VariantInfo>,
     /// True when the `deftype` carried `opaque: true` metadata
     /// (RFC D-CHECK): construction and inspection are checker-gated
@@ -239,11 +247,16 @@ impl AdtRegistry {
             }
         }
 
+        let param_vars: Vec<TypeVar> = type_params
+            .iter()
+            .map(|p| *param_map.get(p).expect("param_map covers every type param"))
+            .collect();
         self.defs.insert(
             name.clone(),
             AdtDef {
                 name,
                 type_params,
+                param_vars,
                 variants,
                 opaque,
                 defining_module,
@@ -486,7 +499,7 @@ fn list_children(list: &deep::List) -> &[deep::Expr] {
     }
 }
 
-fn substitute_alias_type(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
+pub(crate) fn substitute_alias_type(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
     match ty {
         Type::Var(tv) => subst.get(tv).cloned().unwrap_or(Type::Var(*tv)),
         Type::Fn(args, ret) => Type::Fn(
