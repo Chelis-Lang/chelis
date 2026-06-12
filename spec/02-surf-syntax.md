@@ -920,6 +920,11 @@ type Option[a] = | None | Some { value: a }
       (variant {} None)
       (variant {} Some (field {} value (t-var {} a))))
 
+@chelis_opaque
+type Probability = | Probability { value: f32 }
+⟹  (deftype {chelis_opaque: true} Probability ()
+      (variant {} Probability (field {} value (t-prim {} f32))))
+
 type Weights = tensor[h, h, f32]
 ⟹  (typealias {} Weights () (t-tensor {} (d-name {} h) (d-name {} h) (t-prim {} f32)))
 ```

@@ -90,6 +90,10 @@ fn string(value: &str) -> deep::Expr {
     deep::Expr::Atom(deep::Atom::Str(value.to_string()), sp())
 }
 
+fn bool_atom(value: bool) -> deep::Expr {
+    deep::Expr::Atom(deep::Atom::Bool(value), sp())
+}
+
 fn meta_empty() -> deep::Expr {
     deep::Expr::Map(deep::MetaMap::default(), sp())
 }
@@ -705,8 +709,9 @@ impl DesugarCtx {
                 name,
                 params,
                 variants,
+                chelis_opaque,
                 ..
-            } => vec![desugar_type_def(name, params, variants)],
+            } => vec![desugar_type_def(name, params, variants, *chelis_opaque)],
 
             Decl::TypeAlias {
                 name, params, ty, ..
@@ -934,13 +939,26 @@ impl DesugarCtx {
     }
 }
 
-fn desugar_type_def(name: &str, params: &[String], variants: &[Variant]) -> deep::Expr {
+fn desugar_type_def(
+    name: &str,
+    params: &[String],
+    variants: &[Variant],
+    chelis_opaque: bool,
+) -> deep::Expr {
     let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
     let mut children = vec![sym(name), param_list];
     for v in variants {
         children.push(desugar_variant(v));
     }
-    node("deftype", children)
+    if chelis_opaque {
+        node_meta(
+            "deftype",
+            meta_with_entries(vec![("chelis_opaque".to_string(), bool_atom(true))]),
+            children,
+        )
+    } else {
+        node("deftype", children)
+    }
 }
 
 fn desugar_variant(variant: &Variant) -> deep::Expr {
@@ -2472,6 +2490,7 @@ mod tests {
                     span: s(),
                 },
             ],
+            chelis_opaque: false,
             span: s(),
         };
         let nodes = desugar_decl_strs(&decl);
@@ -2492,6 +2511,7 @@ mod tests {
                 fields: VariantFields::Record(vec![("x".to_string(), named_ty("f32"))]),
                 span: s(),
             }],
+            chelis_opaque: false,
             span: s(),
         };
         let nodes = desugar_decl_strs(&decl);

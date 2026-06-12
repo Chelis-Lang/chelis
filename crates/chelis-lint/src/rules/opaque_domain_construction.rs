@@ -1,0 +1,660 @@
+//! Rule `opaque-domain-construction` — domain types marked
+//! `chelis_opaque: true` may only be materialized by code in their defining
+//! module. This is the lint half of the proven-constructor discipline used by
+//! downstream domain shells: admitted code must call the constructors whose
+//! postconditions are proved, not write the representation directly.
+
+use crate::{Context, Rule, Surface, Violation};
+use chelis_deep::Span;
+use chelis_deep::ast as deep;
+use chelis_surf::ast as surf;
+use std::collections::HashSet;
+use std::path::Path;
+use walkdir::WalkDir;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OpaqueType {
+    name: String,
+    module: Option<String>,
+}
+
+pub struct OpaqueDomainConstruction;
+
+impl Rule for OpaqueDomainConstruction {
+    fn id(&self) -> &str {
+        "opaque-domain-construction"
+    }
+
+    fn spec_ref(&self) -> &str {
+        "§12.1"
+    }
+
+    fn applies_to(&self) -> &[Surface] {
+        &[Surface::SurfSource, Surface::DeepSource]
+    }
+
+    fn summary(&self) -> &str {
+        "types marked chelis_opaque may not be directly constructed, record-updated, or cast into outside their defining module"
+    }
+
+    fn check(&self, ctx: &Context<'_>) -> Vec<Violation> {
+        let Some(source) = ctx.source else {
+            return Vec::new();
+        };
+        match ctx.surface {
+            Surface::SurfSource => check_surf(ctx, source),
+            Surface::DeepSource => check_deep(ctx, source),
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn check_surf(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
+    let Ok(decls) = chelis_surf::parser::parse_str(source) else {
+        return Vec::new();
+    };
+    let mut catalog = collect_surf_catalog(ctx.root);
+    if catalog.is_empty() {
+        collect_surf_opaque_decls(&decls, None, &mut catalog);
+    }
+    if catalog.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    check_surf_decls(ctx, source, &decls, &catalog, None, &mut out);
+    out
+}
+
+fn collect_surf_catalog(root: &Path) -> Vec<OpaqueType> {
+    if root.is_file() {
+        return std::fs::read_to_string(root)
+            .ok()
+            .and_then(|source| chelis_surf::parser::parse_str(&source).ok())
+            .map(|decls| {
+                let mut catalog = Vec::new();
+                collect_surf_opaque_decls(&decls, None, &mut catalog);
+                catalog
+            })
+            .unwrap_or_default();
+    }
+    let mut out = HashSet::new();
+    for entry in WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("ch") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
+            continue;
+        };
+        let mut catalog = Vec::new();
+        collect_surf_opaque_decls(&decls, None, &mut catalog);
+        out.extend(catalog);
+    }
+    out.into_iter().collect()
+}
+
+fn collect_surf_opaque_decls(
+    decls: &[surf::Decl],
+    module: Option<String>,
+    out: &mut Vec<OpaqueType>,
+) {
+    for decl in decls {
+        match decl {
+            surf::Decl::Module { name, decls, .. } => {
+                collect_surf_opaque_decls(decls, Some(name.clone()), out);
+            }
+            surf::Decl::TypeDef {
+                name,
+                chelis_opaque,
+                ..
+            } if *chelis_opaque => out.push(OpaqueType {
+                name: name.clone(),
+                module: module.clone(),
+            }),
+            _ => {}
+        }
+    }
+}
+
+fn check_surf_decls(
+    ctx: &Context<'_>,
+    source: &str,
+    decls: &[surf::Decl],
+    catalog: &[OpaqueType],
+    module: Option<&str>,
+    out: &mut Vec<Violation>,
+) {
+    for decl in decls {
+        match decl {
+            surf::Decl::Module { name, decls, .. } => {
+                check_surf_decls(ctx, source, decls, catalog, Some(name), out);
+            }
+            surf::Decl::FunDef { body, .. } => {
+                check_surf_expr(ctx, source, body, catalog, module, out);
+            }
+            surf::Decl::LetDef { value, .. } => {
+                check_surf_expr(ctx, source, value, catalog, module, out);
+            }
+            surf::Decl::Property {
+                preconditions,
+                body,
+                options,
+                ..
+            } => {
+                for expr in preconditions {
+                    check_surf_expr(ctx, source, expr, catalog, module, out);
+                }
+                check_surf_expr(ctx, source, body, catalog, module, out);
+                for option in options {
+                    let expr = match option {
+                        surf::PropertyOption::Tolerance(expr, _)
+                        | surf::PropertyOption::Seed(expr, _)
+                        | surf::PropertyOption::Samples(expr, _) => expr,
+                    };
+                    check_surf_expr(ctx, source, expr, catalog, module, out);
+                }
+            }
+            surf::Decl::MacroDef { body, .. } => {
+                check_surf_expr(ctx, source, body, catalog, module, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn check_surf_expr(
+    ctx: &Context<'_>,
+    source: &str,
+    expr: &surf::Expr,
+    catalog: &[OpaqueType],
+    module: Option<&str>,
+    out: &mut Vec<Violation>,
+) {
+    match expr {
+        surf::Expr::Record(name, fields, span) => {
+            if is_outside_opaque_module(name, module, catalog) {
+                push_violation(
+                    ctx,
+                    source,
+                    *span,
+                    out,
+                    format!(
+                        "opaque domain type `{name}` must be materialized through its proved constructor; direct record construction is only allowed inside the defining module"
+                    ),
+                );
+            }
+            for (_, value) in fields {
+                check_surf_expr(ctx, source, value, catalog, module, out);
+            }
+        }
+        surf::Expr::Cast(inner, target, span) => {
+            if is_outside_opaque_module(target, module, catalog) {
+                push_violation(
+                    ctx,
+                    source,
+                    *span,
+                    out,
+                    format!(
+                        "opaque domain type `{target}` cannot be materialized by `cast`; call its proved constructor"
+                    ),
+                );
+            }
+            check_surf_expr(ctx, source, inner, catalog, module, out);
+        }
+        surf::Expr::Apply(func, args, _span) => {
+            check_surf_expr(ctx, source, func, catalog, module, out);
+            for arg in args {
+                check_surf_expr(ctx, source, arg, catalog, module, out);
+            }
+        }
+        surf::Expr::List(items, _) | surf::Expr::Tuple(items, _) | surf::Expr::Par(items, _) => {
+            for item in items {
+                check_surf_expr(ctx, source, item, catalog, module, out);
+            }
+        }
+        surf::Expr::Access(target, _, _)
+        | surf::Expr::TupleGet(target, _, _)
+        | surf::Expr::Unary(_, target, _)
+        | surf::Expr::Grad(target, _, _)
+        | surf::Expr::Vmap(target, _, _)
+        | surf::Expr::Jit(target, _)
+        | surf::Expr::Realize(target, _)
+        | surf::Expr::Copy(target, _)
+        | surf::Expr::Borrow(target, _)
+        | surf::Expr::Annotate(target, _, _) => {
+            check_surf_expr(ctx, source, target, catalog, module, out);
+        }
+        surf::Expr::Binary(_, lhs, rhs, _)
+        | surf::Expr::WithSeed(lhs, rhs, _)
+        | surf::Expr::WithDevice(lhs, rhs, _) => {
+            check_surf_expr(ctx, source, lhs, catalog, module, out);
+            check_surf_expr(ctx, source, rhs, catalog, module, out);
+        }
+        surf::Expr::Pipe(head, stages, _) => {
+            check_surf_expr(ctx, source, head, catalog, module, out);
+            for stage in stages {
+                check_surf_expr(ctx, source, stage, catalog, module, out);
+            }
+        }
+        surf::Expr::If(cond, then_expr, else_expr, _) => {
+            check_surf_expr(ctx, source, cond, catalog, module, out);
+            check_surf_expr(ctx, source, then_expr, catalog, module, out);
+            check_surf_expr(ctx, source, else_expr, catalog, module, out);
+        }
+        surf::Expr::Match(scrutinee, arms, _) => {
+            check_surf_expr(ctx, source, scrutinee, catalog, module, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    check_surf_expr(ctx, source, guard, catalog, module, out);
+                }
+                check_surf_expr(ctx, source, &arm.body, catalog, module, out);
+            }
+        }
+        surf::Expr::Lambda(_params, body, _) => {
+            check_surf_expr(ctx, source, body, catalog, module, out);
+        }
+        surf::Expr::Block(bindings, body, _) => {
+            for binding in bindings {
+                check_surf_expr(ctx, source, &binding.value, catalog, module, out);
+            }
+            check_surf_expr(ctx, source, body, catalog, module, out);
+        }
+        surf::Expr::Lit(_, _) | surf::Expr::Var(_, _) | surf::Expr::Constructor(_, _) => {}
+    }
+}
+
+fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
+    let Ok(exprs) = chelis_deep::parser::parse_str_strict(source) else {
+        return Vec::new();
+    };
+    let catalog = collect_deep_catalog(&exprs);
+    if catalog.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for expr in &exprs {
+        check_deep_expr(ctx, source, expr, &catalog, None, &mut out);
+    }
+    out
+}
+
+fn collect_deep_catalog(exprs: &[deep::Expr]) -> Vec<OpaqueType> {
+    let mut out = Vec::new();
+    for expr in exprs {
+        collect_deep_opaque_expr(expr, None, &mut out);
+    }
+    out
+}
+
+fn collect_deep_opaque_expr(expr: &deep::Expr, module: Option<String>, out: &mut Vec<OpaqueType>) {
+    let Some(list) = as_list(expr) else {
+        return;
+    };
+    match tag(list) {
+        Some("module") => {
+            let module_name = children(list).first().and_then(sym_str).map(str::to_string);
+            for child in children(list).iter().skip(1) {
+                collect_deep_opaque_expr(child, module_name.clone(), out);
+            }
+        }
+        Some("deftype") if meta_bool(list, "chelis_opaque") => {
+            if let Some(name) = children(list).first().and_then(sym_str) {
+                out.push(OpaqueType {
+                    name: name.to_string(),
+                    module,
+                });
+            }
+        }
+        _ => {
+            for child in children(list) {
+                collect_deep_opaque_expr(child, module.clone(), out);
+            }
+        }
+    }
+}
+
+fn check_deep_expr(
+    ctx: &Context<'_>,
+    source: &str,
+    expr: &deep::Expr,
+    catalog: &[OpaqueType],
+    module: Option<&str>,
+    out: &mut Vec<Violation>,
+) {
+    let Some(list) = as_list(expr) else {
+        return;
+    };
+    match tag(list) {
+        Some("module") => {
+            let module_name = children(list).first().and_then(sym_str);
+            for child in children(list).iter().skip(1) {
+                check_deep_expr(ctx, source, child, catalog, module_name, out);
+            }
+            return;
+        }
+        Some("record") => {
+            if let Some(name) = children(list).first().and_then(sym_str)
+                && is_outside_opaque_module(name, module, catalog)
+            {
+                push_violation(
+                    ctx,
+                    source,
+                    expr.span(),
+                    out,
+                    format!(
+                        "opaque domain type `{name}` must be materialized through its proved constructor; direct record construction is only allowed inside the defining module"
+                    ),
+                );
+            }
+        }
+        Some("cast") => {
+            if let Some(target) = children(list).get(1).and_then(type_name_from_type_expr)
+                && is_outside_opaque_module(target, module, catalog)
+            {
+                push_violation(
+                    ctx,
+                    source,
+                    expr.span(),
+                    out,
+                    format!(
+                        "opaque domain type `{target}` cannot be materialized by `cast`; call its proved constructor"
+                    ),
+                );
+            }
+        }
+        Some("record-update") => {
+            let typed_target = type_name_from_meta(list)
+                .or_else(|| children(list).first().and_then(type_name_from_meta_expr));
+            if let Some(target) = typed_target
+                && is_outside_opaque_module(target, module, catalog)
+            {
+                push_violation(
+                    ctx,
+                    source,
+                    expr.span(),
+                    out,
+                    format!(
+                        "opaque domain type `{target}` cannot be materialized by `record-update`; call its proved constructor"
+                    ),
+                );
+            } else if typed_target.is_none() && is_outside_all_opaque_modules(module, catalog) {
+                push_violation(
+                    ctx,
+                    source,
+                    expr.span(),
+                    out,
+                    "untyped Deep `record-update` cannot be verified against opaque domain types; add type metadata or call the proved constructor".to_string(),
+                );
+            }
+        }
+        _ => {}
+    }
+    for child in children(list) {
+        check_deep_expr(ctx, source, child, catalog, module, out);
+    }
+}
+
+fn is_outside_opaque_module(
+    type_name: &str,
+    current_module: Option<&str>,
+    catalog: &[OpaqueType],
+) -> bool {
+    let leaf = type_leaf(type_name);
+    let mut matched = false;
+    for opaque in catalog {
+        if type_leaf(&opaque.name) != leaf {
+            continue;
+        }
+        matched = true;
+        if opaque.module.as_deref() == current_module {
+            return false;
+        }
+    }
+    matched
+}
+
+fn is_outside_all_opaque_modules(current_module: Option<&str>, catalog: &[OpaqueType]) -> bool {
+    !catalog
+        .iter()
+        .any(|opaque| opaque.module.as_deref() == current_module)
+}
+
+fn type_leaf(name: &str) -> &str {
+    name.rsplit(['.', ':', '/']).next().unwrap_or(name)
+}
+
+fn push_violation(
+    ctx: &Context<'_>,
+    source: &str,
+    span: Span,
+    out: &mut Vec<Violation>,
+    message: String,
+) {
+    let (line, col) = line_col(source, span.offset);
+    out.push(Violation {
+        rule_id: OpaqueDomainConstruction.id().to_string(),
+        spec_ref: OpaqueDomainConstruction.spec_ref().to_string(),
+        path: ctx.path.to_path_buf(),
+        line: Some(line),
+        col: Some(col),
+        message,
+    });
+}
+
+fn line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (idx, ch) in source.char_indices() {
+        if idx >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn as_list(expr: &deep::Expr) -> Option<&deep::List> {
+    match expr {
+        deep::Expr::List(list, _) => Some(list),
+        _ => None,
+    }
+}
+
+fn tag(list: &deep::List) -> Option<&str> {
+    match list.elements.first()? {
+        deep::Expr::Atom(deep::Atom::Symbol(tag), _) => Some(tag.as_str()),
+        _ => None,
+    }
+}
+
+fn meta(list: &deep::List) -> Option<&deep::MetaMap> {
+    match list.elements.get(1)? {
+        deep::Expr::Map(map, _) => Some(map),
+        _ => None,
+    }
+}
+
+fn children(list: &deep::List) -> &[deep::Expr] {
+    if list.elements.len() <= 2 {
+        &[]
+    } else {
+        &list.elements[2..]
+    }
+}
+
+fn sym_str(expr: &deep::Expr) -> Option<&str> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Symbol(value), _) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn meta_bool(list: &deep::List, key: &str) -> bool {
+    meta(list).is_some_and(|map| {
+        map.entries.iter().any(|(entry_key, value)| {
+            entry_key == key && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
+        })
+    })
+}
+
+fn type_name_from_meta(list: &deep::List) -> Option<&str> {
+    let value = meta(list)?
+        .entries
+        .iter()
+        .find_map(|(key, value)| (key == "type").then_some(value))?;
+    type_name_from_type_expr(value)
+}
+
+fn type_name_from_meta_expr(expr: &deep::Expr) -> Option<&str> {
+    match expr {
+        deep::Expr::List(list, _) => type_name_from_meta(list),
+        deep::Expr::MetaExpr(meta, _) => meta
+            .entries
+            .iter()
+            .find_map(|(key, value)| (key == "type").then_some(value))
+            .and_then(type_name_from_type_expr),
+        _ => None,
+    }
+}
+
+fn type_name_from_type_expr(expr: &deep::Expr) -> Option<&str> {
+    let list = as_list(expr)?;
+    match tag(list) {
+        Some("t-prim") => children(list).first().and_then(sym_str),
+        Some("t-adt") => children(list)
+            .iter()
+            .find_map(sym_str)
+            .or_else(|| children(list).first().and_then(sym_str)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    fn run_surf(src: &str) -> Vec<Violation> {
+        let path = Path::new("strategy.ch");
+        let ctx = Context {
+            root: path,
+            path,
+            source: Some(src),
+            surface: Surface::SurfSource,
+        };
+        OpaqueDomainConstruction.check(&ctx)
+    }
+
+    fn run_surf_in_package(agent_src: &str, whale_src: &str) -> Vec<Violation> {
+        let temp = tempdir().expect("tempdir");
+        let whale = temp.path().join("whale.ch");
+        let agent = temp.path().join("agent.ch");
+        std::fs::write(&whale, whale_src).expect("write whale source");
+        std::fs::write(&agent, agent_src).expect("write agent source");
+        let ctx = Context {
+            root: temp.path(),
+            path: &agent,
+            source: Some(agent_src),
+            surface: Surface::SurfSource,
+        };
+        OpaqueDomainConstruction.check(&ctx)
+    }
+
+    fn run_deep(src: &str) -> Vec<Violation> {
+        let path = Path::new("strategy.dp");
+        let ctx = Context {
+            root: path,
+            path,
+            source: Some(src),
+            surface: Surface::DeepSource,
+        };
+        OpaqueDomainConstruction.check(&ctx)
+    }
+
+    #[test]
+    fn allows_constructor_inside_defining_module() {
+        let src = r#"
+module Whale.Types
+@chelis_opaque
+type Probability = | Probability { value: f32 }
+def probability(x: f32) -> Probability = Probability { value: x }
+"#;
+        assert!(run_surf(src).is_empty());
+    }
+
+    #[test]
+    fn rejects_constructor_outside_defining_module() {
+        let whale = r#"
+module Whale.Types
+@chelis_opaque
+type Probability = | Probability { value: f32 }
+"#;
+        let agent = r#"
+module Agent.Strategy
+def bad(x: f32) -> Probability = Probability { value: x }
+"#;
+        let violations = run_surf_in_package(agent, whale);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule_id, "opaque-domain-construction");
+        assert!(violations[0].message.contains("direct record construction"));
+    }
+
+    #[test]
+    fn rejects_deep_record_update_when_type_metadata_names_opaque_type() {
+        let src = r#"
+(module {} whale.types
+  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
+(module {} agent.strategy
+  (record-update {type: (t-adt {} Probability)} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
+"#;
+        let violations = run_deep(src);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("record-update"));
+    }
+
+    #[test]
+    fn rejects_untyped_deep_record_update_outside_opaque_defining_module() {
+        let src = r#"
+(module {} whale.types
+  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
+(module {} agent.strategy
+  (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
+"#;
+        let violations = run_deep(src);
+        assert_eq!(violations.len(), 1);
+        assert!(
+            violations[0]
+                .message
+                .contains("untyped Deep `record-update`")
+        );
+    }
+
+    #[test]
+    fn rejects_deep_cast_into_opaque_type() {
+        let src = r#"
+(module {} whale.types
+  (deftype {chelis_opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
+(module {} agent.strategy
+  (cast {} (var {} x) (t-adt {} Probability)))
+"#;
+        let violations = run_deep(src);
+        assert_eq!(violations.len(), 1);
+        assert!(
+            violations[0]
+                .message
+                .contains("cannot be materialized by `cast`")
+        );
+    }
+}

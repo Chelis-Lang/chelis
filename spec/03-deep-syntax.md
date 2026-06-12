@@ -253,6 +253,18 @@ part of this public vocabulary.
 | `field` | `(field {} name type-expr)` | Named field in variant |
 | `defdim` | `(defdim {} name)` | Dimension name declaration |
 
+`deftype` may carry `chelis_opaque: true` metadata:
+
+```lisp
+(deftype {chelis_opaque: true} Probability ()
+  (variant {} Probability (field {} value (t-prim {} f32))))
+```
+
+This metadata does not by itself hide constructors in the type checker.
+It is consumed by the blocking `opaque-domain-construction` lint rule,
+which enforces the proven-constructor discipline described in
+`spec/01-nomenclature.md` §12.1.
+
 ### 2.3 Expressions
 
 | Tag | Form | Semantics |

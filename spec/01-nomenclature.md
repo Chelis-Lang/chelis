@@ -1130,7 +1130,38 @@ are build-time errors. This discipline closes the loophole that lets
 post-hoc justifications accrete in the lint config: every waiver has
 to point at a documented rule that explicitly carves out the case.
 
-### 12.1 Future rule queue
+### 12.1 Opaque Domain Construction
+
+Types marked with `chelis_opaque: true` metadata participate in a
+verified-constructor discipline. Outside the defining module, code must
+obtain values of that type through exported constructor functions rather
+than materializing the representation directly.
+
+The blocking lint rule is `opaque-domain-construction`. It rejects:
+
+- Surf record construction of a marked ADT outside the defining module.
+- Deep `record` construction of a marked ADT outside the defining module.
+- Deep or Surf casts whose target is a marked domain type.
+- Deep `record-update` when the node or updated value carries type
+  metadata naming a marked domain type.
+- Untyped Deep `record-update` outside every marked type's defining
+  module when a marked type is in scope. This is fail-closed: without
+  type metadata the rule cannot verify that the update is not
+  materializing an opaque domain value.
+
+The rule is a construction-discipline gate, not a private-constructor
+language feature. Downstream reports that rely on it must label the
+claim as "proven constructor plus lint-verified construction
+discipline" unless and until Chelis ships true constructor privacy or
+opaque type exports.
+
+The lint rule deliberately allows direct construction inside the
+defining module so the module can implement and prove its smart
+constructors. It also remains compatible with public pattern matching:
+the rule protects how invalid values are introduced, not whether a
+module chooses to expose field accessors or destructuring.
+
+### 12.2 Future rule queue
 
 The following rules are intentionally queued, not currently part of
 the blocking registry:

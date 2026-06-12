@@ -508,7 +508,7 @@ impl Parser {
             }
             TokenKind::Import => self.parse_import(),
             TokenKind::Export => self.parse_export(),
-            TokenKind::At => self.parse_property_decl(),
+            TokenKind::At => self.parse_at_decl(),
             _ => Err(ParseError::Expected {
                 expected:
                     "declaration (def, sig, binding, type, dim, macro, module, import, export, @property)"
@@ -523,16 +523,21 @@ impl Parser {
     // Declarations
     // ---------------------------------------------------------------------------
 
-    fn parse_property_decl(&mut self) -> Result<Decl, ParseError> {
+    fn parse_at_decl(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume @
         let (keyword, _) = self.expect_ident()?;
-        if keyword != "property" {
-            return Err(ParseError::Expected {
-                expected: "`property` after `@`".into(),
+        match keyword.as_str() {
+            "property" => self.parse_property_decl_after_at(start),
+            "chelis_opaque" => self.parse_chelis_opaque_type_decl(start),
+            _ => Err(ParseError::Expected {
+                expected: "`property` or `chelis_opaque` after `@`".into(),
                 found: keyword,
                 offset: self.current_offset(),
-            });
+            }),
         }
+    }
+
+    fn parse_property_decl_after_at(&mut self, start: Span) -> Result<Decl, ParseError> {
         let (name, _) = self.expect_ident()?;
         let (forall, _) = self.expect_ident()?;
         if forall != "forall" {
@@ -582,6 +587,37 @@ impl Parser {
             options,
             span: start.merge(end),
         })
+    }
+
+    fn parse_chelis_opaque_type_decl(&mut self, start: Span) -> Result<Decl, ParseError> {
+        if *self.peek() != TokenKind::Type {
+            return Err(ParseError::Expected {
+                expected: "`type` declaration after `@chelis_opaque`".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
+        }
+        let decl = self.parse_type_decl_with_opaque(true)?;
+        match decl {
+            Decl::TypeDef {
+                name,
+                params,
+                variants,
+                span,
+                ..
+            } => Ok(Decl::TypeDef {
+                name,
+                params,
+                variants,
+                chelis_opaque: true,
+                span: start.merge(span),
+            }),
+            _ => Err(ParseError::Expected {
+                expected: "ADT type declaration after `@chelis_opaque`".into(),
+                found: "type alias".into(),
+                offset: start.offset,
+            }),
+        }
     }
 
     fn parse_exprs_until_colon(&mut self) -> Result<Vec<Expr>, ParseError> {
@@ -810,6 +846,10 @@ impl Parser {
     }
 
     fn parse_type_decl(&mut self) -> Result<Decl, ParseError> {
+        self.parse_type_decl_with_opaque(false)
+    }
+
+    fn parse_type_decl_with_opaque(&mut self, chelis_opaque: bool) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Type
         let (name, _) = self.expect_type_ident()?;
         let params = if *self.peek() == TokenKind::LBracket {
@@ -833,6 +873,7 @@ impl Parser {
                 name,
                 params,
                 variants,
+                chelis_opaque,
                 span: start.merge(last_span),
             })
         } else {

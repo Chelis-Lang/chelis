@@ -167,10 +167,11 @@ fn format_decl(decl: &Decl) -> String {
             name,
             params,
             variants,
+            chelis_opaque,
             ..
         } => {
             let params = format_type_params(params);
-            if variants.is_empty() {
+            let body = if variants.is_empty() {
                 format!("type {name}{params}")
             } else {
                 let variants = variants
@@ -179,6 +180,11 @@ fn format_decl(decl: &Decl) -> String {
                     .collect::<Vec<_>>()
                     .join("\n  | ");
                 format!("type {name}{params} =\n  | {variants}")
+            };
+            if *chelis_opaque {
+                format!("@chelis_opaque\n{body}")
+            } else {
+                body
             }
         }
         Decl::TypeAlias {
