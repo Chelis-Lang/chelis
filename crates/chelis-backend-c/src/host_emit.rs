@@ -17,7 +17,7 @@ enum SparseSummaryKind {
 use crate::emit::CEmitter;
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     // Emit helpers and functions into a body buffer first so we can detect which
@@ -49,6 +49,30 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     let header = emit_host_header_with_linkage(program, program_name, internal_linkage);
     if !header.is_empty() {
         body.push(header);
+        body.push(String::new());
+    }
+
+    // Issue #352: top-level bindings referenced inside a compiled host
+    // function would otherwise dangle -- `main()` declares every binding as
+    // a local, so a def body's `w` had no declaration in scope and the
+    // native compiler rejected the TU. Hoist captured bindings to file
+    // scope; `emit_main` assigns them in binding order instead of declaring
+    // locals, so function bodies and `main()` resolve the same object
+    // (mirroring eval's load-closure, which serves the binding's value at
+    // call time). Check-time name resolution rejects forward references
+    // from a use site to a later binding, so every hoisted binding is
+    // initialized before the first user call that reads it.
+    let captured_globals = captured_global_names(program);
+    if !captured_globals.is_empty() {
+        body.push("// Top-level bindings captured by compiled functions (issue #352):".to_string());
+        for name in &captured_globals {
+            let binding = program
+                .globals
+                .iter()
+                .find(|binding| binding.name == *name)
+                .expect("captured global name comes from program.globals");
+            body.push(format!("static {};", c_decl(&binding.ty, name)));
+        }
         body.push(String::new());
     }
 
@@ -87,7 +111,8 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     }
 
     if !program.globals.is_empty() {
-        emit_main(&mut body, program_name, program);
+        let hoisted: HashSet<&str> = captured_globals.iter().map(String::as_str).collect();
+        emit_main(&mut body, program_name, program, &hoisted);
     }
 
     let mut out: Vec<String> = vec![
@@ -503,7 +528,12 @@ fn emit_function(
     out.push("}".to_string());
 }
 
-fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
+fn emit_main(
+    out: &mut Vec<String>,
+    program_name: &str,
+    program: &HostProgram,
+    hoisted: &HashSet<&str>,
+) {
     out.push("int main(void) {".to_string());
     let mut emitter = HostEmitter::new(
         "    ".to_string(),
@@ -518,11 +548,18 @@ fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
             &format!("__binding_{index}_value"),
             &binding.ty,
         );
-        emitter.lines.push(format!(
-            "    {} {} = __binding_{index}_value;",
-            c_type(&binding.ty),
-            binding.name
-        ));
+        if hoisted.contains(binding.name.as_str()) {
+            // Declared at file scope (issue #352); assign, don't shadow.
+            emitter
+                .lines
+                .push(format!("    {} = __binding_{index}_value;", binding.name));
+        } else {
+            emitter.lines.push(format!(
+                "    {} {} = __binding_{index}_value;",
+                c_type(&binding.ty),
+                binding.name
+            ));
+        }
     }
     for binding in &program.globals {
         if let Some(display_name) = binding.display_name.as_deref() {
@@ -532,6 +569,138 @@ fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
     out.extend(emitter.lines);
     out.push("    return 0;".to_string());
     out.push("}".to_string());
+}
+
+/// Top-level bindings referenced by name inside at least one compiled host
+/// function body (issue #352), in `program.globals` order, deduped.
+///
+/// Deliberately an over-approximation: the walk records every `Var` name
+/// without subtracting binders (params, let names, match bindings).
+/// Hoisting a binding that is shadowed inside a function body is harmless
+/// in C -- the local declaration shadows the file-scope static -- while
+/// missing a genuine capture reproduces the undeclared-identifier build
+/// break this pass exists to prevent.
+fn captured_global_names(program: &HostProgram) -> Vec<String> {
+    let mut referenced: HashSet<String> = HashSet::new();
+    for function in &program.functions {
+        collect_var_names(&function.body, &mut referenced);
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    program
+        .globals
+        .iter()
+        .filter(|binding| referenced.contains(&binding.name))
+        .filter(|binding| seen.insert(binding.name.as_str()))
+        .map(|binding| binding.name.clone())
+        .collect()
+}
+
+/// Record every `Var` name referenced anywhere in `expr`, including
+/// let-binding values, match arms, and inline-callback bodies. Exhaustive
+/// over `HostExprKind` so a new variant forces this walk to be revisited.
+fn collect_var_names(expr: &HostExpr, out: &mut HashSet<String>) {
+    match &expr.kind {
+        HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Unit => {}
+        HostExprKind::Var(name, _) => {
+            out.insert(name.clone());
+        }
+        HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
+            for item in items {
+                collect_var_names(item, out);
+            }
+        }
+        HostExprKind::Call { args, .. }
+        | HostExprKind::Builtin { args, .. }
+        | HostExprKind::TensorCall { args, .. } => {
+            for arg in args {
+                collect_var_names(arg, out);
+            }
+        }
+        HostExprKind::AdtConstruct { fields, .. } => {
+            for field in fields {
+                collect_var_names(field, out);
+            }
+        }
+        HostExprKind::AdtFieldAccess { base, .. } => collect_var_names(base, out),
+        HostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_var_names(cond, out);
+            collect_var_names(then_expr, out);
+            collect_var_names(else_expr, out);
+        }
+        HostExprKind::MatchOption {
+            scrutinee,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            collect_var_names(scrutinee, out);
+            collect_var_names(some_expr, out);
+            collect_var_names(none_expr, out);
+        }
+        HostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            collect_var_names(scrutinee, out);
+            for arm in arms {
+                collect_var_names(&arm.expr, out);
+            }
+            if let Some(default_expr) = default_expr {
+                collect_var_names(default_expr, out);
+            }
+        }
+        HostExprKind::Let { bindings, body, .. } => {
+            for binding in bindings {
+                collect_var_names(&binding.value, out);
+            }
+            collect_var_names(body, out);
+        }
+        HostExprKind::Map { callback, list, .. }
+        | HostExprKind::Filter { callback, list, .. }
+        | HostExprKind::Partition { callback, list, .. }
+        | HostExprKind::FlatMap { callback, list, .. } => {
+            collect_callback_var_names(callback, out);
+            collect_var_names(list, out);
+        }
+        HostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ..
+        }
+        | HostExprKind::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => {
+            collect_callback_var_names(callback, out);
+            collect_var_names(init, out);
+            collect_var_names(list, out);
+        }
+        HostExprKind::WithSeed { seed, body, .. } => {
+            collect_var_names(seed, out);
+            collect_var_names(body, out);
+        }
+    }
+}
+
+fn collect_callback_var_names(callback: &HostCallback, out: &mut HashSet<String>) {
+    match &callback.kind {
+        HostCallbackKind::Named { .. } => {}
+        HostCallbackKind::Inline { body, .. } => collect_var_names(body, out),
+    }
 }
 
 struct HostEmitter<'a> {
