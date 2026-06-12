@@ -129,6 +129,10 @@ needs Python 3.11+ (it uses `tomllib`), which is why the examples use
 `.venv/bin/python`: the stock macOS `python3` is 3.9 and fails with
 `ModuleNotFoundError: No module named 'tomllib'`.
 
+Documentation-only changes are exempt from the local gate: push and
+require green CI instead (the lint stage and the Docs job cover
+everything a docs-only diff can break).
+
 `chelis build`, `chelis check`, `chelis validate`, and `chelis eval --file`
 each enforce a built-in **style gate** (`chelis fmt --check` plus the
 blocking `chelis lint` rule set) on the input file before the

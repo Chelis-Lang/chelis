@@ -189,6 +189,13 @@ authoritative workspace oracle) run the full suite. See
 for why the workspace suite does not belong in the local loop on
 macOS.
 
+Documentation-only changes (Markdown/prose with no code, fixture, or
+example edits) are exempt from `--local`: skip the local gate, push,
+and require green CI instead. The gate's clippy/build/test stages
+cannot be affected by prose, and CI still runs the lint stage plus the
+Docs job (mdBook build and the `skill_suite` example validator), which
+cover everything a docs-only diff can break.
+
 Default-gate discipline:
 
 - `cargo test --workspace` is the inner development loop and should stay under roughly 60
