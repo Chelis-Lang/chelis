@@ -11,6 +11,11 @@ use walkdir::WalkDir;
 mod smt_lower;
 
 #[cfg(feature = "chelis-prove")]
+mod obligation_run;
+#[cfg(feature = "chelis-prove")]
+mod tier_c_obligation;
+
+#[cfg(feature = "chelis-prove")]
 use smt_lower::{InlineCtx, surf_expr_to_smt};
 
 #[derive(Debug, Clone)]
@@ -26,6 +31,11 @@ pub struct ProveOptions<'a> {
     pub tier: &'a str,
     #[allow(dead_code)]
     pub smt_timeout_ms: u64,
+    /// Floor for invariant rejection-sampling acceptance rate before the
+    /// starvation classifier fires (RFC D-STARVE). `0.0` disables the
+    /// classifier and preserves the legacy exhaustion => Error path.
+    #[allow(dead_code)]
+    pub invariant_min_rate: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +109,9 @@ struct Summary {
     failed: usize,
     unsupported: usize,
     errors: usize,
+    /// Count of derived producer obligations run (RFC D-OBLIG: summary
+    /// gains `obligations: N`). These are also counted in `total`.
+    obligations: usize,
 }
 
 pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
@@ -131,6 +144,7 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
                 "failed": totals.failed,
                 "unsupported": totals.unsupported,
                 "errors": totals.errors,
+                "obligations": totals.obligations,
             })
         );
     } else {
@@ -229,6 +243,13 @@ fn prove_surf_file(
     for property in properties {
         let status = prove_surf_property(&flat, &property, options, totals);
         file_status = combine_status(file_status, status);
+    }
+    // Derived producer obligations (RFC D-OBLIG): collected from the
+    // FULL module-bearing decls so the export/module wrappers survive.
+    #[cfg(feature = "chelis-prove")]
+    {
+        let ob_status = obligation_run::run_obligations(&parsed, options, totals);
+        file_status = combine_status(file_status, ob_status);
     }
     Ok(file_status)
 }

@@ -334,6 +334,11 @@ enum Command {
         /// SMT solver timeout in milliseconds (default 5000)
         #[clap(long, default_value = "5000")]
         smt_timeout: u64,
+        /// Floor for invariant rejection-sampling acceptance rate before
+        /// the generator-starvation classifier fires (RFC D-STARVE). 0.0
+        /// disables the classifier (legacy exhaustion => error path).
+        #[clap(long, default_value = "0.01")]
+        invariant_min_rate: f64,
     },
     /// Lint naming conventions per `spec/01-nomenclature.md`
     Lint {
@@ -645,6 +650,7 @@ fn main() {
             spans,
             tier: _tier,
             smt_timeout: _smt_timeout,
+            invariant_min_rate,
         }) => match prove::cmd_prove(prove::ProveOptions {
             path: path.as_deref(),
             only: only.as_deref(),
@@ -655,6 +661,7 @@ fn main() {
             spans: spans.as_deref(),
             tier: &_tier,
             smt_timeout_ms: _smt_timeout,
+            invariant_min_rate,
         }) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
