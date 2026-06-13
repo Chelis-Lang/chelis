@@ -11,6 +11,11 @@ fn write_prop(source: &str) -> tempfile::TempDir {
 
 #[test]
 fn prove_passes_filtered_samples() {
+    // Pin `--tier fuzz-only` so the test asserts exactly one behavior
+    // across the default and `--features smt` builds: a trivial linear
+    // property auto-proves at the SMT tier under `--tier auto` in the smt
+    // build (which would print "proved (smt)", not "3/3 passed"), so the
+    // tier must be pinned for the fuzz assertion to be deterministic.
     let dir = write_prop(
         r#"
 @property non_negative forall(x: f32) where x >= 0.0:
@@ -26,6 +31,8 @@ fn prove_passes_filtered_samples() {
             "3",
             "--seed",
             "0",
+            "--tier",
+            "fuzz-only",
         ])
         .assert()
         .success()
@@ -149,6 +156,11 @@ fn duplicate_property_name_is_parse_error() {
 
 #[test]
 fn cli_samples_and_seed_override_source_options() {
+    // `--samples`/`--seed` overriding the source options is a FUZZ-tier
+    // behavior (the SMT tier ignores sample count and reports samples:0).
+    // Pin `--tier fuzz-only` so the assertion holds across the default and
+    // `--features smt` builds (under `--tier auto` in the smt build, the
+    // trivial `x == x` property auto-proves at the SMT tier => samples:0).
     let dir = write_prop(
         r#"
 @property source_options forall(x: f32):
@@ -166,6 +178,8 @@ fn cli_samples_and_seed_override_source_options() {
             "2",
             "--seed",
             "42",
+            "--tier",
+            "fuzz-only",
             "--json",
         ])
         .output()

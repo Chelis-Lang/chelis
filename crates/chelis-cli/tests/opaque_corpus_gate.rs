@@ -75,7 +75,17 @@ fn run_runner(script: &str, args: &[&str]) -> (bool, String, String) {
     )
 }
 
+// The solver-free assertion is only meaningful for the DEFAULT (non-smt)
+// binary: under `--features smt` the binary deliberately links cvc5, so
+// "zero cvc5 symbols" is false by design. This is the load-bearing
+// solver-free gate for the default build, so do NOT weaken the assertion;
+// instead skip it under `--features smt` (the smt build asserts the
+// opposite -- that cvc5 IS linked -- through the smt companion suite).
 #[test]
+#[cfg_attr(
+    feature = "smt",
+    ignore = "solver-free gate applies only to the default (non-smt) binary; the smt binary links cvc5 by design"
+)]
 fn check_is_solver_free_on_the_corpus() {
     // The non-smt binary: zero cvc5 symbols (assertion A) + every check-lane
     // program checks to its pinned exit (assertion C). The smt CONTROL +
