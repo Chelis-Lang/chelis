@@ -168,6 +168,7 @@ fn format_decl(decl: &Decl) -> String {
             params,
             variants,
             opaque,
+            invariant,
             ..
         } => {
             let params = format_type_params(params);
@@ -182,7 +183,20 @@ fn format_decl(decl: &Decl) -> String {
                 format!("type {name}{params} =\n  | {variants}")
             };
             if *opaque {
-                format!("@opaque\n{body}")
+                // `@opaque`, then the optional `@invariant(binder) <expr>`
+                // block, then `type ...` (RFC D-SYNTAX). The invariant
+                // body uses the Surf expression formatter so the result
+                // is idempotent under `chelis fmt`.
+                let mut out = String::from("@opaque\n");
+                if let Some(inv) = invariant {
+                    out.push_str(&format!(
+                        "@invariant({}) {}\n",
+                        inv.binder,
+                        format_expr(&inv.body)
+                    ));
+                }
+                out.push_str(&body);
+                out
             } else {
                 body
             }
@@ -837,6 +851,37 @@ mod tests {
         assert!(
             rendered.contains("! { Test }"),
             "Test effect row must be preserved; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn opaque_invariant_formats_with_invariant_line() {
+        // RFC D-SYNTAX: `chelis fmt` renders the `@invariant(binder)
+        // <expr>` block between `@opaque` and `type`.
+        let source = "module M\n@opaque\n\
+             @invariant(p) (p.value >= 0.0) && (p.value <= 1.0)\n\
+             type Probability =\n  | Probability { value: f32 }\n";
+        let program = crate::parser::parse_str(source).expect("parse");
+        let rendered = format_program(&program);
+        assert!(rendered.contains("@opaque"), "opaque lost: {rendered}");
+        assert!(
+            rendered.contains("@invariant(p)"),
+            "invariant line lost: {rendered}"
+        );
+    }
+
+    #[test]
+    fn opaque_invariant_format_is_idempotent() {
+        // `chelis fmt` is idempotent on an invariant-bearing opaque type:
+        // formatting the formatted output reproduces it.
+        let source = "module M\n@opaque\n\
+             @invariant(p) (p.value >= 0.0) && (p.value <= 1.0)\n\
+             type Probability =\n  | Probability { value: f32 }\n";
+        let once = format_source(source).expect("format once");
+        let twice = format_source(&once).expect("format twice");
+        assert_eq!(
+            once, twice,
+            "fmt not idempotent:\n--once--\n{once}\n--twice--\n{twice}"
         );
     }
 

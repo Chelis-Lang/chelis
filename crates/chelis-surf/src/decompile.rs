@@ -1368,10 +1368,51 @@ fn decompile_deftype(list: &List) -> String {
         format!("type {name}{param_str} =\n  {}", variant_lines.join("\n  "))
     };
     if has_true_meta(list, "opaque") {
-        format!("@opaque\n{rendered}")
+        // RFC D-SYNTAX: `@opaque`, then the optional `@invariant(binder)
+        // <expr>` block reconstructed from the `invariant` metadata fn,
+        // then `type ...`. The `invariant_amenability` key is derived
+        // data and is deliberately NOT decompiled (it is recomputed on
+        // the next desugar, RFC D-META); reconstructing it would be a
+        // redundant, drift-prone copy.
+        match decompile_invariant_meta(list) {
+            Some(invariant_line) => format!("@opaque\n{invariant_line}\n{rendered}"),
+            None => format!("@opaque\n{rendered}"),
+        }
     } else {
         rendered
     }
+}
+
+/// Reconstruct the `@invariant(binder) <expr>` Surf line from a
+/// deftype's `invariant` metadata fn `(fn {} (params {} <binder>)
+/// <body>)`, or `None` when the key is absent or malformed. The body is
+/// decompiled with the verbose expression decompiler so the result
+/// re-parses (RT-1 F4 round-trip invariant).
+fn decompile_invariant_meta(list: &List) -> Option<String> {
+    let inv = meta(list)?
+        .entries
+        .iter()
+        .find(|(key, _)| key == "invariant")
+        .map(|(_, value)| value)?;
+    let Expr::List(fn_list, _) = inv else {
+        return None;
+    };
+    if tag(fn_list) != Some("fn") {
+        return None;
+    }
+    let fn_kids = children(fn_list);
+    if fn_kids.len() < 2 {
+        return None;
+    }
+    // params node: (params {} <binder>), binder is a bare symbol.
+    let binder = match &fn_kids[0] {
+        Expr::List(params, _) if tag(params) == Some("params") => {
+            children(params).first().and_then(sym_str)?
+        }
+        _ => return None,
+    };
+    let body = decompile_expr(&fn_kids[1]);
+    Some(format!("@invariant({binder}) {body}"))
 }
 
 fn has_true_meta(list: &List, key: &str) -> bool {
@@ -2224,6 +2265,59 @@ mod tests {
             rendered.contains("| Meters(f32)"),
             "positional variant must use parens, got:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn decompile_invariant_bearing_opaque_module_round_trips() {
+        // RFC D-SYNTAX / RT-1 F4: an invariant-bearing opaque module must
+        // decompile to a re-parsable `@opaque`/`@invariant(...)`/`type`
+        // block.
+        let rendered = assert_reparses(
+            "module Stats.Prob\n@opaque\n\
+             @invariant(p) (p.value >= 0.0) && (p.value <= 1.0)\n\
+             type Probability =\n  | Probability { value: f32 }\n",
+        );
+        assert!(
+            rendered.contains("@opaque"),
+            "opaque annotation lost, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("@invariant(p)"),
+            "invariant line lost, got:\n{rendered}"
+        );
+        // The amenability key is derived data; the decompiler must NOT
+        // emit it (recomputed on next desugar, RFC D-META).
+        assert!(
+            !rendered.contains("amenability"),
+            "amenability must not be decompiled, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn decompile_invariant_re_desugars_to_same_metadata() {
+        // Round-trip through decompile -> re-parse -> re-desugar must
+        // reproduce the invariant + amenability metadata, proving the
+        // decompiled predicate is semantically faithful.
+        let source = "module Stats.Prob\n@opaque\n\
+             @invariant(p) (p.value >= 0.0) && (p.value <= 1.0)\n\
+             type Probability =\n  | Probability { value: f32 }\n";
+        let rendered = assert_reparses(source);
+        let reparsed = parse_str(&rendered).expect("re-parse");
+        let re_deep = desugar_program(&reparsed);
+        let re_text = canonical(&re_deep);
+        assert!(
+            re_text.contains("invariant: (fn {}"),
+            "re-desugar lost invariant fn, got:\n{re_text}"
+        );
+        assert!(
+            re_text.contains("invariant_amenability: \"linear\""),
+            "re-desugar lost amenability, got:\n{re_text}"
+        );
+    }
+
+    /// Print canonical Deep for the re-desugar faithfulness assertion.
+    fn canonical(deep: &[chelis_deep::Expr]) -> String {
+        chelis_deep::printer::print_canonical(deep)
     }
 
     #[test]
