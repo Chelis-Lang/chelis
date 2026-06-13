@@ -689,6 +689,132 @@ type Probability =
     );
 }
 
+// ── Decompiler round-trip on the opaque path (RT-1 F4) ───────────
+
+/// `chelis surf <file.dp>` -> decompiled Surf string.
+fn decompile_dp(dp: &Path) -> String {
+    let output = chelis()
+        .args(["surf", dp.to_str().unwrap()])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(output).expect("utf8 decompiled surf")
+}
+
+#[test]
+fn decompile_opaque_module_round_trips_through_check() {
+    // RT-1 F4: decompile an opaque module's Deep, then re-parse and
+    // re-check the Surf. Both decompiler bugs (multi-segment module
+    // path `Stats.prob`, positional record variant
+    // `Probability(value: f32)`) and the record-construction
+    // separator (`{ value = x }`) broke this path in W1.
+    let dir = tempdir().expect("tempdir");
+    let dp = dir.path().join("opaque.dp");
+    // A single-module opaque fixture: deftype + smart constructor.
+    write_file(
+        &dp,
+        r#"(module {}
+  stats.prob
+  (deftype {opaque: true}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32))))
+  (defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    probability
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Probability (kv {} value (var {} x))))))
+"#,
+    );
+
+    let decompiled = decompile_dp(&dp);
+    // Structural checks on the de-sugared Surf.
+    assert!(
+        decompiled.contains("module Stats.Prob"),
+        "module path must PascalCase every segment: {decompiled}"
+    );
+    assert!(
+        decompiled.contains("| Probability { value: f32 }"),
+        "record variant must use braces: {decompiled}"
+    );
+    assert!(
+        decompiled.contains("Probability { value: x }"),
+        "record construction must use `:`: {decompiled}"
+    );
+
+    // Re-parse + re-check: the decompiled Surf must score 1 clean.
+    let ch = dir.path().join("roundtrip.ch");
+    write_file(&ch, &decompiled);
+    let output = chelis()
+        .args(["check", ch.to_str().unwrap()])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json = check_json(&output);
+    assert_eq!(
+        json.get("score").and_then(Value::as_f64),
+        Some(1.0),
+        "decompiled opaque module must round-trip to a clean check: {json}"
+    );
+    assert!(
+        errors_of(&json).is_empty(),
+        "decompiled opaque module must have no check errors: {json}"
+    );
+}
+
+#[test]
+fn decompile_non_opaque_multi_segment_module_round_trips() {
+    // Negative parity: the multi-segment module-path fix is not
+    // opaque-specific. A plain `module Geo.Units` with a positional
+    // ADT must also round-trip cleanly.
+    let dir = tempdir().expect("tempdir");
+    let dp = dir.path().join("plain.dp");
+    write_file(
+        &dp,
+        r#"(module {}
+  geo.units
+  (deftype {} Meters () (variant {} Meters (t-prim {} f32)))
+  (defsig {} meters (t-fn {} (t-prim {} f32) (t-adt {} Meters)))
+  (def {}
+    meters
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (app {} (var {} Meters) (var {} x)))))
+"#,
+    );
+
+    let decompiled = decompile_dp(&dp);
+    assert!(
+        decompiled.contains("module Geo.Units"),
+        "non-opaque module path must PascalCase every segment: {decompiled}"
+    );
+    assert!(
+        decompiled.contains("| Meters(f32)"),
+        "positional variant must keep parens: {decompiled}"
+    );
+
+    let ch = dir.path().join("plain_roundtrip.ch");
+    write_file(&ch, &decompiled);
+    let output = chelis()
+        .args(["check", ch.to_str().unwrap()])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json = check_json(&output);
+    assert_eq!(
+        json.get("score").and_then(Value::as_f64),
+        Some(1.0),
+        "decompiled non-opaque module must round-trip clean: {json}"
+    );
+}
+
 // ── Formatter round-trip (baseline, passes before and after) ─────
 
 #[test]

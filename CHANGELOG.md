@@ -41,6 +41,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Reef-surface violation messages render user-facing (de-mangled)
   type/module/producer/def names instead of the internal
   `Pkg__<pkg>__<Module>__<Name>` forms.
+  The decompiler (`chelis surf`) round-trips opaque modules: it
+  PascalCases every module-path segment (`module Stats.Prob`,
+  not `Stats.prob`), renders record variants with braces
+  (`| Probability { value: f32 }`), and uses `:` (not `=`) in
+  record construction.
 
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep

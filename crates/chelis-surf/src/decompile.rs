@@ -258,7 +258,7 @@ impl<'a> IdiomaticDecompiler<'a> {
             return "-- malformed module".to_string();
         }
         let name = sym_str(&kids[0]).unwrap_or("_");
-        let cap_name = capitalize(name);
+        let cap_name = capitalize_module_path(name);
         let mut out = format!("module {cap_name}");
         if kids.len() > 1 {
             out.push('\n');
@@ -770,7 +770,11 @@ impl<'a> IdiomaticDecompiler<'a> {
                             return None;
                         }
                         let field = sym_str(&kv_kids[0]).unwrap_or("_");
-                        Some(format!("{field} = {}", self.decompile_expr(&kv_kids[1])))
+                        // RT-1 F4: Surf record construction uses `:`
+                        // (`Name { field: value }`); `=` is a parse
+                        // error, breaking round-trip on the opaque
+                        // smart-constructor path.
+                        Some(format!("{field}: {}", self.decompile_expr(&kv_kids[1])))
                     })
                     .collect::<Vec<_>>();
                 format!("{name} {{ {} }}", fields.join(", "))
@@ -1390,6 +1394,14 @@ fn decompile_variant(expr: &Expr) -> String {
         if kids.len() == 1 {
             return name.to_string();
         }
+        // RT-1 F4b: a variant whose children are `(field {} name type)`
+        // nodes is a RECORD variant and must decompile with braces
+        // (`Name { f: T, ... }`); the positional `Name(T, ...)` form is
+        // a parse error for named fields. A variant whose children are
+        // bare type exprs is positional. (Surf does not allow mixing.)
+        let is_record = kids[1..]
+            .iter()
+            .all(|f| matches!(f, Expr::List(fl, _) if tag(fl) == Some("field")));
         let fields: Vec<String> = kids[1..]
             .iter()
             .map(|f| {
@@ -1406,7 +1418,11 @@ fn decompile_variant(expr: &Expr) -> String {
                 decompile_type_expr(f)
             })
             .collect();
-        return format!("{name}({})", fields.join(", "));
+        return if is_record {
+            format!("{name} {{ {} }}", fields.join(", "))
+        } else {
+            format!("{name}({})", fields.join(", "))
+        };
     }
     "-- unknown variant".to_string()
 }
@@ -1433,7 +1449,7 @@ fn decompile_module(list: &List) -> String {
         return "-- malformed module".to_string();
     }
     let name = sym_str(&kids[0]).unwrap_or("_");
-    let cap_name = capitalize(name);
+    let cap_name = capitalize_module_path(name);
     let mut out = format!("module {cap_name}\n");
     for child in &kids[1..] {
         out.push_str(&decompile_toplevel(child));
@@ -1448,7 +1464,7 @@ fn decompile_import(list: &List) -> String {
         return "-- malformed import".to_string();
     }
     let module = sym_str(&kids[0]).unwrap_or("_");
-    let cap_module = capitalize(module);
+    let cap_module = capitalize_module_path(module);
     let names = decompile_bare_names(&kids[1]);
     if names.is_empty() {
         format!("import {cap_module}")
@@ -1463,7 +1479,7 @@ fn decompile_import_all(list: &List) -> String {
         return "-- malformed import-all".to_string();
     }
     let module = sym_str(&kids[0]).unwrap_or("_");
-    let cap_module = capitalize(module);
+    let cap_module = capitalize_module_path(module);
     format!("import {cap_module} (..)")
 }
 
@@ -2147,6 +2163,19 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// Capitalize EACH `.`-separated segment of a module path (RT-1 F4a).
+/// The Surf desugar lowercases module names (`module Stats.Prob` ->
+/// `stats.prob`), so the decompiler must re-PascalCase every segment
+/// to produce a parseable `module Stats.Prob`; capitalizing only the
+/// first char of the whole string yields `Stats.prob`, whose `prob`
+/// segment the parser rejects (module path segments are TypeIdent).
+fn capitalize_module_path(path: &str) -> String {
+    path.split('.')
+        .map(capitalize)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DecompileOptions, decompile_program, decompile_program_with_context};
@@ -2157,6 +2186,77 @@ mod tests {
         let decls = parse_str(source).expect("surf parse");
         let deep = desugar_program(&decls);
         decompile_program(&deep)
+    }
+
+    /// Decompile, then assert the output re-parses (RT-1 F4 round-trip
+    /// invariant: decompiler output must parse through the supported
+    /// parser path).
+    fn assert_reparses(source: &str) -> String {
+        let rendered = surf_to_surf(source);
+        parse_str(&rendered).unwrap_or_else(|e| {
+            panic!("decompiled output failed to re-parse: {e}\n---\n{rendered}\n---")
+        });
+        rendered
+    }
+
+    #[test]
+    fn decompile_record_variant_uses_braces() {
+        // RT-1 F4b: a record variant must decompile with braces, not
+        // the positional `Name(field: T)` form (a parse error).
+        let rendered = assert_reparses(
+            "module Stats.Prob\n@opaque\ntype Probability =\n  | Probability { value: f32 }\n",
+        );
+        assert!(
+            rendered.contains("| Probability { value: f32 }"),
+            "record variant must use braces, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Probability(value"),
+            "record variant must not use positional parens, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn decompile_positional_variant_keeps_parens() {
+        // Negative parity: a positional variant keeps parentheses.
+        let rendered = assert_reparses("module Geo.Units\ntype Meters =\n  | Meters(f32)\n");
+        assert!(
+            rendered.contains("| Meters(f32)"),
+            "positional variant must use parens, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn decompile_multi_segment_module_path_pascal_cases_every_segment() {
+        // RT-1 F4a: the desugar lowercases `Stats.Prob` to
+        // `stats.prob`; the decompiler must re-PascalCase EVERY
+        // segment, not just the first (`Stats.prob` is a parse error).
+        let rendered = assert_reparses("module Stats.Prob\ndef f(x: f32) -> f32 = x\n");
+        assert!(
+            rendered.starts_with("module Stats.Prob"),
+            "every module-path segment must be PascalCased, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("module Stats.prob"),
+            "second segment must not stay lowercase, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn decompile_record_construction_uses_colon() {
+        // RT-1 F4: Surf record construction uses `:`, not `=`.
+        let rendered = assert_reparses(
+            "module Stats.Prob\ntype Point =\n  | Point { value: f32 }\n\
+             def make(x: f32) -> Point = Point { value: x }\n",
+        );
+        assert!(
+            rendered.contains("Point { value: x }"),
+            "record construction must use `:`, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("value = x"),
+            "record construction must not use `=`, got:\n{rendered}"
+        );
     }
 
     #[test]
