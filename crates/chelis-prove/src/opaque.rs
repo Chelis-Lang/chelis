@@ -726,20 +726,34 @@ pub fn generate_binder(
                 method: GenMethod::Rejection,
             });
         }
-        // Floor short-circuit: once we have enough attempts to judge the
-        // rate and it is below the floor, stop wasting the budget. (No
-        // sample has been accepted at this point, so the rate is 0.)
-        if floor > 0.0 && rej_attempts >= 50 && rate(rej_accepts, rej_attempts) < floor {
-            break;
+        // Floor short-circuit. `generate_binder` returns ONE sample per
+        // call (we return on the first accept above), so the rejection
+        // tier is "starving" only when it fails to find a single valid
+        // sample within a margin of the floor's expected attempt count.
+        // For a floor `r` the expected attempts to one success is `1/r`;
+        // we wait `3/r` attempts (a comfortable margin against an unlucky
+        // run on a satisfiable band) before declaring starvation, capped
+        // at the budget. A `[0,1]` band (~10% acceptance) finds a sample
+        // in ~10 attempts and never short-circuits; a measure-near-zero
+        // band hits the threshold and falls to the constructor tier.
+        if floor > 0.0 {
+            let starvation_threshold = ((3.0 / floor).ceil() as usize).min(budget);
+            if rej_attempts >= starvation_threshold {
+                break;
+            }
         }
     }
 
-    // Tier 2: constructor-based generation. Same accounting: 0 accepted
-    // at the starvation point (we return on the first valid sample).
+    // Tier 2: constructor-based generation. Each proposal is an evaluator
+    // call (expensive), and a working producer lands a valid sample within
+    // a few attempts, so the constructor tier is capped well below the
+    // rejection budget — beyond the cap a starving constructor tier is
+    // declared starved rather than spending thousands of evaluator calls.
+    let ctor_budget = budget.min(200);
     let mut ctor_attempts = 0usize;
     let ctor_accepts = 0usize;
     if !producers.is_empty() {
-        for _ in 0..budget {
+        for _ in 0..ctor_budget {
             ctor_attempts += 1;
             let Some(env) = propose_via_constructor(inv, module_source, producers, rng) else {
                 continue;

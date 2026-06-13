@@ -120,29 +120,33 @@ fn min_rate_zero_disables_floor_short_circuit() {
     assert_eq!(got.method, GenMethod::Rejection);
 }
 
+// A very tight tolerance band (eps = 1e-4): under independent component
+// sampling the satisfying set is measure-near-zero, so rejection sampling
+// reliably starves and the producer-based proposal is what serves the
+// binder (the D-STARVE acceptance probe).
 const SIMPLEX: &str = "module Stats.Simplex
 export (make_simplex)
 @opaque
 @invariant(p) sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps
 type Simplex =
   | Simplex { weights: tensor[3, f32] }
-def eps() -> f32 = 0.01
+def eps() -> f32 = 0.0001
 def make_simplex(a: f32, b: f32, c: f32) -> Simplex =
   { s = abs(a) + abs(b) + abs(c) + 0.001;
     Simplex { weights: to_tensor([abs(a) / s, abs(b) / s, (abs(c) + 0.001) / s]) } }
 ";
 
 #[test]
-fn simplex_band_rejection_starves_then_constructor_serves() {
-    // sum(weights)==1 band is measure-near-zero under independent
-    // component sampling; rejection starves. A `normalize` producer that
-    // divides by the sum lands in the band, so constructor-based
-    // generation serves it WITHOUT starving (the D-STARVE acceptance
-    // probe).
+fn simplex_band_is_served_by_constructor_generation_not_starved() {
+    // The tight sum-to-one band is measure-near-zero under independent
+    // component sampling; rejection starves. A producer that divides by
+    // the sum lands in the band, so constructor-based generation serves it
+    // WITHOUT starving (the D-STARVE acceptance probe). The accepted sample
+    // is predicate-validated regardless of method.
     let exprs = deep_of(SIMPLEX);
     let inv = &collect_opaque_invariants(&exprs)[0];
     let mut consts = ConstEnv::new();
-    consts.insert("eps".to_string(), 0.01);
+    consts.insert("eps".to_string(), 0.0001);
     let producers = vec![GenProducer {
         name: "make_simplex".to_string(),
         param_names: vec!["a".to_string(), "b".to_string(), "c".to_string()],
@@ -163,17 +167,17 @@ fn simplex_band_rejection_starves_then_constructor_serves() {
         0.01,
         400,
     )
-    .expect("constructor-based generation serves the simplex band without starving");
+    .expect("constructor-based generation serves the tight simplex band without starving");
     assert_eq!(
         got.method,
         GenMethod::Constructor,
-        "the equality-band binder is served by the producer, not rejection"
+        "the measure-near-zero band is served by the producer, not rejection"
     );
     let sum: f64 = (0..3)
         .map(|i| got.env.get(&format!("p.weights.{i}")).copied().unwrap())
         .sum();
     assert!(
-        (sum - 1.0).abs() <= 0.01 + 1e-6,
+        (sum - 1.0).abs() <= 0.0001 + 1e-6,
         "validated in band, sum={sum}"
     );
 }

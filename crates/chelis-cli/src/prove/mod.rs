@@ -11,6 +11,8 @@ use walkdir::WalkDir;
 mod smt_lower;
 
 #[cfg(feature = "chelis-prove")]
+mod injection;
+#[cfg(feature = "chelis-prove")]
 mod obligation_run;
 
 #[cfg(feature = "chelis-prove")]
@@ -239,7 +241,7 @@ fn prove_surf_file(
     let properties = collect_surf_properties(path, &flat, options.only);
     let mut file_status = Status::Passed;
     for property in properties {
-        let status = prove_surf_property(&flat, &property, options, totals);
+        let status = prove_surf_property(&flat, &parsed, &property, options, totals);
         file_status = combine_status(file_status, status);
     }
     // Derived producer obligations (RFC D-OBLIG): collected from the
@@ -308,10 +310,34 @@ fn property_seed(options: &[chelis_surf::ast::PropertyOption]) -> Option<u64> {
 
 fn prove_surf_property(
     decls: &[Decl],
+    module_decls: &[Decl],
     property: &Property,
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
+    // `module_decls` is consumed only by the injection path, which is
+    // gated on the prove dependency.
+    #[cfg(not(feature = "chelis-prove"))]
+    let _ = module_decls;
+    // Assumption injection (RFC D-INJECT): a property with an
+    // invariant-carrying opaque binder is verified ONLY over
+    // invariant-satisfying binder values; the injection path owns it. It
+    // uses the FULL module-bearing decls (so `@opaque` keeps its enclosing
+    // module). Counts `total` itself, so this runs before the shared
+    // increment.
+    #[cfg(feature = "chelis-prove")]
+    if injection::property_has_opaque_invariant_binder(module_decls, &property.params) {
+        return injection::prove_with_injection(
+            module_decls,
+            &property.name,
+            &property.params,
+            &property.preconditions,
+            &property.body,
+            options,
+            totals,
+        );
+    }
+
     totals.total += 1;
 
     // Tier B: attempt SMT proof when --tier auto

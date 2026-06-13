@@ -486,6 +486,26 @@ fn unsupported(ob: &ObligationProperty, seed: u64, reason: &str) -> ObligationOu
     )
 }
 
+/// Public entry: the exported base producers of `input_inv`'s type usable
+/// for constructor-based generation, computing the inferred signatures
+/// from the program. Used by the user-property injection path (D-INJECT)
+/// so it shares the obligation engine's producer-resolution rules.
+pub fn generation_producers_for(
+    exprs: &[Expr],
+    input_inv: &OpaqueInvariant,
+) -> Vec<crate::opaque::GenProducer> {
+    let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(exprs) {
+        Ok(checked) => checked
+            .signature_inference()
+            .functions
+            .iter()
+            .map(|(n, s)| (n.clone(), s.checked_signature.clone()))
+            .collect(),
+        Err(_) => BTreeMap::new(),
+    };
+    generation_producers(exprs, &sigs, input_inv)
+}
+
 /// The exported producers of the input type usable for constructor-based
 /// generation (RFC D-STARVE tier 2). A base producer (no input of the
 /// type) whose result is the input type, with scalar/tensor params.
