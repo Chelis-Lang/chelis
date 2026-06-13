@@ -5,8 +5,8 @@
 //! # Status: experimental
 //!
 //! As of V1 **no production codec consumes this entry point**. The survey
-//! (`spec/design/opaque_invariants_survey.md` §7) established — and W5
-//! re-confirmed by direct inspection of [`crate::schema`] — that no
+//! (`spec/design/opaque_invariants_survey.md` §7) established -- and W5
+//! re-confirmed by direct inspection of [`crate::schema`] -- that no
 //! external-payload path materializes a typed ADT value today:
 //! `EvalRequest.bindings` is tensors-only, `ExecutionValue::Adt` is an
 //! output-only shape produced by the evaluator from program text, and the
@@ -21,13 +21,13 @@
 //!
 //! [`decode_adt_value`] performs two passes, in order:
 //!
-//! 1. **Structural validation** — the payload's constructor must exist in
+//! 1. **Structural validation** -- the payload's constructor must exist in
 //!    the program's declared types, and its fields must match the declared
 //!    representation in arity, order, and field type (scalar vs tensor vs
 //!    nested ADT). A structural mismatch is a [`DecodeError::Structural`],
 //!    *distinct from* an invariant violation: structural means "this
 //!    payload is not even shaped like the type."
-//! 2. **Invariant revalidation** — [`crate::runtime::revalidate_adt_value`]
+//! 2. **Invariant revalidation** -- [`crate::runtime::revalidate_adt_value`]
 //!    runs the declared predicate through the interpreter's own evaluator
 //!    (the crate does **not** depend on `chelis-prove`). NaN and Inf in any
 //!    numeric representation field are rejected *before* predicate
@@ -385,7 +385,7 @@ type Probability = | Probability { value: f32 }
     #[test]
     fn wrong_scalar_type_is_structural_error() {
         // A float field fed an int payload is a structural mismatch, NOT an
-        // invariant violation — the wire keeps ints and floats distinct.
+        // invariant violation -- the wire keeps ints and floats distinct.
         let exprs = program_exprs(PROBABILITY_SRC);
         let payload = ExecutionValue::Adt {
             ctor: "Probability".to_string(),

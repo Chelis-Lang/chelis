@@ -25,12 +25,12 @@ pub struct RuntimeTensorValue {
 /// lane; `Grad` and `Vmap` capture the inner `(grad/vmap ...)` Deep form
 /// and resolve at application time by routing through
 /// [`chelis_ir::lower::lower_subexpr_program`] + the forward DAG
-/// evaluator — the same machinery the C backend uses.
+/// evaluator -- the same machinery the C backend uses.
 #[derive(Debug, Clone)]
 pub enum TransformKind {
-    /// `(grad {wrt: ...} fn-expr [index-expr])` — reverse-mode autodiff.
+    /// `(grad {wrt: ...} fn-expr [index-expr])` -- reverse-mode autodiff.
     Grad,
-    /// `(vmap {} fn-expr axis-lit)` — vectorize the leading axis (or
+    /// `(vmap {} fn-expr axis-lit)` -- vectorize the leading axis (or
     /// the explicit axis from the trailing literal).
     Vmap,
 }
@@ -149,7 +149,7 @@ impl ScalarBits {
 
 /// Sealed payload for [`RuntimeValue::Scalar`] (WS-A0 RT-1 fixup C1).
 ///
-/// The dtype/bits pairing is enforced inside [`ScalarPayload::new`] —
+/// The dtype/bits pairing is enforced inside [`ScalarPayload::new`] --
 /// the inner fields are private so no caller (in or out of this crate)
 /// can construct a payload via struct-literal syntax that bypasses the
 /// invariant. This is the structural fix for the silent-init pattern
@@ -391,6 +391,16 @@ impl RuntimeValue {
             _ => None,
         }
     }
+
+    /// Re-encode this value to the machine-facing [`ExecutionValue`] wire
+    /// shape. The inverse direction of the decode chokepoint: a value the
+    /// chokepoint produced from an `ExecutionValue::Adt` re-encodes to a
+    /// value-identical `ExecutionValue::Adt`, so the conformance suite can
+    /// assert the decode round-trips its input bit-for-bit. Errors only for
+    /// values with no wire shape (mapped files), which decode never yields.
+    pub fn to_execution_value(&self) -> Result<ExecutionValue, String> {
+        runtime_value_to_schema(self)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -414,7 +424,7 @@ pub(crate) fn evaluate_host_program(
 /// `resolve_top_level`. This is what lets `chelis test` share a single
 /// compile across every test in a file: compile once with N synthesized
 /// `__chelis_test_k = test_k()` bindings, then run N eval passes each
-/// selecting one root — without each pass paying for the other N-1 tests
+/// selecting one root -- without each pass paying for the other N-1 tests
 /// running as module init.
 pub(crate) fn evaluate_host_program_filtered(
     program: &CheckedProgram,
@@ -424,7 +434,7 @@ pub(crate) fn evaluate_host_program_filtered(
     evaluate_host_program_with_library(program, &[], None, tensor_bindings, selected_roots)
 }
 
-/// Phase G' — host-runtime entry that seeds the `top_level_defs` table
+/// Phase G' -- host-runtime entry that seeds the `top_level_defs` table
 /// with library defs in addition to the new-code program. This is the
 /// host-side parity counterpart to `lower_program_with_context`: when
 /// new code calls a library function (e.g. `Std.Time.is_leap_year`),
@@ -434,7 +444,7 @@ pub(crate) fn evaluate_host_program_filtered(
 /// name`.
 ///
 /// Library defs are registered FIRST, then new-code defs, so on a name
-/// collision the new-code def shadows the library def — mirroring the
+/// collision the new-code def shadows the library def -- mirroring the
 /// type-env stacking semantics in `check_ir_with_context`.
 ///
 /// `library_lowered_names` is the optional library-side
@@ -492,7 +502,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     let mut top_level_order = Vec::new();
 
     // Register library defs FIRST. New-code defs will overwrite on
-    // name collision below — matching the Phase C type-env shadow rule
+    // name collision below -- matching the Phase C type-env shadow rule
     // (new code wins).
     register_top_level_defs(
         library_exprs,
@@ -503,7 +513,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         /* register_runtime_order = */ false,
     );
     // Register new-code defs. New-code is the only source of eager
-    // module-init bindings in `top_level_order` — library was already
+    // module-init bindings in `top_level_order` -- library was already
     // checked + lowered at context-build time and any side effects
     // would have happened then; re-running them on every per-test
     // worker is exactly the regression we're fixing.
@@ -845,7 +855,7 @@ impl<'a> EvalContext<'a> {
                 // applied later. The application path
                 // (`apply_resolved_callable` for a `Transform`) routes
                 // through `lower_subexpr_program` + the forward DAG
-                // evaluator — the same machinery that `chelis build
+                // evaluator -- the same machinery that `chelis build
                 // --target c` uses.
                 Ok(RuntimeValue::Transform {
                     kind: TransformKind::Grad,
@@ -1626,7 +1636,7 @@ impl<'a> EvalContext<'a> {
             // dedicated `tensor_bool_*` helpers wired for issue
             // Chelis-Lang/chelis#185. Per the brief's pinned decision,
             // the tensor lane is NOT a transparent extension of the
-            // scalar lane — it pins input precision to `Bool` and
+            // scalar lane -- it pins input precision to `Bool` and
             // requires matching shapes, which scalar broadcasting
             // would hide.
             "and" => match (args.first(), args.get(1)) {
@@ -2510,7 +2520,7 @@ impl<'a> EvalContext<'a> {
                 // Bit-exact tensor equality for int64 tensors. Std.Test
                 // exposes this as `assert_eq_tensor_int64` because
                 // `assert_close_tensor` types only on f32 tensors and is
-                // tolerance-based — neither fits int64 reduction outputs
+                // tolerance-based -- neither fits int64 reduction outputs
                 // (e.g. `argmax`/`argmin` which return int64 indices).
                 let actual = expect_tensor_arg(args, 0)?;
                 let expected = expect_tensor_arg(args, 1)?;
@@ -2657,7 +2667,7 @@ impl<'a> EvalContext<'a> {
             // Each delegates to the canonical IR decomposition in
             // `crates/chelis-ir/src/tier2.rs` (the same path the C
             // backend takes) and forward-evaluates the resulting small
-            // DAG through `chelis_ir::eval` — the canonical numerical
+            // DAG through `chelis_ir::eval` -- the canonical numerical
             // oracle per `feedback_evaluator_byte_identical_gate`. We do
             // not reimplement the math here; that's the path that drifts
             // when downstream tier2 updates land.
@@ -2732,7 +2742,7 @@ impl<'a> EvalContext<'a> {
             // float tolerance) to the C backend's `chelis_host_*_f32` helpers
             // emitted from `crates/chelis-backend-c/src/host_emit.rs`. Those
             // helpers run all math through `float` (single precision); we
-            // therefore route every transcendental through `f32` here too —
+            // therefore route every transcendental through `f32` here too --
             // widening only happens at the very end when we re-store as
             // `f64`-shaped tensor data. The closures themselves accept and
             // return `f64` so `tensor_float_unop_f32` can cast at the
@@ -2972,7 +2982,7 @@ pub(crate) struct InvariantPredicate {
     pub(crate) type_name: String,
     /// The single predicate binder (e.g. `p`).
     pub(crate) binder: String,
-    /// The desugared predicate body — element 2 of the embedded
+    /// The desugared predicate body -- element 2 of the embedded
     /// `(fn {} (params {} <binder>) <body>)` metadata node.
     pub(crate) body: Expr,
 }
@@ -2982,7 +2992,7 @@ pub(crate) struct InvariantPredicate {
 /// chokepoint reports separately, because the two have different causes:
 /// structural means "this payload is not even shaped like the type,"
 /// invariant means "this payload is shaped correctly but its value is not
-/// admissible." Never a repair — RFC D-DECODE: "Decode of a violating
+/// admissible." Never a repair -- RFC D-DECODE: "Decode of a violating
 /// payload is a failure, never a repair."
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum InvariantViolation {
@@ -3002,7 +3012,7 @@ pub(crate) enum InvariantViolation {
         value: String,
     },
     /// The declared predicate could not be evaluated to a boolean
-    /// (partiality — division by zero feeding a non-comparison position,
+    /// (partiality -- division by zero feeding a non-comparison position,
     /// a domain error in `log`/`sqrt`, or any interpreter error). Per
     /// RFC D-WF the predicate is pure-by-construction but NOT total, so
     /// an evaluation error fails the decode rather than being swallowed.
@@ -3188,7 +3198,7 @@ pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<De
 
 /// Classify a Deep field-type expression into a [`DecodeFieldType`].
 /// Returns `None` for type shapes outside the V1 decodable value class
-/// (function types, generics, type variables) — the chokepoint treats a
+/// (function types, generics, type variables) -- the chokepoint treats a
 /// field with no classifiable type as outside the decodable surface.
 fn decode_field_type(expr: &Expr) -> Option<DecodeFieldType> {
     let list = as_list(expr)?;
@@ -3362,12 +3372,12 @@ fn describe_non_finite(v: f64) -> String {
 /// For every [`RuntimeValue::Adt`] whose constructor carries an invariant:
 /// 1. **Representation sanity pre-check** (RFC H1): reject NaN/Inf in any
 ///    numeric representation field BEFORE predicate evaluation. This is
-///    required for fail-closed behavior — comparisons such as
+///    required for fail-closed behavior -- comparisons such as
 ///    `not (p.value > 1.0)` are *true* on NaN.
 /// 2. **Predicate evaluation**: bind the predicate binder to the value and
 ///    run the interpreter's OWN `eval_expr` on the predicate body. A
 ///    non-boolean or `false` result fails the decode; an evaluation error
-///    (partiality — `/`, `log`, `sqrt`) also fails it (RFC D-WF).
+///    (partiality -- `/`, `log`, `sqrt`) also fails it (RFC D-WF).
 ///
 /// The walk is recursive: nested record fields that are themselves
 /// invariant-carrying opaque types are checked, and an inner violation is
@@ -3487,7 +3497,7 @@ fn dispatch_scalar_binop(
             if lp.dtype().is_float() && rp.dtype().is_float() =>
         {
             // Float-float: pick the wider of the two operand dtypes (no
-            // implicit promotion when they match — but keep f64 if either
+            // implicit promotion when they match -- but keep f64 if either
             // side is f64 so we don't downgrade an f64-typed value).
             //
             // E1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.1
@@ -3668,7 +3678,7 @@ fn activation_relu_f32(x: f32) -> f32 {
 }
 
 /// `sigmoid(x) = 1 / (1 + exp(-x))`. Mirrors `chelis_host_sigmoid_f32`
-/// in `crates/chelis-backend-c/src/host_emit.rs:137` exactly — single
+/// in `crates/chelis-backend-c/src/host_emit.rs:137` exactly -- single
 /// `expf` of `-x`, no f64 widening.
 fn activation_sigmoid_f32(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
@@ -3681,7 +3691,7 @@ fn activation_tanh_f32(x: f32) -> f32 {
 
 /// `silu(x) = x * sigmoid(x)` (a.k.a. swish). Composed from
 /// `activation_sigmoid_f32` so the f32-rounding profile is identical
-/// to the C-backend helper — i.e., the C side computes
+/// to the C-backend helper -- i.e., the C side computes
 /// `x * chelis_host_sigmoid_f32(x)` and we mirror it 1:1.
 fn activation_silu_f32(x: f32) -> f32 {
     x * activation_sigmoid_f32(x)
@@ -3701,7 +3711,7 @@ fn activation_gelu_f32(x: f32) -> f32 {
     // helper (`0.7978845608028654f` in host_emit.rs) both encode; the
     // explicit cast keeps the f32 round-trip identical to those lanes.
     // `clippy::excessive_precision` complains about the trailing digits
-    // being beyond f32 representability — that's intentional (we want
+    // being beyond f32 representability -- that's intentional (we want
     // the same source-level constant the other lanes use).
     #[allow(clippy::excessive_precision)]
     const C: f32 = 0.7978845608028654_f32; // sqrt(2/pi)
@@ -3860,7 +3870,7 @@ fn ordered_compare(
             tensor_compare_scalar(tensor, scalar_f, cmp).map(RuntimeValue::Tensor)
         }
         (Some(scalar), Some(RuntimeValue::Tensor(tensor))) if scalar_as_f64(scalar).is_some() => {
-            // `cmp(scalar, tensor[i])` — flip the comparator so the helper
+            // `cmp(scalar, tensor[i])` -- flip the comparator so the helper
             // can keep using `cmp(tensor[i], scalar)` internally.
             let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
             tensor_compare_scalar(tensor, scalar_f, |t, s| cmp(s, t)).map(RuntimeValue::Tensor)
@@ -3940,9 +3950,9 @@ fn bool_unop(args: &[RuntimeValue], op: impl Fn(bool) -> bool) -> Result<Runtime
 /// issue Chelis-Lang/chelis#185 the tensor-bool arms are SEPARATE from
 /// the scalar `bool_binop` helper: tensor-bool semantics require
 /// explicit precision + shape checking that scalar broadcasting would
-/// hide. The IR evaluator does not have a dedicated bool path —
+/// hide. The IR evaluator does not have a dedicated bool path --
 /// `tier2::lower_and`/`lower_or` lower to `Mul`/`MaxElem` over
-/// 0.0/1.0-encoded bool tensors — but the host runtime stores
+/// 0.0/1.0-encoded bool tensors -- but the host runtime stores
 /// `tensor[D, bool]` as f64 data with `precision == Prim::Bool` (see
 /// `tensor_compare_value` / `tensor_compare_scalar` which produce
 /// 0.0/1.0 entries). Treat the truth value as `element != 0.0`,
@@ -4245,7 +4255,7 @@ fn nested_list_to_tensor_data(
     let first_is_list = matches!(&outer[0], RuntimeValue::List(_));
 
     if !first_is_list {
-        // Leaf level — same code path as the original list_to_tensor.
+        // Leaf level -- same code path as the original list_to_tensor.
         let (precision, data) = list_to_tensor_data(outer)?;
         return Ok((precision, vec![data.len()], data));
     }
@@ -4713,7 +4723,7 @@ fn tensor_matmul_host(
 /// The typer also accepts a same-rank "replace-singleton" interpretation
 /// when the user explicitly annotates the result as same-rank, but the
 /// host runtime has no access to user annotations, so it always picks
-/// the canonical INSERT branch — which is the typer's first-preference
+/// the canonical INSERT branch -- which is the typer's first-preference
 /// branch at infer.rs:7188 and the only branch synthesized by IR
 /// lowering in `tier2::lower_softmax`/`lower_layer_norm`/`lower_matmul`.
 /// Closes Bucket 4a: previously this function silently picked the
@@ -4993,7 +5003,7 @@ fn tensor_softmax_host(
     for slice_linear in 0..reduced_numel {
         let mut base_indices = linear_to_indices(slice_linear, &reduced_shape);
         // First pass: max over the axis. Track positive-Inf positions
-        // separately — `exp(+Inf - +Inf) = exp(NaN) = NaN` would otherwise
+        // separately -- `exp(+Inf - +Inf) = exp(NaN) = NaN` would otherwise
         // silently corrupt mask-style attention usage where the ones-hot
         // position is set to +Inf (red-team v0.2.6 HIGH).
         let mut max_val = f64::NEG_INFINITY;
@@ -5029,7 +5039,7 @@ fn tensor_softmax_host(
         if pos_inf_count > 0 {
             // Standard formula yields exp(+Inf - +Inf) = NaN. Define the
             // softmax of a slice containing K positive-Inf values as
-            // 1/K at each +Inf position and 0 elsewhere — the natural
+            // 1/K at each +Inf position and 0 elsewhere -- the natural
             // limit as the input approaches the multi-Inf configuration.
             let share = 1.0_f64 / (pos_inf_count as f64);
             for k in 0..axis_size {
@@ -5981,7 +5991,7 @@ fn prim_from_name(name: &str) -> Option<Prim> {
         // f8e4m3 is deferred and the type checker rejects every cast
         // and tensor-element use upstream. If the host runtime ever
         // resolves an `f8e4m3` token here, the upstream rejection has
-        // a hole — panic loudly rather than carrying the deferred
+        // a hole -- panic loudly rather than carrying the deferred
         // dtype into runtime classification.
         "f8e4m3" => panic!(
             "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
@@ -6010,7 +6020,7 @@ fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Expr {
         // spec/04-type-system.md §1.1.1 f8e4m3 is deferred and the
         // type checker rejects it upstream. If a TensorType reaches
         // this Deep re-encoder with f8e4m3 precision, the upstream
-        // rejection has a hole — panic rather than emit a
+        // rejection has a hole -- panic rather than emit a
         // `(t-prim {} f8e4m3)` node into a synthesized Deep var.
         Prim::F8e4m3 => panic!(
             "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
@@ -6167,7 +6177,7 @@ const HOST_ONLY_BUILTIN_NAMES: &[&str] = &["tensor_scan"];
 /// grad(target)(x)`) without flagging *unrelated* top-level defs that
 /// happen to call `tensor_scan` but are not reachable from the
 /// transform target (which would be a false-positive rejection of a
-/// perfectly differentiable program — see issue #257 review round 2).
+/// perfectly differentiable program -- see issue #257 review round 2).
 fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec<String>) {
     let Expr::List(list, _) = expr else {
         return;
@@ -6196,21 +6206,21 @@ fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec
 /// Reachability-scoped search for a host-only builtin call. Starts at
 /// `root` (the synthesized `(app {} <transform> <args>...)`), then
 /// follows every `(var <name>)` reference transitively into the bodies
-/// of `defs` so the transform target's own def — and any helper it
-/// calls — is searched, but unrelated top-level defs are not. Returns
+/// of `defs` so the transform target's own def -- and any helper it
+/// calls -- is searched, but unrelated top-level defs are not. Returns
 /// the name of the first host-only builtin reached, or `None`.
 ///
 /// Known, accepted limitation (issue #257 review item 6): detection
 /// matches only a *direct application by name*, `(app (var tensor_scan)
 /// ...)`, and only follows references that resolve to a top-level `defs`
-/// entry. Two exotic aliasing forms therefore slip past — a `let`-bound
+/// entry. Two exotic aliasing forms therefore slip past -- a `let`-bound
 /// alias (`let f = tensor_scan in f(acc, cb, n)`, where `f` is a local
 /// binding rather than a `defs` key and the call site `(app (var f)
 /// ...)` does not name a host-only builtin), and `tensor_scan` passed as
 /// an un-applied value into a higher-order helper whose own body applies
 /// it. Both fail *soft*: the transform then reaches
 /// `try_lower_subexpr_program`, which rejects the un-lowerable builtin
-/// anyway, so the user still gets an error — just the older, less
+/// anyway, so the user still gets an error -- just the older, less
 /// specific one rather than the §3.6-tagged message. The failure mode
 /// is message quality in an aliasing corner, never a wrong gradient or
 /// a silently-lowered host-only op, so it is left as-is.
@@ -6822,10 +6832,10 @@ y = sum(seq, cast(0, int32))
         // `row_sum` bit-exactly for n <= 16; coincides with
         // `numpy.sum` only because this specific 11-element multiset
         // happens to round the same way under both the stride-4
-        // cascade and numpy's pairwise tree — the two algorithms
+        // cascade and numpy's pairwise tree -- the two algorithms
         // disagree in general (numpy uses a divide-and-conquer
         // pairwise tree with 128-element blocks). The old strict
-        // left-fold would have produced 4.218894004821777 here — a
+        // left-fold would have produced 4.218894004821777 here -- a
         // 1-ULP drift that the parity harness now no longer needs to
         // carve out (issue #163 acceptance criterion).
         // Bit patterns rather than f32 decimal literals: clippy's
@@ -6853,7 +6863,7 @@ y = sum(seq, cast(0, int32))
         );
 
         // Same multiset, left-pad ordering. Both stride-4 and the old
-        // left-fold happen to agree here — pinning to prove parity stays
+        // left-fold happen to agree here -- pinning to prove parity stays
         // intact across the algorithm change.
         let checked_left = checked_surf(
             r#"
@@ -6985,7 +6995,7 @@ y = sum(seq, cast(0, int32))
 
     #[test]
     fn host_runtime_matmul_shared_axis_mismatch_errors() {
-        // Build a 2x3 and a 2x2 — shared axis is 3 vs 2, must fail.
+        // Build a 2x3 and a 2x2 -- shared axis is 3 vs 2, must fail.
         let checked = checked_surf(
             r#"
 a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
@@ -7112,7 +7122,7 @@ y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)
 
     #[test]
     fn host_runtime_to_tensor_accepts_3d_float_literal() {
-        // 2x2x2 cube — exercises 3-deep recursion in
+        // 2x2x2 cube -- exercises 3-deep recursion in
         // `nested_list_to_tensor_data`.
         let checked = checked_surf(
             r#"
@@ -7377,7 +7387,7 @@ y = softmax(x, cast(5, int32))
     //
     //     RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }
     //
-    // directly — that struct-literal form bypassed the
+    // directly -- that struct-literal form bypassed the
     // `RuntimeValue::scalar()` invariant check. Post-C1 the variant is
     // a tuple over the sealed `ScalarPayload` newtype; the same code
     // would no longer compile because the variant is no longer
@@ -7676,7 +7686,7 @@ type Plain = | Plain { value: f32 }
     #[test]
     fn revalidate_passes_non_invariant_adt_untouched() {
         // A constructor with no invariant entry must pass even with values
-        // a hypothetical invariant would reject — injection is scoped to
+        // a hypothetical invariant would reject -- injection is scoped to
         // invariant-carrying types only.
         let (invariants, adt_fields) = probability_tables();
         let plain = RuntimeValue::Adt {
