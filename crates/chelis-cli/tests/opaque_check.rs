@@ -1086,3 +1086,51 @@ fn fmt_round_trips_opaque_module_fixture() {
         "fmt must round-trip the @opaque module fixture byte-identically"
     );
 }
+
+/// RT3-F4: verify that an `@opaque`-outside-a-module declaration error is
+/// (1) VISIBLE on `chelis check` (non-empty errors array, exit non-zero,
+/// not a silent score-1 pass) and (2) GATES the build/eval surfaces
+/// (exit non-zero). `chelis check` is the scorer-with-exit-code (0 iff the
+/// errors array is empty, else non-zero per Issue #207); the
+/// build/eval/validate front-ends gate on a non-empty error list. So the
+/// declaration error is never silently admitted -- there is no gap.
+#[test]
+fn rt3_f4_declaration_error_is_visible_on_check_and_gates_build() {
+    let dir = tempdir().expect("tempdir");
+    let ch = dir.path().join("nomodule.ch");
+    write_file(
+        &ch,
+        "@opaque\n@invariant(p) p.value >= 0.0\ntype T = | T { value: f32 }\n",
+    );
+
+    // check: the error is listed AND the exit code is non-zero (it mirrors
+    // the non-empty errors array -- check is NOT a silent score-1 pass for
+    // a declaration error).
+    let output = chelis()
+        .args(["check", ch.to_str().unwrap()])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json = check_json(&output);
+    let errors = errors_of(&json);
+    assert_eq!(
+        opaque_violations(&errors).len(),
+        1,
+        "the declaration error is listed: {errors:?}"
+    );
+
+    // build gates on the declaration error (exit non-zero, does not emit
+    // artifacts for a type-broken/declaration-error module).
+    chelis()
+        .args(["build", ch.to_str().unwrap()])
+        .assert()
+        .failure();
+
+    // eval --file gates likewise.
+    chelis()
+        .args(["eval", "--file", ch.to_str().unwrap()])
+        .assert()
+        .failure();
+}
