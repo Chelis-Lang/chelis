@@ -497,6 +497,56 @@ inference. `chelis check` stays solver-free: the optional declared
 invariant (RFC D-WF and later workstreams) is never evaluated by the
 checker.
 
+#### 2.5.1 Invariant Declaration Well-Formedness
+
+An opaque type may carry one declared invariant (Surf:
+`@invariant(<binder>) <expr>`, spec/02 §P16a; Deep: the `invariant` and
+`invariant_amenability` metadata keys, spec/03 §2.2). The checker runs a
+declaration-time **well-formedness** pass over Deep (covering both `.ch`
+post-desugar and raw `.dp`). The authoritative design record is
+`spec/design/opaque_invariants_rfc.md` (D-WF). Each failure is an
+`OpaqueTypeViolation` declaration error:
+
+- **Opaque required.** An `invariant` key requires `opaque: true`
+  (assumption injection is unsound for a forgeable type).
+- **Value class.** The representation must be exactly one record-shaped
+  variant; every field must be in the V1 value class: a scalar
+  primitive, a fixed-shape numeric tensor (every dimension literal), or
+  a nested single-variant record whose fields are themselves value
+  class. `List`, function types, parameterized records, symbolic tensor
+  dimensions, and multi-variant ADTs are rejected, naming the field.
+- **Predicate grammar.** The predicate admits: literals; the binder and
+  its field projections; arithmetic (`+ - * /`); comparisons;
+  `and`/`or`/`not`; `if`; the whitelisted intrinsics
+  `abs`/`min`/`max`/`sqrt`/`exp`/`log`/`sin`/`cos`; `sum` over a binder
+  field projection; and references to in-module zero-argument constant
+  defs. Anything else (general calls, `match`, lambdas, other tensor
+  ops, effects) is a declaration error. The grammar admits partial
+  functions (`/`, `log`, `sqrt`); totality is not guaranteed here (the
+  partial-eval semantics are pinned downstream, RFC D-WF).
+- **Free variables.** Every free reference must be the binder or an
+  in-module zero-argument constant def.
+- **Boolean-shaped.** The predicate must be boolean at the top.
+- **Amenability recording.** `invariant_amenability` is recorded at
+  desugar (`chelis_pred::classify_predicate`) and the checker
+  **recomputes** it, erroring on a mismatch or a missing key. This
+  protects hand-written `.dp`. The language rejects nothing on
+  amenability grounds; it records.
+- **Exact float equality** in a predicate (`==` over a representation
+  field) draws an advisory lint (`invariant-float-equality`), not an
+  error: exact float equality starves Tier C generation by design (RFC
+  D-STARVE). The advisory points at the tolerance-band idiom.
+
+**Invariant invisible to type checking.** This is not refinement
+typing. The checker records the invariant and never evaluates it: there
+are no predicates in the typing judgment, no verification conditions at
+use sites, and no solver in the check loop. A program whose invariant
+is **violated** by an in-module constructor (e.g. constructing a
+`Probability { value: 5.0 }` under `value <= 1.0`) still type-checks.
+The invariant is consumed by `chelis prove` (derived producer
+obligations and assumption injection) in later workstreams, not by
+`chelis check`.
+
 ---
 
 ## 3. Hindley-Milner Inference

@@ -50,6 +50,9 @@ portable across Surf and Reef boundaries.
 | `property_tolerance` | expr | Optional property runner tolerance metadata |
 | `property_seed` | expr | Optional property runner seed metadata |
 | `property_samples` | expr | Optional property runner sample-count metadata |
+| `opaque` | `true` | On a `deftype`: the type is opaque (see §2.2) |
+| `invariant` | `(fn {} (params {} <binder>) <expr>)` | On an opaque `deftype`: the declared invariant predicate (see §2.2) |
+| `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |
 
 **Reserved for later phases:**
 
@@ -277,6 +280,37 @@ outside its defining module (`spec/04-type-system.md` section 2.5),
 and a marked `deftype` outside a named module is a declaration error.
 The `opaque-domain-construction` lint rule remains as defense-in-depth
 fast feedback (`spec/01-nomenclature.md` section 12.1).
+
+An opaque `deftype` may additionally carry a **declared invariant**
+(`spec/design/opaque_invariants_rfc.md` D-META):
+
+```lisp
+(deftype {opaque: true,
+          invariant: (fn {} (params {} p)
+            (app {} (var {} and)
+              (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))
+              (app {} (var {} lte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 1.0)))),
+          invariant_amenability: "linear"}
+  Probability ()
+  (variant {} Probability (field {} value (t-prim {} f32))))
+```
+
+- `invariant` is the predicate encoded as a Deep `fn` inside the
+  metadata map (metadata values are full Deep expressions; the strict
+  validator recurses into them). The fn has the canonical shape
+  `(fn {} (params {} <binder>) <body>)` with exactly one binder. A
+  `deftype` *child* node would break positional variant parsing and
+  grow the closed tag vocabulary, so the predicate lives in metadata.
+- `invariant_amenability` is one of `"linear"`, `"polynomial"`,
+  `"transcendental"`, `"opaque"` (the `SmtAmenability` vocabulary).
+- **Asymmetry — `invariant_amenability` is derived data.** The
+  decompiler reconstructs the `@invariant(<binder>) <expr>` Surf line
+  from the `invariant` fn, but does NOT decompile
+  `invariant_amenability`: it is recomputed by
+  `chelis_pred::classify_predicate` on the next desugar, so
+  reconstructing it would be a redundant, drift-prone copy. The checker
+  re-verifies the recorded value against a recomputation, which
+  protects hand-written `.dp` (`spec/04-type-system.md` section 2.5.1).
 
 ### 2.3 Expressions
 

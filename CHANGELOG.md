@@ -58,6 +58,36 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   (`| Probability { value: f32 }`), and uses `:` (not `=`) in
   record construction.
 
+- Declared invariants on opaque types (`@invariant(<binder>) <expr>`,
+  design record `spec/design/opaque_invariants_rfc.md` D-SYNTAX /
+  D-META / D-WF / D-PRED; normative spec `spec/02-surf-syntax.md`
+  §P16a, `spec/03-deep-syntax.md` §2.2, `spec/04-type-system.md`
+  §2.5.1). An `@opaque` type may carry one boolean predicate over a
+  single representation binder, declared between `@opaque` and `type`.
+  It desugars to the additive Deep metadata keys `invariant`
+  (the predicate as a `(fn {} (params {} <binder>) <body>)` node) and
+  `invariant_amenability` (`"linear"`/`"polynomial"`/`"transcendental"`/
+  `"opaque"`, derived data recomputed on every desugar). The new
+  `chelis-pred` leaf crate (`PredAmenability`, `classify_predicate`,
+  `predicate_free_vars`, `predicate_in_grammar`, `INTRINSIC_WHITELIST`)
+  is the predicate grammar and amenability classifier, consumable by
+  `chelis-surf`, `chelis-types`, and `chelis-prove` with no dependency
+  cycle. The checker runs a declaration-time well-formedness pass
+  (covering `.ch` and `.dp`): invariant requires `@opaque`; exactly one
+  record-shaped variant with every field in the V1 value class; the
+  predicate is in grammar with free vars scoped to the binder and
+  in-module constants and boolean-shaped at the top; and the recorded
+  amenability must match a recomputation (protecting hand-written
+  `.dp`). The invariant is invisible to type checking -- it is recorded,
+  never evaluated, so a program whose invariant is violated by an
+  in-module constructor still type-checks (this is not refinement
+  typing; the invariant is consumed by `chelis prove` in later
+  workstreams). `chelis fmt` and the decompiler round-trip the
+  `@invariant` line (the amenability key is derived and not decompiled).
+  Two advisory (non-blocking) lint rules ship: `opaque-without-invariant`
+  and `invariant-float-equality` (exact `==` over a representation field
+  starves generation by design; use a tolerance band).
+
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep
   s-expressions to the Surf parser, which reported a bogus

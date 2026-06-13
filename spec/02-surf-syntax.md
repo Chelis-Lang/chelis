@@ -659,6 +659,42 @@ type alias is a parse error), and the declaration must sit inside a
 named module (`@opaque` at top level is a check-time declaration
 error — top-level code has no module identity to enforce against).
 
+#### P16a: Declared Invariants
+
+An `@opaque` type may carry one **declared invariant**: a boolean
+predicate over a single binder of the representation, written in Surf
+between `@opaque` and `type` (`spec/design/opaque_invariants_rfc.md`
+D-SYNTAX). The invariant is recorded as Deep metadata; the everyday
+type checker never evaluates it (`spec/04-type-system.md` §2.5.1).
+
+```
+module Stats.Prob
+@opaque
+@invariant(p) (p.value >= 0.0) && (p.value <= 1.0)
+type Probability = | Probability { value: f32 }
+```
+
+**⟹** inside `(module {} stats.prob ...)`:
+
+```lisp
+(deftype {opaque: true,
+          invariant: (fn {} (params {} p)
+            (app {} (var {} and)
+              (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))
+              (app {} (var {} lte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 1.0)))),
+          invariant_amenability: "linear"}
+  Probability ()
+  (variant {} Probability (field {} value (t-prim {} f32))))
+```
+
+Constraints (parse-time): `@invariant(<binder>) <expr>` must appear
+after `@opaque` and before `type`; exactly one binder; exactly one
+invariant; `@invariant` without `@opaque` is an error (assumption
+injection is unsound for a forgeable type). Surf boolean conjunction is
+`&&` (§2), which desugars to `(app {} (var {} and) ...)`. The predicate
+grammar, value class, free-variable scoping, and amenability recording
+are well-formedness checks (`spec/04-type-system.md` §2.5.1).
+
 ---
 
 ## 4. Formal Grammar (PEG)
@@ -700,7 +736,8 @@ DimDecl       <- 'dim' S Ident (S ',' S Ident)* (S ',')?
 #  TYPE DECLARATIONS
 # ═══════════════════════════════════════════════════
 
-OpaqueTypeDecl <- '@opaque' S TypeDecl
+OpaqueTypeDecl <- '@opaque' S InvariantDecl? S TypeDecl
+InvariantDecl  <- '@invariant' S '(' S Ident S ')' S Expr
 TypeDecl      <- 'type' S TypeIdent TypeParams? S '='
                   S '|'? S Variant (S '|' S Variant)*
 TypeAlias     <- 'type' S TypeIdent TypeParams? S '='
@@ -947,6 +984,20 @@ module Stats.Prob
 type Probability = | Probability { value: f32 }
 ⟹  (module {} stats.prob
       (deftype {opaque: true} Probability ()
+        (variant {} Probability (field {} value (t-prim {} f32)))))
+
+module Stats.Prob
+@opaque
+@invariant(p) (p.value >= 0.0) && (p.value <= 1.0)
+type Probability = | Probability { value: f32 }
+⟹  (module {} stats.prob
+      (deftype {opaque: true,
+                invariant: (fn {} (params {} p)
+                  (app {} (var {} and)
+                    (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))
+                    (app {} (var {} lte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 1.0)))),
+                invariant_amenability: "linear"}
+        Probability ()
         (variant {} Probability (field {} value (t-prim {} f32)))))
 
 type Weights = tensor[h, h, f32]

@@ -1174,6 +1174,26 @@ constructor patterns and field access on the opaque type itself;
 matching with irrefutable patterns and calling exported readers remain
 available.
 
+An opaque type may carry one declared invariant
+(`@invariant(<binder>) <expr>`), extending the proven-constructor
+discipline: a value of the type carries not only the provenance
+guarantee (it originated inside the defining module) but the declared
+boolean property of its representation. The invariant is recorded as
+Deep metadata and checked for well-formedness at declaration time
+(`spec/04-type-system.md` §2.5.1); the everyday checker never evaluates
+it. Two advisory (non-blocking) lint rules support the invariant
+workflow:
+
+- `opaque-without-invariant` (note): an opaque type with no declared
+  `@invariant` carries only the construction guarantee; adding one lets
+  `chelis prove` derive producer obligations.
+- `invariant-float-equality`: exact `==` over a representation field in
+  an invariant starves generation by design; the documented idiom is a
+  tolerance band over a module constant.
+
+The authoritative design record is
+`spec/design/opaque_invariants_rfc.md`.
+
 ### 12.2 Future rule queue
 
 The following rules are intentionally queued, not currently part of
