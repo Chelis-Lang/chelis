@@ -1181,8 +1181,17 @@ guarantee (it originated inside the defining module) but the declared
 boolean property of its representation. The invariant is recorded as
 Deep metadata and checked for well-formedness at declaration time
 (`spec/04-type-system.md` §2.5.1); the everyday checker never evaluates
-it. Two advisory (non-blocking) lint rules support the invariant
-workflow:
+it. The proven-constructor discipline is *discharged*, not merely
+declared: `chelis prove` derives one obligation per exported producer of
+the type (`opaque_invariants_rfc.md` D-PRODUCER / D-OBLIG) and proves —
+at the SMT tier where the constructor lowers, otherwise by validated
+sampling — that every produced value establishes the invariant. The
+producer set is covered-or-rejected: an exported producer whose result
+reaches the type through an unsupported container, or whose signature
+hands caller-supplied code an unobligated value, is a declaration error,
+so the discipline has no silent gaps.
+
+Advisory (non-blocking) lint rules support the invariant workflow:
 
 - `opaque-without-invariant` (note): an opaque type with no declared
   `@invariant` carries only the construction guarantee; adding one lets
@@ -1190,6 +1199,19 @@ workflow:
 - `invariant-float-equality`: exact `==` over a representation field in
   an invariant starves generation by design; the documented idiom is a
   tolerance band over a module constant.
+- `unreachable-producer` (note): an opaque type with no exported
+  producers is fully sealed and has an empty obligation set; the lint
+  flags the dead declaration so the author either exports a producer or
+  removes the type.
+- `opaque-escape-site`: enumerates every in-module argument-egress site
+  of a value of the type (or a function value capable of producing it)
+  passed to an out-of-module callee, labelled by local provenance — a
+  `note` when the value traces to a producer call or a type-T input of
+  the enclosing function (locally attested), a `warning` when it traces
+  to a raw construction or representation update (unattested). This is
+  the audit surface for the explicit argument-egress trust caveat
+  (`opaque_invariants_rfc.md` D-SOUND / D-LINT): return-egress is
+  mechanically obligated, argument-egress is module-audited.
 
 The authoritative design record is
 `spec/design/opaque_invariants_rfc.md`.

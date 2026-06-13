@@ -8,6 +8,37 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+<!-- opaque-types W3/W4 (prove layer) -->
+- Derived producer obligations for invariant-carrying opaque types in
+  `chelis prove` and the chelis-tide `chelis_prove` MCP tool (design
+  record `spec/design/opaque_invariants_rfc.md` D-PRODUCER / D-OBLIG /
+  D-TIERB / D-PARITY / D-STARVE; record schema in
+  `spec/design/chelis_property_spec.md`). For every exported producer of
+  an `@opaque @invariant(...)` type, `chelis prove` synthesizes and
+  discharges a `for all inputs, where the producer succeeds, the
+  invariant holds` obligation through the existing three-tier dispatch:
+  the canonical guard-then-`Option` constructor proves at the SMT tier
+  (`proof_tier:"smt"`) via new Tier B record beta-reduction and
+  case-of-known-constructor reduction; other producers fall to validated
+  sampling (`proof_tier:"fuzz"`). The producer set is computed from
+  checker-**inferred** return types (an unannotated exported def cannot
+  escape it) and is covered-or-rejected: a return reaching the type
+  through an unsupported container (list/record/function/other generic),
+  or an exported signature handing caller-supplied code an unobligated
+  value, is a declaration error naming the producer and channel. Additive
+  NDJSON `{kind:"obligation", ...}` records and a summary `obligations`
+  count; `ProofArtifact` gains a serde-additive `obligation` field
+  (strict downstream admission parsers must add the new record kind at
+  pin time). SMT-tier artifacts carry `arith_model:"real"` and the
+  spec documents that Tier B proves over the reals, not floats. New
+  `--invariant-min-rate` flag (D-STARVE floor) on `chelis prove`. The
+  obligation collection, synthesis, lowering, and execution live in
+  `chelis-prove` and are shared by the CLI and tide (locked by a
+  cross-surface parity test). Oracle:
+  `crates/chelis-cli/tests/prove_invariant_obligations.rs` (run with
+  `--features smt`).
+<!-- end opaque-types W3/W4 -->
+
 - Checker-enforced opaque types (`@opaque`, renamed from the
   unreleased baseline's `@chelis_opaque`; design record
   `spec/design/opaque_invariants_rfc.md`, normative spec
