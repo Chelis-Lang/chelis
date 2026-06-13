@@ -1,19 +1,21 @@
 //! W6 acceptance oracle for the worked opaque-invariants examples.
 //!
-//! Two files split by the executable-vs-illustrative line (Example Corpus
-//! Policy):
+//! Two executable files (Example Corpus Policy), both library-only:
 //!
 //! - `examples/opaque_invariants.ch` (executable): the `Probability`
 //!   unit-interval type. Every part runs clean -- `fmt --check`, `check`
 //!   (score 1), `eval`/`build` (library-only), and `prove` (three SMT-tier
 //!   producer obligations plus an injected property).
-//! - `examples/illustrative/opaque_invariants_simplex.ch` (illustrative): the
-//!   `Simplex` tolerance-band type. It checks and proves clean, but its
-//!   `sum`-over-a-tensor-field invariant predicate does not lower through the
-//!   runtime IR (`eval`/`build`) path, so it lives in `illustrative/`. Its
-//!   producer obligation discharges at Tier C (fuzz) and a `Simplex` binder is
-//!   served by constructor-based generation without starving (the D-STARVE
-//!   acceptance probe).
+//! - `examples/opaque_invariants_simplex.ch` (executable): the `Simplex`
+//!   tolerance-band type with a `sum`-over-a-tensor-field invariant. The
+//!   invariant predicate is declaration metadata consumed only by `chelis
+//!   prove`; it is never lowered to runtime IR, so the runtime IR audit skips
+//!   it and the file now `eval`/`build`s cleanly (library-only, like
+//!   `Probability`). Its producer obligation discharges at Tier C (fuzz) and a
+//!   `Simplex` binder is served by constructor-based generation without
+//!   starving (the D-STARVE acceptance probe). Promoted from
+//!   `examples/illustrative/` once that audit stopped rejecting the
+//!   declaration metadata.
 //!
 //! This pins both files on the RFC surface (`opaque_invariants_rfc.md`
 //! D-PRODUCER, D-OBLIG, D-TIERB, D-INJECT, D-STARVE): the exact obligation
@@ -28,8 +30,10 @@
 //! with `LD_LIBRARY_PATH` set to the uv python lib (see AGENTS.md).
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use serde_json::Value;
 use std::path::PathBuf;
+use tempfile::tempdir;
 
 fn example_path(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,7 +47,7 @@ fn probability_example() -> PathBuf {
 }
 
 fn simplex_example() -> PathBuf {
-    example_path("../../examples/illustrative/opaque_invariants_simplex.ch")
+    example_path("../../examples/opaque_invariants_simplex.ch")
 }
 
 fn run_json_check(path: &PathBuf) -> Value {
@@ -89,6 +93,56 @@ fn assert_check_clean(path: &PathBuf) {
 fn both_examples_check_clean_with_score_one() {
     assert_check_clean(&probability_example());
     assert_check_clean(&simplex_example());
+}
+
+/// `eval --file` succeeds on both examples. Both are library-only (only
+/// `@opaque`/`@invariant` declarations plus exported producers and a
+/// `@property`), so each emits the def-only warning and produces no value.
+/// This is the regression guard for the runtime IR audit fix: before it, the
+/// `Simplex` tensor-field invariant tripped `assert_ir_typed`
+/// ("shape-sensitive IR app nodes must carry explicit type metadata before
+/// lowering") because the audit walked the declaration metadata.
+fn assert_eval_library_only(path: &PathBuf) {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .arg("eval")
+        .arg("--file")
+        .arg(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "input contains only def declarations; nothing to evaluate",
+        ));
+}
+
+#[test]
+fn both_examples_eval_clean_library_only() {
+    assert_eval_library_only(&probability_example());
+    assert_eval_library_only(&simplex_example());
+}
+
+/// `build` (default C target) succeeds on both examples, emitting the C
+/// translation unit. The `Simplex` tensor-field invariant predicate is
+/// declaration metadata for `chelis prove`; it is never lowered to runtime
+/// IR, so the build path emits clean C just like `Probability`.
+fn assert_build_clean(path: &PathBuf) {
+    let out_dir = tempdir().expect("tempdir");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .arg("build")
+        .arg(path)
+        .arg("-o")
+        .arg(out_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Wrote"));
+}
+
+#[test]
+fn both_examples_build_clean() {
+    assert_build_clean(&probability_example());
+    assert_build_clean(&simplex_example());
 }
 
 #[cfg(feature = "smt")]

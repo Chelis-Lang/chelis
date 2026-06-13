@@ -99,11 +99,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   is an executable `Probability` unit-interval type: a guard-then-`Option`
   base constructor plus two update-shaped producers, whose three derived
   obligations all discharge at the SMT tier, and an injected property. The
-  tolerance-band `Simplex` companion lives in
-  `examples/illustrative/opaque_invariants_simplex.ch` (it checks and
-  proves clean, with its producer obligation at Tier C and its binder
-  served by constructor-based generation, but its `sum`-over-a-tensor-field
-  invariant does not lower through the `eval`/`build` runtime IR path).
+  tolerance-band `Simplex` companion
+  `examples/opaque_invariants_simplex.ch` checks and proves clean (its
+  producer obligation at Tier C, its binder served by constructor-based
+  generation) and is library-only-executable like `Probability`: its
+  `sum`-over-a-tensor-field invariant is declaration metadata for
+  `chelis prove`, never lowered to runtime IR, so it `eval`/`build`s clean.
   New book chapter `docs/book/src/opaque-invariants.md` teaches the
   declare-invariant-export-prove workflow against real `chelis prove
   --json` output, including a prominent "What this feature does NOT do"
@@ -300,6 +301,27 @@ Use `--batch-mode file` to force the old execution strategy.
   `uint32_t` / `uint64_t` back to `float` / `double`. Symmetric with
   PR #243's `chelis_fill_f32_bits` mechanism but for per-call scalar
   args rather than buffer fills.
+
+<!-- opaque-types: runtime IR audit skips declaration metadata -->
+- The runtime IR audits (`assert_ir_typed` / `assert_ir_lowerable` in
+  `crates/chelis-ir/src/lower.rs`) no longer descend into the metadata of
+  declaration nodes (`deftype` / `defsig` / `typealias`). A `deftype`'s
+  declared `@invariant` predicate lives in that metadata map and is spec
+  metadata consumed only by `chelis prove`; it is never lowered to runtime
+  IR (the main `lower_top_level` already returns early for those tags). The
+  audit walked into it anyway and rejected a tensor-field invariant such as
+  `sum(p.weights)` with "shape-sensitive IR app nodes must carry explicit
+  type metadata before lowering", so `chelis eval --file` and (on some
+  paths) `chelis build` failed on an opaque type whose invariant is over a
+  tensor field, while the equivalent scalar-field invariant passed only by
+  accident. The audits now mirror the lowering skip for these declaration
+  tags; genuine runtime `def` bodies are still audited. With the fix, the
+  `Simplex` tolerance-band example `eval`/`build`s cleanly and is promoted
+  from `examples/illustrative/` to `examples/opaque_invariants_simplex.ch`
+  (library-only-executable, like `Probability`). The §2.3 span-coverage
+  audit invariant is unaffected: declaration metadata carries no input def
+  body spans.
+<!-- end opaque-types runtime IR audit -->
 
 ### Docs — harmonize Hull / trust-stack / project-plan with shipped reality
 

@@ -183,11 +183,13 @@ def make_simplex(a: f32, b: f32, c: f32) -> Simplex =
 ```
 
 This is the
-[`examples/illustrative/opaque_invariants_simplex.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/illustrative/opaque_invariants_simplex.ch)
-companion. It checks and proves clean, but it is illustrative rather than
-executable: the `sum`-over-a-tensor-field form is a special case of the
-invariant predicate grammar that does not lower through the runtime IR
-(`eval`/`build`) path, so the file is not on the executable corpus.
+[`examples/opaque_invariants_simplex.ch`](https://github.com/Chelis-Lang/chelis/blob/main/examples/opaque_invariants_simplex.ch)
+companion. It checks and proves clean and is executable: the invariant
+predicate (including the `sum`-over-a-tensor-field form) is declaration
+metadata consumed only by `chelis prove`; it is never lowered to runtime IR,
+so the file `eval`/`build`s cleanly. Like `Probability` it is
+library-only-executable — it declares types and exported producers but has
+no top-level work to run.
 
 Two things are worth seeing here:
 
