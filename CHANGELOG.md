@@ -6,6 +6,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The reef package linker's reserved-name predicate is now a single
+  shared definition (`chelis_types::is_linker_format_name`): the reef
+  entry/test reserved-name reject (RFC v6) and the checker's
+  `ReservedLinkerName` rule no longer keep two copies that could drift
+  (CR-7).
+
+### Fixed
+
+- The advisory `opaque-domain-construction` lint now keys opaque types
+  by (type, defining module) instead of bare leaf name (CR-9). A
+  non-opaque type that shares a leaf name with an opaque type in an
+  unrelated module is no longer falsely flagged when constructed in
+  its own module, and a same-leaf opaque type can no longer suppress
+  the check; the genuine out-of-module forge is still flagged. The
+  authoritative checker enforcement was already correct -- this is a
+  fast-feedback lint-quality fix.
+
 ### Added
 
 <!-- opaque-types W3/W4 (prove layer) -->

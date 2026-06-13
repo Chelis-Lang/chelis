@@ -658,7 +658,11 @@ pub(crate) fn unresolved_target_error(
 /// parses as a module-stem-bearing mangled name. RFC v5: this format
 /// is the linker's PRIVATE output; a hand-authored program using it
 /// forges module identity through the stem channel.
-pub(crate) fn is_linker_format_name(name: &str) -> bool {
+///
+/// Public so the reef package linker shares this single definition of
+/// the reserved-name predicate (CR-7); reef rejects the format on
+/// user-authored entry/test decls (RFC v6) using exactly this rule.
+pub fn is_linker_format_name(name: &str) -> bool {
     reef_module_stem(name).is_some()
 }
 
@@ -783,10 +787,13 @@ mod tests {
         ));
         // Marker prefix but no stem -> not a complete mangled name.
         assert!(!is_linker_format_name("Pkg__lonely"));
-        // Ordinary user identifiers pass through.
+        // Ordinary user identifiers pass through (CR-7 borderline:
+        // single-underscore names are not the double-underscore
+        // linker format).
         assert!(!is_linker_format_name("Probability"));
         assert!(!is_linker_format_name("forge"));
         assert!(!is_linker_format_name("my_pkg_thing"));
+        assert!(!is_linker_format_name("pkg_count"));
     }
 
     #[test]
