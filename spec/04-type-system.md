@@ -397,6 +397,24 @@ has no lexical wrappers, so this never fires on it). `validate --deep`
 applies the reserved-name rejection unconditionally, since the linker
 never writes `.dp` for re-ingestion.
 
+The provenance flag answers "did the LINKER produce this decl," not
+"is there linked content in this check unit." The linker re-mangles
+the names of decls it admits at each boundary: the package/source
+rewrite (`rewrite_module_decls`, used by `check`/`build`/the library
+context) rewrites every binding name through `internal_name`. The
+eval/test entry rewrite (`rewrite_eval_module_decls`, used by `chelis
+test`, `chelis eval`'s in-context path, module-init, and the legacy
+batch path) keeps user-authored binding names (so eval can report
+roots and the test runner can select synthetic roots by name) and
+therefore rejects the reserved format at that boundary directly: a
+user entry/test decl whose name matches the reserved format is a
+declaration error regardless of the surrounding linked flag, because
+user entry decls are never linker output. This pairing — every
+flag-TRUE boundary either re-mangles the names it admits or rejects
+the reserved format on the user decls it admits — is the structural
+invariant that prevents a hand-authored mangled name from self-keying
+to a victim module on any surface.
+
 **The rejection set.** Outside the defining module, each of the
 following is a `CheckErrorKind::OpaqueTypeViolation`. Every rejection
 returns the expression's TRUE type, so a violation never cascades into

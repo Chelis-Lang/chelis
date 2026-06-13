@@ -39,8 +39,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   (`Pkg__<pkg>__<Module>__<Name>`) for declaration names -- it is the
   linker's private output and forging it bypasses module identity
   (`ReservedLinkerName`, gated by an in-process link-provenance flag
-  so genuine reef packages still check clean). The sixth rejection now
-  also fires for
+  so genuine reef packages still check clean). `chelis test`,
+  `chelis eval`'s in-context path, and the batch/module-init test
+  paths -- which keep user-authored entry/test decl names through the
+  eval rewrite (so roots resolve by name) -- reject the reserved
+  format at the entry-decl rewrite boundary directly, so a forged
+  mangled test def can no longer self-key to a victim module. The
+  sixth rejection now also fires for
   bare un-imported cross-module references in reef packages (the
   reference is canonicalized to its binding key the way inference
   resolves it).

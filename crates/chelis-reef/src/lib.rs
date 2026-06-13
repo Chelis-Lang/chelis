@@ -4769,6 +4769,25 @@ fn rewrite_eval_module_decls(
     let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
     let mut out = Vec::new();
     for decl in &module.decls {
+        // RFC v6 (RT-1 F2-bypass): user-authored entry/test decls keep
+        // their own names through the eval rewrite (unlike the library
+        // rewrite, which re-mangles via `internal_name`). A name in the
+        // reef linker's reserved internal-name format would then
+        // self-key via `reef_module_stem` to a victim module and forge
+        // its opaque types as in-module, while the linked-program flag
+        // suppresses the checker's reserved-name rejection. Reject the
+        // reserved format here, at the single boundary every test/eval
+        // entry path passes through, before these decls combine with the
+        // linked library. This is flag-independent: user entry decls are
+        // never linker output.
+        if let Some(name) = entry_decl_binding_name(decl)
+            && is_reserved_linker_name(name)
+        {
+            return Err(format!(
+                "`{name}` uses the reef package-linker's reserved internal-name format \
+                 (`Pkg__`/`pkg__`...), which only the linker may produce; rename the declaration"
+            ));
+        }
         match decl {
             Decl::Import { .. } | Decl::Export { .. } => {}
             Decl::Module { .. } => unreachable!("module wrappers already stripped"),
@@ -4776,6 +4795,37 @@ fn rewrite_eval_module_decls(
         }
     }
     Ok(out)
+}
+
+/// The top-level binding name a declaration introduces, for the
+/// reserved-name check (RFC v6). Returns `None` for decls that bind no
+/// name (import/export/module/dim).
+fn entry_decl_binding_name(decl: &Decl) -> Option<&str> {
+    match decl {
+        Decl::FunDef { name, .. }
+        | Decl::LetDef { name, .. }
+        | Decl::Sig { name, .. }
+        | Decl::TypeDef { name, .. }
+        | Decl::TypeAlias { name, .. }
+        | Decl::MacroDef { name, .. }
+        | Decl::Property { name, .. } => Some(name.as_str()),
+        Decl::Import { .. } | Decl::Export { .. } | Decl::Module { .. } | Decl::Dim { .. } => None,
+    }
+}
+
+/// True when `name` matches the reef linker's internal-name format
+/// (`Pkg__<pkg>__<Module>__<Name>` / lowercase twin): a marker prefix
+/// plus a non-empty module stem before the terminal segment. Mirrors
+/// `chelis_types::opacity::is_linker_format_name` and the structure of
+/// [`internal_name`].
+fn is_reserved_linker_name(name: &str) -> bool {
+    let Some(stem) = name
+        .strip_prefix("Pkg__")
+        .or_else(|| name.strip_prefix("pkg__"))
+    else {
+        return false;
+    };
+    matches!(stem.rsplit_once("__"), Some((module, _)) if !module.is_empty())
 }
 
 fn dep_public_exports(shell: &ShellPackage, module: &str) -> Result<BTreeSet<String>, String> {
@@ -5521,6 +5571,50 @@ fn checked_program_with_effects(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn is_reserved_linker_name_matches_only_full_mangled_names() {
+        // RFC v6: the entry-boundary reserved-name reject must match
+        // exactly the names that could self-key via `reef_module_stem`.
+        assert!(is_reserved_linker_name("pkg__opq__Demo__Types__forge"));
+        assert!(is_reserved_linker_name(
+            "Pkg__opq__Demo__Types__Probability"
+        ));
+        assert!(is_reserved_linker_name(
+            "pkg__forgepkg__Smoke__Types__forge"
+        ));
+        // Marker prefix but no module stem -> cannot key to a module.
+        assert!(!is_reserved_linker_name("pkg__lonely"));
+        assert!(!is_reserved_linker_name("Pkg__lonely"));
+        // Ordinary user identifiers (test fns, helpers, synth roots).
+        assert!(!is_reserved_linker_name("test_forge"));
+        assert!(!is_reserved_linker_name("normal_helper"));
+        assert!(!is_reserved_linker_name("__chelis_test_0"));
+        assert!(!is_reserved_linker_name("probability"));
+    }
+
+    #[test]
+    fn entry_decl_binding_name_covers_binding_decls() {
+        use chelis_deep::Span;
+        use chelis_surf::ast::{Decl, Expr};
+        let span = Span::new(0, 0);
+        let fun = Decl::FunDef {
+            name: "pkg__a__B__c".to_string(),
+            dim_params: vec![],
+            params: vec![],
+            ret_ty: None,
+            effects: None,
+            body: Expr::Lit(chelis_surf::ast::Literal::Int(0), span),
+            span,
+        };
+        assert_eq!(entry_decl_binding_name(&fun), Some("pkg__a__B__c"));
+        let import = Decl::Import {
+            module: "Std".to_string(),
+            kind: chelis_surf::ast::ImportKind::Qualified,
+            span,
+        };
+        assert_eq!(entry_decl_binding_name(&import), None);
+    }
 
     /// Process-shared lock for tests that mutate `CHELIS_REEF_HOME`
     /// (or other process env). Cargo runs unit tests in this binary
