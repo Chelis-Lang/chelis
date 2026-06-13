@@ -93,6 +93,26 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   corpus README.
 <!-- end opaque-types W7 -->
 
+<!-- opaque-types W6 (docs + worked example) -->
+- Worked opaque-invariants example and language-book documentation
+  (`spec/design/opaque_invariants_rfc.md`). `examples/opaque_invariants.ch`
+  is an executable `Probability` unit-interval type: a guard-then-`Option`
+  base constructor plus two update-shaped producers, whose three derived
+  obligations all discharge at the SMT tier, and an injected property. The
+  tolerance-band `Simplex` companion lives in
+  `examples/illustrative/opaque_invariants_simplex.ch` (it checks and
+  proves clean, with its producer obligation at Tier C and its binder
+  served by constructor-based generation, but its `sum`-over-a-tensor-field
+  invariant does not lower through the `eval`/`build` runtime IR path).
+  New book chapter `docs/book/src/opaque-invariants.md` teaches the
+  declare-invariant-export-prove workflow against real `chelis prove
+  --json` output, including a prominent "What this feature does NOT do"
+  section (no refinement typing, the invariant is invisible to `chelis
+  check`, the argument-egress trust caveat). Oracle:
+  `crates/chelis-cli/tests/opaque_invariants_example.rs` (run with
+  `--features smt`).
+<!-- end opaque-types W6 -->
+
 - Checker-enforced opaque types (`@opaque`, renamed from the
   unreleased baseline's `@chelis_opaque`; design record
   `spec/design/opaque_invariants_rfc.md`, normative spec

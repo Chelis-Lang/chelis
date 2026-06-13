@@ -458,6 +458,18 @@ fn parity_vmap_relu_library_only() {
     drive_parity(&examples_root().join("vmap_relu.ch"), false);
 }
 
+// The opaque-invariants worked example (RFC `opaque_invariants_rfc.md`).
+// Library-only: `@opaque`/`@invariant` declare the `Probability` type and
+// `@property` desugars to a `bool` def, so there is no top-level work and both
+// lanes emit nothing. The scalar unit-interval invariant lowers cleanly
+// through the C backend; the tensor `sum`-invariant variant is illustrative
+// (`examples/illustrative/opaque_invariants_simplex.ch`) precisely because it
+// does not lower through this path.
+#[test]
+fn parity_opaque_invariants_library_only() {
+    drive_parity(&examples_root().join("opaque_invariants.ch"), false);
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------
@@ -474,6 +486,7 @@ fn parity_corpus_is_complete() {
         "linreg.ch",
         "list_foundation.ch",
         "mnist.ch",
+        "opaque_invariants.ch",
         "scalar_string_foundation.ch",
         "tensor_structural_ops.ch",
         "transformer_block.ch",
