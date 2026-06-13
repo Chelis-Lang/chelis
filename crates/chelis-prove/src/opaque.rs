@@ -293,17 +293,46 @@ fn field_type_from_deep(ty: &Expr) -> Option<FieldType> {
 // Flattened-binder predicate lowering (Tier B + concrete validation)
 // ===========================================================================
 
+/// In-module zero-argument constant values referenced by a predicate
+/// (`sum(p.weights) >= 1.0 - eps` references `eps`). Resolved to concrete
+/// `f64` values by the caller (RFC D-WF: in-grammar constant defs whose
+/// bodies are themselves in-grammar).
+pub type ConstEnv = std::collections::HashMap<String, f64>;
+
+/// Context threaded through predicate lowering: the binder name, the
+/// dotted path prefix of the binder value, the binder's fields (so `sum`
+/// over a tensor field expands to the right number of scalar terms), and
+/// the resolved in-module constant environment.
+struct LowerCtx<'a> {
+    binder: &'a str,
+    prefix: &'a str,
+    fields: &'a [(String, FieldType)],
+    consts: &'a ConstEnv,
+}
+
 /// Lower an invariant predicate to an [`SmtExpr`] over a *flattened*
 /// binder: a field projection `(access (var binder) field)` becomes
-/// `SmtExpr::Var("<prefix>.field")`, dotted for nesting. Returns `None`
-/// if any node is outside the lowerable fragment (the caller then falls
-/// back to Tier C / concrete evaluation).
+/// `SmtExpr::Var("<prefix>.field")`, dotted for nesting; `sum` over a
+/// literal-shape tensor field expands to a sum of its per-element vars
+/// (`<prefix>.field.0 + ... + <prefix>.field.N-1`); in-module constants
+/// resolve through `consts`. Returns `None` if any node is outside the
+/// lowerable fragment (the caller then falls back to Tier C).
 ///
 /// `prefix` is the dotted path of the binder value (e.g. `"p"` at top
 /// level, `"p.inner"` for a nested record binder).
-pub fn lower_predicate_flattened(inv: &OpaqueInvariant, prefix: &str) -> Option<SmtExpr> {
+pub fn lower_predicate_flattened(
+    inv: &OpaqueInvariant,
+    prefix: &str,
+    consts: &ConstEnv,
+) -> Option<SmtExpr> {
     let body = predicate_body(&inv.predicate)?;
-    lower_bool(body, &inv.binder, prefix)
+    let ctx = LowerCtx {
+        binder: &inv.binder,
+        prefix,
+        fields: &inv.fields,
+        consts,
+    };
+    lower_bool(body, &ctx)
 }
 
 fn predicate_body(fn_node: &Expr) -> Option<&Expr> {
@@ -320,7 +349,7 @@ fn app_parts(expr: &Expr) -> Option<(&str, &[Expr])> {
     None
 }
 
-fn lower_bool(expr: &Expr, binder: &str, prefix: &str) -> Option<SmtExpr> {
+fn lower_bool(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
     // Boolean literal.
     if let Expr::Atom(Atom::Bool(b), _) = expr {
         return Some(SmtExpr::BoolLit(*b));
@@ -332,9 +361,9 @@ fn lower_bool(expr: &Expr, binder: &str, prefix: &str) -> Option<SmtExpr> {
     }
     if tag(expr) == Some("if") {
         let kids = children(expr);
-        let c = lower_bool(kids.first()?, binder, prefix)?;
-        let t = lower_bool(kids.get(1)?, binder, prefix)?;
-        let e = lower_bool(kids.get(2)?, binder, prefix)?;
+        let c = lower_bool(kids.first()?, ctx)?;
+        let t = lower_bool(kids.get(1)?, ctx)?;
+        let e = lower_bool(kids.get(2)?, ctx)?;
         return Some(SmtExpr::Ite(Box::new(c), Box::new(t), Box::new(e)));
     }
     let (name, args) = app_parts(expr)?;
@@ -342,20 +371,16 @@ fn lower_bool(expr: &Expr, binder: &str, prefix: &str) -> Option<SmtExpr> {
         "and" => Some(SmtExpr::Bool(
             BoolOp::And,
             args.iter()
-                .map(|a| lower_bool(a, binder, prefix))
+                .map(|a| lower_bool(a, ctx))
                 .collect::<Option<Vec<_>>>()?,
         )),
         "or" => Some(SmtExpr::Bool(
             BoolOp::Or,
             args.iter()
-                .map(|a| lower_bool(a, binder, prefix))
+                .map(|a| lower_bool(a, ctx))
                 .collect::<Option<Vec<_>>>()?,
         )),
-        "not" => Some(SmtExpr::Not(Box::new(lower_bool(
-            args.first()?,
-            binder,
-            prefix,
-        )?))),
+        "not" => Some(SmtExpr::Not(Box::new(lower_bool(args.first()?, ctx)?))),
         "eq" | "neq" | "cmplt" | "lte" | "gte" => {
             let op = match name {
                 "eq" => CmpOp::Eq,
@@ -365,8 +390,8 @@ fn lower_bool(expr: &Expr, binder: &str, prefix: &str) -> Option<SmtExpr> {
                 "gte" => CmpOp::Ge,
                 _ => unreachable!(),
             };
-            let l = lower_arith(args.first()?, binder, prefix)?;
-            let r = lower_arith(args.get(1)?, binder, prefix)?;
+            let l = lower_arith(args.first()?, ctx)?;
+            let r = lower_arith(args.get(1)?, ctx)?;
             Some(SmtExpr::Cmp(op, Box::new(l), Box::new(r)))
         }
         // `>` / `<` desugar to gte/cmplt with swapped operands already, so
@@ -376,7 +401,7 @@ fn lower_bool(expr: &Expr, binder: &str, prefix: &str) -> Option<SmtExpr> {
     }
 }
 
-fn lower_arith(expr: &Expr, binder: &str, prefix: &str) -> Option<SmtExpr> {
+fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
     match expr {
         Expr::Atom(Atom::Float(v), _) => return Some(SmtExpr::RealLit(*v)),
         Expr::Atom(Atom::Int(v), _) => return Some(SmtExpr::IntLit(*v)),
@@ -391,21 +416,21 @@ fn lower_arith(expr: &Expr, binder: &str, prefix: &str) -> Option<SmtExpr> {
     }
     // Field projection: `(access (var binder|path) field)` -> dotted var.
     if tag(expr) == Some("access") {
-        return access_path(expr, binder, prefix).map(SmtExpr::Var);
+        return access_path(expr, ctx.binder, ctx.prefix).map(SmtExpr::Var);
     }
-    // A bare `(var name)`: an in-module constant reference. We do not
-    // resolve constants here (the caller-level lowering handles those for
-    // user properties); for invariant predicates referencing a constant,
-    // return None so the property falls to Tier C where the concrete
-    // evaluator can resolve it via the producer/eval path.
+    // A bare `(var name)`: an in-module constant reference. Resolve it
+    // through the constant environment; an unknown constant means the
+    // caller could not resolve it in-grammar, so the predicate is not
+    // lowerable here and the property falls to Tier C.
     if tag(expr) == Some("var") {
-        return None;
+        let name = symbol_text(children(expr).first()?)?;
+        return ctx.consts.get(name).copied().map(SmtExpr::RealLit);
     }
     if tag(expr) == Some("if") {
         let kids = children(expr);
-        let c = lower_bool(kids.first()?, binder, prefix)?;
-        let t = lower_arith(kids.get(1)?, binder, prefix)?;
-        let e = lower_arith(kids.get(2)?, binder, prefix)?;
+        let c = lower_bool(kids.first()?, ctx)?;
+        let t = lower_arith(kids.get(1)?, ctx)?;
+        let e = lower_arith(kids.get(2)?, ctx)?;
         return Some(SmtExpr::Ite(Box::new(c), Box::new(t), Box::new(e)));
     }
     let (name, args) = app_parts(expr)?;
@@ -418,24 +443,56 @@ fn lower_arith(expr: &Expr, binder: &str, prefix: &str) -> Option<SmtExpr> {
                 "div" => ArithOp::Div,
                 _ => unreachable!(),
             };
-            let l = lower_arith(args.first()?, binder, prefix)?;
-            let r = lower_arith(args.get(1)?, binder, prefix)?;
+            let l = lower_arith(args.first()?, ctx)?;
+            let r = lower_arith(args.get(1)?, ctx)?;
             Some(SmtExpr::Arith(op, Box::new(l), Box::new(r)))
         }
         "neg" => Some(SmtExpr::Arith(
             ArithOp::Neg,
-            Box::new(lower_arith(args.first()?, binder, prefix)?),
+            Box::new(lower_arith(args.first()?, ctx)?),
             Box::new(SmtExpr::RealLit(0.0)),
         )),
         "abs" | "min" | "max" | "sqrt" | "exp" | "log" | "sin" | "cos" => {
             let lowered = args
                 .iter()
-                .map(|a| lower_arith(a, binder, prefix))
+                .map(|a| lower_arith(a, ctx))
                 .collect::<Option<Vec<_>>>()?;
             Some(SmtExpr::Apply(name.to_string(), lowered))
         }
-        // `sum` over a tensor field would expand to a sum of per-element
-        // vars; left to a later extension. Return None -> Tier C.
+        // `sum` over a literal-shape tensor binder field: expand to the
+        // sum of its per-element flattened vars (RFC D-WF / D-TIERB).
+        "sum" => {
+            let path = access_path(args.first()?, ctx.binder, ctx.prefix)?;
+            let count = sum_field_count(&path, ctx)?;
+            if count == 0 {
+                return Some(SmtExpr::RealLit(0.0));
+            }
+            let mut acc = SmtExpr::Var(format!("{path}.0"));
+            for i in 1..count {
+                acc = SmtExpr::Arith(
+                    ArithOp::Add,
+                    Box::new(acc),
+                    Box::new(SmtExpr::Var(format!("{path}.{i}"))),
+                );
+            }
+            Some(acc)
+        }
+        _ => None,
+    }
+}
+
+/// The number of scalar elements a `sum`-target field flattens to. The
+/// dotted path is `<prefix>.<field>` at the top level; resolve the field
+/// against the binder fields and require it to be a tensor.
+fn sum_field_count(path: &str, ctx: &LowerCtx) -> Option<usize> {
+    let field = path.strip_prefix(ctx.prefix)?.strip_prefix('.')?;
+    // Only top-level (non-nested) tensor fields are supported for `sum`.
+    let fty = ctx
+        .fields
+        .iter()
+        .find_map(|(n, f)| (n == field).then_some(f))?;
+    match fty {
+        FieldType::Tensor { dims, .. } => Some(dims.iter().product::<usize>().max(1)),
         _ => None,
     }
 }
