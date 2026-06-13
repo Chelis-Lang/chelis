@@ -12,8 +12,6 @@ mod smt_lower;
 
 #[cfg(feature = "chelis-prove")]
 mod obligation_run;
-#[cfg(feature = "chelis-prove")]
-mod tier_c_obligation;
 
 #[cfg(feature = "chelis-prove")]
 use smt_lower::{InlineCtx, surf_expr_to_smt};

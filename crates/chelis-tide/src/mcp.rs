@@ -309,14 +309,68 @@ fn handle_prove_tool(args: &Value) -> Value {
     let result =
         chelis_prove::dispatch::dispatch_property(&source, "property", amenability, &options);
 
+    // Derived producer obligations (RFC D-OBLIG, D-PARITY): run the SAME
+    // chelis-prove obligation engine the CLI uses on the module source, so
+    // a prove through tide is identical to the CLI on the same module.
+    let ob_options = chelis_prove::obligation_engine::ObligationRunOptions {
+        seed,
+        samples,
+        smt_timeout_ms: smt_timeout,
+        tier: tier.to_string(),
+        only: None,
+    };
+    let obligation_records: Vec<serde_json::Value> =
+        chelis_prove::obligation_engine::run_surf_source_obligations(&source, &ob_options)
+            .unwrap_or_default()
+            .into_iter()
+            .map(obligation_to_json)
+            .collect();
+    let obligations_count = obligation_records.len();
+
     json!({
         "ok": true,
         "stage": "prove",
         "properties": [serde_json::to_value(&result).unwrap_or(json!(null))],
+        "obligations": obligation_records,
         "summary": {
             "total": 1,
             "proved": if result.status == chelis_prove::ProofStatus::Proved { 1 } else { 0 },
             "failed": match &result.status { chelis_prove::ProofStatus::Disproved { .. } => 1, _ => 0 },
+            "obligations": obligations_count,
         }
     })
+}
+
+/// Render an obligation outcome into the same additive JSON record shape
+/// the CLI emits (RFC D-OBLIG), so the cross-surface parity test can
+/// compare them directly.
+fn obligation_to_json(o: chelis_prove::obligation_engine::ObligationOutcome) -> Value {
+    use chelis_prove::obligation_engine::ObligationStatus;
+    let status = match o.status {
+        ObligationStatus::Passed => "passed",
+        ObligationStatus::Failed => "failed",
+        ObligationStatus::Unsupported => "unsupported",
+        ObligationStatus::Error => "error",
+    };
+    let mut value = json!({
+        "kind": "obligation",
+        "obligation_kind": o.meta.obligation_kind,
+        "source_type": o.meta.source_type,
+        "producer": o.meta.producer,
+        "name": o.name,
+        "status": status,
+        "proof_tier": o.proof_tier.as_str(),
+        "samples": o.samples,
+        "seed": o.seed,
+    });
+    if o.proof_tier == chelis_prove::obligation_engine::ObligationTier::Smt {
+        value["arith_model"] = json!("real");
+    }
+    if let Some(cx) = o.counterexample {
+        value["counterexample"] = cx;
+    }
+    if let Some(r) = o.reason {
+        value["reason"] = json!(r);
+    }
+    value
 }

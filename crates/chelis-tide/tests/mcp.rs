@@ -204,3 +204,96 @@ fn invalid_tool_arguments_return_mcp_error_payload() {
     assert_eq!(response["result"]["isError"], true);
     assert_eq!(response["result"]["structuredContent"]["stage"], "mcp");
 }
+
+const OPAQUE_MODULE: &str = "module Stats.Prob
+export (probability)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+def probability(x: f32) -> Option[Probability] =
+  if x >= 0.0 && x <= 1.0 then Some(Probability { value: x }) else None
+";
+
+/// RFC D-PARITY: a prove invoked through the tide MCP tool runs the SAME
+/// derived obligations as the CLI on the same module. We assert tide's
+/// obligation records match the shared chelis-prove engine the CLI also
+/// drives (same obligation set AND same proof_tier per obligation).
+#[test]
+fn tide_runs_obligations_via_shared_engine() {
+    // Tide path.
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":9,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": OPAQUE_MODULE, "seed": 0
+        }}
+    }))
+    .expect("prove response");
+    let tide_obs = response["result"]["structuredContent"]["obligations"]
+        .as_array()
+        .expect("obligations array")
+        .clone();
+
+    // Shared-engine path (what the CLI also calls).
+    let engine_out = chelis_prove::obligation_engine::run_surf_source_obligations(
+        OPAQUE_MODULE,
+        &chelis_prove::obligation_engine::ObligationRunOptions::default(),
+    )
+    .expect("engine run");
+
+    // Same obligation set: same names.
+    let tide_names: Vec<&str> = tide_obs
+        .iter()
+        .map(|o| o["name"].as_str().unwrap())
+        .collect();
+    let engine_names: Vec<&str> = engine_out.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(
+        tide_names, engine_names,
+        "same obligation set across surfaces"
+    );
+
+    // Same proof_tier per obligation.
+    for (tide_ob, engine_ob) in tide_obs.iter().zip(&engine_out) {
+        assert_eq!(
+            tide_ob["proof_tier"].as_str().unwrap(),
+            engine_ob.proof_tier.as_str(),
+            "same proof_tier per obligation across surfaces"
+        );
+        assert_eq!(
+            tide_ob["status"].as_str().unwrap(),
+            match engine_ob.status {
+                chelis_prove::obligation_engine::ObligationStatus::Passed => "passed",
+                chelis_prove::obligation_engine::ObligationStatus::Failed => "failed",
+                chelis_prove::obligation_engine::ObligationStatus::Unsupported => "unsupported",
+                chelis_prove::obligation_engine::ObligationStatus::Error => "error",
+            }
+        );
+    }
+
+    assert_eq!(tide_obs.len(), 1, "the flagship has exactly one obligation");
+    assert_eq!(tide_obs[0]["name"], "invariant:Probability:probability");
+}
+
+/// Under the `smt` feature, the flagship obligation proves at proof_tier
+/// "smt" through tide (the same tier the CLI gets).
+#[cfg(feature = "smt")]
+#[test]
+fn tide_flagship_obligation_proves_at_smt_tier() {
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":10,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": OPAQUE_MODULE
+        }}
+    }))
+    .expect("prove response");
+    let obs = response["result"]["structuredContent"]["obligations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(obs[0]["status"], "passed");
+    assert_eq!(obs[0]["proof_tier"], "smt");
+    assert_eq!(obs[0]["arith_model"], "real");
+}
