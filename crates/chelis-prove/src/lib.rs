@@ -10,6 +10,7 @@
 //! See `docs/trust_stack_verification.md` for architectural framing.
 
 pub mod artifact;
+pub mod concrete_eval;
 pub mod dispatch;
 pub mod from_property_spec;
 pub mod inlineability;
@@ -19,6 +20,7 @@ pub mod tier_b;
 pub mod tier_c;
 
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
+pub use concrete_eval::{eval_arith, eval_bool};
 pub use dispatch::{DispatchOptions, dispatch_property};
 pub use from_property_spec::{PropertySpecInput, to_dispatch_amenability, to_smt_property};
 pub use inlineability::{Fuzzability, Inlineability, classify_fuzzability, classify_inlineability};
