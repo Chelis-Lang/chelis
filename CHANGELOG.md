@@ -203,6 +203,37 @@ Use `--batch-mode file` to force the old execution strategy.
 
 ### Fixed
 
+<!-- opaque-types RT-3 soundness fixes (prove layer) -->
+- **RT3-F1 (CRITICAL, D-PRODUCER / D-SOUND)**: a record field spelled with
+  a type alias of an invariant-carrying opaque type silently defeated the
+  producer set (`type TA = T; type Wrapper = { inner: TA }`), so a
+  violating value escaped the module boundary unobligated and `chelis
+  prove` returned exit 0. The record-field producer path read field types
+  syntactically from Deep without resolving aliases; it now resolves
+  `(typealias ...)` chains so a record reaching the opaque type through any
+  alias spelling is covered-or-rejected, identical to the direct-type case.
+  This also closes the same-root unsound injection-pass (a property over
+  the type passing while the producer escapes).
+- **RT3-F2 (HIGH, D-PRODUCER)**: a module with an unrelated type error
+  passed `chelis prove` with exit 0, wiping the checker-inferred signatures
+  (empty producer set) and hiding a rejectable producer. `chelis prove`
+  (and the chelis-tide `chelis_prove` tool) now surface the check
+  diagnostics and report an Error (exit 3) on a type-broken module; a
+  `prove` exit 0 warrants the module type-checked and every obligation was
+  discharged (the strict downstream prove-compat / FlukeBall guarantee).
+- **RT3-F3 (MEDIUM, D-STARVE)**: constructor-based generation false-starved
+  for tight SCALAR-field invariant bands because the producer-result reader
+  handled only tensor values; a rank-0 scalar field access returns
+  `Float64`/`Int64`/`Bool`, which was dropped. Scalar field reads now
+  extract the scalar value, so a producer that always lands in a tight
+  scalar band serves the binder instead of being reported `unsupported`.
+- **RT3-F4 (verification, D-CHECK)**: confirmed declaration errors
+  (`OpaqueTypeViolation`, amenability mismatch) are visible on `chelis
+  check` (non-zero exit with the error listed) and gate `chelis build` /
+  `chelis eval --file`; `chelis validate` is a structural validator that
+  does not run the type/opacity checker. Documented in spec/04 §2.5.
+<!-- end opaque-types RT-3 soundness fixes -->
+
 - **#248 (#189 follow-up)**: the C backend's `emit_uniform_like` was
   the third lossy `%.8`-format-string site in the same class as the
   F32/F64 `emit_const` arms that PR #243 closed. `low` / `high` were
