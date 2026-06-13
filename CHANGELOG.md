@@ -287,6 +287,47 @@ Use `--batch-mode file` to force the old execution strategy.
   does not run the type/opacity checker. Documented in spec/04 §2.5.
 <!-- end opaque-types RT-3 soundness fixes -->
 
+<!-- opaque-types xhigh-review fixes (prove layer) -->
+- **CR-15 (HIGH, D-PRODUCER)**: a producer returning a MULTI-VARIANT ADT
+  whose non-first variant wrapped the opaque type was silently missed
+  (the record-field collector read only the first variant). All variant
+  payloads (record fields and positional types) are now collected, so any
+  variant wrapping the type is covered-or-rejected.
+- **CR-1 / CR-4 / CR-6 (HIGH, D-OBLIG)**: the tensor-field obligation
+  Tier C verdict ignored the inner produced position for `Option[(T, f32)]`
+  / nested Option (reading record fields off a tuple) and used a NaN-filled
+  record as the None sentinel (so a `Some(record)` with a legitimate NaN
+  representation passed VACUOUSLY). The produced value is now validated
+  structurally over the `ExecutionValue` tree (Option as `Adt{Some|None}`,
+  tuples as `Tuple`, records as `Adt`), applying the inner position and
+  using the real None discriminant; a NaN representation fails the
+  invariant, fail-closed.
+- **CR-2 / CR-5 / CR-10 (MEDIUM-HIGH, D-STARVE)**: invariant-sample
+  validation used the fuzz evaluator's `1e-10`-tolerant `==`/`!=`,
+  contradicting the strict-acceptance contract. Validation now uses
+  `eval_bool_strict` (exact IEEE `==`/`!=`); the fuzz tolerance stays on
+  the user-property postcondition path.
+- **CR-8 (MEDIUM, D-TIERB)**: a Tier B producer guard comparing against an
+  in-module zero-arg constant lowered with the constant unresolved (and
+  paniced the solver on the undeclared variable for a value binding). The
+  Tier B `reduce` pass now resolves module constants; the engine resolves
+  all in-module zero-arg scalar defs.
+- **CR-13 (robustness)**: the unary intrinsics in `concrete_eval` indexed
+  `a[0]` with no arity guard, so a malformed zero-arg `exp()` paniced;
+  they now guard `len == 1` and yield `NaN` on wrong arity.
+- **CR-12 (HIGH, D-PARITY)**: the chelis-tide `chelis_prove` tool
+  hardcoded `ok: true` and derived its summary only from the single user
+  property, so a failed/unsupported/errored producer obligation never
+  lowered the MCP response. The obligation outcomes are now folded into the
+  response `ok`/summary exactly as the CLI folds them into the prove exit
+  status.
+- **CR-14 (cleanup, D-PRODUCER)**: a record field of type `&T` was mapped
+  to an inert placeholder, hiding the borrowed opaque type; `t-ref` now
+  recurses so a borrow of the type is covered-or-rejected.
+- **CR-11 (cleanup, RFC L5)**: inlineability consumes
+  `chelis_pred::INTRINSIC_WHITELIST` instead of a duplicate array.
+<!-- end opaque-types xhigh-review fixes -->
+
 - **#248 (#189 follow-up)**: the C backend's `emit_uniform_like` was
   the third lossy `%.8`-format-string site in the same class as the
   F32/F64 `emit_const` arms that PR #243 closed. `low` / `high` were
