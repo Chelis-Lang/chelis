@@ -1,12 +1,33 @@
 # RFC: Opaque Types With Declared Invariants (Option 1.5)
 
-Version: 4 (frozen). Survey evidence:
+Version: 5 (frozen). Survey evidence:
 [`opaque_invariants_survey.md`](opaque_invariants_survey.md).
 Decisions carry stable IDs (`D-*`) for citation in workstream briefs,
 commits, and red-team reports. Changing a frozen decision requires a
 version bump and an explicit note in the owning PR.
 
 Version history:
+- v5: RT-1 verification bypass. The F2 fix guarded only lexical
+  `(module ...)` wrappers, but module identity also derives from
+  reef-stem mangled names (`Pkg__pkg__Module__Name`), so a
+  hand-authored program using that name format forges module
+  identity through the stem channel and constructs/inspects the
+  opaque type clean on check + validate + build (pure-flat
+  `stem_only.dp`, no wrappers, scores 1). Decision: the reef-internal
+  mangled-name format is the linker's PRIVATE output and is rejected
+  as a declaration error in any program not produced by the reef
+  linker — threaded by an in-process provenance flag set at the link
+  boundary (`prepare_program_for_file`), NOT by filesystem or
+  heuristic detection. This restores the invariant that
+  hand-authored module identity (Surf or raw `.dp`) comes only from
+  lexical wrappers, which the F2 fix guards. Verified safe: no
+  tracked `.dp`/fixture/corpus file uses mangled names, and the
+  linker feeds linked Deep to the checker in-process without ever
+  serializing to `.dp` for re-ingest, so the flag is never lost.
+  Belt-and-suspenders: even in linked input, a stem-derived
+  defining-module colliding with a lexical wrapper key in one check
+  unit is a `DuplicateModule` error (genuine linker output has no
+  lexical wrappers, so this never fires legitimately).
 - v4: RT-1 (forgery suite) fixes. (a) The sixth rejection must be
   enforced on the reef package surface: the reef link path must
   attribute exports and T-mentioning bindings into the opacity
