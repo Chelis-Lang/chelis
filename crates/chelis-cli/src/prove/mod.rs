@@ -423,8 +423,12 @@ fn prove_surf_property(
                             return Status::Failed;
                         }
                         chelis_prove::tier_b::TierBResult::Timeout
-                        | chelis_prove::tier_b::TierBResult::Unknown => {
-                            // Fall through to fuzz (Tier C)
+                        | chelis_prove::tier_b::TierBResult::Unknown
+                        | chelis_prove::tier_b::TierBResult::Error(_) => {
+                            // Fall through to fuzz (Tier C). An Error means
+                            // the property did not lower to a valid SMT term
+                            // (RT5-F1 wrong-arity intrinsic); the concrete
+                            // evaluator validates it instead of aborting cvc5.
                         }
                     }
                 }

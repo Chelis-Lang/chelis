@@ -22,6 +22,12 @@ pub enum TierBResult {
     Timeout,
     /// Solver returned unknown.
     Unknown,
+    /// The property could not be lowered to a valid SMT term (e.g. a
+    /// wrong-arity intrinsic application). Carries a human-facing reason.
+    /// Routed to the same not-provable handling as Timeout/Unknown, never
+    /// allowed to reach cvc5 as an invalid term (which would abort the
+    /// solver with empty stdout).
+    Error(String),
 }
 
 /// Structured property input for SMT solving.
@@ -67,10 +73,79 @@ pub fn solve_property(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     }
 }
 
+/// Arity-validate every intrinsic application in an [`SmtExpr`] before it
+/// reaches cvc5 (RT5-F1). The unary transcendentals/intrinsics
+/// (exp/log/sqrt/sin/cos/abs) require exactly one argument and `min`/`max`
+/// exactly two; a wrong-arity application would otherwise build an invalid
+/// cvc5 term that aborts the solver with empty stdout. Returns the first
+/// offending application's reason, mirroring the arity contract the
+/// concrete evaluator already enforces (CR-13).
+#[cfg(feature = "smt")]
+fn validate_smt_arity(expr: &SmtExpr) -> Result<(), String> {
+    match expr {
+        SmtExpr::Apply(name, args) => {
+            let expected = match name.as_str() {
+                "exp" | "log" | "sqrt" | "sin" | "cos" | "abs" => Some(1usize),
+                "min" | "max" => Some(2usize),
+                // Unknown function name: not lowerable (the lowering
+                // otherwise panics). Reject cleanly here.
+                _ => None,
+            };
+            match expected {
+                Some(n) if args.len() == n => {}
+                Some(n) => {
+                    return Err(format!(
+                        "intrinsic `{name}` expects {n} argument(s), got {}",
+                        args.len()
+                    ));
+                }
+                None => {
+                    return Err(format!("unsupported function `{name}` in SMT lowering"));
+                }
+            }
+            for a in args {
+                validate_smt_arity(a)?;
+            }
+            Ok(())
+        }
+        SmtExpr::Arith(_, l, r) | SmtExpr::Cmp(_, l, r) => {
+            validate_smt_arity(l)?;
+            validate_smt_arity(r)
+        }
+        SmtExpr::Bool(_, children) => {
+            for c in children {
+                validate_smt_arity(c)?;
+            }
+            Ok(())
+        }
+        SmtExpr::Not(inner) | SmtExpr::Forall(_, inner) | SmtExpr::Exists(_, inner) => {
+            validate_smt_arity(inner)
+        }
+        SmtExpr::Ite(c, t, e) => {
+            validate_smt_arity(c)?;
+            validate_smt_arity(t)?;
+            validate_smt_arity(e)
+        }
+        SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => Ok(()),
+    }
+}
+
 #[cfg(feature = "smt")]
 fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     use cvc5_rs::{Kind, Solver, TermManager};
     use std::collections::HashMap;
+
+    // Reject wrong-arity / unsupported intrinsics BEFORE building cvc5
+    // terms (RT5-F1): a bad term aborts the solver with empty stdout, a
+    // machine-contract violation for JSON consumers.
+    if let Err(reason) = validate_smt_arity(&property.postcondition) {
+        return TierBResult::Error(reason);
+    }
+    for pre in &property.preconditions {
+        if let Err(reason) = validate_smt_arity(pre) {
+            return TierBResult::Error(reason);
+        }
+    }
 
     let tm = TermManager::new();
     let mut solver = Solver::new(&tm);
@@ -391,5 +466,88 @@ mod tests {
         };
         let result = solve_property(&prop, 5000);
         assert_eq!(result, TierBResult::Proved);
+    }
+
+    fn intrinsic_ge_zero(name: &str, args: Vec<SmtExpr>) -> SmtProperty {
+        SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Apply(name.to_string(), args)),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        }
+    }
+
+    #[test]
+    fn rt5_f1_zero_arg_transcendental_is_a_clean_error_not_a_cvc5_abort() {
+        // RT5-F1: a zero-arg `exp()` previously built an invalid cvc5
+        // EXPONENTIAL term (cvc5 aborts: empty stdout, bare exit 1). It
+        // must lower to a clean TierBResult::Error, never an abort.
+        let prop = intrinsic_ge_zero("exp", vec![]);
+        match solve_property(&prop, 5000) {
+            TierBResult::Error(reason) => {
+                assert!(reason.contains("exp"), "names the bad intrinsic: {reason}");
+            }
+            other => panic!("expected Error for zero-arg exp(), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rt5_f1_two_arg_transcendental_is_a_clean_error() {
+        // The checker treats `exp` as variadic, so a two-arg `exp(a, b)`
+        // reaches cvc5 for a "valid-looking" call. It must be a clean Error.
+        let prop = intrinsic_ge_zero(
+            "exp",
+            vec![SmtExpr::Var("x".to_string()), SmtExpr::RealLit(1.0)],
+        );
+        match solve_property(&prop, 5000) {
+            TierBResult::Error(reason) => assert!(reason.contains("exp"), "{reason}"),
+            other => panic!("expected Error for two-arg exp(a,b), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rt5_f1_wrong_arity_in_each_unary_transcendental_is_a_clean_error() {
+        for name in ["exp", "log", "sqrt", "sin", "cos", "abs"] {
+            // Zero args.
+            assert!(
+                matches!(
+                    solve_property(&intrinsic_ge_zero(name, vec![]), 5000),
+                    TierBResult::Error(_)
+                ),
+                "zero-arg {name}() must be a clean Error"
+            );
+            // Two args.
+            let two =
+                intrinsic_ge_zero(name, vec![SmtExpr::Var("x".into()), SmtExpr::RealLit(1.0)]);
+            assert!(
+                matches!(solve_property(&two, 5000), TierBResult::Error(_)),
+                "two-arg {name}(a,b) must be a clean Error"
+            );
+        }
+    }
+
+    #[test]
+    fn rt5_f1_correct_arity_transcendental_still_lowers_and_proves() {
+        // Negative parity: a correct unary `exp(x) >= 0` still lowers and
+        // proves (exp is always positive over the reals).
+        let prop = intrinsic_ge_zero("exp", vec![SmtExpr::Var("x".to_string())]);
+        assert_eq!(solve_property(&prop, 5000), TierBResult::Proved);
+        // min/max keep their existing two-arg support.
+        let max_prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Apply(
+                    "max".to_string(),
+                    vec![SmtExpr::Var("x".to_string()), SmtExpr::RealLit(0.0)],
+                )),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        };
+        assert_eq!(solve_property(&max_prop, 5000), TierBResult::Proved);
     }
 }

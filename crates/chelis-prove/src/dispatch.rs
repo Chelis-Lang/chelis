@@ -180,6 +180,22 @@ pub fn dispatch_property(
                     }
                     // Fall through to Tier C
                 }
+                TierBResult::Error(reason) => {
+                    // The property did not lower to a valid SMT term
+                    // (RT5-F1). In smt-only this is rejected; otherwise
+                    // fall through to Tier C.
+                    if options.tier_mode == TierMode::SmtOnly {
+                        return ProofArtifact {
+                            property_name: _property_name.to_string(),
+                            tier: ProofTier::Smt,
+                            status: ProofStatus::Rejected { reason },
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            smt_status: Some(SmtStatus::NotAmenable),
+                            obligation: None,
+                        };
+                    }
+                    // Fall through to Tier C
+                }
             }
         }
     }

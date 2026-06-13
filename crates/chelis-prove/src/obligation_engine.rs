@@ -242,6 +242,24 @@ fn run_one(
                         );
                     }
                 }
+                TierBResult::Error(reason) => {
+                    // The obligation did not lower to a valid SMT term (a
+                    // wrong-arity intrinsic, RT5-F1). Surface it as
+                    // Unsupported with the reason rather than letting the
+                    // bad term abort cvc5. In `auto` mode fall through to
+                    // Tier C; in `smt-only` it is terminal.
+                    if options.tier == "smt-only" {
+                        return outcome(
+                            ob,
+                            ObligationStatus::Unsupported,
+                            ObligationTier::Smt,
+                            0,
+                            options.seed,
+                            None,
+                            Some(format!("smt lowering error: {reason}")),
+                        );
+                    }
+                }
             }
         }
     }
