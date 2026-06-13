@@ -70,6 +70,7 @@ The shipped MCP tool surface is:
 - `chelis_decompile`
 - `chelis_eval`
 - `chelis_grad`
+- `chelis_prove`
 - `chelis_validate`
 
 ### `chelis tide lsp`

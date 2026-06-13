@@ -2086,6 +2086,14 @@ fn cmd_build(
     reject_with_seed_for_build_target(&decls, target)?;
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
+    // chelis#334: drop dead library defs that use an eval-only host builtin
+    // (`process_run`) so an unused transitive dependency module — e.g.
+    // chelis-std's `Std.Process` — cannot force them into the compiled
+    // lowering target and trip the build gate. These defs can never appear
+    // in a compiled artifact, so they are not part of the host-library
+    // surface worth preserving. A *reachable* eval-only use is left in place
+    // for the build gate to reject with a clean diagnostic.
+    let full_deep_exprs = drop_unreachable_eval_only_defs(full_deep_exprs, &entry_deep_exprs);
     let pruned_deep_exprs =
         prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_deep_exprs);
 
@@ -5436,13 +5444,15 @@ fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
 fn reject_eval_only_builtins_host(
     program: &chelis_ir::host::HostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if chelis_ir::host::host_program_uses_builtin(program, "process_run") {
-        return Err(
-            "process_run is an eval/test-only builtin; not available in compiled \
+    for builtin in EVAL_ONLY_HOST_BUILTINS {
+        if chelis_ir::host::host_program_uses_builtin(program, builtin) {
+            return Err(format!(
+                "{builtin} is an eval/test-only builtin; not available in compiled \
                     targets. Run the program with `chelis eval` or `chelis test` instead, \
-                    or remove the process_run call before building."
-                .into(),
-        );
+                    or remove the {builtin} call before building."
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -6523,6 +6533,56 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
     }
 }
 
+/// Host builtins that the IR evaluator (`chelis eval` / `chelis test`)
+/// supports but the compiled build backends deliberately do not. Kept in
+/// one place so [`reject_eval_only_builtins_host`] and
+/// [`drop_unreachable_eval_only_defs`] stay in agreement.
+const EVAL_ONLY_HOST_BUILTINS: &[&str] = &["process_run"];
+
+/// Drop top-level decls for any function whose body references an eval-only
+/// host builtin ([`EVAL_ONLY_HOST_BUILTINS`]) and is not reachable from the
+/// entry program. Such functions can never be lowered into a compiled
+/// artifact, so an unused transitive dependency module (e.g. chelis-std's
+/// `Std.Process`) must not drag them into the build's lowering target. Both
+/// the `def` body and its sibling `defsig` are removed by name. A reachable
+/// eval-only use is preserved so the build gate still rejects it. chelis#334.
+fn drop_unreachable_eval_only_defs(
+    exprs: Vec<DeepExpr>,
+    entry_exprs: &[DeepExpr],
+) -> Vec<DeepExpr> {
+    use std::collections::HashSet;
+
+    let reachable = prune_build_program_to_reachable_defs(&exprs, entry_exprs)
+        .iter()
+        .filter_map(|expr| deep_named_decl_name(expr).map(str::to_string))
+        .collect::<HashSet<_>>();
+
+    // Names of unreachable functions whose body uses an eval-only builtin.
+    // Collected first so both the `def` and its `defsig` are dropped.
+    let drop_names = exprs
+        .iter()
+        .filter_map(|expr| {
+            let name = deep_named_decl_name(expr)?;
+            if reachable.contains(name) {
+                return None;
+            }
+            deep_referenced_vars(expr)
+                .iter()
+                .any(|var| EVAL_ONLY_HOST_BUILTINS.contains(var))
+                .then(|| name.to_string())
+        })
+        .collect::<HashSet<_>>();
+
+    exprs
+        .into_iter()
+        .filter(|expr| {
+            deep_named_decl_name(expr)
+                .map(|name| !drop_names.contains(name))
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
 fn prune_build_program_to_reachable_defs(
     exprs: &[DeepExpr],
     entry_exprs: &[DeepExpr],
@@ -7255,4 +7315,57 @@ fn should_suppress_unfixable_violation(
         return false;
     }
     !fix_would_apply_for_violation(target, rule.as_ref(), &source, surface, violation)
+}
+
+#[cfg(test)]
+mod eval_only_pruning_tests {
+    use super::{
+        deep_named_decl_name, drop_unreachable_eval_only_defs, expanded_desugared_program,
+    };
+
+    fn desugar(src: &str) -> Vec<chelis_deep::ast::Expr> {
+        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+        expanded_desugared_program(&decls).expect("desugar")
+    }
+
+    /// chelis#334: a pure-tensor entry program plus an unused library def
+    /// that uses the eval-only `process_run` builtin (the shape of
+    /// chelis-std's `Std.Process`). The dead eval-only def must be dropped
+    /// so the build gate does not reject a program that never reaches it.
+    #[test]
+    fn drops_unreachable_eval_only_def_but_keeps_entry() {
+        let full = desugar(
+            "def unused_runner(cmd: string, args: List[string]) -> (int64, string, string) = process_run(cmd, args)\n\
+             def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
+        );
+        let entry = desugar(
+            "def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
+        );
+        let kept = drop_unreachable_eval_only_defs(full, &entry);
+        let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
+        assert!(
+            names.contains(&"main"),
+            "entry `main` must survive: {names:?}"
+        );
+        assert!(
+            !names.contains(&"unused_runner"),
+            "unreachable eval-only def must be dropped: {names:?}"
+        );
+    }
+
+    /// Negative parity: a *reachable* eval-only use is preserved so the
+    /// build gate still rejects it with a clean diagnostic instead of the
+    /// program silently building with a missing function.
+    #[test]
+    fn keeps_reachable_eval_only_def_for_the_gate() {
+        let exprs =
+            desugar("def main() -> (int64, string, string) = process_run(\"echo\", [\"hi\"])\n");
+        let entry = exprs.clone();
+        let kept = drop_unreachable_eval_only_defs(exprs, &entry);
+        let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
+        assert!(
+            names.contains(&"main"),
+            "reachable eval-only def must be preserved for the build gate: {names:?}"
+        );
+    }
 }

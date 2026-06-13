@@ -64,7 +64,7 @@ Required coverage for this feature:
 - returning a borrow from a function is rejected
 - `grad(f)(x)` works when `f` takes `&tensor`
 - `vmap(f, axis=0)(xs)` works when `f` takes `&tensor`
-- Deep validation accepts `t-ref` and keeps the 61-tag vocabulary closed
+- Deep validation accepts `t-ref` and keeps the 62-tag vocabulary closed
 - macro-expanded programs continue through check/build when borrow nodes are present
 
 ## Downstream Propagation

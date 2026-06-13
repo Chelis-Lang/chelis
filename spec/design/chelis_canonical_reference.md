@@ -101,14 +101,14 @@ fitness scoring, error reporting), and before CLI paths such as `chelis deep`,
 `check`, `build`, and `eval`.
 Provenance metadata in the `{}` slot traces expanded nodes back to their macro source
 (e.g., `{source: (relu input)}`).
-The 61-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
+The 62-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
 exist in the ecosystem.
 Macros are a human authoring convenience that compiles away before LLMs touch the code.
 Compiler-internal pre-expansion forms such as `defmacro` and `macro-invoke` are not
 public Deep and are rejected by strict Deep validation.
 
 The same properties that make Deep a stable generation target for agents
-also make it a stable editing target. The 61-tag closed vocabulary, the
+also make it a stable editing target. The 62-tag closed vocabulary, the
 3-tuple uniformity, and the metadata-map slot for provenance mean
 structural edits (replace a function body, rename a symbol, change a
 signature) are well-defined operations rather than character-level
@@ -358,15 +358,24 @@ Planned public-style target for Phase 3:
 - algebraic-effect boundary handling for `Random` and `Resource(Device)`
 - `with seed(...)` for seeded stochastic regions and `with device(...)` for resource regions
 
-### Phase 2 shipped after the initial 2a subset
+### Phase 2 surface beyond the initial 2a subset
 
-- broader effect inference/checking beyond the initial `Random` / `Resource(Device)` subset
-- `Diff` as a fully specified effect surface (it remains a compiler capability today)
-- `Accum` as user-visible effect surface (it remains internal-only today)
-- linear types for tensors with borrowing rules and explicit `copy`
+Shipped after the initial 2a subset:
+
+- linear types for tensors with borrowing rules and explicit `copy` (now the implicit
+  copy/drop linearity model — see `spec/design/implicit_linearity.md`)
 - lightweight uniqueness / alias tracking before any full heavy ownership-and-lifetimes model
 - macro expansion before all LLM-facing operations, with provenance in metadata
 - algebraic-effect, linearity, macro, and `vmap` tooling
+- constrained name-preserving rank polymorphism (Tier-2 / Tier-3, chelis#339) — see
+  `spec/04-type-system.md` §4.5.3 and `spec/design/rank_polymorphism.md`
+
+Designed but not yet shipped (the checker implements a bounded subset; see
+`spec/04-type-system.md` §7.1):
+
+- broader effect inference/checking beyond the initial `Random` / `Resource(Device)` subset
+- `Diff` as a fully specified effect surface (it remains a compiler capability today)
+- `Accum` as a user-visible effect surface (it remains internal-only today)
 
 ### Phase 3 shipped foundations and remaining shell work
 
@@ -395,7 +404,9 @@ Shoals, Octant Part A/B, Chelis-native testing, and the final SKILL.md v2 refres
 - distribution types
 - equivariance constraints
 - optimization-property annotations
-- ILP/AUTOMAP-style rank-polymorphism and related research type features
+- full ILP/AUTOMAP-style rank-polymorphism and related research type features (the
+  constrained name-preserving Tier-2 / Tier-3 rank polymorphism has already shipped —
+  see `spec/04-type-system.md` §4.5.3; only the general research version is deferred)
 - Lean mechanized formalization of the core type system
 
 ---
@@ -757,12 +768,16 @@ Chelis vs PyTorch on equivalent tasks. Measures whether a language designed for 
 produces better ML code than the standard approach. Serves double duty as a measurement
 tool and a trajectory source for model training.
 
-**Type-driven property testing:** The Tide API provides `chelis test` / `POST /test` —
-automatic test generation from function type signatures. The compiler knows tensor
-shapes, dtypes, and dimension constraints; it generates random valid inputs, runs the
-function, and verifies output shapes, determinism (for pure functions), and gradient
-correctness (for differentiable functions). No test code written by anyone — the type
-signature is the test specification.
+**Type-driven property testing:** the shipped surface is `chelis prove` and the
+`chelis_prove` MCP tool, which run property checks over Surf/Deep inputs using the type
+information the compiler already has — tensor shapes, dtypes, and dimension constraints —
+to verify properties such as output shapes, determinism (for pure functions), and
+gradient correctness (for differentiable functions). There is no `POST /test` HTTP
+endpoint, and this is distinct from `chelis test`, the Chelis-native runner that
+discovers and executes `tests/*.ch` files. The shipped Tide HTTP/MCP surface is
+enumerated in §6 and [`spec/09-tide.md`](../09-tide.md). The aspiration is full
+type-signature-as-test-specification generation; the shipped `chelis prove` is the
+current step toward it.
 
 ### Editing Surface (Exploratory)
 

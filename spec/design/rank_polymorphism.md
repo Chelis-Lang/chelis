@@ -415,7 +415,7 @@ Plumbing touched:
   `TypeExpr` rank-spread variant + parser token.
 - Deep representation: a new dim node `(d-rank {} r)` joins the closed dim
   vocabulary (`d-name` / `d-var` / `d-lit`) — this is a **spec/03-deep-syntax.md
-  change** (the 61-tag closed vocabulary grows by one) and
+  change** (the closed Deep vocabulary grew by one, from 61 to 62 tags) and
   `chelis-deep/src/validate.rs` allowlist + the `t-tensor` child rules.
 - Decompiler/printer/formatter round-trip (`surf/decompile.rs:1887`,
   `deep/printer.rs:295`) must emit and re-parse `..r` identically (formatter

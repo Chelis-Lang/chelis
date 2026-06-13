@@ -927,9 +927,13 @@ tensor/reduction additions stayed in `chelis-std`.)
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli --test std_nn_build_acceptance` — exercises the integrated
-3j-pre surface (RMSNorm + GELU + Kaiming init + SDPA import) through `chelis
-check`/`chelis eval` with hand-computed exact reference values.
+`cargo test -p chelis-cli --test production_stdlib_typechecks` +
+`cargo test -p chelis-cli --test std_package_acceptance` — exercise the in-repo std
+surface through `chelis check`/`chelis eval` with hand-computed exact reference values.
+(The original `std_nn_build_acceptance` suite, which exercised RMSNorm + GELU + Kaiming
+init + SDPA import, was removed when the `Std.Nn`/`Std.Loss`/`Std.Optim` ML surface moved
+to the downstream School library in chelis-std 0.4.0, #331. RMSNorm/GELU/SDPA now live in
+School; Kaiming init (`Std.Init`) stayed and is covered by the surviving suites.)
 
 Release infrastructure is also in place as of 3j-pre Batch 6: the
 hand-rolled `.github/workflows/release.yml` builds and publishes a
@@ -950,6 +954,12 @@ tag push. Release history:
   `spec/design/phase3j_pre_release.md` for the full release contract.
 
   - **Acknowledged limitations (3j-pre, current state after Batch 7b):**
+    > Historical note: the `crates/chelis-cli/tests/std_nn_build_acceptance.rs`
+    > file referenced below was removed when the `Std.Nn`/`Std.Loss`/`Std.Optim`
+    > ML surface moved to the downstream School library in chelis-std 0.4.0
+    > (#331). The `Std.Nn.*` paths named here now live under `School.Nn.*`; the
+    > in-repo successor oracles are `production_stdlib_typechecks` and
+    > `std_package_acceptance`. The prose is kept as a Batch 5b/7b work record.
     - **Fixed in Batches 5b and 7b** (now exercised end-to-end through
       `chelis build --target c` + gcc-link + run with byte-exact stdout
       assertions in `crates/chelis-cli/tests/std_nn_build_acceptance.rs`, none

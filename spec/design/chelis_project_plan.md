@@ -282,7 +282,7 @@ pure tape-only or pure full-recompute AD.
 **LLM representation constraint:** The macro system must produce clean expanded Deep
 with provenance metadata in the `{}` slot.
 Macro expansion is a compilation step that happens before any LLM-facing operation.
-The expanded form uses only the base 61-tag vocabulary.
+The expanded form uses only the base 62-tag vocabulary.
 LLMs never see, generate, or reason about unexpanded macro invocations.
 This is a settled design decision, not an open question for Phase 2c.
 The Phase 2c design task is: expansion rules, hygiene, phase separation, and the
@@ -336,17 +336,21 @@ The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 
 **Shipped Phase 3 foundations:** `3a` package system, `3b` Python FFI interop,
 `3b-ii` direct Python execution + NumPy guarantee, `3c` scalar/string foundation,
-`3d` collections/iteration, and `3e` pipe-first style pass.
+`3d` collections/iteration, `3e` pipe-first style pass, `3h` core numeric primitives,
+`3m` Rust runtime rewrite, `3g` data loading/tokenization, `3i` standard-library
+expansion, `3j-pre` release infrastructure + std-surface expansion, and `3j` (nautilus,
+shipped in the downstream repo — `Nautilus v0.5.0` is current). Each carries a
+`**Status:** shipped.` marker in [`chelis_phase3_plan.md`](chelis_phase3_plan.md).
+`3j-pre` reserved the `chelis-lang` GitHub organization, shipped a compiler release
+binary, and expanded the standard library surface that `nautilus` and `coral` depend on
+(`Std.Init` plus the ML surface — attention/GELU/SiLU/RMSNorm/Conv, losses — that since
+moved to `School.Nn.*` / `School.Loss.*` in chelis-std 0.4.0; `Std.Init` stayed).
 
-**Recommended execution order for remaining work:** `3h` → `3m` → `3g` → `3i` →
-`3j-pre` → `3j` ∥ `3k` → `3l` → `3f`. `3j-pre` reserves the `chelis-lang` GitHub
-organization, ships a compiler release binary, and expands the standard library surface
-(`Std.Nn` attention/GELU/SiLU/RMSNorm/Conv, `Std.Loss`, `Std.Init`) that both `nautilus`
-and `coral` depend on (the `Std.Nn.*` / `Std.Loss.*` modules since moved to
-`School.Nn.*` / `School.Loss.*` in chelis-std 0.4.0; `Std.Init` stayed). `3j` (nautilus) and `3k` (coral) can then overlap — no mutual
-dependency. `3l` (shoals) depends on both. `3f` (SKILL.md v2) is intentionally last in
-Phase 3: it needs a real rewrite after the runtime, numeric, tokenization,
-standard-library, and domain-shell surfaces stabilize.
+**Remaining Phase 3 work:** `3k` (coral) can overlap with the already-shipped `3j`
+(nautilus) — no mutual dependency; `3l` (shoals) depends on both; `3n` (octant) is
+planned but not yet started; `3f` (SKILL.md v2) is intentionally last in Phase 3 — it
+needs a real rewrite after the runtime, numeric, tokenization, standard-library, and
+domain-shell surfaces stabilize.
 
 ### 3e: Style Foundation
 
@@ -559,7 +563,11 @@ Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
     (since moved to `School.Loss.*` in chelis-std 0.4.0)
   - `Std.Init`: `kaiming_uniform`, `kaiming_normal`, `xavier_uniform`, `xavier_normal`,
     `trunc_normal`
-- acceptance oracle: `cargo test -p chelis-cli --test std_nn_build_acceptance -- --ignored --nocapture`
+- acceptance oracle: `cargo test -p chelis-cli --test production_stdlib_typechecks` +
+  `cargo test -p chelis-cli --test std_package_acceptance` (the original
+  `std_nn_build_acceptance` suite was removed when the `Std.Nn`/`Std.Loss`/`Std.Optim` ML
+  surface moved to the downstream School library in chelis-std 0.4.0, #331; the in-repo
+  oracle now covers the std surface that stayed — `Std.Init`/`Std.Time`/`Std.Decimal`)
 
 ### 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 
@@ -1494,7 +1502,7 @@ depends on it.
 |---|---|---|---|
 | **Effect system design** | effect typing rules, handler syntax, HM interaction; investigate Dex's Accum effect for parallelism-preserving gradient accumulation, and distinguish parallelism-preserving effects from sequentializing ones | Phase 2a | **HIGH** |
 | **Linear type design** | linearity rules, borrowing rules, effect interaction | Phase 2b | **HIGH** |
-| **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 61-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
+| **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 62-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
 | **Fusion rules** | DAG fusion constraints and correctness conditions | Phase 1b | **MEDIUM** |
 | **GPU memory model** | device-memory semantics and ownership model | Phase 1 / 2a | **MEDIUM** |
 | **Effect handler syntax** | Surf and Deep syntax for handling effects | Phase 2a | **MEDIUM** |

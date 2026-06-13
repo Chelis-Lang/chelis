@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,7 +34,7 @@ const MNIST_SEED: u64 = 42;
 
 const TRANSFORMER_SEQ_LEN: usize = 128;
 const TRANSFORMER_D_MODEL: usize = 256;
-const TRANSFORMER_HEADS: usize = 4;
+const TRANSFORMER_HEADS: usize = 1;
 const TRANSFORMER_HEAD_DIM: usize = 64;
 const TRANSFORMER_D_FF: usize = 1024;
 const TRANSFORMER_ITERS: usize = 5;
@@ -58,10 +59,15 @@ impl LinregWorkload {
 
     fn for_profile(profile: Option<&str>) -> Self {
         match profile {
+            // `examples/linreg.ch` fixes the batch dimension at
+            // `tensor[64, 64]`, so the compiled program demands
+            // batch_size == LINREG_BATCH_SIZE. The smoke profile takes its
+            // speedup from a single train/test batch and one epoch, not
+            // from shrinking that fixed architecture dimension.
             Some("smoke") => Self {
                 train_batches: 1,
                 test_batches: 1,
-                batch_size: 8,
+                batch_size: LINREG_BATCH_SIZE,
                 features: LINREG_FEATURES,
                 epochs: 1,
                 lr: LINREG_LR,
@@ -864,11 +870,18 @@ fn build_training_programs_from_compiled(
     infer_node: NodeId,
     param_names: &[&str],
 ) -> Result<TrainingPrograms, String> {
+    // The compiled module lowers every `def` into one shared DAG, so a
+    // parameter name like `w` can appear as a Load in more than one
+    // function (e.g. both `predict` and `loss`). Gradients are taken with
+    // respect to the loss function, so resolve each parameter to the Load
+    // that is actually reachable from `loss_node`; the global-first match
+    // would otherwise bind to `predict`'s loads and produce no gradient.
     let param_nodes = param_names
         .iter()
         .map(|name| {
-            find_load(&forward_dag, name)
-                .ok_or_else(|| format!("missing parameter load `{name}` in benchmark program"))
+            find_load_in_cone(&forward_dag, loss_node, name).ok_or_else(|| {
+                format!("missing parameter load `{name}` in the loss function's dependency cone")
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     add_named_store(&mut forward_dag, "eval_output", infer_node);
@@ -921,9 +934,30 @@ fn build_transformer_programs() -> Result<ForwardPrograms, String> {
     })
 }
 
-fn find_load(dag: &Dag, name: &str) -> Option<NodeId> {
+/// Set of nodes reachable from `root` by walking input edges (the
+/// dependency cone of `root`).
+fn dependency_cone(dag: &Dag, root: NodeId) -> HashSet<NodeId> {
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(node) = dag.get(id) {
+            stack.extend(node.inputs.iter().copied());
+        }
+    }
+    seen
+}
+
+/// Find a Load named `name` that is reachable from `root`. Restricting
+/// the search to the dependency cone of `root` disambiguates parameters
+/// shared by several functions in the same lowered DAG (for example a
+/// `w` Load present in both `predict` and `loss`).
+fn find_load_in_cone(dag: &Dag, root: NodeId, name: &str) -> Option<NodeId> {
+    let cone = dependency_cone(dag, root);
     dag.nodes().iter().find_map(|node| match &node.op {
-        RiscOp::Load { name: load } if load == name => Some(node.id),
+        RiscOp::Load { name: load } if load == name && cone.contains(&node.id) => Some(node.id),
         _ => None,
     })
 }
@@ -1823,22 +1857,10 @@ fn build_forward_main_c(
         &model.input_labels,
         &[
             ("x", "x_tensor"),
-            ("wq0", "wq0_tensor"),
-            ("wk0", "wk0_tensor"),
-            ("wv0", "wv0_tensor"),
-            ("wo0", "wo0_tensor"),
-            ("wq1", "wq1_tensor"),
-            ("wk1", "wk1_tensor"),
-            ("wv1", "wv1_tensor"),
-            ("wo1", "wo1_tensor"),
-            ("wq2", "wq2_tensor"),
-            ("wk2", "wk2_tensor"),
-            ("wv2", "wv2_tensor"),
-            ("wo2", "wo2_tensor"),
-            ("wq3", "wq3_tensor"),
-            ("wk3", "wk3_tensor"),
-            ("wv3", "wv3_tensor"),
-            ("wo3", "wo3_tensor"),
+            ("wq", "wq_tensor"),
+            ("wk", "wk_tensor"),
+            ("wv", "wv_tensor"),
+            ("wo", "wo_tensor"),
             ("ff1", "ff1_tensor"),
             ("ff2", "ff2_tensor"),
             ("gamma1", "gamma1_tensor"),
@@ -1907,22 +1929,10 @@ int main(void) {{
     int norm_shape[1] = {{ (int)d_model }};
 
     chelis_tensor *x_tensor = alloc_and_fill(f, 2, x_shape, seq_len * d_model);
-    chelis_tensor *wq0_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wk0_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wv0_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wo0_tensor = alloc_and_fill(f, 2, proj_shape, head_dim * d_model);
-    chelis_tensor *wq1_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wk1_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wv1_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wo1_tensor = alloc_and_fill(f, 2, proj_shape, head_dim * d_model);
-    chelis_tensor *wq2_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wk2_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wv2_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wo2_tensor = alloc_and_fill(f, 2, proj_shape, head_dim * d_model);
-    chelis_tensor *wq3_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wk3_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wv3_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
-    chelis_tensor *wo3_tensor = alloc_and_fill(f, 2, proj_shape, head_dim * d_model);
+    chelis_tensor *wq_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wk_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wv_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wo_tensor = alloc_and_fill(f, 2, proj_shape, head_dim * d_model);
     chelis_tensor *ff1_tensor = alloc_and_fill(f, 2, ff1_shape, d_model * d_ff);
     chelis_tensor *ff2_tensor = alloc_and_fill(f, 2, ff2_shape, d_ff * d_model);
     chelis_tensor *gamma1_tensor = alloc_and_fill(f, 1, norm_shape, d_model);
@@ -1961,22 +1971,10 @@ int main(void) {{
         if (outputs[i]) chelis_free(outputs[i]);
     }}
     chelis_free(x_tensor);
-    chelis_free(wq0_tensor);
-    chelis_free(wk0_tensor);
-    chelis_free(wv0_tensor);
-    chelis_free(wo0_tensor);
-    chelis_free(wq1_tensor);
-    chelis_free(wk1_tensor);
-    chelis_free(wv1_tensor);
-    chelis_free(wo1_tensor);
-    chelis_free(wq2_tensor);
-    chelis_free(wk2_tensor);
-    chelis_free(wv2_tensor);
-    chelis_free(wo2_tensor);
-    chelis_free(wq3_tensor);
-    chelis_free(wk3_tensor);
-    chelis_free(wv3_tensor);
-    chelis_free(wo3_tensor);
+    chelis_free(wq_tensor);
+    chelis_free(wk_tensor);
+    chelis_free(wv_tensor);
+    chelis_free(wo_tensor);
     chelis_free(ff1_tensor);
     chelis_free(ff2_tensor);
     chelis_free(gamma1_tensor);

@@ -57,6 +57,41 @@ fn bench_phase1e_all_emits_structured_json_for_real_scope() {
             "expected at least one comparison entry"
         );
     }
+
+    // The transformer lane is a deterministic forward pass and must
+    // compile and run on CPU — the in-repo numerical oracle.
+    let transformer = models
+        .iter()
+        .find(|model| model["name"].as_str() == Some("transformer"))
+        .expect("missing transformer model report");
+    let transformer_cpu = &transformer["cpu"];
+    assert_eq!(
+        transformer_cpu["status"].as_str(),
+        Some("ok"),
+        "transformer CPU lane must succeed; got status {:?} reason {:?}",
+        transformer_cpu["status"],
+        transformer_cpu["reason"]
+    );
+
+    // linreg carries its own deterministic data, so its CPU lane must
+    // actually execute and emit a structured verdict — never a silent skip.
+    // Full-profile training currently diverges (loss -> inf/nan); that
+    // numerical regression is tracked by chelis#389, so this gate asserts
+    // the lane ran and reported, not that it converged. The green linreg
+    // oracle is the smoke lane (`bench_phase1e_linreg_smoke_emits_structured_json`),
+    // which asserts `cpu.status == "ok"`.
+    let linreg = models
+        .iter()
+        .find(|model| model["name"].as_str() == Some("linreg"))
+        .expect("missing linreg model report");
+    let linreg_status = linreg["cpu"]["status"]
+        .as_str()
+        .expect("linreg cpu status string");
+    assert!(
+        matches!(linreg_status, "ok" | "failed"),
+        "linreg CPU lane must run (it has its own data), got status {linreg_status:?}; \
+         see chelis#389 for the full-profile training divergence"
+    );
 }
 
 #[test]
@@ -84,6 +119,22 @@ fn bench_phase1e_linreg_smoke_emits_structured_json() {
     assert_eq!(model["workload"]["test_batches"].as_u64(), Some(1));
     assert_eq!(model["workload"]["epochs"].as_u64(), Some(1));
     assert!(model["cpu"].is_object(), "cpu backend report missing");
+    // The CPU lane is the in-repo semantic oracle for this benchmark: it
+    // must actually compile and run, not silently skip or fail. Asserting
+    // only `is_object()` let a month-long regression (a stale bench harness
+    // out of sync with the rewritten example) pass as green.
+    let cpu = &model["cpu"];
+    assert_eq!(
+        cpu["status"].as_str(),
+        Some("ok"),
+        "linreg smoke CPU lane must succeed; got status {:?} reason {:?}",
+        cpu["status"],
+        cpu["reason"]
+    );
+    assert!(
+        cpu["final_loss"].as_f64().is_some(),
+        "linreg smoke CPU lane reported status ok but emitted no final_loss: {cpu:?}"
+    );
     assert!(model["hip"].is_object(), "hip backend report missing");
     assert!(
         model["pytorch"].is_object(),

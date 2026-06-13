@@ -36,13 +36,29 @@ Follow-up status:
   `spec/design/rank_polymorphism.md`.
 - **#340** — `max_reduce`/`min_reduce`/`prod_reduce`/`argmax`/`argmin` in a `..r`
   body (they route through the host scalar lane and don't compile; currently
-  *rejected at check time* to keep check↔backend in sync).
-- **#339** — expand (`R+1`) and the variadic `sum(x, seq, head)` surface
-  (additive ergonomics; multi-axis already works via composition today).
+  *rejected at check time* to keep check↔backend in sync). **The remaining
+  open item.**
+- **#339 — DONE.** Shipped in PR #382 (squash-merged to `main` as `ba6e8c2`),
+  out of the recommended order (before #340). Named-axis expand:
+  `expand(x, new, size)` inserts a trailing named axis and
+  `expand(x, new, size, anchor)` inserts before a uniquely located named
+  anchor; insertion inside an opaque spread, name collisions, and
+  non-literal sizes are hard errors. Variadic named-axis reduction:
+  `sum(x, seq, head)` for the value reductions
+  (`sum`/`mean`/`max_reduce`/`min_reduce`/`prod_reduce`), desugared at
+  lowering to the nested 2-arg composition; duplicate axes are a hard
+  error and `argmax_reduce`/`argmin_reduce` get a targeted rejection.
+  Body-Discipline admission in a `..r` body is unchanged (`sum`/`mean`
+  only — that boundary still belongs to #340). Authoritative spec:
+  `spec/04-type-system.md` §4.5.3; design + red-team history (including
+  the two loud-not-silent collision flavors pinned as Known gaps):
+  `spec/design/rank_polymorphism.md`. Acceptance:
+  `crates/chelis-cli/tests/rank_poly_tier3.rs` (incl. the `variadic_*`
+  suite).
 
 ---
 
-## Recommended order: #338 (done) → #340 → #339
+## Recommended order: #338 (done) → #340 → #339 (shipped out of order; #340 remains)
 
 ### Why this order
 
@@ -107,8 +123,11 @@ operands.
 rank-poly callee with max/min/prod is force-inlined into the host lane and hits
 the stub (the axis name leaks as a bare C identifier). Currently mitigated:
 `shape_class` (`crates/chelis-types/src/builtins.rs`) admits only `sum`/`mean`
-as `NameTracked`; the others are rejected at check time in a `..r` body
-(`rank_poly_tier3.rs::max_reduce_in_rank_poly_body_rejected`).
+among the reductions as `NameTracked` (`expand` is also `NameTracked` since
+chelis#339); the other reductions are rejected at check time in a `..r` body
+(`rank_poly_tier3.rs::max_reduce_in_rank_poly_body_rejected`). The variadic
+form (chelis#339) desugars to the 2-arg composition, so re-admitting these
+ops automatically extends to their variadic calls in a `..r` body.
 
 **Approach.** Either (a) route the rank-poly reduce through the DAG lane (likely
 free if #338 does this), or (b) extend the host lane's reduce coverage to
@@ -116,9 +135,27 @@ max/min/prod/argmax/argmin with named-axis→index resolution. Then **re-admit**
 them as `NameTracked` in `shape_class` (update the `shape_class` pin test) and
 **convert** `max_reduce_in_rank_poly_body_rejected` into a build+run test.
 
-## #339 — expand (`R+1`) + variadic reduction surface
+## #339 — expand (`R+1`) + variadic reduction surface — SHIPPED
 
-Two sub-items; do **expand first** (real capability), variadic last (sugar).
+Shipped in PR #382 (`ba6e8c2`), substantially as planned below, with these
+deltas surfaced by the red-team pass (full record in
+`spec/design/rank_polymorphism.md`; normative rules in
+`spec/04-type-system.md` §4.5.3):
+
+- the 4-arg anchored form `expand(x, new, size, anchor)` landed alongside the
+  trailing insert; both go through an `infer_expand_app` dispatcher (the
+  `infer_permute_app` pattern), since the anchored arity bypasses the HM scheme
+- the inserted size must be a **positive compile-time literal** (a symbolic or
+  runtime size loses the name at lowering / produces a silent shape-0 tensor)
+- inserted-name collisions are rejected at check time where the signature can
+  see them (the introduced-name rule in `unify.rs`); two body-internal flavors
+  the checker cannot see fail **loudly** at lowering and are pinned as Known
+  gaps
+- variadic reduction rejects duplicate axis names (never a silent dedup) and
+  `argmax_reduce`/`argmin_reduce` entirely; lowering desugars to the nested
+  2-arg composition so backend/eval/`grad`/`vmap` ride the single-axis lanes
+
+The original plan, kept for the record:
 
 - **expand (`R+1`):** `shape_class("expand") -> NameTracked`; teach
   `check_expand_signature` (`crates/chelis-types/src/infer.rs` ~13645) to insert

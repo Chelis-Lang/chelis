@@ -541,6 +541,7 @@ name = "chelis-lint"
 version = "0.7.25"
 dependencies = [
  "assert_cmd",
+ "chelis-deep",
  "predicates",
  "regex",
  "tempfile",
