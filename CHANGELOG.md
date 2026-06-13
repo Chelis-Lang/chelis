@@ -78,8 +78,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   coverage is MEASURED, not assumed: `coverage_runner.py` runs every
   program against the live binary and fails the gate if any targeted
   `CheckErrorKind` / well-formedness-message / obligation-status token is
-  hit by zero programs, and pins each program's exit code. The
-  load-bearing deliverable is an executable solver-free regression
+  hit by zero programs, and pins each program's exit code. The central
+  deliverable is an executable solver-free regression
   (`solver_free.py`): the default `chelis` binary links zero cvc5 symbols
   (the `--features smt` build links ≈ 33k, a discriminating control),
   `chelis check`s the whole corpus to its pinned exits, and produces
