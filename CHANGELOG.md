@@ -88,6 +88,29 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   and `invariant-float-equality` (exact `==` over a representation field
   starves generation by design; use a tolerance band).
 
+- **W5 — decode revalidation (`opaque_invariants_rfc.md` D-DECODE).**
+  Experimental public decode chokepoint
+  `chelis_compiler_api::decode_adt_value` (and the typed-error variant
+  `try_decode_adt_value`, returning `DecodeError`). It converts an
+  `ExecutionValue::Adt` payload to a `RuntimeValue` with a structural
+  check (constructor declared; field arity/order/type match the declared
+  representation) and then revalidates the declared invariant by
+  evaluating the predicate through the evaluator's own interpreter --
+  `chelis-compiler-api` does not depend on `chelis-prove`. A NaN or
+  non-finite value in any numeric representation field is rejected
+  *before* predicate evaluation (fail-closed; `not (p.value > 1.0)` is
+  true on NaN). A structural mismatch is reported distinctly from an
+  invariant violation, both in the `DecodeError` enum and in the message
+  prefix. Decode of a violating payload is a failure, never a repair (no
+  clamping). The normative rule is documented in `spec/10-serialization.md`
+  §4 with the cross-link to `spec/01-nomenclature.md` §12.1. V1 reality
+  (survey §7): no external ADT-value payload codec exists yet
+  (`EvalRequest.bindings` is tensors-only; `ExecutionValue::Adt` is
+  output-only), so the chokepoint ships experimental with the conformance
+  suite (`crates/chelis-compiler-api/tests/invariant_decode.rs`) as its
+  only caller. The runtime value type `RuntimeValue` is now exported from
+  the crate root for the chokepoint's return type.
+
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep
   s-expressions to the Surf parser, which reported a bogus
