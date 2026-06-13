@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chelis-deep.workspace = true
+chelis-pred.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

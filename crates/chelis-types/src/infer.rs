@@ -329,6 +329,7 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // downcast to f32 by the current build targets, violating the "no implicit
     // precision promotion" rule. f64 is supported as of v0.2.3.
     validate_tensor_precisions_in_program(exprs, &mut errors);
+    crate::invariants::validate_type_invariants_in_program(exprs, &mut errors);
 
     // WS-A8 cross-row enforcement: reject `matmul`/transcendental ops that
     // are reached through a polymorphic-precision sig instantiated at a
@@ -392,6 +393,7 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
     validate_ir_program(library_exprs, &library_ir, &mut result.errors);
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
@@ -510,6 +512,7 @@ pub fn build_compiled_library_context(
     );
     validate_ir_program(library_exprs, &library_ir, &mut result.errors);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
     if !result.errors.is_empty() {
@@ -632,6 +635,7 @@ pub fn build_compiled_library_context_with_base(
     );
     validate_ir_program(library_exprs, &combined_ir, &mut result.errors);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
     validate_polymorphic_op_constraints(library_exprs, &combined_ir, &mut result.errors);
     suppress_unbound_for_cycle_members_against_context(
         library_exprs,
@@ -783,6 +787,7 @@ pub fn check_ir_with_signature_context(
     validate_ir_program(new_exprs, &combined_ir, &mut result.errors);
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(new_exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(new_exprs, &mut result.errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
     validate_polymorphic_op_constraints(new_exprs, &combined_ir, &mut result.errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
@@ -837,6 +842,7 @@ pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
     let mut result = infer_ir_program_with_env(exprs, &type_env);
     validate_ir_program(exprs, &type_env, &mut result.errors);
     validate_tensor_precisions_in_program(exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(exprs, &mut result.errors);
     validate_polymorphic_op_constraints(exprs, &type_env, &mut result.errors);
     suppress_unbound_for_cycle_members(exprs, &mut result.errors);
     result

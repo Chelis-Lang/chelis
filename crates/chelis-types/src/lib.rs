@@ -6,6 +6,7 @@ pub mod env;
 pub mod errors;
 pub mod fitness;
 pub mod infer;
+pub mod invariants;
 pub mod linearity;
 pub(crate) mod opacity;
 pub(crate) mod pipe_stage;

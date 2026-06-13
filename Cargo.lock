@@ -702,6 +702,7 @@ version = "0.7.21"
 dependencies = [
  "chelis-deep",
  "chelis-macros",
+ "chelis-pred",
  "chelis-surf",
  "serde",
  "thiserror",
