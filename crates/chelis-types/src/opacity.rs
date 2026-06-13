@@ -241,6 +241,40 @@ pub(crate) fn check_ctor_reference(
     check_opaque_use(OpaqueAction::CtorReference, &adt_name, adt_reg, errors)
 }
 
+/// Terminal segment of a binding name: the tail after the last reef
+/// internal-name `__` separator or `.` module separator. Bare lexical
+/// names have no separator, so the terminal is the name itself.
+fn terminal_segment(name: &str) -> &str {
+    name.rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(name)
+}
+
+/// Resolve a reference name to its canonical binding key in `bindings`
+/// (RT-1 F1): reef leaves un-imported cross-module references at their
+/// bare terminal name while the opacity metadata is keyed by the
+/// internal (mangled) name, so an exact lookup misses. Mirror
+/// inference's `lookup_terminal_unique`: prefer an exact match, then
+/// fall back to the UNIQUE binding whose terminal segment equals the
+/// reference's terminal segment. Terminal ambiguity yields `None`
+/// (fail-open) -- which matches inference, since an ambiguous bare
+/// reference does not resolve cleanly there either.
+fn resolve_binding_key<'a>(
+    name: &str,
+    bindings: &'a std::collections::HashMap<String, String>,
+) -> Option<&'a str> {
+    if let Some((key, _)) = bindings.get_key_value(name) {
+        return Some(key.as_str());
+    }
+    let target = terminal_segment(name);
+    let mut matches = bindings
+        .keys()
+        .filter(|key| terminal_segment(key) == target);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first.as_str())
+}
+
 /// The sixth rejection (RT-0 C2, broadened in RFC v3): a reference to
 /// an unexported binding of an opaque-defining module whose signature
 /// mentions the opaque type. `ty` is the reference's resolved type
@@ -254,7 +288,10 @@ pub(crate) fn check_unexported_reference(
     errors: &mut Vec<CheckError>,
 ) -> bool {
     let error = with_context(|ctx| {
-        let def_mod = ctx.meta.bindings.get(name)?;
+        // RT-1 F1: canonicalize the reference to its binding key
+        // (handles reef bare un-imported references), then attribute.
+        let binding_key = resolve_binding_key(name, &ctx.meta.bindings)?;
+        let def_mod = ctx.meta.bindings.get(binding_key)?;
         if ctx.current_module.as_deref() == Some(def_mod.as_str()) {
             return None;
         }
@@ -262,7 +299,7 @@ pub(crate) fn check_unexported_reference(
             .meta
             .exports
             .get(def_mod)
-            .is_some_and(|set| set.contains(name))
+            .is_some_and(|set| set.contains(binding_key))
         {
             return None;
         }
@@ -276,7 +313,12 @@ pub(crate) fn check_unexported_reference(
         opaque_types.sort_unstable();
         for type_name in opaque_types {
             if type_mentions_adt(ty, type_name, adt_reg) {
-                return Some(unexported_reference_error(ctx, name, type_name, def_mod));
+                return Some(unexported_reference_error(
+                    ctx,
+                    binding_key,
+                    type_name,
+                    def_mod,
+                ));
             }
         }
         None

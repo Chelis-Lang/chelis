@@ -137,6 +137,45 @@ def probability(x: f32) -> Probability = Probability { value: x }
 macro forge_prob(x) = Probability { value: x }
 ";
 
+/// Defining module for the sixth-rejection reef surface (RT-1 F1):
+/// exported producer/reader plus an UNEXPORTED `raw_make` whose
+/// signature mentions the opaque type.
+const REEF_SIXTH_TYPES_CH: &str = "module Demo.Types
+export (probability, prob_value)
+@opaque
+type Probability =
+  | Probability { value: f32 }
+def probability(x: f32) -> Probability = Probability { value: x }
+def prob_value(p: Probability) -> f32 = p.value
+def raw_make(x: f32) -> Probability = Probability { value: x }
+";
+
+fn assert_reef_sixth_rejection(json: &Value) {
+    let errors = errors_of(json);
+    let violations = opaque_violations(&errors);
+    assert_eq!(
+        violations.len(),
+        1,
+        "expected exactly one OpaqueTypeViolation, got: {errors:?}"
+    );
+    let msg = violations[0]
+        .get("message")
+        .and_then(Value::as_str)
+        .expect("violation message");
+    assert!(
+        msg.contains("reference to unexported binding"),
+        "message must name the sixth-rejection action: {msg}"
+    );
+    assert!(
+        msg.contains("raw_make"),
+        "message must name the unexported binding: {msg}"
+    );
+    assert!(
+        msg.contains("Probability"),
+        "message must name the opaque type: {msg}"
+    );
+}
+
 // ── `.dp` lexical encoding through `chelis check` ────────────────
 
 #[test]
@@ -342,6 +381,126 @@ def sneak(x: f32) -> f32 = {
         .stdout
         .clone();
     assert_reef_violation(&check_json(&output));
+}
+
+// ── Sixth rejection on the reef package surface (RT-1 F1) ────────
+
+#[test]
+fn check_reef_rejects_unexported_producer_reference_bare_call() {
+    // RT-1 F1 primary probe: `attack.ch` imports only the exported
+    // reader and calls the UNEXPORTED `raw_make` by its bare name
+    // (un-imported cross-module reference). The sixth rejection must
+    // fire -- W1 fail-opened here because reef leaves un-imported
+    // references at their bare terminal name while the opacity
+    // metadata is keyed by the internal (mangled) name.
+    let (_dir, pkg) = reef_package(&[
+        ("types.ch", REEF_SIXTH_TYPES_CH),
+        (
+            "attack.ch",
+            "module Demo.Attack
+import Demo.Types (prob_value)
+def attack(x: f32) -> f32 = prob_value(raw_make(x))
+",
+        ),
+    ]);
+    let output = chelis()
+        .current_dir(&pkg)
+        .args(["check", pkg.join("src/attack.ch").to_str().unwrap()])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    assert_reef_sixth_rejection(&check_json(&output));
+}
+
+#[test]
+fn check_reef_rejects_unexported_producer_reference_imported() {
+    // RT-1 F1 import-shape variant: same-package imports admit
+    // non-exported names, so `attack.ch` can `import` the unexported
+    // `raw_make`. The reference is then rewritten to the internal
+    // name; the sixth rejection must still fire (attribution must be
+    // independent of import shape).
+    let (_dir, pkg) = reef_package(&[
+        ("types.ch", REEF_SIXTH_TYPES_CH),
+        (
+            "attack.ch",
+            "module Demo.Attack
+import Demo.Types (prob_value, raw_make)
+def attack(x: f32) -> f32 = prob_value(raw_make(x))
+",
+        ),
+    ]);
+    let output = chelis()
+        .current_dir(&pkg)
+        .args(["check", pkg.join("src/attack.ch").to_str().unwrap()])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    assert_reef_sixth_rejection(&check_json(&output));
+}
+
+#[test]
+fn build_reef_rejects_unexported_producer_reference() {
+    // RT-1 F1: the same bare-call attack must also be rejected by
+    // `chelis build` (RT-1 confirmed it emitted C in W1).
+    let (_dir, pkg) = reef_package(&[
+        ("types.ch", REEF_SIXTH_TYPES_CH),
+        (
+            "attack.ch",
+            "module Demo.Attack
+import Demo.Types (prob_value)
+def attack(x: f32) -> f32 = prob_value(raw_make(x))
+",
+        ),
+    ]);
+    let out_dir = pkg.join("out");
+    let assert = chelis()
+        .current_dir(&pkg)
+        .args([
+            "build",
+            pkg.join("src/attack.ch").to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    assert!(
+        stderr.contains("OpaqueTypeViolation"),
+        "build must fail on the unexported-producer reference, stderr: {stderr}"
+    );
+}
+
+#[test]
+fn check_reef_exported_producer_reference_stays_clean() {
+    // Negative parity: the exported producer/reader pair is callable
+    // from another module in the same package without any violation.
+    let (_dir, pkg) = reef_package(&[
+        ("types.ch", REEF_SIXTH_TYPES_CH),
+        (
+            "user.ch",
+            "module Demo.User
+import Demo.Types (probability, prob_value)
+def fine(x: f32) -> f32 = prob_value(probability(x))
+",
+        ),
+    ]);
+    let output = chelis()
+        .current_dir(&pkg)
+        .args(["check", pkg.join("src/user.ch").to_str().unwrap()])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json = check_json(&output);
+    assert!(
+        errors_of(&json).is_empty(),
+        "exported producer/reader references must stay clean: {json}"
+    );
 }
 
 // ── `chelis build` rejects the violation ─────────────────────────
