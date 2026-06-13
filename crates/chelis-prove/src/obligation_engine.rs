@@ -1149,7 +1149,9 @@ fn validate_with_predicate(
 ) -> bool {
     let hash: std::collections::HashMap<String, f64> =
         env.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    crate::concrete_eval::eval_bool(predicate, &hash)
+    // STRICT validation (CR-2 / CR-5 / CR-10): the produced value's
+    // invariant is checked with exact `==`/`!=`, never the fuzz tolerance.
+    crate::concrete_eval::eval_bool_strict(predicate, &hash)
 }
 
 fn node_def(name: &str, body: Expr) -> Expr {
