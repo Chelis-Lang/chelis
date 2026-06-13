@@ -6950,7 +6950,14 @@ fn build_opacity_meta(
                 other => other,
             };
             if crate::opacity::type_mentions_adt(result, adt_name, adt_reg) {
-                entries.insert(format!("{name}: {sig}"));
+                // RT-1 F3: store the producer entry de-mangled so the
+                // reef surface renders `probability: (f32) -> Probability`
+                // rather than the internal `pkg__...` names.
+                entries.insert(format!(
+                    "{}: {}",
+                    crate::opacity::demangle_ident(name),
+                    crate::opacity::demangle_type(sig)
+                ));
             }
         }
         if !entries.is_empty() {

@@ -444,6 +444,16 @@ outside its defining module `stats.prob`; exported producers of
 `stats.prob`: probability: (f32) -> Probability
 ```
 
+On the reef package surface the message renders user-facing
+(de-mangled) names, not the package linker's internal
+`Pkg__<pkg>__<Module>__<Name>` forms: type, def, binding, and producer
+identifiers show their trailing user-written segment, and the defining
+module shows its source module path (`Demo.Types`) with the package
+prefix stripped. The same out-of-module construction in a package
+named `opq` reads `in def `bad`: ... opaque type `Probability` ...
+defining module `Demo.Types`; exported producers of `Demo.Types`:
+probability: (f32) -> Probability`.
+
 **Solver-free.** Opacity is a module-identity check inside ordinary
 inference. `chelis check` stays solver-free: the optional declared
 invariant (RFC D-WF and later workstreams) is never evaluated by the

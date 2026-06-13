@@ -38,6 +38,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   bare un-imported cross-module references in reef packages (the
   reference is canonicalized to its binding key the way inference
   resolves it).
+  Reef-surface violation messages render user-facing (de-mangled)
+  type/module/producer/def names instead of the internal
+  `Pkg__<pkg>__<Module>__<Name>` forms.
 
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep

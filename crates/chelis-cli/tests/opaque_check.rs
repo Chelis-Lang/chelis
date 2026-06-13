@@ -188,17 +188,13 @@ fn assert_reef_sixth_rejection(json: &Value) {
         .get("message")
         .and_then(Value::as_str)
         .expect("violation message");
-    assert!(
-        msg.contains("reference to unexported binding"),
-        "message must name the sixth-rejection action: {msg}"
+    assert_eq!(
+        msg, EXPECTED_REEF_SIXTH_MSG,
+        "reef sixth-rejection message must be de-mangled and byte-exact"
     );
     assert!(
-        msg.contains("raw_make"),
-        "message must name the unexported binding: {msg}"
-    );
-    assert!(
-        msg.contains("Probability"),
-        "message must name the opaque type: {msg}"
+        !msg.contains("pkg__") && !msg.contains("Pkg__"),
+        "message must not leak any mangled reef name: {msg}"
     );
 }
 
@@ -260,6 +256,21 @@ fn check_dp_passes_inside_defining_module() {
 
 // ── Reef package encoding (two files + reef.toml) ────────────────
 
+/// RT-1 F3: the reef-surface message renders fully de-mangled names
+/// (def `sneak`, type `Probability`, module `Demo.Types`, producer
+/// `probability: (f32) -> Probability`), NOT the internal
+/// `pkg__opq__Demo__Types__...` forms. Exact-message assertion.
+const EXPECTED_REEF_CONSTRUCTION_MSG: &str = "in def `sneak`: record construction of opaque type \
+     `Probability` outside its defining module `Demo.Types`; exported producers of \
+     `Demo.Types`: probability: (f32) -> Probability";
+
+/// RT-1 F1 + F3: de-mangled sixth-rejection message for `raw_make`.
+/// `prob_value` is exported but returns f32 (its RESULT does not
+/// mention the opaque type), so it is not a producer.
+const EXPECTED_REEF_SIXTH_MSG: &str = "in def `attack`: reference to unexported binding \
+     `raw_make` of module `Demo.Types` whose signature mentions opaque type `Probability`; \
+     exported producers of `Demo.Types`: probability: (f32) -> Probability";
+
 fn assert_reef_violation(json: &Value) {
     let errors = errors_of(json);
     let violations = opaque_violations(&errors);
@@ -268,28 +279,17 @@ fn assert_reef_violation(json: &Value) {
         1,
         "expected exactly one OpaqueTypeViolation, got: {errors:?}"
     );
-    // The reef encoding renders the package-linked module identity
-    // (internal-name stem); the byte-exact message contract is pinned
-    // on the lexical encoding in chelis-types/tests/opaque_types.rs.
     let msg = violations[0]
         .get("message")
         .and_then(Value::as_str)
         .expect("violation message");
-    assert!(
-        msg.contains("record construction of opaque type"),
-        "message must name the action: {msg}"
+    assert_eq!(
+        msg, EXPECTED_REEF_CONSTRUCTION_MSG,
+        "reef construction message must be de-mangled and byte-exact"
     );
     assert!(
-        msg.contains("Probability"),
-        "message must name the type: {msg}"
-    );
-    assert!(
-        msg.contains("Types"),
-        "message must name the defining module: {msg}"
-    );
-    assert!(
-        msg.contains("probability"),
-        "message must enumerate the exported producers: {msg}"
+        !msg.contains("pkg__") && !msg.contains("Pkg__"),
+        "message must not leak any mangled reef name: {msg}"
     );
 }
 

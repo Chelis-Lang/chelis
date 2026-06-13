@@ -364,6 +364,68 @@ pub(crate) fn reef_module_stem(name: &str) -> Option<String> {
     Some(module_part.replace("__", "."))
 }
 
+// ── De-mangle reef internal names for display (RT-1 F3) ──────────
+
+/// Best-effort de-mangle of a reef internal identifier for display in
+/// a violation message (RFC v4c). The package linker rewrites names to
+/// `Pkg__<pkg>__<Module>__<Name>` (or the lowercase `pkg__` twin); the
+/// user-facing name is the trailing `<Name>` segment. Lexical
+/// (non-reef) identifiers carry no marker prefix and pass through
+/// unchanged.
+pub(crate) fn demangle_ident(name: &str) -> String {
+    if name.starts_with("Pkg__") || name.starts_with("pkg__") {
+        terminal_segment(name).to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Best-effort de-mangle of a module key for display (RFC v4c). A reef
+/// module key is `<package>.<Module.Path>` where the module path
+/// segments are PascalCase (TypeIdent, spec §3.1) and the package
+/// segments are lowercase; drop the leading package segments. A
+/// lexical module key is fully lowercased by the Surf desugar
+/// (`module Stats.Prob` -> `stats.prob`) and is shown as-is, so a key
+/// with no PascalCase segment is treated as lexical.
+pub(crate) fn demangle_module(key: &str) -> String {
+    let segments: Vec<&str> = key.split('.').collect();
+    let has_pascal = segments
+        .iter()
+        .any(|seg| seg.chars().next().is_some_and(|c| c.is_ascii_uppercase()));
+    if !has_pascal {
+        return key.to_string();
+    }
+    let module: Vec<&str> = segments
+        .iter()
+        .copied()
+        .skip_while(|seg| seg.chars().next().is_none_or(|c| !c.is_ascii_uppercase()))
+        .collect();
+    if module.is_empty() {
+        key.to_string()
+    } else {
+        module.join(".")
+    }
+}
+
+/// De-mangle every ADT name inside a type for display (RT-1 F3), so a
+/// producer signature renders `(f32) -> Probability` rather than
+/// `(f32) -> Pkg__opq__Demo__Types__Probability`.
+pub(crate) fn demangle_type(ty: &Type) -> Type {
+    match ty {
+        Type::Adt(name, args) => Type::Adt(
+            demangle_ident(name),
+            args.iter().map(demangle_type).collect(),
+        ),
+        Type::Fn(args, ret) => Type::Fn(
+            args.iter().map(demangle_type).collect(),
+            Box::new(demangle_type(ret)),
+        ),
+        Type::Tuple(items) => Type::Tuple(items.iter().map(demangle_type).collect()),
+        Type::Ref(inner) => Type::Ref(Box::new(demangle_type(inner))),
+        other => other.clone(),
+    }
+}
+
 // ── Mentions-T containment (RFC v3 sixth rejection) ──────────────
 
 /// True when `ty` mentions the ADT named `target`, with containment
@@ -455,7 +517,7 @@ impl OpaqueAction {
 
 fn location_context(data: &OpacityContextData) -> String {
     match &data.current_decl {
-        Some(decl) => format!("in def `{decl}`"),
+        Some(decl) => format!("in def `{}`", demangle_ident(decl)),
         None => "at top level".to_string(),
     }
 }
@@ -477,7 +539,11 @@ pub(crate) fn violation_error(
     type_name: &str,
     defining_module: &str,
 ) -> CheckError {
+    // RT-1 F3: de-mangle reef internal names for display. The
+    // producer-entry text is stored de-mangled at build time.
     let producers = producers_for(data, type_name);
+    let type_name = demangle_ident(type_name);
+    let defining_module = demangle_module(defining_module);
     CheckError::new(
         CheckErrorKind::OpaqueTypeViolation,
         format!(
@@ -505,7 +571,11 @@ pub(crate) fn unexported_reference_error(
     type_name: &str,
     defining_module: &str,
 ) -> CheckError {
+    // RT-1 F3: de-mangle reef internal names for display.
     let producers = producers_for(data, type_name);
+    let binding = demangle_ident(binding);
+    let type_name = demangle_ident(type_name);
+    let defining_module = demangle_module(defining_module);
     CheckError::new(
         CheckErrorKind::OpaqueTypeViolation,
         format!(
@@ -598,5 +668,44 @@ mod tests {
         );
         assert_eq!(module_key_for_item(None, Some("plain_name")), None);
         assert_eq!(module_key_for_item(None, None), None);
+    }
+
+    #[test]
+    fn demangle_ident_strips_marker_else_passthrough() {
+        assert_eq!(
+            demangle_ident("Pkg__opq__Demo__Types__Probability"),
+            "Probability"
+        );
+        assert_eq!(
+            demangle_ident("pkg__opq__Demo__Types__raw_make"),
+            "raw_make"
+        );
+        // Lexical (unmangled) identifiers pass through unchanged.
+        assert_eq!(demangle_ident("Probability"), "Probability");
+        assert_eq!(demangle_ident("raw_make"), "raw_make");
+    }
+
+    #[test]
+    fn demangle_module_strips_package_for_reef_keeps_lexical() {
+        // Reef key: drop the lowercase package segment(s), keep the
+        // PascalCase module path.
+        assert_eq!(demangle_module("opq.Demo.Types"), "Demo.Types");
+        assert_eq!(demangle_module("chelis.std.Std.Test"), "Std.Test");
+        // Lexical (Surf-lowercased) key has no PascalCase segment and
+        // is shown as-is, so existing byte-exact messages are stable.
+        assert_eq!(demangle_module("stats.prob"), "stats.prob");
+    }
+
+    #[test]
+    fn demangle_type_rewrites_adt_names_in_signatures() {
+        use crate::types::Prim;
+        let ty = Type::Fn(
+            vec![Type::Prim(Prim::F32)],
+            Box::new(Type::Adt(
+                "Pkg__opq__Demo__Types__Probability".to_string(),
+                vec![],
+            )),
+        );
+        assert_eq!(demangle_type(&ty).to_string(), "(f32) -> Probability");
     }
 }
