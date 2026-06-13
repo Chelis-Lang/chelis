@@ -1,0 +1,26 @@
+(module {}
+  stats.prob
+  (export {} probability prob_value)
+  (deftype {opaque: true}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32))))
+  (defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    probability
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Probability (kv {} value (var {} x)))))
+  (defsig {} prob_value (t-fn {} (t-adt {} Probability) (t-prim {} f32)))
+  (def {}
+    prob_value
+    (fn {}
+      (params {} (p {type: (t-adt {} Probability)}))
+      (access {} (var {} p) value))))
+(module {}
+  agent.x
+  (def {}
+    tweak
+    (fn {}
+      (params {} (p {type: (t-adt {} Probability)}) (x {type: (t-prim {} f32)}))
+      (record-update {} (var {} p) (kv {} value (var {} x))))))

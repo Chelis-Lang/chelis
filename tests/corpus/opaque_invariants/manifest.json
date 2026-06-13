@@ -1,0 +1,599 @@
+{
+  "check_count": 24,
+  "program_count": 40,
+  "programs": [
+    {
+      "expect_exit": 2,
+      "filename": "check_decl_opaque_no_module.ch",
+      "id": "check_decl_opaque_no_module",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "@opaque outside a named enclosing module (declaration error)",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:requires a named enclosing module"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_duplicate_definition.dp",
+      "id": "check_duplicate_definition",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "two deftypes with the same name (duplicate-deftype lock)",
+      "prove_args": [],
+      "targets": [
+        "DuplicateDefinition"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_duplicate_module.dp",
+      "id": "check_duplicate_module",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "a named module opened by more than one wrapper (RT-1 F2)",
+      "prove_args": [],
+      "targets": [
+        "DuplicateModule"
+      ]
+    },
+    {
+      "expect_exit": 0,
+      "filename": "check_pos_inside_module.dp",
+      "id": "check_pos_inside_module",
+      "kind_positive": true,
+      "lane": "check",
+      "note": "clean inside-module opaque construction + read (positive)",
+      "prove_args": [],
+      "targets": [
+        "pos:check_clean"
+      ]
+    },
+    {
+      "expect_exit": 0,
+      "filename": "check_pos_valid_invariant.ch",
+      "id": "check_pos_valid_invariant",
+      "kind_positive": true,
+      "lane": "check",
+      "note": "well-formed invariant-carrying opaque module checks clean (positive)",
+      "prove_args": [],
+      "targets": [
+        "pos:check_clean"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_cast_into.dp",
+      "id": "check_rej_cast_into",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "out-of-module cast-into the opaque ADT",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:cast"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_ctor_app.dp",
+      "id": "check_rej_ctor_app",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "out-of-module positional constructor application",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:constructor application"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_ctor_ref.dp",
+      "id": "check_rej_ctor_ref",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "out-of-module bare constructor reference (binding is hidden)",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:constructor"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_field_access.dp",
+      "id": "check_rej_field_access",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "out-of-module field access of an opaque value",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:field access"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_lit_forge.dp",
+      "id": "check_rej_lit_forge",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "out-of-module lit forging an opaque-typed literal",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:literal ascription"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_pat_ctor.dp",
+      "id": "check_rej_pat_ctor",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "out-of-module positional constructor pattern",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:constructor pattern"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_pat_record.dp",
+      "id": "check_rej_pat_record",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "out-of-module record-pattern match on an opaque scrutinee",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:record pattern"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_record.dp",
+      "id": "check_rej_record",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "out-of-module record literal construction of an opaque type",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:record construction"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_record_update.dp",
+      "id": "check_rej_record_update",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "out-of-module record-update of an opaque value",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:record update"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_rej_sixth_unexported.dp",
+      "id": "check_rej_sixth_unexported",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "sixth rejection: out-of-module ref to an unexported T-mentioning binding",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:unexported binding"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_reserved_linker_name.dp",
+      "id": "check_reserved_linker_name",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "hand-authored reef-internal mangled-name forge (RFC v5)",
+      "prove_args": [],
+      "targets": [
+        "ReservedLinkerName"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_wf_amenability_mismatch.dp",
+      "id": "check_wf_amenability_mismatch",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "recorded amenability differs from the recomputed classification",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:records amenability"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_wf_free_var.dp",
+      "id": "check_wf_free_var",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "predicate references a free var that is not the binder/a constant",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:which is not the"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_wf_grammar.dp",
+      "id": "check_wf_grammar",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "predicate calls a non-whitelisted function (grammar violation)",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:outside the predicate grammar"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_wf_invariant_no_opaque.dp",
+      "id": "check_wf_invariant_no_opaque",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "@invariant without @opaque is a declaration error",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:requires `@opaque`"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_wf_missing_amenability.dp",
+      "id": "check_wf_missing_amenability",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "invariant present but the invariant_amenability key is absent",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:missing the"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_wf_non_boolean.dp",
+      "id": "check_wf_non_boolean",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "predicate top is arithmetic, not boolean-shaped",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:boolean predicate at the top"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_wf_two_variants.dp",
+      "id": "check_wf_two_variants",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "invariant-carrying opaque type with two variants (must be one record)",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:exactly one"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "check_wf_value_class.dp",
+      "id": "check_wf_value_class",
+      "kind_positive": false,
+      "lane": "check",
+      "note": "invariant field outside the V1 value class (generic container)",
+      "prove_args": [],
+      "targets": [
+        "OpaqueTypeViolation",
+        "wf:value class"
+      ]
+    },
+    {
+      "expect_exit": 3,
+      "filename": "prove_error_alias_record_field.ch",
+      "id": "prove_error_alias_record_field",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "covered-or-rejected: type-alias record field (RT-3 critical)",
+      "prove_args": [],
+      "targets": [
+        "status:error",
+        "reason:make_w"
+      ]
+    },
+    {
+      "expect_exit": 3,
+      "filename": "prove_error_caller_receives.ch",
+      "id": "prove_error_caller_receives",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "signature rejection: a caller-receives function-typed param",
+      "prove_args": [],
+      "targets": [
+        "status:error",
+        "reason:with_prob"
+      ]
+    },
+    {
+      "expect_exit": 3,
+      "filename": "prove_error_list_container.ch",
+      "id": "prove_error_list_container",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "covered-or-rejected: List container produces an obligation error",
+      "prove_args": [],
+      "targets": [
+        "status:error",
+        "reason:List"
+      ]
+    },
+    {
+      "expect_exit": 3,
+      "filename": "prove_error_record_wrapper.ch",
+      "id": "prove_error_record_wrapper",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "covered-or-rejected: a non-generic record wrapper (RT-2 critical)",
+      "prove_args": [],
+      "targets": [
+        "status:error",
+        "reason:Wrapper"
+      ]
+    },
+    {
+      "expect_exit": 3,
+      "filename": "prove_error_type_broken.ch",
+      "id": "prove_error_type_broken",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "type-broken module: prove surfaces a check Error, never a silent pass",
+      "prove_args": [],
+      "targets": [
+        "status:check_error",
+        "reason:type-check"
+      ]
+    },
+    {
+      "expect_exit": 1,
+      "filename": "prove_fail_counterexample.ch",
+      "id": "prove_fail_counterexample",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "non-validating constructor obligation fails with a counterexample",
+      "prove_args": [],
+      "targets": [
+        "status:failed"
+      ]
+    },
+    {
+      "expect_exit": 1,
+      "filename": "prove_inject_false_fails.ch",
+      "id": "prove_inject_false_fails",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "injection generates valid binders but does not make a false property true",
+      "prove_args": [
+        "--only",
+        "too_strong",
+        "--samples",
+        "80"
+      ],
+      "targets": [
+        "inject:false_fails"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "prove_inject_free_not_injected.ch",
+      "id": "prove_inject_free_not_injected",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "an invariant-free opaque binder is not injected (unsupported, exit 2)",
+      "prove_args": [
+        "--only",
+        "tok_bounded",
+        "--samples",
+        "30"
+      ],
+      "targets": [
+        "inject:free_not_injected"
+      ]
+    },
+    {
+      "expect_exit": 0,
+      "filename": "prove_inject_pass.ch",
+      "id": "prove_inject_pass",
+      "kind_positive": true,
+      "lane": "prove",
+      "note": "injection: a property true only under inv(p) passes via injection",
+      "prove_args": [
+        "--only",
+        "bounded",
+        "--samples",
+        "30"
+      ],
+      "targets": [
+        "inject:pass",
+        "pos:prove_clean"
+      ]
+    },
+    {
+      "expect_exit": 0,
+      "filename": "prove_pass_constant_producer.ch",
+      "id": "prove_pass_constant_producer",
+      "kind_positive": true,
+      "lane": "prove",
+      "note": "an exported zero-arg producer (constant-shaped) carries an obligation",
+      "prove_args": [],
+      "targets": [
+        "status:passed",
+        "position:constant"
+      ]
+    },
+    {
+      "expect_exit": 0,
+      "filename": "prove_pass_direct_clamp.ch",
+      "id": "prove_pass_direct_clamp",
+      "kind_positive": true,
+      "lane": "prove",
+      "note": "Direct-position clamping constructor obligation passes",
+      "prove_args": [],
+      "targets": [
+        "status:passed",
+        "pos:prove_clean",
+        "position:Direct"
+      ]
+    },
+    {
+      "expect_exit": 0,
+      "filename": "prove_pass_option_flagship.ch",
+      "id": "prove_pass_option_flagship",
+      "kind_positive": true,
+      "lane": "prove",
+      "note": "Option-position guarded constructor obligation passes (flagship)",
+      "prove_args": [],
+      "targets": [
+        "status:passed",
+        "pos:prove_clean",
+        "position:Option"
+      ]
+    },
+    {
+      "expect_exit": 0,
+      "filename": "prove_pass_tuple.ch",
+      "id": "prove_pass_tuple",
+      "kind_positive": true,
+      "lane": "prove",
+      "note": "tuple-component producer obligation is discovered and passes",
+      "prove_args": [],
+      "targets": [
+        "status:passed",
+        "pos:prove_clean",
+        "position:tuple"
+      ]
+    },
+    {
+      "expect_exit": 0,
+      "filename": "prove_perf_many_producers.ch",
+      "id": "prove_perf_many_producers",
+      "kind_positive": true,
+      "lane": "prove",
+      "note": "40 exported producers; perf-sanity + obligation accounting",
+      "prove_args": [],
+      "targets": [
+        "perf:many_producers"
+      ]
+    },
+    {
+      "expect_exit": 2,
+      "filename": "prove_starve_exact_eq.ch",
+      "id": "prove_starve_exact_eq",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "exact float == starves both tiers => Unsupported with shape diagnostic",
+      "prove_args": [
+        "--only",
+        "always",
+        "--samples",
+        "10"
+      ],
+      "targets": [
+        "status:unsupported",
+        "starve:equality-atoms",
+        "starve:Tier B",
+        "starve:starvation"
+      ]
+    },
+    {
+      "expect_exit": 3,
+      "filename": "prove_starve_min_rate_zero.ch",
+      "id": "prove_starve_min_rate_zero",
+      "kind_positive": false,
+      "lane": "prove",
+      "note": "--invariant-min-rate 0.0 restores the legacy exhaustion Error path",
+      "prove_args": [
+        "--only",
+        "always",
+        "--samples",
+        "10",
+        "--invariant-min-rate",
+        "0.0"
+      ],
+      "targets": [
+        "starve:legacy_error"
+      ]
+    }
+  ],
+  "prove_count": 16,
+  "schema_version": 1,
+  "targets": [
+    "DuplicateDefinition",
+    "DuplicateModule",
+    "OpaqueTypeViolation",
+    "ReservedLinkerName",
+    "inject:false_fails",
+    "inject:free_not_injected",
+    "inject:pass",
+    "perf:many_producers",
+    "pos:check_clean",
+    "pos:prove_clean",
+    "position:Direct",
+    "position:Option",
+    "position:constant",
+    "position:tuple",
+    "reason:List",
+    "reason:Wrapper",
+    "reason:make_w",
+    "reason:type-check",
+    "reason:with_prob",
+    "starve:Tier B",
+    "starve:equality-atoms",
+    "starve:legacy_error",
+    "starve:starvation",
+    "status:check_error",
+    "status:error",
+    "status:failed",
+    "status:passed",
+    "status:unsupported",
+    "wf:boolean predicate at the top",
+    "wf:cast",
+    "wf:constructor",
+    "wf:constructor application",
+    "wf:constructor pattern",
+    "wf:exactly one",
+    "wf:field access",
+    "wf:literal ascription",
+    "wf:missing the",
+    "wf:outside the predicate grammar",
+    "wf:record construction",
+    "wf:record pattern",
+    "wf:record update",
+    "wf:records amenability",
+    "wf:requires `@opaque`",
+    "wf:requires a named enclosing module",
+    "wf:unexported binding",
+    "wf:value class",
+    "wf:which is not the"
+  ]
+}

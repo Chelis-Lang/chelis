@@ -1,0 +1,10 @@
+(module {}
+  m.dup
+  (deftype {opaque: true}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32))))
+  (deftype {}
+    Probability
+    ()
+    (variant {} Probability (field {} other (t-prim {} f32)))))

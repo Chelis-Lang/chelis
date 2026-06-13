@@ -1,0 +1,10 @@
+(deftype {opaque: true}
+  Pkg__foo__Secret
+  ()
+  (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
+(defsig {} pkg__foo__forge (t-fn {} (t-prim {} f32) (t-adt {} Pkg__foo__Secret)))
+(def {}
+  pkg__foo__forge
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (record {} Pkg__foo__Secret (kv {} value (var {} x)))))
