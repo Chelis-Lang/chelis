@@ -590,6 +590,7 @@ version = "0.7.21"
 dependencies = [
  "chelis-compiler-api",
  "chelis-deep",
+ "chelis-pred",
  "chelis-surf",
  "chelis-types",
  "cvc5-rs",

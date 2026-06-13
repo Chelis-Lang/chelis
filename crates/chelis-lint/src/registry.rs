@@ -32,6 +32,8 @@ pub fn non_blocking_rules() -> Vec<Box<dyn Rule>> {
         Box::new(rules::prefer_pipe_operator::PreferPipeOperator),
         Box::new(rules::opaque_without_invariant::OpaqueWithoutInvariant),
         Box::new(rules::invariant_float_equality::InvariantFloatEquality),
+        Box::new(rules::unreachable_producer::UnreachableProducer),
+        Box::new(rules::opaque_escape_site::OpaqueEscapeSite),
     ]
 }
 

@@ -1,0 +1,472 @@
+//! Producer-obligation collection and synthesis for invariant-carrying
+//! opaque types (RFC D-PRODUCER, D-OBLIG, D-PARITY).
+//!
+//! This module lives in `chelis-prove` so BOTH the CLI prove path and the
+//! chelis-tide MCP path consume one implementation (D-PARITY). It takes a
+//! desugared Deep program, computes the producer set of each
+//! invariant-carrying opaque type from **checker-inferred** return types
+//! (D-PRODUCER: an unannotated exported def cannot escape the set), and
+//! synthesizes one [`ObligationProperty`] per producer. The CLI / tide
+//! layer turns each `ObligationProperty` into a property and runs it
+//! through the same engine as user properties.
+//!
+//! Covered-or-rejected (D-PRODUCER): a producer whose return reaches the
+//! opaque type through an unsupported container (record / list / function
+//! / non-Option generic), or whose exported signature hands a
+//! caller-receives occurrence of the type (the domain of a function-typed
+//! parameter), is an ERROR naming the producer and channel — never a
+//! silent skip, since one uncovered producer collapses D-SOUND.
+
+use std::collections::BTreeSet;
+
+use chelis_deep::ast::{Atom, Expr};
+use chelis_types::types::Type;
+
+use crate::opaque::OpaqueInvariant;
+
+/// Where the opaque type sits in a producer's inferred return type, after
+/// recursive Option/tuple decomposition (RFC D-PRODUCER).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProducedPosition {
+    /// The result is the opaque type directly.
+    Direct,
+    /// The result is `Option[<inner>]`; the inner position decomposes
+    /// recursively.
+    InsideOption(Box<ProducedPosition>),
+    /// The result is a tuple; the listed component indices carry the
+    /// opaque type, each at the given inner position. Components without
+    /// the type are omitted.
+    TupleComponents(Vec<(usize, ProducedPosition)>),
+}
+
+/// Obligation metadata threaded into the proof artifact / JSON (RFC
+/// D-OBLIG). `obligation_kind` is always `"invariant_producer"` in V1.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ObligationMeta {
+    pub obligation_kind: String,
+    pub source_type: String,
+    pub producer: String,
+}
+
+/// A synthesized producer obligation: enough for the CLI / tide layer to
+/// build a property `for all (typed inputs) where the producer succeeds,
+/// inv(every produced value)` and run it (RFC D-OBLIG).
+#[derive(Debug, Clone)]
+pub struct ObligationProperty {
+    /// `invariant:<Type>:<producer>`.
+    pub name: String,
+    /// The opaque type whose invariant is being discharged.
+    pub source_type: String,
+    /// The producer (exported def or constant) under obligation.
+    pub producer: String,
+    /// `true` for a non-function binding (constant) producer; the
+    /// obligation is then over the constant value, with no args.
+    pub is_constant: bool,
+    /// Where the type sits in the producer's return.
+    pub position: ProducedPosition,
+    /// Obligation metadata for the artifact / JSON.
+    pub meta: ObligationMeta,
+}
+
+/// An error in producer-set computation (RFC D-PRODUCER covered-or-rejected
+/// / signature rejection). Each names the offending producer/function and,
+/// where relevant, the channel, with a user-facing message.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ObligationError {
+    #[error(
+        "opaque type `{type_name}`: exported producer `{producer}` returns the type through an unsupported container ({container}); decompose-or-reject (RFC D-PRODUCER)"
+    )]
+    UnsupportedContainer {
+        type_name: String,
+        producer: String,
+        container: String,
+    },
+    #[error(
+        "opaque type `{type_name}`: exported signature `{function}` has a caller-receives occurrence of the type in the {channel}; this would hand caller-supplied code unobligated values (RFC D-PRODUCER signature rejection)"
+    )]
+    CallerReceives {
+        type_name: String,
+        function: String,
+        channel: String,
+    },
+    #[error(
+        "opaque type `{type_name}`: sig-only def `{producer}` in the defining module returns the type but has no body to prove (RFC D-PRODUCER)"
+    )]
+    SigOnlyProducer { type_name: String, producer: String },
+}
+
+/// The result of collecting obligations for one Deep program: the
+/// synthesized obligations plus any covered-or-rejected errors.
+#[derive(Debug, Clone, Default)]
+pub struct ObligationCollection {
+    pub obligations: Vec<ObligationProperty>,
+    pub errors: Vec<ObligationError>,
+}
+
+// ===========================================================================
+// Deep helpers (module / export discovery)
+// ===========================================================================
+
+fn tag(expr: &Expr) -> Option<&str> {
+    if let Expr::List(list, _) = expr
+        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
+    {
+        Some(s.as_str())
+    } else {
+        None
+    }
+}
+
+fn children(expr: &Expr) -> &[Expr] {
+    if let Expr::List(list, _) = expr
+        && list.elements.len() >= 2
+    {
+        &list.elements[2..]
+    } else {
+        &[]
+    }
+}
+
+fn symbol_text(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// The set of exported names across all `(export {} ...)` nodes in the
+/// program (lexical-module wrappers; the prove path does not go through
+/// reef link, so exports survive as lexical `export` decls). A program
+/// with no `export` decl exports nothing (zero producers; the sixth
+/// rejection makes the type fully sealed — D-PRODUCER).
+pub fn collect_exports(exprs: &[Expr]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_exports_in(exprs, &mut out);
+    out
+}
+
+fn collect_exports_in(exprs: &[Expr], out: &mut BTreeSet<String>) {
+    for expr in exprs {
+        if tag(expr) == Some("export") {
+            for child in children(expr) {
+                if let Some(name) = symbol_text(child) {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+        if let Expr::List(list, _) = expr {
+            collect_exports_in(&list.elements[2.min(list.elements.len())..], out);
+        }
+    }
+}
+
+/// Names of defs that have a body (`(def {} name (fn ...))` or
+/// `(def {} name <value>)`), vs sig-only `(defsig {} name <type>)`.
+fn collect_def_bodies(exprs: &[Expr], with_body: &mut BTreeSet<String>) {
+    for expr in exprs {
+        if tag(expr) == Some("def")
+            && let Some(name) = children(expr).first().and_then(symbol_text)
+        {
+            with_body.insert(name.to_string());
+        }
+        if let Expr::List(list, _) = expr {
+            collect_def_bodies(&list.elements[2.min(list.elements.len())..], with_body);
+        }
+    }
+}
+
+/// The DECLARED return type of each `(defsig {} name (t-fn ...))`,
+/// parsed from the Deep type node. Used as the authoritative producer
+/// position when the checker-inferred return loses the opaque type to an
+/// unresolved variable (e.g. a `None`-only body infers `Option[?]` and
+/// drops the `-> Option[Probability]` annotation). The producer set is
+/// the union of inferred-carrying and declared-carrying returns — the
+/// declared annotation is part of the exported contract (RFC D-PRODUCER:
+/// inferred types ensure unannotated defs cannot escape; declared types
+/// remain authoritative where present).
+pub fn collect_declared_returns(exprs: &[Expr]) -> std::collections::BTreeMap<String, Type> {
+    let mut out = std::collections::BTreeMap::new();
+    collect_declared_returns_in(exprs, &mut out);
+    out
+}
+
+fn collect_declared_returns_in(exprs: &[Expr], out: &mut std::collections::BTreeMap<String, Type>) {
+    for expr in exprs {
+        if tag(expr) == Some("defsig")
+            && let Some(name) = children(expr).first().and_then(symbol_text)
+            && let Some(ty_node) = children(expr).get(1)
+            && let Some(Type::Fn(_, ret)) = type_from_deep(ty_node)
+        {
+            out.insert(name.to_string(), *ret);
+        }
+        if let Expr::List(list, _) = expr {
+            collect_declared_returns_in(&list.elements[2.min(list.elements.len())..], out);
+        }
+    }
+}
+
+/// Parse a Deep type node (`t-prim`/`t-adt`/`t-fn`/`t-tuple`/`t-tensor`)
+/// into a [`Type`]. Returns `None` for nodes outside this set. Type
+/// arguments are parsed recursively; unknown leaves become `Type::Error`
+/// (they never match the opaque type by name, so they are inert).
+fn type_from_deep(ty: &Expr) -> Option<Type> {
+    match tag(ty)? {
+        "t-prim" => {
+            // The producer-set logic only matches ADT names; map prims to
+            // a placeholder that never matches an opaque type name.
+            Some(Type::Error)
+        }
+        "t-adt" => {
+            let kids = children(ty);
+            let name = symbol_text(kids.first()?)?.to_string();
+            let args = kids[1..]
+                .iter()
+                .map(|a| type_from_deep(a).unwrap_or(Type::Error))
+                .collect();
+            Some(Type::Adt(name, args))
+        }
+        "t-fn" => {
+            let kids = children(ty);
+            if kids.len() < 2 {
+                return None;
+            }
+            let ret = type_from_deep(kids.last()?)?;
+            let args = kids[..kids.len() - 1]
+                .iter()
+                .map(|a| type_from_deep(a).unwrap_or(Type::Error))
+                .collect();
+            Some(Type::Fn(args, Box::new(ret)))
+        }
+        "t-tuple" => {
+            let items = children(ty)
+                .iter()
+                .map(|a| type_from_deep(a).unwrap_or(Type::Error))
+                .collect();
+            Some(Type::Tuple(items))
+        }
+        _ => Some(Type::Error),
+    }
+}
+
+// ===========================================================================
+// Return-type decomposition (over checker-inferred Type)
+// ===========================================================================
+
+/// Decompose an inferred return [`Type`] for the opaque type `type_name`:
+/// returns the [`ProducedPosition`] if the type is reachable through a
+/// supported container (Direct / Option / tuple, recursively), `Ok(None)`
+/// if the type does not appear at all, or an `Err(container)` naming the
+/// first unsupported container the type is reached through.
+pub fn decompose_return(ty: &Type, type_name: &str) -> Result<Option<ProducedPosition>, String> {
+    match ty {
+        Type::Adt(name, _) if name == type_name => Ok(Some(ProducedPosition::Direct)),
+        Type::Adt(name, args) if name == "Option" => {
+            // Option[inner]: decompose the inner.
+            let inner = args.first().ok_or_else(|| "Option".to_string())?;
+            match decompose_return(inner, type_name)? {
+                Some(pos) => Ok(Some(ProducedPosition::InsideOption(Box::new(pos)))),
+                None => Ok(None),
+            }
+        }
+        Type::Adt(name, _) => {
+            // Any other generic ADT carrying the type is an unsupported
+            // container (covered-or-rejected). A generic NOT carrying the
+            // type is fine (returns None).
+            if type_contains(ty, type_name) {
+                Err(format!("generic `{name}`"))
+            } else {
+                Ok(None)
+            }
+        }
+        Type::Tuple(components) => {
+            let mut positions = Vec::new();
+            for (idx, comp) in components.iter().enumerate() {
+                if let Some(pos) = decompose_return(comp, type_name)? {
+                    positions.push((idx, pos));
+                }
+            }
+            if positions.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(ProducedPosition::TupleComponents(positions)))
+            }
+        }
+        // A bare reference, function, or tensor carrying the type is an
+        // unsupported container if it actually contains the type.
+        Type::Ref(_) if type_contains(ty, type_name) => Err("borrow".to_string()),
+        Type::Fn(_, _) if type_contains(ty, type_name) => Err("function type".to_string()),
+        _ => Ok(None),
+    }
+}
+
+/// Whether a type structurally mentions the named opaque type anywhere.
+pub fn type_contains(ty: &Type, type_name: &str) -> bool {
+    match ty {
+        Type::Adt(name, args) => {
+            name == type_name || args.iter().any(|a| type_contains(a, type_name))
+        }
+        Type::Tuple(items) => items.iter().any(|t| type_contains(t, type_name)),
+        Type::Fn(args, ret) => {
+            args.iter().any(|a| type_contains(a, type_name)) || type_contains(ret, type_name)
+        }
+        Type::Ref(inner) => type_contains(inner, type_name),
+        _ => false,
+    }
+}
+
+/// Whether a parameter type hands the opaque type to caller-supplied code
+/// (RFC D-PRODUCER signature rejection): the DOMAIN of a function-typed
+/// parameter, transitively. A plain type-T parameter, a record parameter
+/// with a T field, or a caller-implemented function whose RETURN contains
+/// T are module-receives positions and stay legal.
+fn caller_receives_in_param(ty: &Type, type_name: &str) -> bool {
+    match ty {
+        // A function-typed parameter: its argument domain is
+        // caller-receives (the module calls back into caller code with a
+        // value of the type). Its return is module-receives (legal).
+        Type::Fn(args, ret) => {
+            args.iter().any(|a| type_contains(a, type_name))
+                || caller_receives_in_param(ret, type_name)
+                || args.iter().any(|a| caller_receives_in_param(a, type_name))
+        }
+        // Containers: recurse, but a bare T or T-in-record is NOT
+        // caller-receives (module-receives, legal).
+        Type::Tuple(items) => items.iter().any(|t| caller_receives_in_param(t, type_name)),
+        Type::Adt(_, args) => args.iter().any(|a| caller_receives_in_param(a, type_name)),
+        Type::Ref(inner) => caller_receives_in_param(inner, type_name),
+        _ => false,
+    }
+}
+
+// ===========================================================================
+// Top-level collection
+// ===========================================================================
+
+/// Collect and synthesize producer obligations for every
+/// invariant-carrying opaque type in a desugared Deep program.
+///
+/// `sigs` maps def-name -> the checker-inferred function/value type
+/// (`FunctionSignatureInference::checked_signature`). The caller obtains
+/// it from `chelis_types::check_typed_program(exprs)`.
+pub fn collect_obligations(
+    exprs: &[Expr],
+    invariants: &[OpaqueInvariant],
+    sigs: &std::collections::BTreeMap<String, Type>,
+) -> ObligationCollection {
+    let exports = collect_exports(exprs);
+    let mut def_bodies = BTreeSet::new();
+    collect_def_bodies(exprs, &mut def_bodies);
+    let declared = collect_declared_returns(exprs);
+
+    let mut col = ObligationCollection::default();
+    for inv in invariants {
+        for name in &exports {
+            let Some(ty) = sigs.get(name) else {
+                // Exported name with no inferred signature: could be a
+                // type/constructor export, not a producer. Skip — only
+                // value/function defs carry obligations.
+                continue;
+            };
+            collect_one(inv, name, ty, declared.get(name), &def_bodies, &mut col);
+        }
+    }
+    col
+}
+
+fn collect_one(
+    inv: &OpaqueInvariant,
+    name: &str,
+    ty: &Type,
+    declared_ret: Option<&Type>,
+    def_bodies: &BTreeSet<String>,
+    col: &mut ObligationCollection,
+) {
+    let type_name = &inv.type_name;
+    match ty {
+        Type::Fn(params, ret) => {
+            // Signature rejection: any function-typed parameter whose
+            // domain receives the type (caller-receives) is a declaration
+            // error (D-PRODUCER signature rejection).
+            for (idx, p) in params.iter().enumerate() {
+                if caller_receives_in_param(p, type_name) {
+                    col.errors.push(ObligationError::CallerReceives {
+                        type_name: type_name.clone(),
+                        function: name.to_string(),
+                        channel: format!("domain of parameter {idx}"),
+                    });
+                    return;
+                }
+            }
+            // Produced positions: decompose-or-reject the return. Prefer
+            // the inferred return; if it does not carry the type but the
+            // DECLARED return does (e.g. a None-only body infers
+            // Option[?] and drops the -> Option[T] annotation), use the
+            // declared return — it is part of the exported contract.
+            let inferred = decompose_return(ret, type_name);
+            let resolved = match &inferred {
+                Ok(None) => match declared_ret {
+                    Some(d) => decompose_return(d, type_name),
+                    None => inferred,
+                },
+                _ => inferred,
+            };
+            match resolved {
+                Ok(Some(position)) => {
+                    if !def_bodies.contains(name) {
+                        col.errors.push(ObligationError::SigOnlyProducer {
+                            type_name: type_name.clone(),
+                            producer: name.to_string(),
+                        });
+                        return;
+                    }
+                    col.obligations
+                        .push(make_obligation(type_name, name, position, false));
+                }
+                Ok(None) => {}
+                Err(container) => col.errors.push(ObligationError::UnsupportedContainer {
+                    type_name: type_name.clone(),
+                    producer: name.to_string(),
+                    container,
+                }),
+            }
+        }
+        // A non-function exported binding whose type contains the type is
+        // a constant producer (RFC D-PRODUCER L4): the obligation is that
+        // the invariant holds of the value.
+        other => match decompose_return(other, type_name) {
+            Ok(Some(position)) => {
+                col.obligations
+                    .push(make_obligation(type_name, name, position, true));
+            }
+            Ok(None) => {}
+            Err(container) => col.errors.push(ObligationError::UnsupportedContainer {
+                type_name: type_name.clone(),
+                producer: name.to_string(),
+                container,
+            }),
+        },
+    }
+}
+
+fn make_obligation(
+    type_name: &str,
+    producer: &str,
+    position: ProducedPosition,
+    is_constant: bool,
+) -> ObligationProperty {
+    ObligationProperty {
+        name: format!("invariant:{type_name}:{producer}"),
+        source_type: type_name.to_string(),
+        producer: producer.to_string(),
+        is_constant,
+        position,
+        meta: ObligationMeta {
+            obligation_kind: "invariant_producer".to_string(),
+            source_type: type_name.to_string(),
+            producer: producer.to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests;

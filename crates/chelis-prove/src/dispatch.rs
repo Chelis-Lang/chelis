@@ -84,6 +84,7 @@ pub fn dispatch_property(
                         status: ProofStatus::Rejected { reason },
                         duration_ms: start.elapsed().as_millis() as u64,
                         smt_status: None,
+                        obligation: None,
                     };
                 }
                 TierAResult::Proved => {
@@ -93,6 +94,7 @@ pub fn dispatch_property(
                         status: ProofStatus::Proved,
                         duration_ms: start.elapsed().as_millis() as u64,
                         smt_status: None,
+                        obligation: None,
                     };
                 }
                 TierAResult::Inconclusive => {}
@@ -107,6 +109,7 @@ pub fn dispatch_property(
             status: ProofStatus::StatisticallyValidated { samples: 0 },
             duration_ms: start.elapsed().as_millis() as u64,
             smt_status: None,
+            obligation: None,
         };
     }
 
@@ -122,6 +125,7 @@ pub fn dispatch_property(
                     },
                     duration_ms: start.elapsed().as_millis() as u64,
                     smt_status: Some(SmtStatus::NotAmenable),
+                    obligation: None,
                 };
             }
         } else {
@@ -135,6 +139,7 @@ pub fn dispatch_property(
                         status: ProofStatus::Proved,
                         duration_ms: start.elapsed().as_millis() as u64,
                         smt_status: Some(SmtStatus::Proved),
+                        obligation: None,
                     };
                 }
                 TierBResult::Disproved(model) => {
@@ -146,6 +151,7 @@ pub fn dispatch_property(
                         },
                         duration_ms: start.elapsed().as_millis() as u64,
                         smt_status: Some(SmtStatus::Disproved),
+                        obligation: None,
                     };
                 }
                 TierBResult::Timeout => {
@@ -156,6 +162,7 @@ pub fn dispatch_property(
                             status: ProofStatus::StatisticallyValidated { samples: 0 },
                             duration_ms: start.elapsed().as_millis() as u64,
                             smt_status: Some(SmtStatus::Timeout),
+                            obligation: None,
                         };
                     }
                     // Fall through to Tier C
@@ -168,6 +175,7 @@ pub fn dispatch_property(
                             status: ProofStatus::StatisticallyValidated { samples: 0 },
                             duration_ms: start.elapsed().as_millis() as u64,
                             smt_status: Some(SmtStatus::Unknown),
+                            obligation: None,
                         };
                     }
                     // Fall through to Tier C
@@ -190,6 +198,7 @@ pub fn dispatch_property(
             status: ProofStatus::StatisticallyValidated { samples: n },
             duration_ms: start.elapsed().as_millis() as u64,
             smt_status: None,
+            obligation: None,
         },
         TierCResult::Failed(counterexample) => ProofArtifact {
             property_name: _property_name.to_string(),
@@ -197,6 +206,7 @@ pub fn dispatch_property(
             status: ProofStatus::Disproved { counterexample },
             duration_ms: start.elapsed().as_millis() as u64,
             smt_status: None,
+            obligation: None,
         },
         TierCResult::Error(reason) => ProofArtifact {
             property_name: _property_name.to_string(),
@@ -204,6 +214,7 @@ pub fn dispatch_property(
             status: ProofStatus::Rejected { reason },
             duration_ms: start.elapsed().as_millis() as u64,
             smt_status: None,
+            obligation: None,
         },
     }
 }
