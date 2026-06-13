@@ -15,13 +15,12 @@
 //!
 //! - division by zero yields `NaN` (the candidate is then rejected by
 //!   the caller, matching the D-WF partial-eval rule for Tier C);
-//! - `==`/`!=` use a `1e-10` tolerance in this *fuzz* evaluator. This is
-//!   the legacy user-property comparison semantics; it is deliberately
-//!   NOT used for invariant-sample acceptance, which validates strictly
-//!   (RFC D-STARVE "exact float equality starves by design"). The
-//!   strict-validation path supplies its own predicate built so that the
-//!   acceptance test is the predicate's own boolean result, never an
-//!   epsilon-relaxed comparison standing in for it.
+//! - `==`/`!=` carry a `1e-10` tolerance ONLY in the fuzz evaluator
+//!   [`eval_bool`] (the user-property postcondition semantics).
+//!   Invariant-sample acceptance uses [`eval_bool_strict`], which compares
+//!   `==`/`!=` exactly (no tolerance), because an epsilon-validated sample
+//!   would weaken exactly the soundness that validation provides (RFC
+//!   D-STARVE "exact float equality starves by design").
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
 use std::collections::HashMap;
@@ -172,15 +171,18 @@ fn eval_arith_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> 
 }
 
 /// Apply a whitelisted unary/binary intrinsic to its already-evaluated
-/// arguments.
+/// arguments. Out-of-grammar names and wrong arity yield `NaN` (the
+/// candidate is then rejected / the predicate is unsatisfied) rather than
+/// panicking on an out-of-bounds index (CR-13): the unary intrinsics now
+/// guard `len == 1` exactly as `min`/`max` guard `len == 2`.
 fn apply_intrinsic(name: &str, a: &[f64]) -> f64 {
     match name {
-        "exp" => a[0].exp(),
-        "log" => a[0].ln(),
-        "sqrt" => a[0].sqrt(),
-        "sin" => a[0].sin(),
-        "cos" => a[0].cos(),
-        "abs" => a[0].abs(),
+        "exp" if a.len() == 1 => a[0].exp(),
+        "log" if a.len() == 1 => a[0].ln(),
+        "sqrt" if a.len() == 1 => a[0].sqrt(),
+        "sin" if a.len() == 1 => a[0].sin(),
+        "cos" if a.len() == 1 => a[0].cos(),
+        "abs" if a.len() == 1 => a[0].abs(),
         "min" if a.len() == 2 => a[0].min(a[1]),
         "max" if a.len() == 2 => a[0].max(a[1]),
         _ => f64::NAN,
@@ -281,5 +283,42 @@ mod tests {
         );
         assert!(eval_bool_strict(&e, &env(&[("value", 0.5)])));
         assert!(!eval_bool_strict(&e, &env(&[("value", 0.5 + 5e-11)])));
+    }
+
+    #[test]
+    fn cr13_zero_arg_intrinsic_does_not_panic() {
+        // CR-13: a malformed predicate with a zero-arg intrinsic
+        // application (`exp()` with no args) must yield NaN / a clean
+        // rejection, never an out-of-bounds index panic on a[0].
+        let e = SmtExpr::Apply("exp".into(), vec![]);
+        assert!(eval_arith(&e, &env(&[])).is_nan(), "zero-arg exp() is NaN");
+        // In boolean position it must also not panic.
+        let cmp = SmtExpr::Cmp(
+            CmpOp::Ge,
+            Box::new(SmtExpr::Apply("sqrt".into(), vec![])),
+            Box::new(SmtExpr::RealLit(0.0)),
+        );
+        // NaN >= 0.0 is false; the point is it returns without panicking.
+        assert!(!eval_bool(&cmp, &env(&[])));
+    }
+
+    #[test]
+    fn cr13_wrong_arity_binary_intrinsic_is_nan() {
+        // min/max already guarded len==2; a one-arg min() must be NaN, not
+        // a panic.
+        let e = SmtExpr::Apply("min".into(), vec![SmtExpr::RealLit(1.0)]);
+        assert!(eval_arith(&e, &env(&[])).is_nan());
+    }
+
+    #[test]
+    fn cr13_correct_arity_intrinsics_still_evaluate() {
+        // Negative-parity: the guard must not break correct calls.
+        let e = SmtExpr::Apply("sqrt".into(), vec![SmtExpr::RealLit(4.0)]);
+        assert_eq!(eval_arith(&e, &env(&[])), 2.0);
+        let m = SmtExpr::Apply(
+            "max".into(),
+            vec![SmtExpr::RealLit(1.0), SmtExpr::RealLit(2.0)],
+        );
+        assert_eq!(eval_arith(&m, &env(&[])), 2.0);
     }
 }
