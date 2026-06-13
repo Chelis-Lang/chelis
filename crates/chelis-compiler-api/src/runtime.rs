@@ -7652,7 +7652,10 @@ type Plain = | Plain { value: f32 }
         }
         // Fail-closed display naming type + invariant.
         let text = err.to_string();
-        assert!(text.contains("Probability"), "message names the type: {text}");
+        assert!(
+            text.contains("Probability"),
+            "message names the type: {text}"
+        );
     }
 
     #[test]

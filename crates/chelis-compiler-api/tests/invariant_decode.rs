@@ -220,8 +220,7 @@ fn just_past_upper_bound_rejected_naming_type_invariant_value() {
 #[test]
 fn below_lower_bound_rejected() {
     let exprs = program_exprs(PROBABILITY_SRC);
-    let err =
-        try_decode_adt_value(&exprs, &prob_payload(-0.5)).expect_err("-0.5 violates >= 0.0");
+    let err = try_decode_adt_value(&exprs, &prob_payload(-0.5)).expect_err("-0.5 violates >= 0.0");
     assert!(matches!(err, DecodeError::Invariant(_)), "got {err:?}");
 }
 
@@ -339,7 +338,10 @@ fn structural_and_invariant_message_prefixes_distinguish() {
         invariant.starts_with("decode rejected for opaque type"),
         "invariant prefix: {invariant}"
     );
-    assert_ne!(structural, invariant, "the two classes are distinct messages");
+    assert_ne!(
+        structural, invariant,
+        "the two classes are distinct messages"
+    );
 }
 
 // ── Nested record with opaque field ───────────────────────────────────────
