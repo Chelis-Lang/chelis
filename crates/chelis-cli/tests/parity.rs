@@ -458,6 +458,11 @@ fn parity_vmap_relu_library_only() {
     drive_parity(&examples_root().join("vmap_relu.ch"), false);
 }
 
+#[test]
+fn parity_rank_poly_borrow_library_only() {
+    drive_parity(&examples_root().join("rank_poly_borrow.ch"), false);
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------
@@ -474,6 +479,7 @@ fn parity_corpus_is_complete() {
         "linreg.ch",
         "list_foundation.ch",
         "mnist.ch",
+        "rank_poly_borrow.ch",
         "scalar_string_foundation.ch",
         "tensor_structural_ops.ch",
         "transformer_block.ch",

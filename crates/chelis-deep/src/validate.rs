@@ -1,6 +1,10 @@
 use crate::ast::Expr;
 
-const VALID_TAGS: &[&str] = &[
+/// Canonical closed Deep tag vocabulary (`spec/03-deep-syntax.md` §2).
+/// This is the single source of truth; `chelis-validate` and
+/// `chelis-lint` mirror it and assert equality against it in tests so the
+/// three copies cannot silently drift.
+pub const VALID_TAGS: &[&str] = &[
     // Module (4)
     "module",
     "import",

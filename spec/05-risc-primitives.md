@@ -94,8 +94,14 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | `recip` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 reciprocal `1.0 / x` | `-g * y * y` (= `-g / x^2`, using `y = 1/x`) |
 | `exp` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise e^x | `g * exp(x)` |
 | `log` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ln(x) | `g / x` |
-| `sin` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sin(x) | `g * cos(x)` where `cos(x) = sin(x + π/2)` |
+| `sin` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sin(x) | `g * cos(x)` |
+| `cos` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise cos(x) | `-g * sin(x)` |
+| `tan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise tan(x) | `g / (cos(x) * cos(x))` (= `g / cos²(x)`) |
+| `atan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise atan(x) | `g / (1 + x * x)` |
 | `sqrt` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sqrt(x) | `g / (2 * sqrt(x))` |
+| `abs` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise absolute value | `g * sign(x)` (sign = `(x > 0) - (x < 0)`; 0 at x = 0) |
+| `floor` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise floor | non-differentiable (piecewise constant); `grad` rejects it |
+| `ceil` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ceil | non-differentiable (piecewise constant); `grad` rejects it |
 
 **`recip`.** Native IEEE-754 reciprocal, used inside
 `lower_sigmoid` (and any other reciprocal-shaped lowering) to
@@ -488,11 +494,13 @@ lowering are aligned.
 ### 3.5 Lowering Helpers And Sparse Implementation Nodes
 
 The following names appear in lowering narratives (§4) as pseudocode or
-pattern-matched operations. Most decompose into Tier 1 primitives:
+pattern-matched operations. Most decompose into Tier 1 primitives.
+(`cos` was formerly listed here as `sin(add(x, const(π/2)))`; it is now a
+first-class unary primitive `RiscOp::Cos` — see §2.2 — alongside `tan`,
+`atan`, `abs`, `floor`, and `ceil`, none of which decompose.)
 
 | Helper | Decomposes to |
 |---|---|
-| `cos(x)` | `sin(add(x, const(π/2)))` |
 | `argmax(x, axis)` | comparison chain via `cmplt` + `max_elem` |
 | `gather(x, idx, axis)` | one-hot encoding via `reshape`, `expand`, `mul`, `sum` |
 | `im2col(x, kh, kw, ...)` | `stride`, `pad`, `reshape`, `permute` |
@@ -824,7 +832,12 @@ Lowering:
 
 Every RISC primitive has a defined adjoint rule (§2). This means `grad` can differentiate through any composition of RISC primitives.
 
-**Non-differentiable primitives:** `cmplt`, `const`, `load`. These have zero gradient. The type system (Phase 2, via the `Diff` effect) will detect when `grad` is applied to a function containing non-differentiable operations and report which operations are the problem.
+**Non-differentiable primitives:** `cmplt`, `const`, `load` have zero gradient.
+`floor` and `ceil` are piecewise constant and `grad` rejects them with an
+`AdRejectionReason::PiecewiseConstant` error rather than silently returning a zero
+gradient. The type system (Phase 2, via the `Diff` effect) will detect when `grad` is
+applied to a function containing non-differentiable operations and report which
+operations are the problem.
 
 **Almost-everywhere differentiable:** `max_elem` (gradient is zero at the boundary where inputs are equal), `relu` via `max_elem(x, 0)` (gradient is zero at x=0). These are valid targets for `grad` — the subgradient convention (pick one side) is standard in ML.
 

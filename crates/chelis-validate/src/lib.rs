@@ -61,11 +61,13 @@ const VALID_TAGS: &[&str] = &[
     "t-tensor",
     "t-adt",
     "t-var",
+    "t-ref",
     "t-unit",
     "t-tuple",
     "d-name",
     "d-var",
     "d-lit",
+    "d-rank",
     "grad",
     "vmap",
     "jit",
@@ -328,7 +330,35 @@ fn validate_effects_children(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_deep, validate_desugared, validate_surf};
+    use super::{VALID_TAGS, validate_deep, validate_desugared, validate_surf};
+    use std::collections::HashSet;
+
+    #[test]
+    fn valid_tags_match_canonical_deep_vocabulary() {
+        // The Phase 1f executable-grammar validator must accept exactly the
+        // tags the compiler's strict parser accepts. A drift here means
+        // `chelis validate` rejects shipped canonical Deep (this is how the
+        // `t-ref`/`d-rank` rank-polymorphism tags were initially missed).
+        let local: HashSet<&str> = VALID_TAGS.iter().copied().collect();
+        let canonical: HashSet<&str> = chelis_deep::validate::VALID_TAGS.iter().copied().collect();
+        let missing: Vec<&&str> = canonical.difference(&local).collect();
+        let extra: Vec<&&str> = local.difference(&canonical).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "chelis-validate VALID_TAGS drifted from chelis_deep::validate::VALID_TAGS.\n  \
+             missing (in compiler vocabulary, not in validator): {missing:?}\n  \
+             extra (in validator, not in compiler vocabulary): {extra:?}"
+        );
+    }
+
+    #[test]
+    fn deep_accepts_rank_polymorphic_borrow_annotation() {
+        // `&tensor[..r, f32]` desugars to `(t-ref {} (t-tensor {} (d-rank {} r) ...))`.
+        // Both `t-ref` and `d-rank` must be in the vocabulary.
+        let source = "(defsig {} f (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
+        validate_deep(source)
+            .expect("validator should accept canonical t-ref / d-rank rank-polymorphic Deep");
+    }
 
     #[test]
     fn surf_accepts_top_level_binding_program() {

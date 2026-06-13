@@ -505,7 +505,7 @@ Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named
 | Operation | Input type(s) | Output type | Dimension rule |
 |---|---|---|---|
 | `add`, `mul`, `max_elem` | `tensor[D, p]`, `tensor[D, p]` | `tensor[D, p]` | Dimensions must match exactly |
-| `neg`, `exp`, `log`, `sin`, `sqrt` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved |
+| `neg`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `sqrt`, `abs`, `floor`, `ceil` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved |
 | `sum(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Remove dimension at axis k |
 | `max_reduce(x, axis=k)` | same as sum | same as sum | same as sum |
 | `reshape(x, shape)` | `tensor[D_old, p]` | `tensor[D_new, p]` | Product of dims must match. New dims are `d-lit` or `d-name` (user-specified) |
@@ -1157,7 +1157,7 @@ Operations accept same-precision operands only. The table of valid combinations:
 | Arithmetic (add, mul, sub, div) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
 | Comparison (cmplt, eq) | any numeric (same precision) → bool |
 | Logical (and, or, not) | bool only |
-| Transcendental (exp, log, sin, sqrt) | f32, f64, bf16, f16 only (not integer) |
+| Transcendental (exp, log, sin, cos, tan, atan, sqrt) | f32, f64, bf16, f16 only (not integer) |
 
 `f8e4m3` is deferred (§1.1.1) and is not a valid arithmetic precision in any
 row. Unsigned integer types are out of scope (§1.1.2) and never appear in any
