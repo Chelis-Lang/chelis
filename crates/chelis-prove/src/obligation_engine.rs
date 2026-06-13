@@ -94,14 +94,27 @@ impl Default for ObligationRunOptions {
     }
 }
 
+/// The result of an obligation run from module source.
+#[derive(Debug, Clone)]
+pub enum ObligationRunResult {
+    /// The module type-checked; obligations were collected and run.
+    Ran(Vec<ObligationOutcome>),
+    /// The module did NOT type-check. Obligation verification is
+    /// meaningless on a type-broken module (a rejectable producer can be
+    /// hidden behind an unrelated type error), so prove surfaces the check
+    /// diagnostics and is an Error -- never silent success (RT3-F2).
+    CheckFailed(Vec<String>),
+}
+
 /// Run obligations directly from module SOURCE (Surf `.ch` text). This is
-/// the entry the chelis-tide MCP tool calls: it desugars, runs the
-/// checker for inferred return types, then runs the same engine the CLI
-/// uses (RFC D-PARITY). Returns `Err` if the source does not parse.
+/// the entry the chelis-tide MCP tool and the CLI call: it desugars, runs
+/// the checker for inferred return types, then runs the same engine
+/// (RFC D-PARITY). Returns `Err` if the source does not parse;
+/// `Ok(CheckFailed)` if it does not type-check; `Ok(Ran(..))` otherwise.
 pub fn run_surf_source_obligations(
     source: &str,
     options: &ObligationRunOptions,
-) -> Result<Vec<ObligationOutcome>, String> {
+) -> Result<ObligationRunResult, String> {
     let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
     let exprs = chelis_surf::desugar::desugar_program(&decls);
     let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
@@ -111,10 +124,22 @@ pub fn run_surf_source_obligations(
             .iter()
             .map(|(n, s)| (n.clone(), s.checked_signature.clone()))
             .collect(),
-        // Type errors: no obligations (the check surface reports them).
-        Err(_) => BTreeMap::new(),
+        // A type-broken module cannot have its obligations meaningfully
+        // verified: the checker-inferred sigs are unavailable, so the
+        // producer set would be empty and a violating producer hidden.
+        // Surface the check diagnostics as a CheckFailed result (RT3-F2).
+        Err(infer) => {
+            let messages = infer
+                .errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>();
+            return Ok(ObligationRunResult::CheckFailed(messages));
+        }
     };
-    Ok(run_module_obligations(&exprs, &sigs, options))
+    Ok(ObligationRunResult::Ran(run_module_obligations(
+        &exprs, &sigs, options,
+    )))
 }
 
 /// Run all derived producer obligations of a desugared Deep program.

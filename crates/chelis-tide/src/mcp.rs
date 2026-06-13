@@ -323,12 +323,26 @@ fn handle_prove_tool(args: &Value) -> Value {
             .and_then(Value::as_f64)
             .unwrap_or(0.01),
     };
+    // Derived obligations. A type-broken module surfaces a check-failure
+    // record rather than silently reporting zero obligations (RT3-F2).
+    use chelis_prove::obligation_engine::ObligationRunResult;
     let obligation_records: Vec<serde_json::Value> =
-        chelis_prove::obligation_engine::run_surf_source_obligations(&source, &ob_options)
-            .unwrap_or_default()
-            .into_iter()
-            .map(obligation_to_json)
-            .collect();
+        match chelis_prove::obligation_engine::run_surf_source_obligations(&source, &ob_options) {
+            Ok(ObligationRunResult::Ran(outcomes)) => {
+                outcomes.into_iter().map(obligation_to_json).collect()
+            }
+            Ok(ObligationRunResult::CheckFailed(messages)) => vec![json!({
+                "kind": "error",
+                "stage": "check",
+                "reason": "module does not type-check; obligations not verified",
+                "diagnostics": messages,
+            })],
+            Err(message) => vec![json!({
+                "kind": "error",
+                "stage": "parse",
+                "reason": message,
+            })],
+        };
     let obligations_count = obligation_records.len();
 
     json!({

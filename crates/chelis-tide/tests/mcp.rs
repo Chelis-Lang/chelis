@@ -237,11 +237,15 @@ fn tide_runs_obligations_via_shared_engine() {
         .clone();
 
     // Shared-engine path (what the CLI also calls).
-    let engine_out = chelis_prove::obligation_engine::run_surf_source_obligations(
+    let engine_out = match chelis_prove::obligation_engine::run_surf_source_obligations(
         OPAQUE_MODULE,
         &chelis_prove::obligation_engine::ObligationRunOptions::default(),
     )
-    .expect("engine run");
+    .expect("engine run")
+    {
+        chelis_prove::obligation_engine::ObligationRunResult::Ran(o) => o,
+        other => panic!("expected a clean module to run, got {other:?}"),
+    };
 
     // Same obligation set: same names.
     let tide_names: Vec<&str> = tide_obs

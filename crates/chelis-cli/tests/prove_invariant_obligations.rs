@@ -237,6 +237,65 @@ def t_value(p: T) -> f32 = p.value
     );
 }
 
+fn errors(records: &[Value]) -> Vec<&Value> {
+    records
+        .iter()
+        .filter(|r| r.get("kind").and_then(Value::as_str) == Some("error"))
+        .collect()
+}
+
+#[test]
+fn rt3_f2_type_broken_module_is_error_not_silent_pass() {
+    // RT3-F2 HIGH: a module with an unrelated type error wiped the
+    // checker-inferred sigs, so the producer set was empty and a VIOLATING
+    // producer (bad_prob) was hidden behind exit 0. A type-broken module
+    // cannot have its obligations meaningfully verified -> Error (exit 3),
+    // surfacing the check diagnostics, never silent success.
+    let source = "module Stats.Prob
+export (bad_prob)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability = | Probability { value: f32 }
+def bad_prob(x: f32) -> Probability = Probability { value: x }
+def broken(x: f32) -> f32 = to_tensor([x])
+";
+    let (code, records) = prove_json(source, &[]);
+    assert_eq!(code, 3, "type-broken module => Error, not silent exit 0");
+    let errs = errors(&records);
+    assert!(!errs.is_empty(), "a check-failure record is surfaced");
+    assert_eq!(errs[0]["stage"], "check");
+    assert!(
+        errs[0]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("type-check"),
+        "names the type-check failure: {}",
+        errs[0]
+    );
+}
+
+#[test]
+fn rt3_f2_control_clean_module_still_runs_obligations() {
+    // The control (no type error): bad_prob is a violating producer and is
+    // correctly disproved (exit 1) -- the F2 fix does not change clean
+    // modules, only type-broken ones.
+    let source = "module Stats.Prob
+export (bad_prob)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability = | Probability { value: f32 }
+def bad_prob(x: f32) -> Probability = Probability { value: x }
+";
+    let (code, records) = prove_json(source, &[]);
+    assert_eq!(
+        code, 1,
+        "clean module with a violating producer fails (exit 1)"
+    );
+    let obs = obligations(&records);
+    assert_eq!(obs.len(), 1);
+    assert_eq!(obs[0]["status"], "failed");
+}
+
 #[test]
 fn unannotated_producer_has_obligation_via_inferred_return() {
     // No `-> Probability`; the inferred return must place it in the set.

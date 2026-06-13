@@ -141,6 +141,14 @@ Exit codes:
 
 Precedence is `3 > 2 > 1 > 0`.
 
+A module that does not type-check is an `Error` (exit `3`): `chelis prove`
+surfaces the check diagnostics and never reports success on a type-broken
+module. Derived producer obligations cannot be meaningfully verified
+without the checker-inferred signatures, so a rejectable producer must not
+be hidden behind an unrelated type error. Strict downstream prove-compat
+admission (FlukeBall) relies on this: a `prove` that exits `0` warrants
+that the module type-checked and every obligation was discharged.
+
 ## JSON Output
 
 `--json` emits NDJSON. Each selected property emits one record, followed by one

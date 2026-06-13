@@ -14,7 +14,7 @@
 #![cfg(feature = "chelis-prove")]
 
 use chelis_prove::obligation_engine::{
-    ObligationOutcome, ObligationRunOptions, ObligationStatus, ObligationTier,
+    ObligationOutcome, ObligationRunOptions, ObligationRunResult, ObligationStatus, ObligationTier,
     run_surf_source_obligations,
 };
 use chelis_surf::ast::Decl;
@@ -43,8 +43,20 @@ pub(super) fn run_obligations(
         invariant_min_rate: options.invariant_min_rate,
     };
     let outcomes = match run_surf_source_obligations(&source, &run_opts) {
-        Ok(o) => o,
-        Err(_) => return Status::Passed,
+        Ok(ObligationRunResult::Ran(o)) => o,
+        // A module that does not type-check cannot have its obligations
+        // meaningfully verified; surface the check diagnostics and Error,
+        // never silent success (RT3-F2). This also affects FlukeBall's
+        // strict prove-compat admission flow.
+        Ok(ObligationRunResult::CheckFailed(messages)) => {
+            emit_check_failure(options, &messages, totals);
+            return Status::Error;
+        }
+        // A genuinely unparseable module is likewise an Error, not a pass.
+        Err(message) => {
+            emit_check_failure(options, std::slice::from_ref(&message), totals);
+            return Status::Error;
+        }
     };
 
     let mut status = Status::Passed;
@@ -53,6 +65,29 @@ pub(super) fn run_obligations(
         status = super::combine_status(status, s);
     }
     status
+}
+
+/// Emit a module type-check failure as a prove error record (RT3-F2). The
+/// check diagnostics are surfaced so the failure is visible, never hidden.
+fn emit_check_failure(options: &ProveOptions<'_>, messages: &[String], totals: &mut Summary) {
+    totals.errors += 1;
+    let joined = messages.join("; ");
+    if options.json {
+        println!(
+            "{}",
+            json!({
+                "kind": "error",
+                "stage": "check",
+                "reason": format!("module does not type-check; obligations not verified: {joined}"),
+                "diagnostics": messages,
+            })
+        );
+    } else {
+        eprintln!("prove error: module does not type-check; obligations not verified:");
+        for m in messages {
+            eprintln!("  - {m}");
+        }
+    }
 }
 
 fn render_outcome(
