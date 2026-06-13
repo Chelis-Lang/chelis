@@ -67,6 +67,32 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   with `--features smt`).
 <!-- end opaque-types W4 -->
 
+<!-- opaque-types W7 (differential corpus + solver-free gate) -->
+- Opaque-invariants differential corpus + solver-free regression gate
+  (design record `spec/design/opaque_invariants_rfc.md` D-CORPUS). An
+  in-tree, mechanically generated corpus
+  (`tests/corpus/opaque_invariants/`) exercises the shipped opaque-types
+  rejection, well-formedness, obligation, injection, and
+  generator-starvation paths across two lanes: a `check` lane (default
+  non-smt binary) and a `prove` lane (`--features smt`). Diagnostic
+  coverage is MEASURED, not assumed: `coverage_runner.py` runs every
+  program against the live binary and fails the gate if any targeted
+  `CheckErrorKind` / well-formedness-message / obligation-status token is
+  hit by zero programs, and pins each program's exit code. The
+  load-bearing deliverable is an executable solver-free regression
+  (`solver_free.py`): the default `chelis` binary links zero cvc5 symbols
+  (the `--features smt` build links ≈ 33k, a discriminating control),
+  `chelis check`s the whole corpus to its pinned exits, and produces
+  byte-identical check verdicts to the smt build — proving `chelis check`
+  reaches no solver. Oracle:
+  `crates/chelis-cli/tests/opaque_corpus_gate.rs` (default gate: solver-free
+  + check-lane coverage) and `crates/chelis-cli/tests/opaque_corpus_smt.rs`
+  (full both-lane coverage + prove performance sanity, run with
+  `--features smt`). The cross-build check-identity arm and Hull-side
+  reference support are documented out-of-default-gate follow-ups in the
+  corpus README.
+<!-- end opaque-types W7 -->
+
 - Checker-enforced opaque types (`@opaque`, renamed from the
   unreleased baseline's `@chelis_opaque`; design record
   `spec/design/opaque_invariants_rfc.md`, normative spec
