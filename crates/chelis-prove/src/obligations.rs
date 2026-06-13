@@ -437,17 +437,27 @@ fn collect_record_fields_in(
                 meta_value(expr, "opaque"),
                 Some(Expr::Atom(Atom::Bool(true), _))
             );
-            if !opaque
-                && let Some(name) = children(expr).first().and_then(symbol_text)
-                && let Some(variant) = children(expr).iter().find(|c| tag(c) == Some("variant"))
-            {
+            if !opaque && let Some(name) = children(expr).first().and_then(symbol_text) {
+                // Collect EVERY variant's payload types, not just the first
+                // (CR-15): a non-first variant wrapping the opaque type
+                // would otherwise be invisible to type_contains. A variant
+                // payload is either a named-record `field` node or a
+                // positional type child.
                 let mut field_types = Vec::new();
-                for field in children(variant).iter().skip(1) {
-                    if tag(field) == Some("field")
-                        && let Some(fty_node) = children(field).get(1)
-                        && let Some(fty) = type_from_deep(fty_node, aliases)
-                    {
-                        field_types.push(fty);
+                for variant in children(expr).iter().filter(|c| tag(c) == Some("variant")) {
+                    for payload in children(variant).iter().skip(1) {
+                        let fty_node = if tag(payload) == Some("field") {
+                            children(payload).get(1)
+                        } else {
+                            // A positional payload: the child IS the type
+                            // node (`(variant {} Some (t-adt {} T))`).
+                            Some(payload)
+                        };
+                        if let Some(node) = fty_node
+                            && let Some(fty) = type_from_deep(node, aliases)
+                        {
+                            field_types.push(fty);
+                        }
                     }
                 }
                 out.insert(name.to_string(), field_types);

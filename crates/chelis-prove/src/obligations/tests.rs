@@ -399,3 +399,81 @@ def make_w(x: f32) -> Outer = Outer { mid: Mid { inner: T { value: 99.0 } } }
         "make_w",
     );
 }
+
+#[test]
+fn cr15_multi_variant_non_first_variant_record_field_is_rejected() {
+    // CR-15 HIGH: a producer returning a MULTI-VARIANT ADT whose NON-FIRST
+    // variant wraps the opaque type in a record field was silently missed
+    // because collect_record_fields recorded only the FIRST variant's
+    // fields. It must be covered-or-rejected, same as the single-variant
+    // wrapper.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper =
+  | Empty { }
+  | Full { inner: T }
+def make_w(x: f32) -> Wrapper = Full { inner: T { value: 99.0 } }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn cr15_multi_variant_non_first_positional_payload_is_rejected() {
+    // The opaque type as a POSITIONAL payload of a non-first variant.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper =
+  | None
+  | Some(T)
+def make_w(x: f32) -> Wrapper = Some(T { value: 99.0 })
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn cr15_multi_variant_non_first_variant_tuple_field_is_rejected() {
+    // The opaque type inside a TUPLE field of a non-first variant.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper =
+  | Empty { }
+  | Pair { both: (T, f32) }
+def make_w(x: f32) -> Wrapper = Pair { both: (T { value: 99.0 }, x) }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn cr15_first_variant_record_field_still_rejected() {
+    // Negative-parity control: the opaque type in the FIRST variant must
+    // also be rejected (it worked before CR-15 too; this guards against a
+    // regression that only handles non-first variants).
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper =
+  | Full { inner: T }
+  | Empty { }
+def make_w(x: f32) -> Wrapper = Full { inner: T { value: 99.0 } }
+",
+        "make_w",
+    );
+}
