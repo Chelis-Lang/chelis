@@ -2930,6 +2930,406 @@ fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<String>> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Decode revalidation (RFC D-DECODE, spec/10 "Invariant revalidation at
+// decode boundaries"). This is the runtime-side machinery: the invariant
+// table built from `deftype` metadata, the representation-sanity pre-check
+// (NaN/Inf rejection, RFC H1), and `revalidate_adt_value`, which evaluates
+// the declared predicate through the interpreter's OWN `eval_expr` (the
+// compiler-api crate does NOT depend on chelis-prove). The public decode
+// chokepoint lives in `crate::decode`; it calls into this machinery.
+// ---------------------------------------------------------------------------
+
+/// A declared opaque-type invariant, recovered from `deftype` metadata.
+///
+/// Keyed (in [`collect_type_invariants`]) by the **variant constructor
+/// name** because [`RuntimeValue::Adt`] carries the constructor, not the
+/// type name, and the reef linker leaves variant names un-mangled
+/// (survey §2). The `fn_node` is the desugared predicate fn the Surf
+/// desugarer embeds verbatim into the metadata
+/// (`(fn {} (params {} <binder>) <body>)`, RFC D-META); evaluating it
+/// requires binding `binder` to the value being checked and running the
+/// interpreter's `eval_expr` on the body.
+#[derive(Debug, Clone)]
+pub(crate) struct InvariantPredicate {
+    /// The opaque type's name (for diagnostics). The ADT value is keyed by
+    /// constructor, but the violation message names the *type*.
+    pub(crate) type_name: String,
+    /// The single predicate binder (e.g. `p`).
+    pub(crate) binder: String,
+    /// The desugared predicate body — element 2 of the embedded
+    /// `(fn {} (params {} <binder>) <body>)` metadata node.
+    pub(crate) body: Expr,
+}
+
+/// A decode-time invariant failure. Distinct from a *structural* decode
+/// error (wrong constructor, missing field, wrong field type), which the
+/// chokepoint reports separately, because the two have different causes:
+/// structural means "this payload is not even shaped like the type,"
+/// invariant means "this payload is shaped correctly but its value is not
+/// admissible." Never a repair — RFC D-DECODE: "Decode of a violating
+/// payload is a failure, never a repair."
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum InvariantViolation {
+    /// A NaN or non-finite value appeared in a numeric representation
+    /// field. Rejected BEFORE predicate evaluation (RFC H1): an
+    /// in-grammar predicate such as `not (p.value > 1.0)` is *true* on
+    /// NaN, so relying on the comparison to fail closed is unsound.
+    NonFiniteRepresentation {
+        type_name: String,
+        field_path: String,
+        detail: String,
+    },
+    /// The declared predicate evaluated to `false` on the value.
+    PredicateFalse {
+        type_name: String,
+        invariant: String,
+        value: String,
+    },
+    /// The declared predicate could not be evaluated to a boolean
+    /// (partiality — division by zero feeding a non-comparison position,
+    /// a domain error in `log`/`sqrt`, or any interpreter error). Per
+    /// RFC D-WF the predicate is pure-by-construction but NOT total, so
+    /// an evaluation error fails the decode rather than being swallowed.
+    PredicateError {
+        type_name: String,
+        invariant: String,
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for InvariantViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InvariantViolation::NonFiniteRepresentation {
+                type_name,
+                field_path,
+                detail,
+            } => write!(
+                f,
+                "decode rejected for opaque type `{type_name}`: representation field `{field_path}` \
+                 holds a non-finite value ({detail}); NaN and Inf are rejected before invariant \
+                 evaluation (fail-closed, RFC D-DECODE H1)"
+            ),
+            InvariantViolation::PredicateFalse {
+                type_name,
+                invariant,
+                value,
+            } => write!(
+                f,
+                "decode rejected for opaque type `{type_name}`: value {value} violates the declared \
+                 invariant `{invariant}`"
+            ),
+            InvariantViolation::PredicateError {
+                type_name,
+                invariant,
+                reason,
+            } => write!(
+                f,
+                "decode rejected for opaque type `{type_name}`: the declared invariant `{invariant}` \
+                 could not be evaluated on the value ({reason})"
+            ),
+        }
+    }
+}
+
+/// Build the invariant table from a program's `deftype` declarations.
+///
+/// Scans every `deftype` carrying an `invariant` metadata entry of the
+/// RFC D-META shape `(fn {} (params {} <binder>) <body>)`, and keys the
+/// resulting [`InvariantPredicate`] by the type's single record-variant
+/// constructor name. Malformed metadata (no fn, no binder, no body) is
+/// skipped rather than panicking: declaration-time well-formedness is the
+/// checker's job (RFC D-WF); revalidation is fail-closed only for values,
+/// and a missing/garbled predicate simply means "no invariant to check
+/// for this constructor" here.
+pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, InvariantPredicate> {
+    let mut out = HashMap::new();
+    for expr in top_level_items(exprs) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("deftype") {
+            continue;
+        }
+        let Some(meta) = get_meta(list) else {
+            continue;
+        };
+        let Some((_, inv_value)) = meta.entries.iter().find(|(key, _)| key == "invariant") else {
+            continue;
+        };
+        let Some((binder, body)) = parse_invariant_fn(inv_value) else {
+            continue;
+        };
+        let kids = children(list);
+        let Some(type_name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        // Key by every record-variant constructor of the type. The RFC's
+        // single-record-variant representation means there is exactly one
+        // in V1, but iterating keeps the table honest if that widens.
+        for variant in kids.iter().skip(2) {
+            let Some(variant_list) = as_list(variant) else {
+                continue;
+            };
+            if tag(variant_list) != Some("variant") {
+                continue;
+            }
+            let Some(ctor) = children(variant_list).first().and_then(symbol_name) else {
+                continue;
+            };
+            out.insert(
+                ctor.to_string(),
+                InvariantPredicate {
+                    type_name: type_name.to_string(),
+                    binder: binder.clone(),
+                    body: body.clone(),
+                },
+            );
+        }
+    }
+    out
+}
+
+/// Parse `(fn {} (params {} <binder>) <body>)` into `(binder, body)`.
+fn parse_invariant_fn(expr: &Expr) -> Option<(String, Expr)> {
+    let list = as_list(expr)?;
+    if tag(list) != Some("fn") {
+        return None;
+    }
+    let kids = children(list);
+    let params = as_list(kids.first()?)?;
+    if tag(params) != Some("params") {
+        return None;
+    }
+    let binder = children(params).first().and_then(symbol_name)?;
+    let body = kids.get(1)?;
+    Some((binder.to_string(), body.clone()))
+}
+
+/// Render a [`InvariantPredicate`] body for a violation message. Uses the
+/// canonical Deep printer (flat, single-line) so the invariant the user
+/// wrote is reproduced in the diagnostic. `span` metadata keys are stripped
+/// first so the message reads as the source predicate, not the
+/// span-annotated desugar output, and stays stable across re-spanning.
+fn render_invariant_body(pred: &InvariantPredicate) -> String {
+    let mut body = pred.body.clone();
+    strip_span_meta(&mut body);
+    chelis_deep::printer::print_expr_flat(&body)
+}
+
+/// Recursively drop `span` entries from a Deep expression's metadata maps.
+/// Diagnostics-only helper: never mutates a value that round-trips, only a
+/// throwaway clone used to render the invariant text.
+fn strip_span_meta(expr: &mut Expr) {
+    match expr {
+        Expr::List(list, _) => {
+            for element in &mut list.elements {
+                strip_span_meta(element);
+            }
+        }
+        Expr::Map(map, _) => {
+            map.entries.retain(|(key, _)| key != "span");
+            for (_, value) in &mut map.entries {
+                strip_span_meta(value);
+            }
+        }
+        Expr::MetaExpr(meta, _) => {
+            meta.entries.retain(|(key, _)| key != "span");
+            for (_, value) in &mut meta.entries {
+                strip_span_meta(value);
+            }
+            strip_span_meta(&mut meta.expr);
+        }
+        Expr::Atom(_, _) => {}
+    }
+}
+
+/// Render a [`RuntimeValue`] compactly for a violation message.
+fn render_value_for_diagnostic(value: &RuntimeValue) -> String {
+    render_value(value)
+}
+
+/// Recursively reject any NaN or non-finite scalar/tensor element inside a
+/// value (RFC H1 representation-sanity pre-check). `path` accumulates a
+/// human-readable field path for the diagnostic.
+fn check_representation_finite(
+    value: &RuntimeValue,
+    type_name: &str,
+    ctor: &str,
+    invariants: &HashMap<String, InvariantPredicate>,
+    adt_fields: &HashMap<String, Vec<String>>,
+    path: &str,
+) -> Result<(), InvariantViolation> {
+    match value {
+        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
+            let v = payload.bits().as_f64();
+            if !v.is_finite() {
+                return Err(InvariantViolation::NonFiniteRepresentation {
+                    type_name: type_name.to_string(),
+                    field_path: path.to_string(),
+                    detail: describe_non_finite(v),
+                });
+            }
+            Ok(())
+        }
+        RuntimeValue::Tensor(tensor) => {
+            for (index, elem) in tensor.value.data.iter().enumerate() {
+                if !elem.is_finite() {
+                    return Err(InvariantViolation::NonFiniteRepresentation {
+                        type_name: type_name.to_string(),
+                        field_path: format!("{path}[{index}]"),
+                        detail: describe_non_finite(*elem),
+                    });
+                }
+            }
+            Ok(())
+        }
+        RuntimeValue::Adt {
+            ctor: inner_ctor,
+            fields,
+            field_names,
+        } => {
+            // The type/ctor naming the violation is the OUTERMOST opaque
+            // type when we recursed from one; a nested record field that
+            // is itself an invariant-carrying opaque type names ITSELF.
+            let (name_for_field, ctor_for_field) = match invariants.get(inner_ctor) {
+                Some(inner) => (inner.type_name.as_str(), inner_ctor.as_str()),
+                None => (type_name, ctor),
+            };
+            let declared = adt_fields
+                .get(inner_ctor)
+                .cloned()
+                .or_else(|| field_names.clone());
+            for (index, field) in fields.iter().enumerate() {
+                let field_label = declared
+                    .as_ref()
+                    .and_then(|names| names.get(index))
+                    .cloned()
+                    .unwrap_or_else(|| index.to_string());
+                let next_path = if path.is_empty() {
+                    field_label
+                } else {
+                    format!("{path}.{field_label}")
+                };
+                check_representation_finite(
+                    field,
+                    name_for_field,
+                    ctor_for_field,
+                    invariants,
+                    adt_fields,
+                    &next_path,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn describe_non_finite(v: f64) -> String {
+    if v.is_nan() {
+        "NaN".to_string()
+    } else if v == f64::INFINITY {
+        "+Inf".to_string()
+    } else {
+        "-Inf".to_string()
+    }
+}
+
+/// Revalidate a (possibly nested) ADT value against the declared
+/// invariants (RFC D-DECODE).
+///
+/// For every [`RuntimeValue::Adt`] whose constructor carries an invariant:
+/// 1. **Representation sanity pre-check** (RFC H1): reject NaN/Inf in any
+///    numeric representation field BEFORE predicate evaluation. This is
+///    required for fail-closed behavior — comparisons such as
+///    `not (p.value > 1.0)` are *true* on NaN.
+/// 2. **Predicate evaluation**: bind the predicate binder to the value and
+///    run the interpreter's OWN `eval_expr` on the predicate body. A
+///    non-boolean or `false` result fails the decode; an evaluation error
+///    (partiality — `/`, `log`, `sqrt`) also fails it (RFC D-WF).
+///
+/// The walk is recursive: nested record fields that are themselves
+/// invariant-carrying opaque types are checked, and an inner violation is
+/// reported naming the *inner* type. Never repairs.
+pub(crate) fn revalidate_adt_value(
+    value: &RuntimeValue,
+    invariants: &HashMap<String, InvariantPredicate>,
+    adt_fields: &HashMap<String, Vec<String>>,
+) -> Result<(), InvariantViolation> {
+    let RuntimeValue::Adt { ctor, fields, .. } = value else {
+        // Non-ADT values carry no opaque invariant; structural decode has
+        // already vetted their shape. Recurse into containers so an opaque
+        // value nested in a tuple/list is still checked.
+        match value {
+            RuntimeValue::List(items) | RuntimeValue::Tuple(items) => {
+                for item in items {
+                    revalidate_adt_value(item, invariants, adt_fields)?;
+                }
+            }
+            RuntimeValue::Dict(entries) => {
+                for (key, val) in entries {
+                    revalidate_adt_value(key, invariants, adt_fields)?;
+                    revalidate_adt_value(val, invariants, adt_fields)?;
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    };
+
+    // Recurse into fields first so an inner opaque violation is reported
+    // before the outer predicate (inner-most failure is the precise cause).
+    for field in fields {
+        revalidate_adt_value(field, invariants, adt_fields)?;
+    }
+
+    let Some(pred) = invariants.get(ctor) else {
+        return Ok(());
+    };
+
+    // (1) Representation sanity pre-check (RFC H1). Walk the WHOLE value
+    // (including nested record fields of this opaque type) and reject any
+    // non-finite numeric component before evaluating the predicate.
+    check_representation_finite(value, &pred.type_name, ctor, invariants, adt_fields, "")?;
+
+    // (2) Predicate evaluation through the interpreter's own eval_expr.
+    let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
+    let mut ctx = EvalContext {
+        bindings: HashMap::new(),
+        top_level_defs: HashMap::new(),
+        type_env: HashMap::new(),
+        adt_fields: adt_fields.clone(),
+        tensor_bindings: &empty_tensors,
+        transcript: Vec::new(),
+        resolving_top_levels: Vec::new(),
+        random_seed: None,
+        random_counter: 0,
+    };
+    ctx.bindings.insert(pred.binder.clone(), value.clone());
+
+    let invariant_text = render_invariant_body(pred);
+    match ctx.eval_expr(&pred.body) {
+        Ok(RuntimeValue::Bool(true)) => Ok(()),
+        Ok(RuntimeValue::Bool(false)) => Err(InvariantViolation::PredicateFalse {
+            type_name: pred.type_name.clone(),
+            invariant: invariant_text,
+            value: render_value_for_diagnostic(value),
+        }),
+        Ok(other) => Err(InvariantViolation::PredicateError {
+            type_name: pred.type_name.clone(),
+            invariant: invariant_text,
+            reason: format!("predicate did not evaluate to a boolean (got {other:?})"),
+        }),
+        Err(reason) => Err(InvariantViolation::PredicateError {
+            type_name: pred.type_name.clone(),
+            invariant: invariant_text,
+            reason,
+        }),
+    }
+}
+
 fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
     full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
 }
@@ -7019,6 +7419,186 @@ def main -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
                 }
                 other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
             }
+        }
+    }
+
+    // ── Unit 1: decode revalidation core (RFC D-DECODE) ───────────────
+
+    /// The flagship probability invariant: `p.value >= 0.0 && p.value <= 1.0`.
+    const PROBABILITY_SRC: &str = r#"
+module Stats.Prob
+
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability = | Probability { value: f32 }
+
+def make(x: f32) -> Probability = Probability { value: x }
+"#;
+
+    fn probability_tables() -> (
+        HashMap<String, InvariantPredicate>,
+        HashMap<String, Vec<String>>,
+    ) {
+        let checked = checked_surf(PROBABILITY_SRC);
+        let invariants = collect_type_invariants(checked.exprs());
+        let adt_fields = collect_adt_ctor_fields(checked.exprs());
+        (invariants, adt_fields)
+    }
+
+    fn probability(value: f32) -> RuntimeValue {
+        RuntimeValue::Adt {
+            ctor: "Probability".to_string(),
+            fields: vec![RuntimeValue::Scalar(
+                ScalarPayload::new(Prim::F32, ScalarBits::F32(value)).unwrap(),
+            )],
+            field_names: Some(vec!["value".to_string()]),
+        }
+    }
+
+    #[test]
+    fn collect_type_invariants_keys_by_ctor_and_records_binder() {
+        let (invariants, _) = probability_tables();
+        let pred = invariants
+            .get("Probability")
+            .expect("invariant keyed by the variant constructor");
+        assert_eq!(pred.type_name, "Probability");
+        assert_eq!(pred.binder, "p");
+    }
+
+    #[test]
+    fn collect_type_invariants_skips_non_invariant_deftypes() {
+        let checked = checked_surf(
+            r#"
+module M
+
+type Plain = | Plain { value: f32 }
+"#,
+        );
+        let invariants = collect_type_invariants(checked.exprs());
+        assert!(
+            invariants.is_empty(),
+            "a deftype with no invariant metadata must not enter the table, got {invariants:?}"
+        );
+    }
+
+    #[test]
+    fn revalidate_accepts_interior_value() {
+        let (invariants, adt_fields) = probability_tables();
+        assert_eq!(
+            revalidate_adt_value(&probability(0.3), &invariants, &adt_fields),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn revalidate_accepts_boundary_values() {
+        let (invariants, adt_fields) = probability_tables();
+        for v in [0.0_f32, 1.0_f32] {
+            assert_eq!(
+                revalidate_adt_value(&probability(v), &invariants, &adt_fields),
+                Ok(()),
+                "boundary value {v} satisfies a closed [0, 1] invariant"
+            );
+        }
+    }
+
+    #[test]
+    fn revalidate_rejects_above_boundary_naming_invariant() {
+        let (invariants, adt_fields) = probability_tables();
+        let err = revalidate_adt_value(&probability(1.0000001), &invariants, &adt_fields)
+            .expect_err("value just past 1.0 must be rejected");
+        match &err {
+            InvariantViolation::PredicateFalse {
+                type_name,
+                invariant,
+                ..
+            } => {
+                assert_eq!(type_name, "Probability");
+                assert!(
+                    invariant.contains("lte") && invariant.contains("value"),
+                    "violation must name the declared invariant, got `{invariant}`"
+                );
+            }
+            other => panic!("expected PredicateFalse, got {other:?}"),
+        }
+        // Fail-closed display naming type + invariant.
+        let text = err.to_string();
+        assert!(text.contains("Probability"), "message names the type: {text}");
+    }
+
+    #[test]
+    fn revalidate_rejects_nan_before_predicate_fail_closed() {
+        // RFC H1: `p.value <= 1.0` is FALSE on NaN, but `not (p.value > 1.0)`
+        // would be TRUE on NaN. The pre-check must reject NaN regardless of
+        // the predicate's structure, so this is the pinned fail-closed case.
+        let (invariants, adt_fields) = probability_tables();
+        let err = revalidate_adt_value(&probability(f32::NAN), &invariants, &adt_fields)
+            .expect_err("NaN representation must be rejected pre-predicate");
+        assert!(
+            matches!(err, InvariantViolation::NonFiniteRepresentation { .. }),
+            "NaN must fail the representation pre-check, not the predicate: {err:?}"
+        );
+        assert!(err.to_string().contains("NaN"), "message names NaN: {err}");
+    }
+
+    #[test]
+    fn revalidate_rejects_positive_and_negative_inf() {
+        let (invariants, adt_fields) = probability_tables();
+        for v in [f32::INFINITY, f32::NEG_INFINITY] {
+            let err = revalidate_adt_value(&probability(v), &invariants, &adt_fields)
+                .expect_err("infinite representation must be rejected pre-predicate");
+            assert!(
+                matches!(err, InvariantViolation::NonFiniteRepresentation { .. }),
+                "Inf must fail the representation pre-check: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn revalidate_passes_non_invariant_adt_untouched() {
+        // A constructor with no invariant entry must pass even with values
+        // a hypothetical invariant would reject — injection is scoped to
+        // invariant-carrying types only.
+        let (invariants, adt_fields) = probability_tables();
+        let plain = RuntimeValue::Adt {
+            ctor: "Unrelated".to_string(),
+            fields: vec![RuntimeValue::float_lit(99.0)],
+            field_names: Some(vec!["x".to_string()]),
+        };
+        assert_eq!(
+            revalidate_adt_value(&plain, &invariants, &adt_fields),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn revalidate_recurses_into_nested_opaque_field() {
+        // A non-opaque record wrapping an opaque field: the inner opaque
+        // value is still revalidated, and an inner violation names the
+        // INNER type.
+        let (invariants, adt_fields) = probability_tables();
+        let wrapper_ok = RuntimeValue::Adt {
+            ctor: "Wrapper".to_string(),
+            fields: vec![probability(0.7)],
+            field_names: Some(vec!["p".to_string()]),
+        };
+        assert_eq!(
+            revalidate_adt_value(&wrapper_ok, &invariants, &adt_fields),
+            Ok(())
+        );
+
+        let wrapper_bad = RuntimeValue::Adt {
+            ctor: "Wrapper".to_string(),
+            fields: vec![probability(2.0)],
+            field_names: Some(vec!["p".to_string()]),
+        };
+        let err = revalidate_adt_value(&wrapper_bad, &invariants, &adt_fields)
+            .expect_err("inner opaque violation must surface through the wrapper");
+        match err {
+            InvariantViolation::PredicateFalse { type_name, .. } => {
+                assert_eq!(type_name, "Probability", "names the inner opaque type");
+            }
+            other => panic!("expected inner PredicateFalse, got {other:?}"),
         }
     }
 }
