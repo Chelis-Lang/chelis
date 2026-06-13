@@ -16,7 +16,11 @@ pub enum Fuzzability {
     NotFuzzable(String),
 }
 
-const SUPPORTED_FUNCTIONS: &[&str] = &["exp", "log", "sqrt", "sin", "cos", "abs", "min", "max"];
+/// The whitelisted intrinsics admitted in an inlineable SMT expression.
+/// This consumes `chelis_pred::INTRINSIC_WHITELIST` -- the RFC's single
+/// source of truth (D-PRED / RFC L5) -- rather than keeping a second copy
+/// that could drift.
+use chelis_pred::INTRINSIC_WHITELIST as SUPPORTED_FUNCTIONS;
 
 pub fn classify_inlineability(expr: &SmtExpr) -> Inlineability {
     match expr {
@@ -109,6 +113,21 @@ fn combine_fuzz(a: Fuzzability, b: Fuzzability) -> Fuzzability {
 mod tests {
     use super::*;
     use crate::solver::{ArithOp, CmpOp};
+
+    #[test]
+    fn cr11_supported_functions_is_the_canonical_pred_whitelist() {
+        // RFC L5 / CR-11: inlineability consumes chelis_pred's single
+        // source of truth, so the two cannot drift.
+        assert_eq!(SUPPORTED_FUNCTIONS, chelis_pred::INTRINSIC_WHITELIST);
+        // Every whitelisted intrinsic is inlineable.
+        for name in SUPPORTED_FUNCTIONS {
+            let e = SmtExpr::Apply((*name).into(), vec![SmtExpr::Var("x".into())]);
+            assert!(
+                matches!(classify_inlineability(&e), Inlineability::Inlineable),
+                "intrinsic `{name}` must be inlineable"
+            );
+        }
+    }
 
     #[test]
     fn polynomial_is_inlineable() {
