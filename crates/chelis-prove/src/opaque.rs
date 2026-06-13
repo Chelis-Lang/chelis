@@ -1007,15 +1007,17 @@ fn read_produced_field(
         [r] => r,
         _ => return None,
     };
-    let chelis_compiler_api::schema::ExecutionValue::Tensor { value } = &root.value else {
-        return None;
-    };
-    // A None result yields the sentinel (NaN-filled) — treat as failure.
-    if value.data.iter().any(|v| v.is_nan()) {
-        return Some(false);
-    }
+    use chelis_compiler_api::schema::ExecutionValue;
     match fty {
         FieldType::Tensor { dims, .. } => {
+            // A tensor field access yields a Tensor value.
+            let ExecutionValue::Tensor { value } = &root.value else {
+                return None;
+            };
+            // A None result yields the NaN-filled sentinel: treat as failure.
+            if value.data.iter().any(|v| v.is_nan()) {
+                return Some(false);
+            }
             let count = dims.iter().product::<usize>().max(1);
             if value.data.len() != count {
                 return None;
@@ -1025,9 +1027,32 @@ fn read_produced_field(
             }
         }
         _ => {
-            // Scalar field: the access yields a rank-0 / single-element
-            // tensor.
-            let v = *value.data.first()?;
+            // A scalar field access yields a scalar ExecutionValue (RT3-F3:
+            // a rank-0 access returns Float64 / Int64 / Bool, not a
+            // single-element Tensor). Extract the scalar; a NaN result is
+            // the None-sentinel and counts as a producer failure.
+            let v = match &root.value {
+                ExecutionValue::Float64 { value } => *value,
+                ExecutionValue::Int64 { value } => *value as f64,
+                ExecutionValue::Bool { value } => {
+                    if *value {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                // A rank-0/single-element tensor scalar, defensively.
+                ExecutionValue::Tensor { value }
+                    if value.shape.iter().product::<usize>().max(1) == 1
+                        && !value.data.is_empty() =>
+                {
+                    value.data[0]
+                }
+                _ => return None,
+            };
+            if v.is_nan() {
+                return Some(false);
+            }
             env.insert(field_path.to_string(), v);
         }
     }

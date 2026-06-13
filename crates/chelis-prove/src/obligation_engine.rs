@@ -1129,14 +1129,15 @@ fn read_one_field(
         [r] => r,
         _ => return Err("field read did not return one root".to_string()),
     };
-    let ExecutionValue::Tensor { value } = &root.value else {
-        return Err("field read returned a non-tensor value".to_string());
-    };
-    if value.data.iter().any(|v| v.is_nan()) {
-        return Ok(false); // None sentinel.
-    }
     match fty {
         crate::opaque::FieldType::Tensor { dims, .. } => {
+            // A tensor field access yields a Tensor value.
+            let ExecutionValue::Tensor { value } = &root.value else {
+                return Err("tensor field read returned a non-tensor value".to_string());
+            };
+            if value.data.iter().any(|v| v.is_nan()) {
+                return Ok(false); // None sentinel.
+            }
             let count = dims.iter().product::<usize>().max(1);
             if value.data.len() != count {
                 return Err("field read shape mismatch".to_string());
@@ -1146,10 +1147,24 @@ fn read_one_field(
             }
         }
         _ => {
-            let v = *value
-                .data
-                .first()
-                .ok_or_else(|| "empty scalar field read".to_string())?;
+            // A scalar field access yields a scalar ExecutionValue (RT3-F3:
+            // Float64 / Int64 / Bool, not a single-element Tensor).
+            let v = match &root.value {
+                ExecutionValue::Float64 { value } => *value,
+                ExecutionValue::Int64 { value } => *value as f64,
+                ExecutionValue::Bool { value } => {
+                    if *value {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                ExecutionValue::Tensor { value } if !value.data.is_empty() => value.data[0],
+                _ => return Err("scalar field read returned an unreadable value".to_string()),
+            };
+            if v.is_nan() {
+                return Ok(false); // None sentinel.
+            }
             env.insert(field_path.to_string(), v);
         }
     }

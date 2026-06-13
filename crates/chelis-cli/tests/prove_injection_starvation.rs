@@ -282,6 +282,34 @@ fn simplex_binder_under_injection_is_not_starved() {
     assert_eq!(code, 0);
 }
 
+#[test]
+fn rt3_f3_tight_scalar_band_binder_is_served_by_constructor_generation() {
+    // RT3-F3 MEDIUM: a tight SCALAR-field band (value in [0.5, 0.5005])
+    // false-starved because constructor read_produced_field only handled
+    // Tensor results -- a scalar field access yields Float64, which was
+    // dropped (0/200). `norm` always returns value=0.5 (in band), so the
+    // property must verify, not report unsupported.
+    let source = "module M
+export (norm, prob_value)
+@opaque
+@invariant(p) p.value >= 0.5 && p.value <= 0.5005
+type T = | T { value: f32 }
+def norm(x: f32) -> T = T { value: 0.5 }
+def prob_value(p: T) -> f32 = p.value
+@property w forall(p: T):
+  prob_value(p) <= 0.5005
+";
+    let (code, records) = prove_json(source, &["--samples", "8", "--only", "w"]);
+    let prop = property(&records, "w").expect("property record");
+    assert_eq!(
+        prop["status"], "passed",
+        "scalar-field band served by constructor generation, not starved: {prop}"
+    );
+    let reason = prop.get("reason").and_then(Value::as_str).unwrap_or("");
+    assert!(!reason.contains("starvation"), "must not starve: {reason}");
+    assert_eq!(code, 0);
+}
+
 // ── D-STARVE: the starvation classifier ───────────────────────────
 
 #[test]
