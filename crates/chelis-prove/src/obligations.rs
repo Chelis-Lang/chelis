@@ -210,10 +210,14 @@ fn collect_declared_returns_in(
     }
 }
 
-/// Parse a Deep type node (`t-prim`/`t-adt`/`t-fn`/`t-tuple`/`t-tensor`)
-/// into a [`Type`]. Returns `None` for nodes outside this set. Type
-/// arguments are parsed recursively; unknown leaves become `Type::Error`
-/// (they never match the opaque type by name, so they are inert).
+/// Parse a Deep type node into a [`Type`] for producer-set analysis. The
+/// only purpose of the parsed `Type` is name-matching the opaque type, so
+/// nodes that CANNOT contain an opaque type are mapped to the inert
+/// `Type::Error` placeholder (CR-14): `t-prim` (a scalar), `t-tensor` (a
+/// numeric tensor of prims), `t-var` (a free type variable; an opaque type
+/// is nominal, never a variable), and `t-unit`. `t-adt`/`t-tuple`/`t-fn`
+/// recurse; `t-ref` (a borrow `&T`) recurses into its inner type so a
+/// borrow of (or containing) the opaque type is NOT silently dropped.
 ///
 /// `aliases` maps each `(typealias ...)` name to its target Deep type
 /// node. A `(t-adt {} <name>)` whose name is an alias is resolved through
@@ -274,6 +278,17 @@ fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usiz
                 .collect();
             Some(Type::Tuple(items))
         }
+        "t-ref" => {
+            // A borrow `&T`: recurse into the inner type so a borrow of (or
+            // containing) the opaque type is reachable by type_contains
+            // (CR-14). A record field `inner: &T` was otherwise mapped to
+            // Type::Error and the T inside hidden.
+            let inner = type_from_deep_depth(children(ty).first()?, aliases, depth + 1)?;
+            Some(Type::Ref(Box::new(inner)))
+        }
+        // `t-prim` / `t-tensor` / `t-var` / `t-unit` (and any other leaf):
+        // none can contain a nominal opaque type, so the inert Error
+        // placeholder is safe (it never name-matches an opaque type).
         _ => Some(Type::Error),
     }
 }

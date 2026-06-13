@@ -477,3 +477,48 @@ def make_w(x: f32) -> Wrapper = Full { inner: T { value: 99.0 } }
         "make_w",
     );
 }
+
+#[test]
+fn cr14_record_field_ref_to_opaque_is_covered_or_rejected() {
+    // CR-14: a record field of type `&T` (a borrow of the opaque type) was
+    // mapped to Type::Error by type_from_deep, so the T inside the borrow
+    // was hidden and the producer silently missed. A `t-ref` now recurses,
+    // so the record-with-ref-field producer is covered-or-rejected.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper = | Wrapper { inner: &T }
+def make_w(t: &T) -> Wrapper = Wrapper { inner: t }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn cr14_tensor_record_field_is_not_a_false_positive() {
+    // Negative-parity: a record field of a plain numeric tensor (which
+    // cannot contain the opaque type) must NOT be flagged -- the Error
+    // mapping for `t-tensor` is safe. The producer returns a record with a
+    // tensor field and no opaque type, so no obligation and no error.
+    let surf = "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Box = | Box { data: tensor[3, f32] }
+def make_w(d: tensor[3, f32]) -> Box = Box { data: d }
+";
+    let exprs = deep_of(surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    assert!(
+        col.errors.is_empty(),
+        "a tensor-field record is not a false positive: {:?}",
+        col.errors
+    );
+    assert!(col.obligations.is_empty());
+}
