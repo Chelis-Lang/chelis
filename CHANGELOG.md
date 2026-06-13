@@ -111,6 +111,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   check`, the argument-egress trust caveat). Oracle:
   `crates/chelis-cli/tests/opaque_invariants_example.rs` (run with
   `--features smt`).
+- Schema-doc consolidation in `spec/design/chelis_property_spec.md`:
+  corrected the obligation `counterexample` example to the shipped
+  positional-placeholder keying (`__arg0` rather than the source
+  parameter name) and documented the invariant-binder starvation path
+  (the `--invariant-min-rate` floor and the `unsupported`-vs-`Error`
+  distinction from user-precondition exhaustion).
 <!-- end opaque-types W6 -->
 
 - Checker-enforced opaque types (`@opaque`, renamed from the

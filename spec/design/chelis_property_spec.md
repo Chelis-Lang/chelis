@@ -174,7 +174,7 @@ to an existing one.
 
 ```json
 {"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"probability","name":"invariant:Probability:probability","status":"passed","proof_tier":"smt","samples":0,"seed":0,"arith_model":"real"}
-{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"bad_prob","name":"invariant:Probability:bad_prob","status":"failed","proof_tier":"smt","samples":0,"seed":0,"arith_model":"real","counterexample":{"x":"2.0"}}
+{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"bad_prob","name":"invariant:Probability:bad_prob","status":"failed","proof_tier":"smt","samples":0,"seed":0,"arith_model":"real","counterexample":{"__arg0":"2.0"}}
 {"kind":"obligation","obligation_kind":"invariant_producer","status":"error","reason":"opaque type `Probability`: exported producer `many` returns the type through an unsupported container (generic `List`); decompose-or-reject (RFC D-PRODUCER)"}
 {"kind":"summary","total":1,"passed":1,"failed":0,"unsupported":0,"errors":0,"obligations":1}
 ```
@@ -184,7 +184,9 @@ is the opaque type; `producer` is the exported def (or constant) under
 obligation; `name` is `invariant:<Type>:<producer>`; `status` is one of
 `passed`/`failed`/`unsupported`/`error`; `proof_tier` is `"smt"` (Tier B)
 or `"fuzz"` (Tier C); `samples`/`seed` mirror the property records;
-`counterexample` and `reason` are optional. `arith_model:"real"` is
+`counterexample` and `reason` are optional. A `counterexample` keys the
+producer's inputs by **positional placeholder** (`__arg0`, `__arg1`, ...),
+not by source parameter name. `arith_model:"real"` is
 present on `proof_tier:"smt"` records (the SMT-over-reals caveat — see
 the Tier B note below). A `status:"error"` record is a declaration-time
 covered-or-rejected / signature-rejection failure and carries only
@@ -192,6 +194,24 @@ covered-or-rejected / signature-rejection failure and carries only
 meaning: a failed or errored obligation participates in the same
 worst-status exit code as user properties (`Passed=0`, `Failed=1`,
 `Unsupported=2`, `Error=3`).
+
+### Invariant-binder generation and starvation (`--invariant-min-rate`)
+
+A binder whose type is an invariant-carrying opaque type — in a derived
+obligation or in a user `@property` — is generated only over
+invariant-satisfying values: tiered rejection sampling then
+constructor-based generation, with every accepted sample
+predicate-validated (full design in `opaque_invariants_rfc.md` D-STARVE /
+D-INJECT). When both tiers fall below the floor the binder starves and its
+record is `status:"unsupported"` (exit `2`) with a `reason` naming the
+type, per-method accepted/attempted counts, the rate, the floor, the
+predicate-shape classification, and the recommended route. This is
+distinct from user-precondition generator exhaustion, which stays an
+`Error` (exit `3`): the two failure modes remain separable. The
+`--invariant-min-rate <f64>` flag (default `0.01`) sets the floor for the
+rejection tier; `--invariant-min-rate 0.0` disables the starvation
+classification and preserves the legacy exhaustion-as-`Error` path.
+Generation is deterministic under a fixed seed.
 
 ### Tier B SMT proofs are over the reals (caveat)
 
