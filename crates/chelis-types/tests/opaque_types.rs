@@ -917,6 +917,92 @@ type Probability =
     );
 }
 
+// ── Module re-open forge (RT-1 F2, RFC v4b) ──────────────────────
+
+#[test]
+fn module_reopen_same_name_rejected() {
+    // RT-1 F2: a named module opened by a SECOND `(module ...)`
+    // wrapper in the same check unit forges module identity -- the
+    // second wrapper constructs and accesses the opaque type as if it
+    // were inside the defining module. A named module may be opened
+    // at most once per check unit.
+    let program = r#"(module {}
+  stats.prob
+  (deftype {opaque: true}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32))))
+  (defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    probability
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Probability (kv {} value (var {} x))))))
+(module {}
+  stats.prob
+  (def {}
+    forge
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Probability (kv {} value (var {} x))))))
+"#;
+    let exprs = deep_of_dp(program);
+    let errors = errors_ir(&exprs);
+    let dup: Vec<&CheckError> = errors
+        .iter()
+        .filter(|e| kind_name(e) == "DuplicateModule")
+        .collect();
+    assert_eq!(
+        dup.len(),
+        1,
+        "expected exactly one DuplicateModule error, got: {errors:?}"
+    );
+    assert_eq!(
+        dup[0].message,
+        "module `stats.prob` is opened by more than one module wrapper in this check unit; \
+         a named module may be opened at most once"
+    );
+}
+
+#[test]
+fn distinct_module_names_in_one_check_unit_pass() {
+    // Negative parity: two DIFFERENT module wrappers in one check
+    // unit is the ordinary out-of-module setup the whole suite relies
+    // on; it must NOT trip the re-open rule.
+    let outside = "module Agent.Strategy
+def fine(x: f32) -> f32 = prob_value(probability(x))
+";
+    let exprs = deep_of_surf(&[PROB_MODULE, outside]);
+    let errors = errors_ir(&exprs);
+    assert!(
+        !errors.iter().any(|e| kind_name(e) == "DuplicateModule"),
+        "distinct module names must not trip the re-open rule: {errors:?}"
+    );
+    assert_clean(&errors);
+}
+
+#[test]
+fn module_reopen_reported_once_per_name() {
+    // Three wrappers of the same name yield ONE DuplicateModule error
+    // for that name (reported once, not once per extra wrapper).
+    let program = r#"(module {} a.b (def {} f (lit {type: (t-prim {} f32)} 1.0)))
+(module {} a.b (def {} g (lit {type: (t-prim {} f32)} 2.0)))
+(module {} a.b (def {} h (lit {type: (t-prim {} f32)} 3.0)))
+"#;
+    let exprs = deep_of_dp(program);
+    let errors = errors_ir(&exprs);
+    let dup: Vec<&CheckError> = errors
+        .iter()
+        .filter(|e| kind_name(e) == "DuplicateModule")
+        .collect();
+    assert_eq!(
+        dup.len(),
+        1,
+        "a re-opened name is reported once, got: {errors:?}"
+    );
+    assert!(dup[0].message.contains("module `a.b`"));
+}
+
 // ── Exhaustiveness over opaque scrutinees ────────────────────────
 
 #[test]

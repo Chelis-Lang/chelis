@@ -350,6 +350,18 @@ top-level code in a check unit shares one anonymous key), so the
 declaration is rejected: `@opaque type X requires a named enclosing
 module`.
 
+**One wrapper per module.** A named module may be opened by at most
+one `(module ...)` wrapper per check unit. Module identity is
+otherwise a forgeable string: a second `(module Stats.Prob ...)`
+wrapper would let its declarations construct and inspect
+`Stats.Prob`'s opaque types as if they were inside the defining
+module. Re-opening a module name is a `DuplicateModule` checker error
+(same ambiguity rationale as the named-module requirement). Surf emits
+one module per file and the reef package linker strips wrappers before
+inference, so this rule only constrains hand-written Deep. Distinct
+module wrappers in one check unit (the ordinary out-of-module setup)
+are unaffected.
+
 **Module identity.** Each top-level item keys to a module:
 
 - Lexical encoding: the enclosing `(module ...)` wrapper names, with

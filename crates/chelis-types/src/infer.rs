@@ -268,6 +268,10 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
 
+    // RFC v4b (RT-1 F2): reject a named module opened by more than one
+    // wrapper in this check unit (module-identity forgery).
+    detect_module_reopens(exprs, &mut errors);
+
     // First pass: collect deftype and defsig declarations. Descend through
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
@@ -933,6 +937,11 @@ fn infer_ir_program_with_state(
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
 
+    // RFC v4b (RT-1 F2): reject a named module opened by more than one
+    // wrapper in this check unit (module-identity forgery). Reef-linked
+    // decls carry no wrappers, so this only fires on hand-written `.dp`.
+    detect_module_reopens(exprs, &mut errors);
+
     // Descend through `(module {} name ...)` wrappers: every idiomatic
     // Surf source wraps its declarations in `module X`, and without
     // flattening none of the walkers below see any def/defsig/deftype.
@@ -1461,6 +1470,61 @@ fn top_level_decl_items_with_modules(exprs: &[deep::Expr]) -> Vec<(Option<String
         push(expr, None, &mut out);
     }
     out
+}
+
+/// RFC v4b (RT-1 F2): a named module may be opened by at most one
+/// `(module ...)` wrapper per check unit. Module identity is otherwise
+/// a forgeable string -- a second wrapper of an opaque type's defining
+/// module would construct and inspect the type as if it were inside.
+/// Walks every wrapper (including nested ones, keyed by their full
+/// `.`-joined path) and emits ONE `DuplicateModule` error per
+/// re-opened name. Surf emits one module per file and reef strips
+/// wrappers before inference, so this only fires on hand-written `.dp`
+/// (the forge surface).
+fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+    fn walk(
+        expr: &deep::Expr,
+        prefix: Option<&str>,
+        seen: &mut HashSet<String>,
+        reported: &mut HashSet<String>,
+        errors: &mut Vec<CheckError>,
+    ) {
+        let deep::Expr::List(list, _) = expr else {
+            return;
+        };
+        if get_tag(list) != Some("module") {
+            return;
+        }
+        let name = list.elements.get(2).and_then(symbol_name);
+        let key = match (prefix, name) {
+            (Some(p), Some(n)) => Some(format!("{p}.{n}")),
+            (None, Some(n)) => Some(n.to_string()),
+            (p, None) => p.map(str::to_string),
+        };
+        if let Some(key) = &key
+            && !seen.insert(key.clone())
+            && reported.insert(key.clone())
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::DuplicateModule,
+                format!(
+                    "module `{key}` is opened by more than one module wrapper in this \
+                     check unit; a named module may be opened at most once"
+                ),
+                vec![format!(
+                    "merge the `{key}` wrappers into one, or rename one of them"
+                )],
+            ));
+        }
+        for child in list.elements.iter().skip(3) {
+            walk(child, key.as_deref(), seen, reported, errors);
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut reported = HashSet::new();
+    for expr in exprs {
+        walk(expr, None, &mut seen, &mut reported, errors);
+    }
 }
 
 fn infer_signature_metadata(

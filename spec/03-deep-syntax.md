@@ -241,6 +241,11 @@ part of this public vocabulary.
 | `import-all` | `(import-all {} path)` | Wildcard import |
 | `export` | `(export {} name...)` | Public API |
 
+A named module may be opened by at most one `(module ...)` wrapper per
+program: re-opening a module name forges module identity and is
+rejected by both `chelis validate --deep` and the type checker
+(`DuplicateModule`; `spec/04-type-system.md` §2.5).
+
 ### 2.2 Declarations
 
 | Tag | Form | Semantics |

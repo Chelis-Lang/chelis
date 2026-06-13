@@ -43,6 +43,14 @@ pub enum CheckErrorKind {
     /// dependent borrow semantics. Reject the collision at declaration
     /// time instead.
     DuplicateDefinition,
+    /// RFC v4b (RT-1 F2): a named module is opened by more than one
+    /// `(module ...)` wrapper in the same check unit. Module identity
+    /// is otherwise a forgeable string -- a second wrapper of an
+    /// opaque type's defining module would construct and inspect the
+    /// type as if it were inside. A named module may be opened at most
+    /// once per check unit (the same ambiguity rationale as the
+    /// named-module requirement for `@opaque`).
+    DuplicateModule,
     /// RFC D-CHECK (spec/design/opaque_invariants_rfc.md): a type
     /// declared `@opaque` was constructed, inspected, forged, or
     /// reached through an unexported binding outside its defining
@@ -72,6 +80,7 @@ impl CheckErrorKind {
             CheckErrorKind::CycleDetected => 0.9,
             CheckErrorKind::UnsupportedTensorPrecision => 0.8,
             CheckErrorKind::DuplicateDefinition => 0.9,
+            CheckErrorKind::DuplicateModule => 0.9,
             CheckErrorKind::OpaqueTypeViolation => 0.8,
             CheckErrorKind::Other => 0.5,
         }

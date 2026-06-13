@@ -31,6 +31,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `opaque-domain-construction` lint rule is retained as
   defense-in-depth. Compiled-context cache formats bumped
   (`CHELIS_CTX_V5`, stdlib cache v2) for the registry shape change.
+  Re-opening a named module with a second `(module ...)` wrapper in
+  one check unit is a `DuplicateModule` error (rejected by `check`,
+  `build`, and `validate --deep`); it would otherwise forge the
+  defining module's identity. The sixth rejection now also fires for
+  bare un-imported cross-module references in reef packages (the
+  reference is canonicalized to its binding key the way inference
+  resolves it).
 
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep

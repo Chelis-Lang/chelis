@@ -77,6 +77,32 @@ const EXPECTED_DP_VIOLATION_MSG: &str = "in def `bad`: record construction of op
      `Probability` outside its defining module `stats.prob`; exported producers of \
      `stats.prob`: probability: (f32) -> Probability";
 
+/// RT-1 F2: the opaque defining module is RE-OPENED by a second
+/// `(module ...)` wrapper that forges + accesses the type.
+const MODULE_REOPEN_DP: &str = r#"(module {}
+  stats.prob
+  (deftype {opaque: true}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32))))
+  (defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability)))
+  (def {}
+    probability
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Probability (kv {} value (var {} x))))))
+(module {}
+  stats.prob
+  (def {}
+    forge
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Probability (kv {} value (var {} x))))))
+"#;
+
+const EXPECTED_REOPEN_MSG: &str = "module `stats.prob` is opened by more than one module wrapper in this check unit; \
+     a named module may be opened at most once";
+
 fn write_file(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create parent dir");
@@ -500,6 +526,105 @@ def fine(x: f32) -> f32 = prob_value(probability(x))
     assert!(
         errors_of(&json).is_empty(),
         "exported producer/reader references must stay clean: {json}"
+    );
+}
+
+// ── Module re-open forge across the surfaces (RT-1 F2) ───────────
+
+#[test]
+fn check_dp_rejects_module_reopen() {
+    let dir = tempdir().expect("tempdir");
+    let dp = dir.path().join("reopen.dp");
+    write_file(&dp, MODULE_REOPEN_DP);
+
+    let output = chelis()
+        .args(["check", dp.to_str().unwrap()])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json = check_json(&output);
+    let errors = errors_of(&json);
+    let dup: Vec<&Value> = errors
+        .iter()
+        .filter(|e| e.get("kind").and_then(Value::as_str) == Some("DuplicateModule"))
+        .collect();
+    assert_eq!(
+        dup.len(),
+        1,
+        "expected exactly one DuplicateModule error, got: {errors:?}"
+    );
+    assert_eq!(
+        dup[0].get("message").and_then(Value::as_str),
+        Some(EXPECTED_REOPEN_MSG),
+        "pinned re-open message mismatch: {errors:?}"
+    );
+}
+
+#[test]
+fn build_dp_rejects_module_reopen() {
+    let dir = tempdir().expect("tempdir");
+    let dp = dir.path().join("reopen.dp");
+    write_file(&dp, MODULE_REOPEN_DP);
+    let out_dir = dir.path().join("out");
+
+    let assert = chelis()
+        .args([
+            "build",
+            dp.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    assert!(
+        stderr.contains("DuplicateModule"),
+        "build must fail on the module re-open, stderr: {stderr}"
+    );
+}
+
+#[test]
+fn validate_deep_rejects_module_reopen() {
+    let dir = tempdir().expect("tempdir");
+    let dp = dir.path().join("reopen.dp");
+    write_file(&dp, MODULE_REOPEN_DP);
+
+    let assert = chelis()
+        .args(["validate", "--deep", dp.to_str().unwrap()])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    assert!(
+        stderr.contains("stats.prob") && stderr.to_lowercase().contains("module"),
+        "validate --deep must reject the module re-open, stderr: {stderr}"
+    );
+}
+
+#[test]
+fn check_dp_distinct_modules_still_pass_construction_gate() {
+    // Negative parity: two DISTINCT module wrappers in one .dp (the
+    // ordinary out-of-module setup) must not trip the re-open rule --
+    // only the opacity construction violation fires.
+    let dir = tempdir().expect("tempdir");
+    let dp = dir.path().join("two_modules.dp");
+    write_file(&dp, VIOLATION_DP);
+
+    let output = chelis()
+        .args(["check", dp.to_str().unwrap()])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json = check_json(&output);
+    let errors = errors_of(&json);
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.get("kind").and_then(Value::as_str) == Some("DuplicateModule")),
+        "distinct module names must not trip the re-open rule: {errors:?}"
     );
 }
 

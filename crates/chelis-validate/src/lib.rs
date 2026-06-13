@@ -110,7 +110,72 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
             validate_deep_node(pair)?;
         }
     }
+    // RFC v4b (RT-1 F2): a named module may be opened by at most one
+    // `(module ...)` wrapper per program. The grammar admits two
+    // wrappers of the same name, but that forges module identity (the
+    // checker rejects it too, as `DuplicateModule`); reject it here so
+    // the structural surface agrees. Parse through the AST parser (the
+    // grammar already validated above, so this succeeds) and scan the
+    // module-wrapper tree.
+    if let Ok(exprs) = chelis_deep::parser::parse_str_strict(source)
+        && let Some(name) = first_reopened_module(&exprs)
+    {
+        return Err(ValidationError::Failed(format!(
+            "module `{name}` is opened by more than one module wrapper; \
+             a named module may be opened at most once"
+        )));
+    }
     Ok(())
+}
+
+/// Return the first module name opened by more than one `(module ...)`
+/// wrapper (nested wrappers keyed by their full `.`-joined path), or
+/// `None` if every wrapper name is unique. Mirrors the checker's
+/// `detect_module_reopens` (RFC v4b, RT-1 F2).
+fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
+    fn module_name(list: &chelis_deep::ast::List) -> Option<&str> {
+        match list.elements.first() {
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _))
+                if tag == "module" => {}
+            _ => return None,
+        }
+        match list.elements.get(2) {
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }
+    }
+    fn walk(
+        expr: &chelis_deep::ast::Expr,
+        prefix: Option<&str>,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Option<String> {
+        let chelis_deep::ast::Expr::List(list, _) = expr else {
+            return None;
+        };
+        let name = module_name(list)?;
+        let key = match prefix {
+            Some(p) => format!("{p}.{name}"),
+            None => name.to_string(),
+        };
+        if !seen.insert(key.clone()) {
+            return Some(key);
+        }
+        for child in list.elements.iter().skip(3) {
+            if let Some(dup) = walk(child, Some(&key), seen) {
+                return Some(dup);
+            }
+        }
+        None
+    }
+    let mut seen = std::collections::HashSet::new();
+    for expr in exprs {
+        if let Some(dup) = walk(expr, None, &mut seen) {
+            return Some(dup);
+        }
+    }
+    None
 }
 
 pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
