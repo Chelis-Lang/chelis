@@ -107,10 +107,17 @@ feature. Run it with `--json` for the machine-readable NDJSON stream:
 chelis prove examples/opaque_invariants.ch --json
 ```
 
+The example is a library module — it declares types and exported producers
+but has no top-level expression, so `chelis eval`/`chelis build` succeed
+with nothing to run (`chelis eval` reports `{"roots":[]}`). `chelis prove`
+is where its obligations are exercised.
+
 Each exported producer yields one `{kind:"obligation"}` record, the user
 `@property` yields a `{kind:"property"}` record, and a final
 `{kind:"summary"}` record reports the totals (note the new `obligations`
-count):
+count). The records below are shown with related fields grouped for
+reading; the binary emits each object's keys in alphabetical order, so a
+literal byte-diff against this page will differ in field order only:
 
 ```json
 {"kind":"property","name":"prob_value_in_unit_interval","proof_tier":"fuzz","samples":100,"seed":0,"status":"passed"}
@@ -165,6 +172,61 @@ type, any generic other than `Option` — is a **declaration error** naming
 the producer, never a silent skip. One uncovered producer would collapse
 the soundness argument, so the obligation is reported as
 `status:"error"` and `prove` exits `3`.
+
+## Using an opaque type from another module
+
+Opacity only matters across a module boundary, so here is the scenario it
+defends. A *consumer* module imports the exported producers and works with
+the type through them — it never names the representation:
+
+```chelis-surf-fragment
+module App.Pricing
+import Stats.Opaque (probability, scale, prob_value)
+
+// Legitimate: obtain and transform values only through exported producers.
+def adjusted(x: f32, factor: Probability) -> f32 =
+  match probability(x) with {
+    | Some(p) => prob_value(scale(p, factor))
+    | None    => 0.0
+  }
+```
+
+Every attempt to *construct* or *inspect* the representation from a module
+other than `Stats.Opaque` is a type error from `chelis check` (and blocks
+`chelis build`), each naming the type, its defining module, and the
+exported producers you should call instead:
+
+```chelis-surf-fragment
+module App.Forge
+import Stats.Opaque (Probability)
+
+def forge(x: f32) -> Probability = Probability { value: x }   // record construction: rejected
+def peek(p: Probability) -> f32 = p.value                     // field access: rejected
+def grab(x: f32) -> Probability = x : Probability             // ascription/cast: rejected
+def unwrap(p: Probability) -> f32 =
+  match p with { | Probability { value: v } => v }            // pattern match: rejected
+```
+
+Each line raises an `OpaqueTypeViolation`, for example:
+
+```text
+error[OpaqueTypeViolation]: record construction of opaque type `Probability`
+  outside its defining module `Stats.Opaque`; obtain values through the
+  exported producers of `Stats.Opaque`: probability, scale, combine
+```
+
+The same applies to functional record update, positional constructor
+application, a bare reference to the constructor as a value, and a reference
+to an *unexported* binding of the defining module whose signature mentions
+the type. Inside `Stats.Opaque` itself, none of these are restricted — that
+is where the proved constructors live.
+
+A single Surf file holds one module, so the consumer and the defining module
+live in separate files of a reef package (or separate `(module {} ...)`
+wrappers in a hand-written `.dp`). Reusing the defining module's name to
+"reopen" it is itself a `DuplicateModule` error, and the reef package
+linker's internal name format is reserved (`ReservedLinkerName`) — neither
+is an escape hatch.
 
 ## Invariants over tensor fields: the simplex
 
@@ -261,9 +323,12 @@ unattested sites that trace to a raw construction or representation update.
 The enumeration is complete; the provenance labels direct a module audit,
 which is what owns transitive flows.
 
-**Tooling output discloses representation contents.** `chelis eval` prints
-the constructor and its fields, and Tier C counterexamples print
-representation values. This is disclosure, not a secrecy break: none of
+**Tooling output discloses representation contents.** When `chelis eval`
+actually reduces an opaque value to a result it prints the constructor and
+its fields, and Tier C counterexamples print representation values. (The
+library examples in this chapter have no top-level expression, so `eval`
+prints no roots; the disclosure applies to a program that evaluates an
+opaque value to a root.) This is disclosure, not a secrecy break: none of
 those outputs are re-importable as typed values, so the construction
 guarantee is unaffected. Opacity is a construction-and-provenance
 guarantee, not an encryption scheme.
