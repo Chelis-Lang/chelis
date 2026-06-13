@@ -18,6 +18,37 @@ struct OpaqueType {
     module: Option<String>,
 }
 
+/// The lint's opaque catalog, keyed by (type leaf, defining module)
+/// rather than bare leaf (CR-9).
+///
+/// `opaque` lists the opaque types and their defining modules.
+/// `declared_leaves` is the set of `(module, leaf)` for EVERY type
+/// declaration (opaque, non-opaque, alias) -- it records that a module
+/// declares a local type of that leaf. A construction site in module M
+/// of leaf L is a cross-module forge only when M does NOT declare a
+/// local L (so the bare `L` resolves to an imported type): if M
+/// declares its own L, the construction is local and must not be
+/// flagged, even if an UNRELATED module defines an opaque same-leaf
+/// type. The checker keys opacity by (type, defining module); this is
+/// the advisory lint approximating that with per-file/per-corpus
+/// declaration data (no symbol table).
+#[derive(Debug, Default)]
+struct Catalog {
+    opaque: Vec<OpaqueType>,
+    declared_leaves: HashSet<(Option<String>, String)>,
+}
+
+impl Catalog {
+    fn is_empty(&self) -> bool {
+        self.opaque.is_empty()
+    }
+
+    fn extend(&mut self, other: Catalog) {
+        self.opaque.extend(other.opaque);
+        self.declared_leaves.extend(other.declared_leaves);
+    }
+}
+
 pub struct OpaqueDomainConstruction;
 
 impl Rule for OpaqueDomainConstruction {
@@ -55,7 +86,7 @@ fn check_surf(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
     };
     let mut catalog = collect_surf_catalog(ctx.root);
     if catalog.is_empty() {
-        collect_surf_opaque_decls(&decls, None, &mut catalog);
+        collect_surf_decls_catalog(&decls, None, &mut catalog);
     }
     if catalog.is_empty() {
         return Vec::new();
@@ -65,19 +96,19 @@ fn check_surf(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
     out
 }
 
-fn collect_surf_catalog(root: &Path) -> Vec<OpaqueType> {
+fn collect_surf_catalog(root: &Path) -> Catalog {
     if root.is_file() {
         return std::fs::read_to_string(root)
             .ok()
             .and_then(|source| chelis_surf::parser::parse_str(&source).ok())
             .map(|decls| {
-                let mut catalog = Vec::new();
-                collect_surf_opaque_decls(&decls, None, &mut catalog);
+                let mut catalog = Catalog::default();
+                collect_surf_decls_catalog(&decls, None, &mut catalog);
                 catalog
             })
             .unwrap_or_default();
     }
-    let mut out = HashSet::new();
+    let mut out = Catalog::default();
     for entry in WalkDir::new(root)
         .into_iter()
         .filter_map(Result::ok)
@@ -92,27 +123,33 @@ fn collect_surf_catalog(root: &Path) -> Vec<OpaqueType> {
         let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
             continue;
         };
-        let mut catalog = Vec::new();
-        collect_surf_opaque_decls(&decls, None, &mut catalog);
+        let mut catalog = Catalog::default();
+        collect_surf_decls_catalog(&decls, None, &mut catalog);
         out.extend(catalog);
     }
-    out.into_iter().collect()
+    out
 }
 
-fn collect_surf_opaque_decls(
-    decls: &[surf::Decl],
-    module: Option<String>,
-    out: &mut Vec<OpaqueType>,
-) {
+fn collect_surf_decls_catalog(decls: &[surf::Decl], module: Option<String>, out: &mut Catalog) {
     for decl in decls {
         match decl {
             surf::Decl::Module { name, decls, .. } => {
-                collect_surf_opaque_decls(decls, Some(name.clone()), out);
+                collect_surf_decls_catalog(decls, Some(name.clone()), out);
             }
-            surf::Decl::TypeDef { name, opaque, .. } if *opaque => out.push(OpaqueType {
-                name: name.clone(),
-                module: module.clone(),
-            }),
+            surf::Decl::TypeDef { name, opaque, .. } => {
+                out.declared_leaves
+                    .insert((module.clone(), type_leaf(name).to_string()));
+                if *opaque {
+                    out.opaque.push(OpaqueType {
+                        name: name.clone(),
+                        module: module.clone(),
+                    });
+                }
+            }
+            surf::Decl::TypeAlias { name, .. } => {
+                out.declared_leaves
+                    .insert((module.clone(), type_leaf(name).to_string()));
+            }
             _ => {}
         }
     }
@@ -122,7 +159,7 @@ fn check_surf_decls(
     ctx: &Context<'_>,
     source: &str,
     decls: &[surf::Decl],
-    catalog: &[OpaqueType],
+    catalog: &Catalog,
     module: Option<&str>,
     out: &mut Vec<Violation>,
 ) {
@@ -168,7 +205,7 @@ fn check_surf_expr(
     ctx: &Context<'_>,
     source: &str,
     expr: &surf::Expr,
-    catalog: &[OpaqueType],
+    catalog: &Catalog,
     module: Option<&str>,
     out: &mut Vec<Violation>,
 ) {
@@ -280,15 +317,15 @@ fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
     out
 }
 
-fn collect_deep_catalog(exprs: &[deep::Expr]) -> Vec<OpaqueType> {
-    let mut out = Vec::new();
+fn collect_deep_catalog(exprs: &[deep::Expr]) -> Catalog {
+    let mut out = Catalog::default();
     for expr in exprs {
-        collect_deep_opaque_expr(expr, None, &mut out);
+        collect_deep_decls_catalog(expr, None, &mut out);
     }
     out
 }
 
-fn collect_deep_opaque_expr(expr: &deep::Expr, module: Option<String>, out: &mut Vec<OpaqueType>) {
+fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &mut Catalog) {
     let Some(list) = as_list(expr) else {
         return;
     };
@@ -296,20 +333,33 @@ fn collect_deep_opaque_expr(expr: &deep::Expr, module: Option<String>, out: &mut
         Some("module") => {
             let module_name = children(list).first().and_then(sym_str).map(str::to_string);
             for child in children(list).iter().skip(1) {
-                collect_deep_opaque_expr(child, module_name.clone(), out);
+                collect_deep_decls_catalog(child, module_name.clone(), out);
             }
         }
-        Some("deftype") if meta_bool(list, "opaque") => {
+        // Every `deftype`/`typealias` records that its module declares a
+        // local type of that leaf (CR-9); opaque deftypes also enter the
+        // opaque list.
+        Some("deftype") => {
             if let Some(name) = children(list).first().and_then(sym_str) {
-                out.push(OpaqueType {
-                    name: name.to_string(),
-                    module,
-                });
+                out.declared_leaves
+                    .insert((module.clone(), type_leaf(name).to_string()));
+                if meta_bool(list, "opaque") {
+                    out.opaque.push(OpaqueType {
+                        name: name.to_string(),
+                        module,
+                    });
+                }
+            }
+        }
+        Some("typealias") => {
+            if let Some(name) = children(list).first().and_then(sym_str) {
+                out.declared_leaves
+                    .insert((module, type_leaf(name).to_string()));
             }
         }
         _ => {
             for child in children(list) {
-                collect_deep_opaque_expr(child, module.clone(), out);
+                collect_deep_decls_catalog(child, module.clone(), out);
             }
         }
     }
@@ -319,7 +369,7 @@ fn check_deep_expr(
     ctx: &Context<'_>,
     source: &str,
     expr: &deep::Expr,
-    catalog: &[OpaqueType],
+    catalog: &Catalog,
     module: Option<&str>,
     out: &mut Vec<Violation>,
 ) {
@@ -396,27 +446,44 @@ fn check_deep_expr(
     }
 }
 
+/// Whether constructing `type_name` in `current_module` materializes
+/// an opaque type defined in a DIFFERENT module (CR-9).
+///
+/// The construction is a cross-module forge only when the current
+/// module does not declare its own type of that leaf: a bare `L` in a
+/// module that declares a local `L` resolves to the local type (which
+/// may be a non-opaque same-leaf type in an unrelated module, or the
+/// module's own opaque type), so it is never flagged. Otherwise (no
+/// local shadow), it is flagged iff some opaque type of that leaf is
+/// defined in another module.
 fn is_outside_opaque_module(
     type_name: &str,
     current_module: Option<&str>,
-    catalog: &[OpaqueType],
+    catalog: &Catalog,
 ) -> bool {
     let leaf = type_leaf(type_name);
-    let mut matched = false;
-    for opaque in catalog {
-        if type_leaf(&opaque.name) != leaf {
-            continue;
-        }
-        matched = true;
-        if opaque.module.as_deref() == current_module {
-            return false;
-        }
+    // Local declaration shadows: the bare name resolves to this
+    // module's own type, not an imported opaque one.
+    if catalog
+        .declared_leaves
+        .contains(&(current_module.map(str::to_string), leaf.to_string()))
+    {
+        return false;
     }
-    matched
+    // No local shadow: flag iff an opaque same-leaf type is defined in
+    // another module (the genuine out-of-module forge).
+    catalog
+        .opaque
+        .iter()
+        .any(|opaque| type_leaf(&opaque.name) == leaf && opaque.module.as_deref() != current_module)
 }
 
-fn is_outside_all_opaque_modules(current_module: Option<&str>, catalog: &[OpaqueType]) -> bool {
+/// Whether `current_module` is outside the defining module of EVERY
+/// opaque type (used for the fail-closed untyped Deep `record-update`
+/// arm). True when the current module declares no opaque type itself.
+fn is_outside_all_opaque_modules(current_module: Option<&str>, catalog: &Catalog) -> bool {
     !catalog
+        .opaque
         .iter()
         .any(|opaque| opaque.module.as_deref() == current_module)
 }
@@ -652,5 +719,86 @@ def bad(x: f32) -> Probability = Probability { value: x }
                 .message
                 .contains("cannot be materialized by `cast`")
         );
+    }
+
+    // ── CR-9: catalog must key by (type, defining module), not leaf ──
+
+    #[test]
+    fn does_not_flag_non_opaque_same_leaf_type_in_unrelated_module() {
+        // CR-9 false positive: `Whale.Types` defines an @opaque
+        // `Probability`; `Other.Domain` defines an UNRELATED non-opaque
+        // `Probability` and constructs its OWN type. The lint must NOT
+        // flag the unrelated type just because it shares the leaf name.
+        let whale = r#"
+module Whale.Types
+@opaque
+type Probability = | Probability { value: f32 }
+"#;
+        let other = r#"
+module Other.Domain
+type Probability = | Probability { value: f32 }
+def make(x: f32) -> Probability = Probability { value: x }
+"#;
+        let violations = run_surf_in_package(other, whale);
+        assert!(
+            violations.is_empty(),
+            "a non-opaque same-leaf type in an unrelated module must not be flagged; got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn deep_does_not_flag_non_opaque_same_leaf_type_in_unrelated_module() {
+        // CR-9 false positive, Deep surface: same leaf, one opaque
+        // (whale.types) and one non-opaque (other.domain) that
+        // constructs its own. Only the genuine forge should ever flag.
+        let src = r#"
+(module {} whale.types
+  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
+(module {} other.domain
+  (deftype {} Probability () (variant {} Probability (field {} value (t-prim {} f32))))
+  (record {} Probability (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
+"#;
+        let violations = run_deep(src);
+        assert!(
+            violations.is_empty(),
+            "non-opaque same-leaf Deep construction in an unrelated module must not flag; got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn still_flags_genuine_out_of_module_forge_with_no_local_shadow() {
+        // CR-9 negative parity: the genuine forge -- a module that does
+        // NOT declare a local same-leaf type but constructs the opaque
+        // type from another module -- must still be flagged.
+        let whale = r#"
+module Whale.Types
+@opaque
+type Probability = | Probability { value: f32 }
+"#;
+        let agent = r#"
+module Agent.Strategy
+def bad(x: f32) -> Probability = Probability { value: x }
+"#;
+        let violations = run_surf_in_package(agent, whale);
+        assert_eq!(
+            violations.len(),
+            1,
+            "the genuine forge must still flag; got {violations:?}"
+        );
+        assert!(violations[0].message.contains("direct record construction"));
+    }
+
+    #[test]
+    fn defining_module_constructing_its_own_opaque_type_is_still_allowed() {
+        // CR-9 negative parity: the opaque type's OWN defining module
+        // constructing it stays allowed even with the (type, module)
+        // keying.
+        let src = r#"
+module Whale.Types
+@opaque
+type Probability = | Probability { value: f32 }
+def probability(x: f32) -> Probability = Probability { value: x }
+"#;
+        assert!(run_surf(src).is_empty());
     }
 }
