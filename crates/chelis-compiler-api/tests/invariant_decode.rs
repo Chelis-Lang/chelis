@@ -455,3 +455,81 @@ fn prob_payload(value: f64) -> ExecutionValue {
         fields: vec![ExecutionValue::Float64 { value }],
     }
 }
+
+// ── In-module constant references in the invariant (CR-3) ─────────────────
+
+/// An opaque type whose invariant references an in-module zero-argument
+/// constant def, which RFC D-WF explicitly permits (predicate free vars may
+/// be the binder OR in-module constants). The tolerance band `[-eps, 1+eps]`
+/// is the documented float-aggregate idiom (RFC D-STARVE). The constant is
+/// load-bearing: a payload of `1.0005` is admissible only because `eps`
+/// widens the upper bound to `1.001`, and decode must resolve `eps` to its
+/// value to evaluate the predicate at all.
+const CONST_INVARIANT_SRC: &str = r#"
+module Stats.Tol
+
+def eps() -> f32 = 0.001
+
+@opaque
+@invariant(p) p.value >= 0.0 - eps && p.value <= 1.0 + eps
+type Tol = | Tol { value: f32 }
+
+def make(x: f32) -> Tol = Tol { value: x }
+"#;
+
+/// A `Tol` wire payload carrying `value`.
+fn tol_payload(value: f64) -> ExecutionValue {
+    ExecutionValue::Adt {
+        ctor: "Tol".to_string(),
+        fields: vec![ExecutionValue::Float64 { value }],
+    }
+}
+
+#[test]
+fn constant_referencing_invariant_accepts_valid_payload() {
+    // CR-3 (red test): the invariant references `eps`, an in-module
+    // constant. A payload of `0.5` is plainly inside the band. Before the
+    // fix this WRONGLY REJECTS (the decode eval context has empty
+    // top_level_defs, so `eps` is an unknown runtime name and the predicate
+    // errors out, failing the decode).
+    let exprs = program_exprs(CONST_INVARIANT_SRC);
+    let decoded = decode_adt_value(&exprs, &tol_payload(0.5))
+        .expect("a valid payload of a constant-referencing invariant must decode");
+    let (ctor, fields) = decoded.as_adt().expect("decoded an ADT");
+    assert_eq!(ctor, "Tol");
+    assert_eq!(fields[0].as_f64(), Some(0.5_f32 as f64));
+}
+
+#[test]
+fn constant_widens_bound_so_just_past_one_is_accepted() {
+    // The constant is load-bearing: `1.0005` is outside the bare `[0, 1]`
+    // band but inside `[-eps, 1 + eps]` = `[-0.001, 1.001]`, so it is only
+    // admissible because `eps` resolves. This pins that the constant value
+    // actually flows into the bound (not just that the predicate runs).
+    let exprs = program_exprs(CONST_INVARIANT_SRC);
+    let decoded = decode_adt_value(&exprs, &tol_payload(1.0005))
+        .expect("1.0005 is inside the eps-widened upper bound");
+    assert_eq!(
+        decoded.as_adt().expect("ADT").0,
+        "Tol",
+        "value within the eps band decodes"
+    );
+}
+
+#[test]
+fn constant_referencing_invariant_rejects_violating_payload() {
+    // CR-3 (negative parity): a payload outside even the eps-widened band
+    // is still rejected as an invariant violation. The constant resolving
+    // must not silently turn the predicate into a pass-through.
+    let exprs = program_exprs(CONST_INVARIANT_SRC);
+    let err = try_decode_adt_value(&exprs, &tol_payload(1.5))
+        .expect_err("1.5 is outside [-eps, 1 + eps] and must be rejected");
+    assert!(
+        matches!(err, DecodeError::Invariant(_)),
+        "out-of-band value is an invariant violation, got {err:?}"
+    );
+
+    let below = try_decode_adt_value(&exprs, &tol_payload(-0.5))
+        .expect_err("-0.5 is below the lower band and must be rejected");
+    assert!(matches!(below, DecodeError::Invariant(_)), "got {below:?}");
+}

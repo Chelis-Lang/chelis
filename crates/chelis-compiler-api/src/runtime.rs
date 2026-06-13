@@ -3116,6 +3116,65 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
     out
 }
 
+/// Collect in-module zero-argument constant defs as `name -> value-body`
+/// (CR-3). RFC D-WF permits an invariant predicate to reference in-module
+/// zero-argument constant defs (e.g. `def eps() -> f32 = 0.001` used in a
+/// tolerance band), so decode revalidation must resolve those names when it
+/// evaluates the predicate.
+///
+/// A zero-argument constant desugars to `(def {} <name> (fn {} (params {})
+/// <inner-body>))`. The *value* of the constant is the evaluation of the
+/// inner body, so this returns the UNWRAPPED inner body keyed by name. The
+/// decode eval context registers these as `top_level_defs`, where
+/// `resolve_top_level` evaluates each to its scalar/tensor value on first
+/// reference (transitive constant chains resolve through the same map).
+///
+/// Functions with one or more parameters are deliberately excluded: a
+/// well-formed predicate (RFC D-WF) does not call general functions, and a
+/// bare reference to a multi-arg function in a value position is not in the
+/// grammar. Registering only the zero-arg value bodies keeps the decode
+/// context to exactly what D-WF admits, without re-running the checker.
+pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr> {
+    let mut out = HashMap::new();
+    for expr in top_level_items(exprs) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(body) = kids.get(1) else {
+            continue;
+        };
+        // The body must be a `(fn {} (params {}) <inner>)` with an empty
+        // params list: that is the desugared shape of a zero-argument def.
+        let Some(fn_list) = as_list(body) else {
+            continue;
+        };
+        if tag(fn_list) != Some("fn") {
+            continue;
+        }
+        let fn_kids = children(fn_list);
+        let Some(params_list) = fn_kids.first().and_then(as_list) else {
+            continue;
+        };
+        if tag(params_list) != Some("params") || !children(params_list).is_empty() {
+            // Non-empty params => not a constant; a value-producing def with
+            // arguments is not in the predicate grammar.
+            continue;
+        }
+        let Some(inner) = fn_kids.get(1) else {
+            continue;
+        };
+        out.insert(name.to_string(), inner.clone());
+    }
+    out
+}
+
 /// The declared representation type of one record-variant field, used by
 /// the decode chokepoint's STRUCTURAL check (RFC D-DECODE). Distinguishes
 /// the V1 decodable value class (RFC D-WF): scalar prims, fixed-shape
@@ -3382,10 +3441,16 @@ fn describe_non_finite(v: f64) -> String {
 /// The walk is recursive: nested record fields that are themselves
 /// invariant-carrying opaque types are checked, and an inner violation is
 /// reported naming the *inner* type. Never repairs.
+///
+/// `module_constants` carries the in-module zero-argument constant defs
+/// (CR-3): RFC D-WF permits an invariant predicate to reference them, so
+/// they are registered as `top_level_defs` in the predicate eval context.
+/// See [`collect_zero_arg_constants`].
 pub(crate) fn revalidate_adt_value(
     value: &RuntimeValue,
     invariants: &HashMap<String, InvariantPredicate>,
     adt_fields: &HashMap<String, Vec<String>>,
+    module_constants: &HashMap<String, Expr>,
 ) -> Result<(), InvariantViolation> {
     let RuntimeValue::Adt { ctor, fields, .. } = value else {
         // Non-ADT values carry no opaque invariant; structural decode has
@@ -3394,13 +3459,13 @@ pub(crate) fn revalidate_adt_value(
         match value {
             RuntimeValue::List(items) | RuntimeValue::Tuple(items) => {
                 for item in items {
-                    revalidate_adt_value(item, invariants, adt_fields)?;
+                    revalidate_adt_value(item, invariants, adt_fields, module_constants)?;
                 }
             }
             RuntimeValue::Dict(entries) => {
                 for (key, val) in entries {
-                    revalidate_adt_value(key, invariants, adt_fields)?;
-                    revalidate_adt_value(val, invariants, adt_fields)?;
+                    revalidate_adt_value(key, invariants, adt_fields, module_constants)?;
+                    revalidate_adt_value(val, invariants, adt_fields, module_constants)?;
                 }
             }
             _ => {}
@@ -3411,7 +3476,7 @@ pub(crate) fn revalidate_adt_value(
     // Recurse into fields first so an inner opaque violation is reported
     // before the outer predicate (inner-most failure is the precise cause).
     for field in fields {
-        revalidate_adt_value(field, invariants, adt_fields)?;
+        revalidate_adt_value(field, invariants, adt_fields, module_constants)?;
     }
 
     let Some(pred) = invariants.get(ctor) else {
@@ -3424,10 +3489,13 @@ pub(crate) fn revalidate_adt_value(
     check_representation_finite(value, &pred.type_name, ctor, invariants, adt_fields, "")?;
 
     // (2) Predicate evaluation through the interpreter's own eval_expr.
+    // In-module zero-argument constants (CR-3) are registered as
+    // top_level_defs so a predicate referencing e.g. a tolerance `eps`
+    // resolves it to its value instead of dying on "unknown runtime name".
     let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
     let mut ctx = EvalContext {
         bindings: HashMap::new(),
-        top_level_defs: HashMap::new(),
+        top_level_defs: module_constants.clone(),
         type_env: HashMap::new(),
         adt_fields: adt_fields.clone(),
         tensor_bindings: &empty_tensors,
@@ -7574,6 +7642,12 @@ def make(x: f32) -> Probability = Probability { value: x }
         (invariants, adt_fields)
     }
 
+    /// The probability invariant references no in-module constant, so the
+    /// constant table is empty for these tests.
+    fn no_constants() -> HashMap<String, Expr> {
+        HashMap::new()
+    }
+
     fn probability(value: f32) -> RuntimeValue {
         RuntimeValue::Adt {
             ctor: "Probability".to_string(),
@@ -7614,7 +7688,7 @@ type Plain = | Plain { value: f32 }
     fn revalidate_accepts_interior_value() {
         let (invariants, adt_fields) = probability_tables();
         assert_eq!(
-            revalidate_adt_value(&probability(0.3), &invariants, &adt_fields),
+            revalidate_adt_value(&probability(0.3), &invariants, &adt_fields, &no_constants()),
             Ok(())
         );
     }
@@ -7624,7 +7698,7 @@ type Plain = | Plain { value: f32 }
         let (invariants, adt_fields) = probability_tables();
         for v in [0.0_f32, 1.0_f32] {
             assert_eq!(
-                revalidate_adt_value(&probability(v), &invariants, &adt_fields),
+                revalidate_adt_value(&probability(v), &invariants, &adt_fields, &no_constants()),
                 Ok(()),
                 "boundary value {v} satisfies a closed [0, 1] invariant"
             );
@@ -7634,8 +7708,13 @@ type Plain = | Plain { value: f32 }
     #[test]
     fn revalidate_rejects_above_boundary_naming_invariant() {
         let (invariants, adt_fields) = probability_tables();
-        let err = revalidate_adt_value(&probability(1.0000001), &invariants, &adt_fields)
-            .expect_err("value just past 1.0 must be rejected");
+        let err = revalidate_adt_value(
+            &probability(1.0000001),
+            &invariants,
+            &adt_fields,
+            &no_constants(),
+        )
+        .expect_err("value just past 1.0 must be rejected");
         match &err {
             InvariantViolation::PredicateFalse {
                 type_name,
@@ -7664,8 +7743,13 @@ type Plain = | Plain { value: f32 }
         // would be TRUE on NaN. The pre-check must reject NaN regardless of
         // the predicate's structure, so this is the pinned fail-closed case.
         let (invariants, adt_fields) = probability_tables();
-        let err = revalidate_adt_value(&probability(f32::NAN), &invariants, &adt_fields)
-            .expect_err("NaN representation must be rejected pre-predicate");
+        let err = revalidate_adt_value(
+            &probability(f32::NAN),
+            &invariants,
+            &adt_fields,
+            &no_constants(),
+        )
+        .expect_err("NaN representation must be rejected pre-predicate");
         assert!(
             matches!(err, InvariantViolation::NonFiniteRepresentation { .. }),
             "NaN must fail the representation pre-check, not the predicate: {err:?}"
@@ -7677,8 +7761,9 @@ type Plain = | Plain { value: f32 }
     fn revalidate_rejects_positive_and_negative_inf() {
         let (invariants, adt_fields) = probability_tables();
         for v in [f32::INFINITY, f32::NEG_INFINITY] {
-            let err = revalidate_adt_value(&probability(v), &invariants, &adt_fields)
-                .expect_err("infinite representation must be rejected pre-predicate");
+            let err =
+                revalidate_adt_value(&probability(v), &invariants, &adt_fields, &no_constants())
+                    .expect_err("infinite representation must be rejected pre-predicate");
             assert!(
                 matches!(err, InvariantViolation::NonFiniteRepresentation { .. }),
                 "Inf must fail the representation pre-check: {err:?}"
@@ -7698,7 +7783,7 @@ type Plain = | Plain { value: f32 }
             field_names: Some(vec!["x".to_string()]),
         };
         assert_eq!(
-            revalidate_adt_value(&plain, &invariants, &adt_fields),
+            revalidate_adt_value(&plain, &invariants, &adt_fields, &no_constants()),
             Ok(())
         );
     }
@@ -7715,7 +7800,7 @@ type Plain = | Plain { value: f32 }
             field_names: Some(vec!["p".to_string()]),
         };
         assert_eq!(
-            revalidate_adt_value(&wrapper_ok, &invariants, &adt_fields),
+            revalidate_adt_value(&wrapper_ok, &invariants, &adt_fields, &no_constants()),
             Ok(())
         );
 
@@ -7724,13 +7809,115 @@ type Plain = | Plain { value: f32 }
             fields: vec![probability(2.0)],
             field_names: Some(vec!["p".to_string()]),
         };
-        let err = revalidate_adt_value(&wrapper_bad, &invariants, &adt_fields)
+        let err = revalidate_adt_value(&wrapper_bad, &invariants, &adt_fields, &no_constants())
             .expect_err("inner opaque violation must surface through the wrapper");
         match err {
             InvariantViolation::PredicateFalse { type_name, .. } => {
                 assert_eq!(type_name, "Probability", "names the inner opaque type");
             }
             other => panic!("expected inner PredicateFalse, got {other:?}"),
+        }
+    }
+
+    // ── CR-3: in-module constant references in the invariant predicate ────
+
+    /// An opaque type whose invariant references the in-module zero-arg
+    /// constant `eps`, widening the band to `[-eps, 1 + eps]`.
+    const TOL_SRC: &str = r#"
+module Stats.Tol
+
+def eps() -> f32 = 0.001
+
+@opaque
+@invariant(p) p.value >= 0.0 - eps && p.value <= 1.0 + eps
+type Tol = | Tol { value: f32 }
+"#;
+
+    fn tol(value: f32) -> RuntimeValue {
+        RuntimeValue::Adt {
+            ctor: "Tol".to_string(),
+            fields: vec![RuntimeValue::Scalar(
+                ScalarPayload::new(Prim::F32, ScalarBits::F32(value)).unwrap(),
+            )],
+            field_names: Some(vec!["value".to_string()]),
+        }
+    }
+
+    #[test]
+    fn collect_zero_arg_constants_unwraps_value_body() {
+        // The collector must key by the const name and return the UNWRAPPED
+        // inner body (the `(lit ...)`), not the `(fn {} (params {}) ...)`
+        // wrapper, so resolve_top_level evaluates it to the scalar value.
+        let checked = checked_surf(TOL_SRC);
+        let consts = collect_zero_arg_constants(checked.exprs());
+        let body = consts.get("eps").expect("eps is a zero-arg constant");
+        // Unwrapped body is a `lit`, not a `fn`.
+        match body {
+            Expr::List(list, _) => assert_eq!(
+                tag(list),
+                Some("lit"),
+                "constant body must be the unwrapped value expr, got {body:?}"
+            ),
+            other => panic!("expected a lit node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collect_zero_arg_constants_excludes_functions_with_params() {
+        // `make(x)` takes a parameter, so it is not a constant and must not
+        // enter the table (it is not in the predicate grammar as a value).
+        let checked = checked_surf(PROBABILITY_SRC);
+        let consts = collect_zero_arg_constants(checked.exprs());
+        assert!(
+            !consts.contains_key("make"),
+            "a parameterized def must not be collected as a constant, got {consts:?}"
+        );
+    }
+
+    #[test]
+    fn revalidate_resolves_in_module_constant_in_predicate() {
+        // CR-3: without the constant table the predicate dies on
+        // `unknown runtime name eps`; with it, a value inside the
+        // eps-widened band is accepted and one outside it is rejected.
+        let checked = checked_surf(TOL_SRC);
+        let invariants = collect_type_invariants(checked.exprs());
+        let adt_fields = collect_adt_ctor_fields(checked.exprs());
+        let consts = collect_zero_arg_constants(checked.exprs());
+
+        // 1.0005 is outside [0, 1] but inside [-0.001, 1.001].
+        assert_eq!(
+            revalidate_adt_value(&tol(1.0005), &invariants, &adt_fields, &consts),
+            Ok(()),
+            "the constant must resolve so the eps-widened bound admits 1.0005"
+        );
+        // Negative parity: still rejected outside the widened band.
+        let err = revalidate_adt_value(&tol(1.5), &invariants, &adt_fields, &consts)
+            .expect_err("1.5 is outside the eps band");
+        assert!(
+            matches!(err, InvariantViolation::PredicateFalse { .. }),
+            "out-of-band value is a predicate-false violation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn revalidate_without_constant_table_errors_on_constant_reference() {
+        // Pins the bug class: with an EMPTY constant table, the same
+        // predicate cannot resolve `eps` and fails as a predicate error.
+        // This is the exact failure CR-3 fixes; locking it keeps a future
+        // regression (dropping the constant table) observable.
+        let checked = checked_surf(TOL_SRC);
+        let invariants = collect_type_invariants(checked.exprs());
+        let adt_fields = collect_adt_ctor_fields(checked.exprs());
+        let err = revalidate_adt_value(&tol(0.5), &invariants, &adt_fields, &no_constants())
+            .expect_err("an empty constant table cannot resolve eps");
+        match err {
+            InvariantViolation::PredicateError { reason, .. } => {
+                assert!(
+                    reason.contains("eps"),
+                    "the unresolved name must be reported, got `{reason}`"
+                );
+            }
+            other => panic!("expected a PredicateError naming eps, got {other:?}"),
         }
     }
 }

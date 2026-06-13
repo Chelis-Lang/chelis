@@ -48,7 +48,7 @@ use chelis_types::types::Prim;
 use crate::runtime::{
     DecodeField, DecodeFieldType, InvariantPredicate, RuntimeTensorValue, RuntimeValue,
     collect_adt_ctor_fields, collect_ctor_field_types, collect_type_invariants,
-    revalidate_adt_value,
+    collect_zero_arg_constants, revalidate_adt_value,
 };
 use crate::schema::ExecutionValue;
 
@@ -110,7 +110,17 @@ pub fn try_decode_adt_value(
     let field_types = collect_ctor_field_types(program_exprs);
     let adt_fields = collect_adt_ctor_fields(program_exprs);
     let invariants = collect_type_invariants(program_exprs);
-    decode_with_tables(payload, &field_types, &adt_fields, &invariants)
+    // In-module zero-arg constants the invariant predicate may reference
+    // (CR-3, RFC D-WF). Without these, a predicate using a tolerance
+    // constant cannot be evaluated and a valid payload is wrongly rejected.
+    let module_constants = collect_zero_arg_constants(program_exprs);
+    decode_with_tables(
+        payload,
+        &field_types,
+        &adt_fields,
+        &invariants,
+        &module_constants,
+    )
 }
 
 /// Decode against pre-built tables. Crate-internal so a caller that already
@@ -123,11 +133,14 @@ pub(crate) fn decode_with_tables(
     field_types: &HashMap<String, Vec<DecodeField>>,
     adt_fields: &HashMap<String, Vec<String>>,
     invariants: &HashMap<String, InvariantPredicate>,
+    module_constants: &HashMap<String, Expr>,
 ) -> Result<RuntimeValue, DecodeError> {
     // Pass 1: structural conversion (constructor + field arity/order/type).
     let value = structural_decode(payload, field_types)?;
     // Pass 2: invariant revalidation (NaN/Inf pre-check then predicate).
-    revalidate_adt_value(&value, invariants, adt_fields)
+    // `module_constants` lets a predicate referencing an in-module zero-arg
+    // constant resolve it (CR-3).
+    revalidate_adt_value(&value, invariants, adt_fields, module_constants)
         .map_err(|violation| DecodeError::Invariant(violation.to_string()))?;
     Ok(value)
 }

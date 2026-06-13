@@ -68,14 +68,17 @@ equivalent that performs the same two passes):
    is *distinct* from an invariant violation — it means the payload is not
    shaped like the type at all.
 2. **Invariant revalidation.** The declared predicate is evaluated on the
-   materialized value. Before predicate evaluation, the representation
-   sanity pre-check rejects any payload containing a NaN or non-finite
-   value in a numeric representation field. This pre-check is mandatory
-   for fail-closed behavior: an in-grammar predicate such as
-   `not (p.value > 1.0)` is *true* on NaN, so relying on the comparison to
-   reject NaN is unsound. A predicate that evaluates to `false`, fails to
-   evaluate (partiality — division by zero, a domain error in
-   `log`/`sqrt`), or does not evaluate to a boolean is a decode failure.
+   materialized value, with any in-module zero-argument constant defs the
+   predicate references (permitted by the well-formedness grammar; see
+   `spec/01-nomenclature.md` §12.1) resolved to their values. Before
+   predicate evaluation, the representation sanity pre-check rejects any
+   payload containing a NaN or non-finite value in a numeric
+   representation field. This pre-check is mandatory for fail-closed
+   behavior: an in-grammar predicate such as `not (p.value > 1.0)` is
+   *true* on NaN, so relying on the comparison to reject NaN is unsound.
+   A predicate that evaluates to `false`, fails to evaluate (partiality
+   — division by zero, a domain error in `log`/`sqrt`, or an unresolved
+   reference), or does not evaluate to a boolean is a decode failure.
 
 **Decode of a violating payload is a failure, never a repair.** A codec
 must not clamp, normalize, saturate, or otherwise coerce a violating

@@ -221,7 +221,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   output-only), so the chokepoint ships experimental with the conformance
   suite (`crates/chelis-compiler-api/tests/invariant_decode.rs`) as its
   only caller. The runtime value type `RuntimeValue` is now exported from
-  the crate root for the chokepoint's return type.
+  the crate root for the chokepoint's return type. (CR-3) Decode now
+  collects the module's in-module zero-argument constant defs into the
+  predicate evaluation context, so an invariant referencing a constant
+  (e.g. a tolerance band `p.value <= 1.0 + eps` over `def eps() -> f32 =
+  0.001`, permitted by the D-WF grammar) resolves the constant instead of
+  failing on an unknown name; a valid payload of such a type now decodes,
+  and a violating one is still rejected.
 
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep
