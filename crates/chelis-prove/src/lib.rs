@@ -14,6 +14,7 @@ pub mod concrete_eval;
 pub mod dispatch;
 pub mod from_property_spec;
 pub mod inlineability;
+pub mod obligations;
 pub mod opaque;
 pub mod solver;
 pub mod tier_a;
