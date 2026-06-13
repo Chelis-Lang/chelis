@@ -353,6 +353,26 @@ Use `--batch-mode file` to force the old execution strategy.
   `chelis_pred::INTRINSIC_WHITELIST` instead of a duplicate array.
 <!-- end opaque-types xhigh-review fixes -->
 
+<!-- opaque-types RT-5 final fixes (prove layer) -->
+- **RT5-F1 (HIGH, completes CR-13)**: the Tier B SMT lowering applied no
+  arity check to the unary intrinsics (`exp`/`log`/`sqrt`/`sin`/`cos`/
+  `abs`), so a wrong-arity transcendental -- a zero-arg `exp()` or a
+  "valid-looking" two-arg `exp(a, b)` (the checker treats `exp` as
+  variadic) -- built an invalid cvc5 term that aborted the solver with
+  empty stdout and bare exit 1, a machine-contract violation for `prove
+  --json` consumers. The SMT lowering now arity-validates every intrinsic
+  application before building any cvc5 term and routes a wrong-arity or
+  unsupported application to a clean `TierBResult::Error` (mapped to an
+  obligation `unsupported`/Tier-C fallback), never letting a bad term reach
+  cvc5. CR-13 had fixed only the parallel concrete-eval path.
+- **test hygiene**: two `chelis prove` CLI tests asserted fuzz-tier
+  behavior and so failed under `--features smt` (where a trivial property
+  auto-proves at the SMT tier); they now pin `--tier fuzz-only`. The
+  solver-free corpus gate (`zero cvc5 symbols`) is skipped under
+  `--features smt` (where the binary links cvc5 by design), keeping the
+  load-bearing default-build assertion intact.
+<!-- end opaque-types RT-5 final fixes -->
+
 - **#248 (#189 follow-up)**: the C backend's `emit_uniform_like` was
   the third lossy `%.8`-format-string site in the same class as the
   F32/F64 `emit_const` arms that PR #243 closed. `low` / `high` were
