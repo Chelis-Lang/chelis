@@ -175,6 +175,79 @@ fn collect_def_bodies(exprs: &[Expr], with_body: &mut BTreeSet<String>) {
     }
 }
 
+/// The DECLARED return type of each `(defsig {} name (t-fn ...))`,
+/// parsed from the Deep type node. Used as the authoritative producer
+/// position when the checker-inferred return loses the opaque type to an
+/// unresolved variable (e.g. a `None`-only body infers `Option[?]` and
+/// drops the `-> Option[Probability]` annotation). The producer set is
+/// the union of inferred-carrying and declared-carrying returns — the
+/// declared annotation is part of the exported contract (RFC D-PRODUCER:
+/// inferred types ensure unannotated defs cannot escape; declared types
+/// remain authoritative where present).
+pub fn collect_declared_returns(exprs: &[Expr]) -> std::collections::BTreeMap<String, Type> {
+    let mut out = std::collections::BTreeMap::new();
+    collect_declared_returns_in(exprs, &mut out);
+    out
+}
+
+fn collect_declared_returns_in(exprs: &[Expr], out: &mut std::collections::BTreeMap<String, Type>) {
+    for expr in exprs {
+        if tag(expr) == Some("defsig")
+            && let Some(name) = children(expr).first().and_then(symbol_text)
+            && let Some(ty_node) = children(expr).get(1)
+            && let Some(Type::Fn(_, ret)) = type_from_deep(ty_node)
+        {
+            out.insert(name.to_string(), *ret);
+        }
+        if let Expr::List(list, _) = expr {
+            collect_declared_returns_in(&list.elements[2.min(list.elements.len())..], out);
+        }
+    }
+}
+
+/// Parse a Deep type node (`t-prim`/`t-adt`/`t-fn`/`t-tuple`/`t-tensor`)
+/// into a [`Type`]. Returns `None` for nodes outside this set. Type
+/// arguments are parsed recursively; unknown leaves become `Type::Error`
+/// (they never match the opaque type by name, so they are inert).
+fn type_from_deep(ty: &Expr) -> Option<Type> {
+    match tag(ty)? {
+        "t-prim" => {
+            // The producer-set logic only matches ADT names; map prims to
+            // a placeholder that never matches an opaque type name.
+            Some(Type::Error)
+        }
+        "t-adt" => {
+            let kids = children(ty);
+            let name = symbol_text(kids.first()?)?.to_string();
+            let args = kids[1..]
+                .iter()
+                .map(|a| type_from_deep(a).unwrap_or(Type::Error))
+                .collect();
+            Some(Type::Adt(name, args))
+        }
+        "t-fn" => {
+            let kids = children(ty);
+            if kids.len() < 2 {
+                return None;
+            }
+            let ret = type_from_deep(kids.last()?)?;
+            let args = kids[..kids.len() - 1]
+                .iter()
+                .map(|a| type_from_deep(a).unwrap_or(Type::Error))
+                .collect();
+            Some(Type::Fn(args, Box::new(ret)))
+        }
+        "t-tuple" => {
+            let items = children(ty)
+                .iter()
+                .map(|a| type_from_deep(a).unwrap_or(Type::Error))
+                .collect();
+            Some(Type::Tuple(items))
+        }
+        _ => Some(Type::Error),
+    }
+}
+
 // ===========================================================================
 // Return-type decomposition (over checker-inferred Type)
 // ===========================================================================
@@ -283,6 +356,7 @@ pub fn collect_obligations(
     let exports = collect_exports(exprs);
     let mut def_bodies = BTreeSet::new();
     collect_def_bodies(exprs, &mut def_bodies);
+    let declared = collect_declared_returns(exprs);
 
     let mut col = ObligationCollection::default();
     for inv in invariants {
@@ -293,7 +367,7 @@ pub fn collect_obligations(
                 // value/function defs carry obligations.
                 continue;
             };
-            collect_one(inv, name, ty, &def_bodies, &mut col);
+            collect_one(inv, name, ty, declared.get(name), &def_bodies, &mut col);
         }
     }
     col
@@ -303,6 +377,7 @@ fn collect_one(
     inv: &OpaqueInvariant,
     name: &str,
     ty: &Type,
+    declared_ret: Option<&Type>,
     def_bodies: &BTreeSet<String>,
     col: &mut ObligationCollection,
 ) {
@@ -322,8 +397,20 @@ fn collect_one(
                     return;
                 }
             }
-            // Produced positions: decompose-or-reject the return.
-            match decompose_return(ret, type_name) {
+            // Produced positions: decompose-or-reject the return. Prefer
+            // the inferred return; if it does not carry the type but the
+            // DECLARED return does (e.g. a None-only body infers
+            // Option[?] and drops the -> Option[T] annotation), use the
+            // declared return — it is part of the exported contract.
+            let inferred = decompose_return(ret, type_name);
+            let resolved = match &inferred {
+                Ok(None) => match declared_ret {
+                    Some(d) => decompose_return(d, type_name),
+                    None => inferred,
+                },
+                _ => inferred,
+            };
+            match resolved {
                 Ok(Some(position)) => {
                     if !def_bodies.contains(name) {
                         col.errors.push(ObligationError::SigOnlyProducer {
