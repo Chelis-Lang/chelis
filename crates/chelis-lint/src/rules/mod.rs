@@ -22,3 +22,4 @@ pub mod surf_test_name_prefix;
 pub mod surf_type_pascal_case;
 pub mod surf_value_snake_case;
 pub mod type_suffix_policy;
+pub mod unreachable_producer;
