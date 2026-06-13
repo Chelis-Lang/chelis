@@ -79,7 +79,73 @@ type Probability = | Probability { value: f32 }
     let deep_text = print_canonical(&deep_exprs);
     assert!(deep_text.contains("opaque: true"));
     assert!(deep_text.contains("Probability"));
+    // An opaque type without an invariant carries neither key.
+    assert!(!deep_text.contains("invariant"));
     deep_parse_strict(&deep_text).expect("opaque type Deep validates");
+}
+
+/// Desugar a single Surf module and print canonical Deep.
+fn desugar_to_deep(source: &str) -> String {
+    let decls = surf_parse(source).expect("Surf parses");
+    let deep_exprs = desugar_program(&decls);
+    print_canonical(&deep_exprs)
+}
+
+#[test]
+fn invariant_linear_desugars_to_three_metadata_keys() {
+    let deep_text = desugar_to_deep(
+        "module Stats.Prob\n@opaque\n\
+         @invariant(p) (p.value >= 0.0) && (p.value <= 1.0)\n\
+         type Probability = | Probability { value: f32 }",
+    );
+    assert!(deep_text.contains("opaque: true"));
+    // Embedded predicate fn with the binder in a params node. The
+    // canonical printer pretty-prints across lines, so assert on the
+    // key + fn opener and the params node separately.
+    assert!(deep_text.contains("invariant: (fn {}"));
+    assert!(deep_text.contains("(params {} p)"));
+    assert!(deep_text.contains("invariant_amenability: \"linear\""));
+    // The embedded fn (a full Deep expr in the metadata map) round-trips
+    // through the strict validator.
+    deep_parse_strict(&deep_text).expect("invariant Deep validates strictly");
+}
+
+#[test]
+fn invariant_polynomial_amenability_recorded() {
+    let deep_text = desugar_to_deep(
+        "module M\n@opaque\n@invariant(p) (p.value * p.value) <= 1.0\n\
+         type Probability = | Probability { value: f32 }",
+    );
+    assert!(deep_text.contains("invariant_amenability: \"polynomial\""));
+    deep_parse_strict(&deep_text).expect("polynomial invariant validates");
+}
+
+#[test]
+fn invariant_transcendental_amenability_recorded() {
+    let deep_text = desugar_to_deep(
+        "module M\n@opaque\n@invariant(p) exp(p.value) <= 3.0\n\
+         type Probability = | Probability { value: f32 }",
+    );
+    assert!(deep_text.contains("invariant_amenability: \"transcendental\""));
+    deep_parse_strict(&deep_text).expect("transcendental invariant validates");
+}
+
+#[test]
+fn simplex_tolerance_band_desugars_and_validates() {
+    // W6 flagship declaration: sum over a literal-shape tensor field with
+    // a module-constant tolerance band. Must classify linear and the
+    // embedded predicate must validate strictly.
+    let deep_text = desugar_to_deep(
+        "module Stats.Simplex\n@opaque\n\
+         @invariant(p) (sum(p.weights) >= (1.0 - eps)) && (sum(p.weights) <= (1.0 + eps))\n\
+         type Simplex = | Simplex { weights: tensor[3, f32] }",
+    );
+    assert!(deep_text.contains("invariant: (fn {}"));
+    assert!(deep_text.contains("(params {} p)"));
+    assert!(deep_text.contains("invariant_amenability: \"linear\""));
+    // The `sum` callee is present (it carries a span; match the suffix).
+    assert!(deep_text.contains("sum)"));
+    deep_parse_strict(&deep_text).expect("simplex invariant validates strictly");
 }
 
 #[test]

@@ -710,8 +710,9 @@ impl DesugarCtx {
                 params,
                 variants,
                 opaque,
+                invariant,
                 ..
-            } => vec![desugar_type_def(name, params, variants, *opaque)],
+            } => vec![self.desugar_type_def(name, params, variants, *opaque, invariant.as_ref())],
 
             Decl::TypeAlias {
                 name, params, ty, ..
@@ -937,27 +938,48 @@ impl DesugarCtx {
         let sig_node = node("defsig", vec![sym(name), node("t-fn", type_parts)]);
         vec![sig_node, def_node]
     }
-}
 
-fn desugar_type_def(
-    name: &str,
-    params: &[String],
-    variants: &[Variant],
-    opaque: bool,
-) -> deep::Expr {
-    let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
-    let mut children = vec![sym(name), param_list];
-    for v in variants {
-        children.push(desugar_variant(v));
-    }
-    if opaque {
-        node_meta(
-            "deftype",
-            meta_with_entries(vec![("opaque".to_string(), bool_atom(true))]),
-            children,
-        )
-    } else {
-        node("deftype", children)
+    /// Desugar a type definition (RFC D-META). An opaque type emits
+    /// `opaque: true`; an opaque type carrying a declared invariant also
+    /// emits `invariant: (fn {} (params {} <binder>) <desugared body>)`
+    /// and `invariant_amenability: "<class>"`. The predicate body is
+    /// desugared with the binder in scope, and the amenability is
+    /// computed by `chelis_pred::classify_predicate` over the just-built
+    /// fn node.
+    fn desugar_type_def(
+        &self,
+        name: &str,
+        params: &[String],
+        variants: &[Variant],
+        opaque: bool,
+        invariant: Option<&TypeInvariant>,
+    ) -> deep::Expr {
+        let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
+        let mut children = vec![sym(name), param_list];
+        for v in variants {
+            children.push(desugar_variant(v));
+        }
+
+        if !opaque {
+            return node("deftype", children);
+        }
+
+        let mut meta_entries = vec![("opaque".to_string(), bool_atom(true))];
+        if let Some(inv) = invariant {
+            // Predicate fn node: (fn {} (params {} <binder>) <body>).
+            // The body is desugared with the binder in scope.
+            let params_node = node("params", vec![sym(&inv.binder)]);
+            let body = self.desugar_expr_with_scope(&inv.body, std::slice::from_ref(&inv.binder));
+            let fn_node = node("fn", vec![params_node, body]);
+            let amenability = chelis_pred::classify_predicate(&fn_node);
+            meta_entries.push(("invariant".to_string(), fn_node));
+            meta_entries.push((
+                "invariant_amenability".to_string(),
+                string(amenability.as_str()),
+            ));
+        }
+
+        node_meta("deftype", meta_with_entries(meta_entries), children)
     }
 }
 

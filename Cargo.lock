@@ -672,6 +672,7 @@ name = "chelis-surf"
 version = "0.7.21"
 dependencies = [
  "chelis-deep",
+ "chelis-pred",
  "miette",
  "proptest",
  "serde",
