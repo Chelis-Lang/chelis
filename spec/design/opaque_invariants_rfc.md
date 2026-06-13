@@ -1,12 +1,36 @@
 # RFC: Opaque Types With Declared Invariants (Option 1.5)
 
-Version: 5 (frozen). Survey evidence:
+Version: 6 (frozen). Survey evidence:
 [`opaque_invariants_survey.md`](opaque_invariants_survey.md).
 Decisions carry stable IDs (`D-*`) for citation in workstream briefs,
 commits, and red-team reports. Changing a frozen decision requires a
 version bump and an explicit note in the owning PR.
 
 Version history:
+- v6: RT-1 final-pass bypass of the v5 fix. The v5 reserved-name
+  suppression (flag TRUE in linked contexts) is sound ONLY when
+  paired with guaranteed re-mangling of every decl name in that
+  context. The `chelis test` entry path (`prepare_eval_in_context`
+  on formatted synth decls) re-asserts the linked flag but does NOT
+  re-mangle the user-authored test/entry decls — so a hand-authored
+  `pkg__victim__forge`-format def name in a reef package test file
+  self-keys to the victim module and forges the real opaque type;
+  `chelis test` accepts it (eval/check/build/validate all reject,
+  because they re-mangle entry decls or apply the rule
+  unconditionally). Decision — make the pairing structural, two
+  layers: (a) the test/entry path re-mangles user-authored
+  entry/test decl names exactly as the eval entry path
+  (`rewrite_entry_decls_with_reef_graph`) does, so a user decl can
+  never self-key to a victim module; (b) belt-and-suspenders: the
+  `ReservedLinkerName` check stays ACTIVE for user-authored
+  entry/test decls regardless of the surrounding linked flag — the
+  flag answers "did the LINKER produce this decl," not "is there
+  linked content in this check unit," and user entry decls are never
+  linker output. Sibling-sweep requirement: every code path that
+  sets the linked flag TRUE must be paired, at the same boundary,
+  with re-mangling of any user-authored decls it admits; the sweep
+  enumerates all such paths and proves the pairing, so a future
+  flag-TRUE path cannot silently reintroduce this class.
 - v5: RT-1 verification bypass. The F2 fix guarded only lexical
   `(module ...)` wrappers, but module identity also derives from
   reef-stem mangled names (`Pkg__pkg__Module__Name`), so a
