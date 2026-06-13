@@ -74,6 +74,11 @@ pub struct ObligationRunOptions {
     pub tier: String,
     /// Obligation-name selector (`--only`); `None` runs all.
     pub only: Option<String>,
+    /// The acceptance-rate floor for opaque input-binder generation in
+    /// Tier C (`--invariant-min-rate`, RFC D-STARVE). `0.0` disables the
+    /// starvation classifier and restores the legacy exhaustion (`Error`)
+    /// path.
+    pub invariant_min_rate: f64,
 }
 
 impl Default for ObligationRunOptions {
@@ -84,6 +89,7 @@ impl Default for ObligationRunOptions {
             smt_timeout_ms: 5000,
             tier: "auto".to_string(),
             only: None,
+            invariant_min_rate: 0.01,
         }
     }
 }
@@ -154,14 +160,16 @@ pub fn run_module_obligations(
             .iter()
             .find(|i| i.type_name == ob.source_type)
             .expect("obligation references a collected invariant");
-        out.push(run_one(exprs, inv, ob, sigs, &consts, options));
+        out.push(run_one(exprs, inv, &invariants, ob, sigs, &consts, options));
     }
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_one(
     exprs: &[Expr],
     inv: &OpaqueInvariant,
+    invariants: &[OpaqueInvariant],
     ob: &ObligationProperty,
     sigs: &BTreeMap<String, Type>,
     consts: &ConstEnv,
@@ -169,7 +177,7 @@ fn run_one(
 ) -> ObligationOutcome {
     // Tier B.
     if options.tier == "auto" || options.tier == "smt-only" {
-        let pparams = producer_param_types(sigs, &ob.producer);
+        let pparams = producer_param_types(sigs, &ob.producer, invariants);
         if let Some(lowered) =
             crate::tier_b_lower::lower_obligation(exprs, inv, ob, &pparams, consts)
         {
@@ -224,14 +232,17 @@ fn run_one(
         );
     }
     // Tier C.
-    run_tier_c(exprs, inv, ob, sigs, options)
+    run_tier_c(exprs, inv, invariants, ob, sigs, consts, options)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_tier_c(
     exprs: &[Expr],
     inv: &OpaqueInvariant,
+    invariants: &[OpaqueInvariant],
     ob: &ObligationProperty,
     sigs: &BTreeMap<String, Type>,
+    consts: &ConstEnv,
     options: &ObligationRunOptions,
 ) -> ObligationOutcome {
     let seed = options.seed;
@@ -277,48 +288,142 @@ fn run_tier_c(
             Some("producer has no callable signature to sample".to_string()),
         );
     };
+    // Classify each producer parameter.
     let mut kinds = Vec::new();
     for t in arg_types {
         match t {
-            Type::Prim(p) => kinds.push(prim_name(p)),
+            Type::Prim(p) => kinds.push(ArgKind::Scalar(prim_name(p))),
+            Type::Tensor(dims, _) => {
+                // Fixed-shape numeric tensor input.
+                let lit_dims: Option<Vec<usize>> = dims
+                    .iter()
+                    .map(|d| match d {
+                        chelis_types::types::Dim::Lit(n) if *n >= 0 => Some(*n as usize),
+                        _ => None,
+                    })
+                    .collect();
+                match lit_dims {
+                    Some(d) => kinds.push(ArgKind::Tensor(d)),
+                    None => {
+                        return unsupported(
+                            ob,
+                            seed,
+                            "producer has a symbolic-shape tensor parameter (Tier C V1)",
+                        );
+                    }
+                }
+            }
+            Type::Adt(name, _) => match invariants.iter().find(|i| &i.type_name == name) {
+                // An invariant-carrying opaque input: the update-shaped
+                // inductive step. The input is generated to satisfy its
+                // invariant (the assumption), via the tiered generator.
+                Some(input_inv) => kinds.push(ArgKind::Opaque(input_inv.clone())),
+                None => {
+                    return unsupported(
+                        ob,
+                        seed,
+                        "producer has a non-invariant ADT parameter (Tier C V1)",
+                    );
+                }
+            },
             _ => {
-                return outcome(
+                return unsupported(
                     ob,
-                    ObligationStatus::Unsupported,
-                    ObligationTier::Fuzz,
-                    0,
                     seed,
-                    None,
-                    Some("producer has a non-scalar parameter (Tier C V1)".to_string()),
+                    "producer has an unsupported parameter (Tier C V1)",
                 );
             }
         }
     }
     let names = producer_param_names(exprs, &ob.producer);
     if names.len() != kinds.len() {
-        return outcome(
-            ob,
-            ObligationStatus::Unsupported,
-            ObligationTier::Fuzz,
-            0,
-            seed,
-            None,
-            Some("producer parameter arity mismatch".to_string()),
-        );
+        return unsupported(ob, seed, "producer parameter arity mismatch");
     }
+
+    let module_source = chelis_deep::printer::print_canonical(exprs);
     let mut rng = Lcg::new(seed);
+    let gen_budget = options.samples.saturating_mul(100).max(200);
     for n in 0..options.samples {
-        let args: Vec<(String, f64)> = names
-            .iter()
-            .zip(&kinds)
-            .map(|(name, kind)| (name.clone(), sample_scalar(kind, &mut rng)))
-            .collect();
-        match eval_obligation_body(exprs, inv, ob, &args) {
+        // Build the per-arg values. An opaque input is generated to satisfy
+        // its invariant (the assumption); on starvation we report it.
+        let mut arg_values = Vec::new();
+        for (name, kind) in names.iter().zip(&kinds) {
+            match kind {
+                ArgKind::Scalar(prim) => {
+                    let v = sample_scalar(prim, &mut rng);
+                    arg_values.push(ArgValue {
+                        expr: scalar_lit(prim, v),
+                        json: serde_json::json!(v),
+                        name: name.clone(),
+                    });
+                }
+                ArgKind::Tensor(dims) => {
+                    let count: usize = dims.iter().product::<usize>().max(1);
+                    let vals: Vec<f64> = (0..count).map(|_| rng.next_f64(-10.0, 10.0)).collect();
+                    arg_values.push(ArgValue {
+                        expr: crate::opaque::tensor_value_expr_pub(dims, "f32", &vals),
+                        json: serde_json::json!(vals),
+                        name: name.clone(),
+                    });
+                }
+                ArgKind::Opaque(input_inv) => {
+                    let mut grng = crate::opaque::GenRng::new(rng.next_u64());
+                    let producers = generation_producers(exprs, sigs, input_inv);
+                    match crate::opaque::generate_binder(
+                        input_inv,
+                        consts,
+                        &module_source,
+                        &producers,
+                        &mut grng,
+                        options.invariant_min_rate,
+                        gen_budget,
+                    ) {
+                        Ok(binder) => {
+                            let json = serde_json::to_value(&binder.env)
+                                .unwrap_or(serde_json::json!(null));
+                            arg_values.push(ArgValue {
+                                expr: binder.value_expr,
+                                json,
+                                name: name.clone(),
+                            });
+                        }
+                        Err(diag) => {
+                            // Generator starvation for the input binder.
+                            if options.invariant_min_rate == 0.0 {
+                                // Floor disabled: legacy exhaustion => Error.
+                                return outcome(
+                                    ob,
+                                    ObligationStatus::Error,
+                                    ObligationTier::Fuzz,
+                                    n,
+                                    seed,
+                                    None,
+                                    Some(format!(
+                                        "generator exhausted for input binder of type `{}`",
+                                        diag.type_name
+                                    )),
+                                );
+                            }
+                            return outcome(
+                                ob,
+                                ObligationStatus::Unsupported,
+                                ObligationTier::Fuzz,
+                                n,
+                                seed,
+                                None,
+                                Some(diag.message()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        match eval_obligation_body_values(exprs, inv, ob, &arg_values, consts) {
             Ok(true) => {}
             Ok(false) => {
-                let cx = args
+                let cx = arg_values
                     .iter()
-                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                    .map(|a| (a.name.clone(), a.json.clone()))
                     .collect::<serde_json::Map<_, _>>();
                 return outcome(
                     ob,
@@ -354,6 +459,107 @@ fn run_tier_c(
     )
 }
 
+/// A producer parameter kind for Tier C sampling.
+enum ArgKind {
+    Scalar(String),
+    Tensor(Vec<usize>),
+    Opaque(OpaqueInvariant),
+}
+
+/// A sampled argument value: the Deep value expr passed to the producer
+/// call, a JSON repr for counterexamples, and the param name.
+struct ArgValue {
+    expr: Expr,
+    json: serde_json::Value,
+    name: String,
+}
+
+fn unsupported(ob: &ObligationProperty, seed: u64, reason: &str) -> ObligationOutcome {
+    outcome(
+        ob,
+        ObligationStatus::Unsupported,
+        ObligationTier::Fuzz,
+        0,
+        seed,
+        None,
+        Some(reason.to_string()),
+    )
+}
+
+/// The exported producers of the input type usable for constructor-based
+/// generation (RFC D-STARVE tier 2). A base producer (no input of the
+/// type) whose result is the input type, with scalar/tensor params.
+fn generation_producers(
+    exprs: &[Expr],
+    sigs: &BTreeMap<String, Type>,
+    input_inv: &OpaqueInvariant,
+) -> Vec<crate::opaque::GenProducer> {
+    use crate::opaque::{GenParamKind, GenProducer};
+    let exports = crate::obligations::collect_exports(exprs);
+    let mut out = Vec::new();
+    for name in &exports {
+        let Some(Type::Fn(args, ret)) = sigs.get(name) else {
+            continue;
+        };
+        // The result must be the input type directly or Option-wrapped,
+        // and the inputs must be raw (scalar/tensor) — a base producer.
+        let (option_wrapped, ok_ret) = match ret.as_ref() {
+            Type::Adt(n, _) if n == &input_inv.type_name => (false, true),
+            Type::Adt(n, inner) if n == "Option" => match inner.first() {
+                Some(Type::Adt(m, _)) if m == &input_inv.type_name => (true, true),
+                _ => (false, false),
+            },
+            _ => (false, false),
+        };
+        if !ok_ret {
+            continue;
+        }
+        let mut kinds = Vec::new();
+        let mut raw_ok = true;
+        for a in args {
+            match a {
+                Type::Prim(p) => kinds.push(GenParamKind::Scalar(prim_name(p))),
+                Type::Tensor(dims, _) => {
+                    let lit: Option<Vec<usize>> = dims
+                        .iter()
+                        .map(|d| match d {
+                            chelis_types::types::Dim::Lit(n) if *n >= 0 => Some(*n as usize),
+                            _ => None,
+                        })
+                        .collect();
+                    match lit {
+                        Some(d) => kinds.push(GenParamKind::Tensor {
+                            dims: d,
+                            precision: "f32".to_string(),
+                        }),
+                        None => {
+                            raw_ok = false;
+                            break;
+                        }
+                    }
+                }
+                // A producer that itself takes the opaque type is
+                // update-shaped, not a base producer: skip for generation.
+                _ => {
+                    raw_ok = false;
+                    break;
+                }
+            }
+        }
+        if !raw_ok {
+            continue;
+        }
+        let param_names = producer_param_names(exprs, name);
+        out.push(GenProducer {
+            name: name.clone(),
+            param_names,
+            param_kinds: kinds,
+            option_wrapped,
+        });
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn outcome(
     ob: &ObligationProperty,
@@ -379,6 +585,7 @@ fn outcome(
 fn producer_param_types(
     sigs: &BTreeMap<String, Type>,
     producer: &str,
+    invariants: &[OpaqueInvariant],
 ) -> Vec<(String, ProducerParamType)> {
     match sigs.get(producer) {
         Some(Type::Fn(args, _)) => args
@@ -387,6 +594,15 @@ fn producer_param_types(
             .map(|(i, a)| {
                 let pt = match a {
                     Type::Prim(p) => ProducerParamType::Scalar(prim_name(p)),
+                    // An invariant-carrying opaque input parameter: the
+                    // update-shaped inductive step (D-SOUND). Resolve its
+                    // invariant model so Tier B can flatten + inject it.
+                    Type::Adt(name, _) => {
+                        match invariants.iter().find(|inv| &inv.type_name == name) {
+                            Some(inv) => ProducerParamType::Opaque(inv.clone()),
+                            None => ProducerParamType::Other,
+                        }
+                    }
                     _ => ProducerParamType::Other,
                 };
                 (format!("__arg{i}"), pt)
@@ -435,26 +651,65 @@ fn resolve_module_constants(exprs: &[Expr], invariants: &[OpaqueInvariant]) -> C
 }
 
 fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
-    let probe = "__chelis_const_probe";
-    let deep_probe = format!("{source}\n(def {{}} {probe} (var {{}} {name}))\n");
-    let result = chelis_compiler_api::compiler::eval_selected(
-        EvalRequest {
-            source_kind: SourceKind::Deep,
-            source: deep_probe,
-            bindings: Default::default(),
-        },
-        &[probe.to_string()],
-    )
-    .ok()?;
-    match result.roots.as_slice() {
-        [root] => match &root.value {
-            ExecutionValue::Tensor { value } if value.shape.is_empty() && value.data.len() == 1 => {
-                Some(value.data[0])
-            }
-            _ => None,
-        },
-        _ => None,
+    // An in-module constant may be a value binding (`(var name)`) or a
+    // zero-argument constant function (`(app (var name))`, the desugaring
+    // of `def eps() -> f32 = 0.01`). The probe def must live INSIDE the
+    // same module as the constant, so reparse and inject into the module
+    // wrapper. Try the call form first, then the bare-var form.
+    // Strip the invariant metadata so a `sum`-bearing predicate does not
+    // block IR lowering of the module when we evaluate the constant.
+    let exprs: Vec<Expr> = chelis_deep::parser::parse_str(source)
+        .ok()?
+        .iter()
+        .map(strip_invariant_meta)
+        .collect();
+    for probe_body in [deep_node("app", vec![deep_var(name)]), deep_var(name)] {
+        let probe = "__chelis_const_probe";
+        let probe_def = node_def(probe, probe_body);
+        let program = inject_const_probe(&exprs, probe_def);
+        let deep_probe = chelis_deep::printer::print_canonical(&program);
+        let Ok(result) = chelis_compiler_api::compiler::eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Deep,
+                source: deep_probe,
+                bindings: Default::default(),
+            },
+            &[probe.to_string()],
+        ) else {
+            continue;
+        };
+        if let [root] = result.roots.as_slice()
+            && let ExecutionValue::Tensor { value } = &root.value
+            && value.shape.is_empty()
+            && value.data.len() == 1
+        {
+            return Some(value.data[0]);
+        }
     }
+    None
+}
+
+/// Inject a probe def into the first `(module ...)` wrapper (or top level).
+fn inject_const_probe(exprs: &[Expr], def: Expr) -> Vec<Expr> {
+    let mut out = Vec::with_capacity(exprs.len());
+    let mut injected = false;
+    for expr in exprs {
+        if !injected
+            && list_tag(expr) == Some("module")
+            && let Expr::List(l, span) = expr
+        {
+            let mut elements = l.elements.clone();
+            elements.push(def.clone());
+            out.push(Expr::List(List { elements }, *span));
+            injected = true;
+        } else {
+            out.push(expr.clone());
+        }
+    }
+    if !injected {
+        out.push(def);
+    }
+    out
 }
 
 fn eval_obligation_body(
@@ -580,6 +835,377 @@ fn obligation_body_expr(ob: &ObligationProperty, args: &[(String, f64)]) -> Expr
         deep_node("app", app)
     };
     position_body(&ob.position, call)
+}
+
+/// Evaluate the obligation over richer argument VALUES (opaque records,
+/// tensors, scalars) by EVALUATING THE PRODUCER and validating each
+/// produced value's representation against the invariant via
+/// `concrete_eval` (not by evaluating the predicate through the host
+/// runtime — that cannot lower `sum`/constant-bearing tensor invariants).
+/// This makes the update-shaped and tensor-input obligations supported,
+/// and matches the generator's validation so proposal and acceptance
+/// agree.
+fn eval_obligation_body_values(
+    exprs: &[Expr],
+    inv: &OpaqueInvariant,
+    ob: &ObligationProperty,
+    args: &[ArgValue],
+    consts: &ConstEnv,
+) -> Result<bool, String> {
+    let call = {
+        let mut app = vec![deep_var(&ob.producer)];
+        for a in args {
+            app.push(a.expr.clone());
+        }
+        deep_node("app", app)
+    };
+
+    // Two validation strategies. For a scalar-only-field invariant the
+    // predicate evaluates fine through the host runtime (the W3 path,
+    // which also handles every produced position incl. tuples). A
+    // tensor-field invariant (`sum`/constant-bearing) cannot lower through
+    // the runtime, so we EVALUATE THE PRODUCER and validate each produced
+    // value's representation via `concrete_eval` (Direct / Option-of-Direct
+    // in V1).
+    let all_scalar = inv
+        .fields
+        .iter()
+        .all(|(_, f)| matches!(f, crate::opaque::FieldType::Scalar(_)));
+    if all_scalar {
+        return eval_obligation_predicate(exprs, inv, ob, call);
+    }
+    let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts)
+        .ok_or_else(|| "invariant predicate does not lower for validation".to_string())?;
+    let module_source = chelis_deep::printer::print_canonical(exprs);
+    validate_position(&module_source, inv, &ob.position, call, &predicate)
+}
+
+/// The W3 predicate-eval path: build `position_body(__chelis_inv_holds,
+/// producer(args))` and evaluate it through the runtime. Works for
+/// scalar-field invariants and every produced position.
+fn eval_obligation_predicate(
+    exprs: &[Expr],
+    inv: &OpaqueInvariant,
+    ob: &ObligationProperty,
+    call: Expr,
+) -> Result<bool, String> {
+    let probe = "__chelis_obligation_probe";
+    let inv_def = deep_node(
+        "def",
+        vec![deep_sym("__chelis_inv_holds"), typed_predicate(inv)],
+    );
+    let probe_def = deep_node(
+        "def",
+        vec![deep_sym(probe), position_body(&ob.position, call)],
+    );
+    let program = inject_into_defining_module(exprs, &inv.type_name, vec![inv_def, probe_def]);
+    let source = chelis_deep::printer::print_canonical(&program);
+    let result = chelis_compiler_api::compiler::eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Deep,
+            source,
+            bindings: Default::default(),
+        },
+        &[probe.to_string()],
+    )
+    .map_err(|e| {
+        e.errors
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+    match result.roots.as_slice() {
+        [root] => match &root.value {
+            ExecutionValue::Bool { value } => Ok(*value),
+            ExecutionValue::Tensor { value } if value.shape.is_empty() && value.data.len() == 1 => {
+                Ok(value.data[0] != 0.0)
+            }
+            other => Err(format!("obligation evaluated to non-bool: {other:?}")),
+        },
+        _ => Err("obligation did not return exactly one root".to_string()),
+    }
+}
+
+/// Validate every produced occurrence of the opaque type at `position`
+/// inside `value_expr` against the invariant. Returns Ok(true) when every
+/// occurrence satisfies the invariant (None-wrapped failures pass
+/// vacuously), Ok(false) on a violation, Err on an evaluation error.
+fn validate_position(
+    module_source: &str,
+    inv: &OpaqueInvariant,
+    position: &ProducedPosition,
+    value_expr: Expr,
+    predicate: &crate::solver::SmtExpr,
+) -> Result<bool, String> {
+    match position {
+        ProducedPosition::Direct => {
+            // Read the record's representation fields and validate.
+            match read_record_env(module_source, inv, value_expr)? {
+                Some(env) => Ok(validate_with_predicate(&env, predicate)),
+                // A None-projected value (NaN sentinel) cannot occur for a
+                // Direct position; treat unreadable as an error upstream.
+                None => Ok(true),
+            }
+        }
+        ProducedPosition::InsideOption(inner) => {
+            // Project the Some-branch value; a None result passes
+            // vacuously (read_record_env returns None on the NaN sentinel).
+            let some_value = opt_some_projection(value_expr, inner);
+            match read_record_env(module_source, inv, some_value)? {
+                Some(env) => Ok(validate_with_predicate(&env, predicate)),
+                None => Ok(true), // None result: vacuously satisfied.
+            }
+        }
+        ProducedPosition::TupleComponents(comps) => {
+            for (idx, inner) in comps {
+                let comp = deep_node(
+                    "tuple-get",
+                    vec![value_expr.clone(), deep_int_lit(*idx as i64)],
+                );
+                if !validate_position(module_source, inv, inner, comp, predicate)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Build the value to read for an `InsideOption` position: `match v {
+/// Some(__v) => <inner-of-__v> | _ => <NaN sentinel> }`, where the inner
+/// is the value at the inner position (Direct => `__v`).
+fn opt_some_projection(value_expr: Expr, inner: &ProducedPosition) -> Expr {
+    let inner_value = match inner {
+        ProducedPosition::Direct => deep_var("__v"),
+        // Nested Option/tuple: project further by recursion at read time.
+        _ => deep_var("__v"),
+    };
+    deep_node(
+        "match",
+        vec![
+            value_expr,
+            deep_node(
+                "arm",
+                vec![
+                    deep_node(
+                        "pat-ctor",
+                        vec![
+                            deep_sym("Some"),
+                            deep_node("pat-var", vec![deep_sym("__v")]),
+                        ],
+                    ),
+                    deep_bare_list(vec![]),
+                    inner_value,
+                ],
+            ),
+            deep_node(
+                "arm",
+                vec![
+                    deep_node("pat-wild", vec![]),
+                    deep_bare_list(vec![]),
+                    deep_var("__chelis_none_sentinel"),
+                ],
+            ),
+        ],
+    )
+}
+
+/// Read an opaque record value's representation fields into a flattened
+/// env keyed by `<binder>.<field>[.<i>]`. Returns `None` when the value is
+/// a None sentinel (NaN-projected). The probe is injected into the
+/// defining module with the invariant metadata stripped (so the
+/// shape-sensitive predicate does not block IR lowering) and a
+/// `__chelis_none_sentinel` def supplying a NaN record.
+fn read_record_env(
+    module_source: &str,
+    inv: &OpaqueInvariant,
+    value_expr: Expr,
+) -> Result<Option<BTreeMap<String, f64>>, String> {
+    let mut env = BTreeMap::new();
+    for (fname, fty) in &inv.fields {
+        let field_path = format!("{}.{}", inv.binder, fname);
+        match read_one_field(
+            module_source,
+            inv,
+            &value_expr,
+            fname,
+            fty,
+            &field_path,
+            &mut env,
+        )? {
+            true => {}
+            false => return Ok(None), // None sentinel detected.
+        }
+    }
+    Ok(Some(env))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_one_field(
+    module_source: &str,
+    inv: &OpaqueInvariant,
+    value_expr: &Expr,
+    _field: &str,
+    fty: &crate::opaque::FieldType,
+    field_path: &str,
+    env: &mut BTreeMap<String, f64>,
+) -> Result<bool, String> {
+    let probe = "__chelis_read_probe";
+    // Bind the value and project the field. A None-sentinel record yields
+    // NaN, which we detect.
+    let body = let_block(
+        "__r",
+        value_expr.clone(),
+        access_node(deep_var("__r"), _field),
+    );
+    let probe_def = node_def(probe, body);
+    // A None sentinel: a record whose fields are NaN.
+    let sentinel_def = node_def("__chelis_none_sentinel", none_sentinel_record(inv));
+    let program =
+        inject_into_module_stripped(module_source, &inv.type_name, vec![sentinel_def, probe_def])?;
+    let source = chelis_deep::printer::print_canonical(&program);
+    let result = chelis_compiler_api::compiler::eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Deep,
+            source,
+            bindings: Default::default(),
+        },
+        &[probe.to_string()],
+    )
+    .map_err(|e| {
+        e.errors
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+    let root = match result.roots.as_slice() {
+        [r] => r,
+        _ => return Err("field read did not return one root".to_string()),
+    };
+    let ExecutionValue::Tensor { value } = &root.value else {
+        return Err("field read returned a non-tensor value".to_string());
+    };
+    if value.data.iter().any(|v| v.is_nan()) {
+        return Ok(false); // None sentinel.
+    }
+    match fty {
+        crate::opaque::FieldType::Tensor { dims, .. } => {
+            let count = dims.iter().product::<usize>().max(1);
+            if value.data.len() != count {
+                return Err("field read shape mismatch".to_string());
+            }
+            for (i, v) in value.data.iter().enumerate() {
+                env.insert(format!("{field_path}.{i}"), *v);
+            }
+        }
+        _ => {
+            let v = *value
+                .data
+                .first()
+                .ok_or_else(|| "empty scalar field read".to_string())?;
+            env.insert(field_path.to_string(), v);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_with_predicate(
+    env: &BTreeMap<String, f64>,
+    predicate: &crate::solver::SmtExpr,
+) -> bool {
+    let hash: std::collections::HashMap<String, f64> =
+        env.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    crate::concrete_eval::eval_bool(predicate, &hash)
+}
+
+/// A None-sentinel record: every field NaN-filled (0.0/0.0) so the reader
+/// detects a None result.
+fn none_sentinel_record(inv: &OpaqueInvariant) -> Expr {
+    let mut children = vec![deep_sym(&inv.ctor_name)];
+    for (fname, fty) in &inv.fields {
+        let nan = deep_node(
+            "app",
+            vec![deep_var("div"), deep_float_lit(0.0), deep_float_lit(0.0)],
+        );
+        let value = match fty {
+            crate::opaque::FieldType::Tensor { dims, .. } => {
+                let count = dims.iter().product::<usize>().max(1);
+                let elems: Vec<Expr> = (0..count).map(|_| nan.clone()).collect();
+                deep_node("app", vec![deep_var("to_tensor"), deep_cons_list(elems)])
+            }
+            _ => nan,
+        };
+        children.push(deep_node("kv", vec![deep_sym(fname), value]));
+    }
+    deep_node("record", children)
+}
+
+fn deep_cons_list(items: Vec<Expr>) -> Expr {
+    items.into_iter().rev().fold(deep_var("Nil"), |tail, item| {
+        deep_node("app", vec![deep_var("Cons"), item, tail])
+    })
+}
+
+fn access_node(target: Expr, field: &str) -> Expr {
+    deep_node("access", vec![target, deep_sym(field)])
+}
+
+fn let_block(bind: &str, value: Expr, body: Expr) -> Expr {
+    deep_node(
+        "let",
+        vec![deep_node("bind", vec![deep_sym(bind), value]), body],
+    )
+}
+
+fn node_def(name: &str, body: Expr) -> Expr {
+    deep_node("def", vec![deep_sym(name), body])
+}
+
+/// Insert defs into the defining module with the invariant metadata
+/// stripped (so the shape-sensitive predicate does not block IR lowering).
+fn inject_into_module_stripped(
+    module_source: &str,
+    type_name: &str,
+    defs: Vec<Expr>,
+) -> Result<Vec<Expr>, String> {
+    let exprs = chelis_deep::parser::parse_str(module_source)
+        .map_err(|e| format!("reparse module: {e}"))?;
+    let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
+    Ok(inject_into_defining_module(&stripped, type_name, defs))
+}
+
+/// Drop the `invariant`/`invariant_amenability` deftype metadata keys,
+/// recursively (keeps `opaque: true`).
+fn strip_invariant_meta(expr: &Expr) -> Expr {
+    match expr {
+        Expr::List(list, span) => {
+            let mut elements: Vec<Expr> = list.elements.iter().map(strip_invariant_meta).collect();
+            if list.elements.first().and_then(sym_text) == Some("deftype")
+                && let Some(Expr::Map(map, mspan)) = elements.get(1)
+            {
+                let kept: Vec<(String, Expr)> = map
+                    .entries
+                    .iter()
+                    .filter(|(k, _)| k != "invariant" && k != "invariant_amenability")
+                    .cloned()
+                    .collect();
+                elements[1] = Expr::Map(MetaMap { entries: kept }, *mspan);
+            }
+            Expr::List(List { elements }, *span)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Build a typed scalar literal Deep expr for a producer argument.
+fn scalar_lit(prim: &str, v: f64) -> Expr {
+    match prim {
+        "int32" | "int64" => deep_int_lit(v as i64),
+        "bool" => deep_bool_lit(v != 0.0),
+        _ => deep_float_lit(v),
+    }
 }
 
 fn position_body(position: &ProducedPosition, value: Expr) -> Expr {

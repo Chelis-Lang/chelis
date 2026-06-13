@@ -155,50 +155,114 @@ pub fn lower_obligation(
         return None;
     }
 
-    // Solver variables: the producer's scalar params.
-    let mut variables = Vec::new();
-    for (name, pty) in producer_params {
-        let sort = match pty {
-            ProducerParamType::Scalar(s) => match s.as_str() {
-                "int32" | "int64" => SmtSort::Int,
-                "bool" => SmtSort::Bool,
-                _ => SmtSort::Real,
-            },
-            // Non-scalar params do not lower in V1.
-            ProducerParamType::Other => return None,
-        };
-        variables.push((name.clone(), sort));
-    }
-
-    // Inline the producer body with the params kept as free solver vars.
     let prod = lookup_producer(exprs, &ob.producer)?;
     if prod.params.len() != producer_params.len() {
         return None;
     }
-    // Map producer param name -> its (already free) solver var name; here
-    // the property's quantified var name IS the producer param name.
-    let subst: HashMap<String, Expr> = prod
-        .params
-        .iter()
-        .zip(producer_params.iter())
-        .map(|(pname, (vname, _))| (pname.clone(), make_var(vname)))
-        .collect();
 
-    let postcondition = lower_obligation_body(prod.body, &subst, inv, ob, exprs, consts, 0)?;
+    // Solver variables + the input-invariant preconditions (D-SOUND
+    // inductive step). A scalar param contributes one solver var; an
+    // opaque input param contributes one solver var per representation
+    // field (flattened) plus its invariant as a precondition.
+    let mut variables = Vec::new();
+    let mut preconditions = Vec::new();
+    // The set of producer-param names that are opaque inputs, mapped to
+    // their (binder-name -> flattened-prefix) so the body lowering
+    // resolves `access(var p) field` to `Var("p.field")`.
+    let mut opaque_params: HashMap<String, OpaqueInvariant> = HashMap::new();
+    // Substitution: a scalar param maps to a free solver var; an opaque
+    // input param is left as itself (its field projections lower directly
+    // to flattened vars, so it must NOT be substituted by a single var).
+    let mut subst: HashMap<String, Expr> = HashMap::new();
+
+    for (pname, (vname, pty)) in prod.params.iter().zip(producer_params.iter()) {
+        match pty {
+            ProducerParamType::Scalar(s) => {
+                let sort = match s.as_str() {
+                    "int32" | "int64" => SmtSort::Int,
+                    "bool" => SmtSort::Bool,
+                    _ => SmtSort::Real,
+                };
+                variables.push((vname.clone(), sort));
+                subst.insert(pname.clone(), make_var(vname));
+            }
+            ProducerParamType::Opaque(input_inv) => {
+                // Cap: the flattened input representation must fit.
+                if input_inv.scalar_count() > crate::opaque::TIER_B_SCALAR_CAP {
+                    return None;
+                }
+                // One solver var per representation field, named
+                // `<param>.<field>` to match the predicate flattening.
+                for (fname, fty) in &input_inv.fields {
+                    let sort = fty.scalar_sort()?; // tensor fields: V1 cap-out
+                    variables.push((format!("{pname}.{fname}"), sort));
+                }
+                // The input invariant as a precondition (the assumption),
+                // flattened over `<param>`.
+                let pre = crate::opaque::lower_predicate_flattened(input_inv, pname, consts)?;
+                preconditions.push(pre);
+                opaque_params.insert(pname.clone(), input_inv.clone());
+                // No subst entry: the param stays `p`, and its field
+                // projections lower to flattened vars in the body.
+            }
+            ProducerParamType::Other => return None,
+        }
+    }
+
+    let postcondition =
+        lower_obligation_body(prod.body, &subst, &opaque_params, inv, ob, exprs, consts, 0)?;
 
     Some(LoweredObligation {
         property: SmtProperty {
             variables,
-            preconditions: vec![],
+            preconditions,
             postcondition,
         },
     })
+}
+
+/// Rewrite every `(access (var p) field)` where `p` is an opaque input
+/// parameter into a synthetic `(var "p.field")` node, recursively. The
+/// flattened var name matches the input-invariant precondition's
+/// flattening, so the body and the assumption share one variable space.
+fn rewrite_opaque_field_access(
+    expr: &Expr,
+    opaque_params: &HashMap<String, OpaqueInvariant>,
+) -> Expr {
+    // `(access (var p) field)` -> `(var "p.field")` when p is opaque.
+    if tag(expr) == Some("access") {
+        let kids = children(expr);
+        if let (Some(target), Some(field_node)) = (kids.first(), kids.get(1))
+            && let Some(pname) = var_name(target)
+            && opaque_params.contains_key(pname)
+            && let Some(field) = symbol_text(field_node)
+        {
+            return make_var(&format!("{pname}.{field}"));
+        }
+    }
+    match expr {
+        Expr::List(list, span) => {
+            let elements = list
+                .elements
+                .iter()
+                .map(|e| rewrite_opaque_field_access(e, opaque_params))
+                .collect();
+            Expr::List(chelis_deep::ast::List { elements }, *span)
+        }
+        other => other.clone(),
+    }
 }
 
 /// A producer parameter's type, for solver-var sort selection.
 #[derive(Debug, Clone)]
 pub enum ProducerParamType {
     Scalar(String),
+    /// An invariant-carrying opaque input parameter (the update-shaped
+    /// inductive step, RFC D-SOUND): its representation is flattened to
+    /// per-field solver vars and its invariant is asserted as a
+    /// precondition (the input assumption). Carries the input type's
+    /// invariant model.
+    Opaque(OpaqueInvariant),
     Other,
 }
 
@@ -224,6 +288,7 @@ fn make_var(name: &str) -> Expr {
 fn lower_obligation_body(
     result_expr: &Expr,
     subst: &HashMap<String, Expr>,
+    opaque_params: &HashMap<String, OpaqueInvariant>,
     inv: &OpaqueInvariant,
     ob: &ObligationProperty,
     exprs: &[Expr],
@@ -233,12 +298,17 @@ fn lower_obligation_body(
     match &ob.position {
         ProducedPosition::Direct => {
             // The result is the produced record directly: apply inv to it.
+            // After reduction, rewrite any `access(var <opaque_param>)
+            // field` (e.g. an inlined `prob_value(p)`) into the flattened
+            // input var so it shares the precondition's variable space.
             let reduced = reduce(result_expr, subst, exprs, depth)?;
+            let reduced = rewrite_opaque_field_access(&reduced, opaque_params);
             apply_invariant(&reduced, inv, consts)
         }
         ProducedPosition::InsideOption(inner) => {
             // result is Option[..]; reduce to known constructor.
             let reduced = reduce(result_expr, subst, exprs, depth)?;
+            let reduced = rewrite_opaque_field_access(&reduced, opaque_params);
             lower_option_obligation(&reduced, inner, inv, ob, exprs, consts, depth)
         }
         // Tuple obligations lower to a conjunction; not in the flagship

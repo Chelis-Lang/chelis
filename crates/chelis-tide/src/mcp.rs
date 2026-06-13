@@ -318,6 +318,10 @@ fn handle_prove_tool(args: &Value) -> Value {
         smt_timeout_ms: smt_timeout,
         tier: tier.to_string(),
         only: None,
+        invariant_min_rate: args
+            .get("invariant_min_rate")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.01),
     };
     let obligation_records: Vec<serde_json::Value> =
         chelis_prove::obligation_engine::run_surf_source_obligations(&source, &ob_options)

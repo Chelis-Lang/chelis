@@ -637,7 +637,10 @@ impl GenRng {
             state: seed ^ 0x9E37_79B9_7F4A_7C15,
         }
     }
-    fn next_u64(&mut self) -> u64 {
+    /// Advance the generator and return the next 64-bit state. Public so
+    /// the obligation engine can seed a per-binder generator
+    /// deterministically from its own RNG stream.
+    pub fn next_u64(&mut self) -> u64 {
         self.state = self
             .state
             .wrapping_mul(6364136223846793005)
@@ -1210,6 +1213,14 @@ fn deep_cons_list(items: Vec<Expr>) -> Expr {
         app_node(vec![var_node("Cons"), item, tail])
     })
 }
+/// Public wrapper: build a fixed-shape tensor value Deep expr (a
+/// `to_tensor`/`pad_sequences` of typed float literals) for a sampled
+/// producer input. Used by the obligation engine's Tier C tensor-input
+/// sampling.
+pub fn tensor_value_expr_pub(dims: &[usize], precision: &str, values: &[f64]) -> Expr {
+    tensor_value_expr(dims, precision, values)
+}
+
 fn tensor_value_expr(dims: &[usize], precision: &str, values: &[f64]) -> Expr {
     let scalar = |v: f64| float_lit(v, precision);
     if dims.len() <= 1 {

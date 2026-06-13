@@ -162,6 +162,108 @@ def bad_prob(x: f32) -> Option[Probability] =
     );
 }
 
+/// Build the producer-param list for an update-shaped producer whose first
+/// param is the opaque input `Probability` and second is a scalar.
+#[cfg(feature = "smt")]
+fn update_pparams(
+    exprs: &[Expr],
+    inv: &crate::opaque::OpaqueInvariant,
+    producer: &str,
+) -> Vec<(String, ProducerParamType)> {
+    let prod = super::lookup_producer(exprs, producer).expect("producer body");
+    vec![
+        (
+            prod.params[0].clone(),
+            ProducerParamType::Opaque(inv.clone()),
+        ),
+        (
+            prod.params[1].clone(),
+            ProducerParamType::Scalar("f32".to_string()),
+        ),
+    ]
+}
+
+#[cfg(feature = "smt")]
+const PROB_DEFS: &str = "module Stats.Prob
+export (scale_down)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+def prob_value(p: Probability) -> f32 = p.value
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn update_shaped_producer_proves_under_input_invariant_at_smt() {
+    use crate::tier_b::{TierBResult, solve_property};
+    // scale_down preserves [0,1] GIVEN the input is in [0,1]: for k in
+    // [0,1], p.value * k stays in [0,1] when p.value is in [0,1]. The
+    // input invariant is the injected assumption (D-SOUND inductive step).
+    let surf = format!(
+        "{PROB_DEFS}def scale_down(p: Probability, k: f32) -> Probability =\n  \
+         Probability {{ value: if k >= 0.0 then (if k <= 1.0 then prob_value(p) * k else prob_value(p)) else prob_value(p) }}\n"
+    );
+    let exprs = deep_of(&surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    let ob = col
+        .obligations
+        .iter()
+        .find(|o| o.producer == "scale_down")
+        .expect("update-shaped producer is an obligation");
+    let inv = &invs[0];
+    let pparams = update_pparams(&exprs, inv, "scale_down");
+    let lowered = lower_obligation(&exprs, inv, ob, &pparams, &crate::opaque::ConstEnv::new())
+        .expect("update-shaped obligation lowers with input-invariant injection");
+    // The precondition is the input invariant (the assumption).
+    assert_eq!(lowered.property.preconditions.len(), 1);
+    assert_eq!(
+        solve_property(&lowered.property, 5000),
+        TierBResult::Proved,
+        "invariant-preserving update proves GIVEN the input assumption"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn update_shaped_violating_twin_is_disproved_at_smt() {
+    use crate::tier_b::{TierBResult, solve_property};
+    // bad_scale adds k UNGUARDED (k can exceed the band), so even with a
+    // valid input p.value+k can leave [0,1]: disproved.
+    let surf = "module Stats.Prob
+export (bad_scale)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+def prob_value(p: Probability) -> f32 = p.value
+def bad_scale(p: Probability, k: f32) -> Probability = Probability { value: prob_value(p) + k }
+"
+    .to_string();
+    let exprs = deep_of(&surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    let ob = col
+        .obligations
+        .iter()
+        .find(|o| o.producer == "bad_scale")
+        .unwrap();
+    let inv = &invs[0];
+    let pparams = update_pparams(&exprs, inv, "bad_scale");
+    let lowered =
+        lower_obligation(&exprs, inv, ob, &pparams, &crate::opaque::ConstEnv::new()).unwrap();
+    assert!(
+        matches!(
+            solve_property(&lowered.property, 5000),
+            TierBResult::Disproved(_)
+        ),
+        "unguarded update must be disproved even under the input assumption"
+    );
+}
+
 /// Resolve the producer's first param name from the Deep program (the
 /// lowering uses the property's quantified var name = the producer param
 /// name).
