@@ -601,7 +601,7 @@ impl StarvationDiagnostic {
         format!(
             "generator starvation for opaque type `{}`: rejection sampling \
              accepted {}/{} ({:.4}), constructor-based generation accepted \
-             {}/{} ({:.4}, {} distinct) — both below the floor {:.4}; \
+             {}/{} ({:.4}, {} distinct), both below the floor {:.4}; \
              predicate shape `{}`; recommended route: {}",
             self.type_name,
             self.rejection_accepted,
@@ -775,7 +775,7 @@ pub fn generate_binder(
     let shape = classify_pred_shape(inv, consts);
     let recommended_route = match shape {
         PredShape::EqualityAtoms => {
-            "Tier B (real semantics) — exact float `==` starves both fuzz tiers by design; \
+            "Tier B (real semantics): exact float `==` starves both fuzz tiers by design; \
              use a tolerance band over a module constant"
                 .to_string()
         }
