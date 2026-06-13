@@ -1,12 +1,18 @@
 # RFC: Opaque Types With Declared Invariants (Option 1.5)
 
-Version: 6 (frozen). Survey evidence:
+Version: 7 (frozen). Survey evidence:
 [`opaque_invariants_survey.md`](opaque_invariants_survey.md).
 Decisions carry stable IDs (`D-*`) for citation in workstream briefs,
 commits, and red-team reports. Changing a frozen decision requires a
 version bump and an explicit note in the owning PR.
 
 Version history:
+- v7: editorial only, no decision change (surfaced during W2). The
+  predicate examples used the word `and`; Surf's boolean conjunction
+  operator is `&&` (the word `and` does not parse as a conjunction).
+  Corrected the three example predicates and the simplex tolerance
+  band to `&&` and to `sum(p.weights)` so the examples are
+  executable. No contract, grammar, or amenability decision changed.
 - v6: RT-1 final-pass bypass of the v5 fix. The v5 reserved-name
   suppression (flag TRUE in linked contexts) is sound ONLY when
   paired with guaranteed re-mangling of every decl name in that
@@ -200,7 +206,7 @@ Red teams attack this argument as stated, not a reconstruction.
 module Stats.Prob
 
 @opaque
-@invariant(p) p.value >= 0.0 and p.value <= 1.0
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
 type Probability = | Probability { value: f32 }
 ```
 
@@ -492,7 +498,7 @@ The flagship producer shape is guard-then-Option:
 
 ```
 def probability(x: f32) -> Option[Probability] =
-  if x >= 0.0 and x <= 1.0 then Some(Probability { value: x }) else None
+  if x >= 0.0 && x <= 1.0 then Some(Probability { value: x }) else None
 ```
 
 Tier B lowering gains, in addition to the existing function-call
@@ -589,7 +595,7 @@ geometrically and step 2 starves too, since even a correct
 normalize-style producer emits sums merely *near* the target. This
 is treated as a defect of the invariant, not the generator: the
 documented idiom for float aggregates is a tolerance band over a
-module constant (`sum >= 1.0 - eps and sum <= 1.0 + eps`), which a
+module constant (`sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps`), which a
 correct producer satisfies at high rate under constructor-based
 proposals. The `==` advisory (D-WF) points at this section; the
 starvation diagnostic for equality-shaped predicates names Tier B
