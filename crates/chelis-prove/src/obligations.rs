@@ -185,22 +185,27 @@ fn collect_def_bodies(exprs: &[Expr], with_body: &mut BTreeSet<String>) {
 /// inferred types ensure unannotated defs cannot escape; declared types
 /// remain authoritative where present).
 pub fn collect_declared_returns(exprs: &[Expr]) -> std::collections::BTreeMap<String, Type> {
+    let aliases = collect_type_aliases(exprs);
     let mut out = std::collections::BTreeMap::new();
-    collect_declared_returns_in(exprs, &mut out);
+    collect_declared_returns_in(exprs, &aliases, &mut out);
     out
 }
 
-fn collect_declared_returns_in(exprs: &[Expr], out: &mut std::collections::BTreeMap<String, Type>) {
+fn collect_declared_returns_in(
+    exprs: &[Expr],
+    aliases: &BTreeMap<String, Expr>,
+    out: &mut std::collections::BTreeMap<String, Type>,
+) {
     for expr in exprs {
         if tag(expr) == Some("defsig")
             && let Some(name) = children(expr).first().and_then(symbol_text)
             && let Some(ty_node) = children(expr).get(1)
-            && let Some(Type::Fn(_, ret)) = type_from_deep(ty_node)
+            && let Some(Type::Fn(_, ret)) = type_from_deep(ty_node, aliases)
         {
             out.insert(name.to_string(), *ret);
         }
         if let Expr::List(list, _) = expr {
-            collect_declared_returns_in(&list.elements[2.min(list.elements.len())..], out);
+            collect_declared_returns_in(&list.elements[2.min(list.elements.len())..], aliases, out);
         }
     }
 }
@@ -209,7 +214,21 @@ fn collect_declared_returns_in(exprs: &[Expr], out: &mut std::collections::BTree
 /// into a [`Type`]. Returns `None` for nodes outside this set. Type
 /// arguments are parsed recursively; unknown leaves become `Type::Error`
 /// (they never match the opaque type by name, so they are inert).
-fn type_from_deep(ty: &Expr) -> Option<Type> {
+///
+/// `aliases` maps each `(typealias ...)` name to its target Deep type
+/// node. A `(t-adt {} <name>)` whose name is an alias is resolved through
+/// the chain (RT3-F1): the record-field path reads syntactically from
+/// Deep, so a field spelled with a type alias (`inner: TA` for
+/// `type TA = T`) must resolve to the underlying opaque type, exactly as
+/// the checker-inferred signature path already does.
+fn type_from_deep(ty: &Expr, aliases: &BTreeMap<String, Expr>) -> Option<Type> {
+    type_from_deep_depth(ty, aliases, 0)
+}
+
+fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usize) -> Option<Type> {
+    if depth > 32 {
+        return Some(Type::Error);
+    }
     match tag(ty)? {
         "t-prim" => {
             // The producer-set logic only matches ADT names; map prims to
@@ -219,9 +238,20 @@ fn type_from_deep(ty: &Expr) -> Option<Type> {
         "t-adt" => {
             let kids = children(ty);
             let name = symbol_text(kids.first()?)?.to_string();
+            // Resolve a bare (no-arg) alias to its target type. Aliases of
+            // generic instantiations (`type TG = Option[T]`) carry their
+            // args in the target node, so resolving the whole node is
+            // correct; an alias applied with explicit args is not produced
+            // by the grammar (V1 aliases are nullary), so we only resolve
+            // the no-arg spelling.
+            if kids.len() == 1
+                && let Some(target) = aliases.get(&name)
+            {
+                return type_from_deep_depth(target, aliases, depth + 1);
+            }
             let args = kids[1..]
                 .iter()
-                .map(|a| type_from_deep(a).unwrap_or(Type::Error))
+                .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Error))
                 .collect();
             Some(Type::Adt(name, args))
         }
@@ -230,21 +260,48 @@ fn type_from_deep(ty: &Expr) -> Option<Type> {
             if kids.len() < 2 {
                 return None;
             }
-            let ret = type_from_deep(kids.last()?)?;
+            let ret = type_from_deep_depth(kids.last()?, aliases, depth + 1)?;
             let args = kids[..kids.len() - 1]
                 .iter()
-                .map(|a| type_from_deep(a).unwrap_or(Type::Error))
+                .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Error))
                 .collect();
             Some(Type::Fn(args, Box::new(ret)))
         }
         "t-tuple" => {
             let items = children(ty)
                 .iter()
-                .map(|a| type_from_deep(a).unwrap_or(Type::Error))
+                .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Error))
                 .collect();
             Some(Type::Tuple(items))
         }
         _ => Some(Type::Error),
+    }
+}
+
+/// Collect the type-alias map from `(typealias {} <name> (<params>)
+/// <target>)` nodes: alias name -> target Deep type node. Alias chains are
+/// resolved lazily by `type_from_deep` (which re-enters this map), so we
+/// store the raw target node here.
+pub fn collect_type_aliases(exprs: &[Expr]) -> BTreeMap<String, Expr> {
+    let mut out = BTreeMap::new();
+    collect_type_aliases_in(exprs, &mut out);
+    out
+}
+
+fn collect_type_aliases_in(exprs: &[Expr], out: &mut BTreeMap<String, Expr>) {
+    for expr in exprs {
+        if tag(expr) == Some("typealias") {
+            let kids = children(expr);
+            // children: name, (params), target
+            if let Some(name) = kids.first().and_then(symbol_text)
+                && let Some(target) = kids.get(2)
+            {
+                out.insert(name.to_string(), target.clone());
+            }
+        }
+        if let Expr::List(list, _) = expr {
+            collect_type_aliases_in(&list.elements[2.min(list.elements.len())..], out);
+        }
     }
 }
 
@@ -362,12 +419,17 @@ fn type_contains_depth(
 /// variant. The opaque types themselves are intentionally NOT entries
 /// here (their fields are the representation, walled off by opacity).
 pub fn collect_record_fields(exprs: &[Expr]) -> BTreeMap<String, Vec<Type>> {
+    let aliases = collect_type_aliases(exprs);
     let mut out = BTreeMap::new();
-    collect_record_fields_in(exprs, &mut out);
+    collect_record_fields_in(exprs, &aliases, &mut out);
     out
 }
 
-fn collect_record_fields_in(exprs: &[Expr], out: &mut BTreeMap<String, Vec<Type>>) {
+fn collect_record_fields_in(
+    exprs: &[Expr],
+    aliases: &BTreeMap<String, Expr>,
+    out: &mut BTreeMap<String, Vec<Type>>,
+) {
     for expr in exprs {
         if tag(expr) == Some("deftype") {
             // Skip opaque types: their fields are the sealed representation.
@@ -383,7 +445,7 @@ fn collect_record_fields_in(exprs: &[Expr], out: &mut BTreeMap<String, Vec<Type>
                 for field in children(variant).iter().skip(1) {
                     if tag(field) == Some("field")
                         && let Some(fty_node) = children(field).get(1)
-                        && let Some(fty) = type_from_deep(fty_node)
+                        && let Some(fty) = type_from_deep(fty_node, aliases)
                     {
                         field_types.push(fty);
                     }
@@ -392,7 +454,7 @@ fn collect_record_fields_in(exprs: &[Expr], out: &mut BTreeMap<String, Vec<Type>
             }
         }
         if let Expr::List(list, _) = expr {
-            collect_record_fields_in(&list.elements[2.min(list.elements.len())..], out);
+            collect_record_fields_in(&list.elements[2.min(list.elements.len())..], aliases, out);
         }
     }
 }

@@ -286,3 +286,116 @@ def read_wrapped(w: Wrapper) -> f32 = 0.0
     );
     assert!(col.obligations.is_empty());
 }
+
+/// Assert that a producer reaching the opaque type through a record field
+/// spelled with any type-alias chain is covered-or-rejected (RT3-F1), the
+/// same as the direct-type case. The record field reads syntactically from
+/// Deep, so alias resolution must happen there.
+fn assert_record_alias_rejected(surf: &str, producer: &str) {
+    let exprs = deep_of(surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    assert!(
+        col.errors.iter().any(|e| matches!(
+            e,
+            ObligationError::UnsupportedContainer { producer: p, .. } if p == producer
+        )),
+        "alias-wrapped record producer `{producer}` must be covered-or-rejected, got {:?}",
+        col.errors
+    );
+    assert!(
+        col.obligations.is_empty(),
+        "no silent obligation for the alias-wrapped record"
+    );
+}
+
+#[test]
+fn rt3_f1_record_field_typealias_is_covered_or_rejected() {
+    // RT3-F1 CRITICAL: a record field spelled with a type alias of the
+    // opaque type silently defeated the producer set (exit 0, zero
+    // obligations) -- a violating T escaped. It must be covered-or-rejected
+    // identically to the direct-type field.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type TA = T
+type Wrapper = | Wrapper { inner: TA }
+def make_w(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn rt3_f1_record_field_alias_of_alias_chain_is_rejected() {
+    // TB = TA = T reached through a record field.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type TA = T
+type TB = TA
+type Wrapper = | Wrapper { inner: TB }
+def make_w(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn rt3_f1_record_field_alias_inside_option_is_rejected() {
+    // An alias reached through an Option field of a record container.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type TA = T
+type Wrapper = | Wrapper { inner: Option[TA] }
+def make_w(x: f32) -> Wrapper = Wrapper { inner: Some(T { value: 99.0 }) }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn rt3_f1_record_field_alias_inside_tuple_is_rejected() {
+    // An alias reached through a tuple field of a record container.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type TA = T
+type Wrapper = | Wrapper { inner: (TA, f32) }
+def make_w(x: f32) -> Wrapper = Wrapper { inner: (T { value: 99.0 }, x) }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn rt3_f1_record_field_alias_nested_two_records_deep_is_rejected() {
+    // An alias reached two record containers deep (Outer { mid: Mid { inner: TA } }).
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type TA = T
+type Mid = | Mid { inner: TA }
+type Outer = | Outer { mid: Mid }
+def make_w(x: f32) -> Outer = Outer { mid: Mid { inner: T { value: 99.0 } } }
+",
+        "make_w",
+    );
+}

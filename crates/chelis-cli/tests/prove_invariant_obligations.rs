@@ -181,6 +181,63 @@ def make_wrapped(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
 }
 
 #[test]
+fn rt3_f1_record_field_typealias_is_covered_or_rejected() {
+    // RT3-F1 CRITICAL: a record field spelled with a type alias of the
+    // opaque type silently defeated the producer set (exit 0). It must be
+    // covered-or-rejected identically to the direct-type field.
+    let source = "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type TA = T
+type Wrapper = | Wrapper { inner: TA }
+def make_w(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
+";
+    let (code, records) = prove_json(source, &[]);
+    assert_eq!(code, 3, "alias-wrapped record => exit 3, not a silent miss");
+    let obs = obligations(&records);
+    assert_eq!(obs.len(), 1);
+    assert_eq!(obs[0]["status"], "error");
+    let reason = obs[0]["reason"].as_str().unwrap();
+    assert!(reason.contains("make_w"), "names the producer: {reason}");
+}
+
+#[test]
+fn rt3_f1_injection_pass_does_not_hide_an_escaping_producer() {
+    // The SECOND CRITICAL (same root): a property over a T binder passes
+    // via injection while make_w silently escaped value=99.0. After the
+    // fix make_w is covered-or-rejected, so the module FAILS prove (exit 3)
+    // even though the injected property itself passes -- the unsound
+    // "module passes while a violating value escapes" is closed.
+    let source = "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type TA = T
+type Wrapper = | Wrapper { inner: TA }
+def make_w(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
+def t_value(p: T) -> f32 = p.value
+@property bounded forall(p: T):
+  t_value(p) <= 1.0
+";
+    let (code, records) = prove_json(source, &[]);
+    assert_eq!(
+        code, 3,
+        "the escaping producer makes the whole module fail prove"
+    );
+    // The covered-or-rejected obligation error is present.
+    let obs = obligations(&records);
+    assert!(
+        obs.iter().any(
+            |o| o["status"] == "error" && o["reason"].as_str().unwrap_or("").contains("make_w")
+        ),
+        "make_w must surface as a covered-or-rejected error: {obs:?}"
+    );
+}
+
+#[test]
 fn unannotated_producer_has_obligation_via_inferred_return() {
     // No `-> Probability`; the inferred return must place it in the set.
     let source = "module Stats.Prob
