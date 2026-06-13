@@ -278,6 +278,17 @@ fn tide_runs_obligations_via_shared_engine() {
 
     assert_eq!(tide_obs.len(), 1, "the flagship has exactly one obligation");
     assert_eq!(tide_obs[0]["name"], "invariant:Probability:probability");
+
+    // CR-12 / D-PARITY: the response status must reflect the obligation
+    // outcomes, not just the user property. The clean flagship module has
+    // no failed obligation, so the response is ok.
+    let all_ok = engine_out
+        .iter()
+        .all(|o| o.status == chelis_prove::obligation_engine::ObligationStatus::Passed);
+    assert_eq!(
+        response["result"]["structuredContent"]["ok"], all_ok,
+        "tide ok reflects the obligation outcomes"
+    );
 }
 
 /// Under the `smt` feature, the flagship obligation proves at proof_tier
@@ -300,4 +311,71 @@ fn tide_flagship_obligation_proves_at_smt_tier() {
     assert_eq!(obs[0]["status"], "passed");
     assert_eq!(obs[0]["proof_tier"], "smt");
     assert_eq!(obs[0]["arith_model"], "real");
+}
+
+const VIOLATING_OBLIGATION_MODULE: &str = "module Stats.Prob
+export (bad_prob)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+def bad_prob(x: f32) -> Probability = Probability { value: x }
+";
+
+/// CR-12 (D-PARITY): a module with a FAILING producer obligation must
+/// lower the tide response status (ok:false, summary.failed reflects it),
+/// matching the CLI. The tide handler previously hardcoded ok:true and
+/// derived the summary only from the single user property.
+#[test]
+fn cr12_failing_obligation_lowers_tide_status() {
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":11,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": VIOLATING_OBLIGATION_MODULE, "seed": 0
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["ok"], false,
+        "a failing producer obligation makes the tide response not-ok: {structured}"
+    );
+    assert!(
+        structured["summary"]["failed"].as_u64().unwrap_or(0) >= 1,
+        "the failed obligation is counted in the summary: {structured}"
+    );
+    // The obligation record itself is failed.
+    let obs = structured["obligations"].as_array().unwrap();
+    assert_eq!(obs[0]["status"], "failed");
+}
+
+/// CR-12: a type-broken module is not-ok through tide too (parity with the
+/// CLI exit-3 / RT3-F2 contract).
+#[test]
+fn cr12_type_broken_module_is_not_ok_through_tide() {
+    let source = "module Stats.Prob
+export (bad_prob)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+def bad_prob(x: f32) -> Probability = Probability { value: x }
+def broken(x: f32) -> f32 = to_tensor([x])
+";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":12,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": source
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["ok"], false,
+        "a type-broken module is not-ok through tide: {structured}"
+    );
 }

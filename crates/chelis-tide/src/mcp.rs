@@ -325,35 +325,69 @@ fn handle_prove_tool(args: &Value) -> Value {
     };
     // Derived obligations. A type-broken module surfaces a check-failure
     // record rather than silently reporting zero obligations (RT3-F2).
-    use chelis_prove::obligation_engine::ObligationRunResult;
-    let obligation_records: Vec<serde_json::Value> =
-        match chelis_prove::obligation_engine::run_surf_source_obligations(&source, &ob_options) {
-            Ok(ObligationRunResult::Ran(outcomes)) => {
-                outcomes.into_iter().map(obligation_to_json).collect()
+    use chelis_prove::obligation_engine::{ObligationRunResult, ObligationStatus};
+    let mut obligation_records: Vec<serde_json::Value> = Vec::new();
+    // The worst obligation status, folded into the response ok/summary
+    // exactly as the CLI folds it into the overall prove exit status
+    // (CR-12 / D-PARITY): a failed / unsupported / errored producer
+    // obligation must lower the tide response, not be ignored.
+    let mut ob_failed = 0usize;
+    let mut ob_unsupported = 0usize;
+    let mut ob_errored = 0usize;
+    let mut check_failed = false;
+    match chelis_prove::obligation_engine::run_surf_source_obligations(&source, &ob_options) {
+        Ok(ObligationRunResult::Ran(outcomes)) => {
+            for o in &outcomes {
+                match o.status {
+                    ObligationStatus::Failed => ob_failed += 1,
+                    ObligationStatus::Unsupported => ob_unsupported += 1,
+                    ObligationStatus::Error => ob_errored += 1,
+                    ObligationStatus::Passed => {}
+                }
             }
-            Ok(ObligationRunResult::CheckFailed(messages)) => vec![json!({
+            obligation_records = outcomes.into_iter().map(obligation_to_json).collect();
+        }
+        Ok(ObligationRunResult::CheckFailed(messages)) => {
+            check_failed = true;
+            obligation_records.push(json!({
                 "kind": "error",
                 "stage": "check",
                 "reason": "module does not type-check; obligations not verified",
                 "diagnostics": messages,
-            })],
-            Err(message) => vec![json!({
+            }));
+        }
+        Err(message) => {
+            check_failed = true;
+            obligation_records.push(json!({
                 "kind": "error",
                 "stage": "parse",
                 "reason": message,
-            })],
-        };
+            }));
+        }
+    }
     let obligations_count = obligation_records.len();
 
+    let property_proved = result.status == chelis_prove::ProofStatus::Proved;
+    let property_failed = matches!(result.status, chelis_prove::ProofStatus::Disproved { .. });
+    // ok is false if the user property failed, OR any obligation failed /
+    // was unsupported / errored, OR the module did not type-check.
+    let ok = !property_failed
+        && ob_failed == 0
+        && ob_unsupported == 0
+        && ob_errored == 0
+        && !check_failed;
+
     json!({
-        "ok": true,
+        "ok": ok,
         "stage": "prove",
         "properties": [serde_json::to_value(&result).unwrap_or(json!(null))],
         "obligations": obligation_records,
         "summary": {
             "total": 1,
-            "proved": if result.status == chelis_prove::ProofStatus::Proved { 1 } else { 0 },
-            "failed": match &result.status { chelis_prove::ProofStatus::Disproved { .. } => 1, _ => 0 },
+            "proved": if property_proved { 1 } else { 0 },
+            "failed": (if property_failed { 1 } else { 0 }) + ob_failed,
+            "unsupported": ob_unsupported,
+            "errors": ob_errored + if check_failed { 1 } else { 0 },
             "obligations": obligations_count,
         }
     })

@@ -675,12 +675,23 @@ fn matches_filter(name: &str, pattern: &str) -> bool {
 
 fn resolve_module_constants(exprs: &[Expr], invariants: &[OpaqueInvariant]) -> ConstEnv {
     let mut env = ConstEnv::new();
-    let mut referenced = Vec::new();
+    let mut referenced: Vec<String> = Vec::new();
+    // Constants referenced by the invariant predicates...
     for inv in invariants {
         for v in crate::predicate_free_vars(&inv.predicate) {
             if v != inv.binder && !referenced.contains(&v) {
                 referenced.push(v);
             }
+        }
+    }
+    // ...and the in-module zero-arg scalar defs (value bindings or
+    // zero-parameter functions) a producer GUARD may compare against
+    // (CR-8: `def hi() -> f32 = 1.0; ... if x <= hi() ...`, or the value
+    // binding `hi = 1.0; ... x <= hi ...`). Resolving them here makes the
+    // Tier B `reduce` pass inline the constant into the guard.
+    for name in module_zero_arg_scalar_defs(exprs) {
+        if !referenced.contains(&name) {
+            referenced.push(name);
         }
     }
     if referenced.is_empty() {
@@ -695,19 +706,59 @@ fn resolve_module_constants(exprs: &[Expr], invariants: &[OpaqueInvariant]) -> C
     env
 }
 
+/// Names of in-module defs that are zero-arg constants: a value binding
+/// `(def name <value>)` whose value is not a `fn`, or a zero-parameter
+/// function `(def name (fn (params) ...))` with no params. The caller
+/// resolves each to a scalar by evaluation (non-scalar ones simply fail to
+/// resolve and are dropped).
+fn module_zero_arg_scalar_defs(exprs: &[Expr]) -> Vec<String> {
+    fn walk(exprs: &[Expr], out: &mut Vec<String>) {
+        for expr in exprs {
+            if list_tag(expr) == Some("def")
+                && let Some(name) = node_children(expr).first().and_then(sym_text)
+                && let Some(body) = node_children(expr).get(1)
+            {
+                let is_zero_arg = if list_tag(body) == Some("fn") {
+                    // A fn with an empty params node.
+                    node_children(body)
+                        .first()
+                        .map(|p| node_children(p).is_empty())
+                        .unwrap_or(false)
+                } else {
+                    // A non-fn value binding.
+                    true
+                };
+                if is_zero_arg && !out.iter().any(|n| n == name) {
+                    out.push(name.to_string());
+                }
+            }
+            if let Expr::List(l, _) = expr {
+                walk(&l.elements[2.min(l.elements.len())..], out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(exprs, &mut out);
+    out
+}
+
 fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
     // An in-module constant may be a value binding (`(var name)`) or a
     // zero-argument constant function (`(app (var name))`, the desugaring
-    // of `def eps() -> f32 = 0.01`). The probe def must live INSIDE the
-    // same module as the constant, so reparse and inject into the module
-    // wrapper. Try the call form first, then the bare-var form.
-    // Strip the invariant metadata so a `sum`-bearing predicate does not
-    // block IR lowering of the module when we evaluate the constant.
+    // of `def eps() -> f32 = 0.01`).
     let exprs: Vec<Expr> = chelis_deep::parser::parse_str(source)
         .ok()?
         .iter()
         .map(strip_invariant_meta)
         .collect();
+
+    // Fast path: if the const def body is a plain literal, read it
+    // directly (CR-8). A top-level value binding `hi = 1.0` is itself a
+    // root, so the eval-probe path below trips the lowered-root-count
+    // selection mismatch; extracting the literal sidesteps that.
+    if let Some(v) = literal_const_value(&exprs, name) {
+        return Some(v);
+    }
     for probe_body in [deep_node("app", vec![deep_var(name)]), deep_var(name)] {
         let probe = "__chelis_const_probe";
         let probe_def = node_def(probe, probe_body);
@@ -732,6 +783,64 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
         }
     }
     None
+}
+
+/// Read a constant def's value directly when its body is a plain numeric
+/// literal: `(def name (lit {} <num>))` (a value binding) or
+/// `(def name (fn (params) (lit {} <num>)))` (a zero-arg constant fn).
+/// Returns `None` for any non-literal body (those go through evaluation).
+fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
+    fn lit_number(expr: &Expr) -> Option<f64> {
+        // A bare atom or a `(lit {} <num>)` node.
+        match expr {
+            Expr::Atom(Atom::Float(v), _) => Some(*v),
+            Expr::Atom(Atom::Int(v), _) => Some(*v as f64),
+            _ => {
+                if list_tag(expr) == Some("lit") {
+                    match node_children(expr).first() {
+                        Some(Expr::Atom(Atom::Float(v), _)) => Some(*v),
+                        Some(Expr::Atom(Atom::Int(v), _)) => Some(*v as f64),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
+    fn find(exprs: &[Expr], name: &str) -> Option<f64> {
+        for expr in exprs {
+            if list_tag(expr) == Some("def")
+                && node_children(expr).first().and_then(sym_text) == Some(name)
+                && let Some(body) = node_children(expr).get(1)
+            {
+                // Value binding: the body is the literal.
+                if let Some(v) = lit_number(body) {
+                    return Some(v);
+                }
+                // Zero-arg constant fn: `(fn (params) <lit>)`.
+                if list_tag(body) == Some("fn") {
+                    let kids = node_children(body);
+                    if kids
+                        .first()
+                        .map(|p| node_children(p).is_empty())
+                        .unwrap_or(false)
+                        && let Some(fn_body) = kids.get(1)
+                        && let Some(v) = lit_number(fn_body)
+                    {
+                        return Some(v);
+                    }
+                }
+            }
+            if let Expr::List(l, _) = expr
+                && let Some(v) = find(&l.elements[2.min(l.elements.len())..], name)
+            {
+                return Some(v);
+            }
+        }
+        None
+    }
+    find(exprs, name)
 }
 
 /// Inject a probe def into the first `(module ...)` wrapper (or top level).
@@ -922,7 +1031,178 @@ fn eval_obligation_body_values(
     let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts)
         .ok_or_else(|| "invariant predicate does not lower for validation".to_string())?;
     let module_source = chelis_deep::printer::print_canonical(exprs);
-    validate_position(&module_source, inv, &ob.position, call, &predicate)
+    // Evaluate the producer ONCE and validate the produced value's
+    // representation structurally against the position + invariant
+    // (CR-1 / CR-4 / CR-6): the structured ExecutionValue already
+    // represents Option as `Adt{ctor:Some|None}`, tuples as `Tuple`, and
+    // records as `Adt{ctor, fields}`, so the inner position is applied
+    // recursively and None is a real discriminant -- no NaN sentinel and
+    // no spurious record-read off a tuple.
+    let value = eval_producer_value(&module_source, inv, call)?;
+    validate_value(&value, &ob.position, inv, &predicate)
+}
+
+/// Evaluate the producer call inside the defining module (invariant
+/// metadata stripped so the shape-sensitive predicate does not block IR
+/// lowering) and return the full structured result value.
+fn eval_producer_value(
+    module_source: &str,
+    inv: &OpaqueInvariant,
+    call: Expr,
+) -> Result<ExecutionValue, String> {
+    let probe = "__chelis_value_probe";
+    let probe_def = node_def(probe, call);
+    let program = inject_into_module_stripped(module_source, &inv.type_name, vec![probe_def])?;
+    let source = chelis_deep::printer::print_canonical(&program);
+    let result = chelis_compiler_api::compiler::eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Deep,
+            source,
+            bindings: Default::default(),
+        },
+        &[probe.to_string()],
+    )
+    .map_err(|e| {
+        e.errors
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+    match result.roots.as_slice() {
+        [root] => Ok(root.value.clone()),
+        _ => Err("producer value probe did not return one root".to_string()),
+    }
+}
+
+/// Validate a produced [`ExecutionValue`] at `position` against the
+/// invariant. The structured value carries Option/tuple/record structure
+/// directly, so we traverse it (CR-1: the inner position is applied;
+/// CR-4/CR-6: a `None` result is the real `Adt{ctor:"None"}` discriminant,
+/// never a NaN sentinel, so a legitimate NaN inside a `Some` record fails
+/// the invariant rather than passing vacuously).
+fn validate_value(
+    value: &ExecutionValue,
+    position: &ProducedPosition,
+    inv: &OpaqueInvariant,
+    predicate: &crate::solver::SmtExpr,
+) -> Result<bool, String> {
+    match position {
+        ProducedPosition::Direct => {
+            let env = opaque_record_env(value, inv)?;
+            Ok(validate_with_predicate(&env, predicate))
+        }
+        ProducedPosition::InsideOption(inner) => match value {
+            ExecutionValue::Adt { ctor, fields } if ctor == "None" => {
+                let _ = fields;
+                Ok(true) // None result: vacuously satisfied.
+            }
+            ExecutionValue::Adt { ctor, fields } if ctor == "Some" => {
+                let payload = fields
+                    .first()
+                    .ok_or_else(|| "Some has no payload".to_string())?;
+                validate_value(payload, inner, inv, predicate)
+            }
+            other => Err(format!(
+                "expected an Option value at an Option position, got {other:?}"
+            )),
+        },
+        ProducedPosition::TupleComponents(comps) => {
+            let ExecutionValue::Tuple { value: items } = value else {
+                return Err(format!(
+                    "expected a tuple value at a tuple position, got {value:?}"
+                ));
+            };
+            for (idx, inner) in comps {
+                let comp = items
+                    .get(*idx)
+                    .ok_or_else(|| format!("tuple has no component {idx}"))?;
+                if !validate_value(comp, inner, inv, predicate)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Flatten an opaque record [`ExecutionValue`] (`Adt{ctor, fields}` in the
+/// type's declared field order) into the dotted-path env the lowered
+/// predicate reads. A NaN scalar/element is kept as-is so the strict
+/// invariant comparison fails on it (CR-4/CR-6 fail-closed).
+fn opaque_record_env(
+    value: &ExecutionValue,
+    inv: &OpaqueInvariant,
+) -> Result<BTreeMap<String, f64>, String> {
+    let ExecutionValue::Adt { fields, .. } = value else {
+        return Err(format!(
+            "expected an opaque record value at a Direct position, got {value:?}"
+        ));
+    };
+    if fields.len() != inv.fields.len() {
+        return Err(format!(
+            "opaque record arity mismatch: {} runtime fields vs {} declared",
+            fields.len(),
+            inv.fields.len()
+        ));
+    }
+    let mut env = BTreeMap::new();
+    for ((fname, fty), fval) in inv.fields.iter().zip(fields.iter()) {
+        let field_path = format!("{}.{}", inv.binder, fname);
+        flatten_field_value(fval, fty, &field_path, &mut env)?;
+    }
+    Ok(env)
+}
+
+fn flatten_field_value(
+    value: &ExecutionValue,
+    fty: &crate::opaque::FieldType,
+    field_path: &str,
+    env: &mut BTreeMap<String, f64>,
+) -> Result<(), String> {
+    match fty {
+        crate::opaque::FieldType::Tensor { dims, .. } => {
+            let ExecutionValue::Tensor { value } = value else {
+                return Err("tensor field is not a tensor value".to_string());
+            };
+            let count = dims.iter().product::<usize>().max(1);
+            if value.data.len() != count {
+                return Err("tensor field shape mismatch".to_string());
+            }
+            for (i, v) in value.data.iter().enumerate() {
+                env.insert(format!("{field_path}.{i}"), *v);
+            }
+        }
+        crate::opaque::FieldType::Scalar(_) => {
+            let v = match value {
+                ExecutionValue::Float64 { value } => *value,
+                ExecutionValue::Int64 { value } => *value as f64,
+                ExecutionValue::Bool { value } => {
+                    if *value {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                ExecutionValue::Tensor { value } if !value.data.is_empty() => value.data[0],
+                other => return Err(format!("scalar field is not a scalar value: {other:?}")),
+            };
+            env.insert(field_path.to_string(), v);
+        }
+        crate::opaque::FieldType::Record(inner_fields) => {
+            // A nested record value: Adt{fields} in declared order.
+            let ExecutionValue::Adt { fields, .. } = value else {
+                return Err("nested record field is not a record value".to_string());
+            };
+            if fields.len() != inner_fields.len() {
+                return Err("nested record arity mismatch".to_string());
+            }
+            for ((iname, ity), ival) in inner_fields.iter().zip(fields.iter()) {
+                flatten_field_value(ival, ity, &format!("{field_path}.{iname}"), env)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The W3 predicate-eval path: build `position_body(__chelis_inv_holds,
@@ -972,251 +1252,15 @@ fn eval_obligation_predicate(
     }
 }
 
-/// Validate every produced occurrence of the opaque type at `position`
-/// inside `value_expr` against the invariant. Returns Ok(true) when every
-/// occurrence satisfies the invariant (None-wrapped failures pass
-/// vacuously), Ok(false) on a violation, Err on an evaluation error.
-fn validate_position(
-    module_source: &str,
-    inv: &OpaqueInvariant,
-    position: &ProducedPosition,
-    value_expr: Expr,
-    predicate: &crate::solver::SmtExpr,
-) -> Result<bool, String> {
-    match position {
-        ProducedPosition::Direct => {
-            // Read the record's representation fields and validate.
-            match read_record_env(module_source, inv, value_expr)? {
-                Some(env) => Ok(validate_with_predicate(&env, predicate)),
-                // A None-projected value (NaN sentinel) cannot occur for a
-                // Direct position; treat unreadable as an error upstream.
-                None => Ok(true),
-            }
-        }
-        ProducedPosition::InsideOption(inner) => {
-            // Project the Some-branch value; a None result passes
-            // vacuously (read_record_env returns None on the NaN sentinel).
-            let some_value = opt_some_projection(value_expr, inner);
-            match read_record_env(module_source, inv, some_value)? {
-                Some(env) => Ok(validate_with_predicate(&env, predicate)),
-                None => Ok(true), // None result: vacuously satisfied.
-            }
-        }
-        ProducedPosition::TupleComponents(comps) => {
-            for (idx, inner) in comps {
-                let comp = deep_node(
-                    "tuple-get",
-                    vec![value_expr.clone(), deep_int_lit(*idx as i64)],
-                );
-                if !validate_position(module_source, inv, inner, comp, predicate)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-    }
-}
-
-/// Build the value to read for an `InsideOption` position: `match v {
-/// Some(__v) => <inner-of-__v> | _ => <NaN sentinel> }`, where the inner
-/// is the value at the inner position (Direct => `__v`).
-fn opt_some_projection(value_expr: Expr, inner: &ProducedPosition) -> Expr {
-    let inner_value = match inner {
-        ProducedPosition::Direct => deep_var("__v"),
-        // Nested Option/tuple: project further by recursion at read time.
-        _ => deep_var("__v"),
-    };
-    deep_node(
-        "match",
-        vec![
-            value_expr,
-            deep_node(
-                "arm",
-                vec![
-                    deep_node(
-                        "pat-ctor",
-                        vec![
-                            deep_sym("Some"),
-                            deep_node("pat-var", vec![deep_sym("__v")]),
-                        ],
-                    ),
-                    deep_bare_list(vec![]),
-                    inner_value,
-                ],
-            ),
-            deep_node(
-                "arm",
-                vec![
-                    deep_node("pat-wild", vec![]),
-                    deep_bare_list(vec![]),
-                    deep_var("__chelis_none_sentinel"),
-                ],
-            ),
-        ],
-    )
-}
-
-/// Read an opaque record value's representation fields into a flattened
-/// env keyed by `<binder>.<field>[.<i>]`. Returns `None` when the value is
-/// a None sentinel (NaN-projected). The probe is injected into the
-/// defining module with the invariant metadata stripped (so the
-/// shape-sensitive predicate does not block IR lowering) and a
-/// `__chelis_none_sentinel` def supplying a NaN record.
-fn read_record_env(
-    module_source: &str,
-    inv: &OpaqueInvariant,
-    value_expr: Expr,
-) -> Result<Option<BTreeMap<String, f64>>, String> {
-    let mut env = BTreeMap::new();
-    for (fname, fty) in &inv.fields {
-        let field_path = format!("{}.{}", inv.binder, fname);
-        match read_one_field(
-            module_source,
-            inv,
-            &value_expr,
-            fname,
-            fty,
-            &field_path,
-            &mut env,
-        )? {
-            true => {}
-            false => return Ok(None), // None sentinel detected.
-        }
-    }
-    Ok(Some(env))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn read_one_field(
-    module_source: &str,
-    inv: &OpaqueInvariant,
-    value_expr: &Expr,
-    _field: &str,
-    fty: &crate::opaque::FieldType,
-    field_path: &str,
-    env: &mut BTreeMap<String, f64>,
-) -> Result<bool, String> {
-    let probe = "__chelis_read_probe";
-    // Bind the value and project the field. A None-sentinel record yields
-    // NaN, which we detect.
-    let body = let_block(
-        "__r",
-        value_expr.clone(),
-        access_node(deep_var("__r"), _field),
-    );
-    let probe_def = node_def(probe, body);
-    // A None sentinel: a record whose fields are NaN.
-    let sentinel_def = node_def("__chelis_none_sentinel", none_sentinel_record(inv));
-    let program =
-        inject_into_module_stripped(module_source, &inv.type_name, vec![sentinel_def, probe_def])?;
-    let source = chelis_deep::printer::print_canonical(&program);
-    let result = chelis_compiler_api::compiler::eval_selected(
-        EvalRequest {
-            source_kind: SourceKind::Deep,
-            source,
-            bindings: Default::default(),
-        },
-        &[probe.to_string()],
-    )
-    .map_err(|e| {
-        e.errors
-            .iter()
-            .map(|d| d.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-    let root = match result.roots.as_slice() {
-        [r] => r,
-        _ => return Err("field read did not return one root".to_string()),
-    };
-    match fty {
-        crate::opaque::FieldType::Tensor { dims, .. } => {
-            // A tensor field access yields a Tensor value.
-            let ExecutionValue::Tensor { value } = &root.value else {
-                return Err("tensor field read returned a non-tensor value".to_string());
-            };
-            if value.data.iter().any(|v| v.is_nan()) {
-                return Ok(false); // None sentinel.
-            }
-            let count = dims.iter().product::<usize>().max(1);
-            if value.data.len() != count {
-                return Err("field read shape mismatch".to_string());
-            }
-            for (i, v) in value.data.iter().enumerate() {
-                env.insert(format!("{field_path}.{i}"), *v);
-            }
-        }
-        _ => {
-            // A scalar field access yields a scalar ExecutionValue (RT3-F3:
-            // Float64 / Int64 / Bool, not a single-element Tensor).
-            let v = match &root.value {
-                ExecutionValue::Float64 { value } => *value,
-                ExecutionValue::Int64 { value } => *value as f64,
-                ExecutionValue::Bool { value } => {
-                    if *value {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                ExecutionValue::Tensor { value } if !value.data.is_empty() => value.data[0],
-                _ => return Err("scalar field read returned an unreadable value".to_string()),
-            };
-            if v.is_nan() {
-                return Ok(false); // None sentinel.
-            }
-            env.insert(field_path.to_string(), v);
-        }
-    }
-    Ok(true)
-}
-
 fn validate_with_predicate(
     env: &BTreeMap<String, f64>,
     predicate: &crate::solver::SmtExpr,
 ) -> bool {
     let hash: std::collections::HashMap<String, f64> =
         env.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    crate::concrete_eval::eval_bool(predicate, &hash)
-}
-
-/// A None-sentinel record: every field NaN-filled (0.0/0.0) so the reader
-/// detects a None result.
-fn none_sentinel_record(inv: &OpaqueInvariant) -> Expr {
-    let mut children = vec![deep_sym(&inv.ctor_name)];
-    for (fname, fty) in &inv.fields {
-        let nan = deep_node(
-            "app",
-            vec![deep_var("div"), deep_float_lit(0.0), deep_float_lit(0.0)],
-        );
-        let value = match fty {
-            crate::opaque::FieldType::Tensor { dims, .. } => {
-                let count = dims.iter().product::<usize>().max(1);
-                let elems: Vec<Expr> = (0..count).map(|_| nan.clone()).collect();
-                deep_node("app", vec![deep_var("to_tensor"), deep_cons_list(elems)])
-            }
-            _ => nan,
-        };
-        children.push(deep_node("kv", vec![deep_sym(fname), value]));
-    }
-    deep_node("record", children)
-}
-
-fn deep_cons_list(items: Vec<Expr>) -> Expr {
-    items.into_iter().rev().fold(deep_var("Nil"), |tail, item| {
-        deep_node("app", vec![deep_var("Cons"), item, tail])
-    })
-}
-
-fn access_node(target: Expr, field: &str) -> Expr {
-    deep_node("access", vec![target, deep_sym(field)])
-}
-
-fn let_block(bind: &str, value: Expr, body: Expr) -> Expr {
-    deep_node(
-        "let",
-        vec![deep_node("bind", vec![deep_sym(bind), value]), body],
-    )
+    // STRICT validation (CR-2 / CR-5 / CR-10): the produced value's
+    // invariant is checked with exact `==`/`!=`, never the fuzz tolerance.
+    crate::concrete_eval::eval_bool_strict(predicate, &hash)
 }
 
 fn node_def(name: &str, body: Expr) -> Expr {

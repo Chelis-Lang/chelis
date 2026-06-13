@@ -808,7 +808,11 @@ fn validate_env(
         Some(smt) => {
             let hash: std::collections::HashMap<String, f64> =
                 env.iter().map(|(k, v)| (k.clone(), *v)).collect();
-            crate::concrete_eval::eval_bool(smt, &hash)
+            // STRICT validation (CR-2 / CR-5 / CR-10): invariant-sample
+            // acceptance uses exact `==`/`!=`, never the fuzz `1e-10`
+            // tolerance. An epsilon-validated sample would weaken exactly
+            // the soundness that validation provides (RFC D-STARVE).
+            crate::concrete_eval::eval_bool_strict(smt, &hash)
         }
         // A predicate that does not lower (e.g. references an unresolved
         // constant) cannot be validated here; treat as not-satisfied so

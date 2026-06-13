@@ -399,3 +399,126 @@ def make_w(x: f32) -> Outer = Outer { mid: Mid { inner: T { value: 99.0 } } }
         "make_w",
     );
 }
+
+#[test]
+fn cr15_multi_variant_non_first_variant_record_field_is_rejected() {
+    // CR-15 HIGH: a producer returning a MULTI-VARIANT ADT whose NON-FIRST
+    // variant wraps the opaque type in a record field was silently missed
+    // because collect_record_fields recorded only the FIRST variant's
+    // fields. It must be covered-or-rejected, same as the single-variant
+    // wrapper.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper =
+  | Empty { }
+  | Full { inner: T }
+def make_w(x: f32) -> Wrapper = Full { inner: T { value: 99.0 } }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn cr15_multi_variant_non_first_positional_payload_is_rejected() {
+    // The opaque type as a POSITIONAL payload of a non-first variant.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper =
+  | None
+  | Some(T)
+def make_w(x: f32) -> Wrapper = Some(T { value: 99.0 })
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn cr15_multi_variant_non_first_variant_tuple_field_is_rejected() {
+    // The opaque type inside a TUPLE field of a non-first variant.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper =
+  | Empty { }
+  | Pair { both: (T, f32) }
+def make_w(x: f32) -> Wrapper = Pair { both: (T { value: 99.0 }, x) }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn cr15_first_variant_record_field_still_rejected() {
+    // Negative-parity control: the opaque type in the FIRST variant must
+    // also be rejected (it worked before CR-15 too; this guards against a
+    // regression that only handles non-first variants).
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper =
+  | Full { inner: T }
+  | Empty { }
+def make_w(x: f32) -> Wrapper = Full { inner: T { value: 99.0 } }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn cr14_record_field_ref_to_opaque_is_covered_or_rejected() {
+    // CR-14: a record field of type `&T` (a borrow of the opaque type) was
+    // mapped to Type::Error by type_from_deep, so the T inside the borrow
+    // was hidden and the producer silently missed. A `t-ref` now recurses,
+    // so the record-with-ref-field producer is covered-or-rejected.
+    assert_record_alias_rejected(
+        "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper = | Wrapper { inner: &T }
+def make_w(t: &T) -> Wrapper = Wrapper { inner: t }
+",
+        "make_w",
+    );
+}
+
+#[test]
+fn cr14_tensor_record_field_is_not_a_false_positive() {
+    // Negative-parity: a record field of a plain numeric tensor (which
+    // cannot contain the opaque type) must NOT be flagged -- the Error
+    // mapping for `t-tensor` is safe. The producer returns a record with a
+    // tensor field and no opaque type, so no obligation and no error.
+    let surf = "module M
+export (make_w)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Box = | Box { data: tensor[3, f32] }
+def make_w(d: tensor[3, f32]) -> Box = Box { data: d }
+";
+    let exprs = deep_of(surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    assert!(
+        col.errors.is_empty(),
+        "a tensor-field record is not a false positive: {:?}",
+        col.errors
+    );
+    assert!(col.obligations.is_empty());
+}
