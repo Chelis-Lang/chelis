@@ -1,0 +1,11 @@
+[package]
+name = "chelis-pred"
+description = "Invariant-predicate grammar and amenability classifier for opaque types"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chelis-deep.workspace = true
+thiserror.workspace = true

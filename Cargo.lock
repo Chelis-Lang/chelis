@@ -577,6 +577,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-pred"
+version = "0.7.21"
+dependencies = [
+ "chelis-deep",
+ "thiserror",
+]
+
+[[package]]
 name = "chelis-prove"
 version = "0.7.21"
 dependencies = [
