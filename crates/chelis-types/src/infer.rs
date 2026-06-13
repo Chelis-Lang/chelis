@@ -271,6 +271,9 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery).
     detect_module_reopens(exprs, &mut errors);
+    // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
+    // internal-name format in programs not produced by the linker.
+    detect_forged_linker_names(exprs, &mut errors);
 
     // First pass: collect deftype and defsig declarations. Descend through
     // `(module {} name ...)` wrappers so declarations in every idiomatic
@@ -941,6 +944,9 @@ fn infer_ir_program_with_state(
     // wrapper in this check unit (module-identity forgery). Reef-linked
     // decls carry no wrappers, so this only fires on hand-written `.dp`.
     detect_module_reopens(exprs, &mut errors);
+    // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
+    // internal-name format in programs not produced by the linker.
+    detect_forged_linker_names(exprs, &mut errors);
 
     // Descend through `(module {} name ...)` wrappers: every idiomatic
     // Surf source wraps its declarations in `module X`, and without
@@ -1524,6 +1530,80 @@ fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
     let mut reported = HashSet::new();
     for expr in exprs {
         walk(expr, None, &mut seen, &mut reported, errors);
+    }
+
+    // RFC v5 belt-and-suspenders (RT-1 F2 bypass): a stem-derived
+    // module identity (from a top-level mangled `deftype`/`def` name)
+    // that collides with a lexical wrapper key in the same check unit
+    // is also a `DuplicateModule` error. Genuine linker output has NO
+    // lexical wrappers, so this never fires on it; it defends the
+    // stem-plus-wrapper forge shapes even if the name-format check is
+    // somehow bypassed. Runs unconditionally (structural).
+    for (lexical, expr) in top_level_decl_items_with_modules(exprs) {
+        // Only flat (non-wrapped) mangled declarations introduce a
+        // stem-derived module identity; a name inside a lexical
+        // wrapper keys to the wrapper, not its stem.
+        if lexical.is_some() {
+            continue;
+        }
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if !matches!(get_tag(list), Some("deftype" | "def")) {
+            continue;
+        }
+        let Some(name) = children(list).first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(stem_key) = crate::opacity::reef_module_stem(name) else {
+            continue;
+        };
+        if seen.contains(&stem_key) && reported.insert(stem_key.clone()) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DuplicateModule,
+                format!(
+                    "module `{stem_key}` is opened by both a lexical wrapper and a \
+                     reef-stem mangled name in this check unit; a named module may be \
+                     opened at most once"
+                ),
+                vec![format!(
+                    "rename the mangled declaration; the `{stem_key}` lexical module \
+                     already exists"
+                )],
+            ));
+        }
+    }
+}
+
+/// RFC v5 (RT-1 F2 bypass): the reef package-linker's internal-name
+/// format (`Pkg__<pkg>__<Module>__<Name>` / lowercase twin) is the
+/// linker's PRIVATE output. A program NOT produced by the linker
+/// (raw `.ch` or raw `.dp`) that uses it forges module identity
+/// through the reef-stem channel, so any top-level declaration whose
+/// binding name matches the format is a declaration error. Skipped
+/// entirely when the linked-program provenance flag is set (the
+/// linker's own output is accepted). The linker also re-mangles every
+/// user source name, so user code inside a real package cannot smuggle
+/// a clean mangled name into linked output.
+fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+    if crate::opacity::linked_program() {
+        return;
+    }
+    for expr in top_level_decl_items(exprs) {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if !matches!(
+            get_tag(list),
+            Some("deftype" | "def" | "defsig" | "typealias" | "defmacro")
+        ) {
+            continue;
+        }
+        if let Some(name) = children(list).first().and_then(symbol_name)
+            && crate::opacity::is_linker_format_name(name)
+        {
+            errors.push(crate::opacity::forged_linker_name_error(name));
+        }
     }
 }
 

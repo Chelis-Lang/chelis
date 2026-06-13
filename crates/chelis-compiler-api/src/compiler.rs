@@ -380,6 +380,11 @@ fn compile_new_source_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<CompiledSource> {
+    // RFC v5 (RT-1 F2 bypass): the new entry decls are reef-rewritten
+    // (`rewrite_entry_decls_with_reef_graph` mangles them) before this
+    // checks them against the linked library, so the linker name format
+    // is expected here.
+    let _linked = chelis_types::install_linked_program_guard();
     // Phase G inputs are always Surf — `compile_reef_context` already
     // resolved the package's library decls; the new source is whatever
     // the user typed into a `chelis eval --file` / `chelis test` worker /

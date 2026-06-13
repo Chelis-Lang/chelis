@@ -815,6 +815,10 @@ pub fn compile_reef_context(
     _reef_home: &Path,
     package_dir: &Path,
 ) -> Result<CompiledContext, CompilerError> {
+    // RFC v5 (RT-1 F2 bypass): the entire reef library is linker output
+    // (internal-name-mangled), so the reserved linker-name rejection is
+    // off for this whole context build.
+    let _linked = chelis_types::install_linked_program_guard();
     // Phase K profile instrumentation: when `CHELIS_PROFILE_COMPILE_CONTEXT=1`
     // is set, emit per-phase wall-clock to stderr so the operator can see
     // which stage dominates. Off by default — zero cost on the hot path.

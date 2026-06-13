@@ -5494,6 +5494,11 @@ fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Ex
 fn checked_program_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_types::CheckedProgram, String> {
+    // RFC v5 (RT-1 F2 bypass): this checks the fully linked package
+    // (`build_package_with_options` flattens `link_graph` output), which
+    // is reef-linker output carrying internal-name-mangled bindings.
+    // Accept the linker name format for this check.
+    let _linked = chelis_types::install_linked_program_guard();
     let checked = chelis_types::check_ir_program(deep_exprs)
         .map_err(|r| format!("Type errors: {:?}", r.errors))?;
     let checked = chelis_effects::check_program(&checked).map_err(|errors| {

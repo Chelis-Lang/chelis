@@ -110,22 +110,92 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
             validate_deep_node(pair)?;
         }
     }
-    // RFC v4b (RT-1 F2): a named module may be opened by at most one
-    // `(module ...)` wrapper per program. The grammar admits two
-    // wrappers of the same name, but that forges module identity (the
-    // checker rejects it too, as `DuplicateModule`); reject it here so
-    // the structural surface agrees. Parse through the AST parser (the
-    // grammar already validated above, so this succeeds) and scan the
-    // module-wrapper tree.
-    if let Ok(exprs) = chelis_deep::parser::parse_str_strict(source)
-        && let Some(name) = first_reopened_module(&exprs)
-    {
-        return Err(ValidationError::Failed(format!(
-            "module `{name}` is opened by more than one module wrapper; \
-             a named module may be opened at most once"
-        )));
+    // RFC v4b (RT-1 F2) + v5 (RT-1 F2 bypass): structural module-identity
+    // forgery checks. The grammar admits two same-name wrappers and the
+    // reef linker's reserved internal-name format, but both forge module
+    // identity (the checker rejects them too). `validate --deep` only
+    // ever processes hand-authored `.dp` (the linker feeds Deep to the
+    // checker in-process and never writes `.dp`), so the reserved-name
+    // rejection here is unconditional. Parse through the AST parser (the
+    // grammar already validated above, so this succeeds).
+    if let Ok(exprs) = chelis_deep::parser::parse_str_strict(source) {
+        if let Some(name) = first_forged_linker_name(&exprs) {
+            return Err(ValidationError::Failed(format!(
+                "`{name}` uses the reef package-linker's reserved internal-name \
+                 format (`Pkg__`/`pkg__`...), which only the linker may produce; \
+                 rename the declaration"
+            )));
+        }
+        if let Some(name) = first_reopened_module(&exprs) {
+            return Err(ValidationError::Failed(format!(
+                "module `{name}` is opened by more than one module wrapper; \
+                 a named module may be opened at most once"
+            )));
+        }
     }
     Ok(())
+}
+
+/// True when `name` matches the reef linker's internal-name format
+/// (`Pkg__<pkg>__<Module>__<Name>` / lowercase twin): a marker prefix
+/// plus a non-empty module stem before the terminal. Mirrors the
+/// checker's `opacity::is_linker_format_name` (RFC v5).
+fn is_linker_format_name(name: &str) -> bool {
+    let Some(stem) = name
+        .strip_prefix("Pkg__")
+        .or_else(|| name.strip_prefix("pkg__"))
+    else {
+        return false;
+    };
+    matches!(stem.rsplit_once("__"), Some((module, _)) if !module.is_empty())
+}
+
+/// Return the first top-level declaration binding name that matches the
+/// reef linker's reserved internal-name format (RFC v5), or `None`.
+fn first_forged_linker_name(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
+    fn binding_name(list: &chelis_deep::ast::List) -> Option<&str> {
+        let tag = match list.elements.first() {
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _)) => {
+                tag.as_str()
+            }
+            _ => return None,
+        };
+        if !matches!(tag, "deftype" | "def" | "defsig" | "typealias" | "defmacro") {
+            return None;
+        }
+        match list.elements.get(2) {
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }
+    }
+    fn walk(expr: &chelis_deep::ast::Expr) -> Option<String> {
+        let chelis_deep::ast::Expr::List(list, _) = expr else {
+            return None;
+        };
+        let is_module = matches!(
+            list.elements.first(),
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _))
+                if tag == "module"
+        );
+        if is_module {
+            // Descend into a module wrapper's children.
+            for child in list.elements.iter().skip(3) {
+                if let Some(found) = walk(child) {
+                    return Some(found);
+                }
+            }
+            return None;
+        }
+        if let Some(name) = binding_name(list)
+            && is_linker_format_name(name)
+        {
+            return Some(name.to_string());
+        }
+        None
+    }
+    exprs.iter().find_map(walk)
 }
 
 /// Return the first module name opened by more than one `(module ...)`

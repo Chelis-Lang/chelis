@@ -34,7 +34,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Re-opening a named module with a second `(module ...)` wrapper in
   one check unit is a `DuplicateModule` error (rejected by `check`,
   `build`, and `validate --deep`); it would otherwise forge the
-  defining module's identity. The sixth rejection now also fires for
+  defining module's identity. Hand-authored programs (raw `.ch` /
+  `.dp`) may not use the reef linker's reserved internal-name format
+  (`Pkg__<pkg>__<Module>__<Name>`) for declaration names -- it is the
+  linker's private output and forging it bypasses module identity
+  (`ReservedLinkerName`, gated by an in-process link-provenance flag
+  so genuine reef packages still check clean). The sixth rejection now
+  also fires for
   bare un-imported cross-module references in reef packages (the
   reference is canonicalized to its binding key the way inference
   resolves it).

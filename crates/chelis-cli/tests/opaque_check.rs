@@ -103,6 +103,56 @@ const MODULE_REOPEN_DP: &str = r#"(module {}
 const EXPECTED_REOPEN_MSG: &str = "module `stats.prob` is opened by more than one module wrapper in this check unit; \
      a named module may be opened at most once";
 
+/// RT-1 F2 bypass (RFC v5): pure-flat program of reef-internal mangled
+/// names, NO wrappers. The mangled deftype + def stem-key to module
+/// `foo` and forge + inspect the opaque type as in-module.
+const STEM_ONLY_DP: &str = r#"(deftype {opaque: true}
+  Pkg__foo__Secret
+  ()
+  (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
+(defsig {} pkg__foo__forge (t-fn {} (t-prim {} f32) (t-adt {} Pkg__foo__Secret)))
+(def {}
+  pkg__foo__forge
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (record {} Pkg__foo__Secret (kv {} value (var {} x)))))
+(defsig {} pkg__foo__peek (t-fn {} (t-adt {} Pkg__foo__Secret) (t-prim {} f32)))
+(def {}
+  pkg__foo__peek
+  (fn {}
+    (params {} (p {type: (t-adt {} Pkg__foo__Secret)}))
+    (access {} (var {} p) value)))
+"#;
+
+/// RT-1 F2 bypass: stem deftype + a lexical `(module {} foo ...)`
+/// wrapper re-opening it.
+const STEM_DOTFREE_DP: &str = r#"(deftype {opaque: true}
+  Pkg__foo__Secret
+  ()
+  (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
+(module {}
+  foo
+  (def {}
+    forge
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Pkg__foo__Secret (kv {} value (var {} x))))))
+"#;
+
+/// RT-1 F2 bypass: dotted-key variant of the stem-plus-wrapper forge.
+const STEM_COLLIDE_DP: &str = r#"(deftype {opaque: true}
+  Pkg__foo__bar__Secret
+  ()
+  (variant {} Pkg__foo__bar__Secret (field {} value (t-prim {} f32))))
+(module {}
+  foo.bar
+  (def {}
+    forge
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Pkg__foo__bar__Secret (kv {} value (var {} x))))))
+"#;
+
 fn write_file(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create parent dir");
@@ -600,6 +650,200 @@ fn validate_deep_rejects_module_reopen() {
         stderr.contains("stats.prob") && stderr.to_lowercase().contains("module"),
         "validate --deep must reject the module re-open, stderr: {stderr}"
     );
+}
+
+// ── Reef-stem mangled-name forge (RT-1 F2 bypass, RFC v5) ────────
+
+/// `chelis check <dp>` -> the parsed JSON report (any exit code).
+fn check_dp_report(dir: &Path, name: &str, contents: &str) -> Value {
+    let dp = dir.join(name);
+    write_file(&dp, contents);
+    let output = chelis()
+        .args(["check", dp.to_str().unwrap()])
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    check_json(&output)
+}
+
+fn has_kind(errors: &[Value], kind: &str) -> bool {
+    errors
+        .iter()
+        .any(|e| e.get("kind").and_then(Value::as_str) == Some(kind))
+}
+
+#[test]
+fn check_dp_rejects_stem_only_mangled_forge() {
+    let dir = tempdir().expect("tempdir");
+    let json = check_dp_report(dir.path(), "stem_only.dp", STEM_ONLY_DP);
+    let errors = errors_of(&json);
+    assert!(
+        has_kind(&errors, "ReservedLinkerName"),
+        "pure-flat mangled-name forge must be rejected as ReservedLinkerName: {errors:?}"
+    );
+    assert!(
+        json.get("score").and_then(Value::as_f64) != Some(1.0),
+        "the forge must not score 1: {json}"
+    );
+}
+
+#[test]
+fn check_dp_rejects_stem_dotfree_and_collide_forges() {
+    let dir = tempdir().expect("tempdir");
+    for (name, dp) in [
+        ("stem_dotfree.dp", STEM_DOTFREE_DP),
+        ("stem_collide.dp", STEM_COLLIDE_DP),
+    ] {
+        let json = check_dp_report(dir.path(), name, dp);
+        let errors = errors_of(&json);
+        assert!(
+            has_kind(&errors, "ReservedLinkerName"),
+            "{name}: mangled deftype must be ReservedLinkerName: {errors:?}"
+        );
+        assert!(
+            has_kind(&errors, "DuplicateModule"),
+            "{name}: stem-vs-wrapper collision must also be DuplicateModule: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn build_dp_rejects_stem_mangled_forges() {
+    let dir = tempdir().expect("tempdir");
+    for (name, dp) in [
+        ("stem_only.dp", STEM_ONLY_DP),
+        ("stem_dotfree.dp", STEM_DOTFREE_DP),
+        ("stem_collide.dp", STEM_COLLIDE_DP),
+    ] {
+        let path = dir.path().join(name);
+        write_file(&path, dp);
+        let out_dir = dir.path().join(format!("out_{name}"));
+        let assert = chelis()
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "-o",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .failure();
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+        assert!(
+            stderr.contains("ReservedLinkerName") || stderr.contains("DuplicateModule"),
+            "{name}: build must reject the forge, stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn validate_deep_rejects_stem_mangled_forges() {
+    let dir = tempdir().expect("tempdir");
+    for (name, dp) in [
+        ("stem_only.dp", STEM_ONLY_DP),
+        ("stem_dotfree.dp", STEM_DOTFREE_DP),
+        ("stem_collide.dp", STEM_COLLIDE_DP),
+    ] {
+        let path = dir.path().join(name);
+        write_file(&path, dp);
+        let assert = chelis()
+            .args(["validate", "--deep", path.to_str().unwrap()])
+            .assert()
+            .failure();
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+        assert!(
+            stderr.contains("reserved internal-name format"),
+            "{name}: validate --deep must reject the mangled name, stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn check_reef_package_with_internal_names_stays_clean() {
+    // CRITICAL no-regression (RFC v5): a genuine reef package -- whose
+    // decls the linker rewrites to the SAME `Pkg__`/`pkg__` internal
+    // format that the forge uses -- must still check clean, because the
+    // linked-program provenance flag is TRUE on the reef path. If this
+    // breaks, the fix would have rejected the linker's own output.
+    let (_dir, pkg) = reef_package(&[
+        ("types.ch", REEF_SIXTH_TYPES_CH),
+        (
+            "main.ch",
+            "module Demo.Main
+import Demo.Types (probability, prob_value)
+def use(x: f32) -> f32 = prob_value(probability(x))
+",
+        ),
+    ]);
+    let output = chelis()
+        .current_dir(&pkg)
+        .args(["check", pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json = check_json(&output);
+    assert!(
+        errors_of(&json).is_empty(),
+        "a genuine reef package's internal names must check clean: {json}"
+    );
+    assert_eq!(json.get("score").and_then(Value::as_f64), Some(1.0));
+}
+
+#[test]
+fn check_reef_package_with_internal_names_stays_clean_cache_disabled() {
+    // Same no-regression with the stdlib cache off, exercising the
+    // monolithic fallback (which checks `prepared.decls` directly).
+    let (_dir, pkg) = reef_package(&[
+        ("types.ch", REEF_SIXTH_TYPES_CH),
+        (
+            "main.ch",
+            "module Demo.Main
+import Demo.Types (probability, prob_value)
+def use(x: f32) -> f32 = prob_value(probability(x))
+",
+        ),
+    ]);
+    let output = chelis()
+        .env("CHELIS_STDLIB_CACHE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["check", pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json = check_json(&output);
+    assert!(
+        errors_of(&json).is_empty(),
+        "reef internal names must check clean with cache disabled: {json}"
+    );
+}
+
+#[test]
+fn build_reef_package_with_internal_names_stays_clean() {
+    let (_dir, pkg) = reef_package(&[
+        ("types.ch", REEF_SIXTH_TYPES_CH),
+        (
+            "main.ch",
+            "module Demo.Main
+import Demo.Types (probability, prob_value)
+def use(x: f32) -> f32 = prob_value(probability(x))
+",
+        ),
+    ]);
+    let out_dir = pkg.join("out");
+    chelis()
+        .current_dir(&pkg)
+        .args([
+            "build",
+            pkg.join("src/main.ch").to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
 }
 
 #[test]

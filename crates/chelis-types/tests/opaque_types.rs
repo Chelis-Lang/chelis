@@ -1003,6 +1003,149 @@ fn module_reopen_reported_once_per_name() {
     assert!(dup[0].message.contains("module `a.b`"));
 }
 
+// ── Reef-stem module-identity forge (RT-1 F2 bypass, RFC v5) ──────
+
+fn reserved_name_violations(errors: &[CheckError]) -> Vec<&CheckError> {
+    errors
+        .iter()
+        .filter(|e| kind_name(e) == "ReservedLinkerName")
+        .collect()
+}
+
+#[test]
+fn stem_only_mangled_names_rejected() {
+    // RT-1 F2 bypass core case: a pure-flat program of reef-internal
+    // mangled names (NO `(module ...)` wrappers). The mangled
+    // `deftype Pkg__foo__Secret` and `def pkg__foo__forge` both
+    // stem-key to module `foo`, so without the fix the forge is
+    // treated as in-module and constructs/inspects the opaque type
+    // clean. The reserved-name format is the reef linker's private
+    // output; a raw program using it is a declaration error.
+    let program = r#"(deftype {opaque: true}
+  Pkg__foo__Secret
+  ()
+  (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
+(defsig {} pkg__foo__forge (t-fn {} (t-prim {} f32) (t-adt {} Pkg__foo__Secret)))
+(def {}
+  pkg__foo__forge
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (record {} Pkg__foo__Secret (kv {} value (var {} x)))))
+"#;
+    let exprs = deep_of_dp(program);
+    let errors = errors_ir(&exprs);
+    let reserved = reserved_name_violations(&errors);
+    assert!(
+        !reserved.is_empty(),
+        "mangled deftype/def names must be rejected as ReservedLinkerName, got: {errors:?}"
+    );
+    assert_eq!(
+        reserved[0].message,
+        "`Pkg__foo__Secret` uses the reef package-linker's reserved internal-name format \
+         (`Pkg__`/`pkg__`...), which only the linker may produce; rename the declaration"
+    );
+}
+
+#[test]
+fn stem_with_lexical_wrapper_collision_rejected() {
+    // RT-1 F2 bypass + belt-and-suspenders: a stem-derived module
+    // identity (mangled flat `deftype Pkg__foo__Secret` keys to `foo`)
+    // colliding with a lexical `(module {} foo ...)` wrapper is BOTH a
+    // ReservedLinkerName (the mangled name) AND a DuplicateModule (the
+    // stem-vs-wrapper collision).
+    let program = r#"(deftype {opaque: true}
+  Pkg__foo__Secret
+  ()
+  (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
+(module {}
+  foo
+  (def {}
+    forge
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Pkg__foo__Secret (kv {} value (var {} x))))))
+"#;
+    let exprs = deep_of_dp(program);
+    let errors = errors_ir(&exprs);
+    assert!(
+        !reserved_name_violations(&errors).is_empty(),
+        "the mangled deftype must be a ReservedLinkerName: {errors:?}"
+    );
+    let dup: Vec<&CheckError> = errors
+        .iter()
+        .filter(|e| kind_name(e) == "DuplicateModule")
+        .collect();
+    assert_eq!(
+        dup.len(),
+        1,
+        "stem-vs-lexical collision must be one DuplicateModule: {errors:?}"
+    );
+    assert_eq!(
+        dup[0].message,
+        "module `foo` is opened by both a lexical wrapper and a reef-stem mangled name \
+         in this check unit; a named module may be opened at most once"
+    );
+}
+
+#[test]
+fn stem_collision_belt_fires_even_when_linker_name_check_is_off() {
+    // Belt-and-suspenders independence (RFC v5): with the linked
+    // provenance flag forced TRUE (simulating linker output, where the
+    // reserved-name check is off), the stem-vs-lexical collision still
+    // fires as DuplicateModule. Genuine linker output never has lexical
+    // wrappers, so this never false-fires on it; here a lexical
+    // wrapper is present, exposing the forge.
+    let program = r#"(deftype {opaque: true}
+  Pkg__foo__bar__Secret
+  ()
+  (variant {} Pkg__foo__bar__Secret (field {} value (t-prim {} f32))))
+(module {}
+  foo.bar
+  (def {}
+    forge
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (record {} Pkg__foo__bar__Secret (kv {} value (var {} x))))))
+"#;
+    let exprs = deep_of_dp(program);
+    let _linked = chelis_types::install_linked_program_guard();
+    let errors = errors_ir(&exprs);
+    assert!(
+        reserved_name_violations(&errors).is_empty(),
+        "with the linked flag on, the reserved-name check is off: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| kind_name(e) == "DuplicateModule"),
+        "the stem-vs-lexical collision must still fire as DuplicateModule: {errors:?}"
+    );
+}
+
+#[test]
+fn mangled_names_accepted_when_linked_flag_is_set() {
+    // No-regression unit: the SAME flat mangled program is accepted
+    // (no ReservedLinkerName) when the linked-program provenance flag
+    // is set -- this is what keeps the reef linker's own output
+    // checking clean.
+    let program = r#"(deftype {opaque: true}
+  Pkg__foo__Secret
+  ()
+  (variant {} Pkg__foo__Secret (field {} value (t-prim {} f32))))
+(defsig {} pkg__foo__forge (t-fn {} (t-prim {} f32) (t-adt {} Pkg__foo__Secret)))
+(def {}
+  pkg__foo__forge
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (record {} Pkg__foo__Secret (kv {} value (var {} x)))))
+"#;
+    let exprs = deep_of_dp(program);
+    let _linked = chelis_types::install_linked_program_guard();
+    let errors = errors_ir(&exprs);
+    assert!(
+        reserved_name_violations(&errors).is_empty(),
+        "linker output must check clean under the linked flag: {errors:?}"
+    );
+}
+
 // ── Exhaustiveness over opaque scrutinees ────────────────────────
 
 #[test]

@@ -135,6 +135,10 @@ fn format_library_plus_snippet(package_dir: &Path, snippet: &str) -> String {
 
 #[test]
 fn g2_adt_exhaustive_match_in_new_code_against_library_option() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     // Library function returns prelude Option[int32]. New code matches
     // against it with both arms — should accept and produce the unwrapped
     // value parity-equal to the monolithic baseline.
@@ -163,6 +167,10 @@ fn g2_adt_exhaustive_match_in_new_code_against_library_option() {
 
 #[test]
 fn g2_adt_non_exhaustive_match_in_new_code_is_rejected() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     // Library returns prelude Option[int32]; new code matches with only
     // Some — must reject as non-exhaustive citing the missing None.
     //
@@ -219,6 +227,10 @@ fn g2_adt_non_exhaustive_match_in_new_code_is_rejected() {
 
 #[test]
 fn g3_recursive_newcode_def_calling_library_helper() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     let library = "module Mylib.Math\nexport (mul)\n\n\
                    def mul(x: int32, y: int32) -> int32 = x * y\n";
     let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
@@ -316,6 +328,10 @@ fn g4_bincode_tampering_truncates_library_then_eval_must_not_silently_succeed() 
 #[test]
 #[ignore = "perf-ratio gate: wall-clock cold-path overhead measurement; separated from the correctness pass per CLAUDE.md. See docs/manual_gates.md."]
 fn g5_cold_path_overhead_at_most_2x_monolithic() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     // Cold-path probe: 1× compile_reef_context + 1× eval_in_context vs
     // 1× prepare_eval(format(library + snippet)). Per RT-G prompt, target
     // is <= 1.10× — but on a noisy CI box that's too tight; give 2× and
@@ -524,6 +540,10 @@ fn g7_eval_many_in_context_runtime_isolation_matches_combined() {
 
 #[test]
 fn g9_newcode_shadows_library_def_for_new_callers() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     let library = "module Mylib.Math\nexport (foo)\n\n\
                    def foo(x: int32) -> int32 = x + 100\n";
     let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
@@ -655,6 +675,10 @@ fn g12_source_hash_differs_when_package_name_differs_with_same_content() {
 
 #[test]
 fn g1_newcode_inheriting_test_effect_from_library_with_strict_signature_rejected() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     // Library has a Test-effecting helper. New-code def DECLARES `! {}`
     // (no effects) but transitively reaches the library's Test effect by
     // calling the helper. check_in_context MUST reject with
@@ -787,6 +811,10 @@ fn g4_deep_tamper_keeps_referenced_lib_eval_correct_or_fails_loudly() {
 
 #[test]
 fn g10_newcode_tensor_use_after_consume_through_library_call() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     // Library function consumes its tensor parameter (no_grad / consume).
     // New code creates a tensor, calls the library function with it, then
     // tries to use the same tensor again. Linearity must reject.
@@ -872,6 +900,10 @@ fn multi_module_fixture() -> (TempDir, PathBuf) {
 
 #[test]
 fn g8_multi_module_parity_with_monolithic() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     let (_dir, root) = multi_module_fixture();
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
@@ -954,6 +986,10 @@ fn gextra_source_hash_independent_of_tempdir_path() {
 
 #[test]
 fn g9deep_effect_inference_uses_newcode_shadow_not_library_for_inferred_row() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     // Library has `lib_io(x)` that performs Io (calls print).
     // New code redefines `lib_io(x)` with NO effects (just identity).
     // Another new-code def `caller(x)` calls `lib_io(x)`.
@@ -1148,6 +1184,10 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
 
 #[test]
 fn gextra_library_random_call_from_new_code_must_be_handled_or_rejected() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it; declare the linked
+    // provenance, matching the now-guarded production paths.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     // Library function performs Random (calls dropout). If new code
     // calls it WITHOUT a handler, the unhandled-effect validator must
     // reject with a Random-mentioning error. (This is the core Phase D

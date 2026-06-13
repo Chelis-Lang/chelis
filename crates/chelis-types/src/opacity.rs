@@ -107,6 +107,42 @@ impl OpacityContextData {
 
 thread_local! {
     static OPACITY_CONTEXT: RefCell<Option<OpacityContextData>> = const { RefCell::new(None) };
+    /// RT-1 F2-bypass / RFC v5: in-process provenance flag, TRUE only
+    /// while checking decls produced by the reef LINKER (which is the
+    /// sole legitimate producer of the `Pkg__`/`pkg__` internal-name
+    /// format). FALSE by default, so raw `.ch`/`.dp` ingestion rejects
+    /// the linker name format as a forged module identity. Set by an
+    /// install-guard at the link boundary; the linker feeds linked
+    /// Deep to the checker in-process, so the flag is never lost to
+    /// serialization.
+    static LINKED_PROGRAM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Install the linked-program provenance flag for the duration of the
+/// returned guard (RFC v5). Call this at the reef link boundary before
+/// running the checker over linker-mangled decls; nested installs are
+/// saved and restored. See [`linked_program`].
+pub fn install_linked_program_guard() -> LinkedProgramGuard {
+    let previous = LINKED_PROGRAM.with(|cell| cell.replace(true));
+    LinkedProgramGuard { previous }
+}
+
+pub struct LinkedProgramGuard {
+    previous: bool,
+}
+
+impl Drop for LinkedProgramGuard {
+    fn drop(&mut self) {
+        let previous = self.previous;
+        LINKED_PROGRAM.with(|cell| cell.set(previous));
+    }
+}
+
+/// Whether the current check is running over reef-linked decls
+/// (RFC v5). When FALSE, the linker name format is rejected as a
+/// forged declaration; when TRUE, the linker's own output is accepted.
+pub(crate) fn linked_program() -> bool {
+    LINKED_PROGRAM.with(std::cell::Cell::get)
 }
 
 /// Install `data` for the duration of the returned guard, restoring
@@ -617,6 +653,33 @@ pub(crate) fn unresolved_target_error(
     )
 }
 
+/// True when `name` matches the reef linker's internal-name format
+/// (`Pkg__<pkg>__<Module>__<Name>` / lowercase twin) -- i.e. it
+/// parses as a module-stem-bearing mangled name. RFC v5: this format
+/// is the linker's PRIVATE output; a hand-authored program using it
+/// forges module identity through the stem channel.
+pub(crate) fn is_linker_format_name(name: &str) -> bool {
+    reef_module_stem(name).is_some()
+}
+
+/// Build the declaration error for a forged reef linker name in a
+/// program not produced by the linker (RFC v5).
+pub(crate) fn forged_linker_name_error(name: &str) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::ReservedLinkerName,
+        format!(
+            "`{name}` uses the reef package-linker's reserved internal-name format \
+             (`Pkg__`/`pkg__`...), which only the linker may produce; rename the \
+             declaration"
+        ),
+        vec![
+            "the `Pkg__pkg__Module__Name` format is the linker's private output; \
+             hand-authored Surf and Deep must use ordinary identifiers"
+                .to_string(),
+        ],
+    )
+}
+
 /// Build the declaration error for `@opaque` outside a named module
 /// (D-CHECK, RT-0 M6).
 pub(crate) fn unmoduled_opaque_error(type_name: &str) -> CheckError {
@@ -707,5 +770,37 @@ mod tests {
             )),
         );
         assert_eq!(demangle_type(&ty).to_string(), "(f32) -> Probability");
+    }
+
+    #[test]
+    fn is_linker_format_name_matches_only_full_mangled_names() {
+        // RFC v5: the linker format requires the marker prefix AND a
+        // non-empty module stem before the terminal.
+        assert!(is_linker_format_name("Pkg__foo__Secret"));
+        assert!(is_linker_format_name("pkg__foo__forge"));
+        assert!(is_linker_format_name(
+            "Pkg__chelis__std__Std__Decimal__RoundingMode"
+        ));
+        // Marker prefix but no stem -> not a complete mangled name.
+        assert!(!is_linker_format_name("Pkg__lonely"));
+        // Ordinary user identifiers pass through.
+        assert!(!is_linker_format_name("Probability"));
+        assert!(!is_linker_format_name("forge"));
+        assert!(!is_linker_format_name("my_pkg_thing"));
+    }
+
+    #[test]
+    fn linked_program_flag_defaults_false_and_guard_scopes() {
+        assert!(!linked_program(), "default provenance is not-linked");
+        {
+            let _guard = install_linked_program_guard();
+            assert!(linked_program(), "guard sets the linked flag");
+            {
+                let _nested = install_linked_program_guard();
+                assert!(linked_program());
+            }
+            assert!(linked_program(), "nested guard restores TRUE on drop");
+        }
+        assert!(!linked_program(), "guard restores FALSE on drop");
     }
 }

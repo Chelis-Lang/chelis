@@ -244,7 +244,12 @@ part of this public vocabulary.
 A named module may be opened by at most one `(module ...)` wrapper per
 program: re-opening a module name forges module identity and is
 rejected by both `chelis validate --deep` and the type checker
-(`DuplicateModule`; `spec/04-type-system.md` §2.5).
+(`DuplicateModule`; `spec/04-type-system.md` §2.5). Hand-authored Deep
+must not use the reef linker's reserved internal-name format
+(`Pkg__<pkg>__<Module>__<Name>` / lowercase twin) for declaration
+names: that format is the linker's private output, and a raw program
+using it forges module identity through the name stem
+(`ReservedLinkerName`; `spec/04-type-system.md` §2.5).
 
 ### 2.2 Declarations
 

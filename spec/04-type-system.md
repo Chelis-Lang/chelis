@@ -377,6 +377,26 @@ are unaffected.
 The defining module is recorded on the registry entry at `deftype`
 registration and persists through the compiled-context caches.
 
+**Reserved linker name format.** The package-linker encoding
+(`Pkg__<pkg>__<Module>__<Name>` / lowercase twin) is the reef linker's
+PRIVATE output. Because module identity derives from it, a
+hand-authored program of mangled names self-keys to a module and would
+construct and inspect its opaque types as if in-module. So a top-level
+`deftype`/`def`/`defsig`/`typealias`/`defmacro` whose binding name
+matches that format is a `ReservedLinkerName` declaration error in any
+program NOT produced by the linker. Provenance is an in-process flag
+set at the reef link boundary (`prepare_program_for_file` and the
+reef-aware check/eval/build entry points), never filesystem or name
+heuristics; raw `.ch`/`.dp` ingestion keeps it FALSE. The linker feeds
+linked Deep to the checker in-process, and re-mangles every user source
+name, so its own output checks clean while a user cannot smuggle a
+clean mangled name into linked output. As belt-and-suspenders, a
+stem-derived module identity colliding with a lexical wrapper key in
+one check unit is also a `DuplicateModule` error (genuine linker output
+has no lexical wrappers, so this never fires on it). `validate --deep`
+applies the reserved-name rejection unconditionally, since the linker
+never writes `.dp` for re-ingestion.
+
 **The rejection set.** Outside the defining module, each of the
 following is a `CheckErrorKind::OpaqueTypeViolation`. Every rejection
 returns the expression's TRUE type, so a violation never cascades into

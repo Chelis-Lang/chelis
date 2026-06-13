@@ -59,6 +59,14 @@ pub enum CheckErrorKind {
     /// producers with signatures; location context is the enclosing
     /// def name embedded in the message.
     OpaqueTypeViolation,
+    /// RFC v5 (RT-1 F2 bypass): a top-level declaration's binding name
+    /// matches the reef package-linker's reserved internal-name format
+    /// (`Pkg__<pkg>__<Module>__<Name>` / lowercase twin) in a program
+    /// NOT produced by the linker. That format is the linker's private
+    /// output; hand-authoring it forges module identity through the
+    /// reef-stem channel (a flat program of mangled names self-keys to
+    /// one module and constructs/inspects opaque types as in-module).
+    ReservedLinkerName,
     Other,
 }
 
@@ -82,6 +90,7 @@ impl CheckErrorKind {
             CheckErrorKind::DuplicateDefinition => 0.9,
             CheckErrorKind::DuplicateModule => 0.9,
             CheckErrorKind::OpaqueTypeViolation => 0.8,
+            CheckErrorKind::ReservedLinkerName => 0.9,
             CheckErrorKind::Other => 0.5,
         }
     }

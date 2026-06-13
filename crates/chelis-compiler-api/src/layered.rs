@@ -84,6 +84,10 @@ pub fn check_layered(
     stdlib_decls: &[chelis_surf::ast::Decl],
     non_stdlib_decls: &[chelis_surf::ast::Decl],
 ) -> Result<Option<LayeredCheck>, CompilerError> {
+    // RFC v5 (RT-1 F2 bypass): both `stdlib_decls` and `non_stdlib_decls`
+    // are reef-linker output (internal-name-mangled), so the reserved
+    // linker-name rejection must be off for this check.
+    let _linked = chelis_types::install_linked_program_guard();
     let stdlib_ctx = load_or_build_stdlib_context(stdlib_decls)?;
 
     // Desugar + macro-expand the non-chelis-std decls. A macro-expansion
@@ -234,6 +238,8 @@ fn expand(decls: &[chelis_surf::ast::Decl]) -> Result<Vec<chelis_deep::Expr>, St
 pub fn stdlib_structural_stats(
     stdlib_decls: &[chelis_surf::ast::Decl],
 ) -> Result<StructuralStats, CompilerError> {
+    // RFC v5: chelis-std decls are reef-linker output.
+    let _linked = chelis_types::install_linked_program_guard();
     Ok(load_or_build_stdlib_context(stdlib_decls)?.structural_stats)
 }
 
@@ -263,6 +269,8 @@ pub fn check_layered_for_build(
     stdlib_decls: &[chelis_surf::ast::Decl],
     merged_non_stdlib_decls: &[chelis_surf::ast::Decl],
 ) -> Result<Option<CheckedProgram>, CompilerError> {
+    // RFC v5 (RT-1 F2 bypass): linked decls; accept the linker name format.
+    let _linked = chelis_types::install_linked_program_guard();
     let stdlib_ctx = load_or_build_stdlib_context(stdlib_decls)?;
 
     let non_stdlib_deep = match expand(merged_non_stdlib_decls) {
