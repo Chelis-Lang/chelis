@@ -1,12 +1,29 @@
 # RFC: Opaque Types With Declared Invariants (Option 1.5)
 
-Version: 2 (frozen). Survey evidence:
+Version: 4 (frozen). Survey evidence:
 [`opaque_invariants_survey.md`](opaque_invariants_survey.md).
 Decisions carry stable IDs (`D-*`) for citation in workstream briefs,
 commits, and red-team reports. Changing a frozen decision requires a
 version bump and an explicit note in the owning PR.
 
 Version history:
+- v4: RT-1 (forgery suite) fixes. (a) The sixth rejection must be
+  enforced on the reef package surface: the reef link path must
+  attribute exports and T-mentioning bindings into the opacity
+  metadata (fail-open there was a W1 residual; RT-1 F1 proved the
+  unexported-producer attack passes `check` AND `build` in a real
+  package, collapsing D-SOUND side condition (a) on the primary
+  packaging surface). (b) New rejection: a named module may be
+  opened by at most one `(module ...)` wrapper per check unit;
+  re-opening a module name is an error (RT-1 F2 — module identity
+  is otherwise a forgeable string; follows the same ambiguity
+  rationale as the named-module requirement in M6). (c) The
+  violation-message contract requires user-facing (de-mangled)
+  type/module/producer names on the reef surface, with
+  exact-message test assertions (RT-1 F3). (d) Decompiler
+  round-trip is a mandatory invariant on the opaque path:
+  multi-segment module names and record variants must re-parse
+  (RT-1 F4; repo contract invariant).
 - v3: RT-0 fix-verification residuals. Sixth rejection broadened to
   signature-mentions-T (closes the unexported caller-receives HOF
   residual and makes "fully sealed" accurate); escape-site lint made
