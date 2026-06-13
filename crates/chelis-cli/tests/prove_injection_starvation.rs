@@ -256,6 +256,87 @@ def bad_simplex(a: f32, b: f32, c: f32) -> Simplex = Simplex { weights: to_tenso
     assert_eq!(code, 1);
 }
 
+// ── CR-1: Option/tuple inner position applied for tensor fields ────
+
+const SIMPLEX_OPT_TUPLE_HEAD: &str = "module Stats.Simplex
+@opaque
+@invariant(p) sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps
+type Simplex =
+  | Simplex { weights: tensor[3, f32] }
+def eps() -> f32 = 0.01
+def normed(a: f32, b: f32, c: f32) -> tensor[3, f32] =
+  { s = abs(a) + abs(b) + abs(c) + 0.001;
+    to_tensor([abs(a) / s, abs(b) / s, (abs(c) + 0.001) / s]) }
+";
+
+#[test]
+fn cr1_option_of_tuple_validates_the_produced_tensor_invariant() {
+    // CR-1 HIGH: for a TENSOR-field opaque type, an Option[(Simplex, f32)]
+    // producer must actually validate the produced Simplex's invariant.
+    // The bug bound the match var to the whole tuple and read record fields
+    // off it. A VALID producer (normalized weights) must pass.
+    let source = format!(
+        "{SIMPLEX_OPT_TUPLE_HEAD}export (mk)\ndef mk(a: f32, b: f32, c: f32) -> Option[(Simplex, f32)] =\n  Some((Simplex {{ weights: normed(a, b, c) }}, a))\n"
+    );
+    let (code, records) = prove_json(&source, &["--samples", "15"]);
+    let ob = obligation(&records, "mk").expect("option-of-tuple obligation");
+    assert_eq!(
+        ob["status"], "passed",
+        "valid Option[(Simplex,f32)] producer validates the inner Simplex: {ob}"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn cr1_option_of_tuple_violating_producer_fails() {
+    // The negative twin: an Option[(Simplex, f32)] whose Simplex is NOT
+    // normalized must FAIL -- the inner tuple component's invariant is
+    // actually checked (the bug never checked it).
+    let source = format!(
+        "{SIMPLEX_OPT_TUPLE_HEAD}export (mk)\ndef mk(a: f32, b: f32, c: f32) -> Option[(Simplex, f32)] =\n  Some((Simplex {{ weights: to_tensor([a, b, c]) }}, a))\n"
+    );
+    let (code, records) = prove_json(&source, &["--samples", "40"]);
+    let ob = obligation(&records, "mk").expect("violating option-of-tuple obligation");
+    assert_eq!(
+        ob["status"], "failed",
+        "violating inner Simplex must be caught: {ob}"
+    );
+    assert_eq!(code, 1);
+}
+
+// ── CR-4/CR-6: a legitimate NaN representation is not read as None ──
+
+#[test]
+fn cr4_some_record_with_nan_field_does_not_pass_vacuously() {
+    // CR-4/CR-6 HIGH (fail-open): a producer returning Some(record) whose
+    // tensor field legitimately contains NaN was misread as None (the NaN
+    // sentinel) and passed VACUOUSLY. A NaN representation must NOT
+    // vacuously satisfy the band invariant -- NaN comparisons are false, so
+    // the obligation must FAIL (not pass).
+    let source = "module Stats.Simplex
+export (nan_prod)
+@opaque
+@invariant(p) sum(p.weights) >= 1.0 - eps && sum(p.weights) <= 1.0 + eps
+type Simplex =
+  | Simplex { weights: tensor[3, f32] }
+def eps() -> f32 = 0.01
+def nan_prod(a: f32) -> Option[Simplex] =
+  Some(Simplex { weights: to_tensor([0.0 / 0.0, 0.5, 0.5]) })
+";
+    let (code, records) = prove_json(source, &["--samples", "10"]);
+    let ob = obligation(&records, "nan_prod").expect("nan obligation");
+    assert_ne!(
+        ob["status"], "passed",
+        "Some(record-with-NaN) must NOT vacuously pass: {ob}"
+    );
+    // It is a real produced value that violates the invariant => failed.
+    assert_eq!(
+        ob["status"], "failed",
+        "NaN representation fails the invariant: {ob}"
+    );
+    assert_eq!(code, 1);
+}
+
 #[test]
 fn simplex_binder_under_injection_is_not_starved() {
     // The simplex as a property binder: constructor-based generation
