@@ -12,7 +12,7 @@ use chelis_types::{BUILTIN_NAMES, CheckedProgram, types::Prim};
 use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 
 #[derive(Debug, Clone)]
-pub(crate) struct RuntimeTensorValue {
+pub struct RuntimeTensorValue {
     pub(crate) value: IrTensorValue,
     pub(crate) precision: Prim,
 }
@@ -27,7 +27,7 @@ pub(crate) struct RuntimeTensorValue {
 /// [`chelis_ir::lower::lower_subexpr_program`] + the forward DAG
 /// evaluator — the same machinery the C backend uses.
 #[derive(Debug, Clone)]
-pub(crate) enum TransformKind {
+pub enum TransformKind {
     /// `(grad {wrt: ...} fn-expr [index-expr])` — reverse-mode autodiff.
     Grad,
     /// `(vmap {} fn-expr axis-lit)` — vectorize the leading axis (or
@@ -44,7 +44,7 @@ pub(crate) enum TransformKind {
 /// `dtype`-vs-`bits` invariant cannot be silently violated. See
 /// `spec/04-type-system.md` §1.1 for the active dtype set.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum ScalarBits {
+pub enum ScalarBits {
     I8(i8),
     I16(i16),
     I32(i32),
@@ -158,7 +158,7 @@ impl ScalarBits {
 /// `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
 /// directly and skip the `RuntimeValue::scalar()` invariant check.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ScalarPayload {
+pub struct ScalarPayload {
     dtype: Prim,
     bits: ScalarBits,
 }
@@ -213,7 +213,7 @@ impl ScalarPayload {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum RuntimeValue {
+pub enum RuntimeValue {
     Tensor(RuntimeTensorValue),
     /// First-class numeric scalar tagged with its source-level dtype.
     /// Construction must go through [`RuntimeValue::scalar`] (or one of
@@ -353,7 +353,7 @@ impl RuntimeValue {
     }
 
     /// View this value as i64 if it is an integer-typed scalar.
-    pub(crate) fn as_i64(&self) -> Option<i64> {
+    pub fn as_i64(&self) -> Option<i64> {
         match self {
             RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
                 Some(payload.bits().as_i64())
@@ -364,15 +364,30 @@ impl RuntimeValue {
 
     /// View this value as f64 if it is a float-typed scalar. Mirrors
     /// `as_i64` for the float row.
-    #[allow(
-        dead_code,
-        reason = "test surface mirror of as_i64; used by acceptance tests"
-    )]
-    pub(crate) fn as_f64(&self) -> Option<f64> {
+    pub fn as_f64(&self) -> Option<f64> {
         match self {
             RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
                 Some(payload.bits().as_f64())
             }
+            _ => None,
+        }
+    }
+
+    /// View this value as a bool if it is a [`RuntimeValue::Bool`].
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            RuntimeValue::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Borrow this value as an ADT `(ctor, fields)` pair if it is one.
+    /// Read accessor for the decode chokepoint's consumers; field names are
+    /// available via the public `RuntimeValue::Adt { field_names, .. }`
+    /// variant binding when needed.
+    pub fn as_adt(&self) -> Option<(&str, &[RuntimeValue])> {
+        match self {
+            RuntimeValue::Adt { ctor, fields, .. } => Some((ctor.as_str(), fields.as_slice())),
             _ => None,
         }
     }
@@ -2889,7 +2904,7 @@ fn pattern_matches(
     }
 }
 
-fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<String>> {
+pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<String>> {
     let mut out = HashMap::new();
     for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {
@@ -3089,6 +3104,110 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
         }
     }
     out
+}
+
+/// The declared representation type of one record-variant field, used by
+/// the decode chokepoint's STRUCTURAL check (RFC D-DECODE). Distinguishes
+/// the V1 decodable value class (RFC D-WF): scalar prims, fixed-shape
+/// numeric tensors, and nested single-variant records of those.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DecodeFieldType {
+    /// A scalar primitive (`f32`, `int64`, `bool`, ...).
+    Prim(Prim),
+    /// A fixed-shape numeric tensor with the given element precision.
+    Tensor(Prim),
+    /// A nested ADT, referenced by name. Field decode recurses into the
+    /// referenced constructor's field-type table.
+    Adt(String),
+}
+
+/// One field of a record variant: its declared name and representation
+/// type, in source order.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DecodeField {
+    pub(crate) name: String,
+    pub(crate) ty: DecodeFieldType,
+}
+
+/// Build a per-constructor field-type table from a program's `deftype`
+/// declarations. Keyed by variant constructor name (same key space as
+/// [`collect_type_invariants`]). The decode chokepoint uses this for the
+/// structural check (arity, names, scalar-vs-tensor-vs-adt field types)
+/// before invariant revalidation.
+pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<DecodeField>> {
+    let mut out = HashMap::new();
+    for expr in top_level_items(exprs) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("deftype") {
+            continue;
+        }
+        let kids = children(list);
+        for variant in kids.iter().skip(2) {
+            let Some(variant_list) = as_list(variant) else {
+                continue;
+            };
+            if tag(variant_list) != Some("variant") {
+                continue;
+            }
+            let variant_kids = children(variant_list);
+            let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            let mut fields = Vec::new();
+            for field in variant_kids.iter().skip(1) {
+                let Some(field_list) = as_list(field) else {
+                    continue;
+                };
+                if tag(field_list) != Some("field") {
+                    continue;
+                }
+                let field_kids = children(field_list);
+                let Some(name) = field_kids.first().and_then(symbol_name) else {
+                    continue;
+                };
+                let Some(ty_expr) = field_kids.get(1) else {
+                    continue;
+                };
+                let Some(ty) = decode_field_type(ty_expr) else {
+                    continue;
+                };
+                fields.push(DecodeField {
+                    name: name.to_string(),
+                    ty,
+                });
+            }
+            if !fields.is_empty() {
+                out.insert(ctor.to_string(), fields);
+            }
+        }
+    }
+    out
+}
+
+/// Classify a Deep field-type expression into a [`DecodeFieldType`].
+/// Returns `None` for type shapes outside the V1 decodable value class
+/// (function types, generics, type variables) — the chokepoint treats a
+/// field with no classifiable type as outside the decodable surface.
+fn decode_field_type(expr: &Expr) -> Option<DecodeFieldType> {
+    let list = as_list(expr)?;
+    match tag(list) {
+        Some("t-prim") => children(list)
+            .first()
+            .and_then(symbol_name)
+            .and_then(prim_from_name)
+            .map(DecodeFieldType::Prim),
+        Some("t-tensor") => children(list)
+            .last()
+            .and_then(extract_prim_from_type_expr)
+            .map(DecodeFieldType::Tensor),
+        Some("t-adt") => children(list)
+            .first()
+            .and_then(symbol_name)
+            .map(|name| DecodeFieldType::Adt(name.to_string())),
+        _ => None,
+    }
 }
 
 /// Parse `(fn {} (params {} <binder>) <body>)` into `(binder, body)`.
