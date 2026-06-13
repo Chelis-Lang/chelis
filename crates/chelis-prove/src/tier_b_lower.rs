@@ -301,13 +301,13 @@ fn lower_obligation_body(
             // After reduction, rewrite any `access(var <opaque_param>)
             // field` (e.g. an inlined `prob_value(p)`) into the flattened
             // input var so it shares the precondition's variable space.
-            let reduced = reduce(result_expr, subst, exprs, depth)?;
+            let reduced = reduce(result_expr, subst, consts, exprs, depth)?;
             let reduced = rewrite_opaque_field_access(&reduced, opaque_params);
             apply_invariant(&reduced, inv, consts)
         }
         ProducedPosition::InsideOption(inner) => {
             // result is Option[..]; reduce to known constructor.
-            let reduced = reduce(result_expr, subst, exprs, depth)?;
+            let reduced = reduce(result_expr, subst, consts, exprs, depth)?;
             let reduced = rewrite_opaque_field_access(&reduced, opaque_params);
             lower_option_obligation(&reduced, inner, inv, ob, exprs, consts, depth)
         }
@@ -422,27 +422,35 @@ fn record_fields(expr: &Expr) -> Option<HashMap<String, Expr>> {
 // Reduction (inlining + record-beta + if normalization)
 // ===========================================================================
 
-/// Reduce a Deep expression: substitute free vars from `subst`, inline
+/// Reduce a Deep expression: substitute free vars from `subst`, resolve
+/// in-module zero-arg constants from `consts` (CR-8), inline
 /// producer/helper calls, and beta-reduce `(access (record ...) field)`.
 fn reduce(
     expr: &Expr,
     subst: &HashMap<String, Expr>,
+    consts: &crate::opaque::ConstEnv,
     exprs: &[Expr],
     depth: usize,
 ) -> Option<Expr> {
     use chelis_deep::Span;
     use chelis_deep::ast::List;
-    // var: substitute if bound.
+    // var: substitute if bound, else resolve an in-module constant to a
+    // literal (CR-8: a bare `(var hi)` for a value-binding constant
+    // `hi = 1.0` was previously returned unchanged, reaching the SMT
+    // lowering as an undeclared variable).
     if let Some(name) = var_name(expr) {
         if let Some(replacement) = subst.get(name) {
             return Some(replacement.clone());
+        }
+        if let Some(value) = consts.get(name) {
+            return Some(float_lit_node(*value));
         }
         return Some(expr.clone());
     }
     // access over a reduced record => record beta.
     if tag(expr) == Some("access") {
         let kids = children(expr);
-        let target = reduce(kids.first()?, subst, exprs, depth)?;
+        let target = reduce(kids.first()?, subst, consts, exprs, depth)?;
         let field = symbol_text(kids.get(1)?)?;
         if let Some(fields) = record_fields(&target)
             && let Some(val) = fields.get(field)
@@ -457,7 +465,7 @@ fn reduce(
     if let Some((name, args)) = app_parts(expr) {
         let reduced_args = args
             .iter()
-            .map(|a| reduce(a, subst, exprs, depth))
+            .map(|a| reduce(a, subst, consts, exprs, depth))
             .collect::<Option<Vec<_>>>()?;
         // Constructors Some/None and record builders are not inlined.
         if name == "Some" || name == "None" {
@@ -469,7 +477,7 @@ fn reduce(
         {
             let inner_subst: HashMap<String, Expr> =
                 prod.params.iter().cloned().zip(reduced_args).collect();
-            return reduce(prod.body, &inner_subst, exprs, depth + 1);
+            return reduce(prod.body, &inner_subst, consts, exprs, depth + 1);
         }
         return Some(rebuild_app(name, reduced_args));
     }
@@ -481,7 +489,7 @@ fn reduce(
             if tag(kv) == Some("kv") {
                 let kkids = children(kv);
                 let field = kkids.first()?.clone();
-                let val = reduce(kkids.get(1)?, subst, exprs, depth)?;
+                let val = reduce(kkids.get(1)?, subst, consts, exprs, depth)?;
                 new_children.push(Expr::List(
                     List {
                         elements: vec![
@@ -502,13 +510,42 @@ fn reduce(
     // if: reduce children (keep structure for case analysis).
     if tag(expr) == Some("if") {
         let kids = children(expr);
-        let c = reduce(kids.first()?, subst, exprs, depth)?;
-        let t = reduce(kids.get(1)?, subst, exprs, depth)?;
-        let e = reduce(kids.get(2)?, subst, exprs, depth)?;
+        let c = reduce(kids.first()?, subst, consts, exprs, depth)?;
+        let t = reduce(kids.get(1)?, subst, consts, exprs, depth)?;
+        let e = reduce(kids.get(2)?, subst, consts, exprs, depth)?;
         return Some(rebuild(expr, vec![c, t, e]));
     }
     // Other nodes (lits): return as-is.
     Some(expr.clone())
+}
+
+/// A typed f32 literal Deep node `(lit {type: (t-prim {} f32)} value)` for
+/// an inlined constant value (CR-8).
+fn float_lit_node(value: f64) -> Expr {
+    use chelis_deep::Span;
+    use chelis_deep::ast::{List, MetaMap};
+    let type_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("t-prim".to_string()), Span::new(0, 0)),
+                Expr::Map(MetaMap::default(), Span::new(0, 0)),
+                Expr::Atom(Atom::Symbol("f32".to_string()), Span::new(0, 0)),
+            ],
+        },
+        Span::new(0, 0),
+    );
+    let mut meta = MetaMap::default();
+    meta.entries.push(("type".to_string(), type_node));
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("lit".to_string()), Span::new(0, 0)),
+                Expr::Map(meta, Span::new(0, 0)),
+                Expr::Atom(Atom::Float(value), Span::new(0, 0)),
+            ],
+        },
+        Span::new(0, 0),
+    )
 }
 
 fn rebuild(template: &Expr, new_children: Vec<Expr>) -> Expr {

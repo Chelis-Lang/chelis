@@ -675,12 +675,23 @@ fn matches_filter(name: &str, pattern: &str) -> bool {
 
 fn resolve_module_constants(exprs: &[Expr], invariants: &[OpaqueInvariant]) -> ConstEnv {
     let mut env = ConstEnv::new();
-    let mut referenced = Vec::new();
+    let mut referenced: Vec<String> = Vec::new();
+    // Constants referenced by the invariant predicates...
     for inv in invariants {
         for v in crate::predicate_free_vars(&inv.predicate) {
             if v != inv.binder && !referenced.contains(&v) {
                 referenced.push(v);
             }
+        }
+    }
+    // ...and the in-module zero-arg scalar defs (value bindings or
+    // zero-parameter functions) a producer GUARD may compare against
+    // (CR-8: `def hi() -> f32 = 1.0; ... if x <= hi() ...`, or the value
+    // binding `hi = 1.0; ... x <= hi ...`). Resolving them here makes the
+    // Tier B `reduce` pass inline the constant into the guard.
+    for name in module_zero_arg_scalar_defs(exprs) {
+        if !referenced.contains(&name) {
+            referenced.push(name);
         }
     }
     if referenced.is_empty() {
@@ -695,19 +706,59 @@ fn resolve_module_constants(exprs: &[Expr], invariants: &[OpaqueInvariant]) -> C
     env
 }
 
+/// Names of in-module defs that are zero-arg constants: a value binding
+/// `(def name <value>)` whose value is not a `fn`, or a zero-parameter
+/// function `(def name (fn (params) ...))` with no params. The caller
+/// resolves each to a scalar by evaluation (non-scalar ones simply fail to
+/// resolve and are dropped).
+fn module_zero_arg_scalar_defs(exprs: &[Expr]) -> Vec<String> {
+    fn walk(exprs: &[Expr], out: &mut Vec<String>) {
+        for expr in exprs {
+            if list_tag(expr) == Some("def")
+                && let Some(name) = node_children(expr).first().and_then(sym_text)
+                && let Some(body) = node_children(expr).get(1)
+            {
+                let is_zero_arg = if list_tag(body) == Some("fn") {
+                    // A fn with an empty params node.
+                    node_children(body)
+                        .first()
+                        .map(|p| node_children(p).is_empty())
+                        .unwrap_or(false)
+                } else {
+                    // A non-fn value binding.
+                    true
+                };
+                if is_zero_arg && !out.iter().any(|n| n == name) {
+                    out.push(name.to_string());
+                }
+            }
+            if let Expr::List(l, _) = expr {
+                walk(&l.elements[2.min(l.elements.len())..], out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(exprs, &mut out);
+    out
+}
+
 fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
     // An in-module constant may be a value binding (`(var name)`) or a
     // zero-argument constant function (`(app (var name))`, the desugaring
-    // of `def eps() -> f32 = 0.01`). The probe def must live INSIDE the
-    // same module as the constant, so reparse and inject into the module
-    // wrapper. Try the call form first, then the bare-var form.
-    // Strip the invariant metadata so a `sum`-bearing predicate does not
-    // block IR lowering of the module when we evaluate the constant.
+    // of `def eps() -> f32 = 0.01`).
     let exprs: Vec<Expr> = chelis_deep::parser::parse_str(source)
         .ok()?
         .iter()
         .map(strip_invariant_meta)
         .collect();
+
+    // Fast path: if the const def body is a plain literal, read it
+    // directly (CR-8). A top-level value binding `hi = 1.0` is itself a
+    // root, so the eval-probe path below trips the lowered-root-count
+    // selection mismatch; extracting the literal sidesteps that.
+    if let Some(v) = literal_const_value(&exprs, name) {
+        return Some(v);
+    }
     for probe_body in [deep_node("app", vec![deep_var(name)]), deep_var(name)] {
         let probe = "__chelis_const_probe";
         let probe_def = node_def(probe, probe_body);
@@ -732,6 +783,64 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
         }
     }
     None
+}
+
+/// Read a constant def's value directly when its body is a plain numeric
+/// literal: `(def name (lit {} <num>))` (a value binding) or
+/// `(def name (fn (params) (lit {} <num>)))` (a zero-arg constant fn).
+/// Returns `None` for any non-literal body (those go through evaluation).
+fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
+    fn lit_number(expr: &Expr) -> Option<f64> {
+        // A bare atom or a `(lit {} <num>)` node.
+        match expr {
+            Expr::Atom(Atom::Float(v), _) => Some(*v),
+            Expr::Atom(Atom::Int(v), _) => Some(*v as f64),
+            _ => {
+                if list_tag(expr) == Some("lit") {
+                    match node_children(expr).first() {
+                        Some(Expr::Atom(Atom::Float(v), _)) => Some(*v),
+                        Some(Expr::Atom(Atom::Int(v), _)) => Some(*v as f64),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
+    fn find(exprs: &[Expr], name: &str) -> Option<f64> {
+        for expr in exprs {
+            if list_tag(expr) == Some("def")
+                && node_children(expr).first().and_then(sym_text) == Some(name)
+                && let Some(body) = node_children(expr).get(1)
+            {
+                // Value binding: the body is the literal.
+                if let Some(v) = lit_number(body) {
+                    return Some(v);
+                }
+                // Zero-arg constant fn: `(fn (params) <lit>)`.
+                if list_tag(body) == Some("fn") {
+                    let kids = node_children(body);
+                    if kids
+                        .first()
+                        .map(|p| node_children(p).is_empty())
+                        .unwrap_or(false)
+                        && let Some(fn_body) = kids.get(1)
+                        && let Some(v) = lit_number(fn_body)
+                    {
+                        return Some(v);
+                    }
+                }
+            }
+            if let Expr::List(l, _) = expr
+                && let Some(v) = find(&l.elements[2.min(l.elements.len())..], name)
+            {
+                return Some(v);
+            }
+        }
+        None
+    }
+    find(exprs, name)
 }
 
 /// Inject a probe def into the first `(module ...)` wrapper (or top level).

@@ -264,6 +264,52 @@ def bad_scale(p: Probability, k: f32) -> Probability = Probability { value: prob
     );
 }
 
+#[cfg(feature = "smt")]
+const GUARDED_OPTION_CONST: &str = "module Stats.Prob
+export (probability)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+hi = 1.0
+def probability(x: f32) -> Option[Probability] =
+  if x >= 0.0 && x <= hi then Some(Probability { value: x }) else None
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn cr8_guard_with_module_constant_proves_at_smt_tier() {
+    // CR-8: a producer guard comparing against an in-module zero-arg
+    // constant (`hi = 1.0`) lowered with the bare `(var hi)` unresolved,
+    // so its Tier B obligation was wrong (and the SMT solver paniced on
+    // the undeclared variable). With the constant resolved, the
+    // guard-then-Option obligation proves at smt.
+    use crate::tier_b::{TierBResult, solve_property};
+    let exprs = deep_of(GUARDED_OPTION_CONST);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    let ob = col
+        .obligations
+        .iter()
+        .find(|o| o.producer == "probability")
+        .expect("obligation exists");
+    let inv = &invs[0];
+    let pparams = vec![(
+        producer_first_param_name(&exprs, "probability"),
+        ProducerParamType::Scalar("f32".to_string()),
+    )];
+    let mut consts = crate::opaque::ConstEnv::new();
+    consts.insert("hi".to_string(), 1.0);
+    let lowered = lower_obligation(&exprs, inv, ob, &pparams, &consts)
+        .expect("guard-with-constant obligation must lower");
+    assert_eq!(
+        solve_property(&lowered.property, 5000),
+        TierBResult::Proved,
+        "guard against a module constant proves at smt once resolved"
+    );
+}
+
 /// Resolve the producer's first param name from the Deep program (the
 /// lowering uses the property's quantified var name = the producer param
 /// name).

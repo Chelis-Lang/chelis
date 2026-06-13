@@ -101,6 +101,49 @@ def clamp_prob(x: f32) -> Probability =
 }
 
 #[test]
+fn cr8_guard_against_module_constant_proves_at_smt() {
+    // CR-8: a guard comparing against an in-module zero-arg constant
+    // (value binding `hi = 1.0`) previously panicked the SMT solver on the
+    // undeclared `hi` variable. The constant is now resolved and the
+    // guard-then-Option obligation proves at smt.
+    let source = "module Stats.Prob
+export (probability)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+hi = 1.0
+def probability(x: f32) -> Option[Probability] =
+  if x >= 0.0 && x <= hi then Some(Probability { value: x }) else None
+";
+    let (code, records) = prove_json(source, &[]);
+    assert_eq!(code, 0, "guard-against-constant proves cleanly (no panic)");
+    let obs = obligations(&records);
+    assert_eq!(obs[0]["status"], "passed");
+    assert_eq!(obs[0]["proof_tier"], "smt");
+}
+
+#[test]
+fn cr8_guard_against_zero_arg_constant_fn_proves_at_smt() {
+    // The zero-arg constant FUNCTION form (`def hi() -> f32 = 1.0`).
+    let source = "module Stats.Prob
+export (probability)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+def hi() -> f32 = 1.0
+def probability(x: f32) -> Option[Probability] =
+  if x >= 0.0 && x <= hi() then Some(Probability { value: x }) else None
+";
+    let (code, records) = prove_json(source, &[]);
+    assert_eq!(code, 0);
+    let obs = obligations(&records);
+    assert_eq!(obs[0]["status"], "passed");
+    assert_eq!(obs[0]["proof_tier"], "smt");
+}
+
+#[test]
 fn non_validating_constructor_fails_with_counterexample() {
     let source = "module Stats.Prob
 export (bad_prob)
