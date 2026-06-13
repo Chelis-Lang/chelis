@@ -27,7 +27,8 @@ use crate::schema::{
     WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm,
     WireMetaEntry, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
     WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl, WireSurfExpr,
-    WireSurfTypeExpr, WireTensorType, WireUnaryOp, WireVariant, WireVariantFields,
+    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireVariantFields,
 };
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -1929,12 +1930,18 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             params,
             variants,
             opaque,
+            invariant,
             span: s,
         } => WireSurfDecl::TypeDef {
             name: name.clone(),
             params: params.clone(),
             variants: variants.iter().map(wire_variant).collect(),
             opaque: *opaque,
+            invariant: invariant.as_ref().map(|inv| WireTypeInvariant {
+                binder: inv.binder.clone(),
+                body: wire_expr(&inv.body),
+                span: span(inv.span),
+            }),
             span: span(*s),
         },
         Decl::TypeAlias {

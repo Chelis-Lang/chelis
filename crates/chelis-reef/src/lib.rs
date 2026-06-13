@@ -3,7 +3,7 @@ use chelis_shell::{
 };
 use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
-    PropertyOption, TypeExpr, Variant, VariantFields,
+    PropertyOption, TypeExpr, TypeInvariant, Variant, VariantFields,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -4975,6 +4975,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             params,
             variants,
             opaque,
+            invariant,
             span,
         } => Decl::TypeDef {
             name: internal_name(package, module, name),
@@ -4984,6 +4985,9 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
                 .map(|variant| rewrite_variant(variant, resolver))
                 .collect(),
             opaque: *opaque,
+            invariant: invariant
+                .as_ref()
+                .map(|inv| rewrite_invariant(inv, resolver)),
             span: *span,
         },
         Decl::TypeAlias {
@@ -5105,6 +5109,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             params,
             variants,
             opaque,
+            invariant,
             span,
         } => Decl::TypeDef {
             name: name.clone(),
@@ -5114,6 +5119,9 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
                 .map(|variant| rewrite_variant(variant, resolver))
                 .collect(),
             opaque: *opaque,
+            invariant: invariant
+                .as_ref()
+                .map(|inv| rewrite_invariant(inv, resolver)),
             span: *span,
         },
         Decl::TypeAlias {
@@ -5179,6 +5187,20 @@ fn rewrite_variant(variant: &Variant, resolver: &NameResolver) -> Variant {
             ),
         },
         span: variant.span,
+    }
+}
+
+/// Rewrite a declared type invariant under package linking: the predicate
+/// body is rewritten with the invariant binder as a local, so references
+/// to in-module zero-arg constants get reef-mangled while the binder
+/// stays bare (mirrors the `Decl::Property` precondition/body rewrite).
+fn rewrite_invariant(invariant: &TypeInvariant, resolver: &NameResolver) -> TypeInvariant {
+    let mut locals = HashSet::new();
+    locals.insert(invariant.binder.clone());
+    TypeInvariant {
+        binder: invariant.binder.clone(),
+        body: rewrite_expr(&invariant.body, resolver, &mut locals),
+        span: invariant.span,
     }
 }
 

@@ -2491,6 +2491,7 @@ mod tests {
                 },
             ],
             opaque: false,
+            invariant: None,
             span: s(),
         };
         let nodes = desugar_decl_strs(&decl);
@@ -2512,6 +2513,7 @@ mod tests {
                 span: s(),
             }],
             opaque: false,
+            invariant: None,
             span: s(),
         };
         let nodes = desugar_decl_strs(&decl);
