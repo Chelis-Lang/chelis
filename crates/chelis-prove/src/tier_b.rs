@@ -77,10 +77,7 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
 
     // Choose logic based on expression content
     let has_transcendentals = contains_transcendental(&property.postcondition)
-        || property
-            .preconditions
-            .iter()
-            .any(|p| contains_transcendental(p));
+        || property.preconditions.iter().any(contains_transcendental);
     if has_transcendentals {
         solver.set_logic("QF_NRAT");
     } else {

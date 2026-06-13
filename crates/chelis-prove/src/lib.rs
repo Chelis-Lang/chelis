@@ -19,6 +19,7 @@ pub mod opaque;
 pub mod solver;
 pub mod tier_a;
 pub mod tier_b;
+pub mod tier_b_lower;
 pub mod tier_c;
 
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
