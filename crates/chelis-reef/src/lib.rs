@@ -4781,7 +4781,7 @@ fn rewrite_eval_module_decls(
         // linked library. This is flag-independent: user entry decls are
         // never linker output.
         if let Some(name) = entry_decl_binding_name(decl)
-            && is_reserved_linker_name(name)
+            && chelis_types::is_linker_format_name(name)
         {
             return Err(format!(
                 "`{name}` uses the reef package-linker's reserved internal-name format \
@@ -4811,21 +4811,6 @@ fn entry_decl_binding_name(decl: &Decl) -> Option<&str> {
         | Decl::Property { name, .. } => Some(name.as_str()),
         Decl::Import { .. } | Decl::Export { .. } | Decl::Module { .. } | Decl::Dim { .. } => None,
     }
-}
-
-/// True when `name` matches the reef linker's internal-name format
-/// (`Pkg__<pkg>__<Module>__<Name>` / lowercase twin): a marker prefix
-/// plus a non-empty module stem before the terminal segment. Mirrors
-/// `chelis_types::opacity::is_linker_format_name` and the structure of
-/// [`internal_name`].
-fn is_reserved_linker_name(name: &str) -> bool {
-    let Some(stem) = name
-        .strip_prefix("Pkg__")
-        .or_else(|| name.strip_prefix("pkg__"))
-    else {
-        return false;
-    };
-    matches!(stem.rsplit_once("__"), Some((module, _)) if !module.is_empty())
 }
 
 fn dep_public_exports(shell: &ShellPackage, module: &str) -> Result<BTreeSet<String>, String> {
@@ -5595,24 +5580,36 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn is_reserved_linker_name_matches_only_full_mangled_names() {
+    fn reserved_linker_name_predicate_matches_only_full_mangled_names() {
         // RFC v6: the entry-boundary reserved-name reject must match
         // exactly the names that could self-key via `reef_module_stem`.
-        assert!(is_reserved_linker_name("pkg__opq__Demo__Types__forge"));
-        assert!(is_reserved_linker_name(
-            "Pkg__opq__Demo__Types__Probability"
-        ));
-        assert!(is_reserved_linker_name(
-            "pkg__forgepkg__Smoke__Types__forge"
-        ));
+        // CR-7: reef shares the single chelis-types predicate.
+        use chelis_types::is_linker_format_name as is_reserved;
+        assert!(is_reserved("pkg__opq__Demo__Types__forge"));
+        assert!(is_reserved("Pkg__opq__Demo__Types__Probability"));
+        assert!(is_reserved("pkg__forgepkg__Smoke__Types__forge"));
         // Marker prefix but no module stem -> cannot key to a module.
-        assert!(!is_reserved_linker_name("pkg__lonely"));
-        assert!(!is_reserved_linker_name("Pkg__lonely"));
+        assert!(!is_reserved("pkg__lonely"));
+        assert!(!is_reserved("Pkg__lonely"));
         // Ordinary user identifiers (test fns, helpers, synth roots).
-        assert!(!is_reserved_linker_name("test_forge"));
-        assert!(!is_reserved_linker_name("normal_helper"));
-        assert!(!is_reserved_linker_name("__chelis_test_0"));
-        assert!(!is_reserved_linker_name("probability"));
+        assert!(!is_reserved("test_forge"));
+        assert!(!is_reserved("normal_helper"));
+        assert!(!is_reserved("__chelis_test_0"));
+        assert!(!is_reserved("probability"));
+    }
+
+    #[test]
+    fn reserved_name_predicate_agrees_on_borderline_names_cr7() {
+        // CR-7: the reef entry-boundary reject and the chelis-types
+        // checker now use ONE predicate, so they cannot drift. Pin the
+        // borderline cases from the review: a single-underscore name
+        // (`pkg_count`) is NOT reserved; the full mangled form is.
+        use chelis_types::is_linker_format_name as is_reserved;
+        assert!(!is_reserved("pkg_count"));
+        assert!(!is_reserved("pkg"));
+        assert!(!is_reserved("count_pkg"));
+        assert!(is_reserved("Pkg__X__Y"));
+        assert!(is_reserved("pkg__a__b"));
     }
 
     #[test]

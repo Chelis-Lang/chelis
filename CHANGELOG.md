@@ -6,6 +6,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The reef package linker's reserved-name predicate is now a single
+  shared definition (`chelis_types::is_linker_format_name`): the reef
+  entry/test reserved-name reject (RFC v6) and the checker's
+  `ReservedLinkerName` rule no longer keep two copies that could drift
+  (CR-7).
+
 ### Added
 
 <!-- opaque-types W3/W4 (prove layer) -->
