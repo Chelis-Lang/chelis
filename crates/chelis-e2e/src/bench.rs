@@ -2089,9 +2089,13 @@ mod tests {
     fn linreg_workload_smoke_profile_is_small() {
         let workload = LinregWorkload::for_profile(Some("smoke"));
 
+        // The smoke profile's speedup comes from a single train/test batch
+        // and one epoch. `batch_size` must stay at the example's fixed
+        // dimension (`examples/linreg.ch` is `tensor[64, 64]`); shrinking it
+        // would make the compiled program reject its own input shape.
         assert_eq!(workload.train_batches, 1);
         assert_eq!(workload.test_batches, 1);
-        assert_eq!(workload.batch_size, 8);
+        assert_eq!(workload.batch_size, LINREG_BATCH_SIZE);
         assert_eq!(workload.epochs, 1);
     }
 }
