@@ -17,7 +17,7 @@
 //! parameter), is an ERROR naming the producer and channel — never a
 //! silent skip, since one uncovered producer collapses D-SOUND.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::ast::{Atom, Expr};
 use chelis_types::types::Type;
@@ -257,23 +257,40 @@ fn type_from_deep(ty: &Expr) -> Option<Type> {
 /// supported container (Direct / Option / tuple, recursively), `Ok(None)`
 /// if the type does not appear at all, or an `Err(container)` naming the
 /// first unsupported container the type is reached through.
-pub fn decompose_return(ty: &Type, type_name: &str) -> Result<Option<ProducedPosition>, String> {
+///
+/// `records` maps each non-opaque record ADT name to its field types, so a
+/// producer returning a record that *transitively* wraps the opaque type
+/// (`Wrapper { inner: T }`) is covered-or-rejected rather than silently
+/// missed (RT-2 CRITICAL; D-PRODUCER "record" container). Without it the
+/// `Type::Adt("Wrapper", [])` representation hides the `T` inside.
+pub fn decompose_return(
+    ty: &Type,
+    type_name: &str,
+    records: &BTreeMap<String, Vec<Type>>,
+) -> Result<Option<ProducedPosition>, String> {
     match ty {
         Type::Adt(name, _) if name == type_name => Ok(Some(ProducedPosition::Direct)),
         Type::Adt(name, args) if name == "Option" => {
             // Option[inner]: decompose the inner.
             let inner = args.first().ok_or_else(|| "Option".to_string())?;
-            match decompose_return(inner, type_name)? {
+            match decompose_return(inner, type_name, records)? {
                 Some(pos) => Ok(Some(ProducedPosition::InsideOption(Box::new(pos)))),
                 None => Ok(None),
             }
         }
         Type::Adt(name, _) => {
-            // Any other generic ADT carrying the type is an unsupported
-            // container (covered-or-rejected). A generic NOT carrying the
-            // type is fine (returns None).
-            if type_contains(ty, type_name) {
-                Err(format!("generic `{name}`"))
+            // Any other ADT carrying the type -- through its type arguments
+            // (a generic like `List[T]`) OR through the fields of a named
+            // record (`Wrapper { inner: T }`) -- is an unsupported
+            // container (covered-or-rejected). A type NOT carrying the type
+            // returns None.
+            if type_contains(ty, type_name, records) {
+                let kind = if records.contains_key(name) {
+                    format!("record `{name}`")
+                } else {
+                    format!("generic `{name}`")
+                };
+                Err(kind)
             } else {
                 Ok(None)
             }
@@ -281,7 +298,7 @@ pub fn decompose_return(ty: &Type, type_name: &str) -> Result<Option<ProducedPos
         Type::Tuple(components) => {
             let mut positions = Vec::new();
             for (idx, comp) in components.iter().enumerate() {
-                if let Some(pos) = decompose_return(comp, type_name)? {
+                if let Some(pos) = decompose_return(comp, type_name, records)? {
                     positions.push((idx, pos));
                 }
             }
@@ -293,25 +310,103 @@ pub fn decompose_return(ty: &Type, type_name: &str) -> Result<Option<ProducedPos
         }
         // A bare reference, function, or tensor carrying the type is an
         // unsupported container if it actually contains the type.
-        Type::Ref(_) if type_contains(ty, type_name) => Err("borrow".to_string()),
-        Type::Fn(_, _) if type_contains(ty, type_name) => Err("function type".to_string()),
+        Type::Ref(_) if type_contains(ty, type_name, records) => Err("borrow".to_string()),
+        Type::Fn(_, _) if type_contains(ty, type_name, records) => Err("function type".to_string()),
         _ => Ok(None),
     }
 }
 
-/// Whether a type structurally mentions the named opaque type anywhere.
-pub fn type_contains(ty: &Type, type_name: &str) -> bool {
+/// Whether a type structurally mentions the named opaque type anywhere,
+/// chasing named record fields through `records` (so `Wrapper { inner: T }`
+/// mentions `T`). Recursion is depth-bounded against cyclic record types.
+pub fn type_contains(ty: &Type, type_name: &str, records: &BTreeMap<String, Vec<Type>>) -> bool {
+    type_contains_depth(ty, type_name, records, 0)
+}
+
+fn type_contains_depth(
+    ty: &Type,
+    type_name: &str,
+    records: &BTreeMap<String, Vec<Type>>,
+    depth: usize,
+) -> bool {
+    if depth > 16 {
+        return false;
+    }
     match ty {
+        Type::Adt(name, _) if name == type_name => true,
         Type::Adt(name, args) => {
-            name == type_name || args.iter().any(|a| type_contains(a, type_name))
+            args.iter()
+                .any(|a| type_contains_depth(a, type_name, records, depth + 1))
+                // Chase the named record's field types.
+                || records.get(name).is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .any(|f| type_contains_depth(f, type_name, records, depth + 1))
+                })
         }
-        Type::Tuple(items) => items.iter().any(|t| type_contains(t, type_name)),
+        Type::Tuple(items) => items
+            .iter()
+            .any(|t| type_contains_depth(t, type_name, records, depth + 1)),
         Type::Fn(args, ret) => {
-            args.iter().any(|a| type_contains(a, type_name)) || type_contains(ret, type_name)
+            args.iter()
+                .any(|a| type_contains_depth(a, type_name, records, depth + 1))
+                || type_contains_depth(ret, type_name, records, depth + 1)
         }
-        Type::Ref(inner) => type_contains(inner, type_name),
+        Type::Ref(inner) => type_contains_depth(inner, type_name, records, depth + 1),
         _ => false,
     }
+}
+
+/// Build the record-field-type registry from the Deep deftypes: each
+/// non-opaque record ADT name maps to the field types of its single
+/// variant. The opaque types themselves are intentionally NOT entries
+/// here (their fields are the representation, walled off by opacity).
+pub fn collect_record_fields(exprs: &[Expr]) -> BTreeMap<String, Vec<Type>> {
+    let mut out = BTreeMap::new();
+    collect_record_fields_in(exprs, &mut out);
+    out
+}
+
+fn collect_record_fields_in(exprs: &[Expr], out: &mut BTreeMap<String, Vec<Type>>) {
+    for expr in exprs {
+        if tag(expr) == Some("deftype") {
+            // Skip opaque types: their fields are the sealed representation.
+            let opaque = matches!(
+                meta_value(expr, "opaque"),
+                Some(Expr::Atom(Atom::Bool(true), _))
+            );
+            if !opaque
+                && let Some(name) = children(expr).first().and_then(symbol_text)
+                && let Some(variant) = children(expr).iter().find(|c| tag(c) == Some("variant"))
+            {
+                let mut field_types = Vec::new();
+                for field in children(variant).iter().skip(1) {
+                    if tag(field) == Some("field")
+                        && let Some(fty_node) = children(field).get(1)
+                        && let Some(fty) = type_from_deep(fty_node)
+                    {
+                        field_types.push(fty);
+                    }
+                }
+                out.insert(name.to_string(), field_types);
+            }
+        }
+        if let Expr::List(list, _) = expr {
+            collect_record_fields_in(&list.elements[2.min(list.elements.len())..], out);
+        }
+    }
+}
+
+fn meta_value<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
+    if let Expr::List(list, _) = expr
+        && let Some(Expr::Map(map, _)) = list.elements.get(1)
+    {
+        return map
+            .entries
+            .iter()
+            .find_map(|(k, v)| (k == key).then_some(v));
+    }
+    None
 }
 
 /// Whether a parameter type hands the opaque type to caller-supplied code
@@ -319,21 +414,31 @@ pub fn type_contains(ty: &Type, type_name: &str) -> bool {
 /// parameter, transitively. A plain type-T parameter, a record parameter
 /// with a T field, or a caller-implemented function whose RETURN contains
 /// T are module-receives positions and stay legal.
-fn caller_receives_in_param(ty: &Type, type_name: &str) -> bool {
+fn caller_receives_in_param(
+    ty: &Type,
+    type_name: &str,
+    records: &BTreeMap<String, Vec<Type>>,
+) -> bool {
     match ty {
         // A function-typed parameter: its argument domain is
         // caller-receives (the module calls back into caller code with a
         // value of the type). Its return is module-receives (legal).
         Type::Fn(args, ret) => {
-            args.iter().any(|a| type_contains(a, type_name))
-                || caller_receives_in_param(ret, type_name)
-                || args.iter().any(|a| caller_receives_in_param(a, type_name))
+            args.iter().any(|a| type_contains(a, type_name, records))
+                || caller_receives_in_param(ret, type_name, records)
+                || args
+                    .iter()
+                    .any(|a| caller_receives_in_param(a, type_name, records))
         }
         // Containers: recurse, but a bare T or T-in-record is NOT
         // caller-receives (module-receives, legal).
-        Type::Tuple(items) => items.iter().any(|t| caller_receives_in_param(t, type_name)),
-        Type::Adt(_, args) => args.iter().any(|a| caller_receives_in_param(a, type_name)),
-        Type::Ref(inner) => caller_receives_in_param(inner, type_name),
+        Type::Tuple(items) => items
+            .iter()
+            .any(|t| caller_receives_in_param(t, type_name, records)),
+        Type::Adt(_, args) => args
+            .iter()
+            .any(|a| caller_receives_in_param(a, type_name, records)),
+        Type::Ref(inner) => caller_receives_in_param(inner, type_name, records),
         _ => false,
     }
 }
@@ -357,6 +462,7 @@ pub fn collect_obligations(
     let mut def_bodies = BTreeSet::new();
     collect_def_bodies(exprs, &mut def_bodies);
     let declared = collect_declared_returns(exprs);
+    let records = collect_record_fields(exprs);
 
     let mut col = ObligationCollection::default();
     for inv in invariants {
@@ -367,18 +473,28 @@ pub fn collect_obligations(
                 // value/function defs carry obligations.
                 continue;
             };
-            collect_one(inv, name, ty, declared.get(name), &def_bodies, &mut col);
+            collect_one(
+                inv,
+                name,
+                ty,
+                declared.get(name),
+                &def_bodies,
+                &records,
+                &mut col,
+            );
         }
     }
     col
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_one(
     inv: &OpaqueInvariant,
     name: &str,
     ty: &Type,
     declared_ret: Option<&Type>,
     def_bodies: &BTreeSet<String>,
+    records: &BTreeMap<String, Vec<Type>>,
     col: &mut ObligationCollection,
 ) {
     let type_name = &inv.type_name;
@@ -388,7 +504,7 @@ fn collect_one(
             // domain receives the type (caller-receives) is a declaration
             // error (D-PRODUCER signature rejection).
             for (idx, p) in params.iter().enumerate() {
-                if caller_receives_in_param(p, type_name) {
+                if caller_receives_in_param(p, type_name, records) {
                     col.errors.push(ObligationError::CallerReceives {
                         type_name: type_name.clone(),
                         function: name.to_string(),
@@ -402,10 +518,10 @@ fn collect_one(
             // DECLARED return does (e.g. a None-only body infers
             // Option[?] and drops the -> Option[T] annotation), use the
             // declared return — it is part of the exported contract.
-            let inferred = decompose_return(ret, type_name);
+            let inferred = decompose_return(ret, type_name, records);
             let resolved = match &inferred {
                 Ok(None) => match declared_ret {
-                    Some(d) => decompose_return(d, type_name),
+                    Some(d) => decompose_return(d, type_name, records),
                     None => inferred,
                 },
                 _ => inferred,
@@ -433,7 +549,7 @@ fn collect_one(
         // A non-function exported binding whose type contains the type is
         // a constant producer (RFC D-PRODUCER L4): the obligation is that
         // the invariant holds of the value.
-        other => match decompose_return(other, type_name) {
+        other => match decompose_return(other, type_name, records) {
             Ok(Some(position)) => {
                 col.obligations
                     .push(make_obligation(type_name, name, position, true));

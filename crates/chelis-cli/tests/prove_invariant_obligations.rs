@@ -155,6 +155,32 @@ def many(x: f32) -> List[Probability] = Cons(Probability { value: x }, Nil)
 }
 
 #[test]
+fn covered_or_rejected_record_wrapper_is_not_silently_missed() {
+    // RT-2 CRITICAL: a non-generic record wrapping the opaque type in a
+    // produced position must be covered-or-rejected, NEVER silently
+    // missed (zero record / zero error / exit 0).
+    let source = "module M
+export (make_wrapped)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper = | Wrapper { inner: T }
+def make_wrapped(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
+";
+    let (code, records) = prove_json(source, &[]);
+    assert_eq!(code, 3, "record wrapper => covered-or-rejected => exit 3");
+    let obs = obligations(&records);
+    assert_eq!(obs.len(), 1, "exactly one error record, not a silent miss");
+    assert_eq!(obs[0]["status"], "error");
+    let reason = obs[0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("make_wrapped"),
+        "names the producer: {reason}"
+    );
+    assert!(reason.contains("Wrapper"), "names the container: {reason}");
+}
+
+#[test]
 fn unannotated_producer_has_obligation_via_inferred_return() {
     // No `-> Probability`; the inferred return must place it in the set.
     let source = "module Stats.Prob

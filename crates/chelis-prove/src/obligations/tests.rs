@@ -133,7 +133,7 @@ fn opt(inner: Type) -> Type {
 #[test]
 fn decompose_direct() {
     assert_eq!(
-        decompose_return(&adt("Probability"), "Probability").unwrap(),
+        decompose_return(&adt("Probability"), "Probability", &empty_records()).unwrap(),
         Some(ProducedPosition::Direct)
     );
 }
@@ -145,7 +145,9 @@ fn decompose_option_of_tuple() {
         adt("Probability"),
         Type::Prim(chelis_types::types::Prim::F32),
     ]));
-    let pos = decompose_return(&ty, "Probability").unwrap().unwrap();
+    let pos = decompose_return(&ty, "Probability", &empty_records())
+        .unwrap()
+        .unwrap();
     assert_eq!(
         pos,
         ProducedPosition::InsideOption(Box::new(ProducedPosition::TupleComponents(vec![(
@@ -159,13 +161,18 @@ fn decompose_option_of_tuple() {
 fn decompose_unsupported_container_rejects() {
     // List[Probability] is an unsupported container.
     let ty = Type::Adt("List".to_string(), vec![adt("Probability")]);
-    assert!(decompose_return(&ty, "Probability").is_err());
+    assert!(decompose_return(&ty, "Probability", &empty_records()).is_err());
 }
 
 #[test]
 fn decompose_type_absent_is_none() {
     assert_eq!(
-        decompose_return(&Type::Prim(chelis_types::types::Prim::F32), "Probability").unwrap(),
+        decompose_return(
+            &Type::Prim(chelis_types::types::Prim::F32),
+            "Probability",
+            &empty_records()
+        )
+        .unwrap(),
         None
     );
 }
@@ -218,4 +225,64 @@ def prob_value(p: Probability) -> f32 = p.value
         "module-receives is legal: {:?}",
         col.errors
     );
+}
+
+fn empty_records() -> BTreeMap<String, Vec<Type>> {
+    BTreeMap::new()
+}
+
+#[test]
+fn record_wrapper_producer_is_covered_or_rejected() {
+    // RT-2 CRITICAL: a non-generic record wrapping the opaque type in a
+    // produced position must be a covered-or-rejected error, never a
+    // silent miss.
+    let surf = "module M
+export (make_wrapped)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper = | Wrapper { inner: T }
+def make_wrapped(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
+";
+    let exprs = deep_of(surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    assert!(
+        col.errors.iter().any(|e| matches!(
+            e,
+            ObligationError::UnsupportedContainer { producer, container, .. }
+                if producer == "make_wrapped" && container.contains("Wrapper")
+        )),
+        "record-wrapper producer must be covered-or-rejected, got {:?}",
+        col.errors
+    );
+    assert!(
+        col.obligations.is_empty(),
+        "no silent obligation for the wrapper"
+    );
+}
+
+#[test]
+fn record_param_with_t_field_stays_legal() {
+    // Module-receives: a record PARAMETER carrying T is legal (D-PRODUCER);
+    // only produced positions and caller-receives reject.
+    let surf = "module M
+export (read_wrapped)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper = | Wrapper { inner: T }
+def read_wrapped(w: Wrapper) -> f32 = 0.0
+";
+    let exprs = deep_of(surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    assert!(
+        col.errors.is_empty(),
+        "record param is module-receives: {:?}",
+        col.errors
+    );
+    assert!(col.obligations.is_empty());
 }

@@ -162,7 +162,12 @@ fn type_mentions(ty: &TypeExpr, type_name: &str) -> bool {
 /// common producing shapes (block bodies, if-branches, match arms).
 fn body_constructs(expr: &Expr, ctor_names: &[&str]) -> bool {
     match expr {
-        Expr::Record(name, _, _) => ctor_names.contains(&name.as_str()),
+        // A record literal of the type's ctor, OR a record (e.g. a wrapper
+        // `Wrapper { inner: T { .. } }`) whose field values construct it.
+        Expr::Record(name, fields, _) => {
+            ctor_names.contains(&name.as_str())
+                || fields.iter().any(|(_, v)| body_constructs(v, ctor_names))
+        }
         Expr::Apply(func, args, _) => {
             // `Some(Ctor { .. })` and other wrapping applications.
             (matches!(func.as_ref(), Expr::Var(n, _) if ctor_names.contains(&n.as_str())))
@@ -264,6 +269,25 @@ type Probability =
 def probability(x: f32) = Probability { value: x }
 ";
         assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn no_flag_when_producer_wraps_the_type_in_a_record_field() {
+        // RT-2: an exported producer that constructs the opaque type INSIDE
+        // a non-generic wrapper record IS a producer; the lint must not
+        // falsely assert the type is sealed with an empty obligation set.
+        let src = "module M
+export (make_wrapped)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type T = | T { value: f32 }
+type Wrapper = | Wrapper { inner: T }
+def make_wrapped(x: f32) -> Wrapper = Wrapper { inner: T { value: x } }
+";
+        assert!(
+            run(src).is_empty(),
+            "wrapper-constructing producer is reachable; no unreachable flag"
+        );
     }
 
     #[test]
