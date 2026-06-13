@@ -30,6 +30,8 @@ pub fn non_blocking_rules() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(rules::redundant_linearity_call::RedundantLinearityCall),
         Box::new(rules::prefer_pipe_operator::PreferPipeOperator),
+        Box::new(rules::opaque_without_invariant::OpaqueWithoutInvariant),
+        Box::new(rules::invariant_float_equality::InvariantFloatEquality),
     ]
 }
 

@@ -5,11 +5,13 @@
 
 pub mod deep_user_symbol_charset;
 pub mod doc_filename_convention;
+pub mod invariant_float_equality;
 pub mod module_compound_titlecase;
 pub mod module_decl;
 pub mod no_em_dash_in_public_strings;
 pub mod no_shell_scripts;
 pub mod opaque_domain_construction;
+pub mod opaque_without_invariant;
 pub mod phase_identifier_case;
 pub mod prefer_pipe_operator;
 pub mod prefix_namespace;

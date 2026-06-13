@@ -62,6 +62,20 @@ fn assert_no_invariant_violation(errors: &[CheckError]) {
     );
 }
 
+/// Stronger than `assert_no_invariant_violation`: NO check error of any
+/// kind. Catches spurious deep-validate structural errors leaking from
+/// the embedded predicate fn metadata into the check path.
+fn assert_check_clean(errors: &[CheckError]) {
+    assert!(
+        errors.is_empty(),
+        "expected a clean check, got: {:?}",
+        errors
+            .iter()
+            .map(|e| format!("{:?}: {}", e.kind, e.message))
+            .collect::<Vec<_>>()
+    );
+}
+
 // ===========================================================================
 // Positive: well-formed invariants pass (one per amenability class)
 // ===========================================================================
@@ -73,7 +87,10 @@ fn linear_invariant_is_well_formed() {
          @invariant(p) (p.value >= 0.0) && (p.value <= 1.0)\n\
          type Probability = | Probability { value: f32 }",
     );
-    assert_no_invariant_violation(&errors(&deep));
+    // The strongest form: a well-formed invariant produces a fully clean
+    // check (no spurious deep-validate structural error from the embedded
+    // predicate fn metadata).
+    assert_check_clean(&errors(&deep));
 }
 
 #[test]
