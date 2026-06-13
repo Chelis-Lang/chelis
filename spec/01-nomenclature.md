@@ -1137,7 +1137,19 @@ verified-constructor discipline. Outside the defining module, code must
 obtain values of that type through exported constructor functions rather
 than materializing the representation directly.
 
-The blocking lint rule is `opaque-domain-construction`. It rejects:
+The AUTHORITATIVE gate is the type checker: opacity is enforced during
+inference as `CheckErrorKind::OpaqueTypeViolation`, covering
+construction, constructor references, pattern inspection, field
+access, record update, casts, literal ascription, and out-of-module
+references to unexported producer bindings. The full rejection set and
+module-identity rules are normative in `spec/04-type-system.md` §2.5.
+
+The lint rule `opaque-domain-construction` is kept as
+defense-in-depth: per-file, no type context, fast editor/agent
+feedback ahead of a full check, and its fail-closed
+untyped-`record-update` arm complements the checker's deferred-target
+ledger. The lint is fast feedback; the typing judgment is the
+guarantee. The blocking lint rule rejects:
 
 - Surf record construction of a marked ADT outside the defining module.
 - Deep `record` construction of a marked ADT outside the defining module.
@@ -1149,17 +1161,18 @@ The blocking lint rule is `opaque-domain-construction`. It rejects:
   type metadata the rule cannot verify that the update is not
   materializing an opaque domain value.
 
-The rule is a construction-discipline gate, not a private-constructor
-language feature. Downstream reports that rely on it must label the
-claim as "proven constructor plus lint-verified construction
-discipline" unless and until Chelis ships true constructor privacy or
-opaque type exports.
+The lint rule is a per-file construction-discipline gate layered
+under the checker's constructor privacy. Downstream reports may cite
+"checker-enforced opaque types plus lint defense-in-depth"; the
+checker-level guarantee is the one specified in
+`spec/04-type-system.md` §2.5.
 
-The lint rule deliberately allows direct construction inside the
+Both layers deliberately allow direct construction inside the
 defining module so the module can implement and prove its smart
-constructors. It also remains compatible with public pattern matching:
-the rule protects how invalid values are introduced, not whether a
-module chooses to expose field accessors or destructuring.
+constructors. Outside the defining module the checker rejects
+constructor patterns and field access on the opaque type itself;
+matching with irrefutable patterns and calling exported readers remain
+available.
 
 ### 12.2 Future rule queue
 

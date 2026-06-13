@@ -329,6 +329,114 @@ iteration surface are already shipped today.
 
 The type checker verifies that `match` expressions cover all variants. Missing variants are a type error, not a warning.
 
+A top-level irrefutable arm covers the match: a bare variable pattern
+(`| x =>`) or an as-pattern whose inner pattern is irrefutable
+(`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm level
+only; a variable pattern NESTED inside a constructor or record pattern
+does not cover the other variants.
+
+### 2.5 Opaque Types
+
+A `deftype` carrying `opaque: true` metadata (Surf: the `@opaque`
+annotation, spec/02 §5.2) declares an opaque type: constructible and
+inspectable only inside its defining module, enforced by the type
+checker during inference. The authoritative design record is
+`spec/design/opaque_invariants_rfc.md` (D-CHECK); this section is the
+normative summary.
+
+**Named-module requirement.** `@opaque` requires a named enclosing
+module. A top-level opaque declaration has no module identity (all
+top-level code in a check unit shares one anonymous key), so the
+declaration is rejected: `@opaque type X requires a named enclosing
+module`.
+
+**Module identity.** Each top-level item keys to a module:
+
+- Lexical encoding: the enclosing `(module ...)` wrapper names, with
+  nested wrappers joined by `.` (Surf `module Stats.Prob` desugars to
+  the key `stats.prob`).
+- Package-linker encoding: reef rewrites top-level names to
+  `Pkg__<pkg>__<Module>__<Name>` (or the lowercase `pkg__` twin); the
+  stem between the marker and the trailing name is the module key,
+  rendered with `.` separators (`Pkg__opq__Demo__Types__Probability`
+  keys to `opq.Demo.Types`). The lexical wrapper wins when both are
+  present.
+
+The defining module is recorded on the registry entry at `deftype`
+registration and persists through the compiled-context caches.
+
+**The rejection set.** Outside the defining module, each of the
+following is a `CheckErrorKind::OpaqueTypeViolation`. Every rejection
+returns the expression's TRUE type, so a violation never cascades into
+secondary type errors:
+
+1. Record-literal construction (`Probability { value: x }`).
+2. Positional constructor application (`Meters(x)`).
+3. Bare constructor reference (`grab = Probability`): the constructor
+   binding itself is hidden, including nullary constructors.
+4. Pattern inspection: `pat-record` and `pat-ctor` patterns naming an
+   opaque type's constructor.
+5. Field access and Deep `record-update`. Targets whose type is still
+   an unresolved variable when the site is inferred are recorded in a
+   deferred ledger and re-checked after def-level resolution; a target
+   that is NEVER pinned (e.g. an unannotated accessor lambda that
+   let-generalization makes polymorphic) is rejected fail-closed when
+   the check unit declares any opaque type.
+6. Forging: Deep `cast` into the type (both `t-prim` and `t-adt`
+   target shapes), `cast` out of an opaque value, and
+   `{type: (t-adt ...)}` literal metadata -- which is reachable from
+   BOTH surfaces, because Surf expression ascription
+   (`0.5 : Probability`) and block-binding ascription desugar to
+   exactly that metadata.
+
+**The sixth rejection (unexported references).** An out-of-module
+reference to an *unexported* binding of the defining module whose
+signature mentions the opaque type is rejected -- in the result, in
+any parameter, in function-typed parameter domains, or as a
+non-function binding's type. "Mentions" is containment chased through
+named type definitions (an unexported `helper -> WrapRec` where the
+non-opaque `WrapRec` carries a `Probability` field mentions
+`Probability`). A defining module with no `export` decl is fully
+sealed for its T-mentioning bindings. Names the checker cannot
+attribute to a module with a known export set are never flagged
+(fail-open), so pipelines that do not carry export information cannot
+reject legitimately exported producers.
+
+**Alias transparency.** Opacity is keyed to the nominal registry
+entry. A transparent alias (`type P2 = Probability`) resolves to the
+nominal type at construction heads, cast targets, and literal
+ascriptions, so aliases cannot launder any rejection.
+
+**Macro attribution.** Macro expansion is in-place: an expansion lands
+in the CALLER's module subtree and is checked under the caller's
+module key. A macro defined in the defining module but expanded
+outside it is rejected at the call site (fail-closed).
+
+**Duplicate declarations.** A same-name `deftype` in another module is
+already a `DuplicateDefinition` error; that rejection is part of the
+opacity invariant set (nominal keying would otherwise be
+last-write-wins).
+
+**Exhaustiveness over opaque scrutinees.** Outside code may match an
+opaque scrutinee only with irrefutable patterns; with §2.4's
+irrefutable-arm rule, `| x =>`, `| q @ x =>`, and `| _ =>` all cover
+such a match without naming constructors.
+
+**Error contract.** The violation message names the type, the defining
+module, and the exported producers of that module with signatures;
+location context is the enclosing def name embedded in the message:
+
+```
+in def `bad`: record construction of opaque type `Probability`
+outside its defining module `stats.prob`; exported producers of
+`stats.prob`: probability: (f32) -> Probability
+```
+
+**Solver-free.** Opacity is a module-identity check inside ordinary
+inference. `chelis check` stays solver-free: the optional declared
+invariant (RFC D-WF and later workstreams) is never evaluated by the
+checker.
+
 ---
 
 ## 3. Hindley-Milner Inference

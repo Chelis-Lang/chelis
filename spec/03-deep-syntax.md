@@ -256,14 +256,17 @@ part of this public vocabulary.
 `deftype` may carry `opaque: true` metadata:
 
 ```lisp
-(deftype {opaque: true} Probability ()
-  (variant {} Probability (field {} value (t-prim {} f32))))
+(module {} stats.prob
+  (deftype {opaque: true} Probability ()
+    (variant {} Probability (field {} value (t-prim {} f32)))))
 ```
 
-This metadata does not by itself hide constructors in the type checker.
-It is consumed by the blocking `opaque-domain-construction` lint rule,
-which enforces the proven-constructor discipline described in
-`spec/01-nomenclature.md` §12.1.
+The metadata is language semantics: the type checker hides the
+constructors, fields, casts, and literal ascriptions of a marked type
+outside its defining module (`spec/04-type-system.md` section 2.5),
+and a marked `deftype` outside a named module is a declaration error.
+The `opaque-domain-construction` lint rule remains as defense-in-depth
+fast feedback (`spec/01-nomenclature.md` section 12.1).
 
 ### 2.3 Expressions
 

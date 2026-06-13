@@ -639,6 +639,26 @@ Parser disambiguation: after `type Name =`, if next non-whitespace is `|`, it's 
 
 Aliases are transparent — expanded during desugaring. No opaque aliases in v1.
 
+### P16: Opaque Types
+
+`@opaque` immediately before an ADT `type` declaration marks the type
+opaque: constructible and inspectable only inside its defining module,
+enforced by the type checker (`spec/04-type-system.md` §2.5).
+
+```
+module Stats.Prob
+@opaque
+type Probability = | Probability { value: f32 }
+```
+
+**⟹** `(deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32))))`
+inside `(module {} stats.prob ...)`.
+
+Constraints: the annotated declaration must be an ADT (`@opaque` on a
+type alias is a parse error), and the declaration must sit inside a
+named module (`@opaque` at top level is a check-time declaration
+error — top-level code has no module identity to enforce against).
+
 ---
 
 ## 4. Formal Grammar (PEG)
@@ -652,7 +672,8 @@ Program       <- S ModuleDecl S Decl* EOF
 ModuleDecl    <- 'module' S ModulePath
 
 Decl          <- ImportDecl / ExportDecl / DimDecl
-               / TypeDecl / TypeAlias / SigDecl / PropertyDecl / FunDecl
+               / OpaqueTypeDecl / TypeDecl / TypeAlias / SigDecl
+               / PropertyDecl / FunDecl
 
 # ═══════════════════════════════════════════════════
 #  MODULE, IMPORT, EXPORT
@@ -679,6 +700,7 @@ DimDecl       <- 'dim' S Ident (S ',' S Ident)* (S ',')?
 #  TYPE DECLARATIONS
 # ═══════════════════════════════════════════════════
 
+OpaqueTypeDecl <- '@opaque' S TypeDecl
 TypeDecl      <- 'type' S TypeIdent TypeParams? S '='
                   S '|'? S Variant (S '|' S Variant)*
 TypeAlias     <- 'type' S TypeIdent TypeParams? S '='
@@ -920,10 +942,12 @@ type Option[a] = | None | Some { value: a }
       (variant {} None)
       (variant {} Some (field {} value (t-var {} a))))
 
+module Stats.Prob
 @opaque
 type Probability = | Probability { value: f32 }
-⟹  (deftype {opaque: true} Probability ()
-      (variant {} Probability (field {} value (t-prim {} f32))))
+⟹  (module {} stats.prob
+      (deftype {opaque: true} Probability ()
+        (variant {} Probability (field {} value (t-prim {} f32)))))
 
 type Weights = tensor[h, h, f32]
 ⟹  (typealias {} Weights () (t-tensor {} (d-name {} h) (d-name {} h) (t-prim {} f32)))

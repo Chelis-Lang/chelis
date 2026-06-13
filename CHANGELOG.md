@@ -8,6 +8,30 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Checker-enforced opaque types (`@opaque`, renamed from the
+  unreleased baseline's `@chelis_opaque`; design record
+  `spec/design/opaque_invariants_rfc.md`, normative spec
+  `spec/04-type-system.md` §2.5). A `deftype` carrying `opaque: true`
+  metadata is constructible and inspectable only inside its defining
+  module: record literals, positional constructor application, bare
+  constructor references, `pat-record`/`pat-ctor` patterns, field
+  access, Deep `record-update`, casts into and out of the type, and
+  `{type: (t-adt ...)}` literal ascriptions are rejected outside it
+  with the new `CheckErrorKind::OpaqueTypeViolation`, as are
+  out-of-module references to unexported bindings of the defining
+  module whose signatures mention the type. `@opaque` requires a
+  named enclosing module. Module identity covers both encodings
+  (lexical `module` wrappers and reef package-linked internal
+  names); reef now preserves `export` decls (with internal names)
+  through the rewrite so the checker can recover package export
+  sets. `record`/`access`/`record-update` are now actually inferred
+  (previously silently untyped), closing the latent bogus-field
+  hole, and a top-level irrefutable match arm (`| x =>`,
+  `| q @ x =>`) now covers the match. The
+  `opaque-domain-construction` lint rule is retained as
+  defense-in-depth. Compiled-context cache formats bumped
+  (`CHELIS_CTX_V5`, stdlib cache v2) for the registry shape change.
+
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep
   s-expressions to the Surf parser, which reported a bogus
