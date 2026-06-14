@@ -180,7 +180,15 @@ fn collect_surf_decls_catalog(decls: &[surf::Decl], module: Option<String>, out:
             surf::Decl::TypeDef { name, opaque, .. } => {
                 out.declared_leaves
                     .insert((module.clone(), type_leaf(name).to_string()));
-                if *opaque {
+                // CR3: `@opaque` requires a NAMED enclosing module (the
+                // checker rejects a module-less @opaque as a declaration
+                // error). A module-less opaque type keys to the shared
+                // `None` module, which collapses distinct module-less
+                // files and yields false positives against an invalid
+                // declaration. Catalog opaque types only from named
+                // modules; defer the invalid module-less declaration to
+                // the checker.
+                if *opaque && module.is_some() {
                     out.opaque.push(OpaqueType {
                         name: name.clone(),
                         module: module.clone(),
@@ -405,7 +413,11 @@ fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &m
             if let Some(name) = children(list).first().and_then(sym_str) {
                 out.declared_leaves
                     .insert((module.clone(), type_leaf(name).to_string()));
-                if meta_bool(list, "opaque") {
+                // CR3: only catalog opaque types from a named module --
+                // a module-less @opaque is a checker declaration error
+                // and would collapse distinct module-less files under
+                // the shared `None` key. See the Surf collector.
+                if meta_bool(list, "opaque") && module.is_some() {
                     out.opaque.push(OpaqueType {
                         name: name.to_string(),
                         module,
@@ -952,5 +964,76 @@ def make_local(x: f32) -> Secret = Secret { value: x }
             violations.is_empty(),
             "a module-less file constructing its OWN local type must not be flagged; got {violations:?}"
         );
+    }
+
+    // ── CR3: a module-less @opaque is invalid (checker rejects it) ──
+    //   `@opaque` requires a named enclosing module -- the checker
+    //   rejects a module-less @opaque as a declaration error. So the
+    //   lint must NOT catalog a module-less opaque type: doing so keys
+    //   it to the shared `None` module, collapsing distinct module-less
+    //   files and producing a false positive on a same-leaf
+    //   construction in an unrelated module. The lint defers the
+    //   invalid declaration to the checker.
+
+    #[test]
+    fn does_not_flag_construction_against_a_module_less_opaque_definer() {
+        // `filea.ch` declares an @opaque type at top level (module-less,
+        // which the checker rejects). `fileb.ch` is a NAMED module that
+        // constructs a same-leaf type. Before the fix the lint cataloged
+        // the module-less opaque under `None` and flagged fileb -- a
+        // false positive against an invalid opaque declaration.
+        let filea = r#"
+@opaque
+type Secret = | Secret { value: f32 }
+"#;
+        let fileb = r#"
+module Other.Domain
+def f(x: f32) -> Secret = Secret { value: x }
+"#;
+        let violations = run_corpus(&[("filea.ch", filea), ("fileb.ch", fileb)], "fileb.ch");
+        assert!(
+            violations.is_empty(),
+            "a construction must not be flagged against a module-less (invalid) @opaque \
+             definer; the checker rejects the @opaque declaration. got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn deep_does_not_flag_construction_against_a_module_less_opaque_definer() {
+        // Deep surface: a top-level `opaque: true` deftype (module-less)
+        // must not be cataloged, so a same-leaf construction inside a
+        // named module is not flagged against it.
+        let src = r#"
+(deftype {opaque: true} Secret () (variant {} Secret (field {} value (t-prim {} f32))))
+(module {} other.domain
+  (record {} Secret (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
+"#;
+        let violations = run_deep(src);
+        assert!(
+            violations.is_empty(),
+            "a module-less Deep opaque deftype must not be cataloged; got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn named_module_opaque_still_flags_out_of_module_forge_cr3_parity() {
+        // CR3 negative parity: a properly NAMED-module @opaque still
+        // catalogs and still flags the genuine out-of-module forge.
+        let whale = r#"
+module Whale.Types
+@opaque
+type Secret = | Secret { value: f32 }
+"#;
+        let agent = r#"
+module Agent.Strategy
+def bad(x: f32) -> Secret = Secret { value: x }
+"#;
+        let violations = run_surf_in_package(agent, whale);
+        assert_eq!(
+            violations.len(),
+            1,
+            "a named-module @opaque must still catalog and flag the forge; got {violations:?}"
+        );
+        assert!(violations[0].message.contains("direct record construction"));
     }
 }
