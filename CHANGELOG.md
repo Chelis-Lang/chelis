@@ -23,6 +23,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove fixes (review 2) -->
+- Tier B constant inlining now preserves a constant's declared numeric
+  type (CR2-4). An int-typed module constant
+  (`def n() -> int32 = 3`, or the value binding `n = 3`) used in a
+  producer guard was inlined as an f32 literal -- silently retyped --
+  because the resolved-constant environment carries only an `f64`. The
+  inliner now reads the constant's declared literal type from the module
+  and emits an integer literal for an `int32`/`int64` constant (so it
+  lowers to `SmtSort::Int`) while keeping the f32 path for float
+  constants.
+
 - The chelis-tide `chelis_prove` MCP response now folds every non-pass
   property status into `ok:false` (CR2-3). Only `Proved` and
   `StatisticallyValidated` are passes; `Disproved`, `Rejected`, and

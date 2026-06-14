@@ -310,6 +310,50 @@ fn cr8_guard_with_module_constant_proves_at_smt_tier() {
     );
 }
 
+#[cfg(feature = "smt")]
+#[test]
+fn cr2_4_int_constant_guard_proves_at_smt_tier() {
+    // CR2-4 end-to-end: an int-field opaque type whose producer guards an
+    // int param against an int-typed module constant must lower with the
+    // constant as an INTEGER literal (SmtSort::Int), so the obligation
+    // proves at the SMT tier. Inlining the constant as f32 would mix
+    // int/real sorts and mis-lower the guard.
+    use crate::tier_b::{TierBResult, solve_property};
+    let surf = "module M
+export (mk_counter)
+@opaque
+@invariant(c) c.n >= 0
+type Counter =
+  | Counter { n: int32 }
+lo = 0
+def mk_counter(x: int32) -> Option[Counter] =
+  if x >= lo then Some(Counter { n: x }) else None
+";
+    let exprs = deep_of(surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    let ob = col
+        .obligations
+        .iter()
+        .find(|o| o.producer == "mk_counter")
+        .expect("counter producer obligation");
+    let inv = &invs[0];
+    let pparams = vec![(
+        producer_first_param_name(&exprs, "mk_counter"),
+        ProducerParamType::Scalar("int32".to_string()),
+    )];
+    let mut consts = crate::opaque::ConstEnv::new();
+    consts.insert("lo".to_string(), 0.0);
+    let lowered = lower_obligation(&exprs, inv, ob, &pparams, &consts)
+        .expect("int-constant guard obligation must lower");
+    assert_eq!(
+        solve_property(&lowered.property, 5000),
+        TierBResult::Proved,
+        "int-guarded counter proves at smt with the constant kept integral"
+    );
+}
+
 /// Resolve the producer's first param name from the Deep program (the
 /// lowering uses the property's quantified var name = the producer param
 /// name).
@@ -317,3 +361,59 @@ fn producer_first_param_name(exprs: &[Expr], producer: &str) -> String {
     let prod = super::lookup_producer(exprs, producer).expect("producer body");
     prod.params.first().cloned().expect("at least one param")
 }
+
+#[test]
+fn cr2_4_int_typed_constant_inlines_as_integer_literal_not_f32() {
+    // CR2-4: a constant declared with an integer type must inline as an
+    // integer literal, not be silently retyped to f32. The ConstEnv only
+    // carries an f64, so the type is recovered from the const def's
+    // declared literal type in the module.
+    let surf = "module M
+n = 3
+def n_fn() -> int32 = 7
+m = 3.0
+";
+    let exprs = deep_of(surf);
+
+    // Value-binding int constant `n = 3`.
+    let node = super::const_lit_node(&exprs, "n", 3.0);
+    assert_eq!(super::tag(&node), Some("lit"), "is a lit node");
+    let lit_value = super::children(&node).first().cloned().expect("lit value");
+    assert!(
+        matches!(lit_value, Expr::Atom(Atom::Int(3), _)),
+        "int-typed `n = 3` inlines as Atom::Int(3), got {lit_value:?}"
+    );
+    assert_eq!(
+        super::const_declared_int_type(&exprs, "n").as_deref(),
+        Some("int32"),
+        "n is declared int32"
+    );
+
+    // Zero-arg int constant fn `def n_fn() -> int32 = 7`.
+    let fn_node = super::const_lit_node(&exprs, "n_fn", 7.0);
+    let fn_value = super::children(&fn_node)
+        .first()
+        .cloned()
+        .expect("lit value");
+    assert!(
+        matches!(fn_value, Expr::Atom(Atom::Int(7), _)),
+        "int-typed `def n_fn() -> int32 = 7` inlines as Atom::Int(7), got {fn_value:?}"
+    );
+
+    // Float constant `m = 3.0` still inlines as an f32 literal (CR-8).
+    let float_node = super::const_lit_node(&exprs, "m", 3.0);
+    let float_value = super::children(&float_node)
+        .first()
+        .cloned()
+        .expect("lit value");
+    assert!(
+        matches!(float_value, Expr::Atom(Atom::Float(_), _)),
+        "f32-typed `m = 3.0` still inlines as Atom::Float, got {float_value:?}"
+    );
+    assert_eq!(
+        super::const_declared_int_type(&exprs, "m"),
+        None,
+        "m is not an integer type"
+    );
+}
+

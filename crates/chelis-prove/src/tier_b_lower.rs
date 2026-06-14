@@ -443,7 +443,13 @@ fn reduce(
             return Some(replacement.clone());
         }
         if let Some(value) = consts.get(name) {
-            return Some(float_lit_node(*value));
+            // CR2-4: preserve the constant's DECLARED numeric type. The
+            // ConstEnv only carries an f64, so an int-typed constant
+            // (`def n() -> int32 = 3`, or the value binding `n = 3`) would
+            // otherwise be inlined as an f32 literal and silently lower to
+            // SmtSort::Real. Read the const def's declared literal type from
+            // the module and emit a matching typed literal node.
+            return Some(const_lit_node(exprs, name, *value));
         }
         return Some(expr.clone());
     }
@@ -517,6 +523,102 @@ fn reduce(
     }
     // Other nodes (lits): return as-is.
     Some(expr.clone())
+}
+
+/// A typed `(lit {type: (t-prim {} <ty>)} value)` Deep node for an inlined
+/// constant, preserving the constant's DECLARED numeric type (CR2-4). An
+/// int-typed constant (declared `int32`/`int64`) inlines as an integer
+/// literal so it lowers to `SmtSort::Int`; otherwise it inlines as an f32
+/// literal (CR-8).
+fn const_lit_node(exprs: &[Expr], name: &str, value: f64) -> Expr {
+    match const_declared_int_type(exprs, name) {
+        Some(int_ty) => int_lit_node(value as i64, &int_ty),
+        None => float_lit_node(value),
+    }
+}
+
+/// The declared integer primitive type (`int32`/`int64`) of an in-module
+/// constant `name`, or `None` if it is not declared with an integer type.
+/// Reads the type tag the desugarer attaches to the const def's literal
+/// body (a value binding `(def n (lit ...))` or a zero-arg constant fn
+/// `(def n (fn (params) (lit ...)))`).
+fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<String> {
+    fn lit_type_prim(expr: &Expr) -> Option<String> {
+        if tag(expr) != Some("lit") {
+            return None;
+        }
+        if let Expr::List(list, _) = expr
+            && let Some(Expr::Map(meta, _)) = list.elements.get(1)
+        {
+            for (k, v) in &meta.entries {
+                if k == "type" && tag(v) == Some("t-prim") {
+                    return symbol_text(children(v).first()?).map(str::to_string);
+                }
+            }
+        }
+        None
+    }
+    fn scan(exprs: &[Expr], name: &str) -> Option<String> {
+        for expr in exprs {
+            if tag(expr) == Some("def") {
+                let kids = children(expr);
+                if kids.first().and_then(symbol_text) == Some(name)
+                    && let Some(body) = kids.get(1)
+                {
+                    let lit = if tag(body) == Some("fn") {
+                        children(body).get(1).cloned()
+                    } else {
+                        Some(body.clone())
+                    };
+                    if let Some(lit) = lit
+                        && let Some(prim) = lit_type_prim(&lit)
+                    {
+                        return Some(prim);
+                    }
+                }
+            }
+            if let Expr::List(list, _) = expr
+                && let Some(found) = scan(&list.elements[2.min(list.elements.len())..], name)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+    match scan(exprs, name).as_deref() {
+        Some("int32") => Some("int32".to_string()),
+        Some("int64") => Some("int64".to_string()),
+        _ => None,
+    }
+}
+
+/// A typed integer literal Deep node `(lit {type: (t-prim {} <ty>)} value)`
+/// for an inlined int-typed constant (CR2-4).
+fn int_lit_node(value: i64, int_ty: &str) -> Expr {
+    use chelis_deep::Span;
+    use chelis_deep::ast::{List, MetaMap};
+    let type_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("t-prim".to_string()), Span::new(0, 0)),
+                Expr::Map(MetaMap::default(), Span::new(0, 0)),
+                Expr::Atom(Atom::Symbol(int_ty.to_string()), Span::new(0, 0)),
+            ],
+        },
+        Span::new(0, 0),
+    );
+    let mut meta = MetaMap::default();
+    meta.entries.push(("type".to_string(), type_node));
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("lit".to_string()), Span::new(0, 0)),
+                Expr::Map(meta, Span::new(0, 0)),
+                Expr::Atom(Atom::Int(value), Span::new(0, 0)),
+            ],
+        },
+        Span::new(0, 0),
+    )
 }
 
 /// A typed f32 literal Deep node `(lit {type: (t-prim {} f32)} value)` for
