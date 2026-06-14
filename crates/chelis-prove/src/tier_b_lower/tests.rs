@@ -384,7 +384,7 @@ m = 3.0
         "int-typed `n = 3` inlines as Atom::Int(3), got {lit_value:?}"
     );
     assert_eq!(
-        super::const_declared_int_type(&exprs, "n").as_deref(),
+        crate::opaque::const_declared_int_type(&exprs, "n").as_deref(),
         Some("int32"),
         "n is declared int32"
     );
@@ -411,8 +411,210 @@ m = 3.0
         "f32-typed `m = 3.0` still inlines as Atom::Float, got {float_value:?}"
     );
     assert_eq!(
-        super::const_declared_int_type(&exprs, "m"),
+        crate::opaque::const_declared_int_type(&exprs, "m"),
         None,
         "m is not an integer type"
+    );
+}
+
+// ===========================================================================
+// U2 (review 3): ONE type-aware constant lowering, used by BOTH the
+// producer-body path AND the invariant-application path.
+// ===========================================================================
+
+/// True if any leaf of an SmtExpr is a `RealLit`.
+fn contains_real_lit(e: &SmtExpr) -> bool {
+    match e {
+        SmtExpr::RealLit(_) => true,
+        SmtExpr::Arith(_, l, r) | SmtExpr::Cmp(_, l, r) => {
+            contains_real_lit(l) || contains_real_lit(r)
+        }
+        SmtExpr::Bool(_, kids) => kids.iter().any(contains_real_lit),
+        SmtExpr::Not(inner) | SmtExpr::Forall(_, inner) | SmtExpr::Exists(_, inner) => {
+            contains_real_lit(inner)
+        }
+        SmtExpr::Apply(_, args) => args.iter().any(contains_real_lit),
+        SmtExpr::Ite(c, t, e) => {
+            contains_real_lit(c) || contains_real_lit(t) || contains_real_lit(e)
+        }
+        _ => false,
+    }
+}
+
+/// True if any leaf of an SmtExpr is an `IntLit`.
+fn contains_int_lit(e: &SmtExpr) -> bool {
+    match e {
+        SmtExpr::IntLit(_) => true,
+        SmtExpr::Arith(_, l, r) | SmtExpr::Cmp(_, l, r) => {
+            contains_int_lit(l) || contains_int_lit(r)
+        }
+        SmtExpr::Bool(_, kids) => kids.iter().any(contains_int_lit),
+        SmtExpr::Not(inner) | SmtExpr::Forall(_, inner) | SmtExpr::Exists(_, inner) => {
+            contains_int_lit(inner)
+        }
+        SmtExpr::Apply(_, args) => args.iter().any(contains_int_lit),
+        SmtExpr::Ite(c, t, e) => contains_int_lit(c) || contains_int_lit(t) || contains_int_lit(e),
+        _ => false,
+    }
+}
+
+/// An int-field opaque type whose INVARIANT compares the int field against
+/// an int-typed module constant `lo`, AND whose producer guards the int
+/// param against the SAME constant. Under the old code the producer-body
+/// path lowered `lo` as IntLit (CR2-4) while the invariant path hardcoded
+/// `RealLit`, so the SAME constant lowered with two different sorts within
+/// one property -- comparing an Int var against a Real literal -- and cvc5
+/// ABORTED the process ("Subexpressions must have the same type: Int/Real").
+const INT_CONST_IN_INVARIANT: &str = "module M
+export (mk_counter)
+@opaque
+@invariant(c) c.n >= lo
+type Counter =
+  | Counter { n: int32 }
+lo = 0
+def mk_counter(x: int32) -> Option[Counter] =
+  if x >= lo then Some(Counter { n: x }) else None
+";
+
+fn lower_int_const_obligation(surf: &str) -> LoweredObligation {
+    let exprs = deep_of(surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    let ob = col
+        .obligations
+        .iter()
+        .find(|o| o.producer == "mk_counter")
+        .expect("counter producer obligation");
+    let inv = &invs[0];
+    let pparams = vec![(
+        producer_first_param_name(&exprs, "mk_counter"),
+        ProducerParamType::Scalar("int32".to_string()),
+    )];
+    let mut consts = crate::opaque::ConstEnv::new();
+    consts.insert("lo".to_string(), 0.0);
+    lower_obligation(&exprs, inv, ob, &pparams, &consts)
+        .expect("int-constant-in-invariant obligation must lower")
+}
+
+#[test]
+fn u2_int_constant_in_invariant_lowers_as_int_not_real() {
+    // The SAME int constant must lower identically (as an integer literal)
+    // on BOTH the producer-body guard AND the invariant predicate. The
+    // postcondition must carry NO RealLit (which would force a Real sort and
+    // a mismatch against the Int-sorted field var).
+    let lowered = lower_int_const_obligation(INT_CONST_IN_INVARIANT);
+    assert!(
+        !contains_real_lit(&lowered.property.postcondition),
+        "int constant in the invariant must NOT lower as RealLit: {:?}",
+        lowered.property.postcondition
+    );
+    assert!(
+        contains_int_lit(&lowered.property.postcondition),
+        "int constant in the invariant lowers as IntLit: {:?}",
+        lowered.property.postcondition
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn u2_int_constant_in_invariant_proves_without_sort_mismatch() {
+    // End-to-end: with the constant kept integral on both paths the
+    // obligation proves at SMT. Under the old code this ABORTED cvc5.
+    use crate::tier_b::{TierBResult, solve_property};
+    let lowered = lower_int_const_obligation(INT_CONST_IN_INVARIANT);
+    assert_eq!(
+        solve_property(&lowered.property, 5000),
+        TierBResult::Proved,
+        "int constant in both guard and invariant proves, no sort-mismatch abort"
+    );
+}
+
+#[test]
+fn u2_const_declared_int_type_covers_int8_and_int16() {
+    // The declared-type reader must recognize EVERY integer width, not just
+    // int32/int64. int8/int16 constants used in a guard or invariant must
+    // lower to SmtSort::Int, not be silently retyped to Real.
+    let surf = "module M
+def a() -> int8 = 1
+def b() -> int16 = 2
+def c() -> int32 = 3
+def d() -> int64 = 4
+def e() -> f32 = 5.0
+";
+    let exprs = deep_of(surf);
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs, "a").as_deref(),
+        Some("int8"),
+        "int8 is recognized as an integer constant type"
+    );
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs, "b").as_deref(),
+        Some("int16"),
+        "int16 is recognized as an integer constant type"
+    );
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs, "c").as_deref(),
+        Some("int32")
+    );
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs, "d").as_deref(),
+        Some("int64")
+    );
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs, "e"),
+        None,
+        "an f32 constant is not an integer type"
+    );
+
+    // int8/int16 inline as integer literals.
+    let a_node = super::const_lit_node(&exprs, "a", 1.0);
+    let a_val = super::children(&a_node).first().cloned().expect("lit value");
+    assert!(
+        matches!(a_val, Expr::Atom(Atom::Int(1), _)),
+        "int8 `a = 1` inlines as Atom::Int(1), got {a_val:?}"
+    );
+    let b_node = super::const_lit_node(&exprs, "b", 2.0);
+    let b_val = super::children(&b_node).first().cloned().expect("lit value");
+    assert!(
+        matches!(b_val, Expr::Atom(Atom::Int(2), _)),
+        "int16 `b = 2` inlines as Atom::Int(2), got {b_val:?}"
+    );
+}
+
+#[test]
+fn u2_constant_body_referencing_another_constant_keeps_int_type() {
+    // A constant whose body references ANOTHER constant must resolve its
+    // type transitively. The hard case is an UNTYPED value binding whose
+    // body is a bare `(var other)`: there is no defsig on the alias and no
+    // literal on its body, so the type must be followed through the chain to
+    // `base`'s declared int type. The original reader returned None here and
+    // the constant lost its int type.
+    let surf = "module M
+def base() -> int32 = 7
+typed_alias = base
+def fn_alias() -> int32 = base
+";
+    let exprs = deep_of(surf);
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs, "typed_alias").as_deref(),
+        Some("int32"),
+        "an untyped value binding `typed_alias = base` follows the chain to int32"
+    );
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs, "fn_alias").as_deref(),
+        Some("int32"),
+        "a typed alias resolves its declared int type"
+    );
+    // An f32 alias chain must NOT become integer-typed.
+    let surf_f = "module M
+def fbase() -> f32 = 1.5
+falias = fbase
+";
+    let exprs_f = deep_of(surf_f);
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs_f, "falias"),
+        None,
+        "an f32 alias chain stays Real (None)"
     );
 }

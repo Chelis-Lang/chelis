@@ -23,6 +23,19 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove-obligation unification (review 3) -->
+- Module-constant SMT lowering is now ONE type-aware function
+  (`chelis_prove::opaque::lower_const_ref`) used by BOTH the
+  producer-body path and the invariant/precondition path (U2). The
+  invariant-application path previously hardcoded a constant as a Real
+  literal, so within one property the SAME constant lowered as an integer
+  on the producer body but a Real in the invariant; compared against an
+  integer-sorted field var, cvc5 ABORTED the process ("Subexpressions
+  must have the same type: Int/Real"). The shared resolver preserves the
+  declared numeric type for EVERY integer width (int8/int16/int32/int64
+  -> Int; f32/f64 -> Real), reads the authoritative declared return type
+  from the constant's `defsig`, and follows a constant whose body
+  references another constant transitively to the literal that carries
+  the type tag.
 - Produced-value invariant validation now routes through ONE chokepoint
   (U1). A produced opaque value -- scalar-only, tensor-bearing, or
   nested-record -- is always validated structurally through

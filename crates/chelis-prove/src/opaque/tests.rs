@@ -129,6 +129,38 @@ def make(w: tensor[3, f32]) -> Simplex = Simplex { weights: w }
 }
 
 #[test]
+fn u2_int_field_constant_in_precondition_lowers_int_not_real() {
+    // U2 (precondition path): an int-field invariant comparing the field
+    // against an int-typed module constant must lower the constant as an
+    // INTEGER, not a Real, so the flattened precondition does not mix Int and
+    // Real sorts against the int-sorted field var (which would abort cvc5 in
+    // the update-shaped inductive step where this predicate is a precondition).
+    let surf = "module M
+@opaque
+@invariant(c) c.n >= lo
+type Counter =
+  | Counter { n: int32 }
+def make(x: int32) -> Counter = Counter { n: x }
+";
+    let exprs = deep_of(surf);
+    let inv = &collect_opaque_invariants(&exprs)[0];
+    let mut consts = ConstEnv::new();
+    consts.insert("lo".to_string(), 0.0);
+    // The cvc5 precondition path passes the defining program, so the
+    // constant lowers with its declared type via the shared resolver.
+    let smt = lower_predicate_flattened_in(inv, "c", &consts, &exprs).expect("lowerable");
+    let s = format!("{smt:?}");
+    assert!(
+        s.contains("IntLit"),
+        "int constant against an int field lowers as IntLit: {s}"
+    );
+    assert!(
+        !s.contains("RealLit"),
+        "no RealLit against an Int-sorted field var: {s}"
+    );
+}
+
+#[test]
 fn unresolved_constant_makes_predicate_not_lowerable() {
     let surf = "module M.Simplex
 @opaque

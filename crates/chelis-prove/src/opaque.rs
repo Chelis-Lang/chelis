@@ -301,13 +301,170 @@ pub type ConstEnv = std::collections::HashMap<String, f64>;
 
 /// Context threaded through predicate lowering: the binder name, the
 /// dotted path prefix of the binder value, the binder's fields (so `sum`
-/// over a tensor field expands to the right number of scalar terms), and
-/// the resolved in-module constant environment.
+/// over a tensor field expands to the right number of scalar terms), the
+/// resolved in-module constant environment, and the defining program (so a
+/// module constant lowers with its DECLARED numeric type, U2). `exprs` is
+/// empty when no module is available (the concrete-eval-only test callers),
+/// in which case a constant defaults to `Real` -- harmless because concrete
+/// evaluation is sort-agnostic.
 struct LowerCtx<'a> {
     binder: &'a str,
     prefix: &'a str,
     fields: &'a [(String, FieldType)],
     consts: &'a ConstEnv,
+    exprs: &'a [Expr],
+}
+
+/// The numeric sort class of an in-module constant for SMT lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConstNumericType {
+    Int,
+    Real,
+}
+
+/// The ONE type-aware constant lowering (U2 review-3 unification): lower an
+/// in-module constant reference `name` (resolved to `value`) to an
+/// [`SmtExpr`], preserving its declared numeric type. An integer-typed
+/// constant (int8/int16/int32/int64) lowers to `IntLit`; an f32/f64 (or an
+/// unresolvable declared type) lowers to `RealLit`. Both the producer-body
+/// path and the invariant/precondition path call this, so the SAME constant
+/// can never lower as `IntLit` on one and `RealLit` on the other (the cvc5
+/// sort-mismatch abort).
+pub(crate) fn lower_const_ref(exprs: &[Expr], name: &str, value: f64) -> SmtExpr {
+    match const_declared_numeric_type(exprs, name) {
+        ConstNumericType::Int => SmtExpr::IntLit(value as i64),
+        ConstNumericType::Real => SmtExpr::RealLit(value),
+    }
+}
+
+/// The numeric sort class (Int vs Real) of an in-module constant `name`.
+/// `Int` for any declared integer width (int8/int16/int32/int64), `Real`
+/// otherwise. The single source both [`lower_const_ref`] and the
+/// producer-body `const_lit_node` consult.
+pub(crate) fn const_declared_numeric_type(exprs: &[Expr], name: &str) -> ConstNumericType {
+    match const_declared_int_type(exprs, name) {
+        Some(_) => ConstNumericType::Int,
+        None => ConstNumericType::Real,
+    }
+}
+
+/// The declared integer primitive type (int8/int16/int32/int64) of an
+/// in-module constant `name`, or `None` if it is not declared with an
+/// integer type. Reads the DECLARED return type from a sibling `(defsig
+/// name <type>)` (authoritative -- a typed `def a() -> int8 = 1` carries
+/// int8 in the defsig but the default int32 on the body literal), then the
+/// body literal's own type tag, following a const -> const reference chain
+/// transitively (depth-bounded) to the literal that carries the type tag.
+pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<String> {
+    /// The declared numeric prim of a sibling `(defsig name <type>)`, where
+    /// `<type>` is a bare `(t-prim {} P)` or a `(t-fn ... (t-prim {} P))`
+    /// whose LAST element is the return type.
+    fn defsig_prim(exprs: &[Expr], name: &str) -> Option<String> {
+        fn prim_of_type(ty: &Expr) -> Option<String> {
+            match tag(ty)? {
+                "t-prim" => symbol_text(children(ty).first()?).map(str::to_string),
+                "t-fn" => prim_of_type(children(ty).last()?),
+                _ => None,
+            }
+        }
+        fn scan(exprs: &[Expr], name: &str) -> Option<String> {
+            for expr in exprs {
+                if tag(expr) == Some("defsig") {
+                    let kids = children(expr);
+                    if kids.first().and_then(symbol_text) == Some(name)
+                        && let Some(ty) = kids.get(1)
+                        && let Some(prim) = prim_of_type(ty)
+                    {
+                        return Some(prim);
+                    }
+                }
+                if let Expr::List(list, _) = expr
+                    && let Some(found) = scan(&list.elements[2.min(list.elements.len())..], name)
+                {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        scan(exprs, name)
+    }
+    fn lit_type_prim(expr: &Expr) -> Option<String> {
+        if tag(expr) != Some("lit") {
+            return None;
+        }
+        if let Expr::List(list, _) = expr
+            && let Some(Expr::Map(meta, _)) = list.elements.get(1)
+        {
+            for (k, v) in &meta.entries {
+                if k == "type" && tag(v) == Some("t-prim") {
+                    return symbol_text(children(v).first()?).map(str::to_string);
+                }
+            }
+        }
+        None
+    }
+    /// The constant a body references, if the body is a bare `(var other)`
+    /// or a zero-arg `(app (var other))`.
+    fn referenced_const(body: &Expr) -> Option<&str> {
+        if tag(body) == Some("var") {
+            return symbol_text(children(body).first()?);
+        }
+        if tag(body) == Some("app") {
+            let kids = children(body);
+            if kids.len() == 1 {
+                let callee = kids.first()?;
+                if tag(callee) == Some("var") {
+                    return symbol_text(children(callee).first()?);
+                }
+            }
+        }
+        None
+    }
+    fn const_body<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
+        fn scan<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
+            for expr in exprs {
+                if tag(expr) == Some("def") {
+                    let kids = children(expr);
+                    if kids.first().and_then(symbol_text) == Some(name)
+                        && let Some(body) = kids.get(1)
+                    {
+                        return if tag(body) == Some("fn") {
+                            children(body).get(1)
+                        } else {
+                            Some(body)
+                        };
+                    }
+                }
+                if let Expr::List(list, _) = expr
+                    && let Some(found) = scan(&list.elements[2.min(list.elements.len())..], name)
+                {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        scan(exprs, name)
+    }
+    fn as_int_width(prim: String) -> Option<String> {
+        matches!(prim.as_str(), "int8" | "int16" | "int32" | "int64").then_some(prim)
+    }
+    // Depth-bounded const -> const chain; the declared (defsig) type is
+    // authoritative over the body literal's own tag.
+    let mut current = name.to_string();
+    for _ in 0..4 {
+        if let Some(prim) = defsig_prim(exprs, &current) {
+            return as_int_width(prim);
+        }
+        let body = const_body(exprs, &current)?;
+        if let Some(prim) = lit_type_prim(body) {
+            return as_int_width(prim);
+        }
+        match referenced_const(body) {
+            Some(next) => current = next.to_string(),
+            None => return None,
+        }
+    }
+    None
 }
 
 /// Lower an invariant predicate to an [`SmtExpr`] over a *flattened*
@@ -325,12 +482,28 @@ pub fn lower_predicate_flattened(
     prefix: &str,
     consts: &ConstEnv,
 ) -> Option<SmtExpr> {
+    lower_predicate_flattened_in(inv, prefix, consts, &[])
+}
+
+/// Like [`lower_predicate_flattened`] but with the defining program `exprs`
+/// available, so a module constant lowers with its DECLARED numeric type
+/// (U2). The `exprs`-free entry point above defaults a constant to `Real`
+/// (sound for the concrete-eval-only callers); the cvc5 precondition path
+/// (`tier_b_lower::lower_obligation`) passes the real module so an int
+/// constant against an int field is a sound integer comparison.
+pub fn lower_predicate_flattened_in(
+    inv: &OpaqueInvariant,
+    prefix: &str,
+    consts: &ConstEnv,
+    exprs: &[Expr],
+) -> Option<SmtExpr> {
     let body = predicate_body(&inv.predicate)?;
     let ctx = LowerCtx {
         binder: &inv.binder,
         prefix,
         fields: &inv.fields,
         consts,
+        exprs,
     };
     lower_bool(body, &ctx)
 }
@@ -390,14 +563,72 @@ fn lower_bool(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
                 "gte" => CmpOp::Ge,
                 _ => unreachable!(),
             };
-            let l = lower_arith(args.first()?, ctx)?;
-            let r = lower_arith(args.get(1)?, ctx)?;
+            let mut l = lower_arith(args.first()?, ctx)?;
+            let mut r = lower_arith(args.get(1)?, ctx)?;
+            // U2 (precondition path): a bare module constant in a flattened
+            // predicate is lowered as a RealLit by default (the ConstEnv
+            // carries only an f64). When it is compared against an
+            // integer-sorted field var, the precondition would otherwise mix
+            // Int and Real sorts -- the same mismatch the obligation paths
+            // fixed. Coerce an integral RealLit constant to an IntLit when the
+            // other operand is integer-sorted, so an int-field input
+            // invariant lowers consistently as a sound cvc5 precondition.
+            coerce_cmp_operands(&mut l, &mut r, ctx);
             Some(SmtExpr::Cmp(op, Box::new(l), Box::new(r)))
         }
         // `>` / `<` desugar to gte/cmplt with swapped operands already, so
         // only the five comparison symbols appear. Anything else is not a
         // boolean-shaped node we can lower.
         _ => None,
+    }
+}
+
+/// Reconcile the operand sorts of a flattened-predicate comparison so an
+/// integer-sorted field var and an integral module constant lower to the
+/// same SMT sort (U2 precondition path). An integral `RealLit` constant is
+/// rewritten to an `IntLit` when the OTHER operand is integer-sorted; this
+/// is the only direction that can produce a sound int comparison (a
+/// genuinely fractional constant against an int field is a type error the
+/// checker already rejects, so it cannot reach here in a well-typed module).
+fn coerce_cmp_operands(l: &mut SmtExpr, r: &mut SmtExpr, ctx: &LowerCtx) {
+    let l_int = operand_is_int_sorted(l, ctx);
+    let r_int = operand_is_int_sorted(r, ctx);
+    if l_int {
+        coerce_integral_real_to_int(r);
+    }
+    if r_int {
+        coerce_integral_real_to_int(l);
+    }
+}
+
+/// Whether an operand is integer-sorted: an `IntLit`, or a field `Var`
+/// whose declared field type is an integer scalar.
+fn operand_is_int_sorted(expr: &SmtExpr, ctx: &LowerCtx) -> bool {
+    match expr {
+        SmtExpr::IntLit(_) => true,
+        SmtExpr::Var(path) => field_var_sort(path, ctx) == Some(SmtSort::Int),
+        _ => false,
+    }
+}
+
+/// The declared SMT sort of a flattened field var `<prefix>.<field>` (the
+/// top-level field's `scalar_sort`), or `None` if it is not a top-level
+/// scalar field of the binder.
+fn field_var_sort(path: &str, ctx: &LowerCtx) -> Option<SmtSort> {
+    let field = path.strip_prefix(ctx.prefix)?.strip_prefix('.')?;
+    ctx.fields
+        .iter()
+        .find_map(|(n, f)| (n == field).then(|| f.scalar_sort()))
+        .flatten()
+}
+
+/// Rewrite an integral `RealLit` to an `IntLit` (no-op for any other node).
+fn coerce_integral_real_to_int(expr: &mut SmtExpr) {
+    if let SmtExpr::RealLit(v) = expr
+        && v.fract() == 0.0
+        && v.is_finite()
+    {
+        *expr = SmtExpr::IntLit(*v as i64);
     }
 }
 
@@ -419,12 +650,19 @@ fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
         return access_path(expr, ctx.binder, ctx.prefix).map(SmtExpr::Var);
     }
     // A bare `(var name)`: an in-module constant reference. Resolve it
-    // through the constant environment; an unknown constant means the
-    // caller could not resolve it in-grammar, so the predicate is not
-    // lowerable here and the property falls to Tier C.
+    // through the constant environment AND the single type-aware constant
+    // lowering (U2), so an int-typed constant lowers as `IntLit` here exactly
+    // as it does on the producer-body path -- never a `RealLit` that would
+    // mismatch an Int-sorted field var and abort cvc5 in a precondition. An
+    // unknown constant means the caller could not resolve it in-grammar, so
+    // the predicate is not lowerable here and the property falls to Tier C.
     if tag(expr) == Some("var") {
         let name = symbol_text(children(expr).first()?)?;
-        return ctx.consts.get(name).copied().map(SmtExpr::RealLit);
+        return ctx
+            .consts
+            .get(name)
+            .copied()
+            .map(|value| lower_const_ref(ctx.exprs, name, value));
     }
     if tag(expr) == Some("if") {
         let kids = children(expr);
