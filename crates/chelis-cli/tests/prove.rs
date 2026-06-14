@@ -627,6 +627,50 @@ fn non_smt_prove_warns_for_invariant_carrying_opaque_types() {
     );
 }
 
+// CR2-5: a `chelis-prove`-without-`smt` build compiles the obligation
+// machinery and runs it via Tier C (fuzz), NOT cvc5. The warning must
+// still fire (gated on the `smt` capability, not on the optional
+// `chelis-prove` dependency), so a clean fuzz-only run is not mistaken for
+// formal SMT verification. This config compiles the obligation path, so
+// obligation records DO appear on stdout -- but the stderr warning is still
+// present and the exit code is unchanged.
+#[cfg(all(feature = "chelis-prove", not(feature = "smt")))]
+#[test]
+fn chelis_prove_without_smt_still_warns_obligations_not_smt_verified() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("inv.ch");
+    std::fs::write(
+        &path,
+        "module Stats.Prob\n\
+         export (probability)\n\
+         @opaque\n\
+         @invariant(p) ((p.value >= 0.0) && (p.value <= 1.0))\n\
+         type Probability =\n  | Probability { value: f32 }\n\
+         def probability(x: f32) -> Option[Probability] = if ((x >= 0.0) && (x <= 1.0)) then Some(Probability { value: x }) else None\n",
+    )
+    .expect("write");
+    let assert = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["prove", path.to_str().unwrap(), "--json"])
+        .assert()
+        .success();
+    let out = assert.get_output();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The stderr warning fires even though obligations ran (via fuzz).
+    assert!(
+        stderr.contains("obligation verification requires the smt-enabled build")
+            && stderr.contains("Rebuild with --features smt"),
+        "chelis-prove-without-smt must still warn; stderr={stderr}"
+    );
+    // The warning never leaks into the stdout NDJSON stream.
+    assert!(
+        !stdout.contains("obligation verification requires"),
+        "warning must not leak into stdout; stdout={stdout}"
+    );
+}
+
 #[cfg(not(feature = "chelis-prove"))]
 #[test]
 fn non_smt_prove_does_not_warn_for_plain_property_file() {

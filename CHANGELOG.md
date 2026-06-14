@@ -23,6 +23,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove fixes (review 2) -->
+- The `chelis prove` non-SMT obligation warning now fires in every build
+  where obligations were not SMT-verified (CR2-5). It was gated on the
+  absence of the optional `chelis-prove` dependency, so a
+  `chelis-prove`-without-`smt` build -- which compiles the obligation
+  machinery and runs it at Tier C (fuzz), not cvc5 -- suppressed the
+  warning even though no formal SMT verification occurred. The gate is
+  now the actual capability (`not(feature = "smt")`), and the message
+  says the obligations were not SMT-verified. It remains stderr-only and
+  never touches the stdout NDJSON stream or the exit code.
+
 - Tier B constant inlining now preserves a constant's declared numeric
   type (CR2-4). An int-typed module constant
   (`def n() -> int32 = 3`, or the value binding `n = 3`) used in a
