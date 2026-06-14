@@ -13,6 +13,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   entry/test reserved-name reject (RFC v6) and the checker's
   `ReservedLinkerName` rule no longer keep two copies that could drift
   (CR-7).
+- `chelis prove` now warns on stderr when a default (non-`smt`) build
+  proves a module declaring invariant-carrying opaque types: the
+  producer-obligation machinery is gated behind the `smt` feature, so a
+  default build checks no obligations. The one-line warning names the
+  count and the `--features smt` remedy; it never touches the stdout
+  NDJSON stream or the exit code, so machine consumers are unaffected.
 
 ### Fixed
 

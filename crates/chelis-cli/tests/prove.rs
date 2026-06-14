@@ -572,3 +572,82 @@ fn prove_accepts_dotted_deep_symbols_for_bridge_references() {
         .success()
         .stdout(predicate::str::contains("\"name\":\"req_MISS_001\""));
 }
+
+// The producer-obligation machinery is gated behind the `smt` feature
+// (`chelis-prove` is an optional dep enabled only by `smt`). In a default
+// build `chelis prove` cannot check obligations, so it warns on stderr when
+// a module declares invariant-carrying opaque types -- without touching the
+// stdout NDJSON stream or the exit code. These assertions only hold in the
+// non-smt build; under `--features smt` the warning does not exist and the
+// obligation oracles cover the behavior instead.
+#[cfg(not(feature = "chelis-prove"))]
+#[test]
+fn non_smt_prove_warns_for_invariant_carrying_opaque_types() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("inv.ch");
+    std::fs::write(
+        &path,
+        "module Stats.Prob\n\
+         export (probability)\n\
+         @opaque\n\
+         @invariant(p) ((p.value >= 0.0) && (p.value <= 1.0))\n\
+         type Probability =\n  | Probability { value: f32 }\n\
+         def probability(x: f32) -> Option[Probability] = if ((x >= 0.0) && (x <= 1.0)) then Some(Probability { value: x }) else None\n",
+    )
+    .expect("write");
+    let assert = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["prove", path.to_str().unwrap(), "--json"])
+        .assert()
+        .success();
+    let out = assert.get_output();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Warning is on stderr, names the count and the smt remedy.
+    assert!(
+        stderr.contains("obligation verification requires the smt-enabled build")
+            && stderr.contains("Rebuild with --features smt"),
+        "expected stderr warning; stderr={stderr}"
+    );
+    // Stdout is the clean NDJSON summary only -- no obligation records, no
+    // warning text leaked into the machine stream.
+    assert!(
+        !stdout.contains("obligation verification requires"),
+        "warning must not leak into stdout; stdout={stdout}"
+    );
+    let summary = stdout
+        .lines()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|v| v["kind"] == "summary")
+        .expect("a summary record on stdout");
+    assert_eq!(
+        summary["obligations"], 0,
+        "non-smt build checks no obligations"
+    );
+}
+
+#[cfg(not(feature = "chelis-prove"))]
+#[test]
+fn non_smt_prove_does_not_warn_for_plain_property_file() {
+    let dir = write_prop(
+        r#"
+@property nonneg forall(x: f32):
+  (x * x) >= 0.0
+"#,
+    );
+    let assert = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("obligation verification requires"),
+        "a module with no invariant-carrying opaque type must not warn; stderr={stderr}"
+    );
+}

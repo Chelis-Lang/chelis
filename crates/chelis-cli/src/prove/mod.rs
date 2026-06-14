@@ -251,6 +251,12 @@ fn prove_surf_file(
         let ob_status = obligation_run::run_obligations(&parsed, options, totals);
         file_status = combine_status(file_status, ob_status);
     }
+    // Without the smt-enabled build the obligation machinery is compiled out,
+    // so producer obligations are silently unchecked. Warn on stderr (never
+    // touching the stdout NDJSON stream or the exit code) so a clean prove is
+    // not mistaken for verified obligations.
+    #[cfg(not(feature = "chelis-prove"))]
+    warn_obligations_skipped_without_smt(path, count_invariant_opaque_surf(&flat));
     Ok(file_status)
 }
 
@@ -961,7 +967,77 @@ fn prove_deep_file(
         let status = prove_deep_property(&exprs, &property, options, totals);
         file_status = combine_status(file_status, status);
     }
+    #[cfg(not(feature = "chelis-prove"))]
+    warn_obligations_skipped_without_smt(path, count_invariant_opaque_deep(&exprs));
     Ok(file_status)
+}
+
+/// Count opaque types that carry a declared invariant in flattened Surf
+/// decls. Used only in builds without obligation support to warn that
+/// their producer obligations were not checked.
+#[cfg(not(feature = "chelis-prove"))]
+fn count_invariant_opaque_surf(decls: &[Decl]) -> usize {
+    decls
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl,
+                Decl::TypeDef {
+                    opaque: true,
+                    invariant: Some(_),
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// Deep twin of `count_invariant_opaque_surf`: a `deftype` whose metadata
+/// carries both `opaque: true` and an `invariant` entry.
+#[cfg(not(feature = "chelis-prove"))]
+fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
+    fn scan(expr: &DeepExpr, acc: &mut usize) {
+        if let DeepExpr::List(list, _) = expr {
+            let tag = list.elements.first().and_then(|head| match head {
+                DeepExpr::Atom(DeepAtom::Symbol(sym), _) => Some(sym.as_str()),
+                _ => None,
+            });
+            if tag == Some("deftype")
+                && let Some(DeepExpr::Map(meta, _)) = list.elements.get(1)
+            {
+                let opaque = meta.entries.iter().any(|(key, value)| {
+                    key == "opaque" && matches!(value, DeepExpr::Atom(DeepAtom::Bool(true), _))
+                });
+                let has_invariant = meta.entries.iter().any(|(key, _)| key == "invariant");
+                if opaque && has_invariant {
+                    *acc += 1;
+                }
+            }
+            for child in &list.elements {
+                scan(child, acc);
+            }
+        }
+    }
+    let mut acc = 0;
+    for expr in exprs {
+        scan(expr, &mut acc);
+    }
+    acc
+}
+
+/// Emit a one-line stderr warning (never touching stdout or the exit code)
+/// when a non-smt build proves a module declaring invariant-carrying opaque
+/// types, so a clean run is not mistaken for verified producer obligations.
+#[cfg(not(feature = "chelis-prove"))]
+fn warn_obligations_skipped_without_smt(path: &Path, count: usize) {
+    if count > 0 {
+        eprintln!(
+            "warning: producer obligation verification requires the smt-enabled build; {count} \
+             invariant-carrying opaque type(s) in {} had their obligations NOT checked. Rebuild \
+             with --features smt to verify them.",
+            path.display()
+        );
+    }
 }
 
 fn prove_deep_property(
