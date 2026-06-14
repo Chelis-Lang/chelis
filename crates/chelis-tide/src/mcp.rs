@@ -431,11 +431,8 @@ fn handle_prove_tool(args: &Value) -> Value {
     };
     // ok is false if the user property did not pass, OR any obligation
     // failed / was unsupported / errored, OR the module did not type-check.
-    let ok = prop_passed
-        && ob_failed == 0
-        && ob_unsupported == 0
-        && ob_errored == 0
-        && !check_failed;
+    let ok =
+        prop_passed && ob_failed == 0 && ob_unsupported == 0 && ob_errored == 0 && !check_failed;
 
     let property_total = if result.is_some() { 1 } else { 0 };
     let properties: Vec<serde_json::Value> = result

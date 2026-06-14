@@ -437,8 +437,7 @@ pub fn lower_to_cvc5(
 fn contains_transcendental(expr: &SmtExpr) -> bool {
     match expr {
         SmtExpr::Apply(name, args) => {
-            CVC5_TRANSCENDENTAL.contains(&name.as_str())
-                || args.iter().any(contains_transcendental)
+            CVC5_TRANSCENDENTAL.contains(&name.as_str()) || args.iter().any(contains_transcendental)
         }
         SmtExpr::Arith(_, l, r) => contains_transcendental(l) || contains_transcendental(r),
         SmtExpr::Cmp(_, l, r) => contains_transcendental(l) || contains_transcendental(r),
