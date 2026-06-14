@@ -22,6 +22,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+<!-- opaque-types prove fixes (review 2) -->
+- Tier B SMT lowering no longer panics on `log` (CR2-1). `log` is a
+  valid predicate intrinsic that the concrete evaluator (Tier C)
+  supports, but cvc5 has no LOG kind, so the lowering had no arm for it
+  and `panic!`ed -- a grammar-admitted `log(x)` predicate could crash
+  the prove process under `--features smt`. The cvc5-lowerable intrinsic
+  set is now one constant (`CVC5_LOWERABLE`, plus the transcendental
+  subset that selects `QF_NRAT`); the arity guard, the lowering match,
+  and the transcendental-logic classifier all derive from it, so a
+  function admitted by one can no longer diverge from another. A
+  whitelisted-but-not-lowerable name (`log`) is rejected as a clean
+  `TierBResult::Error` so dispatch falls through to Tier C, and
+  `lower_to_cvc5` now returns `Result` (defense in depth) rather than
+  panicking on an unhandled name.
+
 - The advisory `opaque-domain-construction` lint now keys opaque types
   by (type, defining module) instead of bare leaf name (CR-9). A
   non-opaque type that shares a leaf name with an opaque type in an
