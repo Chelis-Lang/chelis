@@ -806,6 +806,15 @@ fn validate_env(
 ) -> bool {
     match predicate {
         Some(smt) => {
+            // CR2-2 (fail-CLOSED on non-finite): a NaN/Inf field is never a
+            // valid inhabitant, regardless of predicate shape. `NaN != C` is
+            // true under strict IEEE, so a `!=`/negation-shaped invariant
+            // would otherwise accept a non-finite sample fail-OPEN. Reject
+            // any non-finite field before the predicate runs, mirroring the
+            // obligation-engine validation chokepoint.
+            if env.values().any(|v| !v.is_finite()) {
+                return false;
+            }
             let hash: std::collections::HashMap<String, f64> =
                 env.iter().map(|(k, v)| (k.clone(), *v)).collect();
             // STRICT validation (CR-2 / CR-5 / CR-10): invariant-sample

@@ -1274,6 +1274,18 @@ fn validate_with_predicate(
     env: &BTreeMap<String, f64>,
     predicate: &crate::solver::SmtExpr,
 ) -> bool {
+    // CR2-2 (fail-CLOSED on non-finite): a NaN/Inf representation field is
+    // never a valid inhabitant of the opaque domain, REGARDLESS of the
+    // predicate's shape. The strict evaluator gives `NaN != C == true`
+    // under IEEE, so a `!=`/negation-shaped invariant would otherwise pass
+    // fail-OPEN on a NaN field. Reject any non-finite field BEFORE the
+    // predicate runs (mirrors the decode-path finiteness pre-check). This
+    // is intentionally unconditional: it cannot be expressed inside the
+    // predicate, because the predicate's own truth value is the thing the
+    // NaN corrupts.
+    if env.values().any(|v| !v.is_finite()) {
+        return false;
+    }
     let hash: std::collections::HashMap<String, f64> =
         env.iter().map(|(k, v)| (k.clone(), *v)).collect();
     // STRICT validation (CR-2 / CR-5 / CR-10): the produced value's

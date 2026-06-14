@@ -508,3 +508,78 @@ fn same_seed_is_deterministic() {
     let (_c2, r2) = prove_json(source, &["--seed", "7"]);
     assert_eq!(obligations(&r1), obligations(&r2));
 }
+
+#[test]
+fn cr2_2_nan_tensor_field_fails_a_negation_shaped_invariant() {
+    // CR2-2 HIGH (fail-open): the strict evaluator gives `NaN != C == true`
+    // under IEEE, so a `!=`-shaped tensor-field invariant SPURIOUSLY PASSES
+    // on a NaN representation field. A producer that builds a NaN tensor
+    // field (`0.0 / 0.0`) must FAIL the obligation unconditionally -- a
+    // non-finite representation is never a valid inhabitant of the opaque
+    // domain, regardless of the predicate's shape.
+    let source = "module Stats.Simplex
+export (make_bad)
+@opaque
+@invariant(p) sum(p.weights) != 2.0
+type Simplex =
+  | Simplex { weights: tensor[3, f32] }
+def make_bad(a: f32) -> Simplex =
+  Simplex { weights: to_tensor([0.0 / 0.0, 0.0 / 0.0, 0.0 / 0.0]) }
+";
+    let (code, records) = prove_json(source, &[]);
+    let obs = obligations(&records);
+    assert_eq!(obs.len(), 1, "one obligation for make_bad");
+    assert_eq!(
+        obs[0]["status"], "failed",
+        "a NaN tensor field must fail, not pass fail-open: {}",
+        obs[0]
+    );
+    assert_eq!(code, 1, "a failed obligation exits 1");
+}
+
+#[test]
+fn cr2_2_nan_scalar_field_fails_a_negation_shaped_invariant() {
+    // CR2-2 HIGH (scalar twin): the same fail-open on a scalar `!=`-shaped
+    // invariant. A producer building a NaN scalar field must fail.
+    let source = "module Stats.Prob
+export (make_bad)
+@opaque
+@invariant(p) p.value != 0.5
+type Probability =
+  | Probability { value: f32 }
+def make_bad(x: f32) -> Probability = Probability { value: 0.0 / 0.0 }
+";
+    let (code, records) = prove_json(source, &[]);
+    let obs = obligations(&records);
+    assert_eq!(obs.len(), 1, "one obligation for make_bad");
+    assert_eq!(
+        obs[0]["status"], "failed",
+        "a NaN scalar field must fail, not pass fail-open: {}",
+        obs[0]
+    );
+    assert_eq!(code, 1, "a failed obligation exits 1");
+}
+
+#[test]
+fn cr2_2_finite_negation_shaped_invariant_still_passes() {
+    // Negative parity: a finite producer that genuinely satisfies a
+    // `!=`-shaped invariant still PASSES -- the NaN pre-check rejects only
+    // non-finite representations, not legitimate ones.
+    let source = "module Stats.Prob
+export (make_ok)
+@opaque
+@invariant(p) p.value != 0.5
+type Probability =
+  | Probability { value: f32 }
+def make_ok(x: f32) -> Probability = Probability { value: 0.25 }
+";
+    let (code, records) = prove_json(source, &[]);
+    let obs = obligations(&records);
+    assert_eq!(obs.len(), 1);
+    assert_eq!(
+        obs[0]["status"], "passed",
+        "a finite value satisfying the invariant still passes: {}",
+        obs[0]
+    );
+    assert_eq!(code, 0);
+}

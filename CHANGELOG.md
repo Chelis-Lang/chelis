@@ -23,6 +23,17 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove fixes (review 2) -->
+- Invariant validation now fails closed on a non-finite (NaN/Inf)
+  representation field (CR2-2). The strict evaluator gives `NaN != C`
+  as `true` under IEEE, so a `!=`/negation-shaped invariant accepted a
+  NaN tensor field fail-OPEN (the obligation reported `passed`). Both
+  validation chokepoints -- the producer-obligation path
+  (`validate_with_predicate` in the obligation engine) and the
+  injection-sampling path (`validate_env` in `opaque`) -- now reject any
+  non-finite field unconditionally, before the predicate runs, because a
+  non-finite value is never a valid inhabitant of the opaque domain
+  regardless of the predicate's shape.
+
 - Tier B SMT lowering no longer panics on `log` (CR2-1). `log` is a
   valid predicate intrinsic that the concrete evaluator (Tier C)
   supports, but cvc5 has no LOG kind, so the lowering had no arm for it
