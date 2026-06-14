@@ -794,6 +794,16 @@ pub fn generate_binder(
     })
 }
 
+/// The single shared finiteness helper (U1 review-3 unification): true if
+/// ANY value in the iterator is non-finite (NaN OR Inf). The produced-value
+/// validation chokepoint (`obligation_engine::validate_produced_env`) and
+/// the generator's `validate_env` both call this, so a non-finite
+/// representation leaf can never slip through one path while the other
+/// rejects it.
+pub fn any_non_finite(values: impl IntoIterator<Item = f64>) -> bool {
+    values.into_iter().any(|v| !v.is_finite())
+}
+
 /// Validate a flattened field env against the predicate. When the
 /// predicate lowers, use the fast concrete evaluator over [`SmtExpr`];
 /// the env keys are exactly the lowered var names so the two agree by
@@ -806,13 +816,13 @@ fn validate_env(
 ) -> bool {
     match predicate {
         Some(smt) => {
-            // CR2-2 (fail-CLOSED on non-finite): a NaN/Inf field is never a
-            // valid inhabitant, regardless of predicate shape. `NaN != C` is
-            // true under strict IEEE, so a `!=`/negation-shaped invariant
-            // would otherwise accept a non-finite sample fail-OPEN. Reject
-            // any non-finite field before the predicate runs, mirroring the
-            // obligation-engine validation chokepoint.
-            if env.values().any(|v| !v.is_finite()) {
+            // CR2-2 / U1 (fail-CLOSED on non-finite): a NaN/Inf field is
+            // never a valid inhabitant, regardless of predicate shape.
+            // `NaN != C` is true under strict IEEE, so a `!=`/negation-shaped
+            // invariant would otherwise accept a non-finite sample fail-OPEN.
+            // Reject any non-finite field before the predicate runs via the
+            // SAME helper the obligation-engine chokepoint uses.
+            if any_non_finite(env.values().copied()) {
                 return false;
             }
             let hash: std::collections::HashMap<String, f64> =

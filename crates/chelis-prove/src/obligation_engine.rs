@@ -290,7 +290,7 @@ fn run_tier_c(
 ) -> ObligationOutcome {
     let seed = options.seed;
     if ob.is_constant {
-        return match eval_obligation_body(exprs, inv, ob, &[]) {
+        return match eval_constant_obligation(exprs, inv, ob, consts) {
             Ok(true) => outcome(
                 ob,
                 ObligationStatus::Passed,
@@ -884,49 +884,25 @@ fn inject_const_probe(exprs: &[Expr], def: Expr) -> Vec<Expr> {
     out
 }
 
-fn eval_obligation_body(
+/// Validate a CONSTANT producer's obligation through the ONE produced-value
+/// chokepoint (U1 review-3 unification). A constant producer's value is a
+/// concrete record; evaluate it and validate its representation
+/// structurally via [`validate_value`] -> [`validate_produced_env`], so a
+/// non-finite constant field is rejected fail-CLOSED exactly like a sampled
+/// producer's value (the old host-runtime predicate eval had no finiteness
+/// guard).
+fn eval_constant_obligation(
     exprs: &[Expr],
     inv: &OpaqueInvariant,
     ob: &ObligationProperty,
-    args: &[(String, f64)],
+    consts: &ConstEnv,
 ) -> Result<bool, String> {
-    let probe = "__chelis_obligation_probe";
-    // The synthetic defs reference the opaque type's fields (via the
-    // typed predicate) and call the producer, so they MUST live inside the
-    // defining module — otherwise the opacity checker rejects the field
-    // access as out-of-module. Insert them into the module wrapper.
-    let inv_def = deep_node(
-        "def",
-        vec![deep_sym("__chelis_inv_holds"), typed_predicate(inv)],
-    );
-    let probe_def = deep_node("def", vec![deep_sym(probe), obligation_body_expr(ob, args)]);
-    let program = inject_into_defining_module(exprs, &inv.type_name, vec![inv_def, probe_def]);
-    let source = chelis_deep::printer::print_canonical(&program);
-    let result = chelis_compiler_api::compiler::eval_selected(
-        EvalRequest {
-            source_kind: SourceKind::Deep,
-            source,
-            bindings: Default::default(),
-        },
-        &[probe.to_string()],
-    )
-    .map_err(|e| {
-        e.errors
-            .iter()
-            .map(|d| d.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-    match result.roots.as_slice() {
-        [root] => match &root.value {
-            ExecutionValue::Bool { value } => Ok(*value),
-            ExecutionValue::Tensor { value } if value.shape.is_empty() && value.data.len() == 1 => {
-                Ok(value.data[0] != 0.0)
-            }
-            other => Err(format!("obligation evaluated to non-bool: {other:?}")),
-        },
-        _ => Err("obligation did not return exactly one root".to_string()),
-    }
+    let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts)
+        .ok_or_else(|| "invariant predicate does not lower for validation".to_string())?;
+    let module_source = chelis_deep::printer::print_canonical(exprs);
+    let call = deep_var(&ob.producer);
+    let value = eval_producer_value(&module_source, inv, call)?;
+    validate_value(&value, &ob.position, inv, &predicate)
 }
 
 /// Insert `new_defs` into the `(module ...)` wrapper that contains the
@@ -968,55 +944,22 @@ fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Ex
     out
 }
 
-/// Rebuild the invariant predicate fn with its binder typed as the
-/// opaque ADT: `(fn {} (params {} (<binder> {type: (t-adt {} <Type>)}))
-/// <body>)`. Inside the defining module the field access `<binder>.field`
-/// is then resolvable by the checker (field access on the opaque type is
-/// legal in-module), so the synthesized `__chelis_inv_holds` def does not
-/// trip the opacity gate during obligation evaluation.
-fn typed_predicate(inv: &OpaqueInvariant) -> Expr {
-    let body = node_children(&inv.predicate)
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| deep_bool_lit(true));
-    let typed_binder = {
-        let mut entries = MetaMap::default();
-        entries.entries.push((
-            "type".to_string(),
-            deep_node("t-adt", vec![deep_sym(&inv.type_name)]),
-        ));
-        Expr::List(
-            List {
-                elements: vec![deep_sym(&inv.binder), Expr::Map(entries, Span::new(0, 0))],
-            },
-            Span::new(0, 0),
-        )
-    };
-    let params = deep_node("params", vec![typed_binder]);
-    deep_node("fn", vec![params, body])
-}
-
-fn obligation_body_expr(ob: &ObligationProperty, args: &[(String, f64)]) -> Expr {
-    let call = if ob.is_constant {
-        deep_var(&ob.producer)
-    } else {
-        let mut app = vec![deep_var(&ob.producer)];
-        for (_, v) in args {
-            app.push(deep_float_lit(*v));
-        }
-        deep_node("app", app)
-    };
-    position_body(&ob.position, call)
-}
-
 /// Evaluate the obligation over richer argument VALUES (opaque records,
-/// tensors, scalars) by EVALUATING THE PRODUCER and validating each
-/// produced value's representation against the invariant via
-/// `concrete_eval` (not by evaluating the predicate through the host
-/// runtime — that cannot lower `sum`/constant-bearing tensor invariants).
-/// This makes the update-shaped and tensor-input obligations supported,
-/// and matches the generator's validation so proposal and acceptance
-/// agree.
+/// tensors, scalars) by EVALUATING THE PRODUCER and validating the
+/// produced value's representation against the invariant through the ONE
+/// shared chokepoint [`validate_value`] -> [`validate_produced_env`]
+/// (U1 review-3 unification).
+///
+/// There is no separate scalar branch. The historical all-scalar branch
+/// routed through the host runtime predicate eval, which never reached a
+/// finiteness guard, so a NaN scalar field under a `!=`/`not(==)`
+/// invariant shipped fail-OPEN (`NaN != C == true`). Every produced value
+/// -- scalar-only, tensor-bearing, or nested-record -- is now evaluated
+/// structurally and validated through the single chokepoint, which walks
+/// EVERY representation leaf, rejects any non-finite leaf fail-CLOSED, then
+/// evaluates the strict invariant predicate. This matches the generator's
+/// `validate_env` (same finiteness helper, same strict evaluator), so
+/// proposal and acceptance agree by construction.
 fn eval_obligation_body_values(
     exprs: &[Expr],
     inv: &OpaqueInvariant,
@@ -1032,20 +975,6 @@ fn eval_obligation_body_values(
         deep_node("app", app)
     };
 
-    // Two validation strategies. For a scalar-only-field invariant the
-    // predicate evaluates fine through the host runtime (the W3 path,
-    // which also handles every produced position incl. tuples). A
-    // tensor-field invariant (`sum`/constant-bearing) cannot lower through
-    // the runtime, so we EVALUATE THE PRODUCER and validate each produced
-    // value's representation via `concrete_eval` (Direct / Option-of-Direct
-    // in V1).
-    let all_scalar = inv
-        .fields
-        .iter()
-        .all(|(_, f)| matches!(f, crate::opaque::FieldType::Scalar(_)));
-    if all_scalar {
-        return eval_obligation_predicate(exprs, inv, ob, call);
-    }
     let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts)
         .ok_or_else(|| "invariant predicate does not lower for validation".to_string())?;
     let module_source = chelis_deep::printer::print_canonical(exprs);
@@ -1106,10 +1035,7 @@ fn validate_value(
     predicate: &crate::solver::SmtExpr,
 ) -> Result<bool, String> {
     match position {
-        ProducedPosition::Direct => {
-            let env = opaque_record_env(value, inv)?;
-            Ok(validate_with_predicate(&env, predicate))
-        }
+        ProducedPosition::Direct => validate_produced_env(value, inv, predicate),
         ProducedPosition::InsideOption(inner) => match value {
             ExecutionValue::Adt { ctor, fields } if ctor == "None" => {
                 let _ = fields;
@@ -1223,74 +1149,38 @@ fn flatten_field_value(
     Ok(())
 }
 
-/// The W3 predicate-eval path: build `position_body(__chelis_inv_holds,
-/// producer(args))` and evaluate it through the runtime. Works for
-/// scalar-field invariants and every produced position.
-fn eval_obligation_predicate(
-    exprs: &[Expr],
+/// The ONE produced-value validation chokepoint (U1 review-3
+/// unification). Flatten a produced opaque record [`ExecutionValue`] into
+/// the dotted-path env the lowered predicate reads (walking EVERY
+/// representation leaf -- scalar fields, every tensor element, and nested
+/// records), reject fail-CLOSED if ANY leaf is non-finite (NaN OR Inf),
+/// then evaluate the strict invariant predicate. The scalar, tensor, and
+/// nested-record produced-value paths all route here; the generator's
+/// `validate_env` shares the SAME finiteness helper
+/// ([`crate::opaque::any_non_finite`]) and the SAME strict evaluation, so
+/// proposal and acceptance agree by construction.
+fn validate_produced_env(
+    value: &ExecutionValue,
     inv: &OpaqueInvariant,
-    ob: &ObligationProperty,
-    call: Expr,
-) -> Result<bool, String> {
-    let probe = "__chelis_obligation_probe";
-    let inv_def = deep_node(
-        "def",
-        vec![deep_sym("__chelis_inv_holds"), typed_predicate(inv)],
-    );
-    let probe_def = deep_node(
-        "def",
-        vec![deep_sym(probe), position_body(&ob.position, call)],
-    );
-    let program = inject_into_defining_module(exprs, &inv.type_name, vec![inv_def, probe_def]);
-    let source = chelis_deep::printer::print_canonical(&program);
-    let result = chelis_compiler_api::compiler::eval_selected(
-        EvalRequest {
-            source_kind: SourceKind::Deep,
-            source,
-            bindings: Default::default(),
-        },
-        &[probe.to_string()],
-    )
-    .map_err(|e| {
-        e.errors
-            .iter()
-            .map(|d| d.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-    match result.roots.as_slice() {
-        [root] => match &root.value {
-            ExecutionValue::Bool { value } => Ok(*value),
-            ExecutionValue::Tensor { value } if value.shape.is_empty() && value.data.len() == 1 => {
-                Ok(value.data[0] != 0.0)
-            }
-            other => Err(format!("obligation evaluated to non-bool: {other:?}")),
-        },
-        _ => Err("obligation did not return exactly one root".to_string()),
-    }
-}
-
-fn validate_with_predicate(
-    env: &BTreeMap<String, f64>,
     predicate: &crate::solver::SmtExpr,
-) -> bool {
-    // CR2-2 (fail-CLOSED on non-finite): a NaN/Inf representation field is
-    // never a valid inhabitant of the opaque domain, REGARDLESS of the
+) -> Result<bool, String> {
+    let env = opaque_record_env(value, inv)?;
+    // CR2-2 / U1 (fail-CLOSED on non-finite): a NaN/Inf representation leaf
+    // is never a valid inhabitant of the opaque domain, REGARDLESS of the
     // predicate's shape. The strict evaluator gives `NaN != C == true`
     // under IEEE, so a `!=`/negation-shaped invariant would otherwise pass
-    // fail-OPEN on a NaN field. Reject any non-finite field BEFORE the
-    // predicate runs (mirrors the decode-path finiteness pre-check). This
-    // is intentionally unconditional: it cannot be expressed inside the
-    // predicate, because the predicate's own truth value is the thing the
-    // NaN corrupts.
-    if env.values().any(|v| !v.is_finite()) {
-        return false;
+    // fail-OPEN on a NaN leaf. Reject before the predicate runs (the
+    // predicate's own truth value is the thing the NaN corrupts). This is
+    // the single shared finiteness helper -- the generator's `validate_env`
+    // calls the identical helper, so no second path can bypass it.
+    if crate::opaque::any_non_finite(env.values().copied()) {
+        return Ok(false);
     }
     let hash: std::collections::HashMap<String, f64> =
         env.iter().map(|(k, v)| (k.clone(), *v)).collect();
     // STRICT validation (CR-2 / CR-5 / CR-10): the produced value's
     // invariant is checked with exact `==`/`!=`, never the fuzz tolerance.
-    crate::concrete_eval::eval_bool_strict(predicate, &hash)
+    Ok(crate::concrete_eval::eval_bool_strict(predicate, &hash))
 }
 
 fn node_def(name: &str, body: Expr) -> Expr {
@@ -1339,52 +1229,6 @@ fn scalar_lit(prim: &str, v: f64) -> Expr {
         "int32" | "int64" => deep_int_lit(v as i64),
         "bool" => deep_bool_lit(v != 0.0),
         _ => deep_float_lit(v),
-    }
-}
-
-fn position_body(position: &ProducedPosition, value: Expr) -> Expr {
-    match position {
-        ProducedPosition::Direct => deep_node("app", vec![deep_var("__chelis_inv_holds"), value]),
-        ProducedPosition::InsideOption(inner) => {
-            let inner_body = position_body(inner, deep_var("__v"));
-            deep_node(
-                "match",
-                vec![
-                    value,
-                    deep_node(
-                        "arm",
-                        vec![
-                            deep_node(
-                                "pat-ctor",
-                                vec![
-                                    deep_sym("Some"),
-                                    deep_node("pat-var", vec![deep_sym("__v")]),
-                                ],
-                            ),
-                            deep_bare_list(vec![]),
-                            inner_body,
-                        ],
-                    ),
-                    deep_node(
-                        "arm",
-                        vec![
-                            deep_node("pat-wild", vec![]),
-                            deep_bare_list(vec![]),
-                            deep_bool_lit(true),
-                        ],
-                    ),
-                ],
-            )
-        }
-        ProducedPosition::TupleComponents(comps) => {
-            let mut conj = deep_bool_lit(true);
-            for (idx, inner) in comps {
-                let comp = deep_node("tuple-get", vec![value.clone(), deep_int_lit(*idx as i64)]);
-                let inner_body = position_body(inner, comp);
-                conj = deep_node("app", vec![deep_var("and"), conj, inner_body]);
-            }
-            conj
-        }
     }
 }
 
@@ -1439,9 +1283,6 @@ fn sample_scalar(kind: &str, rng: &mut Lcg) -> f64 {
 
 fn deep_sym(s: &str) -> Expr {
     Expr::Atom(Atom::Symbol(s.to_string()), Span::new(0, 0))
-}
-fn deep_bare_list(children: Vec<Expr>) -> Expr {
-    Expr::List(List { elements: children }, Span::new(0, 0))
 }
 fn deep_node(tag: &str, children: Vec<Expr>) -> Expr {
     let mut elements = vec![
@@ -1523,3 +1364,6 @@ impl Lcg {
         min + (max - min) * unit
     }
 }
+
+#[cfg(test)]
+mod tests;

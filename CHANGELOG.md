@@ -22,6 +22,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+<!-- opaque-types prove-obligation unification (review 3) -->
+- Produced-value invariant validation now routes through ONE chokepoint
+  (U1). A produced opaque value -- scalar-only, tensor-bearing, or
+  nested-record -- is always validated structurally through
+  `validate_produced_env`, which walks EVERY representation leaf and
+  rejects fail-closed if any is non-finite (NaN OR Inf) before the
+  predicate runs. The historical all-scalar branch evaluated the
+  invariant through the host runtime, which never reached a finiteness
+  guard, so a scalar NaN field under a `!=`/`not(==)` invariant shipped
+  as a PASSING obligation (`NaN != C` is true under strict IEEE). The
+  generator's sample validation shares the same finiteness helper
+  (`chelis_prove::opaque::any_non_finite`), so a non-finite leaf can no
+  longer slip through one path while the other rejects it. The
+  host-runtime predicate-eval branch is removed.
+
 <!-- opaque-types prove fixes (review 2) -->
 - The `chelis prove` non-SMT obligation warning now fires in every build
   where obligations were not SMT-verified (CR2-5). It was gated on the
