@@ -743,7 +743,13 @@ fn lower_pred_arith(
         }
         "neg" => Some(SmtExpr::Arith(
             ArithOp::Neg,
-            Box::new(lower_pred_arith(args.first()?, binder, fields, consts, exprs)?),
+            Box::new(lower_pred_arith(
+                args.first()?,
+                binder,
+                fields,
+                consts,
+                exprs,
+            )?),
             Box::new(SmtExpr::RealLit(0.0)),
         )),
         "abs" | "min" | "max" | "sqrt" | "exp" | "log" | "sin" | "cos" => {

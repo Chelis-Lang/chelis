@@ -23,6 +23,26 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove-obligation unification (review 3) -->
+- User `@property` verification now runs through ONE shared property
+  runner (`chelis_prove::property_runner`) that BOTH the CLI prove path
+  and the chelis-tide MCP `chelis_prove` tool drive (U4). The tide tool
+  previously gated user-property dispatch on a binding literally named
+  `property`, so a property with any other name was silently never proved
+  (the response reported ok:true / total:0); it parsed every source with
+  the Surf parser even for Deep modules; and it folded a
+  zero-sample-validated property (the smt-only timeout sentinel) as a
+  pass. The shared runner discovers `@property` declarations the SAME way
+  for `.ch` (parse + flatten) and `.dp` (Deep metadata scan) -- with no
+  hardcoded name -- runs each through the same Tier B (SMT) -> Tier C
+  (fuzz) engine with assumption injection for invariant-carrying opaque
+  binders, and reports ok=true ONLY when every property AND obligation is
+  a genuine pass (Proved, or statistically validated with samples>0); a
+  Disproved/Rejected/unsupported/errored property or obligation, a
+  zero-sample sentinel, a parse failure, or a type-check failure makes the
+  response not-ok. The CLI renders the shared runner's outcomes as its
+  NDJSON property records, so a CLI prove and a tide prove agree on the
+  same module (test-locked parity). The CLI's own Surf->SMT lowering and
+  injection modules were retired in favour of the single runner.
 - Tier B now rejects an operand-sort mismatch (an Int term compared
   against or combined with a Real term) as a clean
   `TierBResult::Error` before any cvc5 term is built (U3). cvc5's

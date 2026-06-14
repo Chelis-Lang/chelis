@@ -172,9 +172,5 @@ fn u1_tensor_nonfinite_element_fails_closed_fuzz() {
 #[test]
 fn u1_chokepoint_signature_is_stable() {
     let _ = validate_produced_env
-        as fn(
-            &ExecutionValue,
-            &OpaqueInvariant,
-            &crate::solver::SmtExpr,
-        ) -> Result<bool, String>;
+        as fn(&ExecutionValue, &OpaqueInvariant, &crate::solver::SmtExpr) -> Result<bool, String>;
 }

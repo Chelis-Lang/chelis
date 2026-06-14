@@ -569,13 +569,19 @@ def e() -> f32 = 5.0
 
     // int8/int16 inline as integer literals.
     let a_node = super::const_lit_node(&exprs, "a", 1.0);
-    let a_val = super::children(&a_node).first().cloned().expect("lit value");
+    let a_val = super::children(&a_node)
+        .first()
+        .cloned()
+        .expect("lit value");
     assert!(
         matches!(a_val, Expr::Atom(Atom::Int(1), _)),
         "int8 `a = 1` inlines as Atom::Int(1), got {a_val:?}"
     );
     let b_node = super::const_lit_node(&exprs, "b", 2.0);
-    let b_val = super::children(&b_node).first().cloned().expect("lit value");
+    let b_val = super::children(&b_node)
+        .first()
+        .cloned()
+        .expect("lit value");
     assert!(
         matches!(b_val, Expr::Atom(Atom::Int(2), _)),
         "int16 `b = 2` inlines as Atom::Int(2), got {b_val:?}"

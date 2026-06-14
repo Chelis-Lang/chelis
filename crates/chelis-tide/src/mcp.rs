@@ -245,32 +245,6 @@ fn prove_tool_schema() -> Value {
     })
 }
 
-/// Whether the Surf `source` defines a top-level binding named `name`
-/// (function, let-binding, or property). The tide prove tool probes a
-/// property literally named `property`; CR2-3 uses this to avoid emitting
-/// a phantom `unbound variable: property` rejection for obligation-only
-/// modules that define no such binding.
-fn source_defines_binding(source: &str, name: &str) -> bool {
-    fn scan(decls: &[chelis_surf::ast::Decl], name: &str) -> bool {
-        use chelis_surf::ast::Decl;
-        decls.iter().any(|d| match d {
-            Decl::FunDef { name: n, .. }
-            | Decl::LetDef { name: n, .. }
-            | Decl::Property { name: n, .. } => n == name,
-            // A `module M { ... }` wraps its declarations.
-            Decl::Module { decls, .. } => scan(decls, name),
-            _ => false,
-        })
-    }
-    match chelis_surf::parser::parse_str(source) {
-        Ok(decls) => scan(&decls, name),
-        // A parse failure is surfaced elsewhere (the obligation engine
-        // reports a parse error). Treat it as "no user property" so the
-        // phantom dispatch does not add a second, misleading rejection.
-        Err(_) => false,
-    }
-}
-
 fn handle_prove_tool(args: &Value) -> Value {
     let source = match args.get("source").and_then(Value::as_str) {
         Some(s) => s.to_string(),
@@ -283,6 +257,11 @@ fn handle_prove_tool(args: &Value) -> Value {
         }
     };
 
+    let source_kind = args
+        .get("source_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("surf")
+        .to_string();
     let tier = args.get("tier").and_then(Value::as_str).unwrap_or("auto");
     let smt_timeout = args
         .get("smt_timeout")
@@ -291,64 +270,106 @@ fn handle_prove_tool(args: &Value) -> Value {
     let samples = args.get("samples").and_then(Value::as_u64).unwrap_or(100) as usize;
     let seed = args.get("seed").and_then(Value::as_u64).unwrap_or(0);
 
-    let amenability = match args
-        .get("amenability")
-        .and_then(Value::as_str)
-        .unwrap_or("polynomial")
-    {
-        "linear" => chelis_prove::dispatch::SmtAmenability::Linear,
-        "polynomial" => chelis_prove::dispatch::SmtAmenability::Polynomial,
-        "transcendental" => chelis_prove::dispatch::SmtAmenability::Transcendental,
-        "opaque" => chelis_prove::dispatch::SmtAmenability::Opaque,
-        other => {
-            return json!({
-                "ok": false,
-                "stage": "mcp",
-                "errors": [{"kind": "invalid_arguments", "message": format!("invalid amenability `{other}`; must be linear|polynomial|transcendental|opaque"), "severity": 1.0, "suggestions": []}]
-            });
-        }
-    };
-
-    let tier_mode = match tier {
-        "auto" => chelis_prove::dispatch::TierMode::Auto,
-        "fuzz-only" => chelis_prove::dispatch::TierMode::FuzzOnly,
-        "smt-only" => chelis_prove::dispatch::TierMode::SmtOnly,
-        "type-only" => chelis_prove::dispatch::TierMode::TypeOnly,
-        other => {
-            return json!({
-                "ok": false,
-                "stage": "mcp",
-                "errors": [{"kind": "invalid_arguments", "message": format!("invalid tier `{other}`"), "severity": 1.0, "suggestions": []}]
-            });
-        }
-    };
-
-    let options = chelis_prove::dispatch::DispatchOptions {
-        tier_mode,
-        smt_timeout_ms: smt_timeout,
-        fuzz_samples: samples,
-        fuzz_seed: seed,
-    };
-
-    // Dispatch the user property through the three-tier pipeline. The tool
-    // probes a single property literally named `property` in the source.
-    // CR2-3: a module that does NOT define `property` (e.g. an
-    // obligation-only opaque module) must NOT be dragged to ok:false by a
-    // phantom `unbound variable: property` rejection. Only run the
-    // user-property dispatch when the module actually defines that binding;
-    // otherwise there is no user property to fold and `ok` is driven solely
-    // by the derived obligations and the check status.
-    let has_user_property = source_defines_binding(&source, "property");
-    let result = if has_user_property {
-        Some(chelis_prove::dispatch::dispatch_property(
-            &source,
-            "property",
+    // Validate the tier and source_kind up front (the `amenability` arg is
+    // accepted for schema compatibility but no longer drives dispatch -- the
+    // shared property runner classifies amenability internally).
+    if !matches!(tier, "auto" | "fuzz-only" | "smt-only" | "type-only") {
+        return json!({
+            "ok": false,
+            "stage": "mcp",
+            "errors": [{"kind": "invalid_arguments", "message": format!("invalid tier `{tier}`"), "severity": 1.0, "suggestions": []}]
+        });
+    }
+    if !matches!(source_kind.as_str(), "surf" | "deep") {
+        return json!({
+            "ok": false,
+            "stage": "mcp",
+            "errors": [{"kind": "invalid_arguments", "message": format!("invalid source_kind `{source_kind}`; must be surf|deep"), "severity": 1.0, "suggestions": []}]
+        });
+    }
+    if let Some(amenability) = args.get("amenability").and_then(Value::as_str)
+        && !matches!(
             amenability,
-            &options,
-        ))
-    } else {
-        None
+            "linear" | "polynomial" | "transcendental" | "opaque"
+        )
+    {
+        return json!({
+            "ok": false,
+            "stage": "mcp",
+            "errors": [{"kind": "invalid_arguments", "message": format!("invalid amenability `{amenability}`; must be linear|polynomial|transcendental|opaque"), "severity": 1.0, "suggestions": []}]
+        });
+    }
+
+    let invariant_min_rate = args
+        .get("invariant_min_rate")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.01);
+    let source_is_deep = source_kind == "deep";
+
+    // Discover and run the user @property declarations through the SHARED
+    // property runner the CLI also drives (U4 / D-PARITY): no hardcoded
+    // property name, the SAME discovery + engine for `.ch` and `.dp`, so a
+    // prove through tide is identical to the CLI on the same module.
+    use chelis_prove::property_runner::{
+        PropertyRunOptions, PropertyRunResult, PropertyStatus, PropertyTier,
+        run_deep_source_properties, run_surf_source_properties,
     };
+    let prop_options = PropertyRunOptions {
+        seed,
+        samples,
+        smt_timeout_ms: smt_timeout,
+        tier: tier.to_string(),
+        only: None,
+        invariant_min_rate,
+        max_attempts: None,
+    };
+    let property_run = if source_is_deep {
+        run_deep_source_properties(&source, &prop_options)
+    } else {
+        run_surf_source_properties(&source, &prop_options)
+    };
+    let mut property_records: Vec<serde_json::Value> = Vec::new();
+    let mut prop_failed = 0usize;
+    let mut prop_unsupported = 0usize;
+    let mut prop_errored = 0usize;
+    let mut prop_proved = 0usize;
+    let mut property_run_failed = false;
+    let mut property_total = 0usize;
+    match property_run {
+        Ok(PropertyRunResult::Ran(outcomes)) => {
+            property_total = outcomes.len();
+            for o in &outcomes {
+                // A property is a PASS only when it is a genuine pass (Proved,
+                // or StatisticallyValidated with samples > 0). Every other
+                // status -- Disproved/Failed, Unsupported, Error, AND a
+                // Passed-with-zero-samples sentinel -- is a non-pass (U4).
+                if o.is_pass() {
+                    if o.proof_tier == PropertyTier::Smt {
+                        prop_proved += 1;
+                    }
+                } else {
+                    match o.status {
+                        PropertyStatus::Failed => prop_failed += 1,
+                        PropertyStatus::Unsupported => prop_unsupported += 1,
+                        PropertyStatus::Error => prop_errored += 1,
+                        // Passed-but-not-a-pass (zero-sample sentinel): count
+                        // as unsupported so it lowers ok and is visible.
+                        PropertyStatus::Passed => prop_unsupported += 1,
+                    }
+                }
+            }
+            property_records = outcomes.iter().map(property_to_json).collect();
+        }
+        Err(message) => {
+            // A genuinely unparseable module is an error.
+            property_run_failed = true;
+            property_records.push(json!({
+                "kind": "error",
+                "stage": "parse",
+                "reason": message,
+            }));
+        }
+    }
 
     // Derived producer obligations (RFC D-OBLIG, D-PARITY): run the SAME
     // chelis-prove obligation engine the CLI uses on the module source, so
@@ -359,101 +380,106 @@ fn handle_prove_tool(args: &Value) -> Value {
         smt_timeout_ms: smt_timeout,
         tier: tier.to_string(),
         only: None,
-        invariant_min_rate: args
-            .get("invariant_min_rate")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.01),
+        invariant_min_rate,
     };
     // Derived obligations. A type-broken module surfaces a check-failure
     // record rather than silently reporting zero obligations (RT3-F2).
     use chelis_prove::obligation_engine::{ObligationRunResult, ObligationStatus};
     let mut obligation_records: Vec<serde_json::Value> = Vec::new();
-    // The worst obligation status, folded into the response ok/summary
-    // exactly as the CLI folds it into the overall prove exit status
-    // (CR-12 / D-PARITY): a failed / unsupported / errored producer
-    // obligation must lower the tide response, not be ignored.
     let mut ob_failed = 0usize;
     let mut ob_unsupported = 0usize;
     let mut ob_errored = 0usize;
     let mut check_failed = false;
-    match chelis_prove::obligation_engine::run_surf_source_obligations(&source, &ob_options) {
-        Ok(ObligationRunResult::Ran(outcomes)) => {
-            for o in &outcomes {
-                match o.status {
-                    ObligationStatus::Failed => ob_failed += 1,
-                    ObligationStatus::Unsupported => ob_unsupported += 1,
-                    ObligationStatus::Error => ob_errored += 1,
-                    ObligationStatus::Passed => {}
+    // The obligation engine takes Surf source today; a Deep module has no
+    // derived producer obligations through this entry, so skip it for deep.
+    if !source_is_deep {
+        match chelis_prove::obligation_engine::run_surf_source_obligations(&source, &ob_options) {
+            Ok(ObligationRunResult::Ran(outcomes)) => {
+                for o in &outcomes {
+                    match o.status {
+                        ObligationStatus::Failed => ob_failed += 1,
+                        ObligationStatus::Unsupported => ob_unsupported += 1,
+                        ObligationStatus::Error => ob_errored += 1,
+                        ObligationStatus::Passed => {}
+                    }
                 }
+                obligation_records = outcomes.into_iter().map(obligation_to_json).collect();
             }
-            obligation_records = outcomes.into_iter().map(obligation_to_json).collect();
-        }
-        Ok(ObligationRunResult::CheckFailed(messages)) => {
-            check_failed = true;
-            obligation_records.push(json!({
-                "kind": "error",
-                "stage": "check",
-                "reason": "module does not type-check; obligations not verified",
-                "diagnostics": messages,
-            }));
-        }
-        Err(message) => {
-            check_failed = true;
-            obligation_records.push(json!({
-                "kind": "error",
-                "stage": "parse",
-                "reason": message,
-            }));
+            Ok(ObligationRunResult::CheckFailed(messages)) => {
+                check_failed = true;
+                obligation_records.push(json!({
+                    "kind": "error",
+                    "stage": "check",
+                    "reason": "module does not type-check; obligations not verified",
+                    "diagnostics": messages,
+                }));
+            }
+            Err(message) => {
+                check_failed = true;
+                obligation_records.push(json!({
+                    "kind": "error",
+                    "stage": "parse",
+                    "reason": message,
+                }));
+            }
         }
     }
     let obligations_count = obligation_records.len();
 
-    use chelis_prove::ProofStatus;
-    // CR2-3: a property is a PASS only when Proved or StatisticallyValidated.
-    // Every other status -- Disproved, Rejected, NotAmenable -- is a non-pass
-    // and must lower `ok`. The prior fold treated only Disproved as a
-    // failure, so a Rejected / NotAmenable property reported ok:true (a
-    // non-pass masquerading as a pass). The non-pass status is also bucketed
-    // into the summary by kind, mirroring the CLI's Status mapping
-    // (Disproved => failed, NotAmenable => unsupported, Rejected => error).
-    // When the module defines no `property`, there is no user-property
-    // contribution at all.
-    let (property_proved, prop_passed, prop_failed, prop_unsupported, prop_errored) = match &result
-    {
-        None => (false, true, 0, 0, 0),
-        Some(r) => match &r.status {
-            ProofStatus::Proved => (true, true, 0, 0, 0),
-            ProofStatus::StatisticallyValidated { .. } => (false, true, 0, 0, 0),
-            ProofStatus::Disproved { .. } => (false, false, 1, 0, 0),
-            ProofStatus::NotAmenable { .. } => (false, false, 0, 1, 0),
-            ProofStatus::Rejected { .. } => (false, false, 0, 0, 1),
-        },
-    };
-    // ok is false if the user property did not pass, OR any obligation
-    // failed / was unsupported / errored, OR the module did not type-check.
-    let ok =
-        prop_passed && ob_failed == 0 && ob_unsupported == 0 && ob_errored == 0 && !check_failed;
-
-    let property_total = if result.is_some() { 1 } else { 0 };
-    let properties: Vec<serde_json::Value> = result
-        .as_ref()
-        .map(|r| vec![serde_json::to_value(r).unwrap_or(json!(null))])
-        .unwrap_or_default();
+    // ok is true ONLY when every property AND obligation is a genuine pass
+    // and the module type-checks (U4 / D-PARITY). A failed/unsupported/
+    // errored property OR obligation, a zero-sample sentinel property, a
+    // parse failure, or a type-check failure makes the response not-ok.
+    let ok = prop_failed == 0
+        && prop_unsupported == 0
+        && prop_errored == 0
+        && !property_run_failed
+        && ob_failed == 0
+        && ob_unsupported == 0
+        && ob_errored == 0
+        && !check_failed;
 
     json!({
         "ok": ok,
         "stage": "prove",
-        "properties": properties,
+        "properties": property_records,
         "obligations": obligation_records,
         "summary": {
             "total": property_total,
-            "proved": if property_proved { 1 } else { 0 },
+            "proved": prop_proved,
             "failed": prop_failed + ob_failed,
             "unsupported": prop_unsupported + ob_unsupported,
-            "errors": prop_errored + ob_errored + if check_failed { 1 } else { 0 },
+            "errors": prop_errored + ob_errored + if check_failed || property_run_failed { 1 } else { 0 },
             "obligations": obligations_count,
         }
     })
+}
+
+/// Render a property outcome into a JSON record (the same additive shape the
+/// CLI emits), so the cross-surface parity test can compare directly.
+fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value {
+    use chelis_prove::property_runner::PropertyStatus;
+    let status = match o.status {
+        PropertyStatus::Passed => "passed",
+        PropertyStatus::Failed => "failed",
+        PropertyStatus::Unsupported => "unsupported",
+        PropertyStatus::Error => "error",
+    };
+    let mut value = json!({
+        "kind": "property",
+        "name": o.name,
+        "status": status,
+        "proof_tier": o.proof_tier.as_str(),
+        "samples": o.samples,
+        "seed": o.seed,
+    });
+    if let Some(cx) = &o.counterexample {
+        value["counterexample"] = cx.clone();
+    }
+    if let Some(r) = &o.reason {
+        value["reason"] = json!(r);
+    }
+    value
 }
 
 /// Render an obligation outcome into the same additive JSON record shape
