@@ -252,7 +252,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   (e.g. a tolerance band `p.value <= 1.0 + eps` over `def eps() -> f32 =
   0.001`, permitted by the D-WF grammar) resolves the constant instead of
   failing on an unknown name; a valid payload of such a type now decodes,
-  and a violating one is still rejected.
+  and a violating one is still rejected. (CR2-6) The constant collector now
+  also handles the bare value-binding Deep form `(def {} eps <lit>)` (body
+  is the value directly, not a `(fn {} (params {}) ...)` wrapper). The Surf
+  desugarer always wraps def bodies in `fn`, but hand-authored Deep -- which
+  the chokepoint accepts and `validate --deep` admits -- can declare a
+  constant in the bare form, so a `.dp` invariant referencing it now
+  resolves instead of failing on an unknown name.
 
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep

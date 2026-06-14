@@ -3117,19 +3117,29 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
 }
 
 /// Collect in-module zero-argument constant defs as `name -> value-body`
-/// (CR-3). RFC D-WF permits an invariant predicate to reference in-module
-/// zero-argument constant defs (e.g. `def eps() -> f32 = 0.001` used in a
-/// tolerance band), so decode revalidation must resolve those names when it
-/// evaluates the predicate.
+/// (CR-3, CR2-6). RFC D-WF permits an invariant predicate to reference
+/// in-module zero-argument constant defs (e.g. `eps` in a tolerance band),
+/// so decode revalidation must resolve those names when it evaluates the
+/// predicate. The returned map keys each constant by name to its
+/// VALUE-PRODUCING body; the decode eval context registers these as
+/// `top_level_defs`, where `resolve_top_level` evaluates each to its
+/// scalar/tensor value on first reference (transitive constant chains
+/// resolve through the same map).
 ///
-/// A zero-argument constant desugars to `(def {} <name> (fn {} (params {})
-/// <inner-body>))`. The *value* of the constant is the evaluation of the
-/// inner body, so this returns the UNWRAPPED inner body keyed by name. The
-/// decode eval context registers these as `top_level_defs`, where
-/// `resolve_top_level` evaluates each to its scalar/tensor value on first
-/// reference (transitive constant chains resolve through the same map).
+/// Two constant def shapes reach decode, both handled here:
 ///
-/// Functions with one or more parameters are deliberately excluded: a
+/// - **Fn-wrapped form** `(def {} <name> (fn {} (params {}) <inner>))`. The
+///   Surf desugarer wraps *every* def body in a `fn`, so both
+///   `def eps() -> f32 = 0.001` and `def eps = 0.001` desugar to this shape
+///   with empty params. The constant's value is the evaluation of `<inner>`,
+///   so the UNWRAPPED inner body is registered.
+/// - **Bare value-binding form** `(def {} <name> <value>)` where `<value>`
+///   is not a `fn` node (CR2-6). This is legal hand-authored Deep
+///   (`validate --deep` accepts it) that the Surf desugarer never produces,
+///   and the decode chokepoint consumes hand-authored Deep. The body IS the
+///   value, so it is registered directly.
+///
+/// Fn defs with one or more parameters are deliberately excluded: a
 /// well-formed predicate (RFC D-WF) does not call general functions, and a
 /// bare reference to a multi-arg function in a value position is not in the
 /// grammar. Registering only the zero-arg value bodies keeps the decode
@@ -3150,27 +3160,31 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
         let Some(body) = kids.get(1) else {
             continue;
         };
-        // The body must be a `(fn {} (params {}) <inner>)` with an empty
-        // params list: that is the desugared shape of a zero-argument def.
-        let Some(fn_list) = as_list(body) else {
-            continue;
-        };
-        if tag(fn_list) != Some("fn") {
-            continue;
+        match as_list(body) {
+            // Fn-wrapped form: keep only the empty-params (zero-arg) case,
+            // and register the unwrapped inner value body.
+            Some(fn_list) if tag(fn_list) == Some("fn") => {
+                let fn_kids = children(fn_list);
+                let Some(params_list) = fn_kids.first().and_then(as_list) else {
+                    continue;
+                };
+                if tag(params_list) != Some("params") || !children(params_list).is_empty() {
+                    // Non-empty params => a parameterized function, not a
+                    // constant. Not in the predicate grammar as a value.
+                    continue;
+                }
+                let Some(inner) = fn_kids.get(1) else {
+                    continue;
+                };
+                out.insert(name.to_string(), inner.clone());
+            }
+            // Bare value-binding form (CR2-6): the body is the value itself
+            // (a `lit`, an `app` over constants, etc.), not a `fn` wrapper.
+            // Register it directly.
+            _ => {
+                out.insert(name.to_string(), body.clone());
+            }
         }
-        let fn_kids = children(fn_list);
-        let Some(params_list) = fn_kids.first().and_then(as_list) else {
-            continue;
-        };
-        if tag(params_list) != Some("params") || !children(params_list).is_empty() {
-            // Non-empty params => not a constant; a value-producing def with
-            // arguments is not in the predicate grammar.
-            continue;
-        }
-        let Some(inner) = fn_kids.get(1) else {
-            continue;
-        };
-        out.insert(name.to_string(), inner.clone());
     }
     out
 }
@@ -7871,6 +7885,48 @@ type Tol = | Tol { value: f32 }
         assert!(
             !consts.contains_key("make"),
             "a parameterized def must not be collected as a constant, got {consts:?}"
+        );
+    }
+
+    #[test]
+    fn collect_zero_arg_constants_collects_bare_value_binding_form() {
+        // CR2-6: a hand-authored Deep `(def {} eps <lit>)` whose body is the
+        // VALUE directly (no `fn` wrapper) is a legal constant the Surf
+        // desugarer never emits but the decode chokepoint consumes. The
+        // collector must register it, keyed by name, with the value body
+        // itself (the `lit`).
+        let exprs = chelis_deep::parser::parse_str(
+            "(module {} m (def {} eps (lit {type: (t-prim {} f32)} 0.001)))",
+        )
+        .expect("deep parse");
+        let consts = collect_zero_arg_constants(&exprs);
+        let body = consts
+            .get("eps")
+            .expect("bare value-binding constant must be collected");
+        match body {
+            Expr::List(list, _) => assert_eq!(
+                tag(list),
+                Some("lit"),
+                "bare value-binding body is registered as-is, got {body:?}"
+            ),
+            other => panic!("expected a lit node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collect_zero_arg_constants_excludes_bare_parameterized_fn_def() {
+        // A hand-authored fn def WITH params is still excluded even though
+        // the CR2-6 widening added a non-fn fallback arm: the fallback only
+        // fires for non-`fn` bodies. A `(fn {} (params {} x) ...)` body must
+        // not be collected as a constant.
+        let exprs = chelis_deep::parser::parse_str(
+            "(module {} m (def {} f (fn {} (params {} x) (var {} x))))",
+        )
+        .expect("deep parse");
+        let consts = collect_zero_arg_constants(&exprs);
+        assert!(
+            !consts.contains_key("f"),
+            "a parameterized fn def must not be collected as a constant, got {consts:?}"
         );
     }
 
