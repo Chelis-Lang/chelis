@@ -245,6 +245,32 @@ fn prove_tool_schema() -> Value {
     })
 }
 
+/// Whether the Surf `source` defines a top-level binding named `name`
+/// (function, let-binding, or property). The tide prove tool probes a
+/// property literally named `property`; CR2-3 uses this to avoid emitting
+/// a phantom `unbound variable: property` rejection for obligation-only
+/// modules that define no such binding.
+fn source_defines_binding(source: &str, name: &str) -> bool {
+    fn scan(decls: &[chelis_surf::ast::Decl], name: &str) -> bool {
+        use chelis_surf::ast::Decl;
+        decls.iter().any(|d| match d {
+            Decl::FunDef { name: n, .. }
+            | Decl::LetDef { name: n, .. }
+            | Decl::Property { name: n, .. } => n == name,
+            // A `module M { ... }` wraps its declarations.
+            Decl::Module { decls, .. } => scan(decls, name),
+            _ => false,
+        })
+    }
+    match chelis_surf::parser::parse_str(source) {
+        Ok(decls) => scan(&decls, name),
+        // A parse failure is surfaced elsewhere (the obligation engine
+        // reports a parse error). Treat it as "no user property" so the
+        // phantom dispatch does not add a second, misleading rejection.
+        Err(_) => false,
+    }
+}
+
 fn handle_prove_tool(args: &Value) -> Value {
     let source = match args.get("source").and_then(Value::as_str) {
         Some(s) => s.to_string(),
@@ -304,10 +330,25 @@ fn handle_prove_tool(args: &Value) -> Value {
         fuzz_seed: seed,
     };
 
-    // Dispatch the property through the three-tier pipeline.
-    // For now, dispatch a single property from the source.
-    let result =
-        chelis_prove::dispatch::dispatch_property(&source, "property", amenability, &options);
+    // Dispatch the user property through the three-tier pipeline. The tool
+    // probes a single property literally named `property` in the source.
+    // CR2-3: a module that does NOT define `property` (e.g. an
+    // obligation-only opaque module) must NOT be dragged to ok:false by a
+    // phantom `unbound variable: property` rejection. Only run the
+    // user-property dispatch when the module actually defines that binding;
+    // otherwise there is no user property to fold and `ok` is driven solely
+    // by the derived obligations and the check status.
+    let has_user_property = source_defines_binding(&source, "property");
+    let result = if has_user_property {
+        Some(chelis_prove::dispatch::dispatch_property(
+            &source,
+            "property",
+            amenability,
+            &options,
+        ))
+    } else {
+        None
+    };
 
     // Derived producer obligations (RFC D-OBLIG, D-PARITY): run the SAME
     // chelis-prove obligation engine the CLI uses on the module source, so
@@ -367,27 +408,49 @@ fn handle_prove_tool(args: &Value) -> Value {
     }
     let obligations_count = obligation_records.len();
 
-    let property_proved = result.status == chelis_prove::ProofStatus::Proved;
-    let property_failed = matches!(result.status, chelis_prove::ProofStatus::Disproved { .. });
-    // ok is false if the user property failed, OR any obligation failed /
-    // was unsupported / errored, OR the module did not type-check.
-    let ok = !property_failed
-        && ob_failed == 0
-        && ob_unsupported == 0
-        && ob_errored == 0
-        && !check_failed;
+    use chelis_prove::ProofStatus;
+    // CR2-3: a property is a PASS only when Proved or StatisticallyValidated.
+    // Every other status -- Disproved, Rejected, NotAmenable -- is a non-pass
+    // and must lower `ok`. The prior fold treated only Disproved as a
+    // failure, so a Rejected / NotAmenable property reported ok:true (a
+    // non-pass masquerading as a pass). The non-pass status is also bucketed
+    // into the summary by kind, mirroring the CLI's Status mapping
+    // (Disproved => failed, NotAmenable => unsupported, Rejected => error).
+    // When the module defines no `property`, there is no user-property
+    // contribution at all.
+    let (property_proved, prop_passed, prop_failed, prop_unsupported, prop_errored) = match &result
+    {
+        None => (false, true, 0, 0, 0),
+        Some(r) => match &r.status {
+            ProofStatus::Proved => (true, true, 0, 0, 0),
+            ProofStatus::StatisticallyValidated { .. } => (false, true, 0, 0, 0),
+            ProofStatus::Disproved { .. } => (false, false, 1, 0, 0),
+            ProofStatus::NotAmenable { .. } => (false, false, 0, 1, 0),
+            ProofStatus::Rejected { .. } => (false, false, 0, 0, 1),
+        },
+    };
+    // ok is false if the user property did not pass, OR any obligation
+    // failed / was unsupported / errored, OR the module did not type-check.
+    let ok =
+        prop_passed && ob_failed == 0 && ob_unsupported == 0 && ob_errored == 0 && !check_failed;
+
+    let property_total = if result.is_some() { 1 } else { 0 };
+    let properties: Vec<serde_json::Value> = result
+        .as_ref()
+        .map(|r| vec![serde_json::to_value(r).unwrap_or(json!(null))])
+        .unwrap_or_default();
 
     json!({
         "ok": ok,
         "stage": "prove",
-        "properties": [serde_json::to_value(&result).unwrap_or(json!(null))],
+        "properties": properties,
         "obligations": obligation_records,
         "summary": {
-            "total": 1,
+            "total": property_total,
             "proved": if property_proved { 1 } else { 0 },
-            "failed": (if property_failed { 1 } else { 0 }) + ob_failed,
-            "unsupported": ob_unsupported,
-            "errors": ob_errored + if check_failed { 1 } else { 0 },
+            "failed": prop_failed + ob_failed,
+            "unsupported": prop_unsupported + ob_unsupported,
+            "errors": prop_errored + ob_errored + if check_failed { 1 } else { 0 },
             "obligations": obligations_count,
         }
     })

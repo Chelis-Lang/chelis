@@ -164,3 +164,47 @@ def make(w: tensor[3, f32]) -> Simplex = Simplex { weights: w }
     );
     assert_eq!(invs[0].scalar_count(), 3);
 }
+
+#[test]
+fn cr2_2_validate_env_rejects_non_finite_under_negation_invariant() {
+    // CR2-2 HIGH (injection path): a `!=`-shaped invariant satisfied by
+    // `NaN != C == true` would accept a non-finite sample fail-OPEN.
+    // `validate_env` must reject any non-finite field unconditionally,
+    // independent of the predicate's truth value.
+    let surf = "module M.Prob
+@opaque
+@invariant(p) p.value != 0.5
+type Probability =
+  | Probability { value: f32 }
+def make(x: f32) -> Probability = Probability { value: x }
+";
+    let exprs = deep_of(surf);
+    let inv = &collect_opaque_invariants(&exprs)[0];
+    let consts = ConstEnv::new();
+    let pred = lower_predicate_flattened(inv, &inv.binder, &consts);
+
+    // A finite value that satisfies `!= 0.5` is accepted.
+    let mut ok = BTreeMap::new();
+    ok.insert("p.value".to_string(), 0.25);
+    assert!(
+        validate_env(&ok, inv, &pred, &consts),
+        "a finite satisfying value is accepted"
+    );
+
+    // NaN: `NaN != 0.5` is true under strict IEEE, but the field is
+    // non-finite, so it must be REJECTED (fail-closed), not accepted.
+    let mut nan = BTreeMap::new();
+    nan.insert("p.value".to_string(), f64::NAN);
+    assert!(
+        !validate_env(&nan, inv, &pred, &consts),
+        "a NaN field is rejected even though `NaN != 0.5` is true"
+    );
+
+    // +Inf is likewise non-finite and rejected.
+    let mut inf = BTreeMap::new();
+    inf.insert("p.value".to_string(), f64::INFINITY);
+    assert!(
+        !validate_env(&inf, inv, &pred, &consts),
+        "an infinite field is rejected"
+    );
+}

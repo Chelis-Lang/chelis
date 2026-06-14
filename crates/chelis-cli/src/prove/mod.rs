@@ -251,11 +251,14 @@ fn prove_surf_file(
         let ob_status = obligation_run::run_obligations(&parsed, options, totals);
         file_status = combine_status(file_status, ob_status);
     }
-    // Without the smt-enabled build the obligation machinery is compiled out,
-    // so producer obligations are silently unchecked. Warn on stderr (never
-    // touching the stdout NDJSON stream or the exit code) so a clean prove is
-    // not mistaken for verified obligations.
-    #[cfg(not(feature = "chelis-prove"))]
+    // CR2-5: warn whenever obligations were NOT SMT-verified, gated on the
+    // actual capability (`smt`) rather than on the optional `chelis-prove`
+    // dependency. A `chelis-prove`-without-`smt` build compiles the
+    // obligation machinery and runs it via Tier C (fuzz) -- NOT cvc5 -- so a
+    // clean run must still be flagged as not formally verified. The warning
+    // is stderr-only and never touches the stdout NDJSON stream or the exit
+    // code.
+    #[cfg(not(feature = "smt"))]
     warn_obligations_skipped_without_smt(path, count_invariant_opaque_surf(&flat));
     Ok(file_status)
 }
@@ -967,15 +970,15 @@ fn prove_deep_file(
         let status = prove_deep_property(&exprs, &property, options, totals);
         file_status = combine_status(file_status, status);
     }
-    #[cfg(not(feature = "chelis-prove"))]
+    #[cfg(not(feature = "smt"))]
     warn_obligations_skipped_without_smt(path, count_invariant_opaque_deep(&exprs));
     Ok(file_status)
 }
 
 /// Count opaque types that carry a declared invariant in flattened Surf
-/// decls. Used only in builds without obligation support to warn that
-/// their producer obligations were not checked.
-#[cfg(not(feature = "chelis-prove"))]
+/// decls. Used only in non-smt builds to warn that their producer
+/// obligations were not SMT-verified.
+#[cfg(not(feature = "smt"))]
 fn count_invariant_opaque_surf(decls: &[Decl]) -> usize {
     decls
         .iter()
@@ -994,7 +997,7 @@ fn count_invariant_opaque_surf(decls: &[Decl]) -> usize {
 
 /// Deep twin of `count_invariant_opaque_surf`: a `deftype` whose metadata
 /// carries both `opaque: true` and an `invariant` entry.
-#[cfg(not(feature = "chelis-prove"))]
+#[cfg(not(feature = "smt"))]
 fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
     fn scan(expr: &DeepExpr, acc: &mut usize) {
         if let DeepExpr::List(list, _) = expr {
@@ -1027,14 +1030,18 @@ fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
 
 /// Emit a one-line stderr warning (never touching stdout or the exit code)
 /// when a non-smt build proves a module declaring invariant-carrying opaque
-/// types, so a clean run is not mistaken for verified producer obligations.
-#[cfg(not(feature = "chelis-prove"))]
+/// types, so a clean run is not mistaken for formally verified producer
+/// obligations. CR2-5: this fires in EVERY non-`smt` build -- including a
+/// `chelis-prove`-without-`smt` build, where the obligation machinery runs
+/// but only at Tier C (fuzz), not cvc5 -- because the SMT verification the
+/// flag promises is unavailable.
+#[cfg(not(feature = "smt"))]
 fn warn_obligations_skipped_without_smt(path: &Path, count: usize) {
     if count > 0 {
         eprintln!(
             "warning: producer obligation verification requires the smt-enabled build; {count} \
-             invariant-carrying opaque type(s) in {} had their obligations NOT checked. Rebuild \
-             with --features smt to verify them.",
+             invariant-carrying opaque type(s) in {} did not have their obligations SMT-verified. \
+             Rebuild with --features smt to verify them.",
             path.display()
         );
     }

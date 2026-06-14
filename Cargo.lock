@@ -688,6 +688,7 @@ dependencies = [
  "axum",
  "chelis-compiler-api",
  "chelis-prove",
+ "chelis-surf",
  "http-body-util",
  "schemars",
  "serde",

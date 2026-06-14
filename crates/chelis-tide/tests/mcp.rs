@@ -351,6 +351,121 @@ fn cr12_failing_obligation_lowers_tide_status() {
     assert_eq!(obs[0]["status"], "failed");
 }
 
+/// CR2-3 (HIGH): the tide ok-fold previously lowered `ok` only on
+/// `ProofStatus::Disproved`, so a property reported `Rejected` or
+/// `NotAmenable` came back `ok:true` -- a non-pass status masquerading as
+/// a pass. A `property` that is NON-amenable under `smt-only` yields
+/// `NotAmenable`, which must make the response not-ok.
+#[test]
+fn cr2_3_not_amenable_property_is_not_ok_through_tide() {
+    // The module defines `property`, so the user-property dispatch runs.
+    let source = "module M
+def property() -> f32 = 1.0
+";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":23,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": source,
+            "amenability":"opaque","tier":"smt-only"
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["ok"], false,
+        "a NotAmenable property must not report ok:true: {structured}"
+    );
+    assert_eq!(
+        structured["summary"]["unsupported"], 1,
+        "NotAmenable is bucketed as unsupported, not failed: {structured}"
+    );
+}
+
+/// CR2-3: a `property` that genuinely fuzz-disproves is not-ok. The probe
+/// calls `property()` with zero arguments, so the property is nullary.
+#[test]
+fn cr2_3_disproved_property_is_not_ok_through_tide() {
+    let source = "module M
+def property() -> bool = 1.0 > 2.0
+";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":25,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": source, "tier":"fuzz-only"
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["ok"], false,
+        "a disproved property is not-ok: {structured}"
+    );
+}
+
+/// CR2-3 negative parity: a genuinely passing `property`
+/// (StatisticallyValidated) reports ok:true. The stricter fold rejects
+/// only non-pass statuses.
+#[test]
+fn cr2_3_passing_property_is_ok_through_tide() {
+    let source = "module M
+def property() -> bool = 1.0 == 1.0
+";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":26,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": source, "tier":"fuzz-only"
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["ok"], true,
+        "a passing property reports ok:true: {structured}"
+    );
+}
+
+/// CR2-3 (clean obligation-only module): a module that defines NO
+/// `property` binding must not be dragged to ok:false by the phantom
+/// user-property probe. A clean opaque module with all obligations passing
+/// stays ok:true (matches the brief's `clean module => ok:true`).
+#[test]
+fn cr2_3_obligation_only_clean_module_is_ok_through_tide() {
+    let source = "module Stats.Prob
+export (probability)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+def probability(x: f32) -> Option[Probability] =
+  if x >= 0.0 && x <= 1.0 then Some(Probability { value: x }) else None
+";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":27,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": source, "seed": 0
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["ok"], true,
+        "a clean obligation-only module (no `property`) is ok: {structured}"
+    );
+    // No phantom property record is emitted.
+    assert!(
+        structured["properties"].as_array().unwrap().is_empty(),
+        "no user property => empty properties array: {structured}"
+    );
+}
+
 /// CR-12: a type-broken module is not-ok through tide too (parity with the
 /// CLI exit-3 / RT3-F2 contract).
 #[test]

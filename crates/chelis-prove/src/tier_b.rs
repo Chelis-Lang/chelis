@@ -73,25 +73,60 @@ pub fn solve_property(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     }
 }
 
+/// The single source of truth for the intrinsics that [`lower_to_cvc5`]
+/// can actually build a cvc5 term for, paired with their required arity.
+///
+/// CR2-1: three lists used to drift -- the arity guard, the lowering
+/// match arms, and the transcendental-logic classifier. They are now all
+/// derived from this constant (and [`CVC5_TRANSCENDENTAL`]) so a function
+/// admitted by one cannot silently diverge from another.
+///
+/// `log` is deliberately ABSENT: cvc5 has no LOG kind, so `lower_to_cvc5`
+/// cannot build a term for it. `log` is still a valid predicate intrinsic
+/// (it is in [`chelis_pred::INTRINSIC_WHITELIST`]) and works at Tier C via
+/// the concrete evaluator; the arity guard routes it to a clean
+/// [`TierBResult::Error`] so dispatch falls through to Tier C rather than
+/// reaching the lowering and panicking.
+#[cfg(feature = "smt")]
+const CVC5_LOWERABLE: &[(&str, usize)] = &[
+    ("exp", 1),
+    ("sqrt", 1),
+    ("sin", 1),
+    ("cos", 1),
+    ("abs", 1),
+    ("min", 2),
+    ("max", 2),
+];
+
+/// The transcendental subset of [`CVC5_LOWERABLE`] whose presence selects
+/// the `QF_NRAT` logic (vs `QF_NRA`). `abs`/`min`/`max` are algebraic and
+/// stay in `QF_NRA`.
+#[cfg(feature = "smt")]
+const CVC5_TRANSCENDENTAL: &[&str] = &["exp", "sqrt", "sin", "cos"];
+
+/// Required arity for a cvc5-lowerable intrinsic, or `None` if the name is
+/// not in [`CVC5_LOWERABLE`].
+#[cfg(feature = "smt")]
+fn cvc5_lowerable_arity(name: &str) -> Option<usize> {
+    CVC5_LOWERABLE
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, a)| *a)
+}
+
 /// Arity-validate every intrinsic application in an [`SmtExpr`] before it
-/// reaches cvc5 (RT5-F1). The unary transcendentals/intrinsics
-/// (exp/log/sqrt/sin/cos/abs) require exactly one argument and `min`/`max`
-/// exactly two; a wrong-arity application would otherwise build an invalid
-/// cvc5 term that aborts the solver with empty stdout. Returns the first
-/// offending application's reason, mirroring the arity contract the
-/// concrete evaluator already enforces (CR-13).
+/// reaches cvc5 (RT5-F1). Every application must name a cvc5-lowerable
+/// intrinsic ([`CVC5_LOWERABLE`]) at exactly its required arity; otherwise
+/// the lowering would either build an invalid cvc5 term (wrong arity) or
+/// panic (a whitelisted-but-not-lowerable name such as `log`, CR2-1).
+/// Returns the first offending application's reason so dispatch routes the
+/// property to the same not-provable handling as Timeout/Unknown (and on
+/// to Tier C, where `log` is supported by the concrete evaluator).
 #[cfg(feature = "smt")]
 fn validate_smt_arity(expr: &SmtExpr) -> Result<(), String> {
     match expr {
         SmtExpr::Apply(name, args) => {
-            let expected = match name.as_str() {
-                "exp" | "log" | "sqrt" | "sin" | "cos" | "abs" => Some(1usize),
-                "min" | "max" => Some(2usize),
-                // Unknown function name: not lowerable (the lowering
-                // otherwise panics). Reject cleanly here.
-                _ => None,
-            };
-            match expected {
+            match cvc5_lowerable_arity(name) {
                 Some(n) if args.len() == n => {}
                 Some(n) => {
                     return Err(format!(
@@ -99,8 +134,14 @@ fn validate_smt_arity(expr: &SmtExpr) -> Result<(), String> {
                         args.len()
                     ));
                 }
+                // Not cvc5-lowerable: either a whitelisted predicate
+                // intrinsic with no cvc5 kind (e.g. `log`) or an unknown
+                // name. Either way the lowering cannot handle it, so reject
+                // cleanly here -- dispatch falls through to Tier C.
                 None => {
-                    return Err(format!("unsupported function `{name}` in SMT lowering"));
+                    return Err(format!(
+                        "unsupported function `{name}` in cvc5 lowering (routes to Tier C)"
+                    ));
                 }
             }
             for a in args {
@@ -175,12 +216,18 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
 
     // 2. Assert preconditions
     for pre in &property.preconditions {
-        let term = lower_to_cvc5(&tm, pre, &vars);
+        let term = match lower_to_cvc5(&tm, pre, &vars) {
+            Ok(t) => t,
+            Err(reason) => return TierBResult::Error(reason),
+        };
         solver.assert_formula(term);
     }
 
     // 3. Assert negation of postcondition
-    let post_term = lower_to_cvc5(&tm, &property.postcondition, &vars);
+    let post_term = match lower_to_cvc5(&tm, &property.postcondition, &vars) {
+        Ok(t) => t,
+        Err(reason) => return TierBResult::Error(reason),
+    };
     let negated = tm.mk_term(Kind::CVC5_KIND_NOT, &[post_term]);
     solver.assert_formula(negated);
 
@@ -204,15 +251,22 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
 }
 
 /// Lower an SmtExpr to a cvc5 Term.
+///
+/// Returns `Err` (rather than panicking) for any application that
+/// [`validate_smt_arity`] would also reject -- a name with no cvc5 kind
+/// (e.g. `log`, CR2-1) or a wrong arity. The arity guard already runs
+/// before lowering in [`solve_property_cvc5`], so this is defense in depth:
+/// the type system now forbids an unsupported function from silently
+/// reaching cvc5 or crashing the prove process.
 #[cfg(feature = "smt")]
 pub fn lower_to_cvc5(
     tm: &cvc5_rs::TermManager,
     expr: &SmtExpr,
     vars: &std::collections::HashMap<String, cvc5_rs::Term>,
-) -> cvc5_rs::Term {
+) -> Result<cvc5_rs::Term, String> {
     use cvc5_rs::Kind;
 
-    match expr {
+    Ok(match expr {
         SmtExpr::Var(name) => vars[name].clone(),
         SmtExpr::RealLit(value) => {
             // Use rational string representation for cvc5
@@ -227,8 +281,8 @@ pub fn lower_to_cvc5(
             }
         }
         SmtExpr::Arith(op, left, right) => {
-            let l = lower_to_cvc5(tm, left, vars);
-            let r = lower_to_cvc5(tm, right, vars);
+            let l = lower_to_cvc5(tm, left, vars)?;
+            let r = lower_to_cvc5(tm, right, vars)?;
             match op {
                 ArithOp::Add => tm.mk_term(Kind::CVC5_KIND_ADD, &[l, r]),
                 ArithOp::Sub => tm.mk_term(Kind::CVC5_KIND_SUB, &[l, r]),
@@ -238,8 +292,8 @@ pub fn lower_to_cvc5(
             }
         }
         SmtExpr::Cmp(op, left, right) => {
-            let l = lower_to_cvc5(tm, left, vars);
-            let r = lower_to_cvc5(tm, right, vars);
+            let l = lower_to_cvc5(tm, left, vars)?;
+            let r = lower_to_cvc5(tm, right, vars)?;
             match op {
                 CmpOp::Lt => tm.mk_term(Kind::CVC5_KIND_LT, &[l, r]),
                 CmpOp::Le => tm.mk_term(Kind::CVC5_KIND_LEQ, &[l, r]),
@@ -256,7 +310,7 @@ pub fn lower_to_cvc5(
             let terms: Vec<_> = children
                 .iter()
                 .map(|c| lower_to_cvc5(tm, c, vars))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             match op {
                 BoolOp::And => tm.mk_term(Kind::CVC5_KIND_AND, &terms),
                 BoolOp::Or => tm.mk_term(Kind::CVC5_KIND_OR, &terms),
@@ -264,7 +318,7 @@ pub fn lower_to_cvc5(
             }
         }
         SmtExpr::Not(inner) => {
-            let t = lower_to_cvc5(tm, inner, vars);
+            let t = lower_to_cvc5(tm, inner, vars)?;
             tm.mk_term(Kind::CVC5_KIND_NOT, &[t])
         }
         SmtExpr::Forall(bindings, body) => {
@@ -283,7 +337,7 @@ pub fn lower_to_cvc5(
             for (i, (name, _)) in bindings.iter().enumerate() {
                 extended_vars.insert(name.clone(), bound_vars[i].clone());
             }
-            let body_term = lower_to_cvc5(tm, body, &extended_vars);
+            let body_term = lower_to_cvc5(tm, body, &extended_vars)?;
             let bound_list = tm.mk_term(Kind::CVC5_KIND_VARIABLE_LIST, &bound_vars);
             tm.mk_term(Kind::CVC5_KIND_FORALL, &[bound_list, body_term])
         }
@@ -303,12 +357,33 @@ pub fn lower_to_cvc5(
             for (i, (name, _)) in bindings.iter().enumerate() {
                 extended_vars.insert(name.clone(), bound_vars[i].clone());
             }
-            let body_term = lower_to_cvc5(tm, body, &extended_vars);
+            let body_term = lower_to_cvc5(tm, body, &extended_vars)?;
             let bound_list = tm.mk_term(Kind::CVC5_KIND_VARIABLE_LIST, &bound_vars);
             tm.mk_term(Kind::CVC5_KIND_EXISTS, &[bound_list, body_term])
         }
         SmtExpr::Apply(name, args) => {
-            let lowered_args: Vec<_> = args.iter().map(|a| lower_to_cvc5(tm, a, vars)).collect();
+            // Defense in depth: arity/lowerability is already enforced by
+            // validate_smt_arity before any lowering runs, but re-check here
+            // so this function can never build a malformed term or panic
+            // (CR2-1). A non-lowerable name (e.g. `log`) returns Err.
+            match cvc5_lowerable_arity(name) {
+                Some(n) if args.len() == n => {}
+                Some(n) => {
+                    return Err(format!(
+                        "intrinsic `{name}` expects {n} argument(s), got {}",
+                        args.len()
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "unsupported function `{name}` in cvc5 lowering (routes to Tier C)"
+                    ));
+                }
+            }
+            let lowered_args: Vec<_> = args
+                .iter()
+                .map(|a| lower_to_cvc5(tm, a, vars))
+                .collect::<Result<Vec<_>, _>>()?;
             match name.as_str() {
                 "exp" => tm.mk_term(Kind::CVC5_KIND_EXPONENTIAL, &lowered_args),
                 "sqrt" => tm.mk_term(Kind::CVC5_KIND_SQRT, &lowered_args),
@@ -335,27 +410,34 @@ pub fn lower_to_cvc5(
                         &[cond, lowered_args[0].clone(), lowered_args[1].clone()],
                     )
                 }
-                other => panic!(
-                    "unsupported function `{other}` in v0.1; only inlineable functions and supported transcendentals (exp, sqrt, sin, cos, abs, min, max) are allowed"
-                ),
+                // Unreachable after the cvc5_lowerable_arity guard above;
+                // returns Err rather than panicking if it is ever hit
+                // (e.g. CVC5_LOWERABLE gains a name with no match arm).
+                other => {
+                    return Err(format!(
+                        "unsupported function `{other}` in cvc5 lowering (routes to Tier C)"
+                    ));
+                }
             }
         }
         SmtExpr::Ite(cond, then_expr, else_expr) => {
-            let c = lower_to_cvc5(tm, cond, vars);
-            let t = lower_to_cvc5(tm, then_expr, vars);
-            let e = lower_to_cvc5(tm, else_expr, vars);
+            let c = lower_to_cvc5(tm, cond, vars)?;
+            let t = lower_to_cvc5(tm, then_expr, vars)?;
+            let e = lower_to_cvc5(tm, else_expr, vars)?;
             tm.mk_term(Kind::CVC5_KIND_ITE, &[c, t, e])
         }
-    }
+    })
 }
 
-/// Check if an SmtExpr contains transcendental function calls (exp, sin, cos, sqrt, abs).
+/// Check if an SmtExpr contains a cvc5 transcendental call (exp, sin, cos,
+/// sqrt) -- the subset of [`CVC5_LOWERABLE`] that selects the `QF_NRAT`
+/// logic. Derived from [`CVC5_TRANSCENDENTAL`] so it cannot drift from the
+/// lowering (CR2-1). `abs`/`min`/`max` are algebraic and stay in `QF_NRA`.
 #[cfg(feature = "smt")]
 fn contains_transcendental(expr: &SmtExpr) -> bool {
     match expr {
         SmtExpr::Apply(name, args) => {
-            matches!(name.as_str(), "exp" | "sin" | "cos" | "sqrt" | "abs")
-                || args.iter().any(contains_transcendental)
+            CVC5_TRANSCENDENTAL.contains(&name.as_str()) || args.iter().any(contains_transcendental)
         }
         SmtExpr::Arith(_, l, r) => contains_transcendental(l) || contains_transcendental(r),
         SmtExpr::Cmp(_, l, r) => contains_transcendental(l) || contains_transcendental(r),
@@ -549,5 +631,84 @@ mod tests {
             ),
         };
         assert_eq!(solve_property(&max_prop, 5000), TierBResult::Proved);
+    }
+
+    #[test]
+    fn cr2_1_log_is_a_clean_unsupported_not_a_panic() {
+        // CR2-1 CRITICAL: `log` is in the predicate grammar / chelis_pred
+        // whitelist and works at Tier C, but cvc5 has no LOG kind, so
+        // lower_to_cvc5 panics on it. A correct-arity `log(x)` must lower to
+        // a clean Error (so dispatch falls to Tier C), never panic the
+        // prove process. The old test suite only ever exercised exp(x).
+        let prop = intrinsic_ge_zero("log", vec![SmtExpr::Var("x".to_string())]);
+        match solve_property(&prop, 5000) {
+            TierBResult::Error(reason) => {
+                assert!(reason.contains("log"), "names the unsupported fn: {reason}");
+            }
+            other => panic!("expected Error for log(x), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cr2_1_every_whitelisted_intrinsic_at_correct_arity_does_not_panic() {
+        // Loop over EVERY whitelisted intrinsic at its correct arity so no
+        // intrinsic is left untested -- that gap hid `log` twice. Each must
+        // produce a determinate, panic-free outcome: a cvc5-lowerable fn
+        // proves/disproves/times-out; a whitelisted-but-not-lowerable fn
+        // (log) is a clean Error.
+        for &name in chelis_pred::INTRINSIC_WHITELIST {
+            let arity = if name == "min" || name == "max" { 2 } else { 1 };
+            let args: Vec<SmtExpr> = (0..arity).map(|_| SmtExpr::Var("x".into())).collect();
+            let prop = intrinsic_ge_zero(name, args);
+            // The point is the absence of a panic and a determinate result.
+            let result = solve_property(&prop, 5000);
+            assert!(
+                matches!(
+                    result,
+                    TierBResult::Proved
+                        | TierBResult::Disproved(_)
+                        | TierBResult::Timeout
+                        | TierBResult::Unknown
+                        | TierBResult::Error(_)
+                ),
+                "intrinsic `{name}` at arity {arity} must yield a determinate result, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cr2_1_cvc5_lowerable_set_matches_lowering_and_transcendental_classification() {
+        // The single source of truth (CVC5_LOWERABLE) must (a) NOT contain
+        // log (cvc5 has no LOG), (b) be a subset of the predicate-grammar
+        // whitelist, and (c) drive contains_transcendental so the three
+        // lists cannot drift again.
+        assert!(
+            !CVC5_LOWERABLE.iter().any(|(n, _)| *n == "log"),
+            "log is not cvc5-lowerable"
+        );
+        for &(f, _) in CVC5_LOWERABLE {
+            assert!(
+                chelis_pred::INTRINSIC_WHITELIST.contains(&f),
+                "cvc5-lowerable `{f}` must be in the predicate grammar"
+            );
+        }
+        // CVC5_TRANSCENDENTAL is a strict subset of the lowerable names.
+        for &t in CVC5_TRANSCENDENTAL {
+            assert!(
+                CVC5_LOWERABLE.iter().any(|(n, _)| *n == t),
+                "transcendental `{t}` must be cvc5-lowerable"
+            );
+        }
+        // contains_transcendental agrees with CVC5_TRANSCENDENTAL membership
+        // for every lowerable intrinsic (abs/min/max are algebraic).
+        for &(f, _) in CVC5_LOWERABLE {
+            let is_transcendental = CVC5_TRANSCENDENTAL.contains(&f);
+            let expr = SmtExpr::Apply(f.to_string(), vec![SmtExpr::Var("x".into())]);
+            assert_eq!(
+                contains_transcendental(&expr),
+                is_transcendental,
+                "contains_transcendental disagrees on `{f}`"
+            );
+        }
     }
 }

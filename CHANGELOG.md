@@ -22,6 +22,66 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+<!-- opaque-types prove fixes (review 2) -->
+- The `chelis prove` non-SMT obligation warning now fires in every build
+  where obligations were not SMT-verified (CR2-5). It was gated on the
+  absence of the optional `chelis-prove` dependency, so a
+  `chelis-prove`-without-`smt` build -- which compiles the obligation
+  machinery and runs it at Tier C (fuzz), not cvc5 -- suppressed the
+  warning even though no formal SMT verification occurred. The gate is
+  now the actual capability (`not(feature = "smt")`), and the message
+  says the obligations were not SMT-verified. It remains stderr-only and
+  never touches the stdout NDJSON stream or the exit code.
+
+- Tier B constant inlining now preserves a constant's declared numeric
+  type (CR2-4). An int-typed module constant
+  (`def n() -> int32 = 3`, or the value binding `n = 3`) used in a
+  producer guard was inlined as an f32 literal -- silently retyped --
+  because the resolved-constant environment carries only an `f64`. The
+  inliner now reads the constant's declared literal type from the module
+  and emits an integer literal for an `int32`/`int64` constant (so it
+  lowers to `SmtSort::Int`) while keeping the f32 path for float
+  constants.
+
+- The chelis-tide `chelis_prove` MCP response now folds every non-pass
+  property status into `ok:false` (CR2-3). Only `Proved` and
+  `StatisticallyValidated` are passes; `Disproved`, `Rejected`, and
+  `NotAmenable` now lower the response (previously only `Disproved` did,
+  so a rejected or non-amenable property reported `ok:true`). The
+  non-pass status is also bucketed into the summary by kind (Disproved
+  => failed, NotAmenable => unsupported, Rejected => error), matching the
+  CLI's status mapping. As part of this, the tool no longer emits a
+  phantom `unbound variable: property` rejection for a module that
+  defines no `property` binding: the user-property dispatch runs only
+  when the module actually defines `property`, so a clean
+  obligation-only module reports `ok:true` and an empty `properties`
+  array.
+
+- Invariant validation now fails closed on a non-finite (NaN/Inf)
+  representation field (CR2-2). The strict evaluator gives `NaN != C`
+  as `true` under IEEE, so a `!=`/negation-shaped invariant accepted a
+  NaN tensor field fail-OPEN (the obligation reported `passed`). Both
+  validation chokepoints -- the producer-obligation path
+  (`validate_with_predicate` in the obligation engine) and the
+  injection-sampling path (`validate_env` in `opaque`) -- now reject any
+  non-finite field unconditionally, before the predicate runs, because a
+  non-finite value is never a valid inhabitant of the opaque domain
+  regardless of the predicate's shape.
+
+- Tier B SMT lowering no longer panics on `log` (CR2-1). `log` is a
+  valid predicate intrinsic that the concrete evaluator (Tier C)
+  supports, but cvc5 has no LOG kind, so the lowering had no arm for it
+  and `panic!`ed -- a grammar-admitted `log(x)` predicate could crash
+  the prove process under `--features smt`. The cvc5-lowerable intrinsic
+  set is now one constant (`CVC5_LOWERABLE`, plus the transcendental
+  subset that selects `QF_NRAT`); the arity guard, the lowering match,
+  and the transcendental-logic classifier all derive from it, so a
+  function admitted by one can no longer diverge from another. A
+  whitelisted-but-not-lowerable name (`log`) is rejected as a clean
+  `TierBResult::Error` so dispatch falls through to Tier C, and
+  `lower_to_cvc5` now returns `Result` (defense in depth) rather than
+  panicking on an unhandled name.
+
 - The advisory `opaque-domain-construction` lint now keys opaque types
   by (type, defining module) instead of bare leaf name (CR-9). A
   non-opaque type that shares a leaf name with an opaque type in an
