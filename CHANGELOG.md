@@ -23,6 +23,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove fixes (review 2) -->
+- The chelis-tide `chelis_prove` MCP response now folds every non-pass
+  property status into `ok:false` (CR2-3). Only `Proved` and
+  `StatisticallyValidated` are passes; `Disproved`, `Rejected`, and
+  `NotAmenable` now lower the response (previously only `Disproved` did,
+  so a rejected or non-amenable property reported `ok:true`). The
+  non-pass status is also bucketed into the summary by kind (Disproved
+  => failed, NotAmenable => unsupported, Rejected => error), matching the
+  CLI's status mapping. As part of this, the tool no longer emits a
+  phantom `unbound variable: property` rejection for a module that
+  defines no `property` binding: the user-property dispatch runs only
+  when the module actually defines `property`, so a clean
+  obligation-only module reports `ok:true` and an empty `properties`
+  array.
+
 - Invariant validation now fails closed on a non-finite (NaN/Inf)
   representation field (CR2-2). The strict evaluator gives `NaN != C`
   as `true` under IEEE, so a `!=`/negation-shaped invariant accepted a
