@@ -171,6 +171,122 @@ fn validate_smt_arity(expr: &SmtExpr) -> Result<(), String> {
     }
 }
 
+/// The arithmetic sort class of an [`SmtExpr`] for the U3 sort pre-check:
+/// `Int`, `Real`, or `Bool`. `Unknown` is a sort we cannot determine
+/// (e.g. an intrinsic application whose result sort cvc5 fixes to Real but
+/// which we treat as compatible with either to avoid spurious rejections);
+/// it unifies with anything.
+#[cfg(feature = "smt")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortClass {
+    Int,
+    Real,
+    Bool,
+    Unknown,
+}
+
+/// Infer the arithmetic sort class of an [`SmtExpr`] from the declared
+/// variable sorts and the literal kinds. Used only by the U3 operand-sort
+/// pre-check; it is deliberately conservative -- an undetermined sort is
+/// `Unknown` and unifies with anything, so the check rejects only a
+/// definite Int-vs-Real clash (never a sound term).
+#[cfg(feature = "smt")]
+fn infer_sort(expr: &SmtExpr, sorts: &std::collections::HashMap<&str, SmtSort>) -> SortClass {
+    match expr {
+        SmtExpr::IntLit(_) => SortClass::Int,
+        SmtExpr::RealLit(_) => SortClass::Real,
+        SmtExpr::BoolLit(_) => SortClass::Bool,
+        SmtExpr::Var(name) => match sorts.get(name.as_str()) {
+            Some(SmtSort::Int) => SortClass::Int,
+            Some(SmtSort::Real) => SortClass::Real,
+            Some(SmtSort::Bool) => SortClass::Bool,
+            None => SortClass::Unknown,
+        },
+        SmtExpr::Cmp(_, _, _) | SmtExpr::Bool(_, _) | SmtExpr::Not(_) => SortClass::Bool,
+        SmtExpr::Arith(_, l, r) => unify_sort(infer_sort(l, sorts), infer_sort(r, sorts)),
+        SmtExpr::Ite(_, t, e) => unify_sort(infer_sort(t, sorts), infer_sort(e, sorts)),
+        // An intrinsic application (sqrt/exp/min/max/...) is Real-valued in
+        // cvc5; treat as Unknown so an int argument inside it does not trip a
+        // spurious clash (cvc5 coerces ints to reals inside these).
+        SmtExpr::Apply(_, _) => SortClass::Unknown,
+        SmtExpr::Forall(_, _) | SmtExpr::Exists(_, _) => SortClass::Bool,
+    }
+}
+
+/// Unify two sort classes for the U3 pre-check. `Unknown` unifies with
+/// anything; two equal classes unify to themselves; a definite Int-vs-Real
+/// pair does not unify (returns `Unknown` -- the clash is caught at the
+/// comparison/op site, not here).
+#[cfg(feature = "smt")]
+fn unify_sort(a: SortClass, b: SortClass) -> SortClass {
+    match (a, b) {
+        (SortClass::Unknown, x) | (x, SortClass::Unknown) => x,
+        (x, y) if x == y => x,
+        _ => SortClass::Unknown,
+    }
+}
+
+/// Reject an operand-sort mismatch (a definite Int term compared against or
+/// combined with a definite Real term) before any cvc5 term is built (U3).
+/// Returns the first offending site's reason. Numeric comparisons (`Cmp`)
+/// and arithmetic ops (`Arith`) require their two operands to share a
+/// numeric sort; a definite Int-vs-Real pair is the mismatch cvc5 would
+/// abort on.
+#[cfg(feature = "smt")]
+fn check_operand_sorts(
+    expr: &SmtExpr,
+    sorts: &std::collections::HashMap<&str, SmtSort>,
+) -> Result<(), String> {
+    let clash = |l: &SmtExpr, r: &SmtExpr, what: &str| -> Result<(), String> {
+        let ls = infer_sort(l, sorts);
+        let rs = infer_sort(r, sorts);
+        let mismatch = matches!(
+            (ls, rs),
+            (SortClass::Int, SortClass::Real) | (SortClass::Real, SortClass::Int)
+        );
+        if mismatch {
+            Err(format!(
+                "operand sort mismatch in {what}: Int vs Real (routes to Tier C)"
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    match expr {
+        SmtExpr::Cmp(_, l, r) => {
+            clash(l, r, "comparison")?;
+            check_operand_sorts(l, sorts)?;
+            check_operand_sorts(r, sorts)
+        }
+        SmtExpr::Arith(_, l, r) => {
+            clash(l, r, "arithmetic")?;
+            check_operand_sorts(l, sorts)?;
+            check_operand_sorts(r, sorts)
+        }
+        SmtExpr::Bool(_, kids) => {
+            for k in kids {
+                check_operand_sorts(k, sorts)?;
+            }
+            Ok(())
+        }
+        SmtExpr::Not(inner) | SmtExpr::Forall(_, inner) | SmtExpr::Exists(_, inner) => {
+            check_operand_sorts(inner, sorts)
+        }
+        SmtExpr::Ite(c, t, e) => {
+            check_operand_sorts(c, sorts)?;
+            check_operand_sorts(t, sorts)?;
+            check_operand_sorts(e, sorts)
+        }
+        SmtExpr::Apply(_, args) => {
+            for a in args {
+                check_operand_sorts(a, sorts)?;
+            }
+            Ok(())
+        }
+        SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => Ok(()),
+    }
+}
+
 #[cfg(feature = "smt")]
 fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     use cvc5_rs::{Kind, Solver, TermManager};
@@ -184,6 +300,29 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     }
     for pre in &property.preconditions {
         if let Err(reason) = validate_smt_arity(pre) {
+            return TierBResult::Error(reason);
+        }
+    }
+
+    // U3 (defense in depth): reject an operand-sort mismatch (an Int term
+    // compared against / combined with a Real term) BEFORE building any cvc5
+    // term. cvc5's `mk_term` ABORTS THE PROCESS on a sort-mismatched
+    // GEQ/ADD/... ("Subexpressions must have the same type: Int/Real"), which
+    // surfaces to a JSON consumer as an empty-stdout bare exit -- a
+    // machine-contract violation. U2 makes such a mismatch unconstructible on
+    // the obligation path; this pre-check guarantees that ANY mismatch from
+    // ANY caller is a clean TierBResult::Error that dispatch routes to Tier C,
+    // never a cvc5 abort. The variable sorts are the declared ones.
+    let sorts: std::collections::HashMap<&str, SmtSort> = property
+        .variables
+        .iter()
+        .map(|(n, s)| (n.as_str(), *s))
+        .collect();
+    if let Err(reason) = check_operand_sorts(&property.postcondition, &sorts) {
+        return TierBResult::Error(reason);
+    }
+    for pre in &property.preconditions {
+        if let Err(reason) = check_operand_sorts(pre, &sorts) {
             return TierBResult::Error(reason);
         }
     }
@@ -710,5 +849,110 @@ mod tests {
                 "contains_transcendental disagrees on `{f}`"
             );
         }
+    }
+
+    // --- U3: operand-sort mismatch is a clean Error, not a cvc5 abort ---
+
+    /// An Int-sorted var compared against a Real literal. cvc5's
+    /// `mk_term(GEQ, [Int, Real])` ABORTS the process; the U3 pre-check must
+    /// turn it into a clean `TierBResult::Error` so dispatch routes to Tier C.
+    #[test]
+    fn u3_int_vs_real_comparison_is_a_clean_error_not_a_cvc5_abort() {
+        let prop = SmtProperty {
+            variables: vec![("n".to_string(), SmtSort::Int)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Var("n".to_string())),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        };
+        match solve_property(&prop, 5000) {
+            TierBResult::Error(reason) => {
+                assert!(
+                    reason.contains("sort mismatch") || reason.to_lowercase().contains("int"),
+                    "Error names the sort clash: {reason}"
+                );
+            }
+            other => panic!("expected a clean Error for Int-vs-Real comparison, got {other:?}"),
+        }
+    }
+
+    /// The mismatch is also caught when it sits inside an arithmetic term
+    /// (`Int_var + Real_lit`), and when it is buried in a precondition.
+    #[test]
+    fn u3_int_vs_real_in_arith_and_precondition_is_a_clean_error() {
+        // Int var + Real literal inside the postcondition.
+        let arith = SmtProperty {
+            variables: vec![("n".to_string(), SmtSort::Int)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Add,
+                    Box::new(SmtExpr::Var("n".to_string())),
+                    Box::new(SmtExpr::RealLit(1.5)),
+                )),
+                Box::new(SmtExpr::IntLit(0)),
+            ),
+        };
+        assert!(
+            matches!(solve_property(&arith, 5000), TierBResult::Error(_)),
+            "Int+Real arithmetic is a clean Error"
+        );
+        // Mismatch buried in a precondition.
+        let pre = SmtProperty {
+            variables: vec![("n".to_string(), SmtSort::Int)],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(SmtExpr::Var("n".to_string())),
+                Box::new(SmtExpr::RealLit(10.0)),
+            )],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Var("n".to_string())),
+                Box::new(SmtExpr::IntLit(0)),
+            ),
+        };
+        assert!(
+            matches!(solve_property(&pre, 5000), TierBResult::Error(_)),
+            "Int-vs-Real in a precondition is a clean Error"
+        );
+    }
+
+    /// Negative parity: consistent sorts still solve. An all-Int property
+    /// proves, and an all-Real property proves -- the pre-check must not
+    /// reject a sound term.
+    #[test]
+    fn u3_consistent_sorts_still_solve() {
+        let int_prop = SmtProperty {
+            variables: vec![("n".to_string(), SmtSort::Int)],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Var("n".to_string())),
+                Box::new(SmtExpr::IntLit(0)),
+            )],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Var("n".to_string())),
+                Box::new(SmtExpr::IntLit(0)),
+            ),
+        };
+        assert_eq!(solve_property(&int_prop, 5000), TierBResult::Proved);
+
+        let real_prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Mul,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::Var("x".to_string())),
+                )),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        };
+        assert_eq!(solve_property(&real_prop, 5000), TierBResult::Proved);
     }
 }

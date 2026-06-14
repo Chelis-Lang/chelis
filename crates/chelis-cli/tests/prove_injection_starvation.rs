@@ -161,7 +161,18 @@ fn same_seed_injection_is_deterministic() {
         &source,
         &["--samples", "10", "--seed", "5", "--only", "bounded"],
     );
-    assert_eq!(property(&r1, "bounded"), property(&r2, "bounded"));
+    // Compare the deterministic verification fields, not the `source.file`
+    // path (each run uses a fresh tempdir, so the absolute path differs while
+    // the verification result is identical).
+    let strip = |mut p: Value| {
+        if let Some(obj) = p.as_object_mut() {
+            obj.remove("source");
+        }
+        p
+    };
+    let p1 = strip(property(&r1, "bounded").expect("p1").clone());
+    let p2 = strip(property(&r2, "bounded").expect("p2").clone());
+    assert_eq!(p1, p2);
 }
 
 // ── D-SOUND: update-shaped producer obligations ───────────────────

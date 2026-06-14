@@ -1,21 +1,18 @@
-//! Surf -> SMT lowering for the CLI Tier B prove path.
+//! Surf -> SMT lowering for the shared property runner's Tier B path.
 //!
 //! Extracted verbatim from `prove.rs` as a pure module split (W3+W4
 //! Unit a). The `surf_expr_to_smt` family lowers a Surf property body
-//! and its preconditions into `chelis_prove::solver::SmtExpr` form,
+//! and its preconditions into `crate::solver::SmtExpr` form,
 //! inlining in-module function calls (depth 3, cycle-guarded) and
 //! substituting `Block` let-bindings. `if` => `ite` is already handled
 //! here; record beta-reduction and case-of-known-constructor reduction
 //! (RFC D-TIERB) are added in a later unit.
 //!
-//! This whole module is gated on the `chelis-prove` optional dependency
-//! (the implicit feature an `optional = true` dep creates); without it
-//! the CLI prove path runs Tier C only.
-#![cfg(feature = "chelis-prove")]
+//! It lives in chelis-prove so both the CLI prove path and the tide MCP
+//! tool reach one Surf->SMT lowering through the shared property runner.
 
 use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param};
 
-#[cfg(feature = "chelis-prove")]
 pub(super) struct InlineCtx<'a> {
     pub(super) decls: &'a [Decl],
     pub(super) depth: usize,
@@ -23,7 +20,6 @@ pub(super) struct InlineCtx<'a> {
     pub(super) call_stack: Vec<String>,
 }
 
-#[cfg(feature = "chelis-prove")]
 fn lookup_fun_body<'a>(decls: &'a [Decl], name: &str) -> Option<(&'a [Param], &'a Expr)> {
     decls.iter().find_map(|d| match d {
         Decl::FunDef {
@@ -36,12 +32,8 @@ fn lookup_fun_body<'a>(decls: &'a [Decl], name: &str) -> Option<(&'a [Param], &'
     })
 }
 
-#[cfg(feature = "chelis-prove")]
-pub(super) fn surf_expr_to_smt(
-    expr: &Expr,
-    ctx: &InlineCtx,
-) -> Option<chelis_prove::solver::SmtExpr> {
-    use chelis_prove::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
+pub(super) fn surf_expr_to_smt(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
+    use crate::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
     match expr {
         Expr::Binary(BinOp::Ge, l, r, _) => Some(SmtExpr::Cmp(
             SC::Ge,
@@ -86,9 +78,8 @@ pub(super) fn surf_expr_to_smt(
     }
 }
 
-#[cfg(feature = "chelis-prove")]
-fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<chelis_prove::solver::SmtExpr> {
-    use chelis_prove::solver::{ArithOp as SA, SmtExpr};
+fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
+    use crate::solver::{ArithOp as SA, SmtExpr};
     match expr {
         Expr::Var(name, _) => Some(SmtExpr::Var(name.clone())),
         Expr::Lit(Literal::Float(v), _) => Some(SmtExpr::RealLit(*v)),
@@ -158,13 +149,12 @@ fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<chelis_prove::solver::SmtE
     }
 }
 
-#[cfg(feature = "chelis-prove")]
 fn surf_arith_subst(
     expr: &Expr,
     subst: &std::collections::HashMap<String, &Expr>,
     ctx: &InlineCtx,
-) -> Option<chelis_prove::solver::SmtExpr> {
-    use chelis_prove::solver::{ArithOp as SA, BoolOp as SB, CmpOp as SC, SmtExpr};
+) -> Option<crate::solver::SmtExpr> {
+    use crate::solver::{ArithOp as SA, BoolOp as SB, CmpOp as SC, SmtExpr};
     match expr {
         Expr::Var(name, _) => {
             if let Some(replacement) = subst.get(name.as_str()) {
@@ -299,13 +289,12 @@ fn surf_arith_subst(
     }
 }
 
-#[cfg(feature = "chelis-prove")]
 fn surf_expr_to_smt_subst(
     expr: &Expr,
     subst: &std::collections::HashMap<String, &Expr>,
     ctx: &InlineCtx,
-) -> Option<chelis_prove::solver::SmtExpr> {
-    use chelis_prove::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
+) -> Option<crate::solver::SmtExpr> {
+    use crate::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
     match expr {
         Expr::Binary(BinOp::Ge, l, r, _) => Some(SmtExpr::Cmp(
             SC::Ge,

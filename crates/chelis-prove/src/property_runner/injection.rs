@@ -16,19 +16,18 @@
 //!
 //! Gated on the `chelis-prove` optional dependency (the obligation /
 //! generation machinery lives there).
-#![cfg(feature = "chelis-prove")]
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_surf::ast::{Decl, Param, TypeExpr};
 
-use super::{ProveOptions, Status, Summary};
+use super::{PropertyOutcome, PropertyRunOptions, PropertyStatus, PropertyTier};
 
 /// Does this property have at least one binder whose type is an
 /// invariant-carrying opaque type? If so, the injection path owns it.
 pub(super) fn property_has_opaque_invariant_binder(decls: &[Decl], params: &[Param]) -> bool {
     let exprs = chelis_surf::desugar::desugar_program(decls);
-    let invariants = chelis_prove::opaque::collect_opaque_invariants(&exprs);
+    let invariants = crate::opaque::collect_opaque_invariants(&exprs);
     params.iter().any(|p| {
         matches!(&p.ty, Some(TypeExpr::Named(name, _))
             if invariants.iter().any(|inv| &inv.type_name == name))
@@ -43,15 +42,13 @@ pub(super) fn prove_with_injection(
     params: &[Param],
     preconditions: &[chelis_surf::ast::Expr],
     body: &chelis_surf::ast::Expr,
-    options: &ProveOptions<'_>,
-    totals: &mut Summary,
-) -> Status {
-    totals.total += 1;
-    let seed = options.seed.unwrap_or(0);
-    let samples_needed = options.samples.unwrap_or(100);
+    options: &PropertyRunOptions,
+) -> PropertyOutcome {
+    let seed = options.injection_seed();
+    let samples_needed = options.samples;
 
     let exprs = chelis_surf::desugar::desugar_program(decls);
-    let invariants = chelis_prove::opaque::collect_opaque_invariants(&exprs);
+    let invariants = crate::opaque::collect_opaque_invariants(&exprs);
     let consts = resolve_constants(&exprs, &invariants);
     let module_source = chelis_deep::printer::print_canonical(&exprs);
 
@@ -61,14 +58,17 @@ pub(super) fn prove_with_injection(
         match classify_binder(p, &invariants) {
             Some(b) => binders.push(b),
             None => {
-                emit_unsupported(
-                    options,
+                return outcome(
                     property_name,
+                    PropertyStatus::Unsupported,
+                    0,
                     seed,
-                    &format!("binder `{}` has an unsupported type for injection", p.name),
-                    totals,
+                    None,
+                    Some(format!(
+                        "binder `{}` has an unsupported type for injection",
+                        p.name
+                    )),
                 );
-                return Status::Unsupported;
             }
         }
     }
@@ -80,7 +80,7 @@ pub(super) fn prove_with_injection(
         .map(chelis_surf::desugar::desugar_expr_only)
         .collect();
 
-    let mut rng = chelis_prove::opaque::GenRng::new(seed);
+    let mut rng = crate::opaque::GenRng::new(seed);
     let mut accepted = 0usize;
     let gen_budget = samples_needed.saturating_mul(100).max(200);
 
@@ -100,14 +100,14 @@ pub(super) fn prove_with_injection(
                     let vals: Vec<f64> = (0..count).map(|_| rng_f64(&mut rng)).collect();
                     bindings.push((
                         name.clone(),
-                        chelis_prove::opaque::tensor_value_expr_pub(dims, "f32", &vals),
+                        crate::opaque::tensor_value_expr_pub(dims, "f32", &vals),
                         serde_json::json!(vals),
                     ));
                 }
                 Binder::Opaque { name, inv } => {
-                    let mut grng = chelis_prove::opaque::GenRng::new(rng.next_u64());
+                    let mut grng = crate::opaque::GenRng::new(rng.next_u64());
                     let producers = generation_producers(&exprs, &invariants, inv);
-                    match chelis_prove::opaque::generate_binder(
+                    match crate::opaque::generate_binder(
                         inv,
                         &consts,
                         &module_source,
@@ -123,20 +123,26 @@ pub(super) fn prove_with_injection(
                         }
                         Err(diag) => {
                             if options.invariant_min_rate == 0.0 {
-                                emit_error(
-                                    options,
+                                return outcome(
                                     property_name,
+                                    PropertyStatus::Error,
+                                    0,
                                     seed,
-                                    &format!(
+                                    None,
+                                    Some(format!(
                                         "generator exhausted for invariant binder `{}` of type `{}`",
                                         name, diag.type_name
-                                    ),
-                                    totals,
+                                    )),
                                 );
-                                return Status::Error;
                             }
-                            emit_unsupported(options, property_name, seed, &diag.message(), totals);
-                            return Status::Unsupported;
+                            return outcome(
+                                property_name,
+                                PropertyStatus::Unsupported,
+                                0,
+                                seed,
+                                None,
+                                Some(diag.message()),
+                            );
                         }
                     }
                 }
@@ -149,10 +155,7 @@ pub(super) fn prove_with_injection(
             match eval_bool_in_module(&exprs, &invariants, &bindings, &conjoin(&pre_deep)) {
                 Ok(true) => {}
                 Ok(false) => continue,
-                Err(e) => {
-                    emit_error(options, property_name, seed, &e, totals);
-                    return Status::Error;
-                }
+                Err(e) => return outcome_error(property_name, seed, e),
             }
         }
 
@@ -160,21 +163,60 @@ pub(super) fn prove_with_injection(
         match eval_bool_in_module(&exprs, &invariants, &bindings, &body_deep) {
             Ok(true) => {}
             Ok(false) => {
-                totals.failed += 1;
                 let cx = counterexample(&bindings);
-                emit_failed(options, property_name, seed, accepted, cx, totals);
-                return Status::Failed;
+                return outcome(
+                    property_name,
+                    PropertyStatus::Failed,
+                    accepted,
+                    seed,
+                    Some(cx),
+                    None,
+                );
             }
-            Err(e) => {
-                emit_error(options, property_name, seed, &e, totals);
-                return Status::Error;
-            }
+            Err(e) => return outcome_error(property_name, seed, e),
         }
     }
 
-    totals.passed += 1;
-    emit_passed(options, property_name, seed, samples_needed, totals);
-    Status::Passed
+    outcome(
+        property_name,
+        PropertyStatus::Passed,
+        samples_needed,
+        seed,
+        None,
+        None,
+    )
+}
+
+/// Build an injection-path [`PropertyOutcome`]. All injection outcomes are
+/// Tier C (fuzz over generated invariant-valid binders) and carry
+/// `injected: true`.
+fn outcome(
+    name: &str,
+    status: PropertyStatus,
+    samples: usize,
+    seed: u64,
+    counterexample: Option<serde_json::Value>,
+    reason: Option<String>,
+) -> PropertyOutcome {
+    let tier = if matches!(status, PropertyStatus::Passed | PropertyStatus::Failed) {
+        PropertyTier::Fuzz
+    } else {
+        PropertyTier::None
+    };
+    PropertyOutcome {
+        name: name.to_string(),
+        status,
+        proof_tier: tier,
+        samples,
+        seed,
+        counterexample,
+        reason,
+        injected: true,
+    }
+}
+
+fn outcome_error(name: &str, seed: u64, reason: String) -> PropertyOutcome {
+    outcome(name, PropertyStatus::Error, 0, seed, None, Some(reason))
 }
 
 enum Binder {
@@ -188,14 +230,11 @@ enum Binder {
     },
     Opaque {
         name: String,
-        inv: chelis_prove::opaque::OpaqueInvariant,
+        inv: crate::opaque::OpaqueInvariant,
     },
 }
 
-fn classify_binder(
-    p: &Param,
-    invariants: &[chelis_prove::opaque::OpaqueInvariant],
-) -> Option<Binder> {
+fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> Option<Binder> {
     match p.ty.as_ref()? {
         TypeExpr::Named(name, _) => {
             if matches!(name.as_str(), "f32" | "f64" | "int32" | "int64" | "bool") {
@@ -236,7 +275,7 @@ fn classify_binder(
 /// not block IR lowering of the bound module).
 fn eval_bool_in_module(
     exprs: &[Expr],
-    invariants: &[chelis_prove::opaque::OpaqueInvariant],
+    invariants: &[crate::opaque::OpaqueInvariant],
     bindings: &[(String, Expr, serde_json::Value)],
     body: &Expr,
 ) -> Result<bool, String> {
@@ -290,13 +329,13 @@ fn eval_bool_in_module(
 
 fn resolve_constants(
     exprs: &[Expr],
-    invariants: &[chelis_prove::opaque::OpaqueInvariant],
-) -> chelis_prove::opaque::ConstEnv {
+    invariants: &[crate::opaque::OpaqueInvariant],
+) -> crate::opaque::ConstEnv {
     use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
-    let mut env = chelis_prove::opaque::ConstEnv::new();
+    let mut env = crate::opaque::ConstEnv::new();
     let mut referenced = Vec::new();
     for inv in invariants {
-        for v in chelis_prove::predicate_free_vars(&inv.predicate) {
+        for v in crate::predicate_free_vars(&inv.predicate) {
             if v != inv.binder && !referenced.contains(&v) {
                 referenced.push(v);
             }
@@ -336,83 +375,10 @@ fn resolve_constants(
 /// generation (mirrors the obligation engine's resolver).
 fn generation_producers(
     exprs: &[Expr],
-    _invariants: &[chelis_prove::opaque::OpaqueInvariant],
-    input_inv: &chelis_prove::opaque::OpaqueInvariant,
-) -> Vec<chelis_prove::opaque::GenProducer> {
-    chelis_prove::obligation_engine::generation_producers_for(exprs, input_inv)
-}
-
-// --- emit helpers ---
-
-fn emit_passed(
-    options: &ProveOptions<'_>,
-    name: &str,
-    seed: u64,
-    samples: usize,
-    _totals: &mut Summary,
-) {
-    if options.json {
-        println!(
-            "{}",
-            serde_json::json!({"kind":"property","name":name,"status":"passed","proof_tier":"fuzz","samples":samples,"seed":seed})
-        );
-    } else {
-        println!("property: {name} -- {samples}/{samples} passed (injected)");
-    }
-}
-
-fn emit_failed(
-    options: &ProveOptions<'_>,
-    name: &str,
-    seed: u64,
-    samples: usize,
-    cx: serde_json::Value,
-    _totals: &mut Summary,
-) {
-    if options.json {
-        println!(
-            "{}",
-            serde_json::json!({"kind":"property","name":name,"status":"failed","proof_tier":"fuzz","samples":samples,"seed":seed,"counterexample":cx})
-        );
-    } else {
-        println!("property failure: {name} (injected counterexample)");
-    }
-}
-
-fn emit_unsupported(
-    options: &ProveOptions<'_>,
-    name: &str,
-    seed: u64,
-    reason: &str,
-    totals: &mut Summary,
-) {
-    totals.unsupported += 1;
-    if options.json {
-        println!(
-            "{}",
-            serde_json::json!({"kind":"property","name":name,"status":"unsupported","samples":0,"seed":seed,"reason":reason})
-        );
-    } else {
-        println!("property unsupported: {name}: {reason}");
-    }
-}
-
-fn emit_error(
-    options: &ProveOptions<'_>,
-    name: &str,
-    seed: u64,
-    reason: &str,
-    totals: &mut Summary,
-) {
-    totals.errors += 1;
-    if options.json {
-        println!(
-            "{}",
-            serde_json::json!({"kind":"property","name":name,"status":"error","samples":0,"seed":seed,"reason":reason})
-        );
-    } else {
-        println!("property error: {name}: {reason}");
-    }
+    _invariants: &[crate::opaque::OpaqueInvariant],
+    input_inv: &crate::opaque::OpaqueInvariant,
+) -> Vec<crate::opaque::GenProducer> {
+    crate::obligation_engine::generation_producers_for(exprs, input_inv)
 }
 
 fn counterexample(bindings: &[(String, Expr, serde_json::Value)]) -> serde_json::Value {
@@ -433,7 +399,7 @@ fn conjoin(exprs: &[Expr]) -> Expr {
 
 // --- sampling ---
 
-fn sample_scalar(prim: &str, rng: &mut chelis_prove::opaque::GenRng) -> f64 {
+fn sample_scalar(prim: &str, rng: &mut crate::opaque::GenRng) -> f64 {
     match prim {
         "int32" | "int64" => (rng.next_u64() % 2001) as f64 - 1000.0,
         "bool" => (rng.next_u64() & 1) as f64,
@@ -441,7 +407,7 @@ fn sample_scalar(prim: &str, rng: &mut chelis_prove::opaque::GenRng) -> f64 {
     }
 }
 
-fn rng_f64(rng: &mut chelis_prove::opaque::GenRng) -> f64 {
+fn rng_f64(rng: &mut crate::opaque::GenRng) -> f64 {
     let unit = (rng.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
     -10.0 + 20.0 * unit
 }

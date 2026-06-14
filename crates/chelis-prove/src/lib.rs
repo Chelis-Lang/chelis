@@ -17,6 +17,7 @@ pub mod inlineability;
 pub mod obligation_engine;
 pub mod obligations;
 pub mod opaque;
+pub mod property_runner;
 pub mod solver;
 pub mod tier_a;
 pub mod tier_b;

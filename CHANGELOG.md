@@ -22,6 +22,64 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+<!-- opaque-types prove-obligation unification (review 3) -->
+- User `@property` verification now runs through ONE shared property
+  runner (`chelis_prove::property_runner`) that BOTH the CLI prove path
+  and the chelis-tide MCP `chelis_prove` tool drive (U4). The tide tool
+  previously gated user-property dispatch on a binding literally named
+  `property`, so a property with any other name was silently never proved
+  (the response reported ok:true / total:0); it parsed every source with
+  the Surf parser even for Deep modules; and it folded a
+  zero-sample-validated property (the smt-only timeout sentinel) as a
+  pass. The shared runner discovers `@property` declarations the SAME way
+  for `.ch` (parse + flatten) and `.dp` (Deep metadata scan) -- with no
+  hardcoded name -- runs each through the same Tier B (SMT) -> Tier C
+  (fuzz) engine with assumption injection for invariant-carrying opaque
+  binders, and reports ok=true ONLY when every property AND obligation is
+  a genuine pass (Proved, or statistically validated with samples>0); a
+  Disproved/Rejected/unsupported/errored property or obligation, a
+  zero-sample sentinel, a parse failure, or a type-check failure makes the
+  response not-ok. The CLI renders the shared runner's outcomes as its
+  NDJSON property records, so a CLI prove and a tide prove agree on the
+  same module (test-locked parity). The CLI's own Surf->SMT lowering and
+  injection modules were retired in favour of the single runner.
+- Tier B now rejects an operand-sort mismatch (an Int term compared
+  against or combined with a Real term) as a clean
+  `TierBResult::Error` before any cvc5 term is built (U3). cvc5's
+  `mk_term` ABORTS THE PROCESS on a sort-mismatched comparison/op, which
+  surfaces to a JSON consumer as an empty-stdout bare exit. U2 makes such
+  a mismatch unconstructible on the obligation path; this pre-check is the
+  backstop that guarantees ANY mismatch from ANY caller routes to Tier C
+  instead of aborting the prove process. The pre-check is conservative
+  (an undetermined sort unifies with anything), so it never rejects a
+  sound term: consistent all-Int and all-Real properties still solve.
+- Module-constant SMT lowering is now ONE type-aware function
+  (`chelis_prove::opaque::lower_const_ref`) used by BOTH the
+  producer-body path and the invariant/precondition path (U2). The
+  invariant-application path previously hardcoded a constant as a Real
+  literal, so within one property the SAME constant lowered as an integer
+  on the producer body but a Real in the invariant; compared against an
+  integer-sorted field var, cvc5 ABORTED the process ("Subexpressions
+  must have the same type: Int/Real"). The shared resolver preserves the
+  declared numeric type for EVERY integer width (int8/int16/int32/int64
+  -> Int; f32/f64 -> Real), reads the authoritative declared return type
+  from the constant's `defsig`, and follows a constant whose body
+  references another constant transitively to the literal that carries
+  the type tag.
+- Produced-value invariant validation now routes through ONE chokepoint
+  (U1). A produced opaque value -- scalar-only, tensor-bearing, or
+  nested-record -- is always validated structurally through
+  `validate_produced_env`, which walks EVERY representation leaf and
+  rejects fail-closed if any is non-finite (NaN OR Inf) before the
+  predicate runs. The historical all-scalar branch evaluated the
+  invariant through the host runtime, which never reached a finiteness
+  guard, so a scalar NaN field under a `!=`/`not(==)` invariant shipped
+  as a PASSING obligation (`NaN != C` is true under strict IEEE). The
+  generator's sample validation shares the same finiteness helper
+  (`chelis_prove::opaque::any_non_finite`), so a non-finite leaf can no
+  longer slip through one path while the other rejects it. The
+  host-runtime predicate-eval branch is removed.
+
 <!-- opaque-types prove fixes (review 2) -->
 - The `chelis prove` non-SMT obligation warning now fires in every build
   where obligations were not SMT-verified (CR2-5). It was gated on the

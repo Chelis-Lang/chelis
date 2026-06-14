@@ -351,44 +351,44 @@ fn cr12_failing_obligation_lowers_tide_status() {
     assert_eq!(obs[0]["status"], "failed");
 }
 
-/// CR2-3 (HIGH): the tide ok-fold previously lowered `ok` only on
-/// `ProofStatus::Disproved`, so a property reported `Rejected` or
-/// `NotAmenable` came back `ok:true` -- a non-pass status masquerading as
-/// a pass. A `property` that is NON-amenable under `smt-only` yields
-/// `NotAmenable`, which must make the response not-ok.
+/// U4: an unsupported `@property` (a binder type outside the samplable set)
+/// must make the response not-ok and be bucketed as unsupported. The fold
+/// must not report a non-pass as ok.
 #[test]
-fn cr2_3_not_amenable_property_is_not_ok_through_tide() {
-    // The module defines `property`, so the user-property dispatch runs.
+fn u4_unsupported_property_is_not_ok_through_tide() {
+    // A `string`-band tensor element type is outside the L2 v1 samplable
+    // set, so the property is unsupported.
     let source = "module M
-def property() -> f32 = 1.0
+@property tensor_prop forall(t: tensor[3, int32]):
+  (t == t)
 ";
     let response = handle_message(&json!({
         "jsonrpc":"2.0",
         "id":23,
         "method":"tools/call",
         "params":{"name":"chelis_prove","arguments":{
-            "source_kind":"surf","source": source,
-            "amenability":"opaque","tier":"smt-only"
+            "source_kind":"surf","source": source, "tier":"fuzz-only"
         }}
     }))
     .expect("prove response");
     let structured = &response["result"]["structuredContent"];
     assert_eq!(
         structured["ok"], false,
-        "a NotAmenable property must not report ok:true: {structured}"
+        "an unsupported property must not report ok:true: {structured}"
     );
     assert_eq!(
         structured["summary"]["unsupported"], 1,
-        "NotAmenable is bucketed as unsupported, not failed: {structured}"
+        "unsupported is bucketed as unsupported: {structured}"
     );
 }
 
-/// CR2-3: a `property` that genuinely fuzz-disproves is not-ok. The probe
-/// calls `property()` with zero arguments, so the property is nullary.
+/// U4: a `@property` that genuinely disproves is not-ok, and is discovered
+/// by its declared name (NOT a hardcoded `property`).
 #[test]
-fn cr2_3_disproved_property_is_not_ok_through_tide() {
+fn u4_disproved_property_is_not_ok_through_tide() {
     let source = "module M
-def property() -> bool = 1.0 > 2.0
+@property false_claim forall(x: f32):
+  (x > x)
 ";
     let response = handle_message(&json!({
         "jsonrpc":"2.0",
@@ -404,15 +404,22 @@ def property() -> bool = 1.0 > 2.0
         structured["ok"], false,
         "a disproved property is not-ok: {structured}"
     );
+    assert_eq!(
+        structured["summary"]["total"], 1,
+        "the differently-named property was discovered: {structured}"
+    );
+    let props = structured["properties"].as_array().unwrap();
+    assert_eq!(props[0]["name"], "false_claim");
+    assert_eq!(props[0]["status"], "failed");
 }
 
-/// CR2-3 negative parity: a genuinely passing `property`
-/// (StatisticallyValidated) reports ok:true. The stricter fold rejects
-/// only non-pass statuses.
+/// U4 negative parity: a genuinely passing `@property` reports ok:true. The
+/// stricter fold rejects only non-pass statuses.
 #[test]
-fn cr2_3_passing_property_is_ok_through_tide() {
+fn u4_passing_property_is_ok_through_tide() {
     let source = "module M
-def property() -> bool = 1.0 == 1.0
+@property always_true forall(x: f32):
+  (x == x)
 ";
     let response = handle_message(&json!({
         "jsonrpc":"2.0",
@@ -428,6 +435,7 @@ def property() -> bool = 1.0 == 1.0
         structured["ok"], true,
         "a passing property reports ok:true: {structured}"
     );
+    assert_eq!(structured["summary"]["total"], 1);
 }
 
 /// CR2-3 (clean obligation-only module): a module that defines NO
@@ -492,5 +500,113 @@ def broken(x: f32) -> f32 = to_tensor([x])
     assert_eq!(
         structured["ok"], false,
         "a type-broken module is not-ok through tide: {structured}"
+    );
+}
+
+/// U4 parity: for a `.ch` module, tide's per-property verdict (name +
+/// status) matches the shared `chelis_prove::property_runner` that the CLI
+/// also drives, so a CLI prove and a tide prove agree on the same module.
+#[test]
+fn u4_tide_property_verdicts_match_shared_runner() {
+    let source = "module M
+def square(x: f32) -> f32 = x * x
+@property square_non_negative forall(x: f32):
+  (square(x) >= 0.0)
+@property false_claim forall(y: f32):
+  (y > y)
+";
+    // Tide path.
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":30,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": source, "seed": 0
+        }}
+    }))
+    .expect("prove response");
+    let tide_props = response["result"]["structuredContent"]["properties"]
+        .as_array()
+        .expect("properties array")
+        .clone();
+
+    // Shared-runner path (the one the CLI also drives).
+    let chelis_prove::property_runner::PropertyRunResult::Ran(engine) =
+        chelis_prove::property_runner::run_surf_source_properties(
+            source,
+            &chelis_prove::property_runner::PropertyRunOptions::default(),
+        )
+        .expect("run");
+
+    let tide_names: Vec<&str> = tide_props
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    let engine_names: Vec<&str> = engine.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(
+        tide_names, engine_names,
+        "same property set across surfaces"
+    );
+
+    use chelis_prove::property_runner::PropertyStatus;
+    for (tide, eng) in tide_props.iter().zip(&engine) {
+        let expected = match eng.status {
+            PropertyStatus::Passed => "passed",
+            PropertyStatus::Failed => "failed",
+            PropertyStatus::Unsupported => "unsupported",
+            PropertyStatus::Error => "error",
+        };
+        assert_eq!(
+            tide["status"].as_str().unwrap(),
+            expected,
+            "same status per property across surfaces"
+        );
+    }
+}
+
+/// U4: the tide tool handles a Deep (`.dp`) module -- discovering user
+/// `@property` declarations from the Deep metadata and running them. The
+/// fixture is the canonical Deep `chelis deep` emits for a Surf `@property`.
+const DEEP_PROPERTY_MODULE: &str = r#"(module {}
+  m
+  (defsig {} always_true (t-fn {} (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+         property_preconditions: (tuple {}),
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+         property_source_kind: "user"
+       }
+    always_true
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (app {}
+        (var {} gte)
+        (var {} x)
+        (var {} x)))))
+"#;
+
+#[test]
+fn u4_tide_handles_deep_module() {
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":31,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"deep","source": DEEP_PROPERTY_MODULE, "seed": 0
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    let props = structured["properties"].as_array().expect("properties");
+    assert_eq!(
+        props.len(),
+        1,
+        "the deep user property is discovered: {structured}"
+    );
+    assert_eq!(props[0]["name"], "always_true");
+    // x >= x is always true, so the property passes and the module is ok.
+    assert_eq!(props[0]["status"], "passed");
+    assert_eq!(
+        structured["ok"], true,
+        "clean deep module is ok: {structured}"
     );
 }

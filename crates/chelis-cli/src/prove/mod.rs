@@ -4,19 +4,23 @@ use std::path::{Path, PathBuf};
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, MetaMap};
-use chelis_surf::ast::{BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, TypeExpr};
+#[cfg(not(feature = "chelis-prove"))]
+use chelis_surf::ast::{BinOp, LetBinding, LetPattern};
+use chelis_surf::ast::{Decl, Expr, Literal, Param, TypeExpr};
 use serde_json::json;
 use walkdir::WalkDir;
 
-mod smt_lower;
-
-#[cfg(feature = "chelis-prove")]
-mod injection;
+// Under `chelis-prove` the user-property running -- discovery, Tier B
+// (SMT), Tier C (fuzz), and assumption injection -- is the shared
+// `chelis_prove::property_runner` the tide MCP tool also drives (U4). The
+// CLI's own Surf->SMT lowering and injection modules were retired in favour
+// of that single runner; the no-`chelis-prove` build keeps only a local
+// Tier-C-fuzz property path (no SMT, no injection -- that machinery lives
+// behind the capability).
 #[cfg(feature = "chelis-prove")]
 mod obligation_run;
-
 #[cfg(feature = "chelis-prove")]
-use smt_lower::{InlineCtx, surf_expr_to_smt};
+mod property_run;
 
 #[derive(Debug, Clone)]
 pub struct ProveOptions<'a> {
@@ -64,6 +68,7 @@ impl ProveOptions<'_> {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(not(feature = "chelis-prove"))]
 struct Property {
     name: String,
     source: PathBuf,
@@ -83,6 +88,9 @@ struct Sample {
 #[derive(Debug, Clone)]
 struct SampleValue {
     name: String,
+    // Read only by the CLI-local Surf property runner (the no-`chelis-prove`
+    // build); the shared runner under `chelis-prove` uses `deep_expr`.
+    #[cfg_attr(feature = "chelis-prove", allow(dead_code))]
     surf_expr: Expr,
     deep_expr: DeepExpr,
     json: serde_json::Value,
@@ -238,11 +246,26 @@ fn prove_surf_file(
     let parsed = chelis_surf::parser::parse_str(&source)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
     let flat = flatten_module_decls(&parsed);
-    let properties = collect_surf_properties(path, &flat, options.only);
     let mut file_status = Status::Passed;
-    for property in properties {
-        let status = prove_surf_property(&flat, &parsed, &property, options, totals);
-        file_status = combine_status(file_status, status);
+    // Under the `chelis-prove` capability the user @property declarations run
+    // through the SHARED property runner (U4 / D-PARITY): the SAME discovery
+    // + engine the tide MCP tool uses, so a CLI prove and a tide prove agree
+    // on the same module. The CLI renders the outcomes as the NDJSON
+    // `{kind:"property"}` records and folds them into the summary. Without the
+    // capability, fall back to the CLI-local Tier-C-only property path.
+    #[cfg(feature = "chelis-prove")]
+    {
+        let _ = (&flat, &parsed);
+        let prop_status = property_run::run_surf_properties_shared(path, &source, options, totals);
+        file_status = combine_status(file_status, prop_status);
+    }
+    #[cfg(not(feature = "chelis-prove"))]
+    {
+        let properties = collect_surf_properties(path, &flat, options.only);
+        for property in properties {
+            let status = prove_surf_property(&flat, &parsed, &property, options, totals);
+            file_status = combine_status(file_status, status);
+        }
     }
     // Derived producer obligations (RFC D-OBLIG): collected from the
     // FULL module-bearing decls so the export/module wrappers survive.
@@ -274,6 +297,7 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
     out
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn collect_surf_properties(path: &Path, decls: &[Decl], only: Option<&str>) -> Vec<Property> {
     decls
         .iter()
@@ -299,6 +323,7 @@ fn collect_surf_properties(path: &Path, decls: &[Decl], only: Option<&str>) -> V
         .collect()
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn property_samples(options: &[chelis_surf::ast::PropertyOption]) -> Option<usize> {
     options.iter().find_map(|option| match option {
         chelis_surf::ast::PropertyOption::Samples(Expr::Lit(Literal::Int(value), _), _) => {
@@ -308,6 +333,7 @@ fn property_samples(options: &[chelis_surf::ast::PropertyOption]) -> Option<usiz
     })
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn property_seed(options: &[chelis_surf::ast::PropertyOption]) -> Option<u64> {
     options.iter().find_map(|option| match option {
         chelis_surf::ast::PropertyOption::Seed(Expr::Lit(Literal::Int(value), _), _) => {
@@ -317,6 +343,7 @@ fn property_seed(options: &[chelis_surf::ast::PropertyOption]) -> Option<u64> {
     })
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn prove_surf_property(
     decls: &[Decl],
     module_decls: &[Decl],
@@ -324,126 +351,11 @@ fn prove_surf_property(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
-    // `module_decls` is consumed only by the injection path, which is
-    // gated on the prove dependency.
-    #[cfg(not(feature = "chelis-prove"))]
     let _ = module_decls;
-    // Assumption injection (RFC D-INJECT): a property with an
-    // invariant-carrying opaque binder is verified ONLY over
-    // invariant-satisfying binder values; the injection path owns it. It
-    // uses the FULL module-bearing decls (so `@opaque` keeps its enclosing
-    // module). Counts `total` itself, so this runs before the shared
-    // increment.
-    #[cfg(feature = "chelis-prove")]
-    if injection::property_has_opaque_invariant_binder(module_decls, &property.params) {
-        return injection::prove_with_injection(
-            module_decls,
-            &property.name,
-            &property.params,
-            &property.preconditions,
-            &property.body,
-            options,
-            totals,
-        );
-    }
-
+    // The no-`chelis-prove` build runs only Tier C (fuzz). Tier B (SMT) and
+    // assumption injection require the capability and live in the shared
+    // `chelis_prove::property_runner`, which this build does not reach.
     totals.total += 1;
-
-    // Tier B: attempt SMT proof when --tier auto
-    #[cfg(feature = "chelis-prove")]
-    if (options.tier == "auto" || options.tier == "smt-only")
-        && let Some(postcondition) = surf_expr_to_smt(
-            &property.body,
-            &InlineCtx {
-                decls,
-                depth: 0,
-                max_depth: 3,
-                call_stack: vec![],
-            },
-        )
-    {
-        let variables: Vec<(String, chelis_prove::solver::SmtSort)> = property
-            .params
-            .iter()
-            .filter_map(|p| {
-                let sort = match p.ty.as_ref()? {
-                    TypeExpr::Named(name, _) => match name.as_str() {
-                        "f32" | "f64" => chelis_prove::solver::SmtSort::Real,
-                        "int32" | "int64" => chelis_prove::solver::SmtSort::Int,
-                        "bool" => chelis_prove::solver::SmtSort::Bool,
-                        _ => return None,
-                    },
-                    _ => return None,
-                };
-                Some((p.name.clone(), sort))
-            })
-            .collect();
-        if variables.len() == property.params.len() {
-            let preconditions: Vec<chelis_prove::solver::SmtExpr> = property
-                .preconditions
-                .iter()
-                .filter_map(|e| {
-                    surf_expr_to_smt(
-                        e,
-                        &InlineCtx {
-                            decls,
-                            depth: 0,
-                            max_depth: 3,
-                            call_stack: vec![],
-                        },
-                    )
-                })
-                .collect();
-            if preconditions.len() == property.preconditions.len() {
-                let smt_prop = chelis_prove::tier_b::SmtProperty {
-                    variables,
-                    preconditions,
-                    postcondition,
-                };
-                if let chelis_prove::Inlineability::Inlineable =
-                    chelis_prove::classify_inlineability(&smt_prop.postcondition)
-                {
-                    match chelis_prove::solve_property(&smt_prop, options.smt_timeout_ms) {
-                        chelis_prove::tier_b::TierBResult::Proved => {
-                            totals.passed += 1;
-                            if options.json {
-                                println!(
-                                    "{}",
-                                    serde_json::json!({"kind":"property","name":property.name,"status":"passed","proof_tier":"smt","samples":0,"seed":options.effective_seed(property.seed)})
-                                );
-                            } else {
-                                println!("property: {} -- proved (smt)", property.name);
-                            }
-                            return Status::Passed;
-                        }
-                        chelis_prove::tier_b::TierBResult::Disproved(_model) => {
-                            totals.failed += 1;
-                            if options.json {
-                                println!(
-                                    "{}",
-                                    serde_json::json!({"kind":"property","name":property.name,"status":"failed","proof_tier":"smt","samples":0,"seed":options.effective_seed(property.seed)})
-                                );
-                            } else {
-                                println!(
-                                    "property failure: {} (smt counterexample)",
-                                    property.name
-                                );
-                            }
-                            return Status::Failed;
-                        }
-                        chelis_prove::tier_b::TierBResult::Timeout
-                        | chelis_prove::tier_b::TierBResult::Unknown
-                        | chelis_prove::tier_b::TierBResult::Error(_) => {
-                            // Fall through to fuzz (Tier C). An Error means
-                            // the property did not lower to a valid SMT term
-                            // (RT5-F1 wrong-arity intrinsic); the concrete
-                            // evaluator validates it instead of aborting cvc5.
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     let samples_needed = options.samples.or(property.samples).unwrap_or(100);
     let max_attempts = options
@@ -522,6 +434,7 @@ fn prove_surf_property(
     Status::Passed
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn unsupported_property(property: &Property) -> Option<String> {
     unsupported_property_params(&property.params)
 }
@@ -561,6 +474,7 @@ fn unsupported_type(ty: &TypeExpr) -> Option<String> {
     }
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn sample_property(property: &Property, rng: &mut Lcg) -> Result<Sample, String> {
     let mut values = Vec::new();
     for param in &property.params {
@@ -827,6 +741,7 @@ fn deep_lit(value: DeepExpr, ty_name: &str) -> DeepExpr {
     )
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn eval_surf_sample(
     decls: &[Decl],
     property: &Property,
@@ -865,6 +780,7 @@ fn eval_surf_sample(
     eval_bool_with_bindings(SourceKind::Surf, source, root, sample_bindings(sample))
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn sample_block_expr(property: &Property, sample: &Sample, precondition: bool) -> Expr {
     let sp = chelis_deep::Span::new(0, 0);
     let bindings = sample
@@ -892,6 +808,7 @@ fn sample_block_expr(property: &Property, sample: &Sample, precondition: bool) -
     Expr::Block(bindings, Box::new(body), sp)
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn combine_preconditions(preconditions: &[Expr]) -> Expr {
     let sp = chelis_deep::Span::new(0, 0);
     preconditions
@@ -1551,6 +1468,7 @@ fn matches_filter(name: &str, only: Option<&str>) -> bool {
     name.contains(pattern)
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn emit_record(
     options: &ProveOptions<'_>,
     property: &Property,
@@ -1595,6 +1513,7 @@ fn emit_record(
     }
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn emit_error(options: &ProveOptions<'_>, property: &Property, message: &str) {
     if options.json {
         println!(
@@ -1698,6 +1617,7 @@ fn emit_deep_error(options: &ProveOptions<'_>, property: &DeepProperty, message:
     }
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn source_json(property: &Property, options: &ProveOptions<'_>) -> serde_json::Value {
     if property.source.extension().and_then(|ext| ext.to_str()) == Some("dp") {
         let spans = options

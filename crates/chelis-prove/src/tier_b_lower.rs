@@ -198,8 +198,12 @@ pub fn lower_obligation(
                     variables.push((format!("{pname}.{fname}"), sort));
                 }
                 // The input invariant as a precondition (the assumption),
-                // flattened over `<param>`.
-                let pre = crate::opaque::lower_predicate_flattened(input_inv, pname, consts)?;
+                // flattened over `<param>`. Pass the defining program so a
+                // module constant in the precondition lowers with its
+                // declared numeric type (U2), matching the int-sorted field
+                // vars declared just above.
+                let pre =
+                    crate::opaque::lower_predicate_flattened_in(input_inv, pname, consts, exprs)?;
                 preconditions.push(pre);
                 opaque_params.insert(pname.clone(), input_inv.clone());
                 // No subst entry: the param stays `p`, and its field
@@ -303,7 +307,7 @@ fn lower_obligation_body(
             // input var so it shares the precondition's variable space.
             let reduced = reduce(result_expr, subst, consts, exprs, depth)?;
             let reduced = rewrite_opaque_field_access(&reduced, opaque_params);
-            apply_invariant(&reduced, inv, consts)
+            apply_invariant(&reduced, inv, consts, exprs)
         }
         ProducedPosition::InsideOption(inner) => {
             // result is Option[..]; reduce to known constructor.
@@ -371,7 +375,7 @@ fn lower_inner_obligation(
     depth: usize,
 ) -> Option<SmtExpr> {
     match inner {
-        ProducedPosition::Direct => apply_invariant(r, inv, consts),
+        ProducedPosition::Direct => apply_invariant(r, inv, consts, exprs),
         ProducedPosition::InsideOption(deeper) => {
             lower_option_obligation(r, deeper, inv, ob, exprs, consts, depth)
         }
@@ -386,13 +390,14 @@ fn apply_invariant(
     r: &Expr,
     inv: &OpaqueInvariant,
     consts: &crate::opaque::ConstEnv,
+    exprs: &[Expr],
 ) -> Option<SmtExpr> {
     // r must be a record `(record C (kv {} field expr) ...)`.
     let fields = record_fields(r)?;
     // Lower the predicate body, resolving `(access (var binder) field)`
     // to the record's field expression (record beta).
     let body = predicate_body(&inv.predicate)?;
-    lower_pred_bool(body, &inv.binder, &fields, consts)
+    lower_pred_bool(body, &inv.binder, &fields, consts, exprs)
 }
 
 fn predicate_body(fn_node: &Expr) -> Option<&Expr> {
@@ -526,69 +531,18 @@ fn reduce(
 }
 
 /// A typed `(lit {type: (t-prim {} <ty>)} value)` Deep node for an inlined
-/// constant, preserving the constant's DECLARED numeric type (CR2-4). An
-/// int-typed constant (declared `int32`/`int64`) inlines as an integer
+/// constant, preserving the constant's DECLARED numeric type (CR2-4 / U2).
+/// An integer-typed constant (int8/int16/int32/int64) inlines as an integer
 /// literal so it lowers to `SmtSort::Int`; otherwise it inlines as an f32
-/// literal (CR-8).
+/// literal (CR-8). The declared-type decision is the SINGLE shared resolver
+/// in `crate::opaque` -- the same one the invariant/precondition path
+/// consults via `crate::opaque::lower_const_ref` -- so the producer-body and
+/// invariant paths can never disagree on a constant's sort (the cvc5
+/// sort-mismatch abort, U2).
 fn const_lit_node(exprs: &[Expr], name: &str, value: f64) -> Expr {
-    match const_declared_int_type(exprs, name) {
+    match crate::opaque::const_declared_int_type(exprs, name) {
         Some(int_ty) => int_lit_node(value as i64, &int_ty),
         None => float_lit_node(value),
-    }
-}
-
-/// The declared integer primitive type (`int32`/`int64`) of an in-module
-/// constant `name`, or `None` if it is not declared with an integer type.
-/// Reads the type tag the desugarer attaches to the const def's literal
-/// body (a value binding `(def n (lit ...))` or a zero-arg constant fn
-/// `(def n (fn (params) (lit ...)))`).
-fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<String> {
-    fn lit_type_prim(expr: &Expr) -> Option<String> {
-        if tag(expr) != Some("lit") {
-            return None;
-        }
-        if let Expr::List(list, _) = expr
-            && let Some(Expr::Map(meta, _)) = list.elements.get(1)
-        {
-            for (k, v) in &meta.entries {
-                if k == "type" && tag(v) == Some("t-prim") {
-                    return symbol_text(children(v).first()?).map(str::to_string);
-                }
-            }
-        }
-        None
-    }
-    fn scan(exprs: &[Expr], name: &str) -> Option<String> {
-        for expr in exprs {
-            if tag(expr) == Some("def") {
-                let kids = children(expr);
-                if kids.first().and_then(symbol_text) == Some(name)
-                    && let Some(body) = kids.get(1)
-                {
-                    let lit = if tag(body) == Some("fn") {
-                        children(body).get(1).cloned()
-                    } else {
-                        Some(body.clone())
-                    };
-                    if let Some(lit) = lit
-                        && let Some(prim) = lit_type_prim(&lit)
-                    {
-                        return Some(prim);
-                    }
-                }
-            }
-            if let Expr::List(list, _) = expr
-                && let Some(found) = scan(&list.elements[2.min(list.elements.len())..], name)
-            {
-                return Some(found);
-            }
-        }
-        None
-    }
-    match scan(exprs, name).as_deref() {
-        Some("int32") => Some("int32".to_string()),
-        Some("int64") => Some("int64".to_string()),
-        _ => None,
     }
 }
 
@@ -690,15 +644,16 @@ fn lower_pred_bool(
     binder: &str,
     fields: &HashMap<String, Expr>,
     consts: &crate::opaque::ConstEnv,
+    exprs: &[Expr],
 ) -> Option<SmtExpr> {
     if let Expr::Atom(Atom::Bool(b), _) = expr {
         return Some(SmtExpr::BoolLit(*b));
     }
     if tag(expr) == Some("if") {
         let kids = children(expr);
-        let c = lower_pred_bool(kids.first()?, binder, fields, consts)?;
-        let t = lower_pred_bool(kids.get(1)?, binder, fields, consts)?;
-        let e = lower_pred_bool(kids.get(2)?, binder, fields, consts)?;
+        let c = lower_pred_bool(kids.first()?, binder, fields, consts, exprs)?;
+        let t = lower_pred_bool(kids.get(1)?, binder, fields, consts, exprs)?;
+        let e = lower_pred_bool(kids.get(2)?, binder, fields, consts, exprs)?;
         return Some(SmtExpr::Ite(Box::new(c), Box::new(t), Box::new(e)));
     }
     let (name, args) = app_parts(expr)?;
@@ -706,13 +661,13 @@ fn lower_pred_bool(
         "and" => Some(SmtExpr::Bool(
             BoolOp::And,
             args.iter()
-                .map(|a| lower_pred_bool(a, binder, fields, consts))
+                .map(|a| lower_pred_bool(a, binder, fields, consts, exprs))
                 .collect::<Option<Vec<_>>>()?,
         )),
         "or" => Some(SmtExpr::Bool(
             BoolOp::Or,
             args.iter()
-                .map(|a| lower_pred_bool(a, binder, fields, consts))
+                .map(|a| lower_pred_bool(a, binder, fields, consts, exprs))
                 .collect::<Option<Vec<_>>>()?,
         )),
         "not" => Some(SmtExpr::Not(Box::new(lower_pred_bool(
@@ -720,11 +675,12 @@ fn lower_pred_bool(
             binder,
             fields,
             consts,
+            exprs,
         )?))),
         "eq" | "neq" | "cmplt" | "lte" | "gte" => {
             let op = cmp_op(name)?;
-            let l = lower_pred_arith(args.first()?, binder, fields, consts)?;
-            let r = lower_pred_arith(args.get(1)?, binder, fields, consts)?;
+            let l = lower_pred_arith(args.first()?, binder, fields, consts, exprs)?;
+            let r = lower_pred_arith(args.get(1)?, binder, fields, consts, exprs)?;
             Some(SmtExpr::Cmp(op, Box::new(l), Box::new(r)))
         }
         _ => None,
@@ -736,6 +692,7 @@ fn lower_pred_arith(
     binder: &str,
     fields: &HashMap<String, Expr>,
     consts: &crate::opaque::ConstEnv,
+    exprs: &[Expr],
 ) -> Option<SmtExpr> {
     match expr {
         Expr::Atom(Atom::Float(v), _) => return Some(SmtExpr::RealLit(*v)),
@@ -763,30 +720,42 @@ fn lower_pred_arith(
         return None;
     }
     // A bare var that is the binder is invalid in arith position; an
-    // in-module constant resolves via consts.
+    // in-module constant resolves via consts and lowers through the SINGLE
+    // type-aware constant lowering (U2), so an int-typed constant lowers as
+    // IntLit here exactly as it does on the producer-body path -- never a
+    // RealLit that would mismatch an Int-sorted field var and abort cvc5.
     if let Some(name) = var_name(expr) {
         if name == binder {
             return None;
         }
-        return consts.get(name).copied().map(SmtExpr::RealLit);
+        return consts
+            .get(name)
+            .copied()
+            .map(|value| crate::opaque::lower_const_ref(exprs, name, value));
     }
     let (name, args) = app_parts(expr)?;
     match name {
         "add" | "sub" | "mul" | "div" => {
             let op = arith_op(name)?;
-            let l = lower_pred_arith(args.first()?, binder, fields, consts)?;
-            let r = lower_pred_arith(args.get(1)?, binder, fields, consts)?;
+            let l = lower_pred_arith(args.first()?, binder, fields, consts, exprs)?;
+            let r = lower_pred_arith(args.get(1)?, binder, fields, consts, exprs)?;
             Some(SmtExpr::Arith(op, Box::new(l), Box::new(r)))
         }
         "neg" => Some(SmtExpr::Arith(
             ArithOp::Neg,
-            Box::new(lower_pred_arith(args.first()?, binder, fields, consts)?),
+            Box::new(lower_pred_arith(
+                args.first()?,
+                binder,
+                fields,
+                consts,
+                exprs,
+            )?),
             Box::new(SmtExpr::RealLit(0.0)),
         )),
         "abs" | "min" | "max" | "sqrt" | "exp" | "log" | "sin" | "cos" => {
             let lowered = args
                 .iter()
-                .map(|a| lower_pred_arith(a, binder, fields, consts))
+                .map(|a| lower_pred_arith(a, binder, fields, consts, exprs))
                 .collect::<Option<Vec<_>>>()?;
             Some(SmtExpr::Apply(name.to_string(), lowered))
         }
