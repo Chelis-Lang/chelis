@@ -76,13 +76,20 @@ Parallel paths merged:
   read the declared type only from a DIRECT `lit` body, so a constant
   whose body referenced another constant lost its type.
 
-Single chokepoint: `tier_b_lower::lower_const_ref(exprs, consts, name)`
-returns the typed `SmtExpr` for a constant. It reads the declared numeric
-type via `const_declared_numeric_type`, which (a) recognizes every
-integer width int8/int16/int32/int64 as `SmtSort::Int`, f32/f64 as
-`Real`, and (b) follows a `(var other_const)` body transitively to the
-literal that carries the type tag. `reduce` and `lower_pred_arith` both
-call it; the hardcoded `RealLit`-for-constant arm is gone.
+Single chokepoint: `chelis_prove::opaque::lower_const_ref(exprs, name,
+value)` returns the typed `SmtExpr` for a constant. It reads the declared
+numeric type via `const_declared_int_type` / `const_declared_numeric_type`,
+which (a) recognizes every integer width int8/int16/int32/int64 as
+`SmtSort::Int`, f32/f64 as `Real`, reading the AUTHORITATIVE declared
+return type from a sibling `defsig` (a typed `def a() -> int8 = 1` carries
+int8 there, not on the default-int32 body literal), and (b) follows a
+`(var other_const)` body transitively to the literal that carries the type
+tag. The resolver lives in `opaque` (the shared module both surfaces use)
+so the producer-body path (`tier_b_lower::reduce` ->
+`const_lit_node`), the invariant-application path
+(`tier_b_lower::lower_pred_arith`), and the opaque flattened-predicate
+precondition path (`opaque::lower_arith`) all consult the SAME resolver.
+The hardcoded `RealLit`-for-constant arms are gone.
 
 ## U3 -- one cvc5-lowerable intrinsic source of truth + sort-mismatch pre-check
 
@@ -129,15 +136,23 @@ Parallel paths merged:
   timeout sentinel) as a pass.
 
 Single chokepoint: a shared property runner lives in
-`chelis_prove::property_runner`. It discovers user `@property`
-declarations from `.ch` (desugar + collect) and `.dp` (deep metadata
-scan) using the SAME discovery the CLI's `collect_surf_properties` /
-`discover_deep_properties` use, runs each through the existing dispatch
-engine, and classifies each outcome as pass / fail / unsupported / error
-with the `StatisticallyValidated{samples:0}` sentinel folded as NOT a
-pass. Both the CLI and the tide tool call this runner; the CLI's
-exit-code fold and tide's `ok` fold are computed from the same
-classification, so they agree by construction.
+`chelis_prove::property_runner` (with `smt_lower` + `injection`
+submodules relocated from the CLI). It discovers user `@property`
+declarations from `.ch` (parse + flatten modules) and `.dp` (Deep
+metadata scan) -- the SAME discovery the CLI used -- runs each through the
+shared Tier B (SMT) -> Tier C (fuzz) engine with assumption injection for
+invariant-carrying opaque binders, and returns a `PropertyOutcome` whose
+`is_pass()` is true ONLY for `Proved` or fuzz-validated-with-`samples>0`
+(the zero-sample sentinel is NOT a pass). The tide tool calls the runner
+directly; the CLI delegates to it under the `chelis-prove` capability
+(`prove::property_run`) and renders the outcomes as its NDJSON property
+records. The CLI's own `smt_lower` and `injection` modules were retired.
+The no-`chelis-prove` CLI build (the degraded default with no SMT/cvc5
+and no injection) keeps a local Tier-C-only fuzz path; it does not reach
+the shared runner because the runner's Tier B / injection require the
+capability. Because tide and the capability-enabled CLI compute their
+verdict from the SAME runner, they agree by construction (test-locked
+parity).
 
 ## Acceptance oracle
 
