@@ -23,6 +23,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove-obligation unification (review 3) -->
+- Tier B now rejects an operand-sort mismatch (an Int term compared
+  against or combined with a Real term) as a clean
+  `TierBResult::Error` before any cvc5 term is built (U3). cvc5's
+  `mk_term` ABORTS THE PROCESS on a sort-mismatched comparison/op, which
+  surfaces to a JSON consumer as an empty-stdout bare exit. U2 makes such
+  a mismatch unconstructible on the obligation path; this pre-check is the
+  backstop that guarantees ANY mismatch from ANY caller routes to Tier C
+  instead of aborting the prove process. The pre-check is conservative
+  (an undetermined sort unifies with anything), so it never rejects a
+  sound term: consistent all-Int and all-Real properties still solve.
 - Module-constant SMT lowering is now ONE type-aware function
   (`chelis_prove::opaque::lower_const_ref`) used by BOTH the
   producer-body path and the invariant/precondition path (U2). The
