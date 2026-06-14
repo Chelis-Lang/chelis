@@ -3144,8 +3144,20 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
 /// bare reference to a multi-arg function in a value position is not in the
 /// grammar. Registering only the zero-arg value bodies keeps the decode
 /// context to exactly what D-WF admits, without re-running the checker.
+///
+/// A bare value-binding body is registered only when it is **constant
+/// foldable** (review-3): a literal, an application of a predicate-grammar
+/// arithmetic/intrinsic/comparison/boolean op over constant-foldable
+/// arguments, or a reference to another genuine constant. A def whose body
+/// is a `(var ...)` to a non-constant or unbound name (or any other
+/// non-foldable expression) is NOT a constant and must not pollute the
+/// table -- registering it would map the name to an unresolved or wrong
+/// value at predicate evaluation time.
 pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr> {
-    let mut out = HashMap::new();
+    // Phase 1: collect candidate constant bodies keyed by name. A candidate
+    // is the unwrapped value body of either the fn-wrapped zero-arg form or
+    // the bare value-binding form. Parameterized fn defs are not candidates.
+    let mut candidates: HashMap<String, Expr> = HashMap::new();
     for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -3160,9 +3172,9 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
         let Some(body) = kids.get(1) else {
             continue;
         };
-        match as_list(body) {
+        let candidate_body = match as_list(body) {
             // Fn-wrapped form: keep only the empty-params (zero-arg) case,
-            // and register the unwrapped inner value body.
+            // and take the unwrapped inner value body.
             Some(fn_list) if tag(fn_list) == Some("fn") => {
                 let fn_kids = children(fn_list);
                 let Some(params_list) = fn_kids.first().and_then(as_list) else {
@@ -3173,20 +3185,108 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
                     // constant. Not in the predicate grammar as a value.
                     continue;
                 }
-                let Some(inner) = fn_kids.get(1) else {
-                    continue;
-                };
-                out.insert(name.to_string(), inner.clone());
+                match fn_kids.get(1) {
+                    Some(inner) => inner.clone(),
+                    None => continue,
+                }
             }
-            // Bare value-binding form (CR2-6): the body is the value itself
-            // (a `lit`, an `app` over constants, etc.), not a `fn` wrapper.
-            // Register it directly.
-            _ => {
-                out.insert(name.to_string(), body.clone());
-            }
-        }
+            // Bare value-binding form (CR2-6): the body is the value itself.
+            _ => body.clone(),
+        };
+        candidates.insert(name.to_string(), candidate_body);
     }
-    out
+
+    // Phase 2: keep only candidates whose body is constant foldable against
+    // the candidate set (review-3). A `(var name)` body folds only when
+    // `name` is itself a genuine constant; this transitively validates
+    // constant aliases and chains while excluding references to
+    // non-constant or unbound names.
+    candidates
+        .iter()
+        .filter(|(_, body)| {
+            let mut visiting = HashSet::new();
+            is_constant_foldable(body, &candidates, &mut visiting)
+        })
+        .map(|(name, body)| (name.clone(), body.clone()))
+        .collect()
+}
+
+/// True when `expr` is a constant-foldable predicate-grammar value
+/// (review-3): a literal, an application of an admitted arithmetic /
+/// intrinsic / comparison / boolean op over constant-foldable arguments, or
+/// a `(var name)` reference to another constant in `candidates`. `visiting`
+/// guards against cyclic constant references (e.g. `def a = b; def b = a`),
+/// which are not foldable.
+fn is_constant_foldable(
+    expr: &Expr,
+    candidates: &HashMap<String, Expr>,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    let Some(list) = as_list(expr) else {
+        // A bare atom (not wrapped in a Deep node) is not a value form.
+        return false;
+    };
+    match tag(list) {
+        // A literal value is the base constant.
+        Some("lit") => true,
+        // A reference folds only to another genuine constant; chase it.
+        Some("var") => {
+            let Some(name) = children(list).first().and_then(symbol_name) else {
+                return false;
+            };
+            if visiting.contains(name) {
+                // Cyclic constant reference: not foldable.
+                return false;
+            }
+            let Some(referent) = candidates.get(name) else {
+                // Reference to a non-constant or unbound name: not a constant.
+                return false;
+            };
+            visiting.insert(name.to_string());
+            let ok = is_constant_foldable(referent, candidates, visiting);
+            visiting.remove(name);
+            ok
+        }
+        // An application folds when the callee is an admitted predicate-
+        // grammar op and every argument is itself constant foldable.
+        Some("app") => {
+            let kids = children(list);
+            let Some(callee) = kids.first() else {
+                return false;
+            };
+            let Some(op) = var_name(callee) else {
+                return false;
+            };
+            if !is_constant_grammar_op(op) {
+                return false;
+            }
+            kids[1..]
+                .iter()
+                .all(|arg| is_constant_foldable(arg, candidates, visiting))
+        }
+        // Any other node (match, fn, record, tensor op, effect, ...) is not
+        // a constant value.
+        _ => false,
+    }
+}
+
+/// The closed set of operators a constant body may apply, mirroring the
+/// predicate grammar (RFC D-WF, the `chelis_pred` grammar): arithmetic, the
+/// whitelisted intrinsics, comparisons, and boolean connectives. `sum` is
+/// intentionally excluded -- it ranges over a binder field projection,
+/// which a constant (binder-free) body never has. The intrinsic list is
+/// inlined rather than imported from `chelis_pred` to keep
+/// `chelis-compiler-api`'s dependency graph unchanged; it is a closed,
+/// stable D-WF set and any drift is locked by the constant-folding tests.
+fn is_constant_grammar_op(op: &str) -> bool {
+    const ARITH: &[&str] = &["add", "sub", "mul", "div", "neg"];
+    const COMPARISON: &[&str] = &["eq", "neq", "cmplt", "lte", "gte"];
+    const BOOL: &[&str] = &["and", "or", "not"];
+    const INTRINSICS: &[&str] = &["abs", "min", "max", "sqrt", "exp", "log", "sin", "cos"];
+    ARITH.contains(&op)
+        || COMPARISON.contains(&op)
+        || BOOL.contains(&op)
+        || INTRINSICS.contains(&op)
 }
 
 /// The declared representation type of one record-variant field, used by
@@ -7927,6 +8027,88 @@ type Tol = | Tol { value: f32 }
         assert!(
             !consts.contains_key("f"),
             "a parameterized fn def must not be collected as a constant, got {consts:?}"
+        );
+    }
+
+    #[test]
+    fn collect_zero_arg_constants_excludes_non_constant_var_body() {
+        // Review-3: a bare value-binding whose body is a `(var y)` reference
+        // to a NON-constant name is NOT a constant and must not pollute the
+        // table. The earlier catch-all `_ =>` arm registered any non-fn
+        // body, so `a` would map to an unresolved/garbage value.
+        let exprs = chelis_deep::parser::parse_str(
+            "(module {} m (def {} a (var {} y)) (def {} y (fn {} (params {} z) (var {} z))))",
+        )
+        .expect("deep parse");
+        let consts = collect_zero_arg_constants(&exprs);
+        assert!(
+            !consts.contains_key("a"),
+            "a value-binding referencing a non-constant name must not be a constant, got {consts:?}"
+        );
+        // And `y` (a parameterized fn) is not a constant either.
+        assert!(!consts.contains_key("y"), "got {consts:?}");
+    }
+
+    #[test]
+    fn collect_zero_arg_constants_excludes_var_to_unbound_name() {
+        // A `(var y)` body referencing a name that is not defined at all is
+        // not constant-foldable and must be excluded.
+        let exprs =
+            chelis_deep::parser::parse_str("(module {} m (def {} a (var {} y)))").expect("parse");
+        let consts = collect_zero_arg_constants(&exprs);
+        assert!(
+            !consts.contains_key("a"),
+            "a value-binding referencing an unbound name must not be a constant, got {consts:?}"
+        );
+    }
+
+    #[test]
+    fn collect_zero_arg_constants_includes_constant_fold_over_literals() {
+        // A constant-foldable arithmetic expression over literals is a
+        // genuine constant and IS registered (e.g. `def eps = sub(0.001,
+        // 0.0)`), so the restriction does not over-reject real constants.
+        let exprs = chelis_deep::parser::parse_str(
+            "(module {} m (def {} eps (app {} (var {} sub) \
+             (lit {type: (t-prim {} f32)} 0.001) (lit {type: (t-prim {} f32)} 0.0))))",
+        )
+        .expect("deep parse");
+        let consts = collect_zero_arg_constants(&exprs);
+        assert!(
+            consts.contains_key("eps"),
+            "an arithmetic expr over literals is a constant and must be collected, got {consts:?}"
+        );
+    }
+
+    #[test]
+    fn collect_zero_arg_constants_includes_var_to_genuine_constant() {
+        // A constant ALIAS `(def b (var eps))` where `eps` is itself a
+        // genuine literal constant IS constant-foldable and registered.
+        let exprs = chelis_deep::parser::parse_str(
+            "(module {} m (def {} eps (lit {type: (t-prim {} f32)} 0.001)) \
+             (def {} b (var {} eps)))",
+        )
+        .expect("deep parse");
+        let consts = collect_zero_arg_constants(&exprs);
+        assert!(
+            consts.contains_key("b"),
+            "an alias of a genuine constant is a constant and must be collected, got {consts:?}"
+        );
+        assert!(consts.contains_key("eps"), "got {consts:?}");
+    }
+
+    #[test]
+    fn collect_zero_arg_constants_excludes_disallowed_op_over_literals() {
+        // A body calling a function outside the constant grammar (here a
+        // general `foo`) over literals is NOT constant-foldable and is
+        // excluded, even though its arguments are literals.
+        let exprs = chelis_deep::parser::parse_str(
+            "(module {} m (def {} a (app {} (var {} foo) (lit {type: (t-prim {} f32)} 1.0))))",
+        )
+        .expect("deep parse");
+        let consts = collect_zero_arg_constants(&exprs);
+        assert!(
+            !consts.contains_key("a"),
+            "an app over a non-grammar op must not be a constant, got {consts:?}"
         );
     }
 

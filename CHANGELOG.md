@@ -325,7 +325,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   desugarer always wraps def bodies in `fn`, but hand-authored Deep -- which
   the chokepoint accepts and `validate --deep` admits -- can declare a
   constant in the bare form, so a `.dp` invariant referencing it now
-  resolves instead of failing on an unknown name.
+  resolves instead of failing on an unknown name. (Review-3) The
+  bare-value-binding arm is restricted to genuinely constant-foldable
+  bodies (a literal, a predicate-grammar arithmetic/intrinsic/comparison/
+  boolean application over constant arguments, or a reference to another
+  genuine constant); a value-binding whose body is a `(var ...)` to a
+  non-constant or unbound name, or any other non-foldable expression, is
+  no longer registered, so a non-constant binding cannot pollute the
+  decode constant table or mis-resolve.
 
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep

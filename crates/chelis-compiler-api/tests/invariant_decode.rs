@@ -624,3 +624,56 @@ fn value_binding_constant_invariant_rejects_violating_payload() {
         .expect_err("-0.5 is below the lower band and must be rejected");
     assert!(matches!(below, DecodeError::Invariant(_)), "got {below:?}");
 }
+
+/// Same Tol program as `TOL_DEEP_BARE_VALUE_CONST`, but with an EXTRA
+/// non-constant value-binding `(def {} a (var {} foo))` referencing an
+/// undefined name. Review-3: the constant collector must NOT register `a`
+/// (it is not a constant), so this garbage binding cannot pollute the decode
+/// table or affect resolution of the genuine `eps` constant.
+const TOL_DEEP_WITH_NON_CONSTANT_BINDING: &str = r#"
+(module {}
+  stats.tol
+  (def {} a (var {} foo))
+  (def {} eps (lit {type: (t-prim {} f32)} 0.001))
+  (deftype {opaque: true,
+            invariant_amenability: "linear",
+            invariant: (fn {}
+                          (params {} p)
+                          (app {}
+                            (var {} and)
+                            (app {}
+                              (var {} gte)
+                              (access {} (var {} p) value)
+                              (app {}
+                                (var {} sub)
+                                (lit {type: (t-prim {} f32)} 0.0)
+                                (var {} eps)))
+                            (app {}
+                              (var {} lte)
+                              (access {} (var {} p) value)
+                              (app {}
+                                (var {} add)
+                                (lit {type: (t-prim {} f32)} 1.0)
+                                (var {} eps)))))}
+    Tol
+    ()
+    (variant {} Tol (field {} value (t-prim {} f32)))))
+"#;
+
+#[test]
+fn non_constant_value_binding_does_not_break_genuine_constant_decode() {
+    // Review-3: a `(def a (var foo))` non-constant binding sits next to the
+    // genuine `eps` literal constant. The genuine constant still resolves so
+    // a valid payload decodes; the garbage binding is not registered and
+    // does not interfere. (The earlier catch-all would have registered `a`
+    // mapped to an unresolved `(var foo)`.)
+    let exprs = program_exprs_deep(TOL_DEEP_WITH_NON_CONSTANT_BINDING);
+    let decoded = decode_adt_value(&exprs, &tol_payload(0.5))
+        .expect("genuine eps constant still resolves; valid payload decodes");
+    assert_eq!(decoded.as_adt().expect("ADT").0, "Tol");
+
+    // And a violating payload is still rejected (no pass-through).
+    let err = try_decode_adt_value(&exprs, &tol_payload(1.5))
+        .expect_err("1.5 is outside the eps band and must be rejected");
+    assert!(matches!(err, DecodeError::Invariant(_)), "got {err:?}");
+}
