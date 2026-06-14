@@ -32,10 +32,22 @@ struct OpaqueType {
 /// type. The checker keys opacity by (type, defining module); this is
 /// the advisory lint approximating that with per-file/per-corpus
 /// declaration data (no symbol table).
+///
+/// CR2-7: the corpus walk records every module-LESS file's declarations
+/// under the same `module = None` key, so they would all share one
+/// shadow bucket -- a local type in one module-less file would falsely
+/// suppress the forge lint for a DIFFERENT module-less file. A
+/// module-less file's local types shadow only its OWN constructions, so
+/// the `None` (module-less) shadow lookup uses
+/// `current_file_module_less_leaves` -- the leaves the CURRENTLY-CHECKED
+/// file declares at top level -- never the shared corpus `None` bucket.
+/// Named-module shadow keeps using `declared_leaves` so a module split
+/// across files still shadows correctly.
 #[derive(Debug, Default)]
 struct Catalog {
     opaque: Vec<OpaqueType>,
     declared_leaves: HashSet<(Option<String>, String)>,
+    current_file_module_less_leaves: HashSet<String>,
 }
 
 impl Catalog {
@@ -46,6 +58,15 @@ impl Catalog {
     fn extend(&mut self, other: Catalog) {
         self.opaque.extend(other.opaque);
         self.declared_leaves.extend(other.declared_leaves);
+        // `current_file_module_less_leaves` is per-checked-file state,
+        // set after the corpus is built; it is not merged across files.
+    }
+
+    /// Record the leaves declared at top level (module-less) by the
+    /// file currently being checked, for the file-scoped `None` shadow
+    /// (CR2-7).
+    fn set_current_file_module_less_leaves(&mut self, leaves: HashSet<String>) {
+        self.current_file_module_less_leaves = leaves;
     }
 }
 
@@ -91,8 +112,28 @@ fn check_surf(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
     if catalog.is_empty() {
         return Vec::new();
     }
+    // CR2-7: the module-less shadow for THIS file's constructions is
+    // this file's own top-level type declarations, never the shared
+    // corpus `None` bucket.
+    catalog.set_current_file_module_less_leaves(surf_module_less_leaves(&decls));
     let mut out = Vec::new();
     check_surf_decls(ctx, source, &decls, &catalog, None, &mut out);
+    out
+}
+
+/// Leaves of the type declarations the file declares at TOP LEVEL
+/// (outside any `module` wrapper), for the file-scoped module-less
+/// shadow (CR2-7).
+fn surf_module_less_leaves(decls: &[surf::Decl]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for decl in decls {
+        match decl {
+            surf::Decl::TypeDef { name, .. } | surf::Decl::TypeAlias { name, .. } => {
+                out.insert(type_leaf(name).to_string());
+            }
+            _ => {}
+        }
+    }
     out
 }
 
@@ -306,13 +347,34 @@ fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
     let Ok(exprs) = chelis_deep::parser::parse_str_strict(source) else {
         return Vec::new();
     };
-    let catalog = collect_deep_catalog(&exprs);
+    let mut catalog = collect_deep_catalog(&exprs);
     if catalog.is_empty() {
         return Vec::new();
     }
+    // A `.dp` is one check unit (one source), so its module-less
+    // declarations belong to one anonymous module; the file-scoped
+    // module-less shadow is this source's own top-level type leaves.
+    catalog.set_current_file_module_less_leaves(deep_module_less_leaves(&exprs));
     let mut out = Vec::new();
     for expr in &exprs {
         check_deep_expr(ctx, source, expr, &catalog, None, &mut out);
+    }
+    out
+}
+
+/// Leaves of the top-level (module-less) `deftype`/`typealias` nodes in
+/// a Deep source, for the file-scoped module-less shadow (CR2-7).
+fn deep_module_less_leaves(exprs: &[deep::Expr]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for expr in exprs {
+        let Some(list) = as_list(expr) else {
+            continue;
+        };
+        if matches!(tag(list), Some("deftype") | Some("typealias"))
+            && let Some(name) = children(list).first().and_then(sym_str)
+        {
+            out.insert(type_leaf(name).to_string());
+        }
     }
     out
 }
@@ -463,11 +525,19 @@ fn is_outside_opaque_module(
 ) -> bool {
     let leaf = type_leaf(type_name);
     // Local declaration shadows: the bare name resolves to this
-    // module's own type, not an imported opaque one.
-    if catalog
-        .declared_leaves
-        .contains(&(current_module.map(str::to_string), leaf.to_string()))
-    {
+    // module's own type, not an imported opaque one. For a NAMED
+    // module the shadow is corpus-wide (a module split across files
+    // still shadows). For a MODULE-LESS site the shadow is file-scoped
+    // (CR2-7): distinct module-less files collapse into the corpus
+    // `None` bucket, so only THIS file's own top-level types may
+    // shadow it.
+    let shadowed = match current_module {
+        Some(module) => catalog
+            .declared_leaves
+            .contains(&(Some(module.to_string()), leaf.to_string())),
+        None => catalog.current_file_module_less_leaves.contains(leaf),
+    };
+    if shadowed {
         return false;
     }
     // No local shadow: flag iff an opaque same-leaf type is defined in
@@ -800,5 +870,87 @@ type Probability = | Probability { value: f32 }
 def probability(x: f32) -> Probability = Probability { value: x }
 "#;
         assert!(run_surf(src).is_empty());
+    }
+
+    // ── CR2-7: module-less files must not share one None shadow bucket ──
+
+    /// Write a corpus of named `.ch` files into a temp dir and lint
+    /// `checked_rel`. Used for the multi-module-less-file cases that
+    /// `run_surf_in_package` (two fixed files) cannot express.
+    fn run_corpus(files: &[(&str, &str)], checked_rel: &str) -> Vec<Violation> {
+        let temp = tempdir().expect("tempdir");
+        for (rel, src) in files {
+            std::fs::write(temp.path().join(rel), src).expect("write source");
+        }
+        let checked = temp.path().join(checked_rel);
+        let source = std::fs::read_to_string(&checked).expect("read checked");
+        let ctx = Context {
+            root: temp.path(),
+            path: &checked,
+            source: Some(&source),
+            surface: Surface::SurfSource,
+        };
+        OpaqueDomainConstruction.check(&ctx)
+    }
+
+    #[test]
+    fn module_less_local_type_does_not_suppress_another_module_less_files_forge() {
+        // CR2-7 false suppression: the opaque type lives in a NAMED
+        // module (`@opaque` requires one). `filea.ch` is module-less
+        // and declares its OWN non-opaque `Secret`; `fileb.ch` is a
+        // DIFFERENT module-less file that constructs the opaque
+        // `Secret`. file A's local type keys to `module = None`, the
+        // same bucket as file B, so before the fix it falsely
+        // suppressed file B's forge. File B has no local `Secret`, so
+        // its forge must be flagged.
+        let victim = r#"
+module Victim.Types
+@opaque
+type Secret = | Secret { value: f32 }
+"#;
+        let filea = r#"
+type Secret = | Secret { value: f32 }
+def make_local(x: f32) -> Secret = Secret { value: x }
+"#;
+        let fileb = r#"
+def forge(x: f32) -> Secret = Secret { value: x }
+"#;
+        let violations = run_corpus(
+            &[
+                ("victim.ch", victim),
+                ("filea.ch", filea),
+                ("fileb.ch", fileb),
+            ],
+            "fileb.ch",
+        );
+        assert_eq!(
+            violations.len(),
+            1,
+            "a module-less file's local type must not suppress a DIFFERENT module-less \
+             file's forge; got {violations:?}"
+        );
+        assert!(violations[0].message.contains("direct record construction"));
+    }
+
+    #[test]
+    fn module_less_file_constructing_its_own_local_type_is_still_allowed() {
+        // CR2-7 negative parity: a module-less file's OWN local type
+        // shadows its OWN constructions (file A here is the checked
+        // file). It must stay unflagged even though a named module
+        // defines an opaque same-leaf type.
+        let victim = r#"
+module Victim.Types
+@opaque
+type Secret = | Secret { value: f32 }
+"#;
+        let filea = r#"
+type Secret = | Secret { value: f32 }
+def make_local(x: f32) -> Secret = Secret { value: x }
+"#;
+        let violations = run_corpus(&[("victim.ch", victim), ("filea.ch", filea)], "filea.ch");
+        assert!(
+            violations.is_empty(),
+            "a module-less file constructing its OWN local type must not be flagged; got {violations:?}"
+        );
     }
 }

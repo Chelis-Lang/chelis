@@ -30,6 +30,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   the check; the genuine out-of-module forge is still flagged. The
   authoritative checker enforcement was already correct -- this is a
   fast-feedback lint-quality fix.
+- The `opaque-domain-construction` lint no longer collapses distinct
+  module-less files into one shared shadow bucket (CR2-7). Across a
+  corpus walk, a top-level (module-less) `type L` in one file used to
+  falsely suppress the forge lint for a DIFFERENT module-less file
+  constructing an opaque `L`; the module-less local-type shadow is now
+  scoped to the currently-checked file, while named-module shadows
+  stay corpus-wide so a module split across files still resolves.
 
 ### Added
 
