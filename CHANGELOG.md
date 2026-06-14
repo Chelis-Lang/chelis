@@ -97,6 +97,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   constructing an opaque `L`; the module-less local-type shadow is now
   scoped to the currently-checked file, while named-module shadows
   stay corpus-wide so a module split across files still resolves.
+- The `opaque-domain-construction` lint now catalogs opaque types only
+  from a NAMED module (CR3). `@opaque` requires a named enclosing
+  module -- the checker rejects a module-less `@opaque` as a
+  declaration error -- so a module-less opaque type keyed to the shared
+  `None` module, collapsing distinct module-less files and falsely
+  flagging a same-leaf construction in an unrelated module against an
+  invalid declaration. The lint now defers the invalid module-less
+  `@opaque` to the checker.
 
 ### Added
 
