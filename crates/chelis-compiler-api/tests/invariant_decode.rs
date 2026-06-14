@@ -533,3 +533,94 @@ fn constant_referencing_invariant_rejects_violating_payload() {
         .expect_err("-0.5 is below the lower band and must be rejected");
     assert!(matches!(below, DecodeError::Invariant(_)), "got {below:?}");
 }
+
+// ── Value-binding constant references in the invariant (CR2-6) ────────────
+
+/// Parse a raw Deep (`.dp`) program into the exprs the chokepoint consumes.
+/// The decode chokepoint accepts hand-authored Deep, so this exercises the
+/// surface a Surf desugar cannot produce.
+fn program_exprs_deep(source: &str) -> Vec<Expr> {
+    chelis_deep::parser::parse_str(source).expect("deep parse")
+}
+
+/// A hand-authored Deep program declaring the in-module constant `eps` as a
+/// BARE VALUE-BINDING def -- `(def {} eps (lit ...))`, where the body is the
+/// value directly rather than a `(fn {} (params {}) <inner>)` wrapper. This
+/// form is legal Deep (`validate --deep` accepts it) but is never produced
+/// by the Surf desugarer, which always wraps a def body in `fn`. CR2-6: the
+/// CR-3 constant collector only matched the fn-wrapped form, so a `.dp`
+/// invariant referencing this value-binding constant could not resolve it.
+///
+/// The invariant is `p.value >= 0.0 - eps && p.value <= 1.0 + eps`, the same
+/// eps-widened band the fn-form test uses, so `eps` is load-bearing.
+const TOL_DEEP_BARE_VALUE_CONST: &str = r#"
+(module {}
+  stats.tol
+  (def {} eps (lit {type: (t-prim {} f32)} 0.001))
+  (deftype {opaque: true,
+            invariant_amenability: "linear",
+            invariant: (fn {}
+                          (params {} p)
+                          (app {}
+                            (var {} and)
+                            (app {}
+                              (var {} gte)
+                              (access {} (var {} p) value)
+                              (app {}
+                                (var {} sub)
+                                (lit {type: (t-prim {} f32)} 0.0)
+                                (var {} eps)))
+                            (app {}
+                              (var {} lte)
+                              (access {} (var {} p) value)
+                              (app {}
+                                (var {} add)
+                                (lit {type: (t-prim {} f32)} 1.0)
+                                (var {} eps)))))}
+    Tol
+    ()
+    (variant {} Tol (field {} value (t-prim {} f32)))))
+"#;
+
+#[test]
+fn value_binding_constant_invariant_accepts_valid_payload() {
+    // CR2-6 (red test): `eps` is declared as a bare value-binding def, the
+    // form the CR-3 fn-only collector skipped. Before the CR2-6 fix this
+    // WRONGLY REJECTS (the constant is unresolved, so the predicate errors
+    // with `unknown runtime name eps`).
+    let exprs = program_exprs_deep(TOL_DEEP_BARE_VALUE_CONST);
+    let decoded = decode_adt_value(&exprs, &tol_payload(0.5))
+        .expect("a valid payload of a value-binding-constant invariant must decode");
+    let (ctor, fields) = decoded.as_adt().expect("decoded an ADT");
+    assert_eq!(ctor, "Tol");
+    assert_eq!(fields[0].as_f64(), Some(0.5_f32 as f64));
+}
+
+#[test]
+fn value_binding_constant_widens_bound_so_just_past_one_is_accepted() {
+    // The value-binding constant is load-bearing: `1.0005` is outside the
+    // bare `[0, 1]` band but inside `[-eps, 1 + eps]`, so it is admissible
+    // only because `eps` resolves through the value-binding form.
+    let exprs = program_exprs_deep(TOL_DEEP_BARE_VALUE_CONST);
+    let decoded = decode_adt_value(&exprs, &tol_payload(1.0005))
+        .expect("1.0005 is inside the eps-widened upper bound");
+    assert_eq!(decoded.as_adt().expect("ADT").0, "Tol");
+}
+
+#[test]
+fn value_binding_constant_invariant_rejects_violating_payload() {
+    // CR2-6 (negative parity): a payload outside the eps-widened band is
+    // still rejected. Resolving the value-binding constant must not turn the
+    // predicate into a pass-through.
+    let exprs = program_exprs_deep(TOL_DEEP_BARE_VALUE_CONST);
+    let err = try_decode_adt_value(&exprs, &tol_payload(1.5))
+        .expect_err("1.5 is outside [-eps, 1 + eps] and must be rejected");
+    assert!(
+        matches!(err, DecodeError::Invariant(_)),
+        "out-of-band value is an invariant violation, got {err:?}"
+    );
+
+    let below = try_decode_adt_value(&exprs, &tol_payload(-0.5))
+        .expect_err("-0.5 is below the lower band and must be rejected");
+    assert!(matches!(below, DecodeError::Invariant(_)), "got {below:?}");
+}
