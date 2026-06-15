@@ -170,6 +170,19 @@ fn smt_expr_exceeds_depth(expr: &SmtExpr, max: usize) -> bool {
     false
 }
 
+/// Whether a variable/binder name is safe to hand to cvc5's `mk_const` /
+/// `mk_var`. `cvc5-rs` builds a `CString` from the name and `unwrap()`s it,
+/// so an interior NUL byte PANICS out of `solve_property` (a recoverable
+/// unwind under the default profile, a hard abort under `panic=abort`) --
+/// either way it fails to return a `TierBResult`. A name with an interior
+/// NUL routes to Tier C instead (RT6 round-2). cvc5 tolerates every other
+/// byte sequence (reserved words, whitespace, parens, unicode) as an opaque
+/// symbol.
+#[cfg(feature = "smt")]
+fn smt_name_is_cvc5_safe(name: &str) -> bool {
+    !name.as_bytes().contains(&0)
+}
+
 #[cfg(feature = "smt")]
 fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     use cvc5_rs::{Kind, Solver, TermManager};
@@ -237,6 +250,12 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     let mut vars: HashMap<String, cvc5_rs::Term> = HashMap::new();
     let mut sorts: HashMap<String, SmtSort> = HashMap::new();
     for (name, sort) in &property.variables {
+        if !smt_name_is_cvc5_safe(name) {
+            return TierBResult::Error(
+                "variable name contains an interior NUL byte, cannot lower to cvc5 (routes to Tier C)"
+                    .to_string(),
+            );
+        }
         let cvc5_sort = match sort {
             SmtSort::Real => tm.real_sort(),
             SmtSort::Int => tm.integer_sort(),
@@ -494,6 +513,14 @@ pub fn lower_to_cvc5(
             (tm.mk_term(Kind::CVC5_KIND_NOT, &[t]), SmtSort::Bool)
         }
         SmtExpr::Forall(bindings, body) | SmtExpr::Exists(bindings, body) => {
+            for (name, _) in bindings {
+                if !smt_name_is_cvc5_safe(name) {
+                    return Err(
+                        "quantifier bound-variable name contains an interior NUL byte (routes to Tier C)"
+                            .to_string(),
+                    );
+                }
+            }
             let bound_vars = quantifier_bound_vars(tm, bindings);
             let mut extended_vars = vars.clone();
             let mut extended_sorts = sorts.clone();
@@ -1726,6 +1753,47 @@ mod tests {
             solve_property(&prop_shallow, 5000),
             TierBResult::Proved,
             "a shallow nesting must still prove at the SMT tier"
+        );
+    }
+
+    /// A variable / bound-variable name with an interior NUL byte. cvc5-rs
+    /// builds a CString from the name and unwraps it, so an interior NUL
+    /// PANICS out of solve_property (and aborts under panic=abort) rather
+    /// than returning a TierBResult. The name guard routes it to a clean
+    /// Error instead. RT6 round-2.
+    #[test]
+    fn rt6_nul_byte_variable_name_is_clean_error_not_panic() {
+        // Declared variable name with an interior NUL.
+        let declared = SmtProperty {
+            variables: vec![("x\0y".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Var("x\0y".to_string())),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        };
+        assert!(
+            matches!(solve_property(&declared, 5000), TierBResult::Error(_)),
+            "a NUL-containing declared variable name must be a clean Error, not a panic"
+        );
+
+        // Quantifier bound-variable name with an interior NUL.
+        let bound = SmtProperty {
+            variables: vec![],
+            preconditions: vec![],
+            postcondition: SmtExpr::Forall(
+                vec![("k\0z".to_string(), SmtSort::Real)],
+                Box::new(SmtExpr::Cmp(
+                    CmpOp::Ge,
+                    Box::new(SmtExpr::Var("k\0z".to_string())),
+                    Box::new(SmtExpr::RealLit(0.0)),
+                )),
+            ),
+        };
+        assert!(
+            matches!(solve_property(&bound, 5000), TierBResult::Error(_)),
+            "a NUL-containing bound-variable name must be a clean Error, not a panic"
         );
     }
 }
