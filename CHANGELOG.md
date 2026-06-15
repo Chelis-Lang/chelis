@@ -23,6 +23,26 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove-obligation review-4 fixes -->
+- The int-width to SMT-sort decision is now single source
+  (`chelis_prove::opaque::prim_to_smt_sort` / `is_int_width` /
+  `INT_WIDTHS`), consulted by every site (the opaque field sort, the
+  producer-param sort, the `@property` param sort, the in-module constant
+  recognizer, the field value class, and the c-earchin bridge converter)
+  (F3). The rework had widened only some sites to int8/int16, so an
+  int8/int16 field or param compared against an int8/int16 constant lowered
+  as an integer literal against a real-sorted variable and routed to Tier C
+  (a regression). int8/int16 opaque fields are now in the value class and
+  lower consistently with int32/int64.
+- Comparison-operand sort reconciliation is now one shared function
+  (`chelis_prove::opaque::reconcile_cmp_operands`) used by BOTH the
+  flattened-predicate path and the cvc5-feeding producer-body path
+  (`tier_b_lower::lower_pred_bool`) (F4). The producer-body path previously
+  had no reconciliation, the parallel-path divergence the unification
+  missed. The U3 operand-sort pre-check remains the universal backstop.
+- The in-module constant alias chain is now followed to full depth with
+  cycle detection instead of a four-hop cap (F5). A longer integer alias
+  chain previously dropped silently to a real sort; a cyclic chain now
+  terminates instead of mis-resolving.
 - The Tier B sort pre-check no longer lets a `min`/`max` over a mixed
   Int-vs-Real operand pair abort the cvc5 process (F1). cvc5 lowers
   `min`/`max` to an internal `ITE(LT(a,b),a,b)` that aborts on mismatched
