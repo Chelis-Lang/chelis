@@ -93,6 +93,12 @@ The hardcoded `RealLit`-for-constant arms are gone.
 
 ## U3 -- one cvc5-lowerable intrinsic source of truth + sort-mismatch pre-check
 
+> Superseded by **W5** below. The U3 sort pre-check was a blacklist that
+> kept missing aborting shapes; W5 replaces it with the whitelist gate
+> (`is_cvc5_lowerable`). The `CVC5_LOWERABLE` / `CVC5_TRANSCENDENTAL`
+> single-source-of-truth for intrinsics from U3 is retained and consumed by
+> the whitelist. This section is kept for history.
+
 Contract: `validate_smt_arity`, `lower_to_cvc5`, and
 `contains_transcendental` all derive from the single `CVC5_LOWERABLE` /
 `CVC5_TRANSCENDENTAL` source (no fourth list that can drift). A
@@ -153,6 +159,68 @@ the shared runner because the runner's Tier B / injection require the
 capability. Because tide and the capability-enabled CLI compute their
 verdict from the SAME runner, they agree by construction (test-locked
 parity).
+
+## W5 -- the Tier B whitelist invariant (supersedes the U3 blacklist)
+
+Invariant: **Tier B lowers only provably-safe terms; anything else routes
+to Tier C; lowering never aborts cvc5.**
+
+The U3 sort pre-check BLACKLISTED known aborting shapes (Int-vs-Real
+comparisons, mixed-sort `min`/`max`, `ITE` branches). A blacklist keeps
+missing siblings: three more abort shapes survived three reviews -- a
+transcendental over an `Int` argument, a `Bool`-vs-`Int` comparison, and a
+quantifier whose bound-var sort mismatched a literal. The invariant is
+inverted to a WHITELIST.
+
+`is_cvc5_lowerable(prop)` (the SOLE pre-lowering gate in
+`solve_property_cvc5`) walks the whole property -- every precondition and
+the postcondition -- carrying a sort environment seeded from
+`prop.variables`, and returns lowerable ONLY IF every node is PROVABLY
+cvc5-safe:
+
+- `Var`: its sort is KNOWN in the env (else NOT lowerable).
+- literal: sort known (`IntLit` -> Int, `RealLit` -> Real, `BoolLit` ->
+  Bool).
+- `Cmp`: both operands lower to KNOWN, EQUAL sorts; a numeric comparison
+  (`<`/`<=`/`>`/`>=`) additionally rejects a `Bool` operand. `Eq`/`Ne`
+  admit any equal sort (including `Bool == Bool`).
+- `Arith`: operands known + matching numeric sorts; unary `Neg` checks
+  ONLY its real operand (skip the placeholder).
+- `Apply`: name in `CVC5_LOWERABLE` at correct arity AND each arg meets
+  that function's cvc5 sort requirement -- `sqrt`/`exp`/`sin`/`cos`
+  require a Real arg (an Int arg -> NOT lowerable -> Tier C); `min`/`max`
+  require equal-sort args; `abs` preserves a numeric sort. Any other name
+  (e.g. `log`, with no cvc5 kind) -> NOT lowerable.
+- `Ite`: `c` is Bool; `t` and `e` have known EQUAL sorts.
+- `Forall`/`Exists`: ADD the bound vars (with their declared sorts) to the
+  env, THEN recurse into the body; restore shadowed bindings afterward.
+- ANY node where a sort is Unknown, a requirement is unproven, or an op is
+  unrecognized -> NOT lowerable. The DEFAULT is NOT-lowerable; only
+  explicitly-proven-safe terms pass.
+
+Because the default is reject, a shape no review enumerated
+(transcendental-over-Int, Bool-vs-Int, quantifier-bound-var, or any future
+shape) routes to Tier C automatically. `lower_to_cvc5` is therefore only
+ever called on a provably-safe property; its `Result`-not-panic arms are
+defense in depth. Quantifier lowering uses cvc5 bound variables (`mk_var`)
+and the logic selection drops the `QF_` prefix when a quantifier is
+present, so an admitted quantifier lowers under a quantified logic rather
+than aborting. The old blacklist (`check_operand_sorts`, `definitely_mixed`,
+`infer_sort`, `unify_sort`) and the separate arity guard
+(`validate_smt_arity`) are removed -- the whitelist subsumes them.
+
+The abort-proof guarantee is asserted at the subprocess level
+(`whitelist_corpus_never_aborts_cvc5`): a cvc5 process-abort cannot be
+caught in-process, so a diverse predicate corpus is run through `chelis
+prove` and EACH run must exit cleanly with no cvc5 sort/type abort marker.
+
+W5 also single-sources the signed-integer-width decision across the whole
+workspace: `chelis_types::Prim::is_integer` / `integer_range` /
+`integer_fuzz_bounds` own the int-width set, range, and fuzz-sampling
+window; the prove layer's `is_int_width` / `int_sample_bounds` are thin
+wrappers, and every recognition / sort / sampling / literal site routes
+through them, so an `int8`/`int16` field, param, or constant is handled
+identically to `int32`/`int64` everywhere.
 
 ## Acceptance oracle
 
