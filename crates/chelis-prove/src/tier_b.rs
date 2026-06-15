@@ -114,224 +114,14 @@ fn cvc5_lowerable_arity(name: &str) -> Option<usize> {
         .map(|(_, a)| *a)
 }
 
-/// The WHITELIST gate (review 5): Tier B lowers ONLY provably-cvc5-safe
-/// terms. The earlier pre-checks BLACKLISTED known aborting shapes
-/// (Int-vs-Real comparisons, mixed-sort min/max, ITE branches) and kept
-/// missing siblings (transcendental-over-Int, Bool-vs-Int, quantifier
-/// bound-var sort mismatch). The invariant is inverted: a property is
-/// lowerable ONLY IF every node is provably safe; the DEFAULT is
-/// NOT-lowerable, so any shape no review enumerated (a sort the tracker
-/// cannot determine, an unrecognized op) routes to Tier C automatically,
-/// never an abort.
-///
-/// Returns `Ok(())` if the whole property (every precondition + the
-/// postcondition) is provably cvc5-lowerable, else `Err(reason)`.
-#[cfg(feature = "smt")]
-fn is_cvc5_lowerable(prop: &SmtProperty) -> Result<(), String> {
-    let mut env: std::collections::HashMap<String, SmtSort> = prop
-        .variables
-        .iter()
-        .map(|(n, s)| (n.clone(), *s))
-        .collect();
-    for pre in &prop.preconditions {
-        require_bool(pre, &mut env)?;
-    }
-    require_bool(&prop.postcondition, &mut env)
-}
-
-/// The cvc5 sort a node lowers to, or `Err` if the node is not provably
-/// lowerable (an unknown var sort, an unrecognized op, a sort mismatch, or
-/// a function applied to an argument of the wrong cvc5 sort). The DEFAULT
-/// is reject: every admitted shape is enumerated explicitly.
-///
-/// `env` carries the declared variable sorts, extended with quantifier
-/// bound-var sorts as we descend into a `Forall`/`Exists` body.
-#[cfg(feature = "smt")]
-fn lowerable_sort(
-    expr: &SmtExpr,
-    env: &mut std::collections::HashMap<String, SmtSort>,
-) -> Result<SmtSort, String> {
-    match expr {
-        SmtExpr::IntLit(_) => Ok(SmtSort::Int),
-        SmtExpr::RealLit(_) => Ok(SmtSort::Real),
-        SmtExpr::BoolLit(_) => Ok(SmtSort::Bool),
-        SmtExpr::Var(name) => env
-            .get(name)
-            .copied()
-            .ok_or_else(|| format!("variable `{name}` has no known sort (routes to Tier C)")),
-        // A boolean-shaped node is Bool; verify its structure recursively.
-        SmtExpr::Not(inner) => {
-            require_bool(inner, env)?;
-            Ok(SmtSort::Bool)
-        }
-        SmtExpr::Bool(_, children) => {
-            for c in children {
-                require_bool(c, env)?;
-            }
-            Ok(SmtSort::Bool)
-        }
-        SmtExpr::Cmp(op, l, r) => {
-            let ls = lowerable_sort(l, env)?;
-            let rs = lowerable_sort(r, env)?;
-            // Both operands must lower to the SAME known sort. A numeric
-            // comparison (Lt/Le/Gt/Ge) additionally requires a numeric sort
-            // (a Bool operand aborts cvc5). Eq/Ne admit any equal sort
-            // (including Bool == Bool).
-            if ls != rs {
-                return Err(format!(
-                    "comparison operands have differing sorts {ls:?} vs {rs:?} (routes to Tier C)"
-                ));
-            }
-            let is_numeric_cmp = matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
-            if is_numeric_cmp && ls == SmtSort::Bool {
-                return Err("numeric comparison over a Bool operand (routes to Tier C)".to_string());
-            }
-            Ok(SmtSort::Bool)
-        }
-        // Unary `neg` is represented as `Arith(Neg, x, <placeholder>)`; cvc5
-        // lowers NEG as unary and ignores the placeholder, so check ONLY the
-        // real operand and require a numeric sort.
-        SmtExpr::Arith(ArithOp::Neg, l, _placeholder) => {
-            let ls = lowerable_sort(l, env)?;
-            require_numeric(ls, "neg operand")?;
-            Ok(ls)
-        }
-        SmtExpr::Arith(_, l, r) => {
-            let ls = lowerable_sort(l, env)?;
-            let rs = lowerable_sort(r, env)?;
-            require_numeric(ls, "arithmetic operand")?;
-            require_numeric(rs, "arithmetic operand")?;
-            if ls != rs {
-                return Err(format!(
-                    "arithmetic operands have differing sorts {ls:?} vs {rs:?} (routes to Tier C)"
-                ));
-            }
-            Ok(ls)
-        }
-        SmtExpr::Ite(c, t, e) => {
-            require_bool(c, env)?;
-            let ts = lowerable_sort(t, env)?;
-            let es = lowerable_sort(e, env)?;
-            if ts != es {
-                return Err(format!(
-                    "if-then-else branches have differing sorts {ts:?} vs {es:?} (routes to Tier C)"
-                ));
-            }
-            Ok(ts)
-        }
-        SmtExpr::Apply(name, args) => apply_lowerable_sort(name, args, env),
-        SmtExpr::Forall(bindings, body) | SmtExpr::Exists(bindings, body) => {
-            // Seed the bound vars into the env, then verify the body. Restore
-            // any shadowed outer bindings afterward so a later sibling node
-            // does not see the bound var. (This admits a consistent
-            // quantifier and rejects a bound-var sort mismatch in the body.)
-            let mut shadowed: Vec<(String, Option<SmtSort>)> = Vec::new();
-            for (name, sort) in bindings {
-                shadowed.push((name.clone(), env.insert(name.clone(), *sort)));
-            }
-            let result = require_bool(body, env);
-            for (name, prev) in shadowed.into_iter().rev() {
-                match prev {
-                    Some(s) => {
-                        env.insert(name, s);
-                    }
-                    None => {
-                        env.remove(&name);
-                    }
-                }
-            }
-            result?;
-            Ok(SmtSort::Bool)
-        }
-    }
-}
-
-/// Require a node to lower to `Bool` (a precondition / postcondition / the
-/// operands of `and`/`or`/`not` / the condition of an `ite` / a quantifier
-/// body must be boolean).
-#[cfg(feature = "smt")]
-fn require_bool(
-    expr: &SmtExpr,
-    env: &mut std::collections::HashMap<String, SmtSort>,
-) -> Result<(), String> {
-    match lowerable_sort(expr, env)? {
-        SmtSort::Bool => Ok(()),
-        other => Err(format!(
-            "expected a boolean-sorted term, got {other:?} (routes to Tier C)"
-        )),
-    }
-}
-
 /// Require a sort to be numeric (`Int` or `Real`); a `Bool` in an
-/// arithmetic position aborts cvc5.
+/// arithmetic or numeric-comparison position aborts cvc5, so it routes to
+/// Tier C instead.
 #[cfg(feature = "smt")]
-fn require_numeric(sort: SmtSort, what: &str) -> Result<(), String> {
+fn require_numeric_sort(sort: SmtSort, what: &str) -> Result<(), String> {
     match sort {
         SmtSort::Int | SmtSort::Real => Ok(()),
         SmtSort::Bool => Err(format!("{what} is Bool, not numeric (routes to Tier C)")),
-    }
-}
-
-/// The lowerable sort of an intrinsic application, enforcing each cvc5
-/// function's argument-sort requirement. The DEFAULT is reject: a name not
-/// in [`CVC5_LOWERABLE`], a wrong arity, or an argument of the wrong sort
-/// makes the whole property not lowerable.
-#[cfg(feature = "smt")]
-fn apply_lowerable_sort(
-    name: &str,
-    args: &[SmtExpr],
-    env: &mut std::collections::HashMap<String, SmtSort>,
-) -> Result<SmtSort, String> {
-    let arity = cvc5_lowerable_arity(name).ok_or_else(|| {
-        format!("unsupported function `{name}` in cvc5 lowering (routes to Tier C)")
-    })?;
-    if args.len() != arity {
-        return Err(format!(
-            "intrinsic `{name}` expects {arity} argument(s), got {} (routes to Tier C)",
-            args.len()
-        ));
-    }
-    // Every argument must itself be lowerable.
-    let arg_sorts: Vec<SmtSort> = args
-        .iter()
-        .map(|a| lowerable_sort(a, env))
-        .collect::<Result<Vec<_>, _>>()?;
-    match name {
-        // cvc5 SQRT/EXP/SINE/COSINE require a REAL argument; an Int argument
-        // aborts the process. (`log` is not in CVC5_LOWERABLE and is rejected
-        // above, so it never reaches here.)
-        "sqrt" | "exp" | "sin" | "cos" => {
-            if arg_sorts[0] != SmtSort::Real {
-                return Err(format!(
-                    "`{name}` requires a Real argument, got {:?} (routes to Tier C)",
-                    arg_sorts[0]
-                ));
-            }
-            Ok(SmtSort::Real)
-        }
-        // `abs` preserves a numeric operand sort.
-        "abs" => {
-            require_numeric(arg_sorts[0], "abs operand")?;
-            Ok(arg_sorts[0])
-        }
-        // `min`/`max` lower to ITE(cmp(a,b), a, b); both args must share one
-        // known numeric sort (a mixed pair aborts the inner ITE/cmp).
-        "min" | "max" => {
-            require_numeric(arg_sorts[0], "min/max operand")?;
-            require_numeric(arg_sorts[1], "min/max operand")?;
-            if arg_sorts[0] != arg_sorts[1] {
-                return Err(format!(
-                    "`{name}` operands have differing sorts {:?} vs {:?} (routes to Tier C)",
-                    arg_sorts[0], arg_sorts[1]
-                ));
-            }
-            Ok(arg_sorts[0])
-        }
-        // Defense in depth: any other name (should be unreachable after the
-        // CVC5_LOWERABLE arity check) is rejected.
-        other => Err(format!(
-            "unsupported function `{other}` in cvc5 lowering (routes to Tier C)"
-        )),
     }
 }
 
@@ -340,19 +130,20 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     use cvc5_rs::{Kind, Solver, TermManager};
     use std::collections::HashMap;
 
-    // The SOLE pre-lowering gate (review 5 WHITELIST): build a cvc5 term
-    // ONLY for a property every node of which is PROVABLY cvc5-safe. cvc5's
-    // `mk_term` ABORTS THE PROCESS on a sort-mismatched / wrong-sort term
-    // (e.g. Int-vs-Real, a Bool in a numeric comparison, sqrt over an Int, a
-    // quantifier bound-var sort clash), surfacing to a JSON consumer as an
-    // empty-stdout bare exit -- a machine-contract violation. The whitelist's
-    // default is NOT-lowerable, so any shape it cannot prove safe (including
-    // ones no review enumerated) routes to a clean Tier C result here, BEFORE
-    // any cvc5 term is built. `lower_to_cvc5` is therefore only ever called on
-    // a provably-safe property; its Result-not-panic arms are defense in depth.
-    if let Err(reason) = is_cvc5_lowerable(property) {
-        return TierBResult::Error(reason);
-    }
+    // SAFETY MODEL (review 6 -- TOTAL LOWERING): `lower_to_cvc5` is the SOLE
+    // authority on cvc5-safety, and it is TOTAL -- every `mk_term` call site
+    // first verifies cvc5's requirement for that kind (operand sorts AND
+    // arity), and any violation returns `Err` (routed to a clean Tier C
+    // result) BEFORE `mk_term` is reached. cvc5's `mk_term` ABORTS THE PROCESS
+    // on a malformed term (a sort-mismatched comparison, a zero/one-child
+    // `and`/`or`, a non-binary `implies`, sqrt over an Int, a non-finite
+    // literal), surfacing to a JSON consumer as an empty-stdout bare exit -- a
+    // machine-contract violation. Review 5 used a SEPARATE pre-lowering sort
+    // gate; it admitted terms (it checked sorts but not arity) the builder
+    // then aborted on (RT6). Folding the gate INTO the builder makes the
+    // check and the construction one bottom-up pass that returns the cvc5
+    // sort it builds, so the two can no longer diverge: a term that reaches
+    // `mk_term` is provably well-formed by construction.
 
     let tm = TermManager::new();
     let mut solver = Solver::new(&tm);
@@ -377,8 +168,11 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     solver.set_option("produce-models", "true");
     solver.set_option("tlimit-per", &timeout_ms.to_string());
 
-    // 1. Declare variables
+    // 1. Declare variables. `sorts` mirrors `vars` so the lowering knows each
+    //    variable's cvc5 sort without re-querying cvc5 (and so a var absent
+    //    from the declared set is a clean Err, never a panic or an abort).
     let mut vars: HashMap<String, cvc5_rs::Term> = HashMap::new();
+    let mut sorts: HashMap<String, SmtSort> = HashMap::new();
     for (name, sort) in &property.variables {
         let cvc5_sort = match sort {
             SmtSort::Real => tm.real_sort(),
@@ -387,20 +181,21 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
         };
         let var = tm.mk_const(cvc5_sort, name);
         vars.insert(name.clone(), var);
+        sorts.insert(name.clone(), *sort);
     }
 
     // 2. Assert preconditions
     for pre in &property.preconditions {
-        let term = match lower_to_cvc5(&tm, pre, &vars) {
-            Ok(t) => t,
+        let term = match lower_to_cvc5(&tm, pre, &vars, &sorts) {
+            Ok((t, _)) => t,
             Err(reason) => return TierBResult::Error(reason),
         };
         solver.assert_formula(term);
     }
 
     // 3. Assert negation of postcondition
-    let post_term = match lower_to_cvc5(&tm, &property.postcondition, &vars) {
-        Ok(t) => t,
+    let post_term = match lower_to_cvc5(&tm, &property.postcondition, &vars, &sorts) {
+        Ok((t, _)) => t,
         Err(reason) => return TierBResult::Error(reason),
     };
     let negated = tm.mk_term(Kind::CVC5_KIND_NOT, &[post_term]);
@@ -448,58 +243,117 @@ fn quantifier_bound_vars(
         .collect()
 }
 
-/// Lower an SmtExpr to a cvc5 Term.
+/// Lower an SmtExpr to a cvc5 `(Term, SmtSort)`, where the returned sort is
+/// EXACTLY the sort cvc5 assigns to the built term.
 ///
-/// Returns `Err` (rather than panicking) for any application that the
-/// whitelist gate ([`is_cvc5_lowerable`]) would also reject -- a name with
-/// no cvc5 kind (e.g. `log`, CR2-1) or a wrong arity. The whitelist gate
-/// already runs before lowering in [`solve_property_cvc5`], so every term
-/// reaching here is provably cvc5-safe; these arms are defense in depth so
-/// this function can never build a malformed term, panic, or hand cvc5 an
-/// aborting term.
+/// This function is TOTAL with respect to aborts: every `mk_term` call site
+/// first verifies cvc5's requirement for that kind -- operand sorts AND
+/// arity -- and returns `Err` (routed to Tier C by the caller) rather than
+/// handing cvc5 a term it would abort on. cvc5's `mk_term` aborts the
+/// PROCESS on a malformed term (a sort-mismatched comparison, a zero/one-
+/// child `and`/`or`, a non-binary `implies`, a transcendental over an Int, a
+/// non-finite literal), so the safety of the whole prove pipeline rests on
+/// no aborting term ever reaching `mk_term`. Folding the old separate sort
+/// gate INTO this builder (review 6) is what guarantees that: the sort this
+/// returns is the sort cvc5 builds, so a parent node's arity/sort check sees
+/// the truth (e.g. integer `/` is reported `Real` because cvc5 promotes it),
+/// and the check can no longer diverge from the construction.
+///
+/// `sorts` carries each variable's declared sort, extended with quantifier
+/// bound-var sorts as we descend into a `Forall`/`Exists` body.
 #[cfg(feature = "smt")]
 pub fn lower_to_cvc5(
     tm: &cvc5_rs::TermManager,
     expr: &SmtExpr,
     vars: &std::collections::HashMap<String, cvc5_rs::Term>,
-) -> Result<cvc5_rs::Term, String> {
+    sorts: &std::collections::HashMap<String, SmtSort>,
+) -> Result<(cvc5_rs::Term, SmtSort), String> {
     use cvc5_rs::Kind;
 
     Ok(match expr {
-        // Defense in depth: an undeclared var is rejected by the whitelist
-        // gate before lowering, so this is unreachable; return Err rather
-        // than panicking on a missing key if it is ever hit.
-        SmtExpr::Var(name) => vars
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("variable `{name}` has no declared cvc5 sort"))?,
-        SmtExpr::RealLit(value) => {
-            // Use rational string representation for cvc5
-            tm.mk_real_from_str(&format!("{value}"))
+        SmtExpr::Var(name) => {
+            let term = vars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("variable `{name}` has no declared cvc5 term"))?;
+            let sort = sorts
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("variable `{name}` has no known sort (routes to Tier C)"))?;
+            (term, sort)
         }
-        SmtExpr::IntLit(value) => tm.mk_integer(*value),
-        SmtExpr::BoolLit(value) => {
-            if *value {
-                tm.mk_true()
-            } else {
-                tm.mk_false()
+        SmtExpr::RealLit(value) => {
+            // cvc5's `mk_real_from_str` aborts on a non-finite token
+            // (`inf`/`-inf`/`NaN`); a non-finite invariant literal routes to
+            // Tier C instead (RT6 #13).
+            if !value.is_finite() {
+                return Err(format!(
+                    "non-finite real literal `{value}` cannot lower to cvc5 (routes to Tier C)"
+                ));
             }
+            (tm.mk_real_from_str(&format!("{value}")), SmtSort::Real)
+        }
+        SmtExpr::IntLit(value) => (tm.mk_integer(*value), SmtSort::Int),
+        SmtExpr::BoolLit(value) => {
+            let t = if *value { tm.mk_true() } else { tm.mk_false() };
+            (t, SmtSort::Bool)
+        }
+        // Unary `neg` is represented as `Arith(Neg, x, <placeholder>)`; cvc5
+        // lowers NEG as unary and ignores the placeholder, so lower ONLY the
+        // real operand.
+        SmtExpr::Arith(ArithOp::Neg, left, _placeholder) => {
+            let (l, ls) = lower_to_cvc5(tm, left, vars, sorts)?;
+            require_numeric_sort(ls, "neg operand")?;
+            (tm.mk_term(Kind::CVC5_KIND_NEG, &[l]), ls)
         }
         SmtExpr::Arith(op, left, right) => {
-            let l = lower_to_cvc5(tm, left, vars)?;
-            let r = lower_to_cvc5(tm, right, vars)?;
-            match op {
+            let (l, ls) = lower_to_cvc5(tm, left, vars, sorts)?;
+            let (r, rs) = lower_to_cvc5(tm, right, vars, sorts)?;
+            require_numeric_sort(ls, "arithmetic operand")?;
+            require_numeric_sort(rs, "arithmetic operand")?;
+            if ls != rs {
+                return Err(format!(
+                    "arithmetic operands have differing sorts {ls:?} vs {rs:?} (routes to Tier C)"
+                ));
+            }
+            let term = match op {
                 ArithOp::Add => tm.mk_term(Kind::CVC5_KIND_ADD, &[l, r]),
                 ArithOp::Sub => tm.mk_term(Kind::CVC5_KIND_SUB, &[l, r]),
                 ArithOp::Mul => tm.mk_term(Kind::CVC5_KIND_MULT, &[l, r]),
                 ArithOp::Div => tm.mk_term(Kind::CVC5_KIND_DIVISION, &[l, r]),
-                ArithOp::Neg => tm.mk_term(Kind::CVC5_KIND_NEG, &[l]),
-            }
+                ArithOp::Neg => unreachable!("Neg handled in the arm above"),
+            };
+            // cvc5's `/` (CVC5_KIND_DIVISION) is REAL division: its result is
+            // Real even over two Int operands (cvc5 promotes them). Reporting
+            // the operand sort (Int) here was the divergence that let a parent
+            // Int comparison see Int-vs-Int, pass its own check, then abort
+            // cvc5 on a Real-vs-Int term (RT6 #4/#12).
+            let result_sort = if matches!(op, ArithOp::Div) {
+                SmtSort::Real
+            } else {
+                ls
+            };
+            (term, result_sort)
         }
         SmtExpr::Cmp(op, left, right) => {
-            let l = lower_to_cvc5(tm, left, vars)?;
-            let r = lower_to_cvc5(tm, right, vars)?;
-            match op {
+            let (l, ls) = lower_to_cvc5(tm, left, vars, sorts)?;
+            let (r, rs) = lower_to_cvc5(tm, right, vars, sorts)?;
+            // Both operands must lower to the SAME cvc5 sort; a mixed pair
+            // aborts cvc5. (cvc5 would coerce Int->Real for some mixes, but
+            // routing the mix to Tier C is sound -- the property is still
+            // decided there, never aborted.)
+            if ls != rs {
+                return Err(format!(
+                    "comparison operands have differing sorts {ls:?} vs {rs:?} (routes to Tier C)"
+                ));
+            }
+            // A numeric comparison (Lt/Le/Gt/Ge) over Bool operands aborts
+            // cvc5; Eq/Ne admit any equal sort (including Bool == Bool).
+            let is_numeric_cmp = matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
+            if is_numeric_cmp && ls == SmtSort::Bool {
+                return Err("numeric comparison over a Bool operand (routes to Tier C)".to_string());
+            }
+            let term = match op {
                 CmpOp::Lt => tm.mk_term(Kind::CVC5_KIND_LT, &[l, r]),
                 CmpOp::Le => tm.mk_term(Kind::CVC5_KIND_LEQ, &[l, r]),
                 CmpOp::Gt => tm.mk_term(Kind::CVC5_KIND_GT, &[l, r]),
@@ -509,95 +363,149 @@ pub fn lower_to_cvc5(
                     let eq = tm.mk_term(Kind::CVC5_KIND_EQUAL, &[l, r]);
                     tm.mk_term(Kind::CVC5_KIND_NOT, &[eq])
                 }
-            }
+            };
+            (term, SmtSort::Bool)
         }
         SmtExpr::Bool(op, children) => {
-            let terms: Vec<_> = children
+            let lowered: Vec<(cvc5_rs::Term, SmtSort)> = children
                 .iter()
-                .map(|c| lower_to_cvc5(tm, c, vars))
+                .map(|c| lower_to_cvc5(tm, c, vars, sorts))
                 .collect::<Result<Vec<_>, _>>()?;
-            match op {
-                BoolOp::And => tm.mk_term(Kind::CVC5_KIND_AND, &terms),
-                BoolOp::Or => tm.mk_term(Kind::CVC5_KIND_OR, &terms),
-                BoolOp::Implies => tm.mk_term(Kind::CVC5_KIND_IMPLIES, &terms),
+            for (_, s) in &lowered {
+                if *s != SmtSort::Bool {
+                    return Err(format!(
+                        "boolean connective operand has sort {s:?}, expected Bool (routes to Tier C)"
+                    ));
+                }
             }
+            let terms: Vec<cvc5_rs::Term> = lowered.into_iter().map(|(t, _)| t).collect();
+            // cvc5's AND/OR require AT LEAST 2 children and IMPLIES EXACTLY 2;
+            // a degenerate arity aborts the process. Normalize the boundary
+            // cases to their logical meaning so a single-conjunct invariant
+            // still proves at the SMT tier rather than aborting (RT6 #1/#2/
+            // #5/#6/#7/#8/#11/#15).
+            let term = match op {
+                BoolOp::And => match terms.len() {
+                    0 => tm.mk_true(),
+                    1 => terms.into_iter().next().expect("len checked == 1"),
+                    _ => tm.mk_term(Kind::CVC5_KIND_AND, &terms),
+                },
+                BoolOp::Or => match terms.len() {
+                    0 => tm.mk_false(),
+                    1 => terms.into_iter().next().expect("len checked == 1"),
+                    _ => tm.mk_term(Kind::CVC5_KIND_OR, &terms),
+                },
+                BoolOp::Implies => {
+                    if terms.len() != 2 {
+                        return Err(format!(
+                            "`implies` requires exactly 2 operands, got {} (routes to Tier C)",
+                            terms.len()
+                        ));
+                    }
+                    tm.mk_term(Kind::CVC5_KIND_IMPLIES, &terms)
+                }
+            };
+            (term, SmtSort::Bool)
         }
         SmtExpr::Not(inner) => {
-            let t = lower_to_cvc5(tm, inner, vars)?;
-            tm.mk_term(Kind::CVC5_KIND_NOT, &[t])
+            let (t, s) = lower_to_cvc5(tm, inner, vars, sorts)?;
+            if s != SmtSort::Bool {
+                return Err(format!(
+                    "`not` operand has sort {s:?}, expected Bool (routes to Tier C)"
+                ));
+            }
+            (tm.mk_term(Kind::CVC5_KIND_NOT, &[t]), SmtSort::Bool)
         }
-        SmtExpr::Forall(bindings, body) => {
+        SmtExpr::Forall(bindings, body) | SmtExpr::Exists(bindings, body) => {
             let bound_vars = quantifier_bound_vars(tm, bindings);
             let mut extended_vars = vars.clone();
-            for (i, (name, _)) in bindings.iter().enumerate() {
+            let mut extended_sorts = sorts.clone();
+            for (i, (name, sort)) in bindings.iter().enumerate() {
                 extended_vars.insert(name.clone(), bound_vars[i].clone());
+                extended_sorts.insert(name.clone(), *sort);
             }
-            let body_term = lower_to_cvc5(tm, body, &extended_vars)?;
-            let bound_list = tm.mk_term(Kind::CVC5_KIND_VARIABLE_LIST, &bound_vars);
-            tm.mk_term(Kind::CVC5_KIND_FORALL, &[bound_list, body_term])
-        }
-        SmtExpr::Exists(bindings, body) => {
-            let bound_vars = quantifier_bound_vars(tm, bindings);
-            let mut extended_vars = vars.clone();
-            for (i, (name, _)) in bindings.iter().enumerate() {
-                extended_vars.insert(name.clone(), bound_vars[i].clone());
+            let (body_term, body_sort) = lower_to_cvc5(tm, body, &extended_vars, &extended_sorts)?;
+            if body_sort != SmtSort::Bool {
+                return Err(format!(
+                    "quantifier body has sort {body_sort:?}, expected Bool (routes to Tier C)"
+                ));
             }
-            let body_term = lower_to_cvc5(tm, body, &extended_vars)?;
             let bound_list = tm.mk_term(Kind::CVC5_KIND_VARIABLE_LIST, &bound_vars);
-            tm.mk_term(Kind::CVC5_KIND_EXISTS, &[bound_list, body_term])
+            let kind = if matches!(expr, SmtExpr::Forall(_, _)) {
+                Kind::CVC5_KIND_FORALL
+            } else {
+                Kind::CVC5_KIND_EXISTS
+            };
+            (tm.mk_term(kind, &[bound_list, body_term]), SmtSort::Bool)
         }
         SmtExpr::Apply(name, args) => {
-            // Defense in depth: arity/lowerability is already enforced by
-            // validate_smt_arity before any lowering runs, but re-check here
-            // so this function can never build a malformed term or panic
-            // (CR2-1). A non-lowerable name (e.g. `log`) returns Err.
-            match cvc5_lowerable_arity(name) {
-                Some(n) if args.len() == n => {}
-                Some(n) => {
-                    return Err(format!(
-                        "intrinsic `{name}` expects {n} argument(s), got {}",
-                        args.len()
-                    ));
-                }
-                None => {
-                    return Err(format!(
-                        "unsupported function `{name}` in cvc5 lowering (routes to Tier C)"
-                    ));
-                }
+            let arity = cvc5_lowerable_arity(name).ok_or_else(|| {
+                format!("unsupported function `{name}` in cvc5 lowering (routes to Tier C)")
+            })?;
+            if args.len() != arity {
+                return Err(format!(
+                    "intrinsic `{name}` expects {arity} argument(s), got {} (routes to Tier C)",
+                    args.len()
+                ));
             }
-            let lowered_args: Vec<_> = args
+            let lowered: Vec<(cvc5_rs::Term, SmtSort)> = args
                 .iter()
-                .map(|a| lower_to_cvc5(tm, a, vars))
+                .map(|a| lower_to_cvc5(tm, a, vars, sorts))
                 .collect::<Result<Vec<_>, _>>()?;
+            let arg_sorts: Vec<SmtSort> = lowered.iter().map(|(_, s)| *s).collect();
+            let lowered_args: Vec<cvc5_rs::Term> = lowered.iter().map(|(t, _)| t.clone()).collect();
             match name.as_str() {
-                "exp" => tm.mk_term(Kind::CVC5_KIND_EXPONENTIAL, &lowered_args),
-                "sqrt" => tm.mk_term(Kind::CVC5_KIND_SQRT, &lowered_args),
-                "sin" => tm.mk_term(Kind::CVC5_KIND_SINE, &lowered_args),
-                "cos" => tm.mk_term(Kind::CVC5_KIND_COSINE, &lowered_args),
-                "abs" => tm.mk_term(Kind::CVC5_KIND_ABS, &lowered_args),
-                "min" if lowered_args.len() == 2 => {
-                    let cond = tm.mk_term(
-                        Kind::CVC5_KIND_LT,
-                        &[lowered_args[0].clone(), lowered_args[1].clone()],
-                    );
-                    tm.mk_term(
-                        Kind::CVC5_KIND_ITE,
-                        &[cond, lowered_args[0].clone(), lowered_args[1].clone()],
-                    )
+                // cvc5 SQRT/EXP/SINE/COSINE require a REAL argument; an Int
+                // argument aborts the process, so it routes to Tier C.
+                "exp" | "sqrt" | "sin" | "cos" => {
+                    if arg_sorts[0] != SmtSort::Real {
+                        return Err(format!(
+                            "`{name}` requires a Real argument, got {:?} (routes to Tier C)",
+                            arg_sorts[0]
+                        ));
+                    }
+                    let kind = match name.as_str() {
+                        "exp" => Kind::CVC5_KIND_EXPONENTIAL,
+                        "sqrt" => Kind::CVC5_KIND_SQRT,
+                        "sin" => Kind::CVC5_KIND_SINE,
+                        "cos" => Kind::CVC5_KIND_COSINE,
+                        _ => unreachable!("matched above"),
+                    };
+                    (tm.mk_term(kind, &lowered_args), SmtSort::Real)
                 }
-                "max" if lowered_args.len() == 2 => {
+                "abs" => {
+                    require_numeric_sort(arg_sorts[0], "abs operand")?;
+                    (tm.mk_term(Kind::CVC5_KIND_ABS, &lowered_args), arg_sorts[0])
+                }
+                // `min`/`max` lower to ITE(cmp(a,b), a, b); both args must
+                // share one numeric sort (a mixed pair aborts the inner cmp).
+                "min" | "max" => {
+                    require_numeric_sort(arg_sorts[0], "min/max operand")?;
+                    require_numeric_sort(arg_sorts[1], "min/max operand")?;
+                    if arg_sorts[0] != arg_sorts[1] {
+                        return Err(format!(
+                            "`{name}` operands have differing sorts {:?} vs {:?} (routes to Tier C)",
+                            arg_sorts[0], arg_sorts[1]
+                        ));
+                    }
+                    let cmp_kind = if name == "min" {
+                        Kind::CVC5_KIND_LT
+                    } else {
+                        Kind::CVC5_KIND_GT
+                    };
                     let cond = tm.mk_term(
-                        Kind::CVC5_KIND_GT,
+                        cmp_kind,
                         &[lowered_args[0].clone(), lowered_args[1].clone()],
                     );
-                    tm.mk_term(
+                    let ite = tm.mk_term(
                         Kind::CVC5_KIND_ITE,
                         &[cond, lowered_args[0].clone(), lowered_args[1].clone()],
-                    )
+                    );
+                    (ite, arg_sorts[0])
                 }
                 // Unreachable after the cvc5_lowerable_arity guard above;
-                // returns Err rather than panicking if it is ever hit
-                // (e.g. CVC5_LOWERABLE gains a name with no match arm).
+                // returns Err rather than panicking if it is ever hit (e.g.
+                // CVC5_LOWERABLE gains a name with no match arm).
                 other => {
                     return Err(format!(
                         "unsupported function `{other}` in cvc5 lowering (routes to Tier C)"
@@ -606,10 +514,20 @@ pub fn lower_to_cvc5(
             }
         }
         SmtExpr::Ite(cond, then_expr, else_expr) => {
-            let c = lower_to_cvc5(tm, cond, vars)?;
-            let t = lower_to_cvc5(tm, then_expr, vars)?;
-            let e = lower_to_cvc5(tm, else_expr, vars)?;
-            tm.mk_term(Kind::CVC5_KIND_ITE, &[c, t, e])
+            let (c, cs) = lower_to_cvc5(tm, cond, vars, sorts)?;
+            if cs != SmtSort::Bool {
+                return Err(format!(
+                    "if-then-else condition has sort {cs:?}, expected Bool (routes to Tier C)"
+                ));
+            }
+            let (t, ts) = lower_to_cvc5(tm, then_expr, vars, sorts)?;
+            let (e, es) = lower_to_cvc5(tm, else_expr, vars, sorts)?;
+            if ts != es {
+                return Err(format!(
+                    "if-then-else branches have differing sorts {ts:?} vs {es:?} (routes to Tier C)"
+                ));
+            }
+            (tm.mk_term(Kind::CVC5_KIND_ITE, &[c, t, e]), ts)
         }
     })
 }
@@ -1268,11 +1186,9 @@ mod tests {
         );
     }
 
-    /// A quantifier whose bound var IS used consistently is ADMITTED by the
-    /// whitelist (the bound var sort is seeded into the env, so the body
-    /// lowers cleanly) and does NOT abort cvc5. The prove layer uses a
-    /// quantifier-free logic (no production path emits a top-level
-    /// quantifier; they are routed to Tier C by the fuzzability classifier),
+    /// A quantifier whose bound var IS used consistently lowers cleanly (the
+    /// bound var sort is seeded into the lowering, so the body builds) and
+    /// does NOT abort cvc5. A quantifier selects a quantified (non-QF) logic,
     /// so cvc5 returns a clean determinate result, never a process abort.
     #[test]
     fn w5_quantifier_bound_var_consistent_lowers_without_abort() {
@@ -1292,13 +1208,9 @@ mod tests {
                 )),
             ),
         };
-        // The whitelist must ADMIT this (env seeding makes the body lowerable).
-        assert!(
-            is_cvc5_lowerable(&prop).is_ok(),
-            "a consistent Real-bound quantifier is admitted by the whitelist"
-        );
-        // A quantifier selects a quantified (non-QF) logic, so cvc5 can prove
-        // it (forall k: Real . k*k >= 0) -- and never aborts.
+        // The total lowering must build this (bound-var sort seeding makes the
+        // body lowerable) and cvc5 proves it (forall k: Real . k*k >= 0) --
+        // never aborts.
         assert_eq!(
             solve_property(&prop, 5000),
             TierBResult::Proved,
@@ -1423,5 +1335,166 @@ mod tests {
             ),
         };
         assert_eq!(solve_property(&prop, 5000), TierBResult::Proved);
+    }
+
+    // ===================================================================
+    // Review 6: TOTAL lowering. The review-5 separate sort gate ADMITTED
+    // terms (it checked operand sorts but not cvc5's arity / kind-domain
+    // requirements) that the builder then aborted cvc5 on. Folding the
+    // gate into the builder makes every `mk_term` call site verify cvc5's
+    // requirement first. Each test below drives a shape that ABORTED cvc5
+    // under review 5; reaching the assertion at all proves no process
+    // abort (an abort would crash the test binary with empty output).
+    // ===================================================================
+
+    /// Empty `and`/`or` connectives. cvc5's AND/OR require >= 2 children, so
+    /// a zero-child connective aborts the process. The total lowering
+    /// normalizes them to their logical identity (empty `and` is true, empty
+    /// `or` is false), so they yield a determinate result, never an abort.
+    #[test]
+    fn rt6_empty_and_or_do_not_abort() {
+        let empty_and = SmtProperty {
+            variables: vec![],
+            preconditions: vec![],
+            postcondition: SmtExpr::Bool(BoolOp::And, vec![]),
+        };
+        // empty `and` == true, which is trivially provable.
+        assert_eq!(solve_property(&empty_and, 5000), TierBResult::Proved);
+
+        let empty_or = SmtProperty {
+            variables: vec![],
+            preconditions: vec![],
+            postcondition: SmtExpr::Bool(BoolOp::Or, vec![]),
+        };
+        // empty `or` == false, which is disproved by the empty model.
+        assert!(
+            matches!(solve_property(&empty_or, 5000), TierBResult::Disproved(_)),
+            "empty `or` (false) must be cleanly disproved, not abort cvc5"
+        );
+    }
+
+    /// A single-child `and`/`or`. cvc5's AND/OR require >= 2 children, so a
+    /// one-child connective aborts. The total lowering unwraps it to the
+    /// child so a SINGLE-CONJUNCT invariant still PROVES at the SMT tier
+    /// (the over-conservative alternative -- routing to Tier C -- would be a
+    /// flagship regression). RT6 #2.
+    #[test]
+    fn rt6_single_child_and_or_still_proves_at_smt() {
+        // and(x*x >= 0) -- one conjunct, always true over the reals.
+        let child = SmtExpr::Cmp(
+            CmpOp::Ge,
+            Box::new(SmtExpr::Arith(
+                ArithOp::Mul,
+                Box::new(SmtExpr::Var("x".to_string())),
+                Box::new(SmtExpr::Var("x".to_string())),
+            )),
+            Box::new(SmtExpr::RealLit(0.0)),
+        );
+        for op in [BoolOp::And, BoolOp::Or] {
+            let prop = SmtProperty {
+                variables: vec![("x".to_string(), SmtSort::Real)],
+                preconditions: vec![],
+                postcondition: SmtExpr::Bool(op, vec![child.clone()]),
+            };
+            assert_eq!(
+                solve_property(&prop, 5000),
+                TierBResult::Proved,
+                "a single-conjunct `{op:?}` must prove at the SMT tier, not abort or route to Tier C"
+            );
+        }
+    }
+
+    /// A non-binary `implies`. cvc5's IMPLIES requires EXACTLY 2 children, so
+    /// a 1-child (or >2-child) implies aborts. The total lowering returns a
+    /// clean Error (routes to Tier C); a correct binary implies still proves.
+    /// RT6 #5/#8/#11.
+    #[test]
+    fn rt6_implies_arity_one_is_clean_error_two_proves() {
+        let one_child = SmtProperty {
+            variables: vec![("b".to_string(), SmtSort::Bool)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Bool(BoolOp::Implies, vec![SmtExpr::Var("b".to_string())]),
+        };
+        assert!(
+            matches!(solve_property(&one_child, 5000), TierBResult::Error(_)),
+            "a 1-child `implies` must be a clean Error, not a cvc5 abort"
+        );
+
+        // x >= 1 ==> x >= 0 is valid (binary implies).
+        let two_child = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Bool(
+                BoolOp::Implies,
+                vec![
+                    SmtExpr::Cmp(
+                        CmpOp::Ge,
+                        Box::new(SmtExpr::Var("x".to_string())),
+                        Box::new(SmtExpr::RealLit(1.0)),
+                    ),
+                    SmtExpr::Cmp(
+                        CmpOp::Ge,
+                        Box::new(SmtExpr::Var("x".to_string())),
+                        Box::new(SmtExpr::RealLit(0.0)),
+                    ),
+                ],
+            ),
+        };
+        assert_eq!(solve_property(&two_child, 5000), TierBResult::Proved);
+    }
+
+    /// Integer `/` feeding a comparison. cvc5's `/` (DIVISION) is REAL
+    /// division: its result is Real even over Int operands. The review-5
+    /// gate reported the division as Int, so a parent `Eq(int_div, int_var)`
+    /// passed its same-sort check, then cvc5 aborted on the Real-vs-Int
+    /// equality. The total lowering reports the division as Real, so the
+    /// parent comparison sees the mismatch and routes to a clean Error
+    /// (Tier C), never an abort. RT6 #4/#12.
+    #[test]
+    fn rt6_int_division_feeding_comparison_is_clean_error_not_abort() {
+        let prop = SmtProperty {
+            variables: vec![
+                ("a".to_string(), SmtSort::Int),
+                ("b".to_string(), SmtSort::Int),
+                ("c".to_string(), SmtSort::Int),
+            ],
+            preconditions: vec![],
+            // (a / b) == c : the division is Real, c is Int -> mismatch.
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Eq,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Div,
+                    Box::new(SmtExpr::Var("a".to_string())),
+                    Box::new(SmtExpr::Var("b".to_string())),
+                )),
+                Box::new(SmtExpr::Var("c".to_string())),
+            ),
+        };
+        assert!(
+            matches!(solve_property(&prop, 5000), TierBResult::Error(_)),
+            "an Int `/` feeding an Int comparison must be a clean Error, not a cvc5 abort"
+        );
+    }
+
+    /// A non-finite real literal. cvc5's `mk_real_from_str` aborts on an
+    /// `inf`/`-inf`/`NaN` token. The total lowering returns a clean Error
+    /// (routes to Tier C) before reaching cvc5. RT6 #13.
+    #[test]
+    fn rt6_non_finite_real_literal_is_clean_error_not_abort() {
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let prop = SmtProperty {
+                variables: vec![("x".to_string(), SmtSort::Real)],
+                preconditions: vec![],
+                postcondition: SmtExpr::Cmp(
+                    CmpOp::Ge,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(bad)),
+                ),
+            };
+            assert!(
+                matches!(solve_property(&prop, 5000), TierBResult::Error(_)),
+                "a non-finite real literal ({bad}) must be a clean Error, not a cvc5 abort"
+            );
+        }
     }
 }
