@@ -172,6 +172,17 @@ mod imp {
         use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
 
+        // Screen depth BEFORE `clone` / `bincode::serialize` below: both
+        // recurse on `SmtExpr` depth, so a pathologically deep property would
+        // overflow THIS process (the parent is not isolated from itself)
+        // before a child is ever spawned. The check is iterative and cannot
+        // itself overflow.
+        if crate::tier_b::property_exceeds_smt_depth(property) {
+            return TierBResult::Error(
+                "prove isolation: property nests too deep to lower (routes to Tier C)".to_string(),
+            );
+        }
+
         let exe = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => {

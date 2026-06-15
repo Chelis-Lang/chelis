@@ -182,6 +182,22 @@ fn smt_expr_exceeds_depth(expr: &SmtExpr, max: usize) -> bool {
     false
 }
 
+/// Whether any part of a property (the postcondition or a precondition) nests
+/// past [`MAX_SMT_EXPR_DEPTH`]. Run this BEFORE any recursive walk OR recursive
+/// clone/serialize of the property -- not only the lowering but `SmtExpr`'s
+/// derived `Clone` and `Serialize` recurse on depth, so the isolation parent
+/// must screen depth before it `clone`s / bincode-serializes the property to
+/// the worker, or a deep property overflows the PARENT (which is not isolated
+/// from itself) before any child is spawned.
+#[cfg(feature = "smt")]
+pub(crate) fn property_exceeds_smt_depth(property: &SmtProperty) -> bool {
+    smt_expr_exceeds_depth(&property.postcondition, MAX_SMT_EXPR_DEPTH)
+        || property
+            .preconditions
+            .iter()
+            .any(|p| smt_expr_exceeds_depth(p, MAX_SMT_EXPR_DEPTH))
+}
+
 /// Whether a variable/binder name is safe to hand to cvc5's `mk_const` /
 /// `mk_var`. `cvc5-rs` builds a `CString` from the name and `unwrap()`s it,
 /// so an interior NUL byte PANICS out of `solve_property` (a recoverable
@@ -225,12 +241,7 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
     // Bound the depth FIRST, with an iterative check that cannot itself
     // overflow, so every later recursive walk runs on a bounded tree (RT6
     // round-2).
-    if smt_expr_exceeds_depth(&property.postcondition, MAX_SMT_EXPR_DEPTH)
-        || property
-            .preconditions
-            .iter()
-            .any(|p| smt_expr_exceeds_depth(p, MAX_SMT_EXPR_DEPTH))
-    {
+    if property_exceeds_smt_depth(property) {
         return TierBResult::Error(format!(
             "property nests deeper than {MAX_SMT_EXPR_DEPTH} levels (routes to Tier C)"
         ));
