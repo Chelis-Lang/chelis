@@ -998,6 +998,25 @@ fn prove_deep_property(
     options: &PropertyRunOptions,
 ) -> PropertyOutcome {
     let seed = options.effective_seed(property.seed);
+    // Honor the --tier contract on the deep path (F7). A Deep property body
+    // is in Deep AST and has no Surf->SMT lowering path (the Tier B
+    // surf_expr_to_smt lowering the surf path uses takes a Surf body), so
+    // `smt-only` is Unsupported rather than a silent fuzz run; `fuzz-only`
+    // and `auto` run the Tier C fuzz loop below.
+    if options.tier == "smt-only" {
+        return PropertyOutcome {
+            name: property.name.clone(),
+            status: PropertyStatus::Unsupported,
+            proof_tier: PropertyTier::Smt,
+            samples: 0,
+            seed,
+            counterexample: None,
+            reason: Some(
+                "deep property has no Tier B (SMT) lowering path (smt-only)".to_string(),
+            ),
+            injected: false,
+        };
+    }
     let samples_needed = if options.samples != 100 {
         options.samples
     } else {

@@ -147,3 +147,71 @@ fn u4_statistically_validated_zero_samples_is_not_pass() {
         "an SMT-proved property is a pass at 0 samples"
     );
 }
+
+// --- F7: the deep property path honors the --tier contract ---
+
+fn run_deep(source: &str, tier: &str) -> Vec<PropertyOutcome> {
+    let opts = PropertyRunOptions {
+        tier: tier.to_string(),
+        samples: 16,
+        ..Default::default()
+    };
+    let PropertyRunResult::Ran(o) = run_deep_source_properties(source, &opts).expect("run");
+    o
+}
+
+/// A canonical Deep user `@property` (the form `chelis deep` emits): the
+/// always-true `x >= x`.
+const DEEP_TRUE_PROPERTY: &str = r#"(module {}
+  m
+  (defsig {} always_true (t-fn {} (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+         property_preconditions: (tuple {}),
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+         property_source_kind: "user"
+       }
+    always_true
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (app {}
+        (var {} gte)
+        (var {} x)
+        (var {} x)))))
+"#;
+
+#[test]
+fn f7_deep_fuzz_only_runs_the_fuzz_loop() {
+    // `--tier fuzz-only` on a deep property runs the fuzz loop and passes a
+    // true property with samples > 0.
+    let outcomes = run_deep(DEEP_TRUE_PROPERTY, "fuzz-only");
+    assert_eq!(outcomes.len(), 1, "one deep property: {outcomes:?}");
+    assert_eq!(outcomes[0].name, "always_true");
+    assert!(outcomes[0].is_pass(), "deep fuzz-only passes: {:?}", outcomes[0]);
+    assert!(outcomes[0].samples > 0, "fuzz-only collected samples");
+    assert_eq!(outcomes[0].proof_tier, PropertyTier::Fuzz);
+}
+
+#[test]
+fn f7_deep_smt_only_is_unsupported_not_silently_fuzzed() {
+    // `--tier smt-only` on a deep property must NOT silently run the fuzz
+    // loop (the tier was previously ignored on the deep path). A deep body
+    // has no Surf->SMT lowering path, so smt-only is Unsupported.
+    let outcomes = run_deep(DEEP_TRUE_PROPERTY, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].status,
+        PropertyStatus::Unsupported,
+        "deep smt-only is unsupported, not a silent fuzz pass: {:?}",
+        outcomes[0]
+    );
+    assert_eq!(outcomes[0].samples, 0, "smt-only ran no fuzz samples");
+}
+
+#[test]
+fn f7_deep_auto_runs_the_fuzz_loop() {
+    // `--tier auto` falls through to fuzz for a deep property (no SMT path).
+    let outcomes = run_deep(DEEP_TRUE_PROPERTY, "auto");
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].is_pass(), "deep auto passes via fuzz: {:?}", outcomes[0]);
+    assert!(outcomes[0].samples > 0);
+}
