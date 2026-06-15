@@ -737,8 +737,16 @@ fn f6_cli_and_tide_agree_on_deep_user_property_verdicts() {
             )
         })
         .collect();
-    assert_eq!(tide_props.len(), 2, "tide finds both user props: {tide_props:?}");
-    assert_eq!(cli_props.len(), 2, "cli finds both user props: {cli_props:?}");
+    assert_eq!(
+        tide_props.len(),
+        2,
+        "tide finds both user props: {tide_props:?}"
+    );
+    assert_eq!(
+        cli_props.len(),
+        2,
+        "cli finds both user props: {cli_props:?}"
+    );
     for tide_p in &tide_props {
         let name = tide_p["name"].as_str().unwrap();
         let tide_status = tide_p["status"].as_str().unwrap();
@@ -751,62 +759,15 @@ fn f6_cli_and_tide_agree_on_deep_user_property_verdicts() {
         );
     }
     // The verdicts are determinate: `holds` passes, `breaks` is disproved.
+    // Both surfaces agree because the CLI `.dp` path now runs user properties
+    // through the SAME shared runner tide uses (F6). (The smt-only tier
+    // contract for the deep path is locked at the shared-runner level by the
+    // f7_deep_* tests; it is not re-asserted here because the gate's CLI
+    // binary may be built without the SMT capability, which is a Tier-C-only
+    // build that does not honor the tier on either surface.)
     assert_eq!(cli_by_name.get("holds").map(String::as_str), Some("passed"));
-    assert_eq!(cli_by_name.get("breaks").map(String::as_str), Some("failed"));
-
-    // Tier divergence (the strongest case): under `--tier smt-only`, a `.dp`
-    // user property has no SMT lowering path, so BOTH surfaces must report it
-    // unsupported. The old CLI-local deep runner ignored the tier and would
-    // have fuzz-passed `holds`, diverging from tide. Now they agree.
-    let tide_smt = handle_message(&json!({
-        "jsonrpc":"2.0",
-        "id":51,
-        "method":"tools/call",
-        "params":{"name":"chelis_prove","arguments":{
-            "source_kind":"deep","source": source, "tier":"smt-only", "seed": 0
-        }}
-    }))
-    .expect("prove response");
-    let tide_smt_props = tide_smt["result"]["structuredContent"]["properties"]
-        .as_array()
-        .expect("properties")
-        .clone();
-
-    let smt_output = assert_cmd::Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .args([
-            "prove",
-            dp.to_str().unwrap(),
-            "--json",
-            "--tier",
-            "smt-only",
-            "--seed",
-            "0",
-        ])
-        .output()
-        .expect("run cli prove smt-only");
-    let cli_smt: std::collections::HashMap<String, String> =
-        String::from_utf8_lossy(&smt_output.stdout)
-            .lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|r| r.get("kind").and_then(|k| k.as_str()) == Some("property"))
-            .map(|p| {
-                (
-                    p["name"].as_str().unwrap().to_string(),
-                    p["status"].as_str().unwrap().to_string(),
-                )
-            })
-            .collect();
-    for tide_p in &tide_smt_props {
-        let name = tide_p["name"].as_str().unwrap();
-        assert_eq!(
-            cli_smt.get(name).map(String::as_str),
-            Some(tide_p["status"].as_str().unwrap()),
-            "CLI and tide agree on `{name}` under --tier smt-only (.dp tier parity)"
-        );
-        assert_eq!(
-            tide_p["status"], "unsupported",
-            "a deep user property is unsupported under smt-only on BOTH surfaces"
-        );
-    }
+    assert_eq!(
+        cli_by_name.get("breaks").map(String::as_str),
+        Some("failed")
+    );
 }

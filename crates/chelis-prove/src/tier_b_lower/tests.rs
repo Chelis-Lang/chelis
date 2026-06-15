@@ -498,23 +498,35 @@ fn f4_shared_reconcile_coerces_integral_real_against_int_only() {
     let mut l = SmtExpr::Var("n".into());
     let mut r = SmtExpr::RealLit(3.0);
     crate::opaque::reconcile_cmp_operands(&mut l, &mut r, true, false);
-    assert!(matches!(r, SmtExpr::IntLit(3)), "integral real -> IntLit: {r:?}");
+    assert!(
+        matches!(r, SmtExpr::IntLit(3)),
+        "integral real -> IntLit: {r:?}"
+    );
     // Reverse order.
     let mut l = SmtExpr::RealLit(5.0);
     let mut r = SmtExpr::Var("n".into());
     crate::opaque::reconcile_cmp_operands(&mut l, &mut r, false, true);
-    assert!(matches!(l, SmtExpr::IntLit(5)), "integral real -> IntLit (rev): {l:?}");
+    assert!(
+        matches!(l, SmtExpr::IntLit(5)),
+        "integral real -> IntLit (rev): {l:?}"
+    );
     // A FRACTIONAL real against an int operand is NOT coerced (it would
     // change the value); it stays Real (the U3 pre-check then routes out).
     let mut l = SmtExpr::Var("n".into());
     let mut r = SmtExpr::RealLit(2.5);
     crate::opaque::reconcile_cmp_operands(&mut l, &mut r, true, false);
-    assert!(matches!(r, SmtExpr::RealLit(_)), "fractional real stays Real: {r:?}");
+    assert!(
+        matches!(r, SmtExpr::RealLit(_)),
+        "fractional real stays Real: {r:?}"
+    );
     // Two non-int operands: no coercion.
     let mut l = SmtExpr::RealLit(1.0);
     let mut r = SmtExpr::RealLit(2.0);
     crate::opaque::reconcile_cmp_operands(&mut l, &mut r, false, false);
-    assert!(matches!((&l, &r), (SmtExpr::RealLit(_), SmtExpr::RealLit(_))));
+    assert!(matches!(
+        (&l, &r),
+        (SmtExpr::RealLit(_), SmtExpr::RealLit(_))
+    ));
 }
 
 /// True if any leaf of an SmtExpr is a `RealLit`.
@@ -523,9 +535,7 @@ fn smt_contains_real_lit(e: &SmtExpr) -> bool {
     use crate::solver::SmtExpr as E;
     match e {
         E::RealLit(_) => true,
-        E::Arith(_, l, r) | E::Cmp(_, l, r) => {
-            smt_contains_real_lit(l) || smt_contains_real_lit(r)
-        }
+        E::Arith(_, l, r) | E::Cmp(_, l, r) => smt_contains_real_lit(l) || smt_contains_real_lit(r),
         E::Bool(_, kids) => kids.iter().any(smt_contains_real_lit),
         E::Not(inner) | E::Forall(_, inner) | E::Exists(_, inner) => smt_contains_real_lit(inner),
         E::Apply(_, args) => args.iter().any(smt_contains_real_lit),

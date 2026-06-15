@@ -1011,9 +1011,7 @@ fn prove_deep_property(
             samples: 0,
             seed,
             counterexample: None,
-            reason: Some(
-                "deep property has no Tier B (SMT) lowering path (smt-only)".to_string(),
-            ),
+            reason: Some("deep property has no Tier B (SMT) lowering path (smt-only)".to_string()),
             injected: false,
         };
     }

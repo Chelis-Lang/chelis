@@ -186,7 +186,11 @@ fn f7_deep_fuzz_only_runs_the_fuzz_loop() {
     let outcomes = run_deep(DEEP_TRUE_PROPERTY, "fuzz-only");
     assert_eq!(outcomes.len(), 1, "one deep property: {outcomes:?}");
     assert_eq!(outcomes[0].name, "always_true");
-    assert!(outcomes[0].is_pass(), "deep fuzz-only passes: {:?}", outcomes[0]);
+    assert!(
+        outcomes[0].is_pass(),
+        "deep fuzz-only passes: {:?}",
+        outcomes[0]
+    );
     assert!(outcomes[0].samples > 0, "fuzz-only collected samples");
     assert_eq!(outcomes[0].proof_tier, PropertyTier::Fuzz);
 }
@@ -212,6 +216,10 @@ fn f7_deep_auto_runs_the_fuzz_loop() {
     // `--tier auto` falls through to fuzz for a deep property (no SMT path).
     let outcomes = run_deep(DEEP_TRUE_PROPERTY, "auto");
     assert_eq!(outcomes.len(), 1);
-    assert!(outcomes[0].is_pass(), "deep auto passes via fuzz: {:?}", outcomes[0]);
+    assert!(
+        outcomes[0].is_pass(),
+        "deep auto passes via fuzz: {:?}",
+        outcomes[0]
+    );
     assert!(outcomes[0].samples > 0);
 }

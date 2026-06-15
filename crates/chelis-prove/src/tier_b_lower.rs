@@ -713,8 +713,7 @@ fn pred_arg_is_int_sorted(
     if matches!(arg, Expr::Atom(Atom::Int(_), _)) {
         return true;
     }
-    if tag(arg) == Some("lit")
-        && matches!(children(arg).first(), Some(Expr::Atom(Atom::Int(_), _)))
+    if tag(arg) == Some("lit") && matches!(children(arg).first(), Some(Expr::Atom(Atom::Int(_), _)))
     {
         return true;
     }

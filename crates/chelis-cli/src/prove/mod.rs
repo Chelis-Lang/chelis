@@ -892,8 +892,7 @@ fn prove_deep_file(
     // rendering (a CLI-only surface tide does not run).
     #[cfg(feature = "chelis-prove")]
     {
-        let user_status =
-            property_run::run_deep_properties_shared(path, &source, options, totals);
+        let user_status = property_run::run_deep_properties_shared(path, &source, options, totals);
         file_status = combine_status(file_status, user_status);
     }
 
