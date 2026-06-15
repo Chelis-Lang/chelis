@@ -107,12 +107,11 @@ pub fn to_dispatch_amenability(a: SmtAmenabilityInput) -> crate::dispatch::SmtAm
 
 fn type_to_sort(ty: &ChelisTypeInput) -> SmtSort {
     match ty {
-        ChelisTypeInput::Prim(n) => match n.as_str() {
-            "f32" | "f64" => SmtSort::Real,
-            "int32" | "int64" => SmtSort::Int,
-            "bool" => SmtSort::Bool,
-            _ => SmtSort::Real,
-        },
+        // Single-source int-width -> sort decision (F3): the c-earchin
+        // bridge converter shares the same prim->sort mapping as the opaque
+        // prove paths, so an int8/int16 bridge param can never be sorted
+        // differently from an int8/int16 opaque field/param.
+        ChelisTypeInput::Prim(n) => crate::opaque::prim_to_smt_sort(n),
         ChelisTypeInput::Tensor(_, _) => SmtSort::Real,
     }
 }

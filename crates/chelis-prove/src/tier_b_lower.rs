@@ -27,7 +27,7 @@ use chelis_deep::ast::{Atom, Expr};
 
 use crate::obligations::{ObligationProperty, ProducedPosition};
 use crate::opaque::OpaqueInvariant;
-use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
+use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
 use crate::tier_b::SmtProperty;
 
 const MAX_INLINE_DEPTH: usize = 3;
@@ -178,11 +178,10 @@ pub fn lower_obligation(
     for (pname, (vname, pty)) in prod.params.iter().zip(producer_params.iter()) {
         match pty {
             ProducerParamType::Scalar(s) => {
-                let sort = match s.as_str() {
-                    "int32" | "int64" => SmtSort::Int,
-                    "bool" => SmtSort::Bool,
-                    _ => SmtSort::Real,
-                };
+                // Single-source int-width -> sort decision (F3): a producer
+                // param of ANY integer width is Int, matching the field sort
+                // and the constant lowering.
+                let sort = crate::opaque::prim_to_smt_sort(s);
                 variables.push((vname.clone(), sort));
                 subst.insert(pname.clone(), make_var(vname));
             }
@@ -397,7 +396,7 @@ fn apply_invariant(
     // Lower the predicate body, resolving `(access (var binder) field)`
     // to the record's field expression (record beta).
     let body = predicate_body(&inv.predicate)?;
-    lower_pred_bool(body, &inv.binder, &fields, consts, exprs)
+    lower_pred_bool(body, &inv.binder, &fields, consts, exprs, &inv.fields)
 }
 
 fn predicate_body(fn_node: &Expr) -> Option<&Expr> {
@@ -639,21 +638,23 @@ fn rebuild_app(callee: &str, args: Vec<Expr>) -> Expr {
 /// projections substituted by the produced record's field exprs (already
 /// reduced to free-var arithmetic). `fields` maps field name -> the
 /// produced field expression.
+#[allow(clippy::too_many_arguments)]
 fn lower_pred_bool(
     expr: &Expr,
     binder: &str,
     fields: &HashMap<String, Expr>,
     consts: &crate::opaque::ConstEnv,
     exprs: &[Expr],
+    binder_fields: &[(String, crate::opaque::FieldType)],
 ) -> Option<SmtExpr> {
     if let Expr::Atom(Atom::Bool(b), _) = expr {
         return Some(SmtExpr::BoolLit(*b));
     }
     if tag(expr) == Some("if") {
         let kids = children(expr);
-        let c = lower_pred_bool(kids.first()?, binder, fields, consts, exprs)?;
-        let t = lower_pred_bool(kids.get(1)?, binder, fields, consts, exprs)?;
-        let e = lower_pred_bool(kids.get(2)?, binder, fields, consts, exprs)?;
+        let c = lower_pred_bool(kids.first()?, binder, fields, consts, exprs, binder_fields)?;
+        let t = lower_pred_bool(kids.get(1)?, binder, fields, consts, exprs, binder_fields)?;
+        let e = lower_pred_bool(kids.get(2)?, binder, fields, consts, exprs, binder_fields)?;
         return Some(SmtExpr::Ite(Box::new(c), Box::new(t), Box::new(e)));
     }
     let (name, args) = app_parts(expr)?;
@@ -661,13 +662,13 @@ fn lower_pred_bool(
         "and" => Some(SmtExpr::Bool(
             BoolOp::And,
             args.iter()
-                .map(|a| lower_pred_bool(a, binder, fields, consts, exprs))
+                .map(|a| lower_pred_bool(a, binder, fields, consts, exprs, binder_fields))
                 .collect::<Option<Vec<_>>>()?,
         )),
         "or" => Some(SmtExpr::Bool(
             BoolOp::Or,
             args.iter()
-                .map(|a| lower_pred_bool(a, binder, fields, consts, exprs))
+                .map(|a| lower_pred_bool(a, binder, fields, consts, exprs, binder_fields))
                 .collect::<Option<Vec<_>>>()?,
         )),
         "not" => Some(SmtExpr::Not(Box::new(lower_pred_bool(
@@ -676,15 +677,62 @@ fn lower_pred_bool(
             fields,
             consts,
             exprs,
+            binder_fields,
         )?))),
         "eq" | "neq" | "cmplt" | "lte" | "gte" => {
             let op = cmp_op(name)?;
-            let l = lower_pred_arith(args.first()?, binder, fields, consts, exprs)?;
-            let r = lower_pred_arith(args.get(1)?, binder, fields, consts, exprs)?;
+            let lhs_arg = args.first()?;
+            let rhs_arg = args.get(1)?;
+            let mut l = lower_pred_arith(lhs_arg, binder, fields, consts, exprs)?;
+            let mut r = lower_pred_arith(rhs_arg, binder, fields, consts, exprs)?;
+            // F4: route the producer-body comparison through the SAME sort
+            // reconciliation the flattened-predicate path uses, so an int
+            // binder field compared against an integral constant lowers
+            // consistently (no int-vs-real mismatch). Int-sortedness is read
+            // from the original arg (an `(access (var binder) <int-field>)`
+            // projection, or an integer literal).
+            let l_int = pred_arg_is_int_sorted(lhs_arg, binder, binder_fields);
+            let r_int = pred_arg_is_int_sorted(rhs_arg, binder, binder_fields);
+            crate::opaque::reconcile_cmp_operands(&mut l, &mut r, l_int, r_int);
             Some(SmtExpr::Cmp(op, Box::new(l), Box::new(r)))
         }
         _ => None,
     }
+}
+
+/// Whether a predicate comparison argument is integer-sorted: an integer
+/// literal, or an `(access (var binder) field)` projection onto an integer
+/// scalar binder field (F4). Used to drive the shared comparison-operand
+/// reconciliation on the producer-body path.
+fn pred_arg_is_int_sorted(
+    arg: &Expr,
+    binder: &str,
+    binder_fields: &[(String, crate::opaque::FieldType)],
+) -> bool {
+    // An integer literal (bare or `(lit {} <int>)`).
+    if matches!(arg, Expr::Atom(Atom::Int(_), _)) {
+        return true;
+    }
+    if tag(arg) == Some("lit")
+        && matches!(children(arg).first(), Some(Expr::Atom(Atom::Int(_), _)))
+    {
+        return true;
+    }
+    // A field projection `(access (var binder) field)` onto an int field.
+    if tag(arg) == Some("access") {
+        let kids = children(arg);
+        if let (Some(target), Some(field_node)) = (kids.first(), kids.get(1))
+            && var_name(target) == Some(binder)
+            && let Some(field) = symbol_text(field_node)
+        {
+            return binder_fields
+                .iter()
+                .find(|(n, _)| n == field)
+                .map(|(_, f)| f.scalar_sort() == Some(crate::solver::SmtSort::Int))
+                .unwrap_or(false);
+        }
+    }
+    false
 }
 
 fn lower_pred_arith(

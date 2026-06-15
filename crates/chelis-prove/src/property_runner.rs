@@ -316,12 +316,17 @@ fn try_surf_tier_b(
         .iter()
         .filter_map(|p| {
             let sort = match p.ty.as_ref()? {
-                TypeExpr::Named(name, _) => match name.as_str() {
-                    "f32" | "f64" => crate::solver::SmtSort::Real,
-                    "int8" | "int16" | "int32" | "int64" => crate::solver::SmtSort::Int,
-                    "bool" => crate::solver::SmtSort::Bool,
-                    _ => return None,
-                },
+                // Single-source int-width -> sort decision (F3): an @property
+                // scalar param routes through the same prim_to_smt_sort the
+                // field and producer-param paths use. A non-scalar param type
+                // (tensor/ADT) is not SMT-amenable, so the property falls back
+                // to Tier C.
+                TypeExpr::Named(name, _)
+                    if matches!(name.as_str(), "f32" | "f64" | "bool")
+                        || crate::opaque::is_int_width(name) =>
+                {
+                    crate::opaque::prim_to_smt_sort(name)
+                }
                 _ => return None,
             };
             Some((p.name.clone(), sort))

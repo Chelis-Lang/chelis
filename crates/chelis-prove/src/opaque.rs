@@ -24,6 +24,38 @@ use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 /// flattening cap).
 pub const TIER_B_SCALAR_CAP: usize = 64;
 
+/// The integer primitive widths the prove layer treats as `SmtSort::Int`.
+/// This is the SINGLE source for the int-width set (F3 review-4
+/// unification): every site that decides "is this prim an integer" and
+/// "what SMT sort does it lower to" reads it (and [`prim_to_smt_sort`])
+/// rather than spelling out the widths independently, so the const
+/// recognizer, the field sort, and the producer-param sort can never
+/// disagree (which previously made an int8 constant lower as `IntLit`
+/// while an int8 field/param lowered as a Real-sorted var -- a sort
+/// mismatch that routed to Tier C).
+pub const INT_WIDTHS: &[&str] = &["int8", "int16", "int32", "int64"];
+
+/// Whether a primitive type name is one of the integer widths (F3).
+pub fn is_int_width(prim: &str) -> bool {
+    INT_WIDTHS.contains(&prim)
+}
+
+/// The SMT sort a scalar primitive type lowers to (F3 single source). Every
+/// integer width -> `Int`; `bool` -> `Bool`; everything else (f32/f64 and
+/// any unrecognized name) -> `Real`. All four sort-deciding sites -- the
+/// field [`FieldType::scalar_sort`], the producer-param sort in
+/// `tier_b_lower`, the `@property` param sort in `property_runner`, and the
+/// in-module constant lowering -- route through this one function.
+pub fn prim_to_smt_sort(prim: &str) -> SmtSort {
+    if is_int_width(prim) {
+        SmtSort::Int
+    } else if prim == "bool" {
+        SmtSort::Bool
+    } else {
+        SmtSort::Real
+    }
+}
+
 /// A field of an opaque type's single record variant, in the V1 value
 /// class (RFC D-WF): a scalar prim, a fixed-shape numeric tensor, or a
 /// nested single-variant record of those.
@@ -48,14 +80,12 @@ impl FieldType {
         }
     }
 
-    /// The SMT sort of a scalar field; `None` for non-scalar fields.
+    /// The SMT sort of a scalar field; `None` for non-scalar fields. Routes
+    /// through the single-source [`prim_to_smt_sort`] (F3) so an integer
+    /// field of ANY width is `Int`, matching the constant lowering.
     pub fn scalar_sort(&self) -> Option<SmtSort> {
         match self {
-            FieldType::Scalar(name) => Some(match name.as_str() {
-                "int32" | "int64" => SmtSort::Int,
-                "bool" => SmtSort::Bool,
-                _ => SmtSort::Real,
-            }),
+            FieldType::Scalar(name) => Some(prim_to_smt_sort(name)),
             _ => None,
         }
     }
@@ -245,7 +275,11 @@ fn field_type_from_deep(ty: &Expr) -> Option<FieldType> {
     match tag(ty)? {
         "t-prim" => {
             let name = symbol_text(children(ty).first()?)?;
-            matches!(name, "f32" | "f64" | "int32" | "int64" | "bool")
+            // f32/f64, EVERY integer width (int8/int16/int32/int64), and
+            // bool are scalar fields in the value class (F3). The integer
+            // widths share the single-source recognizer so the field value
+            // class and the int-width->sort decision agree.
+            (matches!(name, "f32" | "f64" | "bool") || is_int_width(name))
                 .then(|| FieldType::Scalar(name.to_string()))
         }
         "t-tensor" => {
@@ -446,7 +480,7 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
         scan(exprs, name)
     }
     fn as_int_width(prim: String) -> Option<String> {
-        matches!(prim.as_str(), "int8" | "int16" | "int32" | "int64").then_some(prim)
+        is_int_width(&prim).then_some(prim)
     }
     // Depth-bounded const -> const chain; the declared (defsig) type is
     // authoritative over the body literal's own tag.
@@ -585,18 +619,36 @@ fn lower_bool(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
 
 /// Reconcile the operand sorts of a flattened-predicate comparison so an
 /// integer-sorted field var and an integral module constant lower to the
-/// same SMT sort (U2 precondition path). An integral `RealLit` constant is
-/// rewritten to an `IntLit` when the OTHER operand is integer-sorted; this
-/// is the only direction that can produce a sound int comparison (a
-/// genuinely fractional constant against an int field is a type error the
-/// checker already rejects, so it cannot reach here in a well-typed module).
+/// same SMT sort (U2 precondition path). Delegates to the SHARED
+/// [`reconcile_cmp_operands`] (F4) -- the SAME reconciliation the
+/// cvc5-feeding producer-body path (`tier_b_lower::lower_pred_bool`) uses,
+/// so the two comparison-lowering paths can never diverge.
 fn coerce_cmp_operands(l: &mut SmtExpr, r: &mut SmtExpr, ctx: &LowerCtx) {
     let l_int = operand_is_int_sorted(l, ctx);
     let r_int = operand_is_int_sorted(r, ctx);
-    if l_int {
+    reconcile_cmp_operands(l, r, l_int, r_int);
+}
+
+/// The ONE comparison-operand sort reconciliation (F4 review-4
+/// unification): given whether each operand is integer-sorted, rewrite an
+/// integral `RealLit` on the OTHER side to an `IntLit`, so an int operand
+/// is never compared against a real literal (a sort mismatch cvc5 aborts
+/// on). This is the only direction that can produce a sound int comparison
+/// (a genuinely fractional constant against an int operand is a type error
+/// the checker already rejects). Both the flattened-predicate path
+/// (`coerce_cmp_operands`) and the producer-body path
+/// (`tier_b_lower::lower_pred_bool`) call this, so no comparison-lowering
+/// path lacks the reconciliation.
+pub(crate) fn reconcile_cmp_operands(
+    l: &mut SmtExpr,
+    r: &mut SmtExpr,
+    l_is_int: bool,
+    r_is_int: bool,
+) {
+    if l_is_int {
         coerce_integral_real_to_int(r);
     }
-    if r_int {
+    if r_is_int {
         coerce_integral_real_to_int(l);
     }
 }
@@ -623,7 +675,7 @@ fn field_var_sort(path: &str, ctx: &LowerCtx) -> Option<SmtSort> {
 }
 
 /// Rewrite an integral `RealLit` to an `IntLit` (no-op for any other node).
-fn coerce_integral_real_to_int(expr: &mut SmtExpr) {
+pub(crate) fn coerce_integral_real_to_int(expr: &mut SmtExpr) {
     if let SmtExpr::RealLit(v) = expr
         && v.fract() == 0.0
         && v.is_finite()

@@ -362,6 +362,180 @@ fn producer_first_param_name(exprs: &[Expr], producer: &str) -> String {
     prod.params.first().cloned().expect("at least one param")
 }
 
+/// F3 (review 4): the int-width -> SmtSort::Int decision must be single
+/// source across ALL sites (field `scalar_sort`, producer-param sort, the
+/// constant recognizer). An int8/int16 opaque field + int8/int16 producer
+/// param + an int8/int16 constant used in BOTH the guard AND the invariant
+/// must lower CONSISTENTLY (every int operand is `SmtSort::Int` / `IntLit`)
+/// and prove at Tier B -- not mix IntLit-const against a Real-sorted field
+/// var (which would route to Tier C, the regression the unification missed).
+#[cfg(feature = "smt")]
+#[test]
+fn f3_int_width_field_param_const_lowers_consistently_at_tier_b() {
+    use crate::tier_b::{TierBResult, solve_property};
+    // Loop over EVERY integer width. The bound `0` is cast to the field
+    // width so the module type-checks (integer literals default to int32, so
+    // a bare `0` against an int8 field is a precision mismatch).
+    for width in ["int8", "int16", "int32", "int64"] {
+        let surf = format!(
+            "module M
+export (mk_counter)
+@opaque
+@invariant(c) c.n >= ({lo} : {width})
+type Counter =
+  | Counter {{ n: {width} }}
+def mk_counter(x: {width}) -> Option[Counter] =
+  if x >= ({lo} : {width}) then Some(Counter {{ n: x }}) else None
+",
+            lo = 0,
+            width = width
+        );
+        let exprs = deep_of(&surf);
+        let invs = collect_opaque_invariants(&exprs);
+        assert_eq!(
+            invs.len(),
+            1,
+            "an `{width}` opaque field is in the value class (collected)"
+        );
+        let sigs = inferred_sigs(&exprs);
+        let col = collect_obligations(&exprs, &invs, &sigs);
+        let ob = col
+            .obligations
+            .iter()
+            .find(|o| o.producer == "mk_counter")
+            .unwrap_or_else(|| panic!("counter producer obligation for {width}"));
+        let inv = &invs[0];
+        let pparams = vec![(
+            producer_first_param_name(&exprs, "mk_counter"),
+            ProducerParamType::Scalar(width.to_string()),
+        )];
+        let consts = crate::opaque::ConstEnv::new();
+        let lowered = lower_obligation(&exprs, inv, ob, &pparams, &consts)
+            .unwrap_or_else(|| panic!("`{width}` obligation must lower to Tier B"));
+        // Every solver variable for this all-int module must be Int-sorted
+        // (no int field/param silently lowered to Real).
+        for (vname, sort) in &lowered.property.variables {
+            assert_eq!(
+                *sort,
+                crate::solver::SmtSort::Int,
+                "var `{vname}` of an all-{width} module must be Int-sorted, got {sort:?}"
+            );
+        }
+        assert_eq!(
+            solve_property(&lowered.property, 5000),
+            TierBResult::Proved,
+            "all-{width} field/param/const proves at Tier B (no sort mismatch)"
+        );
+    }
+}
+
+/// F4 (review 4): the producer-body comparison lowering
+/// (`lower_pred_bool`) routes through the SAME operand-sort reconciliation
+/// as the flattened-predicate path, so an int binder field compared against
+/// an integral constant lowers with consistent sorts (no RealLit against an
+/// Int field var). The producer-body path previously had NO reconciliation,
+/// so it was the parallel-path divergence the unification missed.
+#[cfg(feature = "smt")]
+#[test]
+fn f4_producer_body_int_field_comparison_lowers_consistently() {
+    use crate::tier_b::{TierBResult, solve_property};
+    // An int32 field whose invariant compares it against a module constant
+    // `lo`. The GUARDED Option producer constructs the value only when
+    // `x >= lo`, so the obligation lowers through the case-of-known-ctor
+    // reduction -> apply_invariant -> lower_pred_bool, the F4 path, and
+    // PROVES. The constant and the field must lower as the SAME sort.
+    let surf = "module M
+export (mk)
+@opaque
+@invariant(c) c.n >= lo
+type Counter =
+  | Counter { n: int32 }
+lo = 0
+def mk(x: int32) -> Option[Counter] =
+  if x >= lo then Some(Counter { n: x }) else None
+";
+    let exprs = deep_of(surf);
+    let invs = collect_opaque_invariants(&exprs);
+    let sigs = inferred_sigs(&exprs);
+    let col = collect_obligations(&exprs, &invs, &sigs);
+    let ob = col
+        .obligations
+        .iter()
+        .find(|o| o.producer == "mk")
+        .expect("mk producer obligation");
+    let inv = &invs[0];
+    let pparams = vec![(
+        producer_first_param_name(&exprs, "mk"),
+        ProducerParamType::Scalar("int32".to_string()),
+    )];
+    let mut consts = crate::opaque::ConstEnv::new();
+    consts.insert("lo".to_string(), 0.0);
+    let lowered = lower_obligation(&exprs, inv, ob, &pparams, &consts)
+        .expect("int-field producer-body obligation must lower");
+    // The postcondition compares the int field (an Int var) against the int
+    // constant; the reconciliation keeps both Int (no RealLit anywhere).
+    assert!(
+        !smt_contains_real_lit(&lowered.property.postcondition),
+        "producer-body int comparison carries no RealLit: {:?}",
+        lowered.property.postcondition
+    );
+    // And it proves at Tier B (a sort mismatch would route it to Tier C or
+    // abort cvc5 before the U3 pre-check even runs).
+    assert_eq!(
+        solve_property(&lowered.property, 5000),
+        TierBResult::Proved,
+        "consistent-sort int field comparison proves at Tier B"
+    );
+}
+
+/// F4: the shared reconciliation rewrites an integral RealLit on the other
+/// side when one operand is integer-sorted, in both operand orders, and is
+/// a no-op for a fractional real or two reals.
+#[test]
+fn f4_shared_reconcile_coerces_integral_real_against_int_only() {
+    use crate::solver::SmtExpr;
+    // int var on the left, integral real on the right => right becomes Int.
+    let mut l = SmtExpr::Var("n".into());
+    let mut r = SmtExpr::RealLit(3.0);
+    crate::opaque::reconcile_cmp_operands(&mut l, &mut r, true, false);
+    assert!(matches!(r, SmtExpr::IntLit(3)), "integral real -> IntLit: {r:?}");
+    // Reverse order.
+    let mut l = SmtExpr::RealLit(5.0);
+    let mut r = SmtExpr::Var("n".into());
+    crate::opaque::reconcile_cmp_operands(&mut l, &mut r, false, true);
+    assert!(matches!(l, SmtExpr::IntLit(5)), "integral real -> IntLit (rev): {l:?}");
+    // A FRACTIONAL real against an int operand is NOT coerced (it would
+    // change the value); it stays Real (the U3 pre-check then routes out).
+    let mut l = SmtExpr::Var("n".into());
+    let mut r = SmtExpr::RealLit(2.5);
+    crate::opaque::reconcile_cmp_operands(&mut l, &mut r, true, false);
+    assert!(matches!(r, SmtExpr::RealLit(_)), "fractional real stays Real: {r:?}");
+    // Two non-int operands: no coercion.
+    let mut l = SmtExpr::RealLit(1.0);
+    let mut r = SmtExpr::RealLit(2.0);
+    crate::opaque::reconcile_cmp_operands(&mut l, &mut r, false, false);
+    assert!(matches!((&l, &r), (SmtExpr::RealLit(_), SmtExpr::RealLit(_))));
+}
+
+/// True if any leaf of an SmtExpr is a `RealLit`.
+#[cfg(feature = "smt")]
+fn smt_contains_real_lit(e: &SmtExpr) -> bool {
+    use crate::solver::SmtExpr as E;
+    match e {
+        E::RealLit(_) => true,
+        E::Arith(_, l, r) | E::Cmp(_, l, r) => {
+            smt_contains_real_lit(l) || smt_contains_real_lit(r)
+        }
+        E::Bool(_, kids) => kids.iter().any(smt_contains_real_lit),
+        E::Not(inner) | E::Forall(_, inner) | E::Exists(_, inner) => smt_contains_real_lit(inner),
+        E::Apply(_, args) => args.iter().any(smt_contains_real_lit),
+        E::Ite(c, t, el) => {
+            smt_contains_real_lit(c) || smt_contains_real_lit(t) || smt_contains_real_lit(el)
+        }
+        _ => false,
+    }
+}
+
 #[test]
 fn cr2_4_int_typed_constant_inlines_as_integer_literal_not_f32() {
     // CR2-4: a constant declared with an integer type must inline as an
