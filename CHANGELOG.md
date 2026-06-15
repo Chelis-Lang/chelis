@@ -46,22 +46,34 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   field, param, or constant was sampled as a float or built as a mistyped
   literal -- now every width samples as a width-clamped integer (an int8 in
   [-128, 127]) and builds a correctly-cast literal everywhere.
-- Tier B now gates lowering with a WHITELIST instead of a blacklist
-  (`chelis_prove::tier_b::is_cvc5_lowerable`): a property is lowered to
-  cvc5 ONLY IF every node is provably cvc5-safe (known, matching operand
-  sorts; transcendentals over Real arguments; quantifier bound vars seeded
-  into the sort environment), and anything else routes to Tier C. The old
-  pre-checks enumerated known aborting shapes and kept missing siblings;
-  three more abort shapes survived (a transcendental over an Int argument,
-  a Bool-vs-Int comparison, a quantifier whose bound-var sort mismatched a
-  literal). Because the whitelist default is NOT-lowerable, any shape no
-  review enumerated routes to Tier C automatically, so `lower_to_cvc5` is
-  only ever called on a provably-safe property and never aborts the cvc5
-  process (empty-stdout bare exit). The blacklist (`check_operand_sorts`,
-  `definitely_mixed`) and the separate arity guard (`validate_smt_arity`)
-  are subsumed by the single gate. Quantifier lowering now uses cvc5 bound
-  variables (`mk_var`) and selects a quantified (non-`QF_`) logic, so an
-  admitted quantifier lowers cleanly instead of aborting.
+- Tier B cvc5 lowering is now a single TOTAL pass and can no longer hand
+  cvc5 a term that aborts the process. A prior whitelist GATE and the term
+  builder were two enumerations of cvc5's rules that diverged: the gate
+  checked operand sorts but not cvc5's arity / kind-domain requirements, so
+  it admitted an empty or single-child `and`/`or`, a non-binary `implies`,
+  an integer `/` feeding a comparison (cvc5 division returns Real), and a
+  non-finite literal -- all of which the builder then aborted cvc5 on. The
+  gate is removed; `chelis_prove::tier_b::lower_to_cvc5` now returns
+  `(Term, SmtSort)` and verifies cvc5's requirement (operand sorts AND
+  arity) at every `mk_term` call site, returning a clean Tier C `Error`
+  rather than building an aborting term. Degenerate connective arities
+  normalize to their logical identity (empty `and` is true, single-child is
+  the child) so a single-conjunct invariant still proves at the SMT tier.
+  Further guards at their call sites: a non-finite literal, an empty
+  quantifier binder list, a non-Bool precondition / postcondition, an
+  interior-NUL variable name, and an `SmtExpr` past a depth bound (the
+  recursive walks would overflow the stack) all route cleanly to Tier C.
+- Tier B now runs every cvc5 solve in an ISOLATED child process when a host
+  enables it (the `chelis` binary does). Because cvc5 fails by uncatchable
+  process abort, the in-process guards above close every KNOWN cause but
+  cannot be proven exhaustive; `chelis_prove::worker` makes it moot --
+  `solve_property` re-execs a short-lived worker that solves and returns its
+  result over a pipe, and ANY way the child can fail (a cvc5 C++ abort, a
+  cvc5-internal assertion, a stack overflow, an OOM kill, a panic, a hang
+  past the deadline) becomes a clean Tier C result in the parent instead of
+  taking `chelis` down. Tests solve in-process (no spawn); the end-to-end
+  isolated path, including recovery from a worker that crashes on every
+  solve, is locked by the `prove_isolation` integration test.
 
 <!-- opaque-types prove-obligation review-4 fixes -->
 - The CLI `.dp` path now runs USER `@property` declarations through the
