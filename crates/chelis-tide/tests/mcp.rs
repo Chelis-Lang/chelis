@@ -664,3 +664,149 @@ fn u4_tide_handles_deep_module() {
         "clean deep module is ok: {structured}"
     );
 }
+
+/// F6 (review 4): the CLI `.dp` path and the tide `.dp` path run user
+/// `@property` declarations through the SAME shared runner, so a CLI prove
+/// and a tide prove of the same `.dp` module agree on every property's
+/// verdict (status). The CLI `.dp` path previously used a LOCAL deep runner
+/// while tide used the shared one -- the parallel-path divergence.
+#[test]
+fn f6_cli_and_tide_agree_on_deep_user_property_verdicts() {
+    use std::io::Write;
+
+    // A `.dp` module with two user properties: one true, one false.
+    let source = r#"(module {}
+  m
+  (defsig {} holds (t-fn {} (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+         property_preconditions: (tuple {}),
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+         property_source_kind: "user"
+       }
+    holds
+    (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} gte) (var {} x) (var {} x))))
+  (defsig {} breaks (t-fn {} (t-prim {} f32) (t-prim {} bool)))
+  (def {chelis_role: "property",
+         property_preconditions: (tuple {}),
+         property_quantifiers: (params {} (y {type: (t-prim {} f32)})),
+         property_source_kind: "user"
+       }
+    breaks
+    (fn {} (params {} (y {type: (t-prim {} f32)})) (app {} (var {} cmplt) (var {} y) (var {} y)))))
+"#;
+
+    // Tide path.
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":50,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"deep","source": source, "seed": 0
+        }}
+    }))
+    .expect("prove response");
+    let tide_props = response["result"]["structuredContent"]["properties"]
+        .as_array()
+        .expect("properties")
+        .clone();
+
+    // CLI path: write the `.dp`, run the chelis binary, parse the NDJSON.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dp = dir.path().join("props.dp");
+    let mut f = std::fs::File::create(&dp).expect("create dp");
+    f.write_all(source.as_bytes()).expect("write dp");
+    drop(f);
+    let output = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args(["prove", dp.to_str().unwrap(), "--json", "--seed", "0"])
+        .output()
+        .expect("run cli prove");
+    let cli_props: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|r| r.get("kind").and_then(|k| k.as_str()) == Some("property"))
+        .collect();
+
+    // Same property set, same per-property status, across surfaces.
+    let cli_by_name: std::collections::HashMap<String, String> = cli_props
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap().to_string(),
+                p["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(tide_props.len(), 2, "tide finds both user props: {tide_props:?}");
+    assert_eq!(cli_props.len(), 2, "cli finds both user props: {cli_props:?}");
+    for tide_p in &tide_props {
+        let name = tide_p["name"].as_str().unwrap();
+        let tide_status = tide_p["status"].as_str().unwrap();
+        let cli_status = cli_by_name
+            .get(name)
+            .unwrap_or_else(|| panic!("cli is missing property `{name}`"));
+        assert_eq!(
+            cli_status, tide_status,
+            "CLI and tide agree on `{name}` status (.dp parity)"
+        );
+    }
+    // The verdicts are determinate: `holds` passes, `breaks` is disproved.
+    assert_eq!(cli_by_name.get("holds").map(String::as_str), Some("passed"));
+    assert_eq!(cli_by_name.get("breaks").map(String::as_str), Some("failed"));
+
+    // Tier divergence (the strongest case): under `--tier smt-only`, a `.dp`
+    // user property has no SMT lowering path, so BOTH surfaces must report it
+    // unsupported. The old CLI-local deep runner ignored the tier and would
+    // have fuzz-passed `holds`, diverging from tide. Now they agree.
+    let tide_smt = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":51,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"deep","source": source, "tier":"smt-only", "seed": 0
+        }}
+    }))
+    .expect("prove response");
+    let tide_smt_props = tide_smt["result"]["structuredContent"]["properties"]
+        .as_array()
+        .expect("properties")
+        .clone();
+
+    let smt_output = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args([
+            "prove",
+            dp.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "smt-only",
+            "--seed",
+            "0",
+        ])
+        .output()
+        .expect("run cli prove smt-only");
+    let cli_smt: std::collections::HashMap<String, String> =
+        String::from_utf8_lossy(&smt_output.stdout)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|r| r.get("kind").and_then(|k| k.as_str()) == Some("property"))
+            .map(|p| {
+                (
+                    p["name"].as_str().unwrap().to_string(),
+                    p["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+    for tide_p in &tide_smt_props {
+        let name = tide_p["name"].as_str().unwrap();
+        assert_eq!(
+            cli_smt.get(name).map(String::as_str),
+            Some(tide_p["status"].as_str().unwrap()),
+            "CLI and tide agree on `{name}` under --tier smt-only (.dp tier parity)"
+        );
+        assert_eq!(
+            tide_p["status"], "unsupported",
+            "a deep user property is unsupported under smt-only on BOTH surfaces"
+        );
+    }
+}

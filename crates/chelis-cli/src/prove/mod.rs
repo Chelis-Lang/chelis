@@ -883,7 +883,28 @@ fn prove_deep_file(
     }
     let properties = discover_deep_properties(path, &exprs, options.only)?;
     let mut file_status = Status::Passed;
+
+    // User `@property` declarations run through the SHARED property runner
+    // (the SAME engine the tide MCP tool drives, U4 / F6), so a CLI prove and
+    // a tide prove of the same `.dp` module agree. Run the shared runner once
+    // for ALL user properties, then render each. The c-earchin bridge
+    // properties keep the CLI-local path with their span/requirement
+    // rendering (a CLI-only surface tide does not run).
+    #[cfg(feature = "chelis-prove")]
+    {
+        let user_status =
+            property_run::run_deep_properties_shared(path, &source, options, totals);
+        file_status = combine_status(file_status, user_status);
+    }
+
     for property in properties {
+        // Under `chelis-prove` the user properties were already run above by
+        // the shared runner; only bridge properties remain for the local
+        // path. Without the capability, the local path runs everything.
+        #[cfg(feature = "chelis-prove")]
+        if property.source_kind == "user" {
+            continue;
+        }
         let status = prove_deep_property(&exprs, &property, options, totals);
         file_status = combine_status(file_status, status);
     }

@@ -23,6 +23,18 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove-obligation review-4 fixes -->
+- The CLI `.dp` path now runs USER `@property` declarations through the
+  shared `chelis_prove::property_runner::run_deep_source_properties` -- the
+  SAME engine the tide MCP tool drives (F6) -- so a CLI prove and a tide
+  prove of the same Deep module agree on every verdict (including the
+  `--tier smt-only` case, which both now report unsupported). The
+  c-earchin bridge deep properties keep the CLI-local path with their
+  span/requirement rendering. Previously the CLI `.dp` path used a local
+  deep runner while tide used the shared one, the parallel-path divergence.
+- The deep property path honors the `--tier` contract (F7): `--tier
+  smt-only` on a `.dp` module is now unsupported (a Deep body has no
+  Surf->SMT lowering path) instead of silently running the fuzz loop and
+  reporting a pass.
 - Tide and the CLI now render a property's status through one shared
   `is_pass`-bucketed `PropertyOutcome::display_status` (F8). The tide MCP
   JSON previously rendered the raw status, so a zero-sample `Passed`
