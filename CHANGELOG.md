@@ -22,6 +22,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Builtin-shadowing defs rejected at check time (#353)**: a top-level
+  `def` or `sig` whose name appears in the closed builtin vocabulary
+  (`def sum`, `sig relu: ...`) is now a hard front-end error
+  (`BuiltinShadowing`, spec/04-type-system.md §8.6) on every lane.
+  Pre-fix the reproducer checked clean, hit the builtin's arity error
+  under eval (call dispatch is builtin-first by name), and segfaulted
+  on the C backend. The rejection derives from the same
+  `BUILTIN_NAMES` table the evaluator and IR lowering dispatch on, so
+  the sets cannot drift; reef package modules are exempt by
+  construction (their decls are internal-name-rewritten before
+  checking, so a package-scoped `def sum` still resolves to the user
+  def). Style-gate bypasses (`--allow-style-violations`,
+  `CHELIS_STYLE_GATE_DISABLE`) do not unlock it.
+
 <!-- opaque-types prove-obligation review-5 fixes -->
 - The shared Deep property discoverer now classifies a `@property` def's
   source kind exactly as the CLI discoverer does (review 5 / F6): a
@@ -269,6 +283,119 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   invalid declaration. The lint now defers the invalid module-less
   `@opaque` to the checker.
 
+<!-- opaque-types RT-3 soundness fixes (prove layer) -->
+- **RT3-F1 (CRITICAL, D-PRODUCER / D-SOUND)**: a record field spelled with
+  a type alias of an invariant-carrying opaque type silently defeated the
+  producer set (`type TA = T; type Wrapper = { inner: TA }`), so a
+  violating value escaped the module boundary unobligated and `chelis
+  prove` returned exit 0. The record-field producer path read field types
+  syntactically from Deep without resolving aliases; it now resolves
+  `(typealias ...)` chains so a record reaching the opaque type through any
+  alias spelling is covered-or-rejected, identical to the direct-type case.
+  This also closes the same-root unsound injection-pass (a property over
+  the type passing while the producer escapes).
+- **RT3-F2 (HIGH, D-PRODUCER)**: a module with an unrelated type error
+  passed `chelis prove` with exit 0, wiping the checker-inferred signatures
+  (empty producer set) and hiding a rejectable producer. `chelis prove`
+  (and the chelis-tide `chelis_prove` tool) now surface the check
+  diagnostics and report an Error (exit 3) on a type-broken module; a
+  `prove` exit 0 warrants the module type-checked and every obligation was
+  discharged (the strict downstream prove-compat / FlukeBall guarantee).
+- **RT3-F3 (MEDIUM, D-STARVE)**: constructor-based generation false-starved
+  for tight SCALAR-field invariant bands because the producer-result reader
+  handled only tensor values; a rank-0 scalar field access returns
+  `Float64`/`Int64`/`Bool`, which was dropped. Scalar field reads now
+  extract the scalar value, so a producer that always lands in a tight
+  scalar band serves the binder instead of being reported `unsupported`.
+- **RT3-F4 (verification, D-CHECK)**: confirmed declaration errors
+  (`OpaqueTypeViolation`, amenability mismatch) are visible on `chelis
+  check` (non-zero exit with the error listed) and gate `chelis build` /
+  `chelis eval --file`; `chelis validate` is a structural validator that
+  does not run the type/opacity checker. Documented in spec/04 §2.5.
+<!-- end opaque-types RT-3 soundness fixes -->
+
+<!-- opaque-types xhigh-review fixes (prove layer) -->
+- **CR-15 (HIGH, D-PRODUCER)**: a producer returning a MULTI-VARIANT ADT
+  whose non-first variant wrapped the opaque type was silently missed
+  (the record-field collector read only the first variant). All variant
+  payloads (record fields and positional types) are now collected, so any
+  variant wrapping the type is covered-or-rejected.
+- **CR-1 / CR-4 / CR-6 (HIGH, D-OBLIG)**: the tensor-field obligation
+  Tier C verdict ignored the inner produced position for `Option[(T, f32)]`
+  / nested Option (reading record fields off a tuple) and used a NaN-filled
+  record as the None sentinel (so a `Some(record)` with a legitimate NaN
+  representation passed VACUOUSLY). The produced value is now validated
+  structurally over the `ExecutionValue` tree (Option as `Adt{Some|None}`,
+  tuples as `Tuple`, records as `Adt`), applying the inner position and
+  using the real None discriminant; a NaN representation fails the
+  invariant, fail-closed.
+- **CR-2 / CR-5 / CR-10 (MEDIUM-HIGH, D-STARVE)**: invariant-sample
+  validation used the fuzz evaluator's `1e-10`-tolerant `==`/`!=`,
+  contradicting the strict-acceptance contract. Validation now uses
+  `eval_bool_strict` (exact IEEE `==`/`!=`); the fuzz tolerance stays on
+  the user-property postcondition path.
+- **CR-8 (MEDIUM, D-TIERB)**: a Tier B producer guard comparing against an
+  in-module zero-arg constant lowered with the constant unresolved (and
+  paniced the solver on the undeclared variable for a value binding). The
+  Tier B `reduce` pass now resolves module constants; the engine resolves
+  all in-module zero-arg scalar defs.
+- **CR-13 (robustness)**: the unary intrinsics in `concrete_eval` indexed
+  `a[0]` with no arity guard, so a malformed zero-arg `exp()` paniced;
+  they now guard `len == 1` and yield `NaN` on wrong arity.
+- **CR-12 (HIGH, D-PARITY)**: the chelis-tide `chelis_prove` tool
+  hardcoded `ok: true` and derived its summary only from the single user
+  property, so a failed/unsupported/errored producer obligation never
+  lowered the MCP response. The obligation outcomes are now folded into the
+  response `ok`/summary exactly as the CLI folds them into the prove exit
+  status.
+- **CR-14 (cleanup, D-PRODUCER)**: a record field of type `&T` was mapped
+  to an inert placeholder, hiding the borrowed opaque type; `t-ref` now
+  recurses so a borrow of the type is covered-or-rejected.
+- **CR-11 (cleanup, RFC L5)**: inlineability consumes
+  `chelis_pred::INTRINSIC_WHITELIST` instead of a duplicate array.
+<!-- end opaque-types xhigh-review fixes -->
+
+<!-- opaque-types RT-5 final fixes (prove layer) -->
+- **RT5-F1 (HIGH, completes CR-13)**: the Tier B SMT lowering applied no
+  arity check to the unary intrinsics (`exp`/`log`/`sqrt`/`sin`/`cos`/
+  `abs`), so a wrong-arity transcendental -- a zero-arg `exp()` or a
+  "valid-looking" two-arg `exp(a, b)` (the checker treats `exp` as
+  variadic) -- built an invalid cvc5 term that aborted the solver with
+  empty stdout and bare exit 1, a machine-contract violation for `prove
+  --json` consumers. The SMT lowering now arity-validates every intrinsic
+  application before building any cvc5 term and routes a wrong-arity or
+  unsupported application to a clean `TierBResult::Error` (mapped to an
+  obligation `unsupported`/Tier-C fallback), never letting a bad term reach
+  cvc5. CR-13 had fixed only the parallel concrete-eval path.
+- **test hygiene**: two `chelis prove` CLI tests asserted fuzz-tier
+  behavior and so failed under `--features smt` (where a trivial property
+  auto-proves at the SMT tier); they now pin `--tier fuzz-only`. The
+  solver-free corpus gate (`zero cvc5 symbols`) is skipped under
+  `--features smt` (where the binary links cvc5 by design), keeping the
+  load-bearing default-build assertion intact.
+<!-- end opaque-types RT-5 final fixes -->
+
+<!-- opaque-types: runtime IR audit skips declaration metadata -->
+- The runtime IR audits (`assert_ir_typed` / `assert_ir_lowerable` in
+  `crates/chelis-ir/src/lower.rs`) no longer descend into the metadata of
+  declaration nodes (`deftype` / `defsig` / `typealias`). A `deftype`'s
+  declared `@invariant` predicate lives in that metadata map and is spec
+  metadata consumed only by `chelis prove`; it is never lowered to runtime
+  IR (the main `lower_top_level` already returns early for those tags). The
+  audit walked into it anyway and rejected a tensor-field invariant such as
+  `sum(p.weights)` with "shape-sensitive IR app nodes must carry explicit
+  type metadata before lowering", so `chelis eval --file` and (on some
+  paths) `chelis build` failed on an opaque type whose invariant is over a
+  tensor field, while the equivalent scalar-field invariant passed only by
+  accident. The audits now mirror the lowering skip for these declaration
+  tags; genuine runtime `def` bodies are still audited. With the fix, the
+  `Simplex` tolerance-band example `eval`/`build`s cleanly and is promoted
+  from `examples/illustrative/` to `examples/opaque_invariants_simplex.ch`
+  (library-only-executable, like `Probability`). The §2.3 span-coverage
+  audit invariant is unaffected: declaration metadata carries no input def
+  body spans.
+<!-- end opaque-types runtime IR audit -->
+
 ### Added
 
 <!-- opaque-types W3/W4 (prove layer) -->
@@ -505,6 +632,210 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   no longer registered, so a non-constant binding cannot pollute the
   decode constant table or mis-resolve.
 
+## [0.7.25] — 2026-06-11
+
+### Fixed
+
+- **`chelis eval` named-axis reductions (#338, PR #346)**: the host
+  runtime routes named-axis work through the IR lowering + forward-DAG
+  lane (the grad/vmap machinery), restoring the eval-vs-backend
+  agreement invariant for the Tier-3 surface. The Tier-3 corpus now
+  runs the full agreement oracle at ranks 2/3/4 with non-square
+  operands plus a parity-corners suite (List params, top-level
+  reductions, let-blocks, closure aliases, pipes, scalar returns,
+  grad over named-reduce defs).
+- **Elementwise output types in rank-polymorphic inline bodies
+  (PR #346)**: unary and Tier-2 elementwise lowering arms took their
+  output type from body annotations whose symbolic dims survive
+  rank-poly inlining unsubstituted; `sum(exp(x), seq)`-class bodies
+  silently miscompiled on BOTH lanes (C backend garbage since #337,
+  wrong-axis eval numerics). All arms now derive output dims from the
+  lowered operand (`elementwise_out_ty`), pinned executable.
+- **Grad through symbolic-dim sig wrappers (#345, PR #363)**: the
+  0.7.24 regression ICE ("symbolic dim referenced by a non-Load node")
+  is fixed and pinned by an 8-row regression matrix (sig/inline/
+  quantifier/shim wrappers, gelu, rank-2) verified failing on the
+  0.7.24 baseline. The `dag.rs` guard now also scans op-internal
+  symbolic refs (`Expand::size`, `Reshape::new_shape`, `BlasMatmul`
+  dims), which immediately caught and fixed a stale-`Sym` producer in
+  `actualize_tensor_helper_types`. Downstream: unblocks School from
+  its `=0.7.23` pin (re-probe of the #318/#319/#320 surfaces).
+
+### Added
+
+- **`gate.py --local` (#360, PR #362)**: official local/CI gate split.
+  Local pre-push runs workspace clippy, fmt, `chelis lint`, and
+  per-crate nextest derived from changed paths (manifest-accurate
+  package mapping); the workspace suite is CI-owned (macOS Smoke
+  authoritative).
+- **Downstream shell-repo contract (PR #361)**:
+  `spec/design/shell_repo_contract.md`, normative for every shell in
+  the ecosystem table (pin hygiene with offline consistency guards,
+  `CHELIS_SURFACE.md` capability inventories, upstream-issue
+  discipline with the narrowing-citation rule, expected-to-fail
+  blocker probes, negative-test sidecars, pin-bump checklist), with
+  `Chelis-Lang/school` as the reference implementation.
+- **Dev-environment tooling (#348/#349/#356, PRs #354/#355/#358)**:
+  build-concurrency contract + `scripts/reap_orphans.py`; macOS
+  first-exec assessment runbook (`docs/local_macos_environment.md`)
+  + `scripts/preflight_exec_probe.py` with slow-admission detection
+  (exit 3); verified Developer Tools exemption as the durable
+  workstation fix.
+
+### Changed
+
+- **`chelis-compiler-api` runtime split (#350, PR #357)**: the
+  8,018-line `runtime.rs` is now `runtime/{mod,eval,named_axis,
+  transforms,host_ops,tests}.rs`; mechanical move (verified by
+  line-multiset proof), no behavior change.
+
+## [0.7.24] — 2026-06-09
+
+### Added
+
+- **Tier-2 rank polymorphism — identity tier (#258, #286)**: `..r`
+  rank-variable spread syntax (`d-rank` Deep node), `Dim::Rank` with
+  unitary rank unification, and the Body Discipline, so a single `def`
+  is generic over tensor rank for identity/erasure shapes (the
+  relu/silu/gelu activation family and full reduces as one def each).
+- **Tier-3 name-preserving rank polymorphism — named-axis reduction
+  (#258, #337)**: a single `def` reduces a named axis at any rank and
+  the surviving named axes carry through symbolically, e.g.
+  `def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) ->
+  tensor[..pre, ..post, f32] = sum(x, seq)`. Includes call-site rank
+  monomorphization and named-axis lowering on the C backend.
+- **Module-qualified constructor references and patterns (#316, #321,
+  #322)**: `Mod.Ctor` parses and resolves in expressions and in match
+  patterns, completing the #157 cross-module constructor surface.
+- **glibc 2.31 linux-x86_64 release variant (#330)**: the release
+  workflow now also builds `chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz`
+  in a Debian 11 container, so the linux binary loads on any glibc >=
+  2.31. The default ubuntu-latest build carries a hard `GLIBC_2.39`
+  verneed record and fails to load on older distros (Debian 11/12,
+  Ubuntu 20.04/22.04).
+
+### Changed
+
+- **chelis-std 0.4.0 — ML modules cut to School (#331)**: the
+  `Std.Nn.*`, `Std.Loss.*`, `Std.Optim`, and `Std.Schedule` modules are
+  removed from chelis-std; they live on in the standalone School ML
+  library under the `School.*` prefix. Init/Io/Tensor/Sort/Scan/
+  Process/Decimal/Test/Time/Tokenizer are unchanged. The bundle
+  embedded in the chelis binary is regenerated at 0.4.0.
+- **CI (#332, #328)**: the chelis-std self-test corpus now runs
+  nightly, and a red nightly opens a `nightly-failure` tracking issue
+  (closed again on green); Linux jobs reclaim runner disk to stop
+  intermittent link/build failures.
+
+### Fixed
+
+- **Out-of-scope cross-module constructor is a check-time error (#317,
+  #327)**: referencing another module's constructor without importing
+  it — at construction sites, applied heads, record literals, and match
+  patterns — is rejected with `UnknownConstructor` at check instead of
+  silently mis-resolving through the terminal-segment fallback and
+  surfacing as a runtime non-exhaustive match.
+- **grad through a cross-module precision-polymorphic attention verb
+  (#319, #326)**: separate-`sig` def bodies now infer against the
+  declared sig param types (not bare type variables), and renamed body
+  precision variables bind to the call-site precision only when the
+  call is fully precision-monomorphic, preserving the
+  no-implicit-promotion invariant.
+- **grad through windowed mean / max_reduce / gather (#320, #325)**:
+  runtime-extent mean divisor and collapsed-operand rank recovery.
+- **grad backward for shape-derived expand-of-scalar broadcast (#318,
+  #324)**.
+- **chelis-std softmax self-test rank mismatch (#332)**:
+  `test_softmax_normalizes_to_one` compared a rank-0 sum against a
+  rank-1 expectation, failing the file's typecheck; the unimplementable
+  `Std.Tensor.Reduce` self-test is quarantined as #333.
+
+## [0.7.23] — 2026-06-04
+
+### Added
+
+- **Module-scoped constructor resolution (#157)**: the reef linker now
+  mangles, rewrites, and exports ADT constructor names as module
+  symbols, so a downstream program can import a constructor across
+  modules (e.g. `import Std.Io.Json (JsonInt)`) and pattern-match on it.
+- **chelis-std bundle regenerated to expose std constructors
+  cross-module (#311)**: the prebuilt bundle now carries the
+  constructor-mangled, exported symbols from #157, with a cross-module
+  constructor acceptance test wired as a manual gate.
+
+### Fixed
+
+- **grad-tuple projection receiver in the C backend (#309)**: a
+  multi-`wrt` `grad(f)(x, w)` projected with `.N` now reads from a
+  correctly-typed `chelis_tuple` instead of emitting `chelis_tuple_get`
+  over a `chelis_tensor*`. Multi-root grad helper calls are typed as a
+  tuple sized from the helper's actual root count; single-root and
+  zero-root helpers are unchanged.
+- **Zero-length arrays for nullary ADT variants and empty tuples
+  (#310)**: `assign_adt_construct` and `assign_tuple_literal` no longer
+  emit ISO-C-illegal `chelis_value[0]` arrays; they pass `NULL` with
+  count 0, mirroring the list and tensor-helper guards.
+- **const-broadcast tensor binding (#300)**: the C backend emits valid C
+  for a constant-only broadcast tensor binding in a scalar-return body.
+- **grad backward for shrink and stride movement ops (#291)**: the
+  reverse pass now lowers `shrink` and `stride`.
+- **grad backward through the expand-of-scalar constant idiom (#288)**.
+- **precision-variable monomorphization through the grad sub-context
+  (#289)**: precision type variables are now resolved when lowering a
+  grad call.
+- **non-literal reduce/expand axis diagnostic (#259)**: a targeted error
+  replaces a confusing failure when a reduction or expand axis is not a
+  literal.
+- **PascalCase `def` quantifier names (#293)**: promoted to type
+  variables during desugaring rather than being treated as types.
+- **function-typed arrow-argument grouping parens (#290)**: the
+  formatter and printers preserve parentheses around function-typed
+  arguments in arrow types.
+- **Deep `comment` rule (#167)**: made atomic so leading `;` comment
+  lines parse.
+- **reef metadata-step 404 disambiguation (#147)**: a metadata-step 404
+  is distinguished from an auth-privacy 404.
+- **Lossy float emission in HIP / C backend code generation (#250, #251,
+  #252)**: three remaining `%.8`-style decimal format strings emitted
+  float literals into generated HIP / C source that could not round-trip
+  to their exact bit pattern, mirroring the failure mode PR #243 (#189)
+  and PR #249 (#248) already fixed in the C backend's production emit
+  paths. The HIP `emit_const` F32 fill (#250) and the `uniform_like`
+  `low` / `high` args (#251) now narrow to f32 and reconstruct each value
+  from its exact bit pattern via the `chelis_f32_from_bits` static inline
+  helper (with an `f32::to_bits()` / `f64::to_bits()` codegen step); the
+  HIP F64 const fill routes through `chelis_f64_from_bits`. The C backend
+  test-harness input fill (#252) is migrated to the same bit-pattern
+  emission. Denormals such as `1e-40` no longer collapse to `0.0f`, and
+  values like `0.1f32` / `1.0 / 3.0` round-trip to identical bits. The
+  same sibling-sweep also closes the remaining `%.8` / `{:.17e}` decimal
+  fills in the C, HIP, and Metal correctness harnesses (the gcc-gated
+  SIMD-reduction static-array initializer, which now emits exact C99
+  hexadecimal-float constants; the C backend's Sleef fused/single-op
+  test-harness fills; and the HIP / Metal / cross-library GPU-gated
+  driver fills) so the generated device input is byte-identical to the
+  Rust reference the bit-exact and tight-ULP assertions compare against.
+
+## [0.7.22] — 2026-06-03
+
+### Added
+
+- **reduce_window_{max,min,sum,mean} (#254)**: windowed reductions land
+  across the type checker, IR, and backends as first-class RISC
+  primitives with positive and negative coverage.
+- **host-runtime `tensor_scan` (#257/#264)**: a prefix-scan primitive
+  implemented in the host runtime, closing issue #257.
+- **Hull Phase 5b conformance gate (#278)**: a vendored, frozen,
+  version-stamped Hull conformance corpus
+  (`tests/conformance/hull/`) plus a CI gate (`conformance.yml`) that
+  re-renders the corpus against the just-built compiler and FAILS on
+  any `CompilerUnsound`, unexplained `Disagree`, or `EvalDisagree`. The
+  manifest now pins chelis `0.7.22`. Hull is documented as shipped
+  (v0.1.0) as the compiler-vs-spec differential layer (#283).
+- **SMT-prove tier features (`chelis prove`)**: `--tier auto` now wires
+  through SMT Tier B, function-body inlining feeds the SMT dispatch,
+  and the dispatcher selects `QF_NRA` vs `QF_NRAT` based on
+  transcendental content of the goal.
 - `chelis check <file>.dp` and `chelis eval --file <file>.dp` now ingest
   standalone Deep (`.dp`) IR directly. Previously both fed Deep
   s-expressions to the Surf parser, which reported a bogus
@@ -519,117 +850,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `EvalResult` shape. A `.dp` and its byte-equivalent-meaning `.ch`
   produce field-for-field identical check reports. `chelis check <dir>`
   now also discovers `.dp` files in a mixed directory.
-
-Default `chelis test` now amortizes shell/module graph compilation
-across a suite. The CLI batches eligible test files into one internal
-worker in `--batch-mode auto` (the default), preserves per-file
-subprocess isolation for files that need it, and falls back to the
-previous one-worker-per-file path on batch compile/runtime failures.
-Use `--batch-mode file` to force the old execution strategy.
-
-### Added
-
 - `chelis test --batch-mode auto|file`, with `auto` as the default.
   Auto mode compiles one shared context and one combined batch probe
   for eligible files, then reports the same NDJSON/per-test rows as
-  the file-worker path.
+  the file-worker path. The default now amortizes shell/module graph
+  compilation across a suite: the CLI batches eligible test files into
+  one internal worker, preserves per-file subprocess isolation for
+  files that need it, and falls back to the previous
+  one-worker-per-file path on batch compile/runtime failures. Use
+  `--batch-mode file` to force the old execution strategy.
 - Internal `__test_batch` worker support and crash/timeout fallback
   coverage so batch execution cannot hide a file-level failure.
 
 ### Fixed
 
-<!-- opaque-types RT-3 soundness fixes (prove layer) -->
-- **RT3-F1 (CRITICAL, D-PRODUCER / D-SOUND)**: a record field spelled with
-  a type alias of an invariant-carrying opaque type silently defeated the
-  producer set (`type TA = T; type Wrapper = { inner: TA }`), so a
-  violating value escaped the module boundary unobligated and `chelis
-  prove` returned exit 0. The record-field producer path read field types
-  syntactically from Deep without resolving aliases; it now resolves
-  `(typealias ...)` chains so a record reaching the opaque type through any
-  alias spelling is covered-or-rejected, identical to the direct-type case.
-  This also closes the same-root unsound injection-pass (a property over
-  the type passing while the producer escapes).
-- **RT3-F2 (HIGH, D-PRODUCER)**: a module with an unrelated type error
-  passed `chelis prove` with exit 0, wiping the checker-inferred signatures
-  (empty producer set) and hiding a rejectable producer. `chelis prove`
-  (and the chelis-tide `chelis_prove` tool) now surface the check
-  diagnostics and report an Error (exit 3) on a type-broken module; a
-  `prove` exit 0 warrants the module type-checked and every obligation was
-  discharged (the strict downstream prove-compat / FlukeBall guarantee).
-- **RT3-F3 (MEDIUM, D-STARVE)**: constructor-based generation false-starved
-  for tight SCALAR-field invariant bands because the producer-result reader
-  handled only tensor values; a rank-0 scalar field access returns
-  `Float64`/`Int64`/`Bool`, which was dropped. Scalar field reads now
-  extract the scalar value, so a producer that always lands in a tight
-  scalar band serves the binder instead of being reported `unsupported`.
-- **RT3-F4 (verification, D-CHECK)**: confirmed declaration errors
-  (`OpaqueTypeViolation`, amenability mismatch) are visible on `chelis
-  check` (non-zero exit with the error listed) and gate `chelis build` /
-  `chelis eval --file`; `chelis validate` is a structural validator that
-  does not run the type/opacity checker. Documented in spec/04 §2.5.
-<!-- end opaque-types RT-3 soundness fixes -->
-
-<!-- opaque-types xhigh-review fixes (prove layer) -->
-- **CR-15 (HIGH, D-PRODUCER)**: a producer returning a MULTI-VARIANT ADT
-  whose non-first variant wrapped the opaque type was silently missed
-  (the record-field collector read only the first variant). All variant
-  payloads (record fields and positional types) are now collected, so any
-  variant wrapping the type is covered-or-rejected.
-- **CR-1 / CR-4 / CR-6 (HIGH, D-OBLIG)**: the tensor-field obligation
-  Tier C verdict ignored the inner produced position for `Option[(T, f32)]`
-  / nested Option (reading record fields off a tuple) and used a NaN-filled
-  record as the None sentinel (so a `Some(record)` with a legitimate NaN
-  representation passed VACUOUSLY). The produced value is now validated
-  structurally over the `ExecutionValue` tree (Option as `Adt{Some|None}`,
-  tuples as `Tuple`, records as `Adt`), applying the inner position and
-  using the real None discriminant; a NaN representation fails the
-  invariant, fail-closed.
-- **CR-2 / CR-5 / CR-10 (MEDIUM-HIGH, D-STARVE)**: invariant-sample
-  validation used the fuzz evaluator's `1e-10`-tolerant `==`/`!=`,
-  contradicting the strict-acceptance contract. Validation now uses
-  `eval_bool_strict` (exact IEEE `==`/`!=`); the fuzz tolerance stays on
-  the user-property postcondition path.
-- **CR-8 (MEDIUM, D-TIERB)**: a Tier B producer guard comparing against an
-  in-module zero-arg constant lowered with the constant unresolved (and
-  paniced the solver on the undeclared variable for a value binding). The
-  Tier B `reduce` pass now resolves module constants; the engine resolves
-  all in-module zero-arg scalar defs.
-- **CR-13 (robustness)**: the unary intrinsics in `concrete_eval` indexed
-  `a[0]` with no arity guard, so a malformed zero-arg `exp()` paniced;
-  they now guard `len == 1` and yield `NaN` on wrong arity.
-- **CR-12 (HIGH, D-PARITY)**: the chelis-tide `chelis_prove` tool
-  hardcoded `ok: true` and derived its summary only from the single user
-  property, so a failed/unsupported/errored producer obligation never
-  lowered the MCP response. The obligation outcomes are now folded into the
-  response `ok`/summary exactly as the CLI folds them into the prove exit
-  status.
-- **CR-14 (cleanup, D-PRODUCER)**: a record field of type `&T` was mapped
-  to an inert placeholder, hiding the borrowed opaque type; `t-ref` now
-  recurses so a borrow of the type is covered-or-rejected.
-- **CR-11 (cleanup, RFC L5)**: inlineability consumes
-  `chelis_pred::INTRINSIC_WHITELIST` instead of a duplicate array.
-<!-- end opaque-types xhigh-review fixes -->
-
-<!-- opaque-types RT-5 final fixes (prove layer) -->
-- **RT5-F1 (HIGH, completes CR-13)**: the Tier B SMT lowering applied no
-  arity check to the unary intrinsics (`exp`/`log`/`sqrt`/`sin`/`cos`/
-  `abs`), so a wrong-arity transcendental -- a zero-arg `exp()` or a
-  "valid-looking" two-arg `exp(a, b)` (the checker treats `exp` as
-  variadic) -- built an invalid cvc5 term that aborted the solver with
-  empty stdout and bare exit 1, a machine-contract violation for `prove
-  --json` consumers. The SMT lowering now arity-validates every intrinsic
-  application before building any cvc5 term and routes a wrong-arity or
-  unsupported application to a clean `TierBResult::Error` (mapped to an
-  obligation `unsupported`/Tier-C fallback), never letting a bad term reach
-  cvc5. CR-13 had fixed only the parallel concrete-eval path.
-- **test hygiene**: two `chelis prove` CLI tests asserted fuzz-tier
-  behavior and so failed under `--features smt` (where a trivial property
-  auto-proves at the SMT tier); they now pin `--tier fuzz-only`. The
-  solver-free corpus gate (`zero cvc5 symbols`) is skipped under
-  `--features smt` (where the binary links cvc5 by design), keeping the
-  load-bearing default-build assertion intact.
-<!-- end opaque-types RT-5 final fixes -->
-
+- **#285**: suppress a wildcard `defsig` from overwriting an explicit
+  `sig`, preserve the `def` effect-row, and fix the std `generate`
+  signatures.
+- **#258**: reject a duplicate same-name `def` with a clear diagnostic
+  instead of silently shadowing the first definition.
 - **#248 (#189 follow-up)**: the C backend's `emit_uniform_like` was
   the third lossy `%.8`-format-string site in the same class as the
   F32/F64 `emit_const` arms that PR #243 closed. `low` / `high` were
@@ -644,27 +883,6 @@ Use `--batch-mode file` to force the old execution strategy.
   `uint32_t` / `uint64_t` back to `float` / `double`. Symmetric with
   PR #243's `chelis_fill_f32_bits` mechanism but for per-call scalar
   args rather than buffer fills.
-
-<!-- opaque-types: runtime IR audit skips declaration metadata -->
-- The runtime IR audits (`assert_ir_typed` / `assert_ir_lowerable` in
-  `crates/chelis-ir/src/lower.rs`) no longer descend into the metadata of
-  declaration nodes (`deftype` / `defsig` / `typealias`). A `deftype`'s
-  declared `@invariant` predicate lives in that metadata map and is spec
-  metadata consumed only by `chelis prove`; it is never lowered to runtime
-  IR (the main `lower_top_level` already returns early for those tags). The
-  audit walked into it anyway and rejected a tensor-field invariant such as
-  `sum(p.weights)` with "shape-sensitive IR app nodes must carry explicit
-  type metadata before lowering", so `chelis eval --file` and (on some
-  paths) `chelis build` failed on an opaque type whose invariant is over a
-  tensor field, while the equivalent scalar-field invariant passed only by
-  accident. The audits now mirror the lowering skip for these declaration
-  tags; genuine runtime `def` bodies are still audited. With the fix, the
-  `Simplex` tolerance-band example `eval`/`build`s cleanly and is promoted
-  from `examples/illustrative/` to `examples/opaque_invariants_simplex.ch`
-  (library-only-executable, like `Probability`). The §2.3 span-coverage
-  audit invariant is unaffected: declaration metadata carries no input def
-  body spans.
-<!-- end opaque-types runtime IR audit -->
 
 ### Docs — harmonize Hull / trust-stack / project-plan with shipped reality
 

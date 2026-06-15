@@ -1460,14 +1460,20 @@ fn format_type_expr(ty: &TypeExpr) -> String {
             format!("tensor[{inner}]")
         }
         TypeExpr::Arrow(args, ret, _) => {
-            let args = args
-                .iter()
-                .map(format_type_expr)
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("({args}) -> {}", format_type_expr(ret))
+            // Arrow is right-associative: `a -> b -> c` means `a -> (b -> c)`.
+            // An arrow in *argument* (left) position — `(a -> b) -> c` — is a
+            // distinct one-argument function type and must be grouped so the
+            // hover text preserves its arity. The return type is in right
+            // position, where grouping is redundant. Mirror the canonical
+            // `chelis_surf::format::format_type_arg` helper (#290).
+            let mut parts = args.iter().map(format_type_arg).collect::<Vec<_>>();
+            parts.push(format_type_expr(ret));
+            parts.join(" -> ")
         }
-        TypeExpr::Ref(inner, _) => format!("&{}", format_type_expr(inner)),
+        // `&` binds tighter than `->`, so a reference to a function type must
+        // group the arrow: `&(a -> b)` is distinct from `&a -> b`
+        // (`(&a) -> b`). Reuse the arrow-argument grouping helper (#290).
+        TypeExpr::Ref(inner, _) => format!("&{}", format_type_arg(inner)),
         TypeExpr::App(name, args, _) => {
             let args = args
                 .iter()
@@ -1485,6 +1491,19 @@ fn format_type_expr(ty: &TypeExpr) -> String {
             format!("({items})")
         }
         TypeExpr::Infer(_) => "_".to_string(),
+        TypeExpr::RankSpread(name, _) => format!("..{name}"),
+    }
+}
+
+/// Format a type that appears in *argument* (left) position of an arrow, for
+/// hover tooltips. A nested arrow here is a function-typed argument and must be
+/// grouped so the displayed signature keeps its arity. Right-position (return)
+/// types do not need this because arrow is right-associative. Mirrors
+/// `chelis_surf::format::format_type_arg` (#290).
+fn format_type_arg(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Arrow(..) => format!("({})", format_type_expr(ty)),
+        _ => format_type_expr(ty),
     }
 }
 
@@ -1554,5 +1573,46 @@ mod tests {
         let position = Position::new(2, 27);
         let location = definition_location(&state, position, Some(root)).expect("location");
         assert!(location.uri.path().ends_with("/foo/bar.ch"));
+    }
+
+    fn named_ty(n: &str) -> TypeExpr {
+        TypeExpr::Named(n.to_string(), DeepSpan::new(0, 0))
+    }
+
+    fn arrow_ty(args: Vec<TypeExpr>, ret: TypeExpr) -> TypeExpr {
+        TypeExpr::Arrow(args, Box::new(ret), DeepSpan::new(0, 0))
+    }
+
+    #[test]
+    fn hover_groups_arrow_in_argument_position() {
+        // `(a -> b) -> c`: a single function-typed argument. The hover tooltip
+        // must keep the grouping parens around the argument arrow so the
+        // displayed arity (one HOF argument) is not flattened into the curried
+        // `a -> b -> c` (two arguments). Mirrors the #290 formatter fix.
+        let hof = arrow_ty(
+            vec![arrow_ty(vec![named_ty("a")], named_ty("b"))],
+            named_ty("c"),
+        );
+        let curried = arrow_ty(vec![named_ty("a"), named_ty("b")], named_ty("c"));
+        assert_eq!(format_type_expr(&hof), "(a -> b) -> c");
+        assert_eq!(format_type_expr(&curried), "a -> b -> c");
+        assert_ne!(
+            format_type_expr(&hof),
+            format_type_expr(&curried),
+            "HOF-argument and curried arrow types must render distinctly in hover"
+        );
+    }
+
+    #[test]
+    fn hover_groups_arrow_under_ref() {
+        // `&(a -> b) -> c`: the argument is a reference to a function type.
+        // `&` binds tighter than `->`, so the inner arrow must stay grouped to
+        // distinguish `&(a -> b)` from `&a -> b` (`(&a) -> b`).
+        let inner = TypeExpr::Ref(
+            Box::new(arrow_ty(vec![named_ty("a")], named_ty("b"))),
+            DeepSpan::new(0, 0),
+        );
+        let ty = arrow_ty(vec![inner], named_ty("c"));
+        assert_eq!(format_type_expr(&ty), "&(a -> b) -> c");
     }
 }

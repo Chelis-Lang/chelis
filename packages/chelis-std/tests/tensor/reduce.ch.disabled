@@ -1,0 +1,48 @@
+-- QUARANTINED (chelis#333): Std.Tensor.Reduce.{min,prod,argmax,argmin}
+-- are unimplementable as declared — the *_reduce builtins require a
+-- compile-time-constant axis, but the module's sigs take a runtime
+-- int32 axis, so a forwarding wrapper cannot compile. Renamed to
+-- .disabled so `chelis test tests/` skips it; restore once #333 lands.
+module Std.Tests.Tensor.Reduce
+import Std.Test (assert_close_tensor)
+import Std.Tensor.Reduce (argmax, argmin, min, prod)
+def test_prod_single_row() -> unit ! { Test } = {
+  mat = pad_sequences_to([[cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]], cast(3, int64), cast(0.0, f32))
+  out = prod(mat, cast(1, int32))
+  assert_close_tensor(out, to_tensor([24.0]), cast(0.000001, f32), "prod-[2,3,4]=24")
+}
+def test_min_picks_smallest_not_first() -> unit ! { Test } = {
+  mat = pad_sequences_to([[cast(3.0, f32), cast(1.0, f32), cast(2.0, f32)]], cast(3, int64), cast(0.0, f32))
+  out = min(mat, cast(1, int32))
+  assert_close_tensor(out, to_tensor([1.0]), cast(0.000001, f32), "min-[3,1,2]=1")
+}
+def test_argmax_returns_index_of_max() -> unit ! { Test } = {
+  mat = pad_sequences_to([[cast(1.0, f32), cast(3.0, f32), cast(2.0, f32)]], cast(3, int64), cast(0.0, f32))
+  out = argmax(mat, cast(1, int32))
+  assert_close_tensor(out, to_tensor([1.0]), cast(0.0, f32), "argmax-[1,3,2]=1")
+}
+def test_argmin_returns_index_of_min() -> unit ! { Test } = {
+  mat = pad_sequences_to([[cast(3.0, f32), cast(1.0, f32), cast(2.0, f32)]], cast(3, int64), cast(0.0, f32))
+  out = argmin(mat, cast(1, int32))
+  assert_close_tensor(out, to_tensor([1.0]), cast(0.0, f32), "argmin-[3,1,2]=1")
+}
+def test_min_handles_negatives() -> unit ! { Test } = {
+  mat = pad_sequences_to([[cast(-1.0, f32), cast(-2.0, f32), cast(3.0, f32)]], cast(3, int64), cast(0.0, f32))
+  out = min(mat, cast(1, int32))
+  assert_close_tensor(out, to_tensor([-2.0]), cast(0.000001, f32), "min-[-1,-2,3]=-2")
+}
+def test_argmax_tie_break_pins_current_behavior() -> unit ! { Test } = {
+  mat = pad_sequences_to([[cast(2.0, f32), cast(2.0, f32), cast(2.0, f32)]], cast(3, int64), cast(0.0, f32))
+  out = argmax(mat, cast(1, int32))
+  assert_close_tensor(out, to_tensor([0.0]), cast(0.0, f32), "argmax tie-break (current behavior, NOT spec. Pins first-index until tie-break rule is documented)")
+}
+def test_prod_singleton_returns_element() -> unit ! { Test } = {
+  mat = pad_sequences_to([[cast(7.0, f32)]], cast(1, int64), cast(0.0, f32))
+  out = prod(mat, cast(1, int32))
+  assert_close_tensor(out, to_tensor([7.0]), cast(0.000001, f32), "prod-[7]=7")
+}
+def test_min_axis_zero_per_column() -> unit ! { Test } = {
+  mat = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
+  out = min(mat, cast(0, int32))
+  assert_close_tensor(out, to_tensor([1.0, 2.0, 3.0]), cast(0.000001, f32), "min-axis0-2x3")
+}

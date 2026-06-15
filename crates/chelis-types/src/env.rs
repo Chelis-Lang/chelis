@@ -47,6 +47,11 @@ impl Env {
         for &dv in &scheme.dvars {
             subst.insert_dim(dv, var_gen.fresh_dim());
         }
+        for &rv in &scheme.rvars {
+            // Each rank var instantiates to a fresh sole-`Rank` shape so every
+            // call site gets its own rank (Tier-2 rank polymorphism).
+            subst.insert_rank(rv, vec![Dim::Rank(var_gen.fresh_rvar())]);
+        }
         subst.apply(&scheme.body)
     }
 
@@ -80,13 +85,29 @@ impl Env {
         result
     }
 
+    /// Free rank variables in the environment (Tier-2 rank polymorphism).
+    pub fn free_rvars(&self, subst: &Subst) -> HashSet<RankVar> {
+        let mut result = HashSet::new();
+        for scheme in self.bindings.values() {
+            let ty = subst.apply(&scheme.body);
+            for v in free_rvars(&ty) {
+                if !scheme.rvars.contains(&v) {
+                    result.insert(v);
+                }
+            }
+        }
+        result
+    }
+
     /// Generalize a type over variables not free in the environment.
     pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
         let ty = subst.apply(ty);
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
+        let env_rvars = self.free_rvars(subst);
         let ty_tvars = free_tvars(&ty);
         let ty_dvars = free_dvars(&ty);
+        let ty_rvars = free_rvars(&ty);
         Scheme {
             tvars: ty_tvars
                 .into_iter()
@@ -95,6 +116,10 @@ impl Env {
             dvars: ty_dvars
                 .into_iter()
                 .filter(|v| !env_dvars.contains(v))
+                .collect(),
+            rvars: ty_rvars
+                .into_iter()
+                .filter(|v| !env_rvars.contains(v))
                 .collect(),
             body: ty,
         }
@@ -190,6 +215,76 @@ fn collect_dvars(ty: &Type, vars: &mut Vec<DimVar>) {
         Type::Tuple(ts) => {
             for t in ts {
                 collect_dvars(t, vars);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect every dimension occurring in tensor positions of `ty`,
+/// in traversal order, duplicates preserved. Used by the chelis#273
+/// return-position rigidity guard to compare a return-only declared
+/// dim parameter's resolution against the dims of the declared
+/// parameter positions.
+pub fn collect_dims(ty: &Type, dims: &mut Vec<Dim>) {
+    match ty {
+        Type::Tensor(ds, _) => {
+            dims.extend(ds.iter().cloned());
+        }
+        Type::Fn(args, ret) => {
+            for a in args {
+                collect_dims(a, dims);
+            }
+            collect_dims(ret, dims);
+        }
+        Type::Ref(inner) => collect_dims(inner, dims),
+        Type::Adt(_, args) => {
+            for a in args {
+                collect_dims(a, dims);
+            }
+        }
+        Type::Tuple(ts) => {
+            for t in ts {
+                collect_dims(t, dims);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect all free rank variables in a type (Tier-2 rank polymorphism).
+pub fn free_rvars(ty: &Type) -> Vec<RankVar> {
+    let mut vars = Vec::new();
+    collect_rvars(ty, &mut vars);
+    vars.sort_by_key(|v| v.0);
+    vars.dedup_by_key(|v| v.0);
+    vars
+}
+
+fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
+    match ty {
+        Type::Tensor(dims, _) => {
+            for d in dims {
+                if let Dim::Rank(r) = d {
+                    vars.push(*r);
+                }
+            }
+        }
+        Type::Fn(args, ret) => {
+            for a in args {
+                collect_rvars(a, vars);
+            }
+            collect_rvars(ret, vars);
+        }
+        Type::Ref(inner) => collect_rvars(inner, vars),
+        Type::Adt(_, args) => {
+            for a in args {
+                collect_rvars(a, vars);
+            }
+        }
+        Type::Tuple(ts) => {
+            for t in ts {
+                collect_rvars(t, vars);
             }
         }
         _ => {}

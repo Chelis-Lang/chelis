@@ -962,6 +962,16 @@ impl HipEmitter {
                     Self::elem_kind(input_ty),
                 ))
             }
+            // `reduce_window_*` HIP codegen is deferred per the
+            // initial-admission scope (issue #254 / spec §2.3.1). The
+            // C backend is canonical; returning `None` here means no
+            // kernel name is registered, and the launch-emit arm below
+            // panics via `todo!` if a `ReduceWindow` node ever reaches
+            // codegen on the HIP target.
+            RiscOp::ReduceWindow { .. } => None,
+            // `reduce_window_*` adjoint: HIP codegen deferred alongside the
+            // forward op (see above); launch-emit panics via `todo!`.
+            RiscOp::ReduceWindowGrad { .. } => None,
             RiscOp::OneHot { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node).suffix())),
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)),
@@ -1427,6 +1437,25 @@ impl HipEmitter {
                 // collected by the first pass.
                 self.emit_extra_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
             }
+            // `reduce_window_*` HIP codegen is deferred per the
+            // initial-admission scope (issue #254 / spec §2.3.1). C is
+            // the canonical backend. A `reduce_window_*` node is rejected
+            // before codegen with a clean `unsupported_feature` diagnostic by
+            // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); the
+            // `todo!` below is a defensive backstop matching the Pad / Shrink
+            // HIP stubs above, reached only if some path bypasses that guard.
+            RiscOp::ReduceWindow { .. } => {
+                todo!(
+                    "reduce_window_* HIP codegen is deferred (issue #254 / spec/05-risc-primitives.md §2.3.1). \
+                     Use the C backend, or open a follow-up issue if you need GPU windowed reductions."
+                )
+            }
+            RiscOp::ReduceWindowGrad { .. } => {
+                todo!(
+                    "reduce_window_* adjoint (ReduceWindowGrad) HIP codegen is deferred alongside the forward op \
+                     (spec/05-risc-primitives.md §2.3.1). Use the C backend for windowed-reduction gradients."
+                )
+            }
             RiscOp::OneHot { .. } => {
                 panic!(
                     "HIP backend: internal OneHot must be consumed by specialization before codegen"
@@ -1610,12 +1639,30 @@ impl HipEmitter {
         self.indent += 1;
         match elem {
             kernels::ElemKind::F32 => {
-                self.line(&format!("float fill_val = {:.8}f;", value as f32));
+                // Issue #250 (parallel #189): narrow the IR's f64 source to
+                // f32 (storage width is f32) and reconstruct the fill value
+                // from its exact bit pattern via the `chelis_f32_from_bits`
+                // static inline helper (declared in the included
+                // `chelis_runtime.h`). The pre-fix `{:.8}f` format string
+                // printed decimal places after the point, not significant
+                // digits, so small magnitudes drifted by ~3% or collapsed
+                // to zero when the emitted HIP host code parsed the literal
+                // back. Bit-pattern emission round-trips the closest-f32 to
+                // the source value verbatim.
+                let bits = (value as f32).to_bits();
+                self.line(&format!(
+                    "float fill_val = chelis_f32_from_bits(0x{bits:08x}u);"
+                ));
             }
             kernels::ElemKind::F64 => {
-                // emit a double literal (no `f` suffix); use 17 sig digits
-                // per IEEE-754 round-trip.
-                self.line(&format!("double fill_val = {value:.17e};"));
+                // Issue #250 sibling: emit the source f64's exact bit
+                // pattern and reconstruct it via `chelis_f64_from_bits`
+                // rather than a decimal format string. Symmetric with the
+                // f32 arm above and with the C backend's #189 fix.
+                let bits = value.to_bits();
+                self.line(&format!(
+                    "double fill_val = chelis_f64_from_bits(0x{bits:016x}uLL);"
+                ));
             }
         }
         self.line(&format!("int fill_size = d_t{id}->size;"));
@@ -1780,8 +1827,21 @@ impl HipEmitter {
         self.indent += 1;
         // The PRNG itself is f32; the f64 kernel widens at the final
         // store. Emit `low` / `high` as `float` regardless of `ty.precision`.
-        self.line(&format!("float t{id}_low = {:.8}f;", low as f32));
-        self.line(&format!("float t{id}_high = {:.8}f;", high as f32));
+        //
+        // Issue #251 (parallel #248): narrow `low` / `high` to f32 and
+        // reconstruct each from its exact bit pattern via the
+        // `chelis_f32_from_bits` static inline helper (from the included
+        // `chelis_runtime.h`). The pre-fix `{:.8}f` format string drifted
+        // up to one ULP for ordinary values and collapsed sub-normal-range
+        // inputs like `1e-40` to `0.0f` outright.
+        let low_bits = (low as f32).to_bits();
+        let high_bits = (high as f32).to_bits();
+        self.line(&format!(
+            "float t{id}_low = chelis_f32_from_bits(0x{low_bits:08x}u);"
+        ));
+        self.line(&format!(
+            "float t{id}_high = chelis_f32_from_bits(0x{high_bits:08x}u);"
+        ));
         self.line(&format!("unsigned long long t{id}_seed = {seed}ULL;"));
         self.line(&format!("int t{id}_size = d_t{id}->size;"));
         self.emit_shape_vars(id, "out", id);
@@ -2843,6 +2903,8 @@ impl HipEmitter {
             | RiscOp::MaxReduce { .. }
             | RiscOp::MinReduce { .. }
             | RiscOp::ProdReduce { .. }
+            | RiscOp::ReduceWindow { .. }
+            | RiscOp::ReduceWindowGrad { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
             | RiscOp::OneHot { .. }
@@ -3205,6 +3267,13 @@ mod tests {
         }
     }
 
+    fn vec_f64(n: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: Prim::F64,
+        }
+    }
+
     fn mat_f32(rows: usize, cols: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
@@ -3313,6 +3382,102 @@ mod tests {
         assert!(
             !hip.contains("__restrict__"),
             "no-reusable-input fused kernels must keep the legacy non-__restrict__ shape"
+        );
+    }
+
+    /// Issue #250 (parallel #189): an F32 `Const` whose source value is a
+    /// denormal must emit the exact f32 bit pattern through
+    /// `chelis_f32_from_bits`, not a lossy `{:.8}f` decimal literal. The
+    /// reproducer `1e-40` collapses to `0.0f` under `%.8`, so a
+    /// round-trip through the emitted literal would lose the source value.
+    #[test]
+    fn issue_250_f32_const_emits_exact_bit_pattern() {
+        // Denormal f32: `{:.8}` formats this as `0.00000000`, which
+        // reparses to a different (zero) bit pattern.
+        let value = 1e-40_f64;
+        let mut dag = Dag::new();
+        let c = dag.add_node(RiscOp::Const { value }, vec![], vec_f32(4), None);
+        dag.add_root(c);
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+
+        let want_bits = (value as f32).to_bits();
+        assert_ne!(
+            want_bits, 0,
+            "reproducer must be a nonzero denormal so `%.8` would lose it"
+        );
+        let needle = format!("chelis_f32_from_bits(0x{want_bits:08x}u)");
+        assert!(
+            hip.contains(&needle),
+            "F32 const must emit exact bit pattern via chelis_f32_from_bits; \
+             expected `{needle}` in:\n{hip}"
+        );
+        // Negative parity: the lossy decimal form must be gone.
+        assert!(
+            !hip.contains("float fill_val = 0.00000000f;"),
+            "F32 const must not emit a lossy `{{:.8}}f` literal:\n{hip}"
+        );
+    }
+
+    /// Issue #250 sibling: an F64 `Const` below `1e-17` must round-trip
+    /// through `chelis_f64_from_bits` rather than a decimal literal.
+    #[test]
+    fn issue_250_f64_const_emits_exact_bit_pattern() {
+        // 1.0 / 3.0 has no exact decimal form; pin the exact f64 bits.
+        let value = 1.0_f64 / 3.0_f64;
+        let mut dag = Dag::new();
+        let c = dag.add_node(RiscOp::Const { value }, vec![], vec_f64(4), None);
+        dag.add_root(c);
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+
+        let want_bits = value.to_bits();
+        let needle = format!("chelis_f64_from_bits(0x{want_bits:016x}uLL)");
+        assert!(
+            hip.contains(&needle),
+            "F64 const must emit exact bit pattern via chelis_f64_from_bits; \
+             expected `{needle}` in:\n{hip}"
+        );
+    }
+
+    /// Issue #251 (parallel #248): `uniform_like` `low` / `high` args must
+    /// emit through `chelis_f32_from_bits`, not a lossy `{:.8}f` literal.
+    /// The reproducer `1e-40` collapses to `0.0f` under `%.8`.
+    #[test]
+    fn issue_251_uniform_like_args_emit_exact_bit_pattern() {
+        let low = 1e-40_f64; // denormal f32: lost by `%.8`
+        let high = 1.0_f64 / 3.0_f64; // off-by-ULP under `%.8`
+        let mut dag = Dag::new();
+        let u = dag.add_node(
+            RiscOp::UniformLike { low, high, seed: 7 },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        dag.add_root(u);
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn");
+
+        let low_bits = (low as f32).to_bits();
+        let high_bits = (high as f32).to_bits();
+        assert_ne!(
+            low_bits, 0,
+            "reproducer `low` must be a nonzero denormal so `%.8` would lose it"
+        );
+        let low_needle = format!("chelis_f32_from_bits(0x{low_bits:08x}u)");
+        let high_needle = format!("chelis_f32_from_bits(0x{high_bits:08x}u)");
+        assert!(
+            hip.contains(&low_needle),
+            "uniform_like `low` must emit exact bit pattern; \
+             expected `{low_needle}` in:\n{hip}"
+        );
+        assert!(
+            hip.contains(&high_needle),
+            "uniform_like `high` must emit exact bit pattern; \
+             expected `{high_needle}` in:\n{hip}"
+        );
+        // Negative parity: no lossy decimal literal for the collapsed
+        // denormal `low`.
+        assert!(
+            !hip.contains("float t0_low = 0.00000000f;"),
+            "uniform_like must not emit a lossy `{{:.8}}f` literal:\n{hip}"
         );
     }
 }

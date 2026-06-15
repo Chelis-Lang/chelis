@@ -1,5 +1,5 @@
 module Std.Tests.Io.Json
-import Std.Io.Json (Json, parse_json, try_parse_json, json_get, json_string, json_int, json_array, json_is_null)
+import Std.Io.Json (Json, JsonNull, JsonBool, parse_json, try_parse_json, json_get, json_string, json_int, json_array, json_is_null)
 import Std.Test (assert_eq_int, assert_eq_string, assert_true, assert_false, fail)
 def test_parse_null_returns_json_null() -> unit ! { Test } = {
   match parse_json("null") with {

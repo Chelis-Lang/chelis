@@ -11,7 +11,7 @@
 //! `top_level_lowering_map`.
 //!
 //! PR #40 did not extend the **runtime evaluator's** dispatch in
-//! `crates/chelis-compiler-api/src/runtime.rs::eval_list` or the C-backend's
+//! `crates/chelis-compiler-api/src/runtime/eval.rs::eval_list` or the C-backend's
 //! `lower_host_expr_kind` in `crates/chelis-ir/src/host.rs`. This branch's
 //! fix commit adds the missing arms in both layers, matching the IR
 //! semantics: jit is pass-through; par is sequential (last-yields). See

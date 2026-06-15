@@ -1,15 +1,15 @@
 [package]
 name = "chelis-std"
-version = "0.3.0"
+version = "0.4.0"
 
 [[dependencies]]
 name = "chelis-std"
-version = "0.3.0"
-compiler = "=0.7.21"
-archive_sha256 = "cd7b45323344ba775bfd3ff63fd86c7fd18d33c78de8a3dbbf927e0cd5bda267"
-shell_sha256 = "3b7c38d8dbb135930b7a853dbce851686c2baf12e3820660b1a874dbd7736079"
+version = "0.4.0"
+compiler = "=0.7.25"
+archive_sha256 = "a6709c6a0e7179dda7dbb4403c70e7525e2b89f2341c9ce58f5c7228ed1eeb00"
+shell_sha256 = "109f355d81feebcee54d3511a7da58d8142e9055e1e9b7c7c6efecbd4f83ea0f"
 
 [dependencies.source]
 kind = "bundled"
-compiler_version = "0.7.21"
+compiler_version = "0.7.25"
 

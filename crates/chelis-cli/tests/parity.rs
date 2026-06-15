@@ -481,6 +481,11 @@ fn parity_opaque_invariants_simplex_library_only() {
     drive_parity(&examples_root().join("opaque_invariants_simplex.ch"), false);
 }
 
+#[test]
+fn parity_rank_poly_borrow_library_only() {
+    drive_parity(&examples_root().join("rank_poly_borrow.ch"), false);
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------
@@ -499,6 +504,7 @@ fn parity_corpus_is_complete() {
         "mnist.ch",
         "opaque_invariants.ch",
         "opaque_invariants_simplex.ch",
+        "rank_poly_borrow.ch",
         "scalar_string_foundation.ch",
         "tensor_structural_ops.ch",
         "transformer_block.ch",

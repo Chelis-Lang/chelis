@@ -367,7 +367,10 @@ fn unknown_suffix_is_lex_error() {
 
 /// D1 + WS-B1 interaction (spec §5.3 + §5.5): the i32-overflow
 /// diagnostic now suggests both the `i64` literal suffix AND the
-/// `cast(_, i64)` workaround, since the suffix grammar is shipped.
+/// `cast(_, int64)` workaround, since the suffix grammar is shipped.
+/// The cast hint must use the prec type name `int64`, not the suffix
+/// spelling `i64` — `cast(N, i64)` is not a valid cast target and
+/// re-fires this same diagnostic (issue #308 review fix).
 ///
 /// Distinct input from `int_literal_overflow.rs`: this snippet
 /// declares an `int64` return position (`def main -> int64 = ...`),
@@ -387,7 +390,8 @@ fn d1_diagnostic_mentions_i64_suffix_and_cast() {
         "D1 diagnostic must mention `i64` suffix; got: {combined}"
     );
     assert!(
-        combined.contains("cast(") && combined.contains("i64"),
-        "D1 diagnostic must mention cast(_, i64); got: {combined}"
+        combined.contains("cast(2147483648, int64)"),
+        "D1 diagnostic must recommend the working cast spelling \
+         cast(_, int64), not the suffix spelling `i64`; got: {combined}"
     );
 }

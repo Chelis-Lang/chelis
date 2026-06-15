@@ -559,11 +559,13 @@ def call(x: &tensor[3, f32], y: &tensor[3, f32]) -> tensor[3, f32] = add_t(x, y)
 fn finding_5_multi_letter_dim_in_sig_accepts_concrete_caller() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("multi_letter.ch");
+    // Fixture renamed from `take` for chelis#353: `take` is a builtin
+    // name and bare shadowing defs are now rejected at declaration time.
     write_file(
         &path,
-        r#"sig take: &tensor[batch, p] -> &tensor[batch, p]
-def take(x) = x
-def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = take(xs)
+        r#"sig grab: &tensor[batch, p] -> &tensor[batch, p]
+def grab(x) = x
+def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = grab(xs)
 "#,
     );
     let json = run_check(&path);
@@ -583,9 +585,9 @@ fn finding_5_workaround_single_letter_dim_works() {
     let path = dir.path().join("single_letter.ch");
     write_file(
         &path,
-        r#"sig take: &tensor[n, p] -> &tensor[n, p]
-def take(x) = x
-def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = take(xs)
+        r#"sig grab: &tensor[n, p] -> &tensor[n, p]
+def grab(x) = x
+def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = grab(xs)
 "#,
     );
     let json = run_check(&path);

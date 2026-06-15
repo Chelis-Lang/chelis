@@ -97,6 +97,19 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     }
                 }
             }
+            RiscOp::ReduceWindowGrad { .. } => {
+                // Adjoint of ReduceWindow: inputs are `[x, g]` with
+                // *different* shapes (forward input vs forward output), so
+                // this is not an elementwise binary op. Check arity only;
+                // the output shape equals `x`'s shape and is set at
+                // construction by `chelis_ir::grad`.
+                if arity != 2 {
+                    errors.push(format!(
+                        "reduce_window_grad at node {} has {} inputs (expected 2)",
+                        node.id.0, arity
+                    ));
+                }
+            }
             RiscOp::BlasMatmul {
                 batch_dims,
                 m,
@@ -276,6 +289,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::MaxReduce { .. }
             | RiscOp::MinReduce { .. }
             | RiscOp::ProdReduce { .. }
+            | RiscOp::ReduceWindow { .. }
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
             | RiscOp::Reshape { .. }

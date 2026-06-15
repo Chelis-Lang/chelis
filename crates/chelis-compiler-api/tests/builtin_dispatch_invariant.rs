@@ -1,6 +1,6 @@
 //! Lock invariant: every name in `BUILTIN_NAMES` must either have a
 //! dispatch arm in `eval_builtin` (in `crates/chelis-compiler-api/src/
-//! runtime.rs`) OR appear in the documented allowlist below.
+//! runtime/eval.rs`) OR appear in the documented allowlist below.
 //!
 //! The allowlist is for builtins that exist only at type-check / IR-emit
 //! time and never reach the host-runtime evaluator. Each entry MUST have
@@ -42,23 +42,37 @@ const HOST_RUNTIME_ALLOWLIST: &[&str] = &[
 
 fn runtime_source_path() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.join("src").join("runtime.rs")
+    manifest.join("src").join("runtime").join("eval.rs")
 }
 
 /// Extract every dispatch arm name from the `eval_builtin` match
 /// statement. We scan the runtime source between the function signature
-/// and the next top-level `fn` definition for `"name" =>` patterns.
+/// and the next `fn` definition (or end of file — `eval_builtin` is
+/// currently the last item in `runtime/eval.rs`) for `"name" =>`
+/// patterns.
 fn extracted_dispatched_names() -> HashSet<String> {
     let source = fs::read_to_string(runtime_source_path())
-        .expect("runtime.rs must be readable from CARGO_MANIFEST_DIR/src");
+        .expect("runtime/eval.rs must be readable from CARGO_MANIFEST_DIR/src");
     let start = source
         .find("fn eval_builtin")
-        .expect("runtime.rs must contain fn eval_builtin");
-    let end_marker = "fn pattern_matches";
-    let end = source[start..]
-        .find(end_marker)
-        .expect("runtime.rs must contain fn pattern_matches after fn eval_builtin");
-    let body = &source[start..start + end];
+        .expect("runtime/eval.rs must contain fn eval_builtin");
+    let after_start = start + "fn eval_builtin".len();
+    let end = [
+        "\nfn ",
+        "\npub fn ",
+        "\npub(super) fn ",
+        "\npub(crate) fn ",
+        "\n    fn ",
+        "\n    pub fn ",
+        "\n    pub(super) fn ",
+        "\n    pub(crate) fn ",
+    ]
+    .iter()
+    .filter_map(|marker| source[after_start..].find(marker))
+    .min()
+    .map(|offset| after_start + offset)
+    .unwrap_or(source.len());
+    let body = &source[start..end];
 
     let mut out = HashSet::new();
     for line in body.lines() {
@@ -99,7 +113,7 @@ fn every_builtin_name_has_a_host_runtime_arm_or_an_allowlist_entry() {
         missing.is_empty(),
         "the following BUILTIN_NAMES entries have no eval_builtin arm and \
          no allowlist entry: {missing:?}. Add a dispatch arm in \
-         crates/chelis-compiler-api/src/runtime.rs::eval_builtin OR add an \
+         crates/chelis-compiler-api/src/runtime/eval.rs::eval_builtin OR add an \
          allowlist entry to HOST_RUNTIME_ALLOWLIST in this test with a \
          documented reason."
     );

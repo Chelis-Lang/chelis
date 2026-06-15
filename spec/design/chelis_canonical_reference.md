@@ -101,14 +101,14 @@ fitness scoring, error reporting), and before CLI paths such as `chelis deep`,
 `check`, `build`, and `eval`.
 Provenance metadata in the `{}` slot traces expanded nodes back to their macro source
 (e.g., `{source: (relu input)}`).
-The 61-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
+The 62-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
 exist in the ecosystem.
 Macros are a human authoring convenience that compiles away before LLMs touch the code.
 Compiler-internal pre-expansion forms such as `defmacro` and `macro-invoke` are not
 public Deep and are rejected by strict Deep validation.
 
 The same properties that make Deep a stable generation target for agents
-also make it a stable editing target. The 61-tag closed vocabulary, the
+also make it a stable editing target. The 62-tag closed vocabulary, the
 3-tuple uniformity, and the metadata-map slot for provenance mean
 structural edits (replace a function body, rename a symbol, change a
 signature) are well-defined operations rather than character-level
@@ -156,6 +156,10 @@ The domain is **chelis.ch**.
 
 ### Shell Ecosystem
 
+Requirements for shell repos — scaffolding, pin hygiene, capability-surface
+docs, upstream-issue discipline, blocker probes, skills vendoring — are
+normative in [`shell_repo_contract.md`](shell_repo_contract.md).
+
 **Runtime vs shells.** `chelis-std` is the language **runtime**, not a shell.
 It version-marches with the compiler, ships bundled with the toolchain, and
 cannot be substituted independently — programs depend on it implicitly the
@@ -184,19 +188,20 @@ parallel; `shoals` depends on both. `octant` Part A (LaTeX ↔ Deep bridge, pars
 deterministic lowering + rendering + provenance) has the same prerequisite as
 `shoals` (namely `nautilus` green) and runs **in parallel with `shoals`**; `octant`
 Part B (finance-notation lowering through `shoals`, Greek rendering, notebook) is
-sequential after `shoals`. `school` (classical ML), `darwin` (evolutionary
+sequential after `shoals`. `school` is **active** (the ML shell — see its
+table row). `darwin` (evolutionary
 algorithms), `hull` (executable language specification), and `beacon` (automated
 static analysis on the tensor DAG) are post-Phase-3 stubs, as is `octant-docs` (full
 LaTeX document ingestion, Octant Phase 4).
 
 | Package | Kind | Depends On | Status | Contents |
 |---|---|---|---|---|
-| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache, GELU/SiLU/RMSNorm, Conv1d/2d, attention), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss` (including KL, BCEWithLogits, accuracy, perplexity), `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Schedule`, `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests) |
+| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Io` (files, mmap, safetensors, CSV, JSON), `Std.Tensor` (including `Std.Tensor.Mask`), `Std.Index`, `Std.Scan`, `Std.Sort`, `Std.Process`, `Std.Tokenizer`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests). The ML modules moved to the `school` library as of chelis-std 0.4.0: `Std.Nn.*` → `School.Nn.*`, `Std.Loss.*` → `School.Loss.*`, `Std.Optim` → `School.Optim`, `Std.Schedule` → `School.Schedule`. |
 | `nautilus` | Shell | `chelis-std` | Active (`v0.5.0` released) | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy competitor. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
 | `coral` | Shell | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas competitor. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
 | `shoals` | Shell | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
 | `octant` | Shell | `chelis-std` + `nautilus` required; `shoals` required only for the Part B SDE / MC / curve lowering | Phase 3n (Part A) ∥ Phase 3l, Phase 3o (Part B) after Phase 3l | LaTeX ↔ Deep bridge for quantitative finance. Parses a bounded LaTeX subset, lowers to Deep deterministically (arithmetic, derivatives, special functions, integrals, matrix ops) in Part A plus LLM-assisted lowering (SDE, Monte Carlo expectation, calibration, yield curves) in Part B, round-trips through the compiler with type overlays, and carries provenance spans on every Deep node. Ships an interactive cell-based notebook in Part B. **NOT a CAS** — notation adapter only, no symbolic integration or simplification. |
-| `school` | Shell | `chelis-std` + `nautilus` + `coral` | **Stub** (post-3) | Classical ML (scikit-learn competitor). Regression, decision trees, SVMs, clustering, pipelines, cross-validation. |
+| `school` | Shell | `chelis-std` (+ `nautilus` + `coral` planned re-adds) | **Active** (P0–P5 shipped; pinned `=0.7.23`) | Machine learning. Sole home of the NN surface since chelis-std 0.4.0 (`School.Nn.*`, `School.Loss.*`, `School.Optim`, `School.Schedule`): layers, activations, norms, attention, losses, 9 optimizers, schedules, HPO, data utilities, training loop, six-model zoo. Intent is a general deep-learning framework (School `spec/vision.md`); the classical-ML scope (regression, trees, SVMs, clustering, pipelines, cross-validation) remains roadmap. Reference implementation for [`shell_repo_contract.md`](shell_repo_contract.md). |
 | `darwin` | Shell | `chelis-std` + `nautilus` required, `coral` optional | **Stub** (post-3) | Evolutionary algorithms — GA, genetic programming over the Deep AST, evolution strategies, population-based training, neural architecture search. Uniquely natural fit because Deep is homoiconic: program mutation and crossover are typed AST operations, and the compiler's 0–1 fitness scoring is literally the fitness function for evolutionary search. `coral` is optional for evolving feature-engineering pipelines over tabular data. |
 | `hull` | Shell | `chelis-std` | **Stub** (post-3) | Executable language specification. Self-hosted reference type checker and evaluator implementing the LaCaDiLE typing rules and operational semantics as Chelis functions over Deep AST ADTs. Differential testing against the real compiler. Spec-driven random well-typed program generation. The spec of Chelis, written in Chelis, checked by Chelis. |
 | `beacon` | Shell | `chelis-std` + compiler DAG IR | **Future** | Automated static analysis: value range inference, div-zero detection, overflow detection, NaN propagation, bounded output verification. Input ranges specified by user; output ranges inferred. Pre-deployment gate (minutes, not milliseconds). Inspired by Astree (Airbus A380 flight control verification). Trust stack Level 3. |
@@ -205,8 +210,9 @@ Design rule: the chelis-std runtime covers what every Chelis program may need
 (tensors, neural primitives, time, decimal); the substitutability criterion
 keeps it out of the shell taxonomy — programs cannot opt out of it any more
 than a Rust program can opt out of `core`. `nautilus` owns general numerical
-methods. `coral` owns tabular data. `shoals` is finance-only. `school` is
-classical ML only. `darwin` is evolutionary search only. If it's about the language's own specification and
+methods. `coral` owns tabular data. `shoals` is finance-only. `school` owns
+machine learning — the NN surface migrated from chelis-std 0.4.0 plus the
+classical-ML roadmap. `darwin` is evolutionary search only. If it's about the language's own specification and
 conformance testing, it goes in `hull`. If it's about automated static analysis on the
 DAG (range inference, overflow detection, numerical stability), it goes in `beacon`.
 `octant` is a notation bridge layered on top of `nautilus` and (optionally) `shoals` —
@@ -352,15 +358,24 @@ Planned public-style target for Phase 3:
 - algebraic-effect boundary handling for `Random` and `Resource(Device)`
 - `with seed(...)` for seeded stochastic regions and `with device(...)` for resource regions
 
-### Phase 2 shipped after the initial 2a subset
+### Phase 2 surface beyond the initial 2a subset
 
-- broader effect inference/checking beyond the initial `Random` / `Resource(Device)` subset
-- `Diff` as a fully specified effect surface (it remains a compiler capability today)
-- `Accum` as user-visible effect surface (it remains internal-only today)
-- linear types for tensors with borrowing rules and explicit `copy`
+Shipped after the initial 2a subset:
+
+- linear types for tensors with borrowing rules and explicit `copy` (now the implicit
+  copy/drop linearity model — see `spec/design/implicit_linearity.md`)
 - lightweight uniqueness / alias tracking before any full heavy ownership-and-lifetimes model
 - macro expansion before all LLM-facing operations, with provenance in metadata
 - algebraic-effect, linearity, macro, and `vmap` tooling
+- constrained name-preserving rank polymorphism (Tier-2 / Tier-3, chelis#339) — see
+  `spec/04-type-system.md` §4.5.3 and `spec/design/rank_polymorphism.md`
+
+Designed but not yet shipped (the checker implements a bounded subset; see
+`spec/04-type-system.md` §7.1):
+
+- broader effect inference/checking beyond the initial `Random` / `Resource(Device)` subset
+- `Diff` as a fully specified effect surface (it remains a compiler capability today)
+- `Accum` as a user-visible effect surface (it remains internal-only today)
 
 ### Phase 3 shipped foundations and remaining shell work
 
@@ -389,7 +404,9 @@ Shoals, Octant Part A/B, Chelis-native testing, and the final SKILL.md v2 refres
 - distribution types
 - equivariance constraints
 - optimization-property annotations
-- ILP/AUTOMAP-style rank-polymorphism and related research type features
+- full ILP/AUTOMAP-style rank-polymorphism and related research type features (the
+  constrained name-preserving Tier-2 / Tier-3 rank polymorphism has already shipped —
+  see `spec/04-type-system.md` §4.5.3; only the general research version is deferred)
 - Lean mechanized formalization of the core type system
 
 ---
@@ -403,8 +420,8 @@ that lower into primitive compositions during compilation.
 
 Phase `3h` added the practical tensor surface real model code expects: `einsum`,
 `concat` / `split`, `gather` / `scatter`, `where`, `cumsum`, `sort`, `diagonal` /
-`trace`, and `clamp`. `Std.Nn.Embedding` remains the explicit public shell/library
-surface over `gather`.
+`trace`, and `clamp`. `School.Nn.Embedding` (moved to the `school` library in chelis-std
+0.4.0) remains the explicit public shell/library surface over `gather`.
 
 Core transforms remain first-class:
 
@@ -497,17 +514,17 @@ They ship as Shells (Chelis packages) in the `Std` namespace.
 Expected contents:
 
 - common initializers (Xavier, Kaiming, normal, uniform)
-- standard neural-network building blocks such as `Std.Nn.Embedding`
-- standard optimizers beyond SGD (Adam, AdamW, LAMB — update rules composed from
-  primitives)
-- learning rate schedulers
 - data loading utilities
 - tokenizer utilities
-- metric computation (accuracy, F1, AUC)
-- common loss functions that are compositions of primitives (focal loss, hinge loss)
 - basic I/O (tensor serialization, checkpoint save/load)
 - time/date helpers (`Std.Time`)
 - exact-decimal helpers (`Std.Decimal`)
+
+The neural-network building blocks (such as `School.Nn.Embedding`), optimizers beyond
+SGD (Adam, AdamW, LAMB), learning rate schedulers, metric computation (accuracy, F1,
+AUC), and loss functions (cross-entropy, KL, BCE, focal, hinge) moved to the `school`
+library as of chelis-std 0.4.0 (`School.Nn.*`, `School.Optim`, `School.Schedule`,
+`School.Loss.*`).
 
 ### External libraries
 
@@ -751,12 +768,16 @@ Chelis vs PyTorch on equivalent tasks. Measures whether a language designed for 
 produces better ML code than the standard approach. Serves double duty as a measurement
 tool and a trajectory source for model training.
 
-**Type-driven property testing:** The Tide API provides `chelis test` / `POST /test` —
-automatic test generation from function type signatures. The compiler knows tensor
-shapes, dtypes, and dimension constraints; it generates random valid inputs, runs the
-function, and verifies output shapes, determinism (for pure functions), and gradient
-correctness (for differentiable functions). No test code written by anyone — the type
-signature is the test specification.
+**Type-driven property testing:** the shipped surface is `chelis prove` and the
+`chelis_prove` MCP tool, which run property checks over Surf/Deep inputs using the type
+information the compiler already has — tensor shapes, dtypes, and dimension constraints —
+to verify properties such as output shapes, determinism (for pure functions), and
+gradient correctness (for differentiable functions). There is no `POST /test` HTTP
+endpoint, and this is distinct from `chelis test`, the Chelis-native runner that
+discovers and executes `tests/*.ch` files. The shipped Tide HTTP/MCP surface is
+enumerated in §6 and [`spec/09-tide.md`](../09-tide.md). The aspiration is full
+type-signature-as-test-specification generation; the shipped `chelis prove` is the
+current step toward it.
 
 ### Editing Surface (Exploratory)
 

@@ -451,6 +451,36 @@ pub enum FusedStepOp {
     Ceil,
 }
 
+/// Reducer selector for [`RiscOp::ReduceWindow`].
+///
+/// See `spec/05-risc-primitives.md` §2.3.1 for the full surface
+/// contract. The shipped Surf builtins map to the four variants:
+/// `reduce_window_max` → [`ReduceWindowKind::Max`],
+/// `reduce_window_min` → [`ReduceWindowKind::Min`],
+/// `reduce_window_sum` → [`ReduceWindowKind::Sum`],
+/// `reduce_window_mean` → [`ReduceWindowKind::Mean`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReduceWindowKind {
+    Max,
+    Min,
+    Sum,
+    Mean,
+}
+
+impl ReduceWindowKind {
+    /// Canonical Surf builtin name. Used by [`crate::grad::risc_op_name`]
+    /// and by the AD rejection error so error messages reference the
+    /// user-visible builtin rather than an internal variant.
+    pub fn surf_name(self) -> &'static str {
+        match self {
+            ReduceWindowKind::Max => "reduce_window_max",
+            ReduceWindowKind::Min => "reduce_window_min",
+            ReduceWindowKind::Sum => "reduce_window_sum",
+            ReduceWindowKind::Mean => "reduce_window_mean",
+        }
+    }
+}
+
 /// Input reference within a fused chain.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FusedInput {
@@ -528,6 +558,55 @@ pub enum RiscOp {
     },
     ProdReduce {
         axis: usize,
+    },
+    /// Strided windowed reduction over the trailing `window_shape.len()`
+    /// axes. Per `spec/05-risc-primitives.md` §2.3.1, the leading
+    /// `rank - window_shape.len()` axes pass through unchanged, and each
+    /// windowed output axis has extent
+    /// `floor((input_dim - window_shape[i]) / strides[i]) + 1` under
+    /// `Valid` padding (the only padding mode currently shipped).
+    ///
+    /// The `reducer` field selects which scalar reduction is applied
+    /// inside each window; `Max`, `Min`, `Sum`, and `Mean` are the four
+    /// shipped variants. `Mean` is implemented as windowed `Sum` divided
+    /// by the window volume, inlined into the same loop nest.
+    ///
+    /// AD policy: the reverse-mode adjoint lowers to a single
+    /// [`RiscOp::ReduceWindowGrad`] node carrying the same
+    /// `{reducer, window_shape, strides}` triple (see
+    /// `chelis_ir::grad`). Adjoints follow `spec/05-risc-primitives.md`
+    /// §2.3.1: `Sum`/`Mean` scatter (overlap-add) the upstream gradient
+    /// back over each window, and `Max`/`Min` route it to the window
+    /// extreme (distributing to all tied positions, matching the
+    /// `max_reduce` / `min_reduce` subgradient convention).
+    ReduceWindow {
+        reducer: ReduceWindowKind,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
+    },
+    /// Reverse-mode adjoint (vector-Jacobian product) of
+    /// [`RiscOp::ReduceWindow`]. Inputs are `[x, g]` where `x` is the
+    /// original windowed input (shape `S_in`) and `g` is the upstream
+    /// cotangent (shape `S_out`, the forward output shape). The output
+    /// is the input cotangent `din` with shape `S_in` (equal to `x`).
+    ///
+    /// Semantics per `spec/05-risc-primitives.md` §2.3.1, accumulating
+    /// over the (overlapping) windows that cover each input position:
+    /// - `Sum`:  `din[i] += g[o]` for every `(o, w)` with `o*stride+w = i`.
+    /// - `Mean`: as `Sum` with each contribution scaled by `1 /
+    ///   window_volume`.
+    /// - `Max` / `Min`: for each window `o`, route `g[o]` to every
+    ///   position equal to that window's max / min (ties distribute, so
+    ///   the rule is the windowed generalization of the `max_reduce` /
+    ///   `min_reduce` mask adjoint). `x`'s values are read for `Max` /
+    ///   `Min`; for `Sum` / `Mean` only `x`'s shape is used.
+    ///
+    /// Like the forward op, the IR evaluator, host runtime, and C backend
+    /// implement this directly; HIP codegen is deferred (`todo!`).
+    ReduceWindowGrad {
+        reducer: ReduceWindowKind,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
     },
     /// Index of maximum element along `axis`.
     ///
@@ -1076,29 +1155,12 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
                 // necessarily appear in the first pass (its dim could
                 // be `Lit(_)` while the synthesised node carries the
                 // polymorphic name).
-                let mut bound = false;
-                for candidate in dag.nodes() {
-                    let RiscOp::Load { name: load_name } = &candidate.op else {
-                        continue;
-                    };
-                    for (axis, candidate_dim) in candidate.output_type.dims.iter().enumerate() {
-                        if let DimInfo::Named(candidate_sym, _) = candidate_dim
-                            && candidate_sym == symbol
-                        {
-                            occurrences.push(SymbolicDimOccurrence {
-                                name: symbol.clone(),
-                                input_label: load_name.as_str().to_string(),
-                                axis,
-                            });
-                            named_dims_in_loads.insert(symbol.clone());
-                            bound = true;
-                            break;
-                        }
-                    }
-                    if bound {
-                        break;
-                    }
-                }
+                let mut bound = bind_symbol_from_any_load(
+                    dag,
+                    symbol,
+                    &mut occurrences,
+                    &mut named_dims_in_loads,
+                );
                 if !bound
                     && let Some(axis) =
                         node.output_type.dims.iter().position(
@@ -1128,7 +1190,119 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
         }
     }
 
+    // Bucket 4d sweep (chelis#345): op-internal symbolic references.
+    // A node whose output dims are fully concrete can still reference an
+    // undeclared symbolic dim through an op-internal field —
+    // `Expand::size`, `Reshape::new_shape`, or `BlasMatmul`'s
+    // `{batch_dims, m, n, k}` (the BLAS dims are rendered verbatim into
+    // C by `emit_dim_expr`, and `bind_symbolic_dims` / the IR evaluator
+    // resolve Expand sizes by name). The #345 bisect found exactly this
+    // mixed state in a grad helper DAG: `Load: Lit(2)` next to
+    // `Expand { size: Sym("dN") }`. Bucket 4c never sees those names
+    // because it scans output types only, so sweep the op fields too.
+    //
+    // No `shape_source_for_axis` fallback here: the op-internal name has
+    // no output axis to recover from (BlasMatmul's `k` is the
+    // contraction dim and appears in no output type at all). Either a
+    // Load declares the name or the producing pass is buggy.
+    for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Drop) {
+            continue;
+        }
+        for symbol in op_internal_symbolic_dims(&node.op) {
+            if named_dims_in_loads.contains(&symbol) {
+                continue;
+            }
+            if !bind_symbol_from_any_load(dag, &symbol, &mut occurrences, &mut named_dims_in_loads)
+            {
+                panic!(
+                    "internal compiler error: symbolic dim `{symbol}` is referenced by a \
+                     non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) through an \
+                     op-internal field but no Load input declares it. The C codegen would emit \
+                     an undeclared identifier; fix the producing IR pass.",
+                    node.id.0, node.op, node.inputs, node.output_type
+                );
+            }
+        }
+    }
+
     occurrences
+}
+
+/// Hunt for any Load whose type carries `symbol` (bound or unbound) and
+/// register a synthetic occurrence pointing at it. Returns whether a
+/// declaring Load was found. Shared by the Bucket 4c (output-dim) and
+/// Bucket 4d (op-internal) sweeps of [`symbolic_occurrences`].
+fn bind_symbol_from_any_load(
+    dag: &Dag,
+    symbol: &str,
+    occurrences: &mut Vec<SymbolicDimOccurrence>,
+    named_dims_in_loads: &mut HashSet<String>,
+) -> bool {
+    for candidate in dag.nodes() {
+        let RiscOp::Load { name: load_name } = &candidate.op else {
+            continue;
+        };
+        for (axis, candidate_dim) in candidate.output_type.dims.iter().enumerate() {
+            if let DimInfo::Named(candidate_sym, _) = candidate_dim
+                && candidate_sym == symbol
+            {
+                occurrences.push(SymbolicDimOccurrence {
+                    name: symbol.to_string(),
+                    input_label: load_name.as_str().to_string(),
+                    axis,
+                });
+                named_dims_in_loads.insert(symbol.to_string());
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Symbolic dim names referenced by an op's internal fields rather than
+/// its output type: `Expand::size`, `Reshape::new_shape`, and
+/// `BlasMatmul::{batch_dims, m, n, k}`. These are the only `RiscOp`
+/// fields that carry `DimExpr` / unbound `DimInfo` payloads.
+fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
+    fn collect_dim_expr(expr: &DimExpr, out: &mut Vec<String>) {
+        match expr {
+            DimExpr::Concrete(_) => {}
+            DimExpr::Sym(name) => out.push(name.clone()),
+            DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
+                collect_dim_expr(lhs, out);
+                collect_dim_expr(rhs, out);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    match op {
+        RiscOp::Expand { size, .. } => collect_dim_expr(size, &mut out),
+        RiscOp::Reshape { new_shape } => {
+            for dim in new_shape {
+                if let DimInfo::Named(name, None) = dim {
+                    out.push(name.clone());
+                }
+            }
+        }
+        RiscOp::BlasMatmul {
+            batch_dims,
+            m,
+            n,
+            k,
+            ..
+        } => {
+            for dim in batch_dims {
+                collect_dim_expr(dim, &mut out);
+            }
+            collect_dim_expr(m, &mut out);
+            collect_dim_expr(n, &mut out);
+            collect_dim_expr(k, &mut out);
+        }
+        _ => {}
+    }
+    out
 }
 
 fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, usize)> {
@@ -1560,5 +1734,186 @@ mod tests {
             }
         );
         assert_eq!(rebound.roots(), &[y]);
+    }
+
+    // --- chelis#345: op-internal symbolic references (Bucket 4d) ---
+    //
+    // The Bucket 4c sibling sweep scans only `output_type.dims`, so a
+    // node whose OUTPUT dims are fully concrete can still smuggle an
+    // undeclared symbolic dim through an op-internal field:
+    // `Expand { size: Sym(_) }`, `Reshape { new_shape }`, and
+    // `BlasMatmul { batch_dims, m, n, k }` (the latter is rendered
+    // verbatim into C by `emit_dim_expr`). chelis#345's bisect found
+    // exactly this mixed state in a grad helper DAG. These tests pin
+    // that the sweep covers op-internal references with the same
+    // panic-don't-emit contract as output dims.
+
+    #[test]
+    fn symbolic_occurrences_expand_size_sym_binds_from_load() {
+        // Positive: the op-internal `Expand::size` sym is declared by a
+        // Load, so the sweep stays quiet and the Load occurrence is the
+        // canonical (and only) source — no duplicate occurrences.
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 1,
+                size: DimExpr::Sym("n".into()),
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+
+        let occurrences = symbolic_occurrences(&dag);
+        assert_eq!(occurrences.len(), 1);
+        assert_eq!(occurrences[0].name, "n");
+        assert_eq!(occurrences[0].input_label, "x");
+    }
+
+    #[test]
+    #[should_panic(expected = "internal compiler error: symbolic dim `d7` is referenced")]
+    fn symbolic_occurrences_panics_on_expand_size_sym_without_load() {
+        // Negative: concrete output dims everywhere, but the Expand's
+        // op-internal `size` references `d7`, which no Load declares.
+        // This is the chelis#345 mixed state; the sweep must panic
+        // instead of letting an undeclared identifier reach a backend.
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 1,
+                size: DimExpr::Sym("d7".into()),
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let _ = symbolic_occurrences(&dag);
+    }
+
+    #[test]
+    #[should_panic(expected = "internal compiler error: symbolic dim `d9` is referenced")]
+    fn symbolic_occurrences_panics_on_reshape_shape_sym_without_load() {
+        // Negative: `Reshape::new_shape` carries an unbound Named dim
+        // while the node's own output dims are concrete.
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![DimInfo::Named("d9".into(), None), DimInfo::Lit(2)],
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let _ = symbolic_occurrences(&dag);
+    }
+
+    #[test]
+    #[should_panic(expected = "internal compiler error: symbolic dim `d11` is referenced")]
+    fn symbolic_occurrences_panics_on_blas_matmul_dim_sym_without_load() {
+        // Negative: `BlasMatmul::{m,n,k}` are emitted verbatim into C
+        // (`emit_dim_expr`), so an unbound sym there is exactly the
+        // undeclared-identifier hazard the guard exists for. `k` is the
+        // contraction dim and never appears in the output type at all.
+        let mut dag = Dag::new();
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::matmul_default(
+                vec![],
+                DimExpr::Concrete(2),
+                DimExpr::Concrete(4),
+                DimExpr::Sym("d11".into()),
+                Prim::F32,
+            )
+            .expect("f32 matmul"),
+            vec![a, b],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let _ = symbolic_occurrences(&dag);
+    }
+
+    #[test]
+    fn symbolic_occurrences_concrete_op_internals_stay_quiet() {
+        // Negative parity for the sweep itself: fully concrete
+        // op-internal fields must not invent occurrences or panic.
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 1,
+                size: DimExpr::Concrete(3),
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        assert!(symbolic_occurrences(&dag).is_empty());
     }
 }

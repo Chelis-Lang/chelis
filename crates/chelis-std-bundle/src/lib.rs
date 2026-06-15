@@ -49,7 +49,7 @@ use std::path::Path;
 /// `packages/chelis-std/reef.toml`'s `[package].version`. The
 /// `bundled_chelis_std_version_matches_packages_manifest` test in
 /// chelis-reef and `archive_self_consistency` here assert agreement.
-pub const BUNDLED_CHELIS_STD_VERSION: &str = "0.3.0";
+pub const BUNDLED_CHELIS_STD_VERSION: &str = "0.4.0";
 
 /// The compile-time-embedded zstd-compressed tar archive of the
 /// chelis-std source tree. Layout inside the archive mirrors the
@@ -58,7 +58,7 @@ pub const BUNDLED_CHELIS_STD_VERSION: &str = "0.3.0";
 /// for any reef package.
 pub const CHELIS_STD_ARCHIVE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/dist/chelis-std-0.3.0.tar.zst"
+    "/dist/chelis-std-0.4.0.tar.zst"
 ));
 
 /// The compile-time-embedded `ShellPackage` (bincode) for chelis-std,
@@ -66,7 +66,7 @@ pub const CHELIS_STD_ARCHIVE: &[u8] = include_bytes!(concat!(
 /// as `<name>-<version>.chb` produced by `chelis reef build`.
 pub const CHELIS_STD_SHELL: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/dist/chelis-std-0.3.0.chb"
+    "/dist/chelis-std-0.4.0.chb"
 ));
 
 /// SHA256 of [`CHELIS_STD_ARCHIVE`], computed at runtime on first
@@ -178,6 +178,6 @@ mod tests {
         // version. Keep this assertion as a reminder that bumping
         // the constant requires updating both lib.rs (here) and the
         // build.rs file-existence check.
-        assert_eq!(BUNDLED_CHELIS_STD_VERSION, "0.3.0");
+        assert_eq!(BUNDLED_CHELIS_STD_VERSION, "0.4.0");
     }
 }

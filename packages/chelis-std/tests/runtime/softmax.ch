@@ -1,5 +1,5 @@
 module Std.Tests.Runtime.Softmax
-import Std.Test (assert_close_tensor)
+import Std.Test (assert_close, assert_close_tensor)
 def test_softmax_uniform_zeros_is_uniform() -> unit ! { Test } = {
   x = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
   out = softmax(x, cast(0, int32))
@@ -19,6 +19,6 @@ def test_softmax_large_inputs_remain_stable() -> unit ! { Test } = {
 def test_softmax_normalizes_to_one() -> unit ! { Test } = {
   x = to_tensor([cast(2.0, f32), cast(1.0, f32), cast(0.5, f32)])
   out = softmax(x, cast(0, int32))
-  total = sum(out, cast(0, int32))
-  assert_close_tensor(total, to_tensor([cast(1.0, f32)]), cast(0.001, f32), "softmax probabilities sum to 1")
+  total = tensor_to_scalar(sum(out, cast(0, int32)))
+  assert_close(total, cast(1.0, f32), cast(0.001, f32), "softmax probabilities sum to 1")
 }

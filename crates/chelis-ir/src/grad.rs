@@ -201,16 +201,17 @@ pub fn grad_dag_checked(
                     reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
                 });
             }
+            // `reduce_window_*` now has a reverse-mode adjoint
+            // (`RiscOp::ReduceWindowGrad`, lowered in `grad_dag` below) per
+            // spec/05-risc-primitives.md §2.3.1, so it is no longer rejected
+            // here.
             _ => {}
         }
     }
 
-    grad_dag(forward, output, wrt).ok_or(AdError::NotSupported {
+    grad_dag_result(forward, output, wrt).map_err(|why| AdError::NotSupported {
         op: "<unknown>",
-        reason: AdRejectionReason::Other(
-            "grad: failed to construct backward DAG (unsupported op or verification failure)"
-                .to_string(),
-        ),
+        reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
     })
 }
 
@@ -242,6 +243,8 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::MaxReduce { .. } => "max_reduce",
         RiscOp::MinReduce { .. } => "min_reduce",
         RiscOp::ProdReduce { .. } => "prod_reduce",
+        RiscOp::ReduceWindow { reducer, .. } => reducer.surf_name(),
+        RiscOp::ReduceWindowGrad { .. } => "reduce_window_grad",
         RiscOp::Argmax { .. } => "argmax",
         RiscOp::Argmin { .. } => "argmin",
         RiscOp::Reshape { .. } => "reshape",
@@ -305,12 +308,29 @@ fn stamp_grad_marker(dag: &mut Dag, dag_size_before: usize, forward_node: &DagNo
 ///
 /// Returns `None` if the forward DAG is empty or the output node doesn't exist.
 pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
+    grad_dag_result(forward, output, wrt).ok()
+}
+
+/// Like [`grad_dag`] but returns a structured failure string instead of
+/// a bare `None` when backward construction fails. The string names the
+/// concrete cause — either an unsupported op whose adjoint is undefined
+/// or the post-construction verifier diagnostics — so callers
+/// (`grad_dag_checked` and its user-facing lowering error) can report
+/// *why* the backward DAG could not be built rather than the legacy
+/// opaque "unsupported op or verification failure".
+fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<GradResult, String> {
     if forward.is_empty() {
-        return None;
+        return Err("grad: forward DAG is empty".to_string());
     }
-    let output_ty = forward.get(output)?.output_type.clone();
+    let output_ty = forward
+        .get(output)
+        .ok_or_else(|| "grad: output node is missing from the forward DAG".to_string())?
+        .output_type
+        .clone();
     if !is_scalar_float(&output_ty) {
-        return None;
+        return Err(format!(
+            "grad: output node type {output_ty:?} is not a scalar float"
+        ));
     }
     // Forward nodes clone span_id + merged_spans unchanged via Dag::clone()
     // — `forward.clone()` deep-copies the DagNodes, and the existing
@@ -338,7 +358,14 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 
         let node = forward.get(node_id).unwrap().clone();
         let dag_size_before = dag.len();
-        let input_grads = compute_adjoints(&node, grad_out, forward, &mut dag)?;
+        let input_grads =
+            compute_adjoints(&node, grad_out, forward, &mut dag).ok_or_else(|| {
+                format!(
+                    "grad: no reverse-mode adjoint is defined for `{}` (node {})",
+                    risc_op_name(&node.op),
+                    node.id.0
+                )
+            })?;
         // Every node added inside compute_adjoints is a backward
         // (adjoint) node for `node`. Stamp the grad marker + the
         // forward span onto each.
@@ -377,11 +404,15 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 
     let (dag, output_node, grad_nodes) = prune_to_requested_outputs(&dag, output, &grad_nodes);
 
-    if !crate::verify::verify(&dag).is_empty() {
-        return None;
+    let verify_errors = crate::verify::verify(&dag);
+    if !verify_errors.is_empty() {
+        return Err(format!(
+            "grad: constructed backward DAG failed verification: {}",
+            verify_errors.join("; ")
+        ));
     }
 
-    Some(GradResult {
+    Ok(GradResult {
         dag,
         output_node,
         grad_nodes,
@@ -997,22 +1028,112 @@ fn compute_adjoints(
             Some(vec![(x, dx)])
         }
         RiscOp::Expand { axis, .. } => {
+            // Two forward `Expand` shapes exist (see `verify.rs` C10):
+            //
+            //   * rank-INCREASING: a new axis is inserted at `axis`, so
+            //     `output_rank == source_rank + 1`. The broadcast copies
+            //     the source across the new axis; the adjoint is a `Sum`
+            //     over that axis, which *removes* it and recovers the
+            //     source rank exactly.
+            //
+            //   * SAME-RANK: an existing size-1 axis is broadcast to size
+            //     n, so `output_rank == source_rank`. The adjoint must
+            //     `Sum` over `axis` (which removes it, giving rank
+            //     `source_rank - 1`) and then restore the collapsed size-1
+            //     axis so the cotangent matches the source shape
+            //     `[..., 1, ...]`.
+            //
+            // The previous rule emitted `Sum { axis }` with the SOURCE
+            // type as the output for both shapes. For the same-rank case
+            // that mislabels a rank `source_rank - 1` reduction as the
+            // full rank-`source_rank` source type, so the cotangent flows
+            // on with the wrong shape and a downstream elementwise op
+            // fails verification with a dimension mismatch (issue #288:
+            // `expand(scalar_to_tensor(c), 0, n)`, where the constant
+            // lowers to a rank-1 size-1 `tensor[1]` source and the expand
+            // is a same-rank `1 -> n` broadcast). Branch on the forward
+            // shape and reshape the same-rank result back to the source.
             let x = node.inputs[0];
-            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let source_ty = forward.get(x).unwrap().output_type.clone();
+            let source_rank = source_ty.dims.len();
+            let output_rank = node.output_type.dims.len();
+            let same_rank = output_rank == source_rank;
             // The gradient sum runs over the operand precision; use the
             // spec-default accumulator so the AD path tracks WS-A0 §5.7.1.
-            let acc = RiscOp::default_reduce_sum_accumulator(input_ty.precision)
-                .unwrap_or(input_ty.precision);
-            let dx = dag.add_node(
+            let acc = RiscOp::default_reduce_sum_accumulator(source_ty.precision)
+                .unwrap_or(source_ty.precision);
+
+            // `Sum { axis }` over the cotangent removes `axis`. Its
+            // resulting dims depend on the forward expand shape:
+            //
+            //   * RANK-INCREASING: the cotangent's `axis` is the inserted
+            //     axis, which is NOT present in the source, so removing it
+            //     yields the source dims unchanged.
+            //   * SAME-RANK: the cotangent's `axis` IS the source's
+            //     broadcast (size-1) axis, so removing it yields the
+            //     source dims with that axis collapsed away; a follow-up
+            //     reshape restores it to size 1.
+            let summed_dims: Vec<DimInfo> = if same_rank {
+                let mut dims = source_ty.dims.clone();
+                if *axis < dims.len() {
+                    dims.remove(*axis);
+                }
+                dims
+            } else {
+                source_ty.dims.clone()
+            };
+            let summed = dag.add_node(
                 RiscOp::Sum {
                     axis: *axis,
                     accumulator: acc,
                 },
                 vec![g],
-                input_ty,
+                TensorType {
+                    dims: summed_dims.clone(),
+                    precision: acc,
+                },
                 None,
             );
-            Some(vec![(x, dx)])
+
+            // WS-A3: the §5.7.1 accumulator may be wider than the source
+            // precision (bf16/f16 sum into f32); the gradient must be in
+            // the source precision, so cast back when they differ. This
+            // mirrors the `Sum` adjoint above.
+            let summed_in_source_prec = if acc == source_ty.precision {
+                summed
+            } else {
+                dag.add_node(
+                    RiscOp::Cast {
+                        new_precision: source_ty.precision,
+                    },
+                    vec![summed],
+                    TensorType {
+                        dims: summed_dims,
+                        precision: source_ty.precision,
+                    },
+                    None,
+                )
+            };
+
+            if same_rank {
+                // Same-rank broadcast of a size-1 axis: restore the
+                // collapsed size-1 axis so the cotangent matches the
+                // source shape `[..., 1, ...]`.
+                let dx = dag.add_node(
+                    RiscOp::Reshape {
+                        new_shape: source_ty.dims.clone(),
+                    },
+                    vec![summed_in_source_prec],
+                    source_ty,
+                    None,
+                );
+                Some(vec![(x, dx)])
+            } else {
+                // Rank-increasing broadcast: the single `Sum` already
+                // recovered the source rank (this also covers a rank-0
+                // source, whose cotangent is rank 1 and sums to a scalar).
+                Some(vec![(x, summed_in_source_prec)])
+            }
         }
         RiscOp::OneHot { .. } => Some(vec![]),
         RiscOp::Pad { padding, .. } => {
@@ -1040,10 +1161,132 @@ fn compute_adjoints(
             Some(vec![(x, dx)])
         }
         RiscOp::Stride { strides } => {
-            // Phase 0 does not have a scatter/upsample primitive, so exact stride adjoints
-            // cannot be represented soundly in the current RISC set.
-            let _ = strides;
-            None
+            // Forward `stride(x, s)`: `out[i] = x[i .* s]` along each
+            // axis, with `out` axis size `ceil(in / s)` (verify.rs C10).
+            // The exact reverse-mode adjoint scatters each cotangent
+            // element `g[i]` back to source position `i .* s` and zeros
+            // every skipped slot (spec/05-risc-primitives.md §2.4: stride
+            // adjoint = "appropriate expand/scatter").
+            //
+            // No new primitive is needed: the scatter is the separable
+            // "insert `s - 1` zeros after each element, then trim to the
+            // original size" upsample, which is exactly `pad` of a
+            // freshly-inserted minor axis followed by `shrink`, applied
+            // one axis at a time. For a single axis `a` with step `s_a`
+            // and source size `n_a` (so the strided size is
+            // `m_a = ceil(n_a / s_a)`):
+            //
+            //   reshape : [.., m_a, ..]      -> [.., m_a, 1, ..]
+            //   pad     : [.., m_a, 1, ..]   -> [.., m_a, s_a, ..]   (axis a+1, after = s_a - 1)
+            //   reshape : [.., m_a, s_a, ..] -> [.., m_a * s_a, ..]
+            //   shrink  : [.., m_a * s_a, ..]-> [.., n_a, ..]        (axis a, [0, n_a))
+            //
+            // which places `g[.., i, ..]` at source index `i * s_a` and 0
+            // at every `i * s_a + 1 ..= i * s_a + (s_a - 1)`. A step of 1
+            // is the identity (`m_a == n_a`) and is skipped. All four ops
+            // already have evaluator, C-backend, and adjoint coverage, so
+            // this is sound under eval-vs-backend agreement and supports
+            // higher-order AD.
+            let x = node.inputs[0];
+            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let precision = input_ty.precision;
+            // Source sizes per axis; symbolic (unsized) dims cannot be
+            // upsampled because the trim size is unknown, so fail closed.
+            let source_sizes: Vec<usize> = input_ty.dims.iter().map(dim_size).collect();
+
+            // Running cotangent; its dims mutate axis-by-axis from the
+            // strided shape back toward the source shape.
+            let mut cur = g;
+            let mut cur_dims: Vec<DimInfo> = node.output_type.dims.clone();
+
+            for (axis, (&step, &n_a)) in strides.iter().zip(source_sizes.iter()).enumerate() {
+                if step <= 1 {
+                    // Identity stride on this axis: m_a == n_a already.
+                    continue;
+                }
+                let m_a = dim_size(&cur_dims[axis]);
+
+                // reshape: insert a size-1 axis after `axis`.
+                let mut split_dims = cur_dims.clone();
+                split_dims.insert(axis + 1, DimInfo::Lit(1));
+                let split = dag.add_node(
+                    RiscOp::Reshape {
+                        new_shape: split_dims.clone(),
+                    },
+                    vec![cur],
+                    TensorType {
+                        dims: split_dims.clone(),
+                        precision,
+                    },
+                    None,
+                );
+
+                // pad the new minor axis with (0, step - 1).
+                let mut padding = vec![(0usize, 0usize); split_dims.len()];
+                padding[axis + 1] = (0, step - 1);
+                let mut padded_dims = split_dims.clone();
+                padded_dims[axis + 1] = DimInfo::Lit(step);
+                let padded = dag.add_node(
+                    RiscOp::Pad { padding, fill: 0.0 },
+                    vec![split],
+                    TensorType {
+                        dims: padded_dims.clone(),
+                        precision,
+                    },
+                    None,
+                );
+
+                // reshape: merge axis and axis+1 back into one axis of
+                // size m_a * step.
+                let mut merged_dims = cur_dims.clone();
+                merged_dims[axis] = DimInfo::Lit(m_a * step);
+                let merged = dag.add_node(
+                    RiscOp::Reshape {
+                        new_shape: merged_dims.clone(),
+                    },
+                    vec![padded],
+                    TensorType {
+                        dims: merged_dims.clone(),
+                        precision,
+                    },
+                    None,
+                );
+
+                // shrink axis back to [0, n_a). m_a * step >= n_a always
+                // (ceil), so this is a valid trim of the trailing
+                // overshoot from the final group.
+                let mut bounds: Vec<(usize, usize)> =
+                    merged_dims.iter().map(|d| (0usize, dim_size(d))).collect();
+                bounds[axis] = (0, n_a);
+                let mut trimmed_dims = merged_dims.clone();
+                trimmed_dims[axis] = DimInfo::Lit(n_a);
+                let trimmed = dag.add_node(
+                    RiscOp::Shrink { bounds },
+                    vec![merged],
+                    TensorType {
+                        dims: trimmed_dims.clone(),
+                        precision,
+                    },
+                    None,
+                );
+
+                cur = trimmed;
+                cur_dims = trimmed_dims;
+            }
+
+            // The accumulated cotangent now has the source shape exactly;
+            // label the terminal node with the original input type.
+            if cur == g {
+                // All steps were identity (every step <= 1): stride was a
+                // no-op, so the adjoint is the cotangent unchanged.
+                Some(vec![(x, g)])
+            } else {
+                debug_assert_eq!(
+                    cur_dims, input_ty.dims,
+                    "stride adjoint must reconstruct the source shape",
+                );
+                Some(vec![(x, cur)])
+            }
         }
 
         // --- Memory ---
@@ -1103,6 +1346,40 @@ fn compute_adjoints(
             Some(vec![(values, dvalues)])
         }
         RiscOp::ScatterAdd { .. } => None,
+        RiscOp::ReduceWindow {
+            reducer,
+            window_shape,
+            strides,
+        } => {
+            // Reverse-mode adjoint of `reduce_window_*`
+            // (spec/05-risc-primitives.md §2.3.1): lower to a single
+            // `ReduceWindowGrad` node carrying the same window contract.
+            // It scatters/overlap-adds (Sum/Mean) or routes-to-extreme
+            // (Max/Min) the upstream cotangent `g` back to the input shape.
+            //
+            // No `Cast` is needed (unlike `Sum`): `reduce_window` does not
+            // widen its accumulator — the forward output precision equals
+            // the input precision — so `g` and `x` share a precision and
+            // the adjoint carries the operand precision directly.
+            let x = node.inputs[0];
+            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let din = dag.add_node(
+                RiscOp::ReduceWindowGrad {
+                    reducer: *reducer,
+                    window_shape: window_shape.clone(),
+                    strides: strides.clone(),
+                },
+                vec![x, g],
+                input_ty,
+                None,
+            );
+            Some(vec![(x, din)])
+        }
+        RiscOp::ReduceWindowGrad { .. } => {
+            // Second-order AD through the windowed adjoint itself is not
+            // defined; fail closed rather than synthesize a wrong adjoint.
+            None
+        }
         RiscOp::Scatter { .. } => {
             // Replace-scatter (last-write-wins) is non-differentiable.
             // `grad_dag_checked` rejects this case before reaching here
@@ -2879,7 +3156,13 @@ mod tests {
     }
 
     #[test]
-    fn adv_stride_gradient_is_rejected_until_supported() {
+    fn adv_stride_gradient_scatters_into_strided_slots() {
+        // Issue #291: the stride adjoint scatters the cotangent back into
+        // the strided source slots (zeros elsewhere) using existing
+        // movement primitives (reshape/pad/shrink). `f(x) = sum(stride(x,
+        // 2)) = x0 + x2`, so `df/dx = [1, 0, 1, 0]`.
+        use crate::eval::{TensorValue, eval_tensor};
+
         let vec4_ty = TensorType {
             dims: vec![DimInfo::Lit(4)],
             precision: chelis_types::types::Prim::F32,
@@ -2911,9 +3194,20 @@ mod tests {
             scalar_f32(),
             None,
         );
-        assert!(
-            grad_dag(&dag, out, &[x]).is_none(),
-            "stride gradients should fail closed until the RISC set can express them soundly"
+        let grad_result =
+            grad_dag(&dag, out, &[x]).expect("stride gradients are supported (issue #291)");
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
+        );
+        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let grad = &vals[&grad_result.grad_nodes[&x]];
+        assert_eq!(
+            grad.data,
+            vec![1.0, 0.0, 1.0, 0.0],
+            "stride gradient must scatter into strided slots: got {:?}",
+            grad.data
         );
     }
 

@@ -28,7 +28,7 @@ fn symbol_re() -> &'static Regex {
 /// `crates/chelis-deep/src/validate.rs`. Hyphens here are intentional
 /// per §1.4. Any hyphenated symbol that's NOT in this list is a
 /// user-defined symbol and a §1.5 / §11.1 violation.
-const CLOSED_TAGS: &[&str] = &[
+pub const CLOSED_TAGS: &[&str] = &[
     "module",
     "import",
     "import-all",
@@ -75,6 +75,7 @@ const CLOSED_TAGS: &[&str] = &[
     "d-name",
     "d-var",
     "d-lit",
+    "d-rank",
     "grad",
     "vmap",
     "jit",

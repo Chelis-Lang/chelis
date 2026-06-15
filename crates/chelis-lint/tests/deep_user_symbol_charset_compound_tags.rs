@@ -14,8 +14,9 @@
 //! - rule: `crates/chelis-lint/src/rules/deep_user_symbol_charset.rs`
 //! - canonical vocabulary: `crates/chelis-deep/src/validate.rs`
 
-use chelis_lint::rules::deep_user_symbol_charset::DeepUserSymbolCharset;
+use chelis_lint::rules::deep_user_symbol_charset::{CLOSED_TAGS, DeepUserSymbolCharset};
 use chelis_lint::{Context, Rule, Surface, Violation};
+use std::collections::HashSet;
 use std::path::Path;
 
 fn run(src: &str) -> Vec<Violation> {
@@ -62,14 +63,14 @@ fn accepts_t_ref_compound_tag() {
 #[test]
 fn accepts_all_emitted_compound_tags() {
     // Each line exercises a distinct hyphenated compound tag from the
-    // canonical 61-tag vocabulary. Stringing them into one Deep
+    // canonical 62-tag vocabulary. Stringing them into one Deep
     // program keeps the fixture compact while asserting every tag is
     // on the allowlist.
     let src = r#"(module {} demo
   (import-all {} other_mod)
   (defsig {} f
     (t-fn {}
-      (t-ref {} (t-tensor {} (d-name {} batch) (d-var {} k) (d-lit {} 16) (t-prim {} f32)))
+      (t-ref {} (t-tensor {} (d-name {} batch) (d-var {} k) (d-lit {} 16) (d-rank {} r) (t-prim {} f32)))
       (t-adt {} Box (t-var {} a))
       (t-tuple {} (t-unit {}) (t-prim {} f32))))
   (def {} f (params {} p r) (var {} p))
@@ -86,6 +87,24 @@ fn accepts_all_emitted_compound_tags() {
     assert!(
         v.is_empty(),
         "expected zero violations for canonical compound-tag corpus, got: {v:?}"
+    );
+}
+
+/// The lint's closed allowlist must mirror the compiler's canonical Deep
+/// vocabulary exactly. A drift means the style gate rejects shipped
+/// canonical Deep — which is how `d-rank` (rank polymorphism) was
+/// initially missed from this allowlist.
+#[test]
+fn closed_tags_match_canonical_deep_vocabulary() {
+    let local: HashSet<&str> = CLOSED_TAGS.iter().copied().collect();
+    let canonical: HashSet<&str> = chelis_deep::validate::VALID_TAGS.iter().copied().collect();
+    let missing: Vec<&&str> = canonical.difference(&local).collect();
+    let extra: Vec<&&str> = local.difference(&canonical).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "deep-user-symbol-charset CLOSED_TAGS drifted from chelis_deep::validate::VALID_TAGS.\n  \
+         missing (in compiler vocabulary, not in allowlist): {missing:?}\n  \
+         extra (in allowlist, not in compiler vocabulary): {extra:?}"
     );
 }
 

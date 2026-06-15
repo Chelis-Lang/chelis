@@ -735,7 +735,7 @@ Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named
 | Operation | Input type(s) | Output type | Dimension rule |
 |---|---|---|---|
 | `add`, `mul`, `max_elem` | `tensor[D, p]`, `tensor[D, p]` | `tensor[D, p]` | Dimensions must match exactly |
-| `neg`, `exp`, `log`, `sin`, `sqrt` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved |
+| `neg`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `sqrt`, `abs`, `floor`, `ceil` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved |
 | `sum(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Remove dimension at axis k |
 | `max_reduce(x, axis=k)` | same as sum | same as sum | same as sum |
 | `reshape(x, shape)` | `tensor[D_old, p]` | `tensor[D_new, p]` | Product of dims must match. New dims are `d-lit` or `d-name` (user-specified) |
@@ -783,6 +783,80 @@ dim variable is genuinely bound to a concrete dimension.
 ;; tensor[n, f32]; n and m are distinct rigid dim parameters.
 ```
 
+#### 4.4.1 Return-Only Dim Parameters (chelis#273)
+
+A declared dim parameter that appears **only in the return type** has a
+different relationship to the body than a param-position one. Chelis has
+no explicit dimension application: callers instantiate dim parameters by
+unification against *arguments*, and an argument never mentions a
+return-only dim. The body is therefore the only place the output
+dimension can come from, and a return-only dim parameter is
+**output-inferred** rather than fully rigid. Two body behaviors are
+legitimate:
+
+- the body leaves the dim var unbound — a clean, generalizable
+  dimension (e.g. a variable-fed `to_tensor` whose shape is genuinely
+  unknown), or
+- the body resolves it to a **body-internal** concrete dimension; the
+  registered scheme then resolves to the produced dim. This is the
+  `examples/hello_tensor.ch` shape: `def main() -> tensor[n, f32]`
+  whose body builds a `tensor[3, f32]`.
+
+What the body must **not** do is couple the promised-independent output
+dimension to the caller-visible input world. Both of the following are
+`DimensionMismatch` type errors:
+
+- **input-coupled pin**: the return-only dim parameter resolves to a
+  concrete literal that occurs (after unification) in a declared
+  parameter position;
+- **input-coupled collapse**: the return-only dim parameter unifies with
+  a distinct param-position declared dim parameter.
+
+```scheme
+;; def f[k](a: tensor[2, f32]): tensor[k, f32] = a
+;; TYPE ERROR: the body pins the return-only dim parameter k to the
+;; parameter's concrete Lit(2); the signature promised an output
+;; dimension the body does not derive from the inputs.
+
+;; def f[n, m](x: tensor[n, f32]): tensor[m, f32] = x
+;; TYPE ERROR: the return-only dim parameter m collapses with the
+;; param-position dim parameter n.
+
+;; def make(): tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
+;; OK: output-inferred. The body produces a body-internal tensor[3, f32]
+;; and the scheme resolves n := 3; no input dimension is involved.
+```
+
+Three deliberate boundaries of this rule:
+
+- a body-internal concrete pin whose literal does *not* occur in any
+  declared parameter position is tolerated even when the def has
+  parameters (`def f(x: tensor[2, f32]) -> tensor[k, f32] =
+  to_tensor([1.0, 2.0, 3.0])` is accepted with `k := 3`) — the guard
+  compares resolved dimensions, not provenance, so a body-internal
+  literal that happens to *equal* a parameter dim is conservatively
+  rejected, and one that differs is conservatively accepted;
+- coupling through a *named* symbolic dim
+  (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x`, which binds
+  `m` to `batch`) is not flagged: `Dim::Name` unifies permissively by
+  design (chelis#219) and no declared dim parameter participates.
+  (When a param-position declared dim parameter *also* resolves to the
+  same name — e.g. `def f[n, m](x: tensor[n, f32],
+  y: tensor[batch, f32]) -> tensor[m, f32] = add(x, y)` binds both `n`
+  and `m` to `batch` — the collapse rule above does fire, because the
+  two declared dim parameters now share a resolution.);
+- coupling through a *wildcard* param dim is invisible
+  (`def f[k](b: tensor[*, f32]) -> tensor[k, f32] = b` is accepted):
+  the wildcard unifies permissively without binding (§4.5), so `k`
+  stays unbound and generalizes even though the returned value's
+  runtime dimension is the input's. This is the pre-existing §4.5
+  wildcard permissiveness, not a new tolerance of this rule.
+
+Enforcement is `check_return_only_dvars_rigid` in
+`crates/chelis-types/src/infer.rs`, run at the same def-vs-signature
+reconciliation point as the §4.4 param-position guard; the acceptance
+oracle is `crates/chelis-cli/tests/issue_273_return_dvar_rigidity.rs`.
+
 ### 4.5 The Wildcard Dimension
 
 `(d-name {} *)` represents an unknown/dynamic dimension. Produced by operations where the compiler cannot statically determine the dimension:
@@ -826,7 +900,11 @@ that names each rank as a separate variant. A rank-polymorphic
 site) was considered and deferred: the named-dim safety guarantee in
 §4.2 is preferred over the additional flexibility, and the
 reshape-at-the-boundary idiom is cheap enough that current consumers
-absorb it without losing per-tensor named dimensions.
+absorb it without losing per-tensor named dimensions. A *constrained,
+name-preserving* shape spread that does **not** sacrifice that guarantee
+is admitted for top-level tensor signatures by Tier-3 rank polymorphism
+(§4.5.3) — but it remains barred from `List`/ADT element position, so the
+rank-uniform-list guarantee above is unaffected.
 
 ```chelis
 ;; WRONG: rank-1 and rank-2 elements in the same List[tensor[k, f32]]
@@ -906,11 +984,20 @@ and are locked by dedicated tests so a future change is a conscious one:
   resolves the joined axis to whatever the *head* (the element being
   prepended, i.e. the earlier list position) resolves to. So
   `[tensor[2, f32], tensor[*, f32]]` joins to element `tensor[2, f32]`
-  (the concrete head absorbs the wildcard tail) and type-checks against
-  `List[tensor[k, f32]]`, whereas the reordered
+  (the concrete head absorbs the wildcard tail), whereas the reordered
   `[tensor[*, f32], tensor[2, f32]]` joins to `tensor[*, f32]` (the
-  wildcard head erases the concrete tail) and is **rejected**. Element
-  ordering therefore changes the verdict. Genuinely-mismatched *concrete*
+  wildcard head erases the concrete tail). Under a `def f[k](a:
+  tensor[2, f32], b: tensor[*, f32]) -> List[tensor[k, f32]]`
+  annotation **both orderings are now rejected**, but through different
+  guards: the concrete-element ordering pins the return-only `k` to the
+  parameter's `Lit(2)` and trips the §4.4.1 return-position rigidity
+  check (chelis#273 — parity with the non-list
+  `def f[k](a: tensor[2, f32]) -> tensor[k, f32] = a`), while the
+  wildcard-element ordering trips the join-origin-wildcard uniformity
+  check below. The head bias itself is still observable in *which*
+  diagnostic fires. (Before chelis#273 the concrete-element ordering
+  type-checked, because the return-only `k` was outside the rigidity
+  guard's param-position scope.) Genuinely-mismatched *concrete*
   heads/tails still widen to `*` regardless of order (the ragged-axis
   arm).
 - **The uniformity check is single-level.** It compares the declared and
@@ -925,6 +1012,143 @@ alongside `check_declared_dvars_rigid`); the acceptance oracle is
 `crates/chelis-cli/tests/issue_272_list_dim_rigidity.rs` with the
 chelis#218 ergonomics locked by
 `crates/chelis-cli/tests/issue_218_to_tensor_in_grad_body.rs`.
+
+#### 4.5.3 Name-Preserving Rank Polymorphism (Tier-3)
+
+§4.5.1 deferred a shape-vector variable because *rank erasure masks
+transposition bugs*. Tier-3 admits a **constrained, name-preserving** shape
+spread that does not reopen that hole: a rank variable `..r` (the `Dim::Rank`
+spread) binds to the *actual named dims it covers*, so per-axis names are
+retained, not erased, and the surviving axes carry their identity through.
+
+A tensor shape may interleave spreads with concrete **named anchors** — the
+admitted form is `Rank? (Name Rank?)*` (a given spread name appears at most once
+per shape). The headline use is a **named-axis reduction**: a single `def`
+reduces a named axis at any rank, and the checker computes the output shape
+symbolically.
+
+```chelis
+;; reduce the named `seq` axis, keep everything else by name:
+;; def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+;;   tensor[batch, seq, hidden] -> tensor[batch, hidden]
+;;   tensor[a, b, seq, c]       -> tensor[a, b, c]
+```
+
+Multiple **named** axes may be reduced in one call — the variadic form
+`sum(x, seq, head)` (chelis#339) — or by composing single-axis reductions
+(`sum(sum(x, head), seq)`); the two are equivalent, and the variadic form is
+order-insensitive (`sum(x, head, seq)` produces the same result). The variadic
+form is defined for the value reductions `sum`, `mean`, `max_reduce`,
+`min_reduce`, and `prod_reduce` (for `mean`, reducing axes one at a time with
+uniform weights equals the joint mean). It is **not** defined for the
+index-returning reductions `argmax_reduce`/`argmin_reduce`: an index along one
+axis is not composable with a second reduction, so a variadic call on those is
+a hard error. Every axis in a variadic call must be a *named* axis (a
+positional integer is only valid as the single axis of a concrete-rank
+operand), each name must resolve per the rules above, and a **duplicate** axis
+name in the list is a hard error. Inside a `..r` body the Body-Discipline
+admission is unchanged (`sum`/`mean` only, chelis#340). At lowering the
+variadic call desugars to the composition, innermost stage reducing the last
+listed axis.
+
+**Unification (unitary).** A row shape unifies with a ground shape by locating
+each named anchor uniquely in the ground and binding the spreads to the runs
+between. Because each interior split is fixed by a name, there is one
+most-general unifier:
+
+- A named anchor must occur in the operand **exactly once**; absent, ambiguous,
+  or non-named (a fully-literal operand under the §4.1 Name↔Lit rule) is a
+  **hard error**, never a guessed split.
+- Two spreads with no anchor between them (`tensor[..a, ..b]`) is an
+  *undetermined* split and is rejected at unification — except in an output
+  position (e.g. a reduction's `tensor[..pre, ..post]` result), which is only
+  ever matched against an identical row or expanded after its spreads are bound.
+
+**Named-axis expand (`R+1`).** The inverse arithmetic direction: `expand`
+inserts a *named* axis in a rank-polymorphic way when its axis argument is a
+dimension name rather than an integer. Two call forms are admitted
+(chelis#339):
+
+```chelis
+;; insert a trailing named axis (the new axis goes after every existing axis):
+;; def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = expand(x, one, 1)
+;; insert immediately BEFORE an existing named anchor (4-arg form):
+;; def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32]
+;;   = expand(x, c, 5, seq)
+```
+
+- `expand(x, new, size)` — `new` is a bare dimension name: insert a new
+  **trailing** axis named `new` with extent `size`. The symbolic output is the
+  operand's row form with `new` appended.
+- `expand(x, new, size, anchor)` — additionally name an **anchor**, an existing
+  named axis of the operand; the new axis is inserted immediately *before* the
+  anchor. Leading-end insertion is expressible exactly when the row begins with
+  a named anchor (`tensor[first, ..rest]` + `expand(x, c, k, first)`); a row
+  that begins with a spread has no leading anchor and admits trailing or
+  anchored insertion only.
+
+Both forms keep unification unitary: the insertion point is either an end of
+the row or a position fixed by a named anchor located uniquely in the operand.
+Hard errors (`DimensionMismatch`, never a guessed placement):
+
+- the inserted name already names an axis of the operand (a duplicate dim name
+  would make every later by-name lookup ambiguous). This holds through
+  call-site rank monomorphization too: when the inserted name survives into
+  the result row, a caller whose spread-covered axes include that name is
+  rejected at check time (the introduced-name rule in `unify.rs`); when the
+  inserted name is consumed inside the body (insert + reduce), or the
+  collision comes from a single-letter dim *var* whose source letter matches,
+  the check cannot see it and the collision surfaces as a **fatal lowering
+  error** at build/eval — loud, never a silent wrong-axis resolution;
+- the anchor is absent from the operand's row, or ambiguous (appears more than
+  once);
+- a *positional* (integer) insert axis on a rank-spread operand — an index is
+  meaningless at symbolic rank, so the positional form is concrete-rank only;
+- insertion *strictly inside* an opaque spread has no anchor and is not
+  expressible: the computed output row places the new axis only at an end or
+  at an anchor, so a declared result such as `tensor[..lo, c, ..hi, f32]` from
+  an operand `tensor[..rest, f32]` fails row unification (differing anchor
+  structure) and is rejected.
+
+The inserted axis is a *named* dim: declared result types refer to it by name
+(`tensor[..rest, one, f32]`). A bare identifier in the axis slot is read as a
+dimension name only when it is **not bound in the value environment**: a bound
+`int32` variable is a runtime value and keeps the compile-time-constant
+rejection (issue #259) — `expand(x, ax, 4)` with `ax: int32` is still an
+error, never a trailing insert of an axis named `ax`. The `size` argument
+must be a **positive compile-time literal** (a bare int or `cast(N, int32)`):
+the inserted axis's extent is stamped onto the new named dim at lowering, and
+a symbolic-dim or runtime int32 size has no stampable extent (the eval lane
+cannot stage it and the C backend would reference an undeclared dim symbol),
+so those forms are rejected at check time. The positional concrete-rank
+`expand` forms (§4.7.2, insert-or-set) are unchanged and keep the three
+§4.7.2 size forms. At lowering, the named insertion point
+is resolved against the monomorphized operand dims (trailing → operand rank;
+anchored → the anchor's index), mirroring named-axis reduction.
+
+**Soundness (§4.2).** Order is preserved (shapes stay ordered positional
+sequences — never unordered "rows"); the reduced axis is a retained name; and a
+rank-poly def body is restricted by the §4.2 Body-Discipline check to
+*name-trackable* operations only — shape-identity (elementwise) ops,
+named-axis reductions, and named-axis expand. A *positional* shape-rewriter
+(`permute`, `reshape`, `matmul`, positional `gather`) is rejected inside a
+`..r` body: its output shape is not name-trackable at symbolic rank, so it
+could hide an untracked transposition. For the name-tracked ops the procedural
+inference arm is the real gate: it rejects a positional index at symbolic rank
+and a non-existent/ambiguous/duplicate axis name, so no transposition can slip
+past. This is what keeps the §4.5.1 transposition-safety guarantee intact while
+admitting the deferred flexibility for the reduction and expand cases.
+
+Enforcement: the unification arm is `crates/chelis-types/src/unify.rs`
+(`unify_row_against_ground` / `unify_row_against_row`); the named-axis reduction
+arm is `check_reduction_signature`, the named-axis expand arm is
+`check_expand_signature`, and the discipline check is
+`check_rank_body_discipline` in `crates/chelis-types/src/infer.rs`. Call-site
+**rank monomorphization** (`tensor_rank_substitutions` /
+`extract_rank_var_bindings` in `crates/chelis-ir/src/lower.rs`) substitutes each
+spread's concrete run and resolves the named axis to a positional index at
+lowering, so a rank-poly reduce **builds and runs** on the C backend. The
+acceptance oracle is `crates/chelis-cli/tests/rank_poly_tier3.rs`.
 
 ### 4.6 Property Definitions
 
@@ -951,7 +1175,10 @@ dimension that is only known at run time. The relevant built-ins are:
   the axis-bounds check). The result is a runtime scalar, not a symbolic
   dim reference.
 - `expand(x, axis, size)`: insert or set a dimension at position `axis`
-  with width `size`.
+  with width `size`. When `axis` is a dimension *name* instead of an
+  integer, the call is the named-axis expand form (§4.5.3): it inserts a
+  new named axis at the trailing end, or — with a fourth `anchor`
+  argument — immediately before an existing named axis.
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
   `shape_list`, a `List<Int64>`.
 
@@ -1160,7 +1387,7 @@ Operations accept same-precision operands only. The table of valid combinations:
 | Arithmetic (add, mul, sub, div) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
 | Comparison (cmplt, eq) | any numeric (same precision) → bool |
 | Logical (and, or, not) | bool only |
-| Transcendental (exp, log, sin, sqrt) | f32, f64, bf16, f16 only (not integer) |
+| Transcendental (exp, log, sin, cos, tan, atan, sqrt) | f32, f64, bf16, f16 only (not integer) |
 
 `f8e4m3` is deferred (§1.1.1) and is not a valid arithmetic precision in any
 row. Unsigned integer types are out of scope (§1.1.2) and never appear in any
@@ -1233,6 +1460,20 @@ exactly:
    tensor type, when the body is a tensor literal
 4. the first argument of a `cast(literal, p)` expression, where `p` is a
    precision type literal — the literal body adopts `p`
+
+Position 4 applies to a **bare scalar numeric literal** as well as to a
+tensor-literal body (issue #308). `cast(1.1, f64)` binds the decimal `1.1`
+at `f64` — exactly `0x3ff199999999999a` — it does NOT narrow to the §5.3
+`f32` default and then widen (which would yield the f32-truncation value
+`1.100000023841858`). Likewise `cast(3000000000, int64)` binds the literal
+at `int64`, which is what makes the §5.3 out-of-int32-range escape hatch
+work. The adoption re-binds the literal at `p` and the §5.6 range checks
+apply at `p`: `cast(2147483648, int32)` is still a range error. Adoption
+is limited to unsuffixed numeric literals with a numeric `p` of matching
+kind: a suffixed literal binds at its suffix (§5.5; `cast(1.1f32, f64)`
+widens the f32 value), and a float literal under an integer `p` keeps the
+default-then-truncate cast semantics because a decimal cannot bind at an
+integer type.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
 §5.3 literal defaults: integer literals to `int32`, float literals to `f32`.
@@ -1718,3 +1959,45 @@ another `deftype Foo` nor with a `typealias Foo = ...`, and user code cannot
 re-declare a prelude type name (e.g. `Option`, `List`). Collisions are
 rejected at declaration time as `DuplicateDefinition`. This rule is what
 makes the §8.4 carrier set well-defined when keyed on the bare ADT name.
+
+### 8.6 Builtin-Name Shadowing
+
+A top-level `def` or `sig` whose name appears in the closed builtin function
+vocabulary (`BUILTIN_NAMES` in `crates/chelis-types/src/builtins.rs`) is
+rejected at declaration time as `BuiltinShadowing`, before inference runs.
+
+Rationale: call sites are dispatched builtin-first by name in both the host
+evaluator and IR lowering, so a user definition that shadows a builtin name
+can never be reached by name. Pre-rule, the checker resolved such calls to
+the user signature while eval and the backends resolved them to the builtin —
+three lanes, three different answers (chelis#353: `def sum` checked clean,
+failed with the builtin's arity error under eval, and segfaulted on the C
+backend). The rejection reads the same `BUILTIN_NAMES` table the evaluator
+dispatch and IR lowering import, so the rejected set and the dispatched set
+cannot drift.
+
+Scope:
+
+- The rule binds to top-level `def` and `defsig` declarations after module
+  flattening, including load-style top-level bindings (`sum = ...` desugars
+  to a `def`), in every lane that runs the type checker (`check`, `eval`,
+  `build`, `test`, `cost`). `chelis validate` is a syntax-grammar lane that
+  does not run the type checker and therefore does not surface this (or any
+  other) semantic rejection. It is a semantic rejection, not a style-gate
+  rule: `--allow-style-violations` and `CHELIS_STYLE_GATE_DISABLE=1` do not
+  bypass it.
+- Reef package modules are exempt by construction: package declarations are
+  internal-name-rewritten (`pkg__<package>__<module>__<name>`) before the
+  checker runs and their call sites are rewritten with them, so a
+  package-scoped `def sum` neither collides with the builtin table nor
+  mis-dispatches — inside a package the user def genuinely wins (the
+  stdlib's `Std.Decimal.normalize` and `Std.Test.fail` rely on this).
+- Function parameters and block-local bindings may reuse builtin names: they
+  bind values, not call-site dispatch, and shadow harmlessly on every lane.
+  Known residual asymmetry: *calling* a function-typed parameter or local
+  named like a builtin still dispatches builtin-first under eval (a loud
+  eval-time error) while the C backend compiles the call correctly; that
+  gap is documented here rather than rejected, because rejecting it would
+  break programs the backend lane compiles and runs correctly today.
+- Builtin-adjacent reserved keywords (`cast`, `grad`, `vmap`, ...) are not
+  part of `BUILTIN_NAMES`; a `def cast` is already a parse error.

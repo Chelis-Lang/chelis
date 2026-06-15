@@ -2661,7 +2661,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.3.0" }}
+chelis-std = {{ version = "0.4.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -2670,15 +2670,13 @@ chelis-std = {{ version = "0.3.0" }}
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Nn.Embedding (forward)
-
 export (main)
 
 def main(
   ids: tensor[2, 3, int64],
   table: tensor[8, 4, f32]
 ) -> tensor[2, 3, 4, f32] =
-  forward(ids, table)
+  gather(table, ids, 0)
 "#,
     );
 
@@ -3317,6 +3315,116 @@ fn build_fails_cleanly_when_chelis_runtime_dir_is_wrong() {
         .stderr(predicate::str::contains("libchelis_runtime.a"));
 }
 
+/// Regression for issue #261: `chelis build --target c` must reject
+/// `reduce_window_*` over a runtime-symbolic windowed axis with a clean
+/// `unsupported_feature` diagnostic, rather than silently emit a
+/// mis-allocated, out-of-bounds kernel whose output diverges from the
+/// evaluator (or panic in the emitter). `pad_sequences` produces a
+/// runtime-bound trailing extent, which is the windowed axis here. The
+/// host runtime / IR evaluator handle this case correctly; only the
+/// ahead-of-time build path is restricted. See
+/// `spec/05-risc-primitives.md` §2.3.1.
+#[test]
+fn build_c_rejects_reduce_window_over_runtime_symbolic_axis() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rw_symbolic.ch");
+    write_file(
+        &path,
+        "padded = pad_sequences([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], 0.0)\n\
+         windowed = reduce_window_max(padded, [2], [1])\n",
+    );
+    let out_dir = dir.path().join("rw-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires statically-known windowed-axis extents",
+        ))
+        .stderr(predicate::str::contains("reduce_window"))
+        // Must be the clean guard, not the emitter backstop panic.
+        .stderr(predicate::str::contains("panicked").not());
+}
+
+/// Regression for PR #261 review finding #1: `chelis build --target c` on a
+/// bf16 `reduce_window_*` must fail with a clean `unsupported_feature`
+/// diagnostic, not an emitter `panic!`. `reject_unsupported_c_precisions`
+/// admits bf16 generally, but the C windowed-reduction emitter is f32-only.
+/// See `spec/05-risc-primitives.md` §2.3.1.
+#[test]
+fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rw_bf16.ch");
+    write_file(
+        &path,
+        "def pool_bf16(x: tensor[1, 1, 4, 4, bf16]) -> tensor[1, 1, 3, 3, bf16] = \
+         reduce_window_max(&x, [2, 2], [1, 1])\n",
+    );
+    let out_dir = dir.path().join("rw-bf16-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("f32"))
+        .stderr(predicate::str::contains("reduce_window"))
+        // Must be the clean guard, not the emitter backstop panic.
+        .stderr(predicate::str::contains("panicked").not());
+}
+
+/// Regression for PR #261 review finding #2: `chelis build --target hip` on
+/// a `reduce_window_*` program must fail with a clean `unsupported_feature`
+/// diagnostic (HIP windowed-reduction codegen is deferred), not the
+/// launch-emit `todo!` panic. See `spec/05-risc-primitives.md` §2.3.1.
+#[test]
+fn build_hip_rejects_reduce_window_with_clean_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rw_hip.ch");
+    write_file(
+        &path,
+        "def pool_hip(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
+         reduce_window_max(&x, [2, 2], [1, 1])\n",
+    );
+    let out_dir = dir.path().join("rw-hip-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reduce_window"))
+        .stderr(predicate::str::contains("hip"))
+        // Must be the clean guard, not the launch-emit `todo!` panic.
+        .stderr(predicate::str::contains("panicked").not());
+}
+
 #[test]
 fn build_honors_chelis_runtime_dir_override() {
     let dir = tempdir().expect("tempdir");
@@ -3527,6 +3635,73 @@ fn fmt_check_accepts_trailing_newline_terminated_canonical_surf() {
         .args(["fmt", path.to_str().unwrap(), "--check"])
         .assert()
         .success();
+}
+
+// #290: `chelis fmt` must keep the grouping parens around a function-typed
+// parameter in a `sig`. Arrow types are right-associative, so `(a -> b) -> c`
+// (one function-typed argument) is a different type from the curried 3-ary
+// `a -> b -> c`. The formatter previously stripped the parens, changing the
+// arity and making higher-order sigs impossible to write fmt-clean.
+#[test]
+fn fmt_inplace_preserves_hof_argument_parens() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("hof.ch");
+    write_file(&path, "module T\nsig f: (a -> b) -> c\ndef f(g, x) = x\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    let after = fs::read_to_string(&path).expect("read formatted file");
+    assert!(
+        after.contains("sig f: (a -> b) -> c"),
+        "fmt stripped the function-typed argument's grouping parens; got:\n{after}"
+    );
+    assert!(
+        !after.contains("sig f: a -> b -> c"),
+        "fmt flattened the HOF sig to the curried form; got:\n{after}"
+    );
+
+    // The formatted output must be stable under a second pass (idempotence).
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .success();
+}
+
+// #290 negative parity: a genuinely curried sig must NOT gain spurious parens,
+// and a redundant right-position group `a -> (b -> c)` canonicalizes to the
+// bare flat form.
+#[test]
+fn fmt_inplace_leaves_curried_sig_unparenthesized() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("curried.ch");
+    write_file(
+        &path,
+        "module T\nsig f: a -> (b -> c)\ndef f(x, y, z) = x\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    let after = fs::read_to_string(&path).expect("read formatted file");
+    assert!(
+        after.contains("sig f: a -> b -> c"),
+        "redundant right-position arrow parens were not canonicalized away; got:\n{after}"
+    );
+    assert!(
+        !after.contains("(b -> c)"),
+        "right-position arrow kept spurious parens; got:\n{after}"
+    );
 }
 
 // #144: `chelis fmt --inplace` must preserve `--` line comments and
@@ -3771,11 +3946,11 @@ fn reef_build_emits_shell_and_archive() {
         .args(["reef", "build", pkg.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Built chelis-std 0.3.0"));
+        .stdout(predicate::str::contains("Built chelis-std 0.4.0"));
 
     assert!(pkg.join("reef.lock").exists());
-    assert!(pkg.join("dist/chelis-std-0.3.0.chb").exists());
-    assert!(pkg.join("dist/chelis-std-0.3.0.tar.zst").exists());
+    assert!(pkg.join("dist/chelis-std-0.4.0.chb").exists());
+    assert!(pkg.join("dist/chelis-std-0.4.0.tar.zst").exists());
 }
 
 #[test]
@@ -3806,7 +3981,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.3.0" }}
+chelis-std = {{ version = "0.4.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -3815,16 +3990,17 @@ chelis-std = {{ version = "0.3.0" }}
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Nn.Linear (forward)
-
 export (main)
 
 def main(
   x: tensor[32, 784, f32],
   w: tensor[784, 10, f32],
   b: tensor[10, f32]
-) -> tensor[32, 10, f32] =
-  forward(x, w, b)
+) -> tensor[32, 10, f32] = {
+  bias = expand(&b, 0, shape(&x, cast(0, int32)))
+  wx = matmul(&x, &w)
+  add(wx, bias)
+}
 "#,
     );
 
@@ -3888,7 +4064,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.3.0" }}
+chelis-std = {{ version = "0.4.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -5560,7 +5736,7 @@ fn target_metal_rejects_cpu_resource_region() {
 // These tests close the IR-evaluator/C-backend gap surfaced as
 // `unsupported builtin \`relu\` in host runtime` (and siblings). For each
 // activation we run a small program through both `chelis eval` (the
-// in-process IR evaluator dispatched in `chelis-compiler-api/src/runtime.rs`)
+// in-process IR evaluator dispatched in `chelis-compiler-api/src/runtime/eval.rs`)
 // and `chelis build --target c` (whose generated code uses the
 // `chelis_host_*_f32` helpers in `chelis-backend-c/src/host_emit.rs`).
 //
@@ -5733,7 +5909,7 @@ ok = test_assert_close_tensor(actual, expected, 0.0001, "silu pointwise")
 #[test]
 fn bucket3_gelu_tanh_approx_runs_in_eval_and_c_lanes() {
     // gelu(0) = 0; gelu(1) ≈ 0.84119; gelu(-1) ≈ -0.15881.
-    // Tanh approximation matches `Std.Nn.Gelu.gelu_scalar` byte-for-byte.
+    // Tanh approximation matches the host-runtime `activation_gelu_f32` helper.
     run_activation_parity(
         "bucket3_gelu",
         r#"
@@ -6806,7 +6982,7 @@ fn check_single_file_keeps_legacy_report_shape() {
 // evaluator (the same machinery the C backend uses) so the two lanes
 // agree on programs that pass `chelis check`.
 //
-// See `crates/chelis-compiler-api/src/runtime.rs::apply_transform` for
+// See `crates/chelis-compiler-api/src/runtime/transforms.rs::apply_transform` for
 // the implementation, and `spec/upstream-bugs/grad-eval-host-runtime.md`
 // for the canonical repro / closure reference.
 

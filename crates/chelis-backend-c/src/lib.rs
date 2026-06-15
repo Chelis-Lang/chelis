@@ -979,6 +979,60 @@ int main() {{
         (shape.len(), shape.to_vec())
     }
 
+    /// Issue #252: build a single test-harness input-fill statement that
+    /// reconstructs `value` from its exact f32 bit pattern via the
+    /// `chelis_f32_from_bits` static inline helper (declared in the
+    /// emitted `chelis_runtime.h`). Mirrors the production #189 / #248
+    /// bit-pattern emission. The pre-fix `{:.8}f` format string printed
+    /// decimal places after the point (not significant digits), so values
+    /// like `0.1f32` or `1.0 / 3.0` could not round-trip to their exact
+    /// f32 bits when the emitted C reparsed the literal.
+    fn harness_input_fill_line(lhs: &str, value: f32) -> String {
+        let bits = value.to_bits();
+        format!("{lhs} = chelis_f32_from_bits(0x{bits:08x}u);")
+    }
+
+    /// Issue #252: the test-harness fill must round-trip every f32 value
+    /// to its exact bit pattern, including values that the pre-fix
+    /// `{:.8}f` format string truncated or collapsed. This is a pure
+    /// string-shape oracle: no gcc / run needed.
+    #[test]
+    fn issue_252_harness_input_fill_round_trips_exact_f32_bits() {
+        // `0.1f32`, `1.0 / 3.0`, and a denormal all reparse to a
+        // different bit pattern (or zero) under `%.8`.
+        let cases: [f32; 4] = [
+            0.1_f32,
+            (1.0_f64 / 3.0_f64) as f32,
+            1e-40_f32, // denormal: `%.8` -> `0.00000000f` (bits 0)
+            // Arbitrary pinned bit pattern in the #189 small-magnitude
+            // family; `%.8` cannot reproduce these exact bits.
+            f32::from_bits(0x1234_5678),
+        ];
+        for value in cases {
+            let line = harness_input_fill_line("dst->data[0]", value);
+            let want_bits = value.to_bits();
+            let needle = format!("chelis_f32_from_bits(0x{want_bits:08x}u)");
+            assert!(
+                line.contains(&needle),
+                "fill for {value:e} must carry exact bits {want_bits:#010x}; got: {line}"
+            );
+            // Negative parity: the lossy decimal `f` literal must be gone.
+            assert!(
+                !line.contains(&format!("{value:.8}f")),
+                "fill must not use the lossy `{{:.8}}f` form for {value:e}: {line}"
+            );
+        }
+        // The denormal reproducer is the sharpest: `%.8` collapses it to
+        // zero, but the bit pattern is nonzero and must survive.
+        let denormal = 1e-40_f32;
+        assert_ne!(denormal.to_bits(), 0);
+        let line = harness_input_fill_line("dst->data[0]", denormal);
+        assert!(
+            !line.contains("0.00000000f"),
+            "denormal must not collapse to `0.00000000f`: {line}"
+        );
+    }
+
     fn compile_and_run_input_cases(
         dag: &Dag,
         func_name: &str,
@@ -1032,10 +1086,8 @@ int main() {{
                     "chelis_tensor *input_{case_idx}_{slot} = chelis_alloc({ndim}, {shape_arg}, CHELIS_F32);"
                 ));
                 for (i, value) in input.data.iter().enumerate() {
-                    lines.push(format!(
-                        "input_{case_idx}_{slot}->data[{i}] = {:.8}f;",
-                        value
-                    ));
+                    let lhs = format!("input_{case_idx}_{slot}->data[{i}]");
+                    lines.push(harness_input_fill_line(&lhs, *value));
                 }
                 lines.push(format!(
                     "inputs_{case_idx}[{slot}] = input_{case_idx}_{slot};"
@@ -2681,17 +2733,21 @@ int main(void) {{
         copy_runtime_artifacts(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
-        // Build input initializers from the test vectors.
+        // Build input initializers from the test vectors. Issue #252
+        // sibling: reuse the exact-bits fill helper so the C program
+        // computes its reference from byte-identical f32 inputs, not a
+        // lossy `{:.8}f` truncation that could push the post-exp output
+        // past the 1-ULP (`2e-7`) tolerance asserted below.
         let a_init: String = a_data
             .iter()
             .enumerate()
-            .map(|(i, v)| format!("ta->data[{i}] = {v:.8}f;"))
+            .map(|(i, v)| harness_input_fill_line(&format!("ta->data[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
         let b_init: String = b_data
             .iter()
             .enumerate()
-            .map(|(i, v)| format!("tb->data[{i}] = {v:.8}f;"))
+            .map(|(i, v)| harness_input_fill_line(&format!("tb->data[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 
@@ -2831,10 +2887,12 @@ int main(void) {{
         // Input: x[i] = 0.3 * i + 0.1 (non-trivial, spans SIMD + tail)
         let inputs: Vec<f32> = (0..n).map(|i| 0.3 * i as f32 + 0.1).collect();
         let reference: Vec<f32> = inputs.iter().map(|v| v.exp()).collect();
+        // Issue #252 sibling: exact-bits fill so the C program's input is
+        // byte-identical to the Rust `reference`, not `{:.8}f`-truncated.
         let x_init = inputs
             .iter()
             .enumerate()
-            .map(|(i, v)| format!("tx->data[{i}] = {v:.8}f;"))
+            .map(|(i, v)| harness_input_fill_line(&format!("tx->data[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 

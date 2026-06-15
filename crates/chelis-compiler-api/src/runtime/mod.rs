@@ -1,0 +1,827 @@
+use std::collections::{HashMap, HashSet};
+
+use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_ir::eval::TensorValue as IrTensorValue;
+use chelis_ir::lower::top_level_lowering_map;
+use chelis_types::{CheckedProgram, types::Prim};
+
+use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
+
+mod eval;
+mod host_ops;
+mod invariant;
+mod named_axis;
+#[cfg(test)]
+mod tests;
+mod transforms;
+
+pub(crate) use host_ops::collect_adt_ctor_fields;
+// Decode-boundary invariant revalidation surface (RFC D-DECODE). The
+// `crate::decode` chokepoint imports these as `crate::runtime::<name>`.
+pub(crate) use invariant::{
+    DecodeField, DecodeFieldType, InvariantPredicate, collect_ctor_field_types,
+    collect_type_invariants, collect_zero_arg_constants, revalidate_adt_value,
+};
+use transforms::extract_prim_from_type_expr;
+
+#[derive(Debug, Clone)]
+pub struct RuntimeTensorValue {
+    pub(crate) value: IrTensorValue,
+    pub(crate) precision: Prim,
+}
+
+/// Kind of transform captured by [`RuntimeValue::Transform`].
+///
+/// Bucket 1 closure: the host runtime needs to honor `grad`, `vmap`, and
+/// `realize` so `chelis test`/`chelis eval` agree with the C backend on
+/// programs that pass `chelis check`. `realize` is identity in the host
+/// lane; `Grad` and `Vmap` capture the inner `(grad/vmap ...)` Deep form
+/// and resolve at application time by routing through
+/// [`chelis_ir::lower::lower_subexpr_program`] + the forward DAG
+/// evaluator — the same machinery the C backend uses.
+#[derive(Debug, Clone)]
+pub enum TransformKind {
+    /// `(grad {wrt: ...} fn-expr [index-expr])` — reverse-mode autodiff.
+    Grad,
+    /// `(vmap {} fn-expr axis-lit)` — vectorize the leading axis (or
+    /// the explicit axis from the trailing literal).
+    Vmap,
+}
+
+/// Per-dtype scalar storage used by [`RuntimeValue::Scalar`].
+///
+/// The variant carries the value at exactly the precision the program
+/// has assigned. Construction goes through
+/// [`RuntimeValue::scalar`]/[`RuntimeValue::int`]/[`RuntimeValue::float`]
+/// (or one of the typed `int_*`/`float_*` constructors) so the
+/// `dtype`-vs-`bits` invariant cannot be silently violated. See
+/// `spec/04-type-system.md` §1.1 for the active dtype set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScalarBits {
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    F16(half::f16),
+    Bf16(half::bf16),
+    F32(f32),
+    F64(f64),
+}
+
+impl ScalarBits {
+    /// The Prim that **must** match the surrounding `Scalar { dtype, bits }`
+    /// payload's `dtype` field. The constructor [`RuntimeValue::scalar`]
+    /// enforces that invariant.
+    pub(crate) fn dtype(&self) -> Prim {
+        match self {
+            ScalarBits::I8(_) => Prim::Int8,
+            ScalarBits::I16(_) => Prim::Int16,
+            ScalarBits::I32(_) => Prim::Int32,
+            ScalarBits::I64(_) => Prim::Int64,
+            ScalarBits::F16(_) => Prim::F16,
+            ScalarBits::Bf16(_) => Prim::Bf16,
+            ScalarBits::F32(_) => Prim::F32,
+            ScalarBits::F64(_) => Prim::F64,
+        }
+    }
+
+    /// View any integer scalar as i64. Float scalars truncate toward zero
+    /// (same convention as the existing `as i64` cast paths the host lane
+    /// already used pre-refactor).
+    pub(crate) fn as_i64(&self) -> i64 {
+        match self {
+            ScalarBits::I8(v) => *v as i64,
+            ScalarBits::I16(v) => *v as i64,
+            ScalarBits::I32(v) => *v as i64,
+            ScalarBits::I64(v) => *v,
+            ScalarBits::F16(v) => f32::from(*v) as i64,
+            ScalarBits::Bf16(v) => f32::from(*v) as i64,
+            ScalarBits::F32(v) => *v as i64,
+            ScalarBits::F64(v) => *v as i64,
+        }
+    }
+
+    /// View any numeric scalar as f64. Integer scalars widen losslessly
+    /// up to i32; i64 may lose precision past 2^53 (matches IEEE-754
+    /// double semantics, which is what the pre-refactor host lane did).
+    pub(crate) fn as_f64(&self) -> f64 {
+        match self {
+            ScalarBits::I8(v) => *v as f64,
+            ScalarBits::I16(v) => *v as f64,
+            ScalarBits::I32(v) => *v as f64,
+            ScalarBits::I64(v) => *v as f64,
+            ScalarBits::F16(v) => f32::from(*v) as f64,
+            ScalarBits::Bf16(v) => f32::from(*v) as f64,
+            ScalarBits::F32(v) => *v as f64,
+            ScalarBits::F64(v) => *v,
+        }
+    }
+
+    /// Re-pack an `f64` as the same dtype as `self`. Used by binary ops
+    /// that compute in `f64` and need to stash the result back at the
+    /// operand's dtype.
+    pub(crate) fn from_f64_as(dtype: Prim, value: f64) -> Result<Self, String> {
+        Ok(match dtype {
+            Prim::Int8 => ScalarBits::I8(value as i8),
+            Prim::Int16 => ScalarBits::I16(value as i16),
+            Prim::Int32 => ScalarBits::I32(value as i32),
+            Prim::Int64 => ScalarBits::I64(value as i64),
+            Prim::F16 => ScalarBits::F16(half::f16::from_f32(value as f32)),
+            Prim::Bf16 => ScalarBits::Bf16(half::bf16::from_f32(value as f32)),
+            Prim::F32 => ScalarBits::F32(value as f32),
+            Prim::F64 => ScalarBits::F64(value),
+            other => {
+                return Err(format!(
+                    "cannot pack scalar bits at non-numeric dtype `{}`",
+                    other.name()
+                ));
+            }
+        })
+    }
+
+    /// Re-pack an `i64` as the same dtype as `self`.
+    pub(crate) fn from_i64_as(dtype: Prim, value: i64) -> Result<Self, String> {
+        Ok(match dtype {
+            Prim::Int8 => ScalarBits::I8(value as i8),
+            Prim::Int16 => ScalarBits::I16(value as i16),
+            Prim::Int32 => ScalarBits::I32(value as i32),
+            Prim::Int64 => ScalarBits::I64(value),
+            Prim::F16 => ScalarBits::F16(half::f16::from_f32(value as f32)),
+            Prim::Bf16 => ScalarBits::Bf16(half::bf16::from_f32(value as f32)),
+            Prim::F32 => ScalarBits::F32(value as f32),
+            Prim::F64 => ScalarBits::F64(value as f64),
+            other => {
+                return Err(format!(
+                    "cannot pack scalar bits at non-numeric dtype `{}`",
+                    other.name()
+                ));
+            }
+        })
+    }
+}
+
+/// Sealed payload for [`RuntimeValue::Scalar`] (WS-A0 RT-1 fixup C1).
+///
+/// The dtype/bits pairing is enforced inside [`ScalarPayload::new`] —
+/// the inner fields are private so no caller (in or out of this crate)
+/// can construct a payload via struct-literal syntax that bypasses the
+/// invariant. This is the structural fix for the silent-init pattern
+/// the RT-1 review found: with a `pub(crate) Scalar { dtype, bits }`
+/// variant, any in-crate caller could write
+/// `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
+/// directly and skip the `RuntimeValue::scalar()` invariant check.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScalarPayload {
+    dtype: Prim,
+    bits: ScalarBits,
+}
+
+/// Error returned by [`ScalarPayload::new`] when the requested dtype
+/// disagrees with the bits-variant's intrinsic dtype. Replaces the
+/// stringly-typed error returned by the old `RuntimeValue::scalar`
+/// constructor so the C1 invariant has a typed failure path.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScalarMismatchError {
+    pub dtype: Prim,
+    pub bits_dtype: Prim,
+}
+
+impl std::fmt::Display for ScalarMismatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ScalarPayload dtype/bits mismatch: dtype={} but bits carry dtype {} \
+             (spec/04-type-system.md §1.1)",
+            self.dtype.name(),
+            self.bits_dtype.name(),
+        )
+    }
+}
+
+impl std::error::Error for ScalarMismatchError {}
+
+impl ScalarPayload {
+    /// Construct a payload with the dtype/bits invariant enforced.
+    /// Returns [`ScalarMismatchError`] for mismatched pairs (e.g.
+    /// `dtype = F16, bits = F32(_)`).
+    pub(crate) fn new(dtype: Prim, bits: ScalarBits) -> Result<Self, ScalarMismatchError> {
+        if dtype != bits.dtype() {
+            return Err(ScalarMismatchError {
+                dtype,
+                bits_dtype: bits.dtype(),
+            });
+        }
+        Ok(Self { dtype, bits })
+    }
+
+    /// Read the source-level dtype.
+    pub(crate) fn dtype(&self) -> Prim {
+        self.dtype
+    }
+
+    /// Read the dtype-tagged storage.
+    pub(crate) fn bits(&self) -> ScalarBits {
+        self.bits
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RuntimeValue {
+    Tensor(RuntimeTensorValue),
+    /// First-class numeric scalar tagged with its source-level dtype.
+    /// Construction must go through [`RuntimeValue::scalar`] (or one of
+    /// the convenience constructors) so the `dtype`-vs-`bits` invariant
+    /// holds. The variant is now a tuple over the sealed
+    /// [`ScalarPayload`] (C1) so struct-literal initialization can no
+    /// longer bypass the invariant. See `spec/04-type-system.md` §1.1.
+    Scalar(ScalarPayload),
+    Bool(bool),
+    String(String),
+    List(Vec<RuntimeValue>),
+    Dict(Vec<(RuntimeValue, RuntimeValue)>),
+    Tuple(Vec<RuntimeValue>),
+    Adt {
+        ctor: String,
+        fields: Vec<RuntimeValue>,
+        field_names: Option<Vec<String>>,
+    },
+    MappedFile(Vec<u8>),
+    Closure {
+        params: Vec<String>,
+        /// Declared Deep type expression per param, when the `(fn ...)`
+        /// carried checker-annotated `{type: ...}` param metadata.
+        /// Consulted by the chelis#338 named-axis routing to recover a
+        /// frame binding's static tensor type (named dims) at eval time.
+        param_types: Vec<Option<Expr>>,
+        body: Expr,
+        env: HashMap<String, RuntimeValue>,
+    },
+    /// A captured `grad(f)` / `vmap(f)` waiting to be applied to args. The
+    /// `transform_expr` holds the original `(grad ...)` or `(vmap ...)`
+    /// Deep form so we can re-emit it as the callee in a synthesized
+    /// `(app ...)` expression at apply time. `captured_env` snapshots the
+    /// host-runtime bindings active when the transform was constructed so
+    /// references to local closures (e.g. `target = fn (...) -> ...; grad(target)`)
+    /// still resolve once the synthesized DAG is lowered.
+    Transform {
+        kind: TransformKind,
+        transform_expr: Expr,
+        captured_env: HashMap<String, RuntimeValue>,
+    },
+    Unit,
+}
+
+impl RuntimeValue {
+    /// Construct a `Scalar` payload, asserting that `dtype` matches the
+    /// `bits` variant. Returns an error for mismatched pairs (e.g.
+    /// `dtype = F16, bits = F32(_)`) so the WS-A0 invariant from
+    /// `spec/04-type-system.md` §1.1 is enforced at every construction
+    /// site, not silently elided. Used by every typed-literal lowering
+    /// path; ad-hoc internal sites that already have the dtype + bits
+    /// in sync should prefer one of the typed `int_*` / `float_*`
+    /// constructors below.
+    #[allow(
+        dead_code,
+        reason = "WS-A0 invariant constructor; used by acceptance tests"
+    )]
+    pub(crate) fn scalar(dtype: Prim, bits: ScalarBits) -> Result<Self, String> {
+        ScalarPayload::new(dtype, bits)
+            .map(RuntimeValue::Scalar)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Default-narrowed integer literal per spec §5.3: bare integer
+    /// values default to `int32` unless the surrounding context says
+    /// otherwise.
+    pub(crate) fn int_lit(value: i64) -> Self {
+        // C1 (WS-A0 RT-1 fixup): route every internal construction
+        // through `ScalarPayload::new` so the dtype/bits invariant is
+        // enforced uniformly. The pair is hardcoded matching, so
+        // `expect` here is a structural assertion, not a runtime check.
+        RuntimeValue::Scalar(
+            ScalarPayload::new(Prim::Int32, ScalarBits::I32(value as i32))
+                .expect("int_lit pair is invariant-correct by construction"),
+        )
+    }
+
+    /// Default-narrowed float literal per spec §5.3: bare float values
+    /// default to `f32`.
+    pub(crate) fn float_lit(value: f64) -> Self {
+        RuntimeValue::Scalar(
+            ScalarPayload::new(Prim::F32, ScalarBits::F32(value as f32))
+                .expect("float_lit pair is invariant-correct by construction"),
+        )
+    }
+
+    /// Computed integer value preserving full i64 precision (e.g. `len`,
+    /// shape sizes, parsed `to_int` results). Carries dtype `int64`.
+    pub(crate) fn int64(value: i64) -> Self {
+        RuntimeValue::Scalar(
+            ScalarPayload::new(Prim::Int64, ScalarBits::I64(value))
+                .expect("int64 pair is invariant-correct by construction"),
+        )
+    }
+
+    /// Computed float value preserving full f64 precision (e.g. `to_float`
+    /// parse results, scalar reductions over f64 tensors). Carries dtype
+    /// `f64`.
+    pub(crate) fn float64(value: f64) -> Self {
+        RuntimeValue::Scalar(
+            ScalarPayload::new(Prim::F64, ScalarBits::F64(value))
+                .expect("float64 pair is invariant-correct by construction"),
+        )
+    }
+
+    /// Construct a scalar at the dtype of an existing scalar (used by
+    /// arithmetic ops to keep result-precision = operand-precision).
+    pub(crate) fn scalar_like_int(template_dtype: Prim, value: i64) -> Result<Self, String> {
+        let bits = ScalarBits::from_i64_as(template_dtype, value)?;
+        ScalarPayload::new(template_dtype, bits)
+            .map(RuntimeValue::Scalar)
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn scalar_like_float(template_dtype: Prim, value: f64) -> Result<Self, String> {
+        let bits = ScalarBits::from_f64_as(template_dtype, value)?;
+        ScalarPayload::new(template_dtype, bits)
+            .map(RuntimeValue::Scalar)
+            .map_err(|e| e.to_string())
+    }
+
+    /// True for any [`RuntimeValue::Scalar`] whose dtype is integer-typed
+    /// per `Prim::is_integer`. Used by dispatch sites that previously
+    /// matched `RuntimeValue::Int(_)`.
+    #[allow(
+        dead_code,
+        reason = "downstream wave-2 will route through these classification helpers"
+    )]
+    pub(crate) fn is_int_scalar(&self) -> bool {
+        matches!(self, RuntimeValue::Scalar(payload) if payload.dtype().is_integer())
+    }
+
+    /// True for any [`RuntimeValue::Scalar`] whose dtype is float-typed
+    /// per `Prim::is_float`. Used by dispatch sites that previously
+    /// matched `RuntimeValue::Float(_)`.
+    #[allow(
+        dead_code,
+        reason = "downstream wave-2 will route through these classification helpers"
+    )]
+    pub(crate) fn is_float_scalar(&self) -> bool {
+        matches!(self, RuntimeValue::Scalar(payload) if payload.dtype().is_float())
+    }
+
+    /// View this value as i64 if it is an integer-typed scalar.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+                Some(payload.bits().as_i64())
+            }
+            _ => None,
+        }
+    }
+
+    /// View this value as f64 if it is a float-typed scalar. Mirrors
+    /// `as_i64` for the float row.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
+                Some(payload.bits().as_f64())
+            }
+            _ => None,
+        }
+    }
+
+    /// View this value as a bool if it is a [`RuntimeValue::Bool`].
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            RuntimeValue::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Borrow this value as an ADT `(ctor, fields)` pair if it is one.
+    /// Read accessor for the decode chokepoint's consumers; field names are
+    /// available via the public `RuntimeValue::Adt { field_names, .. }`
+    /// variant binding when needed.
+    pub fn as_adt(&self) -> Option<(&str, &[RuntimeValue])> {
+        match self {
+            RuntimeValue::Adt { ctor, fields, .. } => Some((ctor.as_str(), fields.as_slice())),
+            _ => None,
+        }
+    }
+
+    /// Re-encode this value to the machine-facing [`ExecutionValue`] wire
+    /// shape. The inverse direction of the decode chokepoint: a value the
+    /// chokepoint produced from an `ExecutionValue::Adt` re-encodes to a
+    /// value-identical `ExecutionValue::Adt`, so the conformance suite can
+    /// assert the decode round-trips its input bit-for-bit. Errors only for
+    /// values with no wire shape (mapped files), which decode never yields.
+    pub fn to_execution_value(&self) -> Result<ExecutionValue, String> {
+        runtime_value_to_schema(self)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RuntimeOutcome {
+    pub(crate) host_bindings: HashMap<String, RuntimeValue>,
+    pub(crate) transcript: Vec<String>,
+}
+
+#[cfg(test)]
+pub(crate) fn evaluate_host_program(
+    program: &CheckedProgram,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+) -> Result<RuntimeOutcome, String> {
+    evaluate_host_program_filtered(program, tensor_bindings, None)
+}
+
+/// Evaluate top-level non-fn bindings. When `selected_roots` is `Some`, only
+/// bindings whose names appear in the filter are *eagerly* evaluated. Other
+/// top-level bindings stay registered in `top_level_defs` so the body of a
+/// selected binding can lazily resolve references to them via
+/// `resolve_top_level`. This is what lets `chelis test` share a single
+/// compile across every test in a file: compile once with N synthesized
+/// `__chelis_test_k = test_k()` bindings, then run N eval passes each
+/// selecting one root — without each pass paying for the other N-1 tests
+/// running as module init.
+pub(crate) fn evaluate_host_program_filtered(
+    program: &CheckedProgram,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    selected_roots: Option<&[String]>,
+) -> Result<RuntimeOutcome, String> {
+    evaluate_host_program_with_library(program, &[], None, tensor_bindings, selected_roots)
+}
+
+/// Phase G' — host-runtime entry that seeds the `top_level_defs` table
+/// with library defs in addition to the new-code program. This is the
+/// host-side parity counterpart to `lower_program_with_context`: when
+/// new code calls a library function (e.g. `Std.Time.is_leap_year`),
+/// `eval_app` looks up that name through `lookup_top_level_def`, and
+/// the function body must be reachable. Pre-Phase-G' the runtime only
+/// saw `program.exprs()`, so library names errored as `unknown runtime
+/// name`.
+///
+/// Library defs are registered FIRST, then new-code defs, so on a name
+/// collision the new-code def shadows the library def — mirroring the
+/// type-env stacking semantics in `check_ir_with_context`.
+///
+/// `library_lowered_names` is the optional library-side
+/// lowered-vs-host classification, threaded through so a library def
+/// that the lowering pass identifies as "lives in the tensor DAG, not
+/// in the host runtime" stays out of the host runtime's eager-eval
+/// list. The new code's lowering map (computed locally below) merges
+/// on top.
+pub(crate) fn evaluate_host_program_with_library(
+    program: &CheckedProgram,
+    library_exprs: &[Expr],
+    library_lowered_names: Option<&HashMap<String, bool>>,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    selected_roots: Option<&[String]>,
+) -> Result<RuntimeOutcome, String> {
+    evaluate_host_program_with_library_and_types(
+        program,
+        library_exprs,
+        &HashMap::new(),
+        library_lowered_names,
+        tensor_bindings,
+        selected_roots,
+    )
+}
+
+/// Variant of [`evaluate_host_program_with_library`] that also takes the
+/// library's Deep type-env. Bucket 1 (`grad`/`vmap`/`realize` in the host
+/// runtime) needs the merged type-env so the IR
+/// `lower_subexpr_program` call resolves library-name free vars in the
+/// inner fn body the same way the C backend does.
+pub(crate) fn evaluate_host_program_with_library_and_types(
+    program: &CheckedProgram,
+    library_exprs: &[Expr],
+    library_type_env: &HashMap<String, Expr>,
+    library_lowered_names: Option<&HashMap<String, bool>>,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    selected_roots: Option<&[String]>,
+) -> Result<RuntimeOutcome, String> {
+    // Lowered classification: start with library's (if provided), then
+    // overlay the new-code program's. New-code wins on shadow.
+    let new_lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
+    let mut lowered_names: HashMap<String, bool> = HashMap::new();
+    if let Some(lib) = library_lowered_names {
+        lowered_names.extend(lib.iter().map(|(k, v)| (k.clone(), *v)));
+    }
+    lowered_names.extend(new_lowered_names);
+
+    // ADT field map covers both library and new-code constructors so a
+    // record-pattern match on a library ADT in new code resolves field
+    // names correctly.
+    let mut adt_fields = collect_adt_ctor_fields(library_exprs);
+    adt_fields.extend(collect_adt_ctor_fields(program.exprs()));
+
+    let mut top_level_defs = HashMap::new();
+    let mut top_level_order = Vec::new();
+
+    // Register library defs FIRST. New-code defs will overwrite on
+    // name collision below — matching the Phase C type-env shadow rule
+    // (new code wins).
+    register_top_level_defs(
+        library_exprs,
+        &lowered_names,
+        selected_roots,
+        &mut top_level_defs,
+        &mut top_level_order,
+        /* register_runtime_order = */ false,
+    );
+    // Register new-code defs. New-code is the only source of eager
+    // module-init bindings in `top_level_order` — library was already
+    // checked + lowered at context-build time and any side effects
+    // would have happened then; re-running them on every per-test
+    // worker is exactly the regression we're fixing.
+    register_top_level_defs(
+        program.exprs(),
+        &lowered_names,
+        selected_roots,
+        &mut top_level_defs,
+        &mut top_level_order,
+        /* register_runtime_order = */ true,
+    );
+
+    // Compose the runtime's type-env from library + new-code program type
+    // envs. New code wins on shadow, mirroring `compose_type_env` semantics.
+    // We need this for grad/vmap/realize routing through
+    // `lower_subexpr_program`: the IR lowerer's `lower_subexpr_program`
+    // resolves free names against `full_type_env`.
+    let mut type_env: HashMap<String, Expr> = library_type_env.clone();
+    for (name, ty_expr) in program.type_env() {
+        type_env.insert(name.clone(), ty_expr.clone());
+    }
+
+    let mut ctx = EvalContext {
+        bindings: HashMap::new(),
+        binding_types: HashMap::new(),
+        named_axis_route_cache: HashMap::new(),
+        named_axis_route_visiting: HashSet::new(),
+        top_level_defs,
+        type_env,
+        adt_fields,
+        tensor_bindings,
+        transcript: Vec::new(),
+        resolving_top_levels: Vec::new(),
+        random_seed: None,
+        random_counter: 0,
+    };
+
+    for name in top_level_order {
+        let _ = ctx.resolve_top_level(&name)?;
+    }
+
+    Ok(RuntimeOutcome {
+        host_bindings: ctx.bindings,
+        transcript: ctx.transcript,
+    })
+}
+
+fn register_top_level_defs(
+    exprs: &[Expr],
+    lowered_names: &HashMap<String, bool>,
+    selected_roots: Option<&[String]>,
+    top_level_defs: &mut HashMap<String, Expr>,
+    top_level_order: &mut Vec<String>,
+    register_runtime_order: bool,
+) {
+    for expr in top_level_items(exprs) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(body) = kids.get(1) else {
+            continue;
+        };
+        top_level_defs.insert(name.to_string(), body.clone());
+        if !register_runtime_order {
+            continue;
+        }
+        let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some("fn"));
+        if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
+            let selected = match selected_roots {
+                None => true,
+                Some(filter) => filter.iter().any(|s| s == name),
+            };
+            if selected {
+                top_level_order.push(name.to_string());
+            }
+        }
+    }
+}
+
+/// Compute a lowered-vs-host classification map for a slice of
+/// library exprs, using its own type-env. Phase G' threads this from
+/// the `CompiledContext`'s `library_checked` into the host runtime so
+/// the new-code lowering map merges with library state instead of
+/// re-deriving the wrong answer for library names that shadow
+/// builtins.
+pub(crate) fn library_lowered_names(
+    library_exprs: &[Expr],
+    library_type_env: &HashMap<String, Expr>,
+) -> HashMap<String, bool> {
+    top_level_lowering_map(library_exprs, library_type_env)
+}
+
+fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    for expr in exprs {
+        collect_top_level_items(expr, &mut out);
+    }
+    out
+}
+
+fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    if tag(list) == Some("module") {
+        for child in list.elements.iter().skip(3) {
+            collect_top_level_items(child, out);
+        }
+        return;
+    }
+    out.push(expr);
+}
+
+pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
+    Ok(match value {
+        RuntimeValue::Tensor(tensor) => ExecutionValue::Tensor {
+            value: TensorValue {
+                shape: tensor.value.shape.clone(),
+                data: tensor.value.data.clone(),
+            },
+        },
+        RuntimeValue::Scalar(payload) => {
+            let dtype = payload.dtype();
+            let bits = payload.bits();
+            if dtype.is_integer() {
+                ExecutionValue::Int64 {
+                    value: bits.as_i64(),
+                }
+            } else if dtype.is_float() {
+                ExecutionValue::Float64 {
+                    value: bits.as_f64(),
+                }
+            } else {
+                return Err(format!(
+                    "non-numeric scalar dtype `{}` cannot be encoded into ExecutionValue",
+                    dtype.name()
+                ));
+            }
+        }
+        RuntimeValue::Bool(value) => ExecutionValue::Bool { value: *value },
+        RuntimeValue::String(value) => ExecutionValue::String {
+            value: value.clone(),
+        },
+        RuntimeValue::List(items) => ExecutionValue::List {
+            value: items
+                .iter()
+                .map(runtime_value_to_schema)
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        RuntimeValue::Dict(entries) => ExecutionValue::Dict {
+            entries: entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok(DictEntryValue {
+                        key: runtime_value_to_schema(key)?,
+                        value: runtime_value_to_schema(value)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        },
+        RuntimeValue::Tuple(items) => ExecutionValue::Tuple {
+            value: items
+                .iter()
+                .map(runtime_value_to_schema)
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        RuntimeValue::Adt { ctor, fields, .. } => ExecutionValue::Adt {
+            ctor: ctor.clone(),
+            fields: fields
+                .iter()
+                .map(runtime_value_to_schema)
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        RuntimeValue::MappedFile(_) => {
+            return Err(
+                "MappedFile values are not serializable on machine-facing APIs".to_string(),
+            );
+        }
+        RuntimeValue::Closure { .. } => ExecutionValue::String {
+            value: "<closure>".to_string(),
+        },
+        RuntimeValue::Transform { kind, .. } => ExecutionValue::String {
+            value: match kind {
+                TransformKind::Grad => "<grad>".to_string(),
+                TransformKind::Vmap => "<vmap>".to_string(),
+            },
+        },
+        RuntimeValue::Unit => ExecutionValue::Unit,
+    })
+}
+
+pub(crate) fn lookup_runtime_value_for_root(
+    name: &str,
+    host_bindings: &HashMap<String, RuntimeValue>,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+) -> Option<RuntimeValue> {
+    if let Some(value) = tensor_bindings.get(name) {
+        return Some(RuntimeValue::Tensor(value.clone()));
+    }
+
+    let mut parts = name.split('.');
+    let head = parts.next()?;
+    let mut value = host_bindings.get(head)?.clone();
+    for part in parts {
+        let index = part.parse::<usize>().ok()?;
+        value = match value {
+            RuntimeValue::Tuple(items) => items.get(index)?.clone(),
+            _ => return None,
+        };
+    }
+    Some(value)
+}
+
+struct EvalContext<'a> {
+    bindings: HashMap<String, RuntimeValue>,
+    /// Declared/static Deep type expression for names in `bindings`,
+    /// maintained in lockstep with `bindings` (saved/swapped/restored at
+    /// every frame boundary). Every locally-bound name gets a key here:
+    /// `Some(ty)` when a declared or checker-annotated type is known,
+    /// `None` otherwise. The explicit `None` marker matters: it masks a
+    /// same-named top-level `type_env` entry so a local shadow is never
+    /// typed with the outer binding's type (chelis#338 named-axis routing).
+    binding_types: HashMap<String, Option<Expr>>,
+    /// Memoized per-def result of [`Self::def_requires_named_axis_routing`].
+    named_axis_route_cache: HashMap<String, bool>,
+    /// Cycle guard for the recursive routing detection walk.
+    named_axis_route_visiting: HashSet<String>,
+    top_level_defs: HashMap<String, Expr>,
+    /// Combined library + new-code Deep type-env. Threaded into
+    /// [`chelis_ir::lower::lower_subexpr_program`] when the host runtime
+    /// hits a `grad` / `vmap` form so the lowerer can resolve free names
+    /// the same way the C backend does. Empty when no library context is
+    /// present (e.g. unit tests that don't need transform support).
+    type_env: HashMap<String, Expr>,
+    adt_fields: HashMap<String, Vec<String>>,
+    tensor_bindings: &'a HashMap<String, RuntimeTensorValue>,
+    transcript: Vec<String>,
+    resolving_top_levels: Vec<String>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+}
+
+fn tag(list: &List) -> Option<&str> {
+    match list.elements.first() {
+        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
+        _ => None,
+    }
+}
+
+fn get_meta(list: &List) -> Option<&MetaMap> {
+    match list.elements.get(1) {
+        Some(Expr::Map(map, _)) => Some(map),
+        _ => None,
+    }
+}
+
+/// Extract the primitive dtype written into a `(lit {type: ...})` meta
+/// by the type checker, if any. Returns `None` for non-primitive type
+/// metadata (e.g. tensor literal types) or missing metadata; eval_lit
+/// then falls back to the spec §5.3 literal default.
+fn lit_meta_prim(meta: &MetaMap) -> Option<Prim> {
+    let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
+    extract_prim_from_type_expr(ty_expr)
+}
+
+fn children(list: &List) -> &[Expr] {
+    if list.elements.len() > 2 {
+        &list.elements[2..]
+    } else {
+        &[]
+    }
+}
+
+fn symbol_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn int_value(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Atom(Atom::Int(value), _) => Some(*value),
+        _ => None,
+    }
+}

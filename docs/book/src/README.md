@@ -19,6 +19,14 @@ on top of it.
 - [Type System Basics](types.md)
 - [Reef and Packages](reef.md)
 - [Examples](examples.md)
+
+## Language Reference
+
+- [Surf Syntax Reference](surf-reference.md)
+- [Type System Reference](type-reference.md)
+- [Transforms: grad and vmap](transforms.md)
+- [Backends](backends.md)
+- [Runtime and Standard Library](stdlib.md)
 - [Reference Map](reference.md)
 
 ## A Small Surf Program

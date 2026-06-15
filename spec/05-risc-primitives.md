@@ -37,8 +37,8 @@ Together, the two tiers define everything the compiler has special knowledge of.
 
 Phase `3h` expands the practical primitive surface beyond this initial minimal set with
 `einsum`, `concat` / `split`, `gather` / `scatter`, `where`, `cumsum`, `sort`,
-`diagonal` / `trace`, and `clamp`. `Std.Nn.Embedding` remains the named standard-
-library surface over `gather`.
+`diagonal` / `trace`, and `clamp`. `School.Nn.Embedding` (moved to the `school` library
+in chelis-std 0.4.0) remains the named library surface over `gather`.
 
 For the `3h` additions, Chelis now rejects deterministic literal-driven value errors
 at check time when enough information is concrete in source (for example, statically
@@ -94,8 +94,14 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | `recip` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 reciprocal `1.0 / x` | `-g * y * y` (= `-g / x^2`, using `y = 1/x`) |
 | `exp` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise e^x | `g * exp(x)` |
 | `log` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ln(x) | `g / x` |
-| `sin` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sin(x) | `g * cos(x)` where `cos(x) = sin(x + π/2)` |
+| `sin` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sin(x) | `g * cos(x)` |
+| `cos` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise cos(x) | `-g * sin(x)` |
+| `tan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise tan(x) | `g / (cos(x) * cos(x))` (= `g / cos²(x)`) |
+| `atan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise atan(x) | `g / (1 + x * x)` |
 | `sqrt` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sqrt(x) | `g / (2 * sqrt(x))` |
+| `abs` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise absolute value | `g * sign(x)` (sign = `(x > 0) - (x < 0)`; 0 at x = 0) |
+| `floor` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise floor | non-differentiable (piecewise constant); `grad` rejects it |
+| `ceil` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ceil | non-differentiable (piecewise constant); `grad` rejects it |
 
 **`recip`.** Native IEEE-754 reciprocal, used inside
 `lower_sigmoid` (and any other reciprocal-shaped lowering) to
@@ -122,7 +128,29 @@ primitive — the reductions here, `softmax`, `mean`, `gather`,
 `scatter`, and the movement and ordering ops — and is the convention
 the formula examples below already use (`axis=-1` for the last axis).
 
+The reduction axis must be a compile-time constant (a literal, or a
+`cast(N, int32)`-wrapped literal). Because the output shape is "remove
+the dimension at position `axis`", the type checker cannot determine
+which dimension is dropped from a runtime axis value. A reduction whose
+axis is a runtime expression (for example a function-parameter `int32`)
+is rejected at the reduction call site with a diagnostic naming the
+compile-time-constant requirement, rather than leaving the output shape
+unresolved (chelis#259). The same constraint and diagnostic apply to
+`expand`'s insert axis.
+
 **Output dimensions:** The dimension at position `axis` is removed. All other dimensions are preserved.
+
+**Runtime-derived operand rank (chelis#320).** When a reduction
+(`max_reduce`) or `gather` is applied to a windowing/stacking
+intermediate whose IR node lowered without a static tensor type (a
+rank-0 placeholder), the lowering recovers the operand's rank from the
+ascribed result type — for a reduction the operand rank is the result
+rank plus one; for `gather` it is `result_rank - indices_rank + 1` —
+and re-inserts the reduced/gathered axis as a runtime-derived symbolic
+dim. This lets `grad` differentiate a windowed reduce/gather (the
+pooling/im2col pattern) instead of raising "axis out of range for an
+operand of rank 0"; the symbolic axis resolves from the operand's
+runtime shape at evaluation time.
 
 **Accumulator parameter (`sum` only).** The optional `accumulator: prec`
 parameter controls the precision used for the running sum and the precision
@@ -150,6 +178,175 @@ explicitly request a narrower-than-default accumulator are a type error per
 `max_reduce` does not take an accumulator parameter. Max is order-preserving
 and does not lose precision the way a long sum does, so the result element
 type matches the operand element type.
+
+### 2.3.1 Windowed Reduction
+
+| Name | Signature | Semantics | AD adjoint |
+|---|---|---|---|
+| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's max (ties distribute, as `max_reduce`); accumulated over overlapping windows |
+| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's min (ties distribute, as `min_reduce`); accumulated over overlapping windows |
+| `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives the owning window's `g` (overlap-add over windows covering it) |
+| `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | As `sum`, with each contribution scaled by `1 / window_volume` |
+
+**Design rationale: four primitives, not one with a Reducer enum.** The
+issue text (Chelis-Lang/chelis#254) proposed a `Reducer` enum argument
+(`Sum | Max | Min | Mean`). The shipped surface follows the same pattern as
+the existing reductions — `max_reduce`, `min_reduce`, `prod_reduce`,
+`argmax_reduce`, `argmin_reduce` are already four siblings, not one
+parameterized op — so adding four siblings keeps the builtin set
+consistent and avoids introducing a string-keyed or ADT-keyed argument that
+would have to be resolved at check time. The IR carries a single
+`RiscOp::ReduceWindow { reducer, window_shape, strides }` node whose
+`reducer` field selects `Max` / `Min` / `Sum` / `Mean`; the four Surf
+builtins differ only in which `ReduceWindowKind` they emit.
+
+**Padding mode: Valid only.** The shipped surface implements
+`Valid`-padding only. Output spatial extent per windowed axis is
+`floor((input_dim - window) / stride) + 1`. `Same`-padding (with
+`ceil(input_dim / stride)` output and zero / `-inf` fill at the
+boundary) is **deferred** to a follow-up; users who need that
+behavior should pad explicitly with `pad(x, ..., fill)` before
+calling `reduce_window_*`. The four-arg signature in the original
+issue text proposed `(x, window_shape, strides, reducer)` with no
+explicit mode; this matches `Valid` as the implicit default.
+
+**Shape contract.**
+
+- `window_shape` and `strides` are int32 lists of equal length
+  `n >= 1`.
+- The trailing `n` axes of the input are the windowed axes. The
+  leading `rank(input) - n` axes pass through unchanged.
+- Each windowed entry must be a positive int32. `window_shape[i] >= 1`
+  and `strides[i] >= 1`.
+- The output rank equals the input rank. Leading dims match the
+  input; trailing dim `i` is
+  `floor((input_dims[rank - n + i] - window_shape[i]) / strides[i]) + 1`.
+  When that formula yields a non-positive value the call is a type
+  error (an empty window output is structurally meaningless under
+  `Valid` padding).
+
+**Lowering.** The IR `RiscOp::ReduceWindow` carries the full
+`{reducer, window_shape, strides}` triple. The IR evaluator, the host
+runtime, and the C backend each implement it as a direct windowed loop
+nest — `Mean` is implemented as windowed `Sum` divided by the window
+volume, computed inline rather than as a separate `Div` op. (HIP
+codegen is deferred; see **Backend status** below.) There is no Tier-2
+to Tier-1 decomposition: `reduce_window_*` is a Tier-1 primitive in its
+own right. The Surf `reduce_window_*` names are the public surface;
+the IR node and backends share the single `ReduceWindow` lowering
+path.
+
+*Accumulation precision.* The IR evaluator and host runtime accumulate
+each window in `f64` and store at the tensor precision; the C backend
+accumulates `sum` / `mean` in an `f32` lane (`float acc`). For the small
+windows the parity gate exercises (2×2, 3×3) the two agree well inside the
+`1e-5` compile-run tolerance, but a very large window in `f32` can drift
+past it — widen the C accumulator (or the tolerance) before relying on
+big-window `sum` / `mean` parity. `reduce_window_sum` deliberately does
+**not** widen its result precision the way the global `sum` reduction
+does; the output element type matches the operand type (which is also why
+the adjoint needs no `Cast` — see **AD policy**).
+
+**AD policy.** `reduce_window_*` is differentiable. `chelis_ir::grad`
+lowers the reverse-mode adjoint to a single `RiscOp::ReduceWindowGrad`
+node carrying the same `{reducer, window_shape, strides}` triple, taking
+`(x, g)` (the forward input and the upstream cotangent) and returning the
+input cotangent `din` (shape `S_in`). The adjoints, accumulated over the
+(overlapping) windows that cover each input position, are:
+
+- `Sum`: scatter (overlap-add) the owning window's `g` to each
+  window-source position — the transpose of the windowed sum.
+- `Mean`: as `Sum`, scaling each contribution by `1 / window_volume`.
+- `Max` / `Min`: route each window's `g` to every position equal to that
+  window's extreme — the windowed generalization of the `max_reduce` /
+  `min_reduce` `eq`-mask subgradient, so ties distribute the full `g`
+  (not a `1/k` share). `x` is read to locate the extreme.
+
+Like the forward op, `ReduceWindowGrad` is implemented directly by the IR
+evaluator, the host runtime, and the C backend (the C adjoint is emitted
+serially, since overlapping windows scatter-add into shared `din`
+positions); HIP codegen is deferred and rejected before codegen (see
+**Backend status**). Second-order AD through the adjoint itself is not
+defined. The adjoints are validated against central
+finite differences for all four reducers over overlapping and strided
+windows (`chelis-ir::eval` unit tests), and the C backend is checked for
+evaluator parity (`chelis-backend-c::exec_compile::exec_reduce_window_grad_*`).
+
+**Output-dim formula vs. issue #254.** The admitting issue text
+sketched the `Valid` output extent as `(input_dim - window + 1) /
+stride`. That informal form only agrees with the standard pooling
+formula at `stride == 1`; for `stride > 1` it under-counts (e.g.
+`input=8, window=2, stride=2` gives `3` instead of the correct `4`
+non-overlapping windows at positions `0, 2, 4, 6`). The shipped
+formula `floor((input_dim - window) / stride) + 1` matches
+`jax.lax.reduce_window` / PyTorch pool kernels and is the normative
+contract above.
+
+**Backend status (initial admission).** The C backend is the
+canonical lowering and is exercised by a gcc compile-and-run
+evaluator-parity gate. The HIP backend codegen for `ReduceWindow` (and
+its `ReduceWindowGrad` adjoint) is **deferred**: `chelis build --target
+hip` on a program containing `reduce_window_*` is **rejected** at compile
+time with a clean `unsupported_feature` error
+(`reject_unsupported_hip_ops`, compiler-api + CLI mirror) rather than
+emitting a GPU kernel. The HIP launch-emit arm retains a deferred-feature
+`todo!` as a defensive backstop (matching the `Pad` / `Shrink` HIP stubs),
+reached only if some path bypasses the guard. Use the default C target
+until GPU windowed reductions land.
+
+**Statically-known windowed extents required on the build path.** The
+build/backend path needs each *windowed* axis extent to be known at
+compile time (a literal `tensor[..., 8, 8, p]` dim, or a named dim with
+a bound size). A windowed axis whose extent is only known at runtime
+(e.g. a `pad_sequences` result, whose dims are bound from input
+metadata) cannot be lowered to a correct static output shape under the
+current `DimInfo` model: the windowed output extent
+`floor((d - window) / stride) + 1` is strictly smaller than the input
+extent `d` and is not representable as a `DimExpr` (no subtraction /
+floor), so the backend's symbolic-dim binding would tie the windowed
+output axis to the *input* extent — silently mis-allocating the output
+tensor and emitting an out-of-bounds window read. To prevent that, the C
+build **rejects** such a program at compile time with an
+`unsupported_feature` error
+(`chelis_compiler_api::compiler::reject_symbolic_windowed_reduce` and the
+CLI's mirror, with a defensive backstop in the C emitter); it does not
+emit a kernel. Window over a statically-sized axis, or pad the input to a
+concrete extent first. (The HIP target is unaffected by this specific
+check: it defers `reduce_window_*` codegen entirely — see **Backend
+status** above — so it never reaches the mis-allocation.) The leading
+pass-through axes may remain symbolic. The IR evaluator and host runtime
+always recompute from the concrete runtime shape and so handle
+runtime-only extents correctly; only the ahead-of-time C/HIP build path
+carries this restriction.
+
+Separately, the C `reduce_window_*` emitter is **f32-only** (no bf16/f16
+convert-load path yet). A bf16/f16 windowed reduction is rejected before
+codegen with an `unsupported_feature` error
+(`reject_unsupported_reduce_window_precision`, compiler-api + CLI mirror,
+with the C emitter `panic!` as a defensive backstop), so it surfaces as a
+clean diagnostic rather than an emitter crash. Cast to `f32` before the
+windowed reduction; bf16/f16 widening is follow-on work.
+
+**Acceptance oracle.** The authoritative completion oracle for this
+primitive is the standard per-PR gate, `python3 scripts/gate.py`, which
+runs (among the broader suite): the type-checker shape-contract tests
+(`chelis-types::issue_254_reduce_window_signatures`), the IR
+evaluator + adjoint-lowering tests (`chelis-ir::issue_254_reduce_window`)
+plus the finite-difference adjoint checks
+(`chelis-ir::eval::tests::reduce_window_grad_*`), the host-runtime
+evaluator tests
+(`chelis-compiler-api::issue_254_reduce_window_host_runtime`), the C
+emit structural tests (`chelis-backend-c::issue_254_reduce_window_emit`)
+plus the gcc compile-and-run evaluator-parity tests for both the forward
+op and its adjoint
+(`chelis-backend-c::exec_compile::exec_reduce_window_*`), the
+build-path rejection of runtime-symbolic windowed axes
+(`chelis-compiler-api::compiler::tests::*reduce_window*` and
+`chelis-cli::cli::build_c_rejects_reduce_window_over_runtime_symbolic_axis`),
+and the end-to-end build-vs-eval parity over the executable example
+(`chelis-cli::cli::build_c_runs_tensor_structural_ops_and_matches_eval_output`).
+No `#[ignore]`d or HIP manual gate is required for this primitive,
+because HIP codegen (forward and adjoint) is deferred.
 
 **Reduction order (`sum` only).** `sum` evaluates the reduction with a
 **stride-4 ILP cascade** — four independent accumulator lanes loaded
@@ -281,7 +478,7 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 | Name | Lowering to RISC |
 |---|---|
 | `matmul(A, B)` | See §4.1 |
-| `mean(x, axis)` | `div(sum(x, axis), const(dim_size))` |
+| `mean(x, axis)` | `div(sum(x, axis), divisor)` where `divisor = const(dim_size)` for a concrete-extent axis, or the runtime count `sum(const(1.0, x.shape), axis)` when the reduced axis is a runtime-derived (`Named(_, None)`) extent (chelis#320) |
 | `softmax(x, axis)` | See §4.2 |
 | `linear(x, w, b)` | `add(matmul(x, w), b)` (with appropriate expand on b) |
 | `cross_entropy(logits, labels)` | See §4.3 |
@@ -297,11 +494,13 @@ lowering are aligned.
 ### 3.5 Lowering Helpers And Sparse Implementation Nodes
 
 The following names appear in lowering narratives (§4) as pseudocode or
-pattern-matched operations. Most decompose into Tier 1 primitives:
+pattern-matched operations. Most decompose into Tier 1 primitives.
+(`cos` was formerly listed here as `sin(add(x, const(π/2)))`; it is now a
+first-class unary primitive `RiscOp::Cos` — see §2.2 — alongside `tan`,
+`atan`, `abs`, `floor`, and `ceil`, none of which decompose.)
 
 | Helper | Decomposes to |
 |---|---|
-| `cos(x)` | `sin(add(x, const(π/2)))` |
 | `argmax(x, axis)` | comparison chain via `cmplt` + `max_elem` |
 | `gather(x, idx, axis)` | one-hot encoding via `reshape`, `expand`, `mul`, `sum` |
 | `im2col(x, kh, kw, ...)` | `stride`, `pad`, `reshape`, `permute` |
@@ -633,7 +832,12 @@ Lowering:
 
 Every RISC primitive has a defined adjoint rule (§2). This means `grad` can differentiate through any composition of RISC primitives.
 
-**Non-differentiable primitives:** `cmplt`, `const`, `load`. These have zero gradient. The type system (Phase 2, via the `Diff` effect) will detect when `grad` is applied to a function containing non-differentiable operations and report which operations are the problem.
+**Non-differentiable primitives:** `cmplt`, `const`, `load` have zero gradient.
+`floor` and `ceil` are piecewise constant and `grad` rejects them with an
+`AdRejectionReason::PiecewiseConstant` error rather than silently returning a zero
+gradient. The type system (Phase 2, via the `Diff` effect) will detect when `grad` is
+applied to a function containing non-differentiable operations and report which
+operations are the problem.
 
 **Almost-everywhere differentiable:** `max_elem` (gradient is zero at the boundary where inputs are equal), `relu` via `max_elem(x, 0)` (gradient is zero at x=0). These are valid targets for `grad` — the subgradient convention (pick one side) is standard in ML.
 

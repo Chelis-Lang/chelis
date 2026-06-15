@@ -1,10 +1,10 @@
 //! Tensor-aware evaluator for the Phase 0 RISC DAG.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dag::{
-    Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType, bind_symbolic_dims,
-    symbolic_bindings,
+    Dag, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, TensorType,
+    bind_symbolic_dims, symbolic_bindings,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -168,6 +168,7 @@ fn resolve_load_inputs<F>(
     dag: &Dag,
     live: Option<&[bool]>,
     strict_loads: bool,
+    symbolic_dim_load_inputs: &HashSet<&str>,
     mut load_input: F,
 ) -> Result<HashMap<String, TensorValue>, String>
 where
@@ -175,14 +176,17 @@ where
 {
     let mut inputs = HashMap::new();
     for node in dag.nodes() {
-        if let Some(mask) = live
-            && !mask[node.id.0]
-        {
-            continue;
-        }
         let RiscOp::Load { name } = &node.op else {
             continue;
         };
+        let is_live = live.is_none_or(|mask| mask[node.id.0]);
+        // A dead Load is still resolved when its type may declare a
+        // symbolic dim a live node needs (chelis#351) — but its absence
+        // is never a strict-load error; only inference may complain
+        // about it, with the dim-targeted message.
+        if !is_live && !symbolic_dim_load_inputs.contains(name.as_str()) {
+            continue;
+        }
         if inputs.contains_key(name.as_str()) {
             continue;
         }
@@ -190,7 +194,9 @@ where
             Some(value) => {
                 inputs.insert(name.as_str().to_string(), value);
             }
-            None if strict_loads => return Err(format!("missing required input `{name}`")),
+            None if strict_loads && is_live => {
+                return Err(format!("missing required input `{name}`"));
+            }
             None => {}
         }
     }
@@ -457,6 +463,257 @@ fn scatter_replace(
     out
 }
 
+/// Strided windowed reduction over the trailing `window_shape.len()` axes.
+///
+/// Per `spec/05-risc-primitives.md` §2.3.1 (Valid padding):
+/// - Leading `rank - n` axes pass through unchanged.
+/// - Each windowed output axis has extent
+///   `floor((input_dim - window_shape[i]) / strides[i]) + 1`.
+/// - `Mean` is windowed `Sum` divided by the window volume.
+///
+/// Panics if the input rank is smaller than `window_shape.len()`, if any
+/// window/stride entry is zero, or if any windowed dim has `window > input_dim`.
+/// The IR verifier and type checker reject those statically before the
+/// evaluator runs.
+fn reduce_window(
+    input: &TensorValue,
+    reducer: ReduceWindowKind,
+    window_shape: &[usize],
+    strides: &[usize],
+) -> TensorValue {
+    assert_eq!(
+        window_shape.len(),
+        strides.len(),
+        "window_shape and strides must have equal length"
+    );
+    let rank = input.shape.len();
+    let n = window_shape.len();
+    assert!(
+        rank >= n,
+        "reduce_window: input rank {rank} smaller than window arity {n}"
+    );
+    let leading = rank - n;
+
+    let mut out_shape = input.shape[..leading].to_vec();
+    for i in 0..n {
+        let in_dim = input.shape[leading + i];
+        let w = window_shape[i];
+        let s = strides[i];
+        assert!(w >= 1, "reduce_window: window axis {i} must be >= 1");
+        assert!(s >= 1, "reduce_window: stride axis {i} must be >= 1");
+        assert!(
+            in_dim >= w,
+            "reduce_window: axis {i} input dim {in_dim} < window {w}"
+        );
+        out_shape.push((in_dim - w) / s + 1);
+    }
+
+    let window_volume: usize = window_shape.iter().product();
+    let out_len = numel(&out_shape);
+    let mut out = vec![0.0_f64; out_len];
+
+    let init_acc = |r: ReduceWindowKind| -> f64 {
+        match r {
+            ReduceWindowKind::Max => f64::NEG_INFINITY,
+            ReduceWindowKind::Min => f64::INFINITY,
+            ReduceWindowKind::Sum | ReduceWindowKind::Mean => 0.0,
+        }
+    };
+    let combine = |r: ReduceWindowKind, acc: f64, x: f64| -> f64 {
+        match r {
+            ReduceWindowKind::Max => acc.max(x),
+            ReduceWindowKind::Min => acc.min(x),
+            ReduceWindowKind::Sum | ReduceWindowKind::Mean => acc + x,
+        }
+    };
+
+    for (out_flat, slot) in out.iter_mut().enumerate() {
+        let out_idx = linear_to_index(out_flat, &out_shape);
+
+        // Walk the window: iterate over all positions inside the
+        // window_shape multi-index. The source index per dimension is
+        // `out_idx[axis] * stride + window_pos` for windowed axes,
+        // matching the leading-axis passthrough rule above.
+        let mut acc = init_acc(reducer);
+        let mut window_pos = vec![0usize; n];
+        loop {
+            let mut src_idx = vec![0usize; rank];
+            src_idx[..leading].copy_from_slice(&out_idx[..leading]);
+            for i in 0..n {
+                src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
+            }
+            let src_flat = index_to_linear(&src_idx, &input.shape);
+            acc = combine(reducer, acc, input.data[src_flat]);
+
+            // Increment window_pos (mixed-radix carry).
+            if n == 0 {
+                break;
+            }
+            let mut carry = n;
+            for i in (0..n).rev() {
+                window_pos[i] += 1;
+                if window_pos[i] < window_shape[i] {
+                    carry = i;
+                    break;
+                }
+                window_pos[i] = 0;
+            }
+            if carry == n {
+                break;
+            }
+        }
+        if matches!(reducer, ReduceWindowKind::Mean) {
+            acc /= window_volume as f64;
+        }
+        *slot = acc;
+    }
+
+    TensorValue {
+        data: out,
+        shape: out_shape,
+    }
+}
+
+/// Reverse-mode adjoint of [`reduce_window`] (see `RiscOp::ReduceWindowGrad`).
+///
+/// `x` is the original windowed input (shape `S_in`); `g` is the upstream
+/// cotangent (shape `S_out`, the forward output). Returns `din` with shape
+/// `S_in`, accumulating contributions over every (overlapping) window:
+/// - `Sum`:  each window-source position receives the owning window's `g`.
+/// - `Mean`: as `Sum`, scaled by `1 / window_volume`.
+/// - `Max` / `Min`: the window's `g` is routed to every position equal to
+///   that window's max / min (ties distribute, matching the `max_reduce` /
+///   `min_reduce` subgradient convention).
+///
+/// Panics on the same structural violations as [`reduce_window`]; the IR
+/// verifier and type checker reject those before the evaluator runs.
+fn reduce_window_grad(
+    x: &TensorValue,
+    g: &TensorValue,
+    reducer: ReduceWindowKind,
+    window_shape: &[usize],
+    strides: &[usize],
+) -> TensorValue {
+    assert_eq!(
+        window_shape.len(),
+        strides.len(),
+        "window_shape and strides must have equal length"
+    );
+    let rank = x.shape.len();
+    let n = window_shape.len();
+    assert!(
+        rank >= n,
+        "reduce_window_grad: input rank {rank} smaller than window arity {n}"
+    );
+    let leading = rank - n;
+    let window_volume: f64 = window_shape.iter().product::<usize>() as f64;
+
+    // Output dim per windowed axis: floor((in - w) / s) + 1 (Valid padding),
+    // matching the forward. The cotangent `g` is indexed by this shape.
+    let mut out_shape = x.shape[..leading].to_vec();
+    for i in 0..n {
+        let in_dim = x.shape[leading + i];
+        let w = window_shape[i];
+        let s = strides[i];
+        assert!(w >= 1, "reduce_window_grad: window axis {i} must be >= 1");
+        assert!(s >= 1, "reduce_window_grad: stride axis {i} must be >= 1");
+        assert!(
+            in_dim >= w,
+            "reduce_window_grad: axis {i} input dim {in_dim} < window {w}"
+        );
+        out_shape.push((in_dim - w) / s + 1);
+    }
+    assert_eq!(
+        g.shape, out_shape,
+        "reduce_window_grad: cotangent shape {:?} != forward output shape {out_shape:?}",
+        g.shape
+    );
+
+    let mut din = vec![0.0_f64; x.data.len()];
+
+    // Walk each output position `o` (one upstream gradient value `g[o]`),
+    // then walk that window's source positions. `Max`/`Min` need the
+    // window extreme first; `Sum`/`Mean` scatter unconditionally.
+    for (out_flat, &g_val) in g.data.iter().enumerate() {
+        let out_idx = linear_to_index(out_flat, &out_shape);
+
+        let src_flat_at = |window_pos: &[usize]| -> usize {
+            let mut src_idx = vec![0usize; rank];
+            src_idx[..leading].copy_from_slice(&out_idx[..leading]);
+            for i in 0..n {
+                src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
+            }
+            index_to_linear(&src_idx, &x.shape)
+        };
+
+        // First pass (Max/Min only): find the window extreme.
+        let extreme = match reducer {
+            ReduceWindowKind::Max | ReduceWindowKind::Min => {
+                let mut acc = match reducer {
+                    ReduceWindowKind::Max => f64::NEG_INFINITY,
+                    _ => f64::INFINITY,
+                };
+                for_each_window_pos(window_shape, n, |window_pos| {
+                    let v = x.data[src_flat_at(window_pos)];
+                    acc = match reducer {
+                        ReduceWindowKind::Max => acc.max(v),
+                        _ => acc.min(v),
+                    };
+                });
+                Some(acc)
+            }
+            ReduceWindowKind::Sum | ReduceWindowKind::Mean => None,
+        };
+
+        // Second pass: scatter the contribution into `din`.
+        for_each_window_pos(window_shape, n, |window_pos| {
+            let src = src_flat_at(window_pos);
+            match reducer {
+                ReduceWindowKind::Sum => din[src] += g_val,
+                ReduceWindowKind::Mean => din[src] += g_val / window_volume,
+                ReduceWindowKind::Max | ReduceWindowKind::Min => {
+                    // Distribute to every position equal to the window
+                    // extreme (ties get the full gradient, mirroring the
+                    // `max_reduce` `eq`-mask adjoint).
+                    if x.data[src] == extreme.expect("extreme computed for Max/Min") {
+                        din[src] += g_val;
+                    }
+                }
+            }
+        });
+    }
+
+    TensorValue {
+        data: din,
+        shape: x.shape.clone(),
+    }
+}
+
+/// Invoke `f` once per multi-index inside an `n`-dimensional window of
+/// extent `window_shape` (row-major / mixed-radix order). For `n == 0`
+/// (no windowed axes) `f` is invoked once with an empty index.
+fn for_each_window_pos(window_shape: &[usize], n: usize, mut f: impl FnMut(&[usize])) {
+    let mut window_pos = vec![0usize; n];
+    loop {
+        f(&window_pos);
+        if n == 0 {
+            break;
+        }
+        let mut carry = n;
+        for i in (0..n).rev() {
+            window_pos[i] += 1;
+            if window_pos[i] < window_shape[i] {
+                carry = i;
+                break;
+            }
+            window_pos[i] = 0;
+        }
+        if carry == n {
+            break;
+        }
+    }
+}
+
 fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f64) -> TensorValue {
     assert!(axis < input.shape.len());
     let mut out_shape = input.shape.clone();
@@ -688,8 +945,7 @@ fn eval_tensor_internal<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    let resolved_inputs = resolve_load_inputs(dag, live, strict_loads, &mut load_input)?;
-    let bound_dag = if dag
+    let needs_symbolic_binding = dag
         .nodes()
         .iter()
         .any(|node| matches!(&node.op, RiscOp::Expand { size, .. } if !size.is_concrete()))
@@ -704,7 +960,47 @@ where
                 .iter()
                 .any(|dim| matches!(dim, DimInfo::Named(_, None))),
             _ => false,
-        }) {
+        });
+    // chelis#351: symbolic-dim inference reads shapes from the Loads
+    // that `symbolic_occurrences` nominates as each dim's declaring
+    // inputs — and such a Load can be DEAD under the roots' live mask
+    // while the dim itself is live (e.g. `vmap(grad(f))` where the
+    // gradient is constant in `x`: the backward DAG never consumes the
+    // `x` Load, but its `Expand { size: Sym(..) }` still needs the dim
+    // bound from `x`'s shape). Resolve named-dim-typed Loads even when
+    // masked off (a superset of the nominated occurrence labels, which
+    // always point at a Load carrying the symbol in its dims),
+    // tolerating absence: if a needed one is genuinely unavailable,
+    // `infer_symbolic_bindings_from_inputs` reports the targeted
+    // "missing required input ... for symbolic dimension" error
+    // instead of the strict-load one.
+    let symbolic_dim_load_inputs: HashSet<&str> = if needs_symbolic_binding && live.is_some() {
+        dag.nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::Load { name }
+                    if node
+                        .output_type
+                        .dims
+                        .iter()
+                        .any(|dim| matches!(dim, DimInfo::Named(_, _))) =>
+                {
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let resolved_inputs = resolve_load_inputs(
+        dag,
+        live,
+        strict_loads,
+        &symbolic_dim_load_inputs,
+        &mut load_input,
+    )?;
+    let bound_dag = if needs_symbolic_binding {
         let bindings = infer_symbolic_bindings_from_inputs(dag, &resolved_inputs)?;
         bind_symbolic_dims(dag, &bindings)?
     } else {
@@ -789,6 +1085,22 @@ where
             RiscOp::ProdReduce { axis } => {
                 reduce(&values[&node.inputs[0]], *axis, 1.0, |acc, x| acc * x)
             }
+            RiscOp::ReduceWindow {
+                reducer,
+                window_shape,
+                strides,
+            } => reduce_window(&values[&node.inputs[0]], *reducer, window_shape, strides),
+            RiscOp::ReduceWindowGrad {
+                reducer,
+                window_shape,
+                strides,
+            } => reduce_window_grad(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                *reducer,
+                window_shape,
+                strides,
+            ),
             RiscOp::Argmax { axis } => reduce_argcmp(
                 &values[&node.inputs[0]],
                 *axis,
@@ -1033,6 +1345,145 @@ mod tests {
         }
     }
 
+    // ---- reduce_window reverse-mode adjoint (RiscOp::ReduceWindowGrad) ----
+
+    /// Scalar loss `sum(reduce_window(x))` used as the finite-difference
+    /// oracle: its cotangent w.r.t. every forward output is exactly 1, so
+    /// the analytic input gradient is `reduce_window_grad(x, ones)`.
+    fn rw_loss(x: &TensorValue, r: ReduceWindowKind, w: &[usize], s: &[usize]) -> f64 {
+        reduce_window(x, r, w, s).data.iter().sum()
+    }
+
+    /// Central finite-difference gradient of `rw_loss` w.r.t. each element.
+    fn rw_fd_grad(x: &TensorValue, r: ReduceWindowKind, w: &[usize], s: &[usize]) -> Vec<f64> {
+        let eps = 1e-4;
+        (0..x.data.len())
+            .map(|i| {
+                let mut xp = x.clone();
+                let mut xm = x.clone();
+                xp.data[i] += eps;
+                xm.data[i] -= eps;
+                (rw_loss(&xp, r, w, s) - rw_loss(&xm, r, w, s)) / (2.0 * eps)
+            })
+            .collect()
+    }
+
+    fn assert_close(a: &[f64], b: &[f64], tol: f64, ctx: &str) {
+        assert_eq!(a.len(), b.len(), "{ctx}: length mismatch");
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            assert!(
+                (x - y).abs() <= tol,
+                "{ctx}: element {i} differs: {x} vs {y} (tol {tol})"
+            );
+        }
+    }
+
+    #[test]
+    fn reduce_window_grad_matches_finite_difference_all_reducers() {
+        // Distinct values (no ties) so Max/Min gradients are unique and
+        // both the analytic adjoint and the central difference agree.
+        let x = TensorValue {
+            data: vec![
+                3.0, 1.0, 4.0, 1.5, 5.0, 9.0, 2.0, 6.0, 5.0, 3.5, 8.0, 9.5, 7.0, 0.5, 2.5, 6.5,
+            ],
+            shape: vec![4, 4],
+        };
+        // Overlapping (stride < window) and a non-unit stride exercise the
+        // overlap-add / select-and-scatter accumulation across windows.
+        for (w, s) in [
+            (vec![2, 2], vec![1, 1]),
+            (vec![2, 2], vec![2, 2]),
+            (vec![3, 3], vec![1, 1]),
+            (vec![2, 3], vec![2, 1]),
+        ] {
+            for r in [
+                ReduceWindowKind::Sum,
+                ReduceWindowKind::Mean,
+                ReduceWindowKind::Max,
+                ReduceWindowKind::Min,
+            ] {
+                let out = reduce_window(&x, r, &w, &s);
+                let ones = TensorValue {
+                    data: vec![1.0; out.data.len()],
+                    shape: out.shape.clone(),
+                };
+                let analytic = reduce_window_grad(&x, &ones, r, &w, &s);
+                assert_eq!(analytic.shape, x.shape);
+                let fd = rw_fd_grad(&x, r, &w, &s);
+                assert_close(
+                    &analytic.data,
+                    &fd,
+                    1e-3,
+                    &format!("reducer={r:?} window={w:?} stride={s:?}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reduce_window_grad_sum_is_window_cover_count() {
+        // With g = ones, Sum's adjoint at position i is exactly the number
+        // of windows covering i. For a [4] input, window=2, stride=1 the
+        // windows are [0,1],[1,2],[2,3]; interior positions are covered
+        // twice, the two ends once.
+        let x = TensorValue {
+            data: vec![10.0, 20.0, 30.0, 40.0],
+            shape: vec![4],
+        };
+        let out = reduce_window(&x, ReduceWindowKind::Sum, &[2], &[1]);
+        let ones = TensorValue {
+            data: vec![1.0; out.data.len()],
+            shape: out.shape.clone(),
+        };
+        let din = reduce_window_grad(&x, &ones, ReduceWindowKind::Sum, &[2], &[1]);
+        assert_eq!(din.data, vec![1.0, 2.0, 2.0, 1.0]);
+
+        // Mean is Sum scaled by 1 / window_volume (= 2 here).
+        let din_mean = reduce_window_grad(&x, &ones, ReduceWindowKind::Mean, &[2], &[1]);
+        assert_eq!(din_mean.data, vec![0.5, 1.0, 1.0, 0.5]);
+    }
+
+    #[test]
+    fn reduce_window_grad_max_routes_to_argmax_and_accumulates_overlap() {
+        // Strictly increasing input over a [4] window=2 stride=1: windows
+        // [0,1]->max@1, [1,2]->max@2, [2,3]->max@3. With distinct upstream
+        // gradients, position 0 gets nothing, 1 gets g[0], 2 gets g[1],
+        // 3 gets g[2].
+        let x = TensorValue {
+            data: vec![1.0, 2.0, 3.0, 4.0],
+            shape: vec![4],
+        };
+        let g = TensorValue {
+            data: vec![5.0, 7.0, 11.0],
+            shape: vec![3],
+        };
+        let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1]);
+        assert_eq!(din.data, vec![0.0, 5.0, 7.0, 11.0]);
+
+        // Min over the same increasing input routes to the window minimum:
+        // windows pick positions 0,1,2; position 3 gets nothing.
+        let din_min = reduce_window_grad(&x, &g, ReduceWindowKind::Min, &[2], &[1]);
+        assert_eq!(din_min.data, vec![5.0, 7.0, 11.0, 0.0]);
+    }
+
+    #[test]
+    fn reduce_window_grad_max_distributes_to_ties() {
+        // A flat window: every position equals the max, so each tied
+        // position receives the full upstream gradient (the max_reduce
+        // mask convention), not a 1/k share.
+        let x = TensorValue {
+            data: vec![2.0, 2.0, 2.0],
+            shape: vec![3],
+        };
+        let g = TensorValue {
+            data: vec![4.0, 4.0],
+            shape: vec![2],
+        };
+        let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1]);
+        // windows [0,1] and [1,2]: pos0 += 4 (win0), pos1 += 4+4, pos2 += 4.
+        assert_eq!(din.data, vec![4.0, 8.0, 4.0]);
+    }
+
     #[test]
     fn eval_add() {
         let mut dag = Dag::new();
@@ -1264,6 +1715,85 @@ mod tests {
         assert_eq!(
             vals[&live],
             TensorValue::from_vec(vec![3], vec![2.0, 4.0, 6.0])
+        );
+    }
+
+    /// chelis#351: a Load can be DEAD under the roots' live mask while a
+    /// live node still needs a symbolic dim that only that Load
+    /// declares (`vmap(grad(f))` where the gradient is constant in the
+    /// input: the backward DAG never consumes `x`, but its
+    /// `Expand { size: Sym(n) }` must bind `n` from `x`'s shape).
+    /// The occurrence input is resolved despite the mask, and the dim
+    /// binds from its shape.
+    #[test]
+    fn eval_root_scoped_strict_resolves_dead_load_for_symbolic_dim() {
+        let mut dag = Dag::new();
+        let sym_ty = TensorType {
+            dims: vec![DimInfo::Named("n".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty.clone(),
+            None,
+        );
+        let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let ones = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Sym("n".to_string()),
+            },
+            vec![one],
+            sym_ty,
+            None,
+        );
+
+        let vals = eval_tensor_roots_with_strict(&dag, &[ones], |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![3], vec![5.0, 6.0, 7.0])),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            vals[&ones],
+            TensorValue::from_vec(vec![3], vec![1.0, 1.0, 1.0]),
+            "`n` must bind to 3 from the dead `x` Load's runtime shape"
+        );
+    }
+
+    /// Negative parity for the dead-load resolution above: when the
+    /// declaring occurrence input is genuinely unavailable, the failure
+    /// is the dim-targeted inference error — never a silent default
+    /// shape and never the bare strict-load error (the Load is dead, so
+    /// strict mode has no claim on it).
+    #[test]
+    fn eval_root_scoped_strict_missing_dead_symbolic_load_is_dim_error() {
+        let mut dag = Dag::new();
+        let sym_ty = TensorType {
+            dims: vec![DimInfo::Named("n".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty.clone(),
+            None,
+        );
+        let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let ones = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Sym("n".to_string()),
+            },
+            vec![one],
+            sym_ty,
+            None,
+        );
+
+        let err = eval_tensor_roots_with_strict(&dag, &[ones], |_| None).unwrap_err();
+        assert!(
+            err.contains("missing required input `x` for symbolic dimension `n`"),
+            "expected the dim-targeted inference error, got: {err}"
         );
     }
 

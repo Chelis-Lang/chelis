@@ -20,7 +20,20 @@ Usage:
     python3 scripts/gate.py            # run every gate command
     python3 scripts/gate.py lint-and-unit   # run the lint-and-unit subset
     python3 scripts/gate.py integration     # run the integration subset
-    python3 scripts/gate.py --list     # print the canonical full list
+    python3 scripts/gate.py --list     # print the canonical full list,
+                                       # annotated local-vs-CI-owned
+    python3 scripts/gate.py --local    # run the developer pre-push subset
+
+Local/CI stage split (chelis#360): the full
+`cargo nextest run --workspace --profile ci` stage stays in the
+canonical list but is CI-owned -- macOS Smoke is the authoritative
+workspace oracle, and on the macOS workstation the mass first-exec
+burst it triggers can wedge assessment entirely (see
+docs/local_macos_environment.md). `--local` is the pre-push
+checkpoint: workspace clippy (compile-only, no mass exec), fmt,
+`chelis lint`, plus `cargo nextest run -p <crate>` for each crate
+changed vs `origin/main` (committed diff plus uncommitted work). The
+derived crate list is always printed so nothing is silently skipped.
 
 The script is safe to run from any cwd: it `chdir`s to the repo root
 (resolved relative to the script's own location) before running any
@@ -32,6 +45,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -44,35 +58,64 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Keep this in lockstep with `.github/workflows/ci.yml`: the parity
 # test in `scripts/test_gate.py` greps the workflow and fails if any
 # `cargo`/`chelis` invocation in a gate step is not produced here.
+BUILD_WORKSPACE: list[str] = ["cargo", "build", "--workspace", "--all-targets"]
+CLIPPY_WORKSPACE: list[str] = [
+    "cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings",
+]
+FMT_CHECK: list[str] = ["cargo", "fmt", "--all", "--", "--check"]
+CHELIS_LINT_CHECK: list[str] = [
+    "cargo",
+    "run",
+    "-p",
+    "chelis-cli",
+    "--bin",
+    "chelis",
+    "--quiet",
+    "--",
+    "lint",
+    "--check",
+    ".",
+]
+# The `ci` nextest profile (.config/nextest.toml) writes per-test JUnit
+# timing XML to target/nextest/ci/junit.xml, which
+# scripts/test_timing_check.py consumes. Running it locally too keeps
+# the dev gate and CI on one command.
+NEXTEST_WORKSPACE: list[str] = [
+    "cargo", "nextest", "run", "--workspace", "--profile", "ci",
+]
+
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
-        ["cargo", "build", "--workspace", "--all-targets"],
-        ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
-        ["cargo", "fmt", "--all", "--", "--check"],
-        [
-            "cargo",
-            "run",
-            "-p",
-            "chelis-cli",
-            "--bin",
-            "chelis",
-            "--quiet",
-            "--",
-            "lint",
-            "--check",
-            ".",
-        ],
+        BUILD_WORKSPACE,
+        CLIPPY_WORKSPACE,
+        FMT_CHECK,
+        CHELIS_LINT_CHECK,
     ],
     "integration": [
-        # The `ci` nextest profile (.config/nextest.toml) writes
-        # per-test JUnit timing XML to target/nextest/ci/junit.xml,
-        # which scripts/test_timing_check.py consumes. Running it
-        # locally too keeps the dev gate and CI on one command.
-        ["cargo", "nextest", "run", "--workspace", "--profile", "ci"],
+        NEXTEST_WORKSPACE,
     ],
 }
 
 STAGE_ORDER: list[str] = ["lint-and-unit", "integration"]
+
+# The static `--local` pre-push subset (chelis#360). Deliberately
+# excludes BUILD_WORKSPACE (clippy already compiles everything; no mass
+# first-exec burst) and NEXTEST_WORKSPACE (CI-owned; macOS Smoke is the
+# authoritative workspace oracle). `--local` appends a dynamic
+# `cargo nextest run -p <crate>` stage per changed crate; see
+# `local_command_list`.
+LOCAL_STATIC_COMMANDS: list[list[str]] = [
+    CLIPPY_WORKSPACE,
+    FMT_CHECK,
+    CHELIS_LINT_CHECK,
+]
+
+LOCAL_ANNOTATION = "local + ci"
+CI_OWNED_ANNOTATION = "ci-owned"
+LOCAL_DYNAMIC_NOTE = (
+    "# --local also runs: cargo nextest run -p <crate> "
+    "for each crate changed vs origin/main"
+)
 
 
 def full_command_list() -> list[list[str]]:
@@ -87,6 +130,135 @@ def full_command_list() -> list[list[str]]:
 
 def render(command: list[str]) -> str:
     return " ".join(command)
+
+
+def list_annotation(command: list[str]) -> str:
+    """The `--list` annotation for a canonical command: whether the
+    `--local` pre-push subset includes it or CI owns it."""
+    if command in LOCAL_STATIC_COMMANDS:
+        return LOCAL_ANNOTATION
+    return CI_OWNED_ANNOTATION
+
+
+def workspace_member_packages(repo_root: Path = REPO_ROOT) -> dict[str, str]:
+    """Map each workspace member directory (repo-relative, as written in
+    the root `Cargo.toml` members list) to its `[package].name` from the
+    member's own `Cargo.toml`. The directory name is NOT assumed to be
+    the package name; `cargo nextest run -p` needs the package name."""
+    manifest = tomllib.loads((repo_root / "Cargo.toml").read_text())
+    members: list[str] = manifest["workspace"]["members"]
+    packages: dict[str, str] = {}
+    for entry in members:
+        if any(ch in entry for ch in "*?["):
+            paths = sorted(p for p in repo_root.glob(entry) if p.is_dir())
+        else:
+            paths = [repo_root / entry]
+        for path in paths:
+            member_manifest = tomllib.loads((path / "Cargo.toml").read_text())
+            rel = path.relative_to(repo_root).as_posix()
+            packages[rel] = member_manifest["package"]["name"]
+    return packages
+
+
+def changed_paths_from_git(diff_output: str, status_output: str) -> list[str]:
+    """Extract repo-relative changed paths from `git diff --name-only`
+    output (committed work vs origin/main) plus `git status --porcelain`
+    output (uncommitted and untracked work). Porcelain rename lines
+    (`R  old -> new`) contribute both sides."""
+    paths: list[str] = []
+    for line in diff_output.splitlines():
+        # git quotes paths containing non-ASCII/quote/backslash bytes
+        # (core.quotePath); strip the quotes so the member-dir prefix
+        # match still sees the path. Mirrors the porcelain branch below;
+        # without this a committed-only change to such a file silently
+        # excludes its crate from the --local nextest stage (PR #362
+        # review finding 1).
+        line = line.strip().strip('"')
+        if line:
+            paths.append(line)
+    for line in status_output.splitlines():
+        if len(line) < 4:
+            continue
+        # Porcelain v1: two status characters, a space, then the path
+        # (or `orig -> dest` for renames/copies).
+        body = line[3:]
+        for part in body.split(" -> "):
+            part = part.strip().strip('"')
+            if part:
+                paths.append(part)
+    return paths
+
+
+def changed_crates(
+    paths: list[str], member_packages: dict[str, str]
+) -> list[str]:
+    """The sorted, deduplicated package names of workspace members that
+    own at least one of `paths`. Paths outside every member directory
+    (scripts/, docs/, spec/, ...) map to no crate."""
+    found: set[str] = set()
+    for path in paths:
+        for member_dir, package in member_packages.items():
+            if path == member_dir or path.startswith(member_dir + "/"):
+                found.add(package)
+    return sorted(found)
+
+
+def local_command_list(crates: list[str]) -> list[list[str]]:
+    """The `--local` pre-push command list: the static subset plus one
+    `cargo nextest run -p <crate>` per changed crate."""
+    commands = list(LOCAL_STATIC_COMMANDS)
+    for crate in crates:
+        commands.append(["cargo", "nextest", "run", "-p", crate])
+    return commands
+
+
+def _git_output(args: list[str]) -> str:
+    """Run a git query from the repo root and return stdout. Raises
+    `subprocess.CalledProcessError` (with stderr captured) on failure,
+    e.g. when `origin/main` does not exist locally."""
+    result = subprocess.run(
+        ["git", *args],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def run_local() -> int:
+    """Run the `--local` pre-push gate: derive the changed crates vs
+    origin/main, print the derived list (or say explicitly that none
+    were detected), then run the local command list."""
+    try:
+        diff_output = _git_output(
+            ["diff", "--name-only", "origin/main...HEAD"]
+        )
+        status_output = _git_output(["status", "--porcelain"])
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        print(
+            f"gate --local: git failed ({stderr}); cannot derive changed "
+            f"crates vs origin/main",
+            file=sys.stderr,
+        )
+        return exc.returncode or 1
+    paths = changed_paths_from_git(diff_output, status_output)
+    crates = changed_crates(paths, workspace_member_packages())
+    if crates:
+        print(
+            "gate --local: changed crates vs origin/main: "
+            + ", ".join(crates),
+            flush=True,
+        )
+    else:
+        print(
+            "gate --local: no crate changes detected vs origin/main; "
+            "skipping the per-crate nextest stage. The workspace suite "
+            "is CI-owned and was NOT run.",
+            flush=True,
+        )
+    return run_commands(local_command_list(crates))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -108,9 +280,27 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--list",
         action="store_true",
-        help="Print the canonical full gate command list and exit.",
+        help=(
+            "Print the canonical full gate command list, annotated with "
+            "which commands the --local subset includes, and exit."
+        ),
     )
-    return p.parse_args(argv)
+    p.add_argument(
+        "--local",
+        action="store_true",
+        help=(
+            "Run the developer pre-push subset: workspace clippy, fmt "
+            "--check, chelis lint --check ., and cargo nextest run -p "
+            "<crate> for each crate changed vs origin/main. The "
+            "workspace nextest stage is CI-owned (chelis#360)."
+        ),
+    )
+    args = p.parse_args(argv)
+    if args.local and args.stage is not None:
+        p.error("--local cannot be combined with a CI stage name")
+    if args.local and args.list:
+        p.error("--local cannot be combined with --list")
+    return args
 
 
 def run_commands(commands: list[list[str]]) -> int:
@@ -134,8 +324,11 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     if args.list:
         for command in full_command_list():
-            print(render(command))
+            print(f"{render(command)}  # {list_annotation(command)}")
+        print(LOCAL_DYNAMIC_NOTE)
         return 0
+    if args.local:
+        return run_local()
     if args.stage is not None:
         commands = STAGES[args.stage]
     else:

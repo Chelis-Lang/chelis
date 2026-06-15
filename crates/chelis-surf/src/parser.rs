@@ -122,6 +122,35 @@ impl Parser {
         matches!(self.peek(), TokenKind::Eof)
     }
 
+    /// True when the next two significant tokens are `.` followed by a
+    /// PascalCase `TypeIdent` — the shape of a module-qualified path segment
+    /// (`.Dropout`, `.Train`). Used to extend a constructor pattern head into
+    /// a qualified path (`Demo.Dropout.Train`, chelis#316) without consuming
+    /// the `.` when it is not part of such a path.
+    fn peek_dot_then_typeident(&self) -> bool {
+        let mut pos = self.pos;
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
+        if !matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Dot)) {
+            return false;
+        }
+        pos += 1;
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
+        matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::TypeIdent(_))
+        )
+    }
+
     fn current_offset(&self) -> usize {
         let mut pos = self.pos;
         while matches!(
@@ -1075,9 +1104,11 @@ impl Parser {
 
         let (kind, end) = if *self.peek() == TokenKind::LParen {
             self.advance();
-            let kind = if *self.peek() == TokenKind::Dot {
+            let kind = if *self.peek() == TokenKind::DotDot {
+                // `import Foo(..)` import-all. `..` now lexes as a single
+                // DotDot token (the rank-spread marker), so accept it here
+                // rather than two `Dot`s.
                 self.advance();
-                self.expect(&TokenKind::Dot)?;
                 ImportKind::All
             } else {
                 ImportKind::Names(self.parse_ident_list(TokenKind::RParen)?)
@@ -1129,7 +1160,22 @@ impl Parser {
                         let tok = self.advance();
                         let start = expr_span(&lhs);
                         lhs = Expr::Access(Box::new(lhs), field, start.merge(tok.span));
-                        continue;
+                    }
+                    // A PascalCase segment after `.` is a module/type path
+                    // component, never a record field (fields are snake_case,
+                    // §3.2). Accepting it lets a module-qualified reference
+                    // such as `Demo.Dropout.Eval` (a constructor) or
+                    // `Demo.Dropout.use` (a value) parse into an `Access`
+                    // chain that reef resolves to the module-qualified
+                    // internal name (chelis#316). Without this, the only way
+                    // to disambiguate two imported modules that export the
+                    // same constructor name was to rename one — and the
+                    // ambiguity diagnostic's own suggestion (`Module.Eval`)
+                    // did not parse.
+                    TokenKind::TypeIdent(segment) => {
+                        let tok = self.advance();
+                        let start = expr_span(&lhs);
+                        lhs = Expr::Access(Box::new(lhs), segment, start.merge(tok.span));
                     }
                     TokenKind::Int(index) => {
                         let tok = self.advance();
@@ -1145,6 +1191,22 @@ impl Parser {
                         });
                     }
                 }
+                // A dotted path may be applied: `Demo.Dropout.use(m)` or the
+                // qualified constructor call `Demo.List.Cons(x, xs)`. The
+                // prefix-position juxtaposition handler only runs on the head
+                // atom, before this postfix `.` chain is built, so consume a
+                // trailing parenthesized argument list (or a curried chain of
+                // them) here. This also fixes plain `Module.func(arg)`, which
+                // previously failed with "expected end of declaration
+                // expression, found LParen".
+                while *self.peek() == TokenKind::LParen {
+                    let start = expr_span(&lhs);
+                    self.advance();
+                    let args = self.parse_expr_list(TokenKind::RParen)?;
+                    let end = self.expect(&TokenKind::RParen)?;
+                    lhs = Expr::Apply(Box::new(lhs), args, start.merge(end.span));
+                }
+                continue;
             }
 
             // Check for pipe
@@ -2078,6 +2140,29 @@ impl Parser {
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
+                // Extend the type name into a module-qualified path
+                // `Demo.Dropout.Mode` (chelis#316), so a consumer that imports
+                // two modules exporting the same type name can still annotate
+                // against one. reef resolves the dotted head to the declaring
+                // module's mangled type name, mirroring qualified constructor
+                // expressions and patterns. Type names are PascalCase, so only
+                // `.TypeIdent` segments extend the path.
+                let mut name = name;
+                let mut head_span = tok.span;
+                while self.peek_dot_then_typeident() {
+                    self.advance(); // consume `.`
+                    let seg = self.advance(); // consume the PascalCase segment
+                    // `peek_dot_then_typeident` just verified this is a
+                    // `TypeIdent`; `let else` pins that invariant so a future
+                    // drift fails loudly instead of silently dropping a segment.
+                    let TokenKind::TypeIdent(segment) = seg.kind else {
+                        unreachable!("peek_dot_then_typeident guaranteed a TypeIdent segment")
+                    };
+                    name.push('.');
+                    name.push_str(&segment);
+                    head_span = seg.span;
+                }
+                let tok_span = tok.span.merge(head_span);
                 if *self.peek() == TokenKind::LBracket {
                     self.advance();
                     let mut args = Vec::new();
@@ -2092,15 +2177,22 @@ impl Parser {
                         }
                     }
                     let end = self.expect(&TokenKind::RBracket)?;
-                    Ok(TypeExpr::App(name, args, tok.span.merge(end.span)))
+                    Ok(TypeExpr::App(name, args, tok_span.merge(end.span)))
                 } else {
-                    Ok(TypeExpr::Named(name, tok.span))
+                    Ok(TypeExpr::Named(name, tok_span))
                 }
             }
             TokenKind::Star => {
                 // * in type position = wildcard dimension
                 let tok = self.advance();
                 Ok(TypeExpr::Named("*".to_string(), tok.span))
+            }
+            TokenKind::DotDot => {
+                // `..r` rank-variable spread — only valid as the sole shape
+                // element of a tensor type (enforced in the `Tensor` arm).
+                let tok = self.advance();
+                let (name, name_span) = self.expect_ident()?;
+                Ok(TypeExpr::RankSpread(name, tok.span.merge(name_span)))
             }
             TokenKind::Tensor => {
                 let tok = self.advance();
@@ -2125,6 +2217,31 @@ impl Parser {
                         });
                     }
                 };
+                // Rank polymorphism (spec/design/rank_polymorphism.md): a `..r`
+                // spread is a name-preserving run of dims and may be interleaved
+                // with concrete anchors (`tensor[..pre, seq, ..post, f32]` —
+                // Tier-3). The only parse-time fence is that a spread name may
+                // not repeat within one tensor shape (it would bind the same run
+                // twice). Two *adjacent* spreads are allowed syntactically: they
+                // occur in a reduction's output type `tensor[..pre, ..post]`. An
+                // undetermined adjacent-spread *split* is rejected later at
+                // unification, where an output position (sound) is distinguished
+                // from an input split (non-unitary).
+                let mut seen_spreads: Vec<&str> = Vec::new();
+                for d in &items {
+                    if let TypeExpr::RankSpread(n, _) = d {
+                        if seen_spreads.contains(&n.as_str()) {
+                            return Err(ParseError::Expected {
+                                expected: "a distinct rank-spread name; the same `..r` may \
+                                           not appear twice in one tensor shape"
+                                    .into(),
+                                found: format!("repeated rank spread `..{n}`"),
+                                offset: self.current_offset(),
+                            });
+                        }
+                        seen_spreads.push(n);
+                    }
+                }
                 Ok(TypeExpr::Tensor(items, prec_name, tok.span.merge(end.span)))
             }
             TokenKind::Amp => {
@@ -2220,6 +2337,28 @@ impl Parser {
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
+                // Extend the constructor head into a module-qualified path:
+                // `| Demo.Dropout.Train =>` (chelis#316). The dotted head is
+                // carried on the pattern's constructor name; reef resolves it
+                // to the declaring module's mangled constructor, mirroring how
+                // qualified constructor *expressions* resolve. Constructors are
+                // PascalCase, so only `.TypeIdent` segments extend the path.
+                let mut name = name;
+                let mut head_span = tok.span;
+                while self.peek_dot_then_typeident() {
+                    self.advance(); // consume `.`
+                    let seg = self.advance(); // consume the PascalCase segment
+                    // `peek_dot_then_typeident` just verified this is a
+                    // `TypeIdent`; `let else` pins that invariant so a future
+                    // drift fails loudly instead of silently dropping a segment.
+                    let TokenKind::TypeIdent(segment) = seg.kind else {
+                        unreachable!("peek_dot_then_typeident guaranteed a TypeIdent segment")
+                    };
+                    name.push('.');
+                    name.push_str(&segment);
+                    head_span = seg.span;
+                }
+                let tok_span = tok.span.merge(head_span);
                 // Check for record pattern: Ctor { field1, field2 }
                 if *self.peek() == TokenKind::LBrace {
                     self.advance(); // consume {
@@ -2252,7 +2391,7 @@ impl Parser {
                         }
                     }
                     let end = self.expect(&TokenKind::RBrace)?;
-                    Ok(Pattern::Record(name, fields, tok.span.merge(end.span)))
+                    Ok(Pattern::Record(name, fields, tok_span.merge(end.span)))
                 } else if *self.peek() == TokenKind::LParen {
                     self.advance();
                     let mut sub_pats = Vec::new();
@@ -2270,7 +2409,7 @@ impl Parser {
                     Ok(Pattern::Constructor(
                         name,
                         sub_pats,
-                        tok.span.merge(end.span),
+                        tok_span.merge(end.span),
                     ))
                 } else {
                     let mut sub_pats = Vec::new();
@@ -2278,10 +2417,10 @@ impl Parser {
                         sub_pats.push(self.parse_pattern_atom()?);
                     }
                     if sub_pats.is_empty() {
-                        Ok(Pattern::Constructor(name, vec![], tok.span))
+                        Ok(Pattern::Constructor(name, vec![], tok_span))
                     } else {
                         let end = pattern_span(sub_pats.last().unwrap());
-                        Ok(Pattern::Constructor(name, sub_pats, tok.span.merge(end)))
+                        Ok(Pattern::Constructor(name, sub_pats, tok_span.merge(end)))
                     }
                 }
             }
@@ -2513,6 +2652,7 @@ fn expr_span(e: &Expr) -> Span {
 fn type_span(t: &TypeExpr) -> Span {
     match t {
         TypeExpr::Named(_, s) => *s,
+        TypeExpr::RankSpread(_, s) => *s,
         TypeExpr::Tensor(_, _, s) => *s,
         TypeExpr::Arrow(_, _, s) => *s,
         TypeExpr::Ref(_, s) => *s,
@@ -2801,6 +2941,19 @@ mod tests {
                 );
             }
             _ => panic!("expected Import"),
+        }
+    }
+
+    #[test]
+    fn import_all_uses_dotdot_token() {
+        // Regression lock: `..` now lexes as a single DotDot token (the
+        // rank-spread marker), and `import Foo(..)` import-all must still parse.
+        for src in ["import Foo(..)", "import Foo.Bar(..)"] {
+            let decls = p(src);
+            match &decls[0] {
+                Decl::Import { kind, .. } => assert_eq!(kind, &ImportKind::All, "for `{src}`"),
+                _ => panic!("expected Import for `{src}`"),
+            }
         }
     }
 
@@ -3114,6 +3267,48 @@ mod tests {
         }
     }
 
+    // The first parameter's type annotation of a single `def`.
+    fn first_param_type(s: &str) -> TypeExpr {
+        match p(s).into_iter().next().unwrap() {
+            Decl::FunDef { params, .. } => params.into_iter().next().unwrap().ty.unwrap(),
+            other => panic!("expected FunDef, got {other:?}"),
+        }
+    }
+
+    // A module-qualified type name `Demo.Dropout.Mode` (chelis#316) parses as
+    // a `Named` type carrying the dotted path; reef resolves it to the
+    // declaring module's type. Lets a consumer annotate against one of two
+    // imported modules that export the same type name.
+    #[test]
+    fn qualified_named_type_parses() {
+        let ty = first_param_type("def f(m: Demo.Dropout.Mode) = m");
+        assert!(
+            matches!(&ty, TypeExpr::Named(n, _) if n == "Demo.Dropout.Mode"),
+            "expected qualified Named type, got {ty:?}"
+        );
+    }
+
+    // A qualified *applied* type head: `xs: Demo.Coral.Frame[n]`.
+    #[test]
+    fn qualified_applied_type_parses() {
+        let ty = first_param_type("def f(xs: Demo.Coral.Frame[n]) = xs");
+        match &ty {
+            TypeExpr::App(name, args, _) => {
+                assert_eq!(name, "Demo.Coral.Frame");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected qualified App type, got {other:?}"),
+        }
+    }
+
+    // A bare type name is unchanged — the dotted extension only fires on a
+    // following `.PascalCase` segment.
+    #[test]
+    fn bare_named_type_unchanged() {
+        let ty = first_param_type("def f(m: Mode) = m");
+        assert!(matches!(&ty, TypeExpr::Named(n, _) if n == "Mode"));
+    }
+
     #[test]
     fn type_tensor() {
         let decls = p("x: tensor[batch, hidden, f32] = x");
@@ -3144,6 +3339,76 @@ mod tests {
             },
             _ => panic!("expected typed let"),
         }
+    }
+
+    // chelis#258 / rank polymorphism Tier-2: `..r` rank-variable spread.
+
+    #[test]
+    fn rank_spread_parses_as_sole_dim() {
+        let decls = p("def f(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)");
+        let Decl::FunDef {
+            ret_ty: Some(ret), ..
+        } = &decls[0]
+        else {
+            panic!("expected fun def, got {:?}", decls[0]);
+        };
+        match ret {
+            TypeExpr::Tensor(dims, prec, _) => {
+                assert_eq!(dims.len(), 1, "rank var must be the sole shape element");
+                assert!(
+                    matches!(&dims[0], TypeExpr::RankSpread(n, _) if n == "r"),
+                    "expected RankSpread(r), got {:?}",
+                    dims[0]
+                );
+                assert_eq!(prec, "f32");
+            }
+            _ => panic!("expected Tensor return type, got {ret:?}"),
+        }
+    }
+
+    #[test]
+    fn rank_spread_adjacent_to_concrete_dim_parses() {
+        // Tier-3: `..r` interleaved with concrete anchors is now valid syntax
+        // (`tensor[..pre, seq, ..post, f32]`); the boundary moved to unification.
+        let decls =
+            p("def f(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = x");
+        let Decl::FunDef {
+            ret_ty: Some(ret), ..
+        } = &decls[0]
+        else {
+            panic!("expected fun def, got {:?}", decls[0]);
+        };
+        match ret {
+            TypeExpr::Tensor(dims, _, _) => {
+                assert_eq!(
+                    dims.len(),
+                    2,
+                    "two adjacent spreads in the reduce output type"
+                );
+                assert!(matches!(&dims[0], TypeExpr::RankSpread(n, _) if n == "pre"));
+                assert!(matches!(&dims[1], TypeExpr::RankSpread(n, _) if n == "post"));
+            }
+            _ => panic!("expected Tensor return type, got {ret:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_rank_spread_name_is_parse_error() {
+        // The one parse-time fence: a spread name may not repeat in one shape.
+        assert!(
+            parse_str("x: tensor[..r, seq, ..r, f32] = x").is_err(),
+            "a repeated `..r` in one tensor shape must be a parse error"
+        );
+    }
+
+    #[test]
+    fn rank_spread_erasure_position_parses() {
+        // The erasure SHAPE (`..r` input, rank-0 `tensor[f32]` output) parses.
+        // The erasure *tier* is deferred (no all-reduce primitive), so a body
+        // like `sum(x, 0)` is rejected at check time by Body Discipline — this
+        // test only pins that the surface shape is parseable.
+        let decls = p("def sum_all(x: &tensor[..r, f32]) -> tensor[f32] = sum(x, 0)");
+        assert!(matches!(&decls[0], Decl::FunDef { .. }));
     }
 
     #[test]
@@ -3850,5 +4115,156 @@ mod tests {
         // the ADT form is required.
         let e = p_err("module M\n@opaque\n@invariant(p) p.value >= 0.0\ntype T = f32");
         assert!(matches!(e, ParseError::Expected { .. }));
+    }
+
+    // ===== Module-qualified path tests (chelis#316) =====
+
+    // `Demo.Dropout.Eval` is a module-qualified nullary constructor. It must
+    // parse into a nested `Access` chain rooted at the head segment so reef
+    // can walk the segments and resolve them to the module-qualified internal
+    // name. Before the fix the parser rejected the uppercase `Dropout`
+    // segment with "expected field name or tuple index".
+    #[test]
+    fn qualified_nullary_constructor_parses() {
+        let e = body("def f() = Demo.Dropout.Eval");
+        match &e {
+            Expr::Access(inner, last, _) => {
+                assert_eq!(last, "Eval");
+                match inner.as_ref() {
+                    Expr::Access(head, mid, _) => {
+                        assert_eq!(mid, "Dropout");
+                        assert!(matches!(head.as_ref(), Expr::Constructor(n, _) if n == "Demo"));
+                    }
+                    other => panic!("expected Access(Demo.Dropout), got {other:?}"),
+                }
+            }
+            other => panic!("expected Access chain, got {other:?}"),
+        }
+    }
+
+    // `Demo.Dropout.use(m)` is a module-qualified value applied to an
+    // argument. The whole-path-then-call shape must yield `Apply(<access
+    // chain>, [arg])`. This form previously failed with "expected end of
+    // declaration expression, found LParen" even for a lowercase tail.
+    #[test]
+    fn qualified_call_parses() {
+        let e = body("def f(m) = Demo.Dropout.use(m)");
+        match &e {
+            Expr::Apply(func, args, _) => {
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], Expr::Var(n, _) if n == "m"));
+                match func.as_ref() {
+                    Expr::Access(inner, last, _) => {
+                        assert_eq!(last, "use");
+                        assert!(
+                            matches!(inner.as_ref(), Expr::Access(_, mid, _) if mid == "Dropout")
+                        );
+                    }
+                    other => panic!("expected Access chain as call head, got {other:?}"),
+                }
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    // A qualified constructor applied to arguments: `Demo.List.Cons(x, xs)`.
+    #[test]
+    fn qualified_constructor_application_parses() {
+        let e = body("def f(x, xs) = Demo.List.Cons(x, xs)");
+        match &e {
+            Expr::Apply(func, args, _) => {
+                assert_eq!(args.len(), 2);
+                assert!(matches!(func.as_ref(), Expr::Access(_, last, _) if last == "Cons"));
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    // Lowercase field access must still work and still bind tighter than a
+    // following binary operator — the new trailing-call loop must not disturb
+    // it.
+    #[test]
+    fn lowercase_field_access_still_parses() {
+        let e = body("def f(r) = r.field + 1");
+        match &e {
+            Expr::Binary(BinOp::Add, left, _, _) => {
+                assert!(matches!(left.as_ref(), Expr::Access(_, f, _) if f == "field"));
+            }
+            other => panic!("expected Add with field access on the left, got {other:?}"),
+        }
+    }
+
+    // Tuple index access is unchanged.
+    #[test]
+    fn tuple_index_access_still_parses() {
+        let e = body("def f(t) = t.0");
+        assert!(matches!(&e, Expr::TupleGet(_, 0, _)));
+    }
+
+    // Convenience: parse a single def, return the first match arm's pattern.
+    fn first_arm_pattern(s: &str) -> Pattern {
+        match body(s) {
+            Expr::Match(_, arms, _) => arms.into_iter().next().unwrap().pattern,
+            other => panic!("expected Match, got {other:?}"),
+        }
+    }
+
+    // A module-qualified *nullary* constructor pattern: `| Demo.Dropout.Train =>`.
+    // The dotted head must land on the `Pattern::Constructor` name verbatim so
+    // reef can resolve it to the declaring module's constructor (chelis#316).
+    #[test]
+    fn qualified_nullary_constructor_pattern_parses() {
+        let pat = first_arm_pattern("def f(m) = match m with { | Demo.Dropout.Train => 1 }");
+        match pat {
+            Pattern::Constructor(name, args, _) => {
+                assert_eq!(name, "Demo.Dropout.Train");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected Constructor pattern, got {other:?}"),
+        }
+    }
+
+    // A qualified constructor pattern with positional sub-patterns:
+    // `| Demo.List.Cons(x, xs) =>`. The dotted head and the sub-patterns must
+    // both survive.
+    #[test]
+    fn qualified_constructor_pattern_with_args_parses() {
+        let pat = first_arm_pattern("def f(m) = match m with { | Demo.List.Cons(x, xs) => 1 }");
+        match pat {
+            Pattern::Constructor(name, args, _) => {
+                assert_eq!(name, "Demo.List.Cons");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], Pattern::Var(n, _) if n == "x"));
+            }
+            other => panic!("expected Constructor pattern, got {other:?}"),
+        }
+    }
+
+    // A qualified *record* constructor pattern: `| Demo.Frame.Col { values } =>`.
+    #[test]
+    fn qualified_record_pattern_parses() {
+        let pat = first_arm_pattern("def f(m) = match m with { | Demo.Frame.Col { values } => 1 }");
+        match pat {
+            Pattern::Record(name, fields, _) => {
+                assert_eq!(name, "Demo.Frame.Col");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "values");
+            }
+            other => panic!("expected Record pattern, got {other:?}"),
+        }
+    }
+
+    // A bare constructor pattern is unchanged — the dotted-path extension only
+    // fires when a `.PascalCase` segment actually follows.
+    #[test]
+    fn bare_constructor_pattern_unchanged() {
+        let pat = first_arm_pattern("def f(m) = match m with { | None => 1 }");
+        match pat {
+            Pattern::Constructor(name, args, _) => {
+                assert_eq!(name, "None");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected Constructor pattern, got {other:?}"),
+        }
     }
 }

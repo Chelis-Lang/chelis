@@ -1,22 +1,22 @@
 # Lines of Code Report
 
-Generated: 2026-05-30 22:14 UTC
+Generated: 2026-06-15 17:25 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 365 | 139,095 | 17,379 | 51,875 | 208,349 | Compiler, CLI, runtime, backends, type checker |
-| C | 13 | 33,482 | 325 | 755 | 34,562 | Generated runtime, headers |
+| Rust | 397 | 149,687 | 20,031 | 56,137 | 225,855 | Compiler, CLI, runtime, backends, type checker |
+| C | 13 | 33,483 | 325 | 755 | 34,563 | Generated runtime, headers |
 | JSON | 28 | 9,274 | 0 | 3,181 | 12,455 | Package metadata, test fixtures |
-| Python | 40 | 5,368 | 1,508 | 1,683 | 8,559 | PyO3 bindings, tools, benchmarks |
-| **Chelis Surf** (.ch) | **111** | **3,101** | **49** | **7** | **3,157** | **Examples, std library, test fixtures** |
+| Python | 47 | 6,539 | 1,917 | 2,035 | 10,491 | PyO3 bindings, tools, benchmarks |
+| **Chelis Surf** (.ch) | **83** | **2,217** | **49** | **7** | **2,273** | **Examples, std library, test fixtures** |
 | **Chelis Deep** (.dp) | **1,501** | **1,699** | **0** | **3** | **1,702** | **Deep test fixtures** |
-| TOML | 35 | 557 | 94 | 76 | 727 | Cargo/reef manifests |
-| YAML | 5 | 485 | 170 | 122 | 777 | CI workflows |
-| PEG Grammars (.pest) | 2 | 262 | 0 | 28 | 290 | Validator grammars (Surf + Deep) |
+| YAML | 6 | 653 | 213 | 152 | 1,018 | CI workflows |
+| TOML | 35 | 558 | 94 | 76 | 728 | Cargo/reef manifests |
+| PEG Grammars (.pest) | 2 | 262 | 14 | 28 | 304 | Validator grammars (Surf + Deep) |
 | Objective-C | 1 | 248 | 117 | 63 | 428 |  |
 | XML | 1 | 212 | 57 | 38 | 307 |  |
 | JavaScript | 2 | 202 | 0 | 29 | 231 | Tree-sitter grammar definitions |
 | Tree-sitter Queries (.scm) | 2 | 102 | 0 | 6 | 108 | Syntax highlighting for Surf and Deep |
-| Markdown | 203 | 0 | 19,493 | 9,552 | 29,045 | Specs, design docs, plans |
+| Markdown | 211 | 0 | 21,024 | 10,059 | 31,083 | Specs, design docs, plans |
 | __generated__ | 1 | 0 | 0 | 0 | 0 |  |
-| **Total** | **2,310** | **194,087** | **39,192** | **67,418** | **300,697** | |
+| **Total** | **2,330** | **205,136** | **43,841** | **72,569** | **321,546** | |

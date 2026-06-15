@@ -7,6 +7,7 @@ use chelis_surf::ast::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -1077,8 +1078,21 @@ pub enum GitHubFetchError {
     /// token is invalid or lacks scope.
     AuthRejected { url: String, status: u16 },
     /// HTTP 404 — the release tag exists but the named asset is not
-    /// attached to it (or the tag itself does not exist).
+    /// attached to it. This fires only after the release metadata has
+    /// been fetched successfully, so the repo is reachable and the tag
+    /// exists; a 404 here genuinely means "asset missing." The
+    /// metadata-step 404 (repo/tag-level) is the separate, ambiguous
+    /// [`Self::ReleaseTagNotFoundOrUnauthorized`].
     ReleaseAssetNotFound { url: String, asset_name: String },
+    /// HTTP 404 on the release-metadata endpoint (`releases/tags/<tag>`).
+    /// This status is inherently ambiguous: GitHub returns 404 both when
+    /// the tag genuinely does not exist on a reachable repo and when the
+    /// token lacks `contents: read` access to a private repo (GitHub
+    /// returns 404, not 403, for unauthorized private repos as a privacy
+    /// measure, so the repo's existence is not leaked). We cannot tell
+    /// the two apart from this single response, so the variant and its
+    /// message name both possibilities. See issue #147.
+    ReleaseTagNotFoundOrUnauthorized { url: String, tag: String },
     /// HTTP 429 — GitHub rate limit. Message includes the `Retry-After`
     /// header value if present.
     RateLimited {
@@ -1117,6 +1131,16 @@ impl std::fmt::Display for GitHubFetchError {
                 f,
                 "release asset `{asset_name}` not found at {url} (HTTP 404): \
                  verify the release tag exists and that the asset is attached to it"
+            ),
+            Self::ReleaseTagNotFoundOrUnauthorized { url, tag } => write!(
+                f,
+                "release tag `{tag}` at {url} returned HTTP 404. This is ambiguous: \
+                 either (a) the tag does not exist on that repo, or (b) your token \
+                 (GITHUB_TOKEN / `gh auth token`) lacks `contents: read` access to \
+                 the repo. GitHub returns 404 (not 403) in case (b) as a privacy \
+                 measure, so the two cannot be told apart from this response alone. \
+                 Verify with `gh release view {tag} --repo <org>/<repo>` using the \
+                 same token."
             ),
             Self::RateLimited { url, retry_after } => match retry_after {
                 Some(r) => write!(
@@ -1828,10 +1852,13 @@ fn github_api_base_url() -> String {
 /// Map a non-200 HTTP status to the appropriate
 /// [`GitHubFetchError`] variant for the given URL. Used by both the
 /// metadata-fetch step and the byte-download step. The 404 mapping
-/// uses the **caller-provided** `not_found` builder so the metadata
-/// step can name the tag URL while the byte-download step can name
-/// the asset name; both surface as `ReleaseAssetNotFound` at the
-/// outer API boundary.
+/// uses the **caller-provided** `not_found` builder so the two steps
+/// can choose distinct variants: the metadata step builds the ambiguous
+/// [`GitHubFetchError::ReleaseTagNotFoundOrUnauthorized`] (a 404 there
+/// could be a missing tag or a private repo the token cannot read),
+/// while the byte-download step builds [`GitHubFetchError::ReleaseAssetNotFound`]
+/// (a 404 there fires only after metadata fetch succeeded, so the asset
+/// is genuinely absent). See issue #147.
 fn map_http_error_status(
     url: &str,
     response: &reqwest::blocking::Response,
@@ -1876,14 +1903,20 @@ fn map_http_error_status(
 /// given tag and parse the asset list. The response shape is GitHub's
 /// "Release" object; we only read `assets[].id` and `assets[].name`.
 ///
-/// On 404 returns [`GitHubFetchError::ReleaseAssetNotFound`] with the
-/// tag URL — this is the "tag does not exist or release missing"
-/// case. The error names the URL we tried, which lets the user
-/// disambiguate "wrong tag" from "wrong asset name."
+/// On 404 returns [`GitHubFetchError::ReleaseTagNotFoundOrUnauthorized`]
+/// naming both possibilities: the tag genuinely does not exist on the
+/// repo, or the token lacks read access to a private repo (GitHub
+/// returns 404, not 403, in the latter case as a privacy measure). The
+/// `tag` is threaded in so the message can name it and point the user at
+/// `gh release view <tag> --repo <org>/<repo>` for verification. See
+/// issue #147 — this 404 used to surface as `ReleaseAssetNotFound`
+/// naming a `<release-metadata>` placeholder asset, which misled users
+/// hitting the auth-privacy case toward their release pipeline.
 fn fetch_release_metadata(
     client: &reqwest::blocking::Client,
     url: &str,
     token: &str,
+    tag: &str,
 ) -> Result<Vec<ReleaseAsset>, GitHubFetchError> {
     let response = client
         .get(url)
@@ -1900,13 +1933,13 @@ fn fetch_release_metadata(
         })?;
     if !response.status().is_success() {
         return Err(map_http_error_status(url, &response, || {
-            GitHubFetchError::ReleaseAssetNotFound {
+            // Metadata-step 404 is ambiguous: a missing tag and a
+            // private repo the token cannot read both return 404. Emit
+            // the dedicated variant whose message names both cases
+            // rather than the misleading "asset not found" wording.
+            GitHubFetchError::ReleaseTagNotFoundOrUnauthorized {
                 url: url.to_string(),
-                // For the metadata step, the "asset name" the user
-                // tried to find lives one level up: it's the tag.
-                // Surface the tag URL itself so the user knows the
-                // 404 is about the release, not the individual asset.
-                asset_name: "<release-metadata>".to_string(),
+                tag: tag.to_string(),
             }
         }));
     }
@@ -2092,7 +2125,7 @@ pub fn install_from_github(
 
     // Step 1: fetch release metadata, extract asset ids.
     let metadata_url = spec.release_metadata_url(&api_base);
-    let assets = fetch_release_metadata(&client, &metadata_url, &token)?;
+    let assets = fetch_release_metadata(&client, &metadata_url, &token, &spec.tag)?;
     let archive_id = find_asset_id(&assets, &archive_name, &metadata_url)?;
     let shell_id = find_asset_id(&assets, &shell_name, &metadata_url)?;
 
@@ -2590,7 +2623,7 @@ fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ReefManifest, Bootstr
         })?;
 
     let metadata_url = spec.release_metadata_url(&api_base);
-    let assets = fetch_release_metadata(&client, &metadata_url, &token)?;
+    let assets = fetch_release_metadata(&client, &metadata_url, &token, &spec.tag)?;
     let archive_id = find_asset_id(&assets, &archive_name, &metadata_url)?;
     let archive_url = spec.release_asset_url(&api_base, archive_id);
     download_asset_by_id(&client, &archive_url, &archive_name, &token, &archive_path)?;
@@ -3818,8 +3851,8 @@ pub fn canonical_origin_for(name: &str, version: &str) -> String {
 ///   (auth state)
 /// - if `fetch_err` is `Some`, the typed [`GitHubFetchError`] category
 ///   (`auth-missing`, `auth-rejected`, `release-asset-not-found`,
-///   `rate-limited`, `server-error`, `network`, `io`, `validation`,
-///   `parse`)
+///   `release-tag-not-found-or-unauthorized`, `rate-limited`,
+///   `server-error`, `network`, `io`, `validation`, `parse`)
 ///
 /// The message shape is asserted against by the named acceptance oracle
 /// `phaseA_item8_autofetch_build_oracle`. Wording must remain stable
@@ -3879,6 +3912,9 @@ fn github_fetch_error_category(e: &GitHubFetchError) -> &'static str {
         GitHubFetchError::AuthMissing { .. } => "auth-missing",
         GitHubFetchError::AuthRejected { .. } => "auth-rejected",
         GitHubFetchError::ReleaseAssetNotFound { .. } => "release-asset-not-found",
+        GitHubFetchError::ReleaseTagNotFoundOrUnauthorized { .. } => {
+            "release-tag-not-found-or-unauthorized"
+        }
         GitHubFetchError::RateLimited { .. } => "rate-limited",
         GitHubFetchError::ServerError { .. } => "server-error",
         GitHubFetchError::Network { .. } => "network",
@@ -4206,6 +4242,21 @@ fn validate_module_path(prefix: &str, module: &str, rel: &Path) -> Result<(), St
 }
 
 fn compute_exports(decls: &[Decl]) -> BTreeSet<String> {
+    // Map an ADT type name to its constructor (variant) names so that
+    // exporting (or auto-exporting) a type also brings its constructors
+    // into the importing module's scope. This mirrors OCaml/Haskell
+    // module semantics (importing a type exposes its constructors) and is
+    // required for chelis#157: a downstream module that imports `Column`
+    // must be able to write `IntCol(...)` and resolve it to the exporting
+    // module's mangled constructor.
+    let ctors_for_type: HashMap<&str, &[Variant]> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::TypeDef { name, variants, .. } => Some((name.as_str(), variants.as_slice())),
+            _ => None,
+        })
+        .collect();
+
     let explicit = decls
         .iter()
         .filter_map(|decl| match decl {
@@ -4215,17 +4266,31 @@ fn compute_exports(decls: &[Decl]) -> BTreeSet<String> {
         .flatten()
         .collect::<Vec<_>>();
     if !explicit.is_empty() {
-        return explicit.into_iter().collect();
+        let mut exports: BTreeSet<String> = explicit.into_iter().collect();
+        // Pull in constructors for every explicitly exported type name.
+        let type_exports: Vec<String> = exports.iter().cloned().collect();
+        for name in type_exports {
+            if let Some(variants) = ctors_for_type.get(name.as_str()) {
+                for variant in *variants {
+                    exports.insert(variant.name.clone());
+                }
+            }
+        }
+        return exports;
     }
     decls
         .iter()
-        .filter_map(|decl| match decl {
+        .flat_map(|decl| match decl {
             Decl::FunDef { name, .. }
             | Decl::Property { name, .. }
             | Decl::LetDef { name, .. }
-            | Decl::TypeDef { name, .. }
-            | Decl::TypeAlias { name, .. } => Some(name.clone()),
-            _ => None,
+            | Decl::TypeAlias { name, .. } => vec![name.clone()],
+            Decl::TypeDef { name, variants, .. } => {
+                let mut names = vec![name.clone()];
+                names.extend(variants.iter().map(|variant| variant.name.clone()));
+                names
+            }
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -4240,7 +4305,30 @@ fn collect_symbol_kinds(decls: &[Decl]) -> BTreeMap<String, SymbolKind> {
             | Decl::Sig { name, .. } => {
                 symbols.insert(name.clone(), SymbolKind::Value);
             }
-            Decl::TypeDef { name, .. } | Decl::TypeAlias { name, .. } => {
+            Decl::TypeDef { name, variants, .. } => {
+                symbols.insert(name.clone(), SymbolKind::Type);
+                // Constructor (variant) names are value-level symbols:
+                // they appear in expression position (`IntCol(xs, mask)`,
+                // `IntCol { values: xs }`). Registering them as module
+                // symbols is the principled fix for chelis#157
+                // (module-scoped constructor resolution): without this,
+                // `internal_name` mangling never applies to a constructor,
+                // so two packages that each declare an `IntCol` variant
+                // bind the same bare `IntCol` into the flat type-checker
+                // env/registry and resolution is last-write-wins.
+                //
+                // A constructor that shares its name with its enclosing
+                // type (the idiomatic `type Foo = | Foo { ... }`) mangles
+                // to the same internal name as the type via `internal_name`
+                // and must keep the `Type` kind in the module's public
+                // surface, so do not clobber an existing entry.
+                for variant in variants {
+                    symbols
+                        .entry(variant.name.clone())
+                        .or_insert(SymbolKind::Value);
+                }
+            }
+            Decl::TypeAlias { name, .. } => {
                 symbols.insert(name.clone(), SymbolKind::Type);
             }
             Decl::MacroDef { name, .. } => {
@@ -4646,6 +4734,16 @@ fn build_name_resolver(
         unqualified.insert(name.clone(), internal.clone());
     }
 
+    // Track, per unqualified bare name, the distinct internal names it was
+    // bound to by `import (..)` / `import (names)` forms, along with the
+    // importing module path for diagnostics. A bare name that resolves to
+    // two or more *distinct* internal names across imports is an ambiguous
+    // unqualified reference; the user must qualify it (chelis#157). A name
+    // the module declares itself (`module_internal`) shadows imports and is
+    // never ambiguous. Re-importing the *same* internal name from two paths
+    // is idempotent and not an error.
+    let mut import_sources: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+
     for decl in &module.decls {
         let Decl::Import {
             module: import_module,
@@ -4692,6 +4790,12 @@ fn build_name_resolver(
             ImportKind::Qualified => {}
             ImportKind::All => {
                 for (name, internal) in qualified_map {
+                    import_sources
+                        .entry(name.clone())
+                        .or_default()
+                        .entry(internal.clone())
+                        .or_default()
+                        .insert(import_module.clone());
                     unqualified.insert(name, internal);
                 }
             }
@@ -4703,9 +4807,36 @@ fn build_name_resolver(
                             import_module, name, module.module_name
                         )
                     })?;
+                    import_sources
+                        .entry(name.clone())
+                        .or_default()
+                        .entry(internal.clone())
+                        .or_default()
+                        .insert(import_module.clone());
                     unqualified.insert(name.clone(), internal.clone());
                 }
             }
+        }
+    }
+
+    // Reject genuinely ambiguous unqualified references. A name the module
+    // declares itself shadows any import, so only flag names that were
+    // brought in solely by imports and resolved to more than one distinct
+    // internal target.
+    for (name, internals) in &import_sources {
+        if module_internal.contains_key(name) {
+            continue;
+        }
+        if internals.len() > 1 {
+            let mut from_modules: BTreeSet<String> = BTreeSet::new();
+            for modules in internals.values() {
+                from_modules.extend(modules.iter().cloned());
+            }
+            let from_list = from_modules.into_iter().collect::<Vec<_>>().join(", ");
+            return Err(format!(
+                "ambiguous reference to `{name}`: imported from multiple modules ({from_list}). \
+                 Qualify the reference (e.g. `Module.{name}`) or import only one of them."
+            ));
         }
     }
 
@@ -4713,6 +4844,7 @@ fn build_name_resolver(
         own_names: module_internal,
         imported_names: unqualified,
         qualified_modules: qualified,
+        qualified_failures: RefCell::new(Vec::new()),
     })
 }
 
@@ -4757,7 +4889,18 @@ fn rewrite_module_decls(
             )),
         }
     }
+    drain_qualified_failures(&resolver)?;
     Ok(out)
+}
+
+/// Turn any qualified-reference misses recorded during rewrite into a hard
+/// error (chelis#316). Reported deterministically (first by record order) so a
+/// program with several unknown qualified names fails on a stable one.
+fn drain_qualified_failures(resolver: &NameResolver) -> Result<(), String> {
+    match resolver.qualified_failures.borrow().first() {
+        Some(msg) => Err(msg.clone()),
+        None => Ok(()),
+    }
 }
 
 fn rewrite_eval_module_decls(
@@ -4794,6 +4937,7 @@ fn rewrite_eval_module_decls(
             _ => out.push(rewrite_eval_decl(decl, &resolver)),
         }
     }
+    drain_qualified_failures(&resolver)?;
     Ok(out)
 }
 
@@ -4858,6 +5002,28 @@ struct NameResolver {
     own_names: HashMap<String, String>,
     imported_names: HashMap<String, String>,
     qualified_modules: HashMap<String, HashMap<String, String>>,
+    /// Qualified references whose head named an imported module but whose leaf
+    /// that module does not export — a typo or unexported name. Recorded by
+    /// the expression / pattern / type resolvers as they run, then drained
+    /// into a hard error by `rewrite_module_decls` so all three positions
+    /// reject an unknown qualified name uniformly (chelis#316). A `RefCell`
+    /// because the resolvers take `&NameResolver`; each module is rewritten
+    /// with its own resolver on a single thread, so there is no sharing.
+    qualified_failures: RefCell<Vec<String>>,
+}
+
+/// Record that a qualified reference named the imported module `module` but a
+/// leaf `leaf` it does not export. Shared by the expression, pattern, and type
+/// resolvers so an unknown qualified name fails the same way everywhere
+/// instead of silently surviving into a later stage that may not catch it
+/// (e.g. an opaque `Named` type, or a dead `match` arm). Deduplicated so the
+/// same typo used in several positions reports once.
+fn record_qualified_miss(resolver: &NameResolver, module: &str, leaf: &str) {
+    let msg = format!("module `{module}` does not export `{leaf}` (qualified reference)");
+    let mut failures = resolver.qualified_failures.borrow_mut();
+    if !failures.contains(&msg) {
+        failures.push(msg);
+    }
 }
 
 fn internal_name(package: &str, module: &str, name: &str) -> String {
@@ -4967,7 +5133,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             params: params.clone(),
             variants: variants
                 .iter()
-                .map(|variant| rewrite_variant(variant, resolver))
+                .map(|variant| rewrite_variant(variant, resolver, package, module))
                 .collect(),
             opaque: *opaque,
             invariant: invariant
@@ -5097,11 +5263,17 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             invariant,
             span,
         } => Decl::TypeDef {
+            // Eval-entry decls are the user's bare program: the type name
+            // is kept unmangled (the synthetic `__Eval` module has no
+            // internal-name map, so own-name references are never
+            // rewritten either). The constructor names must stay bare for
+            // the same reason; only their field types are rewritten so an
+            // imported type used as a field resolves to its internal name.
             name: name.clone(),
             params: params.clone(),
             variants: variants
                 .iter()
-                .map(|variant| rewrite_variant(variant, resolver))
+                .map(|variant| rewrite_eval_variant(variant, resolver))
                 .collect(),
             opaque: *opaque,
             invariant: invariant
@@ -5154,24 +5326,49 @@ fn rewrite_property_option(option: &PropertyOption, resolver: &NameResolver) -> 
     }
 }
 
-fn rewrite_variant(variant: &Variant, resolver: &NameResolver) -> Variant {
+fn rewrite_variant(
+    variant: &Variant,
+    resolver: &NameResolver,
+    package: &str,
+    module: &str,
+) -> Variant {
+    Variant {
+        // Mangle the constructor name to the package/module-qualified
+        // internal form (chelis#157). `internal_name` is deterministic, so
+        // this matches the `own_names` entry `collect_symbol_kinds` produced
+        // for the same variant, which is what `resolve_name` rewrites
+        // constructor references to at the call site.
+        name: internal_name(package, module, &variant.name),
+        fields: rewrite_variant_fields(&variant.fields, resolver),
+        span: variant.span,
+    }
+}
+
+/// Rewrite a variant's field types through the resolver while keeping its
+/// constructor name unmangled. Used by the eval-entry path, where the
+/// enclosing type and its constructors stay bare (see `rewrite_eval_decl`).
+fn rewrite_eval_variant(variant: &Variant, resolver: &NameResolver) -> Variant {
     Variant {
         name: variant.name.clone(),
-        fields: match &variant.fields {
-            VariantFields::Positional(fields) => VariantFields::Positional(
-                fields
-                    .iter()
-                    .map(|field| rewrite_type(field, resolver))
-                    .collect(),
-            ),
-            VariantFields::Record(fields) => VariantFields::Record(
-                fields
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), rewrite_type(ty, resolver)))
-                    .collect(),
-            ),
-        },
+        fields: rewrite_variant_fields(&variant.fields, resolver),
         span: variant.span,
+    }
+}
+
+fn rewrite_variant_fields(fields: &VariantFields, resolver: &NameResolver) -> VariantFields {
+    match fields {
+        VariantFields::Positional(fields) => VariantFields::Positional(
+            fields
+                .iter()
+                .map(|field| rewrite_type(field, resolver))
+                .collect(),
+        ),
+        VariantFields::Record(fields) => VariantFields::Record(
+            fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), rewrite_type(ty, resolver)))
+                .collect(),
+        ),
     }
 }
 
@@ -5205,9 +5402,16 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
                 .get(name)
                 .cloned()
                 .or_else(|| resolver.imported_names.get(name).cloned())
+                // A dotted head is a module-qualified type name
+                // (`Demo.Dropout.Mode`, chelis#316): resolve it through the
+                // same `qualified_modules` map qualified constructors use.
+                .or_else(|| resolve_qualified_name(name, resolver))
                 .unwrap_or_else(|| name.clone()),
             *span,
         ),
+        // A rank variable `..r` is local to its def/sig and never a
+        // module-qualified name, so it passes through name resolution as-is.
+        TypeExpr::RankSpread(name, span) => TypeExpr::RankSpread(name.clone(), *span),
         TypeExpr::Tensor(parts, precision, span) => TypeExpr::Tensor(
             parts
                 .iter()
@@ -5228,6 +5432,8 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
                 .get(name)
                 .cloned()
                 .or_else(|| resolver.imported_names.get(name).cloned())
+                // Qualified applied type head `Demo.Coral.Frame[n]` (chelis#316).
+                .or_else(|| resolve_qualified_name(name, resolver))
                 .unwrap_or_else(|| name.clone()),
             args.iter().map(|arg| rewrite_type(arg, resolver)).collect(),
             *span,
@@ -5268,7 +5474,13 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<Strin
             *span,
         ),
         Expr::Record(name, fields, span) => Expr::Record(
-            name.clone(),
+            // The record-construction head is a constructor name and must
+            // resolve through the same own-module/imports scope as a
+            // positional constructor call (chelis#157). Without this, a
+            // record build `IntCol { values: xs }` kept the bare `IntCol`
+            // and collided with a same-named constructor from another
+            // package in the flat type-checker registry.
+            resolve_name(name, resolver, locals),
             fields
                 .iter()
                 .map(|(field, expr)| (field.clone(), rewrite_expr(expr, resolver, locals)))
@@ -5415,12 +5627,7 @@ fn rewrite_pattern(pattern: &Pattern, resolver: &NameResolver) -> Pattern {
         Pattern::Var(name, span) => Pattern::Var(name.clone(), *span),
         Pattern::Lit(lit, span) => Pattern::Lit(lit.clone(), *span),
         Pattern::Constructor(name, args, span) => Pattern::Constructor(
-            resolver
-                .imported_names
-                .get(name)
-                .cloned()
-                .or_else(|| resolver.own_names.get(name).cloned())
-                .unwrap_or_else(|| name.clone()),
+            resolve_ctor_pattern_name(name, resolver),
             args.iter()
                 .map(|arg| rewrite_pattern(arg, resolver))
                 .collect(),
@@ -5434,7 +5641,11 @@ fn rewrite_pattern(pattern: &Pattern, resolver: &NameResolver) -> Pattern {
             *span,
         ),
         Pattern::Record(name, fields, span) => Pattern::Record(
-            name.clone(),
+            // A record pattern's head is a constructor name; resolve it
+            // through the same scope as `Pattern::Constructor` so a
+            // record-shaped match arm resolves to the module-qualified
+            // constructor (chelis#157).
+            resolve_ctor_pattern_name(name, resolver),
             fields
                 .iter()
                 .map(|(field, pattern)| (field.clone(), rewrite_pattern(pattern, resolver)))
@@ -5512,19 +5723,96 @@ fn resolve_name(name: &str, resolver: &NameResolver, locals: &HashSet<String>) -
         .unwrap_or_else(|| name.to_string())
 }
 
+/// Resolve a constructor name that appears as a pattern head
+/// (`Pattern::Constructor` / `Pattern::Record`). Patterns introduce
+/// binders rather than reference locals, so unlike `resolve_name` there
+/// is no `locals` shadow set; but the own-module-before-imports
+/// precedence must match `resolve_name` exactly. Otherwise a module that
+/// both declares its own constructor `C` and imports a different `C`
+/// would build `C(..)` as the own (shadowing) constructor but match
+/// `| C(..) =>` against the imported one, because `imported_names`
+/// overwrites the own seed in `build_name_resolver`. That asymmetry
+/// silently mis-resolves a `match` arm to a different package's
+/// constructor (chelis#157); own-first keeps construction and
+/// destructuring on the same mangled name.
+/// A dotted head (`| Demo.Dropout.Train =>`) is a module-qualified
+/// constructor pattern (chelis#316). It cannot match `own_names`/
+/// `imported_names` (those are keyed by bare names), so resolve it through the
+/// same `qualified_modules` map a qualified constructor *expression* uses,
+/// keeping construction and destructuring on one mangled name even when two
+/// imported modules export the same constructor.
+fn resolve_ctor_pattern_name(name: &str, resolver: &NameResolver) -> String {
+    resolver
+        .own_names
+        .get(name)
+        .cloned()
+        .or_else(|| resolver.imported_names.get(name).cloned())
+        .or_else(|| resolve_qualified_name(name, resolver))
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// Resolve a module-qualified dotted name (`Demo.Dropout.Train`) to the
+/// declaring module's internal name, the string-keyed counterpart of
+/// `resolve_qualified_expr`'s segment walk (used for constructor patterns and
+/// type names). Returns `None` for a bare name, for a path whose prefix does
+/// not name an imported module (left untouched — an ordinary unknown name), or
+/// for a path whose prefix *does* name a module but whose leaf it does not
+/// export. In that last case it also records a qualified-reference miss so
+/// `rewrite_module_decls` rejects the typo with a precise error — matching the
+/// expression position rather than silently leaving a dotted name for a later
+/// stage that may not catch it.
+fn resolve_qualified_name(name: &str, resolver: &NameResolver) -> Option<String> {
+    if !name.contains('.') {
+        return None;
+    }
+    let segments: Vec<&str> = name.split('.').collect();
+    let mut miss: Option<(String, String)> = None;
+    for split in 1..segments.len() {
+        let module = segments[..split].join(".");
+        let leaf = segments[split..].join(".");
+        if let Some(map) = resolver.qualified_modules.get(&module) {
+            if let Some(internal) = map.get(&leaf) {
+                return Some(internal.clone());
+            }
+            miss.get_or_insert((module, leaf));
+        }
+    }
+    if let Some((module, leaf)) = miss {
+        record_qualified_miss(resolver, &module, &leaf);
+    }
+    None
+}
+
 fn resolve_qualified_expr(expr: &Expr, resolver: &NameResolver) -> Option<Expr> {
     let (segments, span) = access_segments(expr)?;
     if segments.len() < 2 {
         return None;
     }
+    let mut miss: Option<(String, String)> = None;
     for split in 1..segments.len() {
         let module = segments[..split].join(".");
         let name = segments[split..].join(".");
-        if let Some(map) = resolver.qualified_modules.get(&module)
-            && let Some(internal) = map.get(&name)
-        {
-            return Some(Expr::Var(internal.clone(), span));
+        if let Some(map) = resolver.qualified_modules.get(&module) {
+            if let Some(internal) = map.get(&name) {
+                return Some(Expr::Var(internal.clone(), span));
+            }
+            miss.get_or_insert((module, name));
         }
+    }
+    // The head segments name an imported module, but the trailing name is not
+    // one of its exports: a qualified reference to a missing name (a typo, or
+    // a name the module does not export), not a record field access. Record
+    // the miss so `rewrite_module_decls` rejects it with a precise error —
+    // the same diagnostic the pattern and type positions now get (chelis#316).
+    // Also rewrite it to the written dotted path as a `Var` so that even if the
+    // failure is somehow not drained, the checker still reports an unbound
+    // variable rather than silently typing it as an unconstrained field
+    // projection (field access is not checked against its base). A path whose
+    // head is *not* an imported module (an ordinary record field access such
+    // as `opt.lr`) is left untouched.
+    if let Some((module, leaf)) = miss {
+        record_qualified_miss(resolver, &module, &leaf);
+        return Some(Expr::Var(segments.join("."), span));
     }
     None
 }
@@ -6318,6 +6606,956 @@ path = "./mylib"
         );
 
         (dir, root)
+    }
+
+    // ---- chelis#157: module-scoped constructor resolution ----
+
+    /// Build a two-package graph where the dependency (`coral`) and the
+    /// root (`school`) each declare an ADT carrying a same-named
+    /// *positional* `IntCol` constructor with a *different arity and field
+    /// type*: coral's `IntCol(tensor[n, int64], tensor[n, bool])` takes
+    /// two args, school's `IntCol(tensor[n, f32])` takes one. Each
+    /// package's own function constructs its own `IntCol`. Both go through
+    /// the type-checked positional-application path (`infer_app`), so a
+    /// mis-resolution surfaces as a concrete arity/type error. This is the
+    /// type-dispatch collision the #148 fix explicitly could not cover
+    /// (its `two_positional_same_name` test had to use identical field
+    /// types to dodge env-binding last-write-wins).
+    fn ctor_collision_two_package_fixture() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("school");
+        let dep_root = root.join("coral");
+
+        write(
+            &dep_root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "coral"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Coral"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &dep_root.join("src/frame.ch"),
+            "module Coral.Frame\n\
+             export (Column, make_int_col)\n\
+             type Column[n] = | IntCol(tensor[n, int64], tensor[n, bool])\n\
+             def make_int_col[n](xs: tensor[n, int64], mask: tensor[n, bool]) -> Column[n] = IntCol(xs, mask)\n",
+        );
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "school"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "School"
+
+[dependencies]
+coral = {{ path = "./coral" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module School.Main\n\
+             type Dataset[n] = | IntCol(tensor[n, f32])\n\
+             def make_dataset[n](xs: tensor[n, f32]) -> Dataset[n] = IntCol(xs)\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "school"
+version = "0.1.0"
+
+[[dependencies]]
+name = "coral"
+version = "0.1.0"
+compiler = "=0.1.0"
+archive_sha256 = ""
+shell_sha256 = ""
+
+[dependencies.source]
+kind = "path"
+path = "./coral"
+"#,
+        );
+
+        (dir, root)
+    }
+
+    /// Positive (#157): linking the school/coral graph mangles each
+    /// package's `IntCol` to a distinct package/module-qualified internal
+    /// name, so the two constructors no longer collide in the flat
+    /// type-checker registry. coral's body resolves its own positional
+    /// `IntCol`; school's body resolves its own record `IntCol`; the full
+    /// desugar + type/effect/linearity check is clean.
+    ///
+    /// Pre-fix, both packages bound the bare `IntCol` into one env and the
+    /// last-registered scheme won, so coral's positional call mis-resolved
+    /// to school's record constructor (or vice versa) and the program
+    /// flooded `must use named fields` / `type mismatch` errors.
+    #[test]
+    fn cross_package_same_named_ctor_resolves_module_scoped() {
+        let (_dir, root) = ctor_collision_two_package_fixture();
+        let entry = root.join("src/main.ch");
+
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare_program_for_file ok")
+            .expect("entry is inside a reef package");
+
+        // Both constructors survive linking under distinct mangled names.
+        let ctor_type_names: Vec<String> = prepared
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::TypeDef { variants, .. } => Some(variants),
+                _ => None,
+            })
+            .flatten()
+            .map(|variant| variant.name.clone())
+            .filter(|name| name.contains("IntCol"))
+            .collect();
+        assert_eq!(
+            ctor_type_names.len(),
+            2,
+            "both ADTs must contribute a mangled IntCol variant; got {ctor_type_names:?}"
+        );
+        assert!(
+            ctor_type_names
+                .iter()
+                .all(|name| name != "IntCol" && name.contains("__IntCol")),
+            "each IntCol constructor must be package/module-qualified, not bare; got {ctor_type_names:?}"
+        );
+        let distinct: BTreeSet<&String> = ctor_type_names.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            2,
+            "the two IntCol constructors must mangle to distinct names; got {ctor_type_names:?}"
+        );
+
+        // Full pipeline must type/effect/linearity-check with no errors.
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("module-scoped ctor resolution must type-check the school/coral graph cleanly");
+    }
+
+    /// Regression (#157): a wildcard-free exhaustive `match` on a
+    /// module-scoped multi-constructor ADT must still type-check. After
+    /// reef mangles the constructor names, the type checker's
+    /// exhaustiveness check compares the scrutinee ADT's mangled variant
+    /// names against the names recorded by each matched pattern. If those
+    /// pattern names were recorded bare (the pre-fix behavior) they would
+    /// never cover the mangled variants and the checker would fire a
+    /// spurious `non-exhaustive match`. The `pat-ctor`/`pat-record`
+    /// coverage fix records the *resolved* variant name, so this checks
+    /// clean.
+    #[test]
+    fn module_scoped_adt_exhaustive_match_checks() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("school");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "school"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "School"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module School.Main\n\
+             type Side = | Left | Right\n\
+             def flip(s: Side) -> Side = match s with { | Left => Right | Right => Left }\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "school"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/main.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // The variants are mangled, not bare.
+        let variant_names: Vec<String> = prepared
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::TypeDef { variants, .. } => Some(variants),
+                _ => None,
+            })
+            .flatten()
+            .map(|variant| variant.name.clone())
+            .filter(|name| name.contains("Left") || name.contains("Right"))
+            .collect();
+        assert!(
+            variant_names.iter().all(|name| name.contains("__")),
+            "Side variants must mangle; got {variant_names:?}"
+        );
+
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep).expect(
+            "wildcard-free exhaustive match on a mangled ADT must not fire non-exhaustive match",
+        );
+    }
+
+    /// Negative parity for the exhaustiveness change (#157): recording the
+    /// *resolved* (mangled) variant name for `pat-ctor` must not over-accept.
+    /// A genuinely non-exhaustive, wildcard-free match on a module-scoped
+    /// multi-constructor ADT (covers `Left` but not `Right`) must still be
+    /// REJECTED with a `non-exhaustive match` diagnostic that names the
+    /// uncovered (mangled) `Right` variant. This is the counterpart to
+    /// `module_scoped_adt_exhaustive_match_checks`: the coverage fix maps a
+    /// covered pattern to the same mangled key `variant_names` returns, so a
+    /// missing variant stays missing: the change tightens nothing into a
+    /// false "exhaustive".
+    #[test]
+    fn module_scoped_adt_non_exhaustive_match_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("school");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "school"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "School"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        // `classify` covers only `Left`, omitting `Right`. With the scrutinee
+        // ADT's variants mangled, the checker must still see `Right`
+        // uncovered.
+        write(
+            &root.join("src/main.ch"),
+            "module School.Main\n\
+             type Side = | Left | Right\n\
+             def classify(s: Side) -> int32 = match s with { | Left => 0 }\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "school"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/main.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // Sanity: the scrutinee ADT's variants are mangled, so this exercises
+        // the resolved-name coverage path, not the bare-name one.
+        let right_mangled = internal_name("school", "School.Main", "Right");
+        assert!(
+            right_mangled.contains("__Right") && right_mangled != "Right",
+            "fixture sanity: Right must mangle; got {right_mangled}"
+        );
+
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        let err = checked_program_with_effects(&deep).expect_err(
+            "a wildcard-free match missing the Right variant must be rejected as non-exhaustive",
+        );
+        assert!(
+            err.contains("NonExhaustiveMatch") || err.contains("non-exhaustive"),
+            "diagnostic must report a non-exhaustive match; got: {err}"
+        );
+        assert!(
+            err.contains("Right"),
+            "diagnostic must name the uncovered Right variant (mangled or bare); got: {err}"
+        );
+    }
+
+    /// Negative parity (#157): the principled fix must not silently
+    /// dispatch a genuinely ambiguous unqualified constructor reference.
+    /// A module that imports `IntCol` unqualified from two different
+    /// modules (here coral's `Frame` and `Frame2`, each declaring an
+    /// `IntCol`) must be rejected with an explicit ambiguity diagnostic,
+    /// not last-binding-wins.
+    #[test]
+    fn ambiguous_unqualified_ctor_import_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("school");
+        let dep_root = root.join("coral");
+
+        write(
+            &dep_root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "coral"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Coral"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &dep_root.join("src/frame.ch"),
+            "module Coral.Frame\n\
+             export (ColumnA, IntCol)\n\
+             type ColumnA[n] = | IntCol(tensor[n, int64])\n",
+        );
+        write(
+            &dep_root.join("src/frame2.ch"),
+            "module Coral.Frame2\n\
+             export (ColumnB, IntCol)\n\
+             type ColumnB[n] = | IntCol(tensor[n, f32])\n",
+        );
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "school"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "School"
+
+[dependencies]
+coral = {{ path = "./coral" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module School.Main\n\
+             import Coral.Frame (ColumnA, IntCol)\n\
+             import Coral.Frame2 (IntCol)\n\
+             def use_it[n](xs: tensor[n, int64]) -> ColumnA[n] = IntCol(xs)\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "school"
+version = "0.1.0"
+
+[[dependencies]]
+name = "coral"
+version = "0.1.0"
+compiler = "=0.1.0"
+archive_sha256 = ""
+shell_sha256 = ""
+
+[dependencies.source]
+kind = "path"
+path = "./coral"
+"#,
+        );
+
+        let entry = root.join("src/main.ch");
+        let err = prepare_program_for_file(&entry).expect_err(
+            "ambiguous unqualified IntCol import must be rejected, not silently dispatched",
+        );
+        assert!(
+            err.contains("ambiguous reference to `IntCol`"),
+            "diagnostic must name the ambiguous constructor; got: {err}"
+        );
+        assert!(
+            err.contains("Coral.Frame") && err.contains("Coral.Frame2"),
+            "diagnostic must name both source modules; got: {err}"
+        );
+    }
+
+    /// No-regression for the cross-module *import* of a constructor
+    /// (#157 module-system semantics): a module that imports a single
+    /// `IntCol` from one module and uses it resolves to that module's
+    /// mangled constructor and type-checks cleanly. This is the positive
+    /// control for `ambiguous_unqualified_ctor_import_is_rejected`: one
+    /// import is fine, two colliding imports are the error.
+    #[test]
+    fn single_unqualified_ctor_import_resolves_and_checks() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("school");
+        let dep_root = root.join("coral");
+
+        write(
+            &dep_root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "coral"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Coral"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &dep_root.join("src/frame.ch"),
+            "module Coral.Frame\n\
+             export (Column, IntCol)\n\
+             type Column[n] = | IntCol(tensor[n, int64])\n",
+        );
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "school"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "School"
+
+[dependencies]
+coral = {{ path = "./coral" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module School.Main\n\
+             import Coral.Frame (Column, IntCol)\n\
+             def use_it[n](xs: tensor[n, int64]) -> Column[n] = IntCol(xs)\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "school"
+version = "0.1.0"
+
+[[dependencies]]
+name = "coral"
+version = "0.1.0"
+compiler = "=0.1.0"
+archive_sha256 = ""
+shell_sha256 = ""
+
+[dependencies.source]
+kind = "path"
+path = "./coral"
+"#,
+        );
+
+        let entry = root.join("src/main.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("single imported constructor must resolve and type-check");
+    }
+
+    /// Regression (#157): a module that declares its own constructor `Mark`
+    /// AND imports a different `Mark` from a dependency must resolve a
+    /// *pattern* head the same way it resolves a *construction* head:
+    /// own-module-first. The design rule is "a name the module declares
+    /// itself shadows imports", and the ambiguity check honors it for
+    /// expressions. Before the `resolve_ctor_pattern_name` fix, the pattern
+    /// rewrite checked `imported_names` first; since an import overwrites
+    /// the own seed in that map, `Tag(Mark)` was *constructed* with the own
+    /// mangled name but `| Tag(Mark) =>` was *matched* against the imported
+    /// (other-package) mangled name. The two never unified and the program
+    /// failed to type-check. This test pins construction and destructuring
+    /// to the same own internal name.
+    #[test]
+    fn own_ctor_shadows_imported_same_name_in_pattern() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("school");
+        let dep_root = root.join("coral");
+
+        // Dependency declares + exports its own `Mark` constructor.
+        write(
+            &dep_root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "coral"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Coral"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &dep_root.join("src/frame.ch"),
+            "module Coral.Frame\n\
+             export (Stamp, Mark)\n\
+             type Stamp = | Mark(int64)\n",
+        );
+
+        // Root module declares its OWN `Tag` with an own `Mark` constructor
+        // (positional, single field), imports the dependency's different
+        // `Mark`, then both builds and matches its own `Mark`.
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "school"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "School"
+
+[dependencies]
+coral = {{ path = "./coral" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module School.Main\n\
+             import Coral.Frame (Stamp, Mark)\n\
+             type Tag = | Mark(f32)\n\
+             def build(x: f32) -> Tag = Mark(x)\n\
+             def unwrap(t: Tag) -> f32 = match t with { | Mark(v) => v }\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "school"
+version = "0.1.0"
+
+[[dependencies]]
+name = "coral"
+version = "0.1.0"
+compiler = "=0.1.0"
+archive_sha256 = ""
+shell_sha256 = ""
+
+[dependencies.source]
+kind = "path"
+path = "./coral"
+"#,
+        );
+
+        let entry = root.join("src/main.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // The own `Mark` mangles to School.Main's internal name; the
+        // imported `Mark` mangles to Coral.Frame's. The match arm head must
+        // equal the construction head (the own one), never the imported one.
+        let imported_mark = internal_name("coral", "Coral.Frame", "Mark");
+        let own_mark = internal_name("school", "School.Main", "Mark");
+        assert_ne!(
+            own_mark, imported_mark,
+            "fixture sanity: own and imported Mark must mangle differently"
+        );
+
+        let mut construction_head: Option<String> = None;
+        let mut pattern_head: Option<String> = None;
+        for decl in &prepared.decls {
+            let Decl::FunDef { name, body, .. } = decl else {
+                continue;
+            };
+            if name.ends_with("__build")
+                && let Expr::Apply(func, _, _) = body
+                && let Expr::Constructor(ctor, _) = func.as_ref()
+            {
+                construction_head = Some(ctor.clone());
+            }
+            if name.ends_with("__unwrap")
+                && let Expr::Match(_, arms, _) = body
+                && let Some(arm) = arms.first()
+                && let Pattern::Constructor(ctor, _, _) = &arm.pattern
+            {
+                pattern_head = Some(ctor.clone());
+            }
+        }
+
+        let construction_head =
+            construction_head.expect("build() body must be a constructor application");
+        let pattern_head = pattern_head.expect("unwrap() body must be a constructor-pattern match");
+        assert_eq!(
+            construction_head, own_mark,
+            "construction must resolve to the own Mark; got {construction_head}"
+        );
+        assert_eq!(
+            pattern_head, own_mark,
+            "pattern head must resolve to the SAME own Mark, not the imported one; got {pattern_head} (imported is {imported_mark})"
+        );
+
+        // And the full pipeline must type-check: construction and
+        // destructuring agree on one mangled constructor.
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep).expect(
+            "own constructor shadowing an imported same-name must construct and match consistently",
+        );
+    }
+
+    /// Issue #316: two modules in one package each declare
+    /// `type Mode = | Train | Eval`. A third module that needs both must be
+    /// able to disambiguate with a module-qualified reference
+    /// (`Demo.Dropout.Eval`) instead of renaming one module's constructors.
+    /// This is the positive resolution of `ambiguous_unqualified_ctor_import_is_rejected`:
+    /// where importing both `Eval`s unqualified is an error, qualifying each
+    /// reference resolves cleanly to that module's own mangled constructor and
+    /// the program type-checks. Before the parser fix the qualified form did
+    /// not even parse — the ambiguity diagnostic recommended a syntax the
+    /// front end rejected.
+    #[test]
+    fn qualified_ctor_reference_disambiguates_same_named_constructors() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        write(
+            &root.join("src/sd.ch"),
+            "module Demo.Sd\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        // `combo` pulls in both modules qualified-access-only (`()`), so no
+        // unqualified `Mode`/`Train`/`Eval`/`use` collide, and reaches each
+        // module's constructor and value through the qualified path.
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             import Demo.Sd ()\n\
+             def go() -> i64 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // The qualified references must resolve to each module's OWN mangled
+        // names, not collapse onto one. Walk `go`'s rewritten body and collect
+        // every `Var` head; it must contain both modules' `Eval`/`Train` and
+        // both `use` internals.
+        fn collect_vars(expr: &Expr, out: &mut Vec<String>) {
+            match expr {
+                Expr::Var(name, _) | Expr::Constructor(name, _) => out.push(name.clone()),
+                Expr::Apply(func, args, _) => {
+                    collect_vars(func, out);
+                    for arg in args {
+                        collect_vars(arg, out);
+                    }
+                }
+                Expr::Binary(_, l, r, _) => {
+                    collect_vars(l, out);
+                    collect_vars(r, out);
+                }
+                Expr::Access(inner, _, _) => collect_vars(inner, out),
+                _ => {}
+            }
+        }
+        let go_body = prepared
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef { name, body, .. } if name.ends_with("__go") => Some(body),
+                _ => None,
+            })
+            .expect("combo go() must be present after rewrite");
+        let mut vars = Vec::new();
+        collect_vars(go_body, &mut vars);
+
+        let dropout_eval = internal_name("demo", "Demo.Dropout", "Eval");
+        let sd_train = internal_name("demo", "Demo.Sd", "Train");
+        let dropout_use = internal_name("demo", "Demo.Dropout", "use");
+        let sd_use = internal_name("demo", "Demo.Sd", "use");
+        assert_ne!(
+            dropout_eval, sd_train,
+            "fixture sanity: per-module constructors must mangle differently"
+        );
+        for expected in [&dropout_eval, &sd_train, &dropout_use, &sd_use] {
+            assert!(
+                vars.contains(expected),
+                "qualified reference must resolve to {expected}; resolved heads were {vars:?}"
+            );
+        }
+
+        // The full pipeline must type-check: each `use` receives a value of its
+        // own module's `Mode`, so the #316 `Pkg__demo__Demo__Dropout__Mode vs
+        // Pkg__demo__Demo__Sd__Mode` mismatch cannot arise.
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("module-qualified constructor references must let two same-named ADTs coexist");
+    }
+
+    /// Negative parity for #316: a module-qualified reference to a name the
+    /// target module does NOT export must not silently resolve. `Demo.Dropout`
+    /// does not export `Missing`, so `Demo.Dropout.Missing` is rejected during
+    /// reef rewrite with a `does not export` error rather than being invented
+    /// or left to silently survive into a later stage.
+    #[test]
+    fn qualified_reference_to_unexported_name_is_unresolved() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             def go() -> i64 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
+        let err = prepare_program_for_file(&entry)
+            .expect_err("qualified reference to an unexported name must be rejected");
+        assert!(
+            err.contains("does not export") && err.contains("Missing"),
+            "diagnostic must name the unexported leaf; got: {err}"
+        );
+    }
+
+    /// Issue #316 (patterns): module-qualified constructor *patterns*
+    /// (`| Demo.Dropout.Train =>`) resolve to the declaring module's mangled
+    /// constructor, the destructuring dual of the qualified construction in
+    /// `qualified_ctor_reference_disambiguates_same_named_constructors`. With
+    /// two modules each declaring `type Mode = | Train | Eval`, a `match` whose
+    /// arms qualify against one module must bind that module's variants (so the
+    /// arm heads equal the scrutinee ADT's variant names) and type-check.
+    #[test]
+    fn qualified_constructor_patterns_resolve_per_module() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, Train, Eval)\n\
+             type Mode = | Train | Eval\n",
+        );
+        write(
+            &root.join("src/sd.ch"),
+            "module Demo.Sd\n\
+             export (Mode, Train, Eval)\n\
+             type Mode = | Train | Eval\n",
+        );
+        // The scrutinee is a qualified constructor expression (pinning the
+        // ADT), and every arm qualifies to the same module — so no unqualified
+        // `Mode`/`Train`/`Eval` is needed and the two modules cannot collide.
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             import Demo.Sd ()\n\
+             def classify_dropout() -> i64 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
+             def classify_sd() -> i64 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // Collect each function's match-arm pattern heads.
+        fn arm_heads(decls: &[Decl], fn_suffix: &str) -> Vec<String> {
+            decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::FunDef { name, body, .. } if name.ends_with(fn_suffix) => Some(body),
+                    _ => None,
+                })
+                .and_then(|body| match body {
+                    Expr::Match(_, arms, _) => Some(arms),
+                    _ => None,
+                })
+                .map(|arms| {
+                    arms.iter()
+                        .filter_map(|arm| match &arm.pattern {
+                            Pattern::Constructor(name, _, _) => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
+        let dropout_heads = arm_heads(&prepared.decls, "__classify_dropout");
+        let sd_heads = arm_heads(&prepared.decls, "__classify_sd");
+        assert_eq!(
+            dropout_heads,
+            vec![
+                internal_name("demo", "Demo.Dropout", "Train"),
+                internal_name("demo", "Demo.Dropout", "Eval"),
+            ],
+            "Dropout arms must resolve to Dropout's mangled constructors"
+        );
+        assert_eq!(
+            sd_heads,
+            vec![
+                internal_name("demo", "Demo.Sd", "Train"),
+                internal_name("demo", "Demo.Sd", "Eval"),
+            ],
+            "Sd arms must resolve to Sd's mangled constructors"
+        );
+
+        // Both exhaustive matches must type-check: arm heads and scrutinee
+        // agree on one module's `Mode`, so neither the #316 cross-module
+        // mismatch nor a spurious non-exhaustive diagnostic can arise.
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("qualified constructor patterns must type-check per module");
+    }
+
+    /// Issue #316 (types): a module-qualified *type* name (`Demo.Dropout.Mode`)
+    /// in annotation position resolves to the declaring module's mangled type,
+    /// so a consumer that imports two modules exporting the same type name can
+    /// still annotate against one. Completes the qualification trio alongside
+    /// qualified constructor expressions and patterns.
+    #[test]
+    fn qualified_type_name_resolves_in_annotation() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("demo");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/dropout.ch"),
+            "module Demo.Dropout\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        write(
+            &root.join("src/sd.ch"),
+            "module Demo.Sd\n\
+             export (Mode, use)\n\
+             type Mode = | Train | Eval\n\
+             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+        );
+        // `relay` annotates its parameter with the qualified type and forwards
+        // it to the qualified `use`. Both `Mode` ADTs are linked, so a bare
+        // `Mode` would be ambiguous; the qualified annotation pins Dropout's.
+        write(
+            &root.join("src/combo.ch"),
+            "module Demo.Combo\n\
+             import Demo.Dropout ()\n\
+             import Demo.Sd ()\n\
+             def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)\n",
+        );
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        );
+
+        let entry = root.join("src/combo.ch");
+        let prepared = prepare_program_for_file(&entry)
+            .expect("prepare ok")
+            .expect("entry inside reef package");
+
+        // `relay`'s parameter type must resolve to Dropout's mangled `Mode`.
+        let expected = internal_name("demo", "Demo.Dropout", "Mode");
+        let param_ty = prepared
+            .decls
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef { name, params, .. } if name.ends_with("__relay") => {
+                    params.first().and_then(|p| p.ty.clone())
+                }
+                _ => None,
+            })
+            .expect("relay must have an annotated parameter");
+        assert!(
+            matches!(&param_ty, TypeExpr::Named(n, _) if *n == expected),
+            "qualified type must resolve to Dropout's mangled Mode ({expected}); got {param_ty:?}"
+        );
+
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar+expand ok");
+        checked_program_with_effects(&deep)
+            .expect("qualified type annotation must resolve and type-check");
     }
 
     /// Positive: `prepare_reef_graph` + two calls to `compile_with_reef_graph`

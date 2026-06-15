@@ -242,6 +242,10 @@ pub enum WireInferredDim {
     /// `Dim::Wildcard` — an unknown / dynamic dimension (the `*`
     /// display rendering).
     Wildcard,
+    /// `Dim::Rank` — a rank variable standing for an entire shape vector
+    /// (Tier-2 rank polymorphism). `id` is the raw `RankVar` index, matching
+    /// the `..rN` display rendering.
+    Rank { id: u32 },
 }
 
 /// Structured tensor precision slot, mirroring
@@ -862,6 +866,11 @@ pub enum WireSurfTypeExpr {
     Infer {
         span: Span,
     },
+    /// `..r` rank-variable spread (Tier-2 rank polymorphism).
+    RankSpread {
+        name: String,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1008,6 +1017,22 @@ pub enum WireRiscOp {
     },
     ProdReduce {
         axis: usize,
+    },
+    ReduceWindow {
+        /// One of "max" / "min" / "sum" / "mean", matching the Surf
+        /// builtin name suffix and `chelis_ir::dag::ReduceWindowKind`.
+        reducer: String,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
+    },
+    /// Reverse-mode adjoint of `ReduceWindow` (`RiscOp::ReduceWindowGrad`).
+    /// Carries the same `reducer` / window / stride contract; appears only
+    /// in `grad`-lowered DAGs.
+    ReduceWindowGrad {
+        /// One of "max" / "min" / "sum" / "mean", as for `ReduceWindow`.
+        reducer: String,
+        window_shape: Vec<usize>,
+        strides: Vec<usize>,
     },
     Argmax {
         axis: usize,
@@ -1183,5 +1208,79 @@ mod tests {
             result.is_err(),
             "unknown effect kind must not deserialize, got {result:?}"
         );
+    }
+
+    /// Issue #254: the `reduce_window_*` family wires to a single
+    /// `ReduceWindow` variant carrying a stringly-typed `reducer`
+    /// discriminator plus the window/stride vectors. Pin the JSON
+    /// shape and the serialize → deserialize round-trip so a downstream
+    /// consumer of the machine-facing DAG sees a stable contract.
+    #[test]
+    fn reduce_window_wire_op_round_trips_with_reducer_string() {
+        for (reducer, kind) in [
+            ("max", "max"),
+            ("min", "min"),
+            ("sum", "sum"),
+            ("mean", "mean"),
+        ] {
+            let op = WireRiscOp::ReduceWindow {
+                reducer: reducer.to_string(),
+                window_shape: vec![2, 3],
+                strides: vec![1, 2],
+            };
+            let json = serde_json::to_string(&op).unwrap();
+            assert_eq!(
+                json,
+                format!(
+                    r#"{{"kind":"reduce_window","reducer":"{kind}","window_shape":[2,3],"strides":[1,2]}}"#
+                ),
+            );
+            match serde_json::from_str::<WireRiscOp>(&json).unwrap() {
+                WireRiscOp::ReduceWindow {
+                    reducer,
+                    window_shape,
+                    strides,
+                } => {
+                    assert_eq!(reducer, kind);
+                    assert_eq!(window_shape, vec![2, 3]);
+                    assert_eq!(strides, vec![1, 2]);
+                }
+                other => panic!("expected reduce_window wire op, got {other:?}"),
+            }
+        }
+    }
+
+    /// The `reduce_window_*` adjoint wires to a sibling `ReduceWindowGrad`
+    /// variant carrying the same `reducer` / window / stride contract.
+    /// Pin its JSON shape and round-trip so grad-lowered machine-facing
+    /// DAGs have a stable wire form.
+    #[test]
+    fn reduce_window_grad_wire_op_round_trips_with_reducer_string() {
+        for kind in ["max", "min", "sum", "mean"] {
+            let op = WireRiscOp::ReduceWindowGrad {
+                reducer: kind.to_string(),
+                window_shape: vec![2, 3],
+                strides: vec![1, 2],
+            };
+            let json = serde_json::to_string(&op).unwrap();
+            assert_eq!(
+                json,
+                format!(
+                    r#"{{"kind":"reduce_window_grad","reducer":"{kind}","window_shape":[2,3],"strides":[1,2]}}"#
+                ),
+            );
+            match serde_json::from_str::<WireRiscOp>(&json).unwrap() {
+                WireRiscOp::ReduceWindowGrad {
+                    reducer,
+                    window_shape,
+                    strides,
+                } => {
+                    assert_eq!(reducer, kind);
+                    assert_eq!(window_shape, vec![2, 3]);
+                    assert_eq!(strides, vec![1, 2]);
+                }
+                other => panic!("expected reduce_window_grad wire op, got {other:?}"),
+            }
+        }
     }
 }

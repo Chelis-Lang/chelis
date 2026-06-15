@@ -1,5 +1,5 @@
 module Std.Tests.Tokenizer
-import Std.Tokenizer (Tokenizer, batch_encode, decode, encode)
+import Std.Tokenizer (Tokenizer, BpeTokenizer, batch_encode, decode, encode)
 import Std.Test (assert_eq_int, assert_eq_string)
 def make_ab_tokenizer() -> Tokenizer = {
   vocab = dict_of([("a", cast(1, int64)), ("b", cast(2, int64))])

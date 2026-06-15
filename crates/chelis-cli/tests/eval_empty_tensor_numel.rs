@@ -7,7 +7,7 @@
 //! despite the shape being printed as `tensor(shape=[0], data=[])`. The bug
 //! is in two clamp sites that inflate a zero-element product back to 1:
 //!
-//! - `crates/chelis-compiler-api/src/runtime.rs::eval_builtin "numel"` does
+//! - `crates/chelis-compiler-api/src/runtime/eval.rs::eval_builtin "numel"` does
 //!   `tensor.value.shape.iter().product::<usize>().max(1)`. For shape `[0]`
 //!   the product is 0, then `.max(1)` clamps to 1.
 //! - `crates/chelis-runtime/src/lib.rs::chelis_alloc_tensor` and

@@ -274,6 +274,7 @@ pub enum TypeExpr {
     App(String, Vec<TypeExpr>, Span),          // Option f32
     Tuple(Vec<TypeExpr>, Span),                // (f32, f32)
     Infer(Span),                               // _
+    RankSpread(String, Span),                  // ..r (rank variable; whole-shape spread)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

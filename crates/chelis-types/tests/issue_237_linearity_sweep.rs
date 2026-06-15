@@ -189,11 +189,13 @@ fn closure_that_consumes_via_app_arg_still_trips_use_after_consume() {
     // The closure body passes the captured tensor to a user fn whose
     // first param is owned-linear, so the body structurally consumes
     // the capture. Later use outside must still be flagged.
+    // (Fixture renamed from `take` for chelis#353: `take` is a builtin
+    // name and bare shadowing defs are now rejected at declaration time.)
     let errors = check_surf(
         r#"
-def take(t: tensor[4, f32]) -> tensor[4, f32] = t
+def grab(t: tensor[4, f32]) -> tensor[4, f32] = t
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn (i: int64) -> take(x)
+  g = fn (i: int64) -> grab(x)
   z = g(cast(0, int64))
   add(x, z)
 }

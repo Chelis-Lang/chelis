@@ -299,6 +299,7 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // Second pass: infer def bodies. Same module-descent rationale as the
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
+    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     for (module, expr) in &items {
         let decl_name = top_level_decl_name(expr);
         crate::opacity::set_current_item(
@@ -314,6 +315,7 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
             &mut errors,
             &mut typed_nodes,
             &mut total_nodes,
+            &user_def_names,
         );
         // Issue #256 round 2: re-check each deferred borrow against the
         // now-complete substitution (see `validate_deferred_borrow_vars`).
@@ -545,7 +547,7 @@ pub fn build_compiled_library_context(
     // arm of `annotate_expr_with_scope` stamps borrow-correct types
     // onto each library def's `(params ...)` node -- the library
     // compile path is exactly where chelis-std's separate-`sig` defs
-    // (`Std.Loss.CrossEntropy.loss` etc.) are annotated.
+    // (`School.Loss.CrossEntropy.loss` etc.) are annotated.
     let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
@@ -994,6 +996,7 @@ fn infer_ir_program_with_state(
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
+    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     for (module, expr) in &items {
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
@@ -1014,6 +1017,7 @@ fn infer_ir_program_with_state(
             &mut errors,
             &mut typed_nodes,
             &mut total_nodes,
+            &user_def_names,
         );
         if let Some(t0) = t0 {
             let elapsed = t0.elapsed();
@@ -4691,6 +4695,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     // `def` arm of `annotate_expr_with_scope` for the duration of this
     // pass. Restored on drop.
     let _declared_sig_guard = install_declared_sig_param_types(exprs);
+    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
 
     // Descend through `(module {} name ...)` wrappers when collecting
     // declarations, matching `infer_program`. Without this, module-
@@ -4739,6 +4744,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
                 &mut step_errors,
                 &mut typed_nodes,
                 &mut total_nodes,
+                &user_def_names,
             );
         }
 
@@ -4779,6 +4785,7 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
     // Declared `defsig` parameter type expressions for the new-code
     // exprs being annotated here. Restored on drop.
     let _declared_sig_guard = install_declared_sig_param_types(exprs);
+    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
 
     // Descend through `(module {} name ...)` wrappers when collecting
     // declarations; mirrors the `infer_program` shape and the parallel
@@ -4819,6 +4826,7 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
                 &mut step_errors,
                 &mut typed_nodes,
                 &mut total_nodes,
+                &user_def_names,
             );
         }
 
@@ -5117,10 +5125,84 @@ fn annotate_fn_children(
 
     let mut param_vg = vg.clone();
     let raw_params = extract_params(&kids[0], &mut param_vg, adt_reg);
+    // issue #319: when the def carries a separate `sig`, the `fn`
+    // literal's params are bare symbols, so the inference above seeds
+    // each with an unconstrained fresh tvar — the body's shape-sensitive
+    // ops (`matmul`, `permute`) then annotate as bare type variables
+    // rather than resolved tensor types. Recovering the declared param
+    // types from `declared_param_type_exprs` and binding them into
+    // `fn_env` lets the recursive body annotation resolve those ops to
+    // their true `tensor[...]` shapes. Without this, IR lowering reads a
+    // rank-0 `default_type()` off a `(t-var ...)` body-node annotation
+    // and `tier2::lower_matmul` panics with `expects rank >= 2`.
+    //
+    // A SHARED `tvar_map`/`dvar_map` is used across every declared param
+    // so a dim/precision variable that recurs across parameters (e.g.
+    // `tensor[s, d, p]` for `q`, `k`, and `v`) maps to the SAME `DimVar`
+    // / `TypeVar` — preserving the inter-parameter shape relationships
+    // (`q: [s, d]`, `kt: [d, s]` ⇒ `matmul(q, kt): [s, s]`) that the
+    // matmul typing rule depends on. `param_vg` (the cloned `VarGen`)
+    // feeds fresh-var allocation so it does not perturb the caller's.
+    //
+    // Why clone rather than thread the caller's `vg` and advance its
+    // counter (which would be collision-free and shrink the argument
+    // below to a sentence): this is a post-inference ANNOTATION pass and
+    // `vg: &VarGen` is borrowed SHARED here — advancing the caller's
+    // counter is not even available without widening the whole annotation
+    // call-chain to `&mut VarGen`, a far larger change for a pass whose
+    // vars never escape. The throwaway clone is the correct local choice;
+    // the confinement argument below is why the resulting ID overlap is
+    // harmless.
+    //
+    // Var-ID overlap is harmless. These freshly-minted `TypeVar`s are
+    // used ONLY to seed `fn_env` for the body-ANNOTATION pass below; the
+    // annotation re-infers each body node's `type:` via
+    // `infer_expr_in_scope`, which runs in its OWN throwaway `Subst`
+    // (`infer_expr_in_scope` creates `Subst::new()`). Nothing from
+    // `param_vg` flows back into the caller's `vg`/`subst` or the
+    // program's global type state, so a `TypeVar(N)` minted here that
+    // happens to collide numerically with a `TypeVar(N)` elsewhere never
+    // unifies the two: the collision is confined to this one node's
+    // annotation scope. (Re-using the already-resolved declared `Fn` type
+    // — as the WS-A7 `infer_def_body_with_sig` inference path does — would
+    // also work, but is not reachable from this post-inference annotation
+    // pass, which has no access to that resolved type or the error
+    // vector.)
+    let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
+        Some(declared) => {
+            let mut tvar_map: HashMap<String, TypeVar> = HashMap::new();
+            let mut dvar_map: HashMap<String, DimVar> = HashMap::new();
+            // Tier-2 rank polymorphism (#286): a `..r` rank var recurring
+            // across params must map to the SAME `RankVar`, so the rvar map
+            // is shared across the declared params exactly like tvar/dvar.
+            let mut rvar_map = HashMap::new();
+            declared
+                .iter()
+                .map(|expr| {
+                    if is_wildcard_tvar_expr(expr) {
+                        None
+                    } else {
+                        match deep_type_to_type_inner(
+                            expr,
+                            &mut param_vg,
+                            &mut tvar_map,
+                            &mut dvar_map,
+                            &mut rvar_map,
+                        ) {
+                            Type::Error => None,
+                            ty => Some(ty),
+                        }
+                    }
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
     let mut fn_env = env.clone();
     for (index, (name, maybe_ty)) in raw_params.iter().enumerate() {
         let ty = maybe_ty
             .clone()
+            .or_else(|| declared_param_types.get(index).cloned().flatten())
             .or_else(|| param_types.get(index).cloned())
             .unwrap_or(Type::Error);
         fn_env.bind(name.clone(), Scheme::mono(ty));
@@ -5528,6 +5610,7 @@ fn dim_to_deep_expr(dim: &Dim) -> deep::Expr {
             vec![deep::Expr::Atom(deep::Atom::Int(*value), zero_span())],
         ),
         Dim::Wildcard => node_expr("d-name", vec![symbol_expr("*")]),
+        Dim::Rank(rank) => node_expr("d-rank", vec![symbol_expr(&format!("r{}", rank.0))]),
     }
 }
 
@@ -6480,7 +6563,7 @@ fn ir_builtin_axis_dim(
 /// through a `(borrow {} <inner>)` wrapper if present.
 ///
 /// Surf source idiomatically passes tensors to shape-sensitive IR
-/// builtins via borrows (e.g. the `Std.Nn.Conv.conv2d_small` sig
+/// builtins via borrows (e.g. the `School.Nn.Conv.conv2d_small` sig
 /// requires `&tensor[...]`). The validator's lookup helpers need to
 /// see through that wrapper to find the underlying tensor type in the
 /// IR type environment; otherwise the dim-concreteness checks in the
@@ -6611,6 +6694,104 @@ fn with_macro_provenance(expr: &deep::Expr, message: String) -> String {
         return message;
     };
     format!("{message} (in expansion of {source})")
+}
+
+// chelis#317 constructor-scope invariant (read before touching the helpers
+// below). The reef name resolver guarantees that every constructor reference
+// which is genuinely *in scope* — declared in the current module, imported by
+// name, or module-qualified — reaches the type checker rewritten to its exact
+// reef-mangled name (`Pkg__Mod__Ctor`), and the matching `deftype` registers
+// that exact name in both the type env and the ADT registry. A bare,
+// un-mangled constructor name therefore arrives at type-check ONLY when the
+// importing module never brought it into scope (a type-only import, or no
+// import at all). The `lookup_terminal_unique` / `lookup_variant_terminal_unique`
+// fuzzy fallbacks are diagnostic-only: they exist so a partially-mangled or
+// out-of-scope name can be *named* in an error, never to bind a reference to a
+// scope. The guards below depend on this: an in-scope constructor is always
+// exact-bound, so rejecting a name that resolves only through the fuzzy
+// fallback (or not at all) cannot reject an in-scope constructor. A future
+// half-mangled producer (mangled `deftype`, bare reference) would violate the
+// invariant and be wrongly rejected here — which is the intended failure mode:
+// a half-mangled program is a structural defect, not a valid reference. The
+// `ir_resolves_consistently_mangled_constructor_names` /
+// `ir_rejects_out_of_scope_terminal_constructor_name` unit tests pin both
+// directions.
+
+/// The terminal (last) segment of a possibly module-qualified or
+/// reef-mangled name. Mirrors `env::terminal_name` / `adt::terminal_name`:
+/// `Pkg__Demo__Adt__Alpha` and `Demo.Adt.Alpha` both have terminal `Alpha`.
+fn terminal_segment(name: &str) -> &str {
+    name.rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(name)
+}
+
+/// Whether `name` is an ADT constructor reference by Chelis nomenclature:
+/// its terminal segment starts with an uppercase ASCII letter (§3.1, the
+/// same rule the surf parser uses to classify a bare uppercase identifier
+/// as `Expr::Constructor` / `Pattern::Constructor`). Type names are also
+/// PascalCase, but they never reach value-position `var`/`pat-ctor`
+/// resolution, so an uppercase terminal in those positions is a
+/// constructor.
+fn is_constructor_name(name: &str) -> bool {
+    terminal_segment(name)
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// A constructor reference is *in scope* only when its exact name is bound
+/// in `env` — either a bare builtin constructor (`Some`/`None`/`Cons`/`Nil`,
+/// registered bare by `register_prelude_adts`) or a reef-mangled in-scope
+/// constructor (chelis#157/#316 rewrite the reference to its mangled name
+/// when the importing module declares it locally or imports it by name).
+///
+/// Returns `true` when `name` looks like a constructor (PascalCase terminal)
+/// but is *not* bound exactly and is *only* reachable through the registry's
+/// fuzzy terminal-segment fallback (`lookup_terminal_unique`). That fallback
+/// is exactly the silent cross-module mis-resolution chelis#317 reports: a
+/// type-only import leaves the bare constructor un-rewritten, and the fuzzy
+/// match binds it to another module's mangled tag, deferring the failure to
+/// a runtime non-exhaustive match. Such a reference must be rejected at
+/// `check` as an unknown constructor instead.
+fn constructor_out_of_scope(name: &str, env: &Env) -> bool {
+    is_constructor_name(name)
+        && env.lookup(name).is_none()
+        && env.lookup_terminal_unique(name).is_some()
+}
+
+/// Pattern-position counterpart of [`constructor_out_of_scope`]. A constructor
+/// **pattern** head (`| Alpha =>`, `| Alpha { .. } =>`) is in scope only when it
+/// resolves through an *exact* binding — either the type env (`env.lookup`, for
+/// builtins and reef-mangled in-scope constructors) or the ADT registry
+/// (`adt_reg.lookup_variant`, the exact mangled variant key). The terminal-unique
+/// fallbacks (`env.lookup_terminal_unique` / `lookup_variant_terminal_unique`)
+/// are diagnostic-only fuzzy matches, never an in-scope binding.
+///
+/// Returns `true` when `name` is a PascalCase constructor that resolves through
+/// *neither* exact path. This rejects two out-of-scope cases the bare
+/// [`constructor_out_of_scope`] env check misses for patterns (chelis#317):
+///
+///   1. unique fuzzy — exactly one foreign same-terminal variant exists, so a
+///      bare `| Alpha =>` would fuzzy-bind to it; and
+///   2. non-unique / unresolvable — two foreign modules export a same-terminal
+///      `Dup`, so `lookup_*_terminal_unique` returns `None` and the arm would
+///      otherwise push the bare name into `covered_variants` with no scheme and
+///      no diagnostic. Normally that surfaces as `NonExhaustiveMatch`, but a `_`
+///      wildcard arm (`has_wildcard`) suppresses exhaustiveness and the bogus
+///      out-of-scope arm is silently accepted. Rejecting here closes that hole.
+///
+/// Soundness depends on the reef rewriter guaranteeing every genuinely in-scope
+/// constructor reaches type-check exact-bound under its mangled name (see the
+/// module-level note on the terminal-unique fallback). A future half-mangled
+/// producer (mangled deftype, bare reference) would be wrongly rejected here —
+/// which is the intended failure mode: a half-mangled program is a structural
+/// defect, not a valid in-scope reference.
+fn constructor_pattern_out_of_scope(name: &str, env: &Env, adt_reg: &AdtRegistry) -> bool {
+    is_constructor_name(name)
+        && env.lookup(name).is_none()
+        && adt_reg.lookup_variant(name).is_none()
 }
 
 fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> CheckErrorKind {
@@ -6907,6 +7088,12 @@ fn collect_all_declarations(
     adt_reg: &mut AdtRegistry,
     errors: &mut Vec<CheckError>,
 ) {
+    // chelis#258 (main): duplicate-def / builtin-shadowing rejection runs
+    // over the bare item list. Our `items` is paired with module keys, so
+    // project to the `&deep::Expr` slice the reporters expect.
+    let bare_items: Vec<&deep::Expr> = items.iter().map(|(_, expr)| *expr).collect();
+    report_duplicate_defs(&bare_items, errors);
+    report_builtin_shadowing(&bare_items, errors);
     for (module, expr) in items {
         collect_declarations(
             expr,
@@ -7056,6 +7243,124 @@ fn build_opacity_meta(
     meta
 }
 
+/// Reject two same-name `def` declarations in one program (chelis#258).
+///
+/// A def's value binding is silent last-write-wins (`env.bind` →
+/// `HashMap::insert`, like the `defsig` arm of `collect_declarations`), and
+/// Chelis does not dispatch same-name `def`s by argument arity or tensor
+/// rank. So two `def f`s whose sigs differ only in rank leave just one arm
+/// reachable: callers of the other rank fire a confusing `DimensionMismatch`
+/// at the call site instead of a clear error at the redundant definition.
+/// This mirrors the duplicate-`deftype` / duplicate-`typealias` rejection
+/// already in `collect_declarations`, moving the diagnostic to the
+/// definition site.
+///
+/// Scoped to `def` (not `defsig`): a `defsig` legitimately co-occurs with a
+/// synthesized signature for the same name (an inline-annotated `def`
+/// desugars to both a `defsig` and a `def`), so a same-name `defsig` is not
+/// on its own a duplicate definition. `items` is already flattened past
+/// `module` wrappers, and the prelude lives in the builtin env rather than as
+/// `def` nodes here, so only genuine in-program user redefinitions match.
+fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for expr in items {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("def") {
+            continue;
+        }
+        let Some(name) = children(list).first().and_then(symbol_name) else {
+            continue;
+        };
+        if !seen.insert(name) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DuplicateDefinition,
+                format!("duplicate definition: `{name}` is defined more than once"),
+                vec![format!(
+                    "rename one of the `{name}` definitions: Chelis does not dispatch same-name `def`s by argument type or rank"
+                )],
+            ));
+        }
+    }
+}
+
+/// Reject a top-level `def` or `defsig` whose name appears in the closed
+/// builtin vocabulary (chelis#353, spec/04-type-system.md §8.6).
+///
+/// Call sites are dispatched builtin-first by name in both the host
+/// evaluator (`runtime/host_ops.rs::builtin_name`) and IR lowering
+/// (`lower.rs::builtin_name`); both import `BUILTIN_NAMES`, the same
+/// table consulted here, so the rejected set and the dispatched set
+/// cannot drift. A user definition with a builtin name is therefore
+/// unreachable by name: pre-fix, `def sum` checked clean, hit the
+/// builtin's arity error under eval, and segfaulted on the C backend —
+/// three lanes, three different answers. Rejecting the declaration here,
+/// in the collection chokepoint every checker entry point shares, makes
+/// all lanes agree on the same diagnostic.
+///
+/// Deliberately narrow scope:
+/// - Reef package modules never reach this check with bare names: reef
+///   rewrites package decls to internal `pkg__...` names (and rewrites
+///   their call sites with them) before the checker runs, so a package
+///   `def sum` is allowed and genuinely dispatches to the user def (the
+///   stdlib's `Std.Decimal.normalize` / `Std.Test.fail` rely on this).
+/// - Function parameters and block-locals may reuse builtin names: they
+///   bind values, not call-site dispatch, and shadow harmlessly on every
+///   lane.
+///
+/// An inline-annotated `def` desugars to a `defsig` AND a `def` with the
+/// same name; report once per name, as the `def` (what the user wrote).
+fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+    let decl_name = |expr: &deep::Expr, tag: &str| -> Option<String> {
+        let deep::Expr::List(list, _) = expr else {
+            return None;
+        };
+        if get_tag(list) != Some(tag) {
+            return None;
+        }
+        children(list)
+            .first()
+            .and_then(symbol_name)
+            .filter(|name| builtins::BUILTIN_NAMES.contains(name))
+            .map(str::to_string)
+    };
+
+    let def_names: HashSet<String> = items
+        .iter()
+        .filter_map(|expr| decl_name(expr, "def"))
+        .collect();
+
+    let mut reported: HashSet<String> = HashSet::new();
+    for expr in items {
+        let Some(name) = decl_name(expr, "def").or_else(|| decl_name(expr, "defsig")) else {
+            continue;
+        };
+        if !reported.insert(name.clone()) {
+            continue;
+        }
+        let decl_kw = if def_names.contains(&name) {
+            "def"
+        } else {
+            "sig"
+        };
+        errors.push(CheckError::new(
+            CheckErrorKind::BuiltinShadowing,
+            format!(
+                "`{decl_kw} {name}` shadows the builtin function `{name}`: user `def`/`sig` \
+                 declarations may not reuse builtin names (spec/04-type-system.md \u{00a7}8.6). \
+                 Calls to `{name}` always dispatch to the builtin under eval and lowering, so \
+                 the shadowing declaration can never be reached by name."
+            ),
+            vec![format!(
+                "rename `{name}` (e.g. `{name}2` or `my_{name}`); inside a reef package \
+                 module the name is allowed because package declarations are \
+                 internal-name-rewritten before checking"
+            )],
+        ));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_declarations(
     expr: &deep::Expr,
@@ -7185,6 +7490,168 @@ fn collect_declarations(
     }
 }
 
+// ── Tier-2 rank-polymorphism Body Discipline ─────────────────────
+
+/// True if any tensor inside `ty` carries a `Dim::Rank` (a rank variable).
+fn type_contains_rank(ty: &Type) -> bool {
+    match ty {
+        Type::Tensor(dims, _) => dims.iter().any(|d| matches!(d, Dim::Rank(_))),
+        Type::Fn(args, ret) => args.iter().any(type_contains_rank) || type_contains_rank(ret),
+        Type::Ref(inner) => type_contains_rank(inner),
+        Type::Adt(_, args) => args.iter().any(type_contains_rank),
+        Type::Tuple(ts) => ts.iter().any(type_contains_rank),
+        Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+    }
+}
+
+/// Extract the callee name from an `app`'s first child when it is `(var {} name)`.
+fn app_var_name(callee: &deep::Expr) -> Option<&str> {
+    let deep::Expr::List(list, _) = callee else {
+        return None;
+    };
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
+}
+
+/// Names of every top-level `def` in the program (after module flattening),
+/// so the Body-Discipline check can reject a call that resolves to a user
+/// function shadowing an Identity builtin name (chelis#258 §4.2).
+fn collect_user_def_names(items: &[&deep::Expr]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for expr in items {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
+/// Walk a rank-polymorphic def's body and reject any call whose output shape is
+/// not *name-trackable* at symbolic rank. Admitted: shape-identity (elementwise)
+/// builtins and named-axis reductions (the procedural arm verifies those drop a
+/// named axis and carry the rest through). Rejected: positional shape-rewriting
+/// builtins (`permute`/`reshape`/`matmul`/…), and any user/non-builtin/computed
+/// callee not proven rank-safe — against a spread `..r` there are no named axes
+/// left to catch an untracked transposition/reshape, so admitting one would
+/// silently break §4.2 transposition safety (spec/design/rank_polymorphism.md
+/// §Soundness Boundary).
+fn check_rank_body_discipline(
+    def_name: &str,
+    expr: &deep::Expr,
+    user_def_names: &HashSet<String>,
+    errors: &mut Vec<CheckError>,
+) {
+    let deep::Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        // Function-taking transforms apply a *referenced* user function across
+        // the opaque rank. That callee is not inlined here, so its body can
+        // transpose/reshape undetected — reject outright (spec §4.2).
+        // `jit`/`realize`/`cast`/`copy` wrap an *inline* expression that the
+        // recursion below still checks, so they are not rejected here.
+        Some(t @ ("grad" | "vmap")) => {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "rank-polymorphic def `{def_name}` may not use `{t}` in its body: it applies \
+                     a function across the opaque rank `..r`, whose body cannot be proven \
+                     shape-identity (spec/04-type-system.md \u{00a7}4.2)."
+                ),
+                vec![],
+            ));
+        }
+        Some("app") => match children(list).first().and_then(app_var_name) {
+            // A user-defined `def` of this name — possibly SHADOWING an
+            // Identity builtin (`def relu(x) = permute(x,1,0)`). The call
+            // resolves to the user def, whose body is not proven rank-safe, so
+            // it must be rejected before the builtin-name classification below.
+            Some(name) if user_def_names.contains(name) => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "rank-polymorphic def `{def_name}` may not call user-defined `{name}`: \
+                         only shape-identity builtins are proven rank-safe in a `..r` body, and a \
+                         user `def` (even one shadowing a builtin name) is not (spec/04-type-system.md \
+                         \u{00a7}4.2)."
+                    ),
+                    vec![],
+                ));
+            }
+            // Identity (elementwise) or NameTracked (named-axis reduction /
+            // named-axis expand) builtin — admissible. For a NameTracked op
+            // the procedural inference arm (`check_reduction_signature` /
+            // `check_expand_signature`) is the real gate: it verifies the
+            // addressed axis is name-anchored against the operand and
+            // computes a symbolic output that carries the surviving named axes
+            // through, rejecting a positional index at symbolic rank or a
+            // non-existent/ambiguous/duplicate axis name. So no untracked
+            // transposition can slip past.
+            Some(name)
+                if builtins::BUILTIN_NAMES.contains(&name)
+                    && matches!(
+                        builtins::shape_class(name),
+                        builtins::ShapeClass::Identity | builtins::ShapeClass::NameTracked
+                    ) => {}
+            // A named builtin that rewrites shape positionally (not name-tracked).
+            Some(name) if builtins::BUILTIN_NAMES.contains(&name) => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "rank-polymorphic def `{def_name}` may not call shape-rewriting builtin \
+                         `{name}`: it is not name-trackable at symbolic rank, so against a spread \
+                         `..r` there are no named axes left to catch a transposition or reshape \
+                         (spec/04-type-system.md \u{00a7}4.2). A `..r` body may call shape-identity \
+                         (elementwise) operations, named-axis reductions, and named-axis expand \
+                         only."
+                    ),
+                    vec![format!(
+                        "remove the `{name}` call from the rank-polymorphic body, or use \
+                         concrete-rank `def`s instead of a `..r` signature"
+                    )],
+                ));
+            }
+            // A named user-defined function — not proven rank-safe.
+            Some(name) => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "rank-polymorphic def `{def_name}` may not call `{name}`: only \
+                         shape-identity builtins are proven rank-safe in a `..r` body \
+                         (spec/04-type-system.md \u{00a7}4.2). Calling a user-defined function \
+                         from a rank-polymorphic body is not supported."
+                    ),
+                    vec![],
+                ));
+            }
+            // A computed callee (a transform result like `grad(f)(x)`, a
+            // first-class function value, or an applied lambda's non-inline
+            // form): cannot be proven rank-safe.
+            None => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "rank-polymorphic def `{def_name}` may not apply a computed or \
+                         non-builtin callee in a `..r` body: only shape-identity builtins are \
+                         proven rank-safe (spec/04-type-system.md \u{00a7}4.2)."
+                    ),
+                    vec![],
+                ));
+            }
+        },
+        _ => {}
+    }
+    // Recurse so nested calls (in let/if/match/lambda bodies, args) are checked.
+    for child in &list.elements {
+        check_rank_body_discipline(def_name, child, user_def_names, errors);
+    }
+}
+
 // ── Top-level inference (second pass) ────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -7197,6 +7664,7 @@ fn infer_top_level(
     errors: &mut Vec<CheckError>,
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
+    user_def_names: &HashSet<String>,
 ) {
     let list = match expr {
         deep::Expr::List(list, _) => list,
@@ -7335,6 +7803,23 @@ fn infer_top_level(
                 }
             }
             check_declared_dvars_rigid(&declared_dvars, subst, errors);
+            // chelis#273: the param-position guard above never sees a dim
+            // parameter that occurs only in the return type, so a body
+            // could silently pin a return-only rigid dim. Reject the
+            // input-coupled pins/collapses while keeping the legitimate
+            // output-inferred uses (hello_tensor-style) green.
+            check_return_only_dvars_rigid(&decl_ty, &declared_dvars, subst, errors);
+            // Tier-2 rank-polymorphism Body Discipline
+            // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
+            // a def whose signature mentions a rank variable `..r` may call only
+            // shape-identity (elementwise) builtins. Against an opaque rank there
+            // are no named axes left to catch a transposition/reshape, so any
+            // shape-rewriting op (or an unproven user call) is rejected here.
+            if type_contains_rank(&decl_ty)
+                && let Some((_, body_expr)) = extract_fn_params_and_body(&kids[1])
+            {
+                check_rank_body_discipline(&name, &body_expr, user_def_names, errors);
+            }
             // chelis#272 list-uniformity check. A list literal of
             // tensors with *mismatched concrete* element axes joins to a
             // `Wildcard` along the differing axis (the deliberate #218
@@ -7849,6 +8334,27 @@ fn infer_var(
 ) -> Type {
     let kids = children(list);
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
+        // chelis#317: a nullary constructor at a construction site (a bare
+        // `Alpha`, desugared to `(var Alpha)`) or an applied constructor
+        // head (`Foo(x)` → `(app (var Foo) ...)`) that is out of scope must
+        // be an `unknown constructor` error at `check`, not a silent bind
+        // to a foreign module's same-terminal tag via the registry's fuzzy
+        // fallback. Check exact scope first; the fuzzy `lookup_terminal_unique`
+        // is the mis-resolution path the issue reports.
+        if constructor_out_of_scope(name, env) {
+            errors.push(CheckError::new(
+                CheckErrorKind::UnknownConstructor,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("unknown constructor: {name}"),
+                ),
+                vec![format!(
+                    "Constructor '{name}' is not in scope. Declare it locally or add it \
+                     to an import (e.g. `import Mod ({name})`)"
+                )],
+            ));
+            return Type::Error;
+        }
         if let Some(scheme) = env
             .lookup(name)
             .or_else(|| env.lookup_terminal_unique(name))
@@ -7939,17 +8445,22 @@ fn infer_lit(
             && (*n < lo || *n > hi)
         {
             // The int32 default path keeps the WS-A0 D1 message
-            // shape (i64 suffix + cast(_, i64) hint) so existing
+            // shape (i64 suffix + cast(_, int64) hint) so existing
             // diagnostics-pinning tests stay green; the int8/int16
             // contextual paths cite §5.6 + §5.3 because the
             // narrowing came from contextual inference, not the
-            // default.
+            // default. The cast hint spells the prec type name
+            // `int64` (§1.1) — `i64` is only the literal-suffix
+            // spelling (§5.5) and is not a valid `cast` target, so
+            // recommending `cast({n}, i64)` would send the user to a
+            // form that re-fires this same diagnostic (issue #308
+            // review fix).
             if dtype == "int32" {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!(
                         "literal {n} out of range for default int32; use the `i64` \
-                         suffix (`{n}i64`) or an explicit cast({n}, i64) \
+                         suffix (`{n}i64`) or an explicit cast({n}, int64) \
                          (spec/04-type-system.md §5.3, §5.5)"
                     ),
                     vec![format!(
@@ -8021,7 +8532,7 @@ fn infer_lit(
                         CheckErrorKind::TypeMismatch,
                         format!(
                             "literal {n} out of range for default int32; use the \
-                             `{n}i64` literal suffix or an explicit cast({n}, i64) \
+                             `{n}i64` literal suffix or an explicit cast({n}, int64) \
                              (spec/04-type-system.md §5.3, §5.5)"
                         ),
                         vec![format!(
@@ -8141,6 +8652,77 @@ fn infer_app(
         );
     }
 
+    // chelis#339: the anchored named-axis expand form `expand(x, new, size,
+    // anchor)` carries four arguments, but the builtin HM scheme is arity-3
+    // (`(&tensor, int32, int32) -> out`), so it would hit the generic arity
+    // check before the procedural arm. Dispatch it here (the
+    // `infer_permute_app` pattern); 2-/3-arg expand keeps the generic path,
+    // which reaches `check_expand_signature` with the scheme intact.
+    if matches!(func_name.as_deref(), Some("expand")) && kids.len() >= 5 {
+        return infer_expand_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
+    // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
+    // The reduction HM schemes are arity-2 (`(input, axis)`), so a 3+-arg
+    // call would hit the generic arity check before the reduction arm;
+    // dispatch it here. `check_reduction_signature`'s named loop handles N
+    // axes (rejecting positional integers, unknown names, and duplicates).
+    // The index-returning reductions are routed too, so they get a targeted
+    // no-variadic-form rejection instead of a generic arity error.
+    if matches!(
+        func_name.as_deref(),
+        Some(
+            "sum"
+                | "mean"
+                | "max_reduce"
+                | "min_reduce"
+                | "prod_reduce"
+                | "argmax_reduce"
+                | "argmin_reduce"
+        )
+    ) && kids.len() >= 4
+    {
+        return infer_reduction_app(
+            list,
+            func_name.as_deref().unwrap(),
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
+    if matches!(
+        func_name.as_deref(),
+        Some(
+            "reduce_window_max" | "reduce_window_min" | "reduce_window_sum" | "reduce_window_mean"
+        )
+    ) {
+        return infer_reduce_window_app(
+            list,
+            func_name.as_deref().unwrap(),
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
     let ctor_lookup_name = func_name.as_ref().and_then(|fname| {
         adt_reg
             .lookup_variant(fname)
@@ -8182,7 +8764,18 @@ fn infer_app(
         );
     }
 
-    if let Some(ref fname) = ctor_lookup_name
+    // chelis#317: do not emit the record-shape diagnostic for an applied
+    // constructor whose name is out of scope (a type-only import that calls
+    // `Alpha(...)`). The shape check resolves through the same fuzzy
+    // terminal fallback that mis-binds out-of-scope names, so firing it here
+    // would mask the real defect with a confusing "must use named fields"
+    // message. Let the head's `infer_var` report `unknown constructor`
+    // instead.
+    let ctor_call_out_of_scope = func_name
+        .as_deref()
+        .is_some_and(|fname| constructor_out_of_scope(fname, env));
+    if !ctor_call_out_of_scope
+        && let Some(ref fname) = ctor_lookup_name
         && let Some((_adt_name, variant)) = adt_reg
             .lookup_variant_preferring_shape(fname, CallShape::Positional)
             .or_else(|| adt_reg.lookup_variant_terminal_unique(fname))
@@ -8215,12 +8808,44 @@ fn infer_app(
             total_nodes,
         )
     };
+    // A reduction's axis argument may name a *dimension* of the operand
+    // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
+    // *value*. Like `expand`'s symbolic size arg below, such a name is typed as
+    // an axis (`int32`) rather than inferred as a value — otherwise the
+    // name-resolution pass would report a spurious `unbound variable`. The
+    // actual name is read back from the arg expr in `check_reduction_signature`.
+    let is_named_reduction = matches!(
+        func_name.as_deref(),
+        Some(
+            "sum"
+                | "mean"
+                | "max_reduce"
+                | "min_reduce"
+                | "prod_reduce"
+                | "argmax_reduce"
+                | "argmin_reduce"
+        )
+    );
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
         .map(|(index, arg)| {
-            if matches!(func_name.as_deref(), Some("expand"))
-                && index == 2
+            // `expand` axis slots that may carry a dim NAME instead of a bound
+            // value: the size (index 2, §4.7.2 form 2) and — chelis#339
+            // named-axis expand — the inserted-axis name (index 1). The
+            // inserted-axis slot is scope-discriminated: a name bound in the
+            // value environment is a *runtime value* (the issue #259 class,
+            // `expand(&x, ax, 4)` with `ax: int32`), not a dim name, and must
+            // keep flowing through ordinary inference into the
+            // compile-time-constant rejection. The 4-arg anchored form routes
+            // through `infer_expand_app` instead and never reaches this loop.
+            let is_expand = matches!(func_name.as_deref(), Some("expand"));
+            let is_expand_size = is_expand && index == 2;
+            let is_expand_inserted_name = is_expand
+                && index == 1
+                && symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none());
+            let is_reduction_axis = is_named_reduction && index >= 1;
+            if (is_expand_size || is_expand_inserted_name || is_reduction_axis)
                 && symbolic_dim_ref_name(arg).is_some()
             {
                 Type::Prim(Prim::Int32)
@@ -8951,8 +9576,22 @@ fn infer_app(
                         );
                     }
                     "expand" => {
-                        result_ty =
-                            check_expand_signature(&kids[1..], &arg_tys, &result_ty, subst, errors);
+                        // chelis#339: the axis slot is a dim NAME (the
+                        // named-axis insert form) only when it is not bound in
+                        // the value environment — a bound `int32` var is the
+                        // issue #259 runtime-value class instead.
+                        let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
+                            symbolic_dim_ref_name(arg)
+                                .is_some_and(|name| env.lookup(name).is_none())
+                        });
+                        result_ty = check_expand_signature(
+                            &kids[1..],
+                            &arg_tys,
+                            &result_ty,
+                            axis_is_dim_name,
+                            subst,
+                            errors,
+                        );
                     }
                     "layer_norm" => {
                         result_ty =
@@ -11478,6 +12117,187 @@ fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
     }
 }
 
+/// chelis#339 Part 2: infer a variadic named-axis reduction
+/// `sum(x, seq, head)` (spec/04-type-system.md §4.5.3). The reduction HM
+/// schemes are arity-2, so the 3+-arg form bypasses the generic arity
+/// check (the `infer_permute_app` pattern); the existing
+/// `check_reduction_signature` named loop validates every axis and
+/// computes the symbolic output. The variadic form is defined for the
+/// value reductions only — `argmax_reduce`/`argmin_reduce` produce
+/// indices along ONE axis, which a second reduction cannot compose, so
+/// they are rejected here with a targeted diagnostic.
+#[allow(clippy::too_many_arguments)]
+fn infer_reduction_app(
+    list: &deep::List,
+    fname: &str,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    if fname == "argmax_reduce" || fname == "argmin_reduce" {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "{fname} is an index-returning reduction and has no variadic \
+                 named-axis form: an index along one axis is not composable with a \
+                 second reduction (spec/04-type-system.md \u{00a7}4.5.3). Reduce one \
+                 axis at a time."
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let kids = children(list);
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let arg_tys: Vec<Type> = kids[1..]
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            // Axis slots carry dimension names, typed as axes (`int32`)
+            // rather than inferred as values — the named-reduction exemption
+            // from the generic path.
+            if index >= 1 && symbolic_dim_ref_name(arg).is_some() {
+                Type::Prim(Prim::Int32)
+            } else {
+                infer_expr(
+                    arg,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                )
+            }
+        })
+        .collect();
+    if arg_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Type::Error;
+    }
+
+    let result_ty = Type::Var(vg.fresh_tvar());
+    check_reduction_signature(fname, &kids[1..], &arg_tys, &result_ty, subst, errors)
+}
+
+/// chelis#339: infer the 4-arg anchored named-axis expand form
+/// `expand(x, new, size, anchor)` (spec/04-type-system.md §4.5.3). The
+/// builtin scheme is arity-3, so this form bypasses the generic HM arity
+/// check (the `infer_permute_app` pattern). The `new` and `anchor` slots
+/// carry dimension *names*, not bound values — like a named reduction
+/// axis they are typed as `int32` axes rather than inferred, and
+/// `check_expand_signature` reads the actual names back from the arg
+/// exprs.
+#[allow(clippy::too_many_arguments)]
+fn infer_expand_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() != 5 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "expand expects (tensor, axis, size) or the named-axis form \
+                 (tensor, name, size, anchor), got {} arguments",
+                kids.len() - 1
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let arg_tys: Vec<Type> = kids[1..]
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            // The name/size/anchor slots may carry dim names; a name bound in
+            // the value environment is a runtime value instead (issue #259
+            // scope discrimination, as in the generic-path exemption).
+            if index >= 1
+                && symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
+            {
+                Type::Prim(Prim::Int32)
+            } else {
+                infer_expr(
+                    arg,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                )
+            }
+        })
+        .collect();
+    if arg_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Type::Error;
+    }
+    // The size slot must still be an int32 (a literal, a symbolic dim, or a
+    // runtime int32 expression — §4.7.2); a non-int size is a type error the
+    // arity-3 scheme would otherwise have caught.
+    let size_ty = subst.apply(&arg_tys[2]);
+    match size_ty {
+        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("expand expects an int32 size, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    }
+
+    let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
+        symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
+    });
+    let result_ty = Type::Var(vg.fresh_tvar());
+    check_expand_signature(
+        &kids[1..],
+        &arg_tys,
+        &result_ty,
+        axis_is_dim_name,
+        subst,
+        errors,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn infer_permute_app(
     list: &deep::List,
@@ -12307,6 +13127,265 @@ fn infer_pad_app(
     }
 
     Type::Tensor(out_dims, prec)
+}
+
+/// `reduce_window_*(&x, window_shape, strides)` infer.
+///
+/// Per `spec/05-risc-primitives.md` §2.3.1:
+/// - `window_shape` and `strides` are `List[int32]` of equal length
+///   `n >= 1`.
+/// - The trailing `n` axes of the input are the windowed axes; leading
+///   `rank - n` axes pass through.
+/// - Each window/stride entry must be a positive int32 literal at
+///   check time (non-literal arguments fall back to a wildcard output
+///   shape so runtime checks can still apply).
+/// - Output rank equals input rank. Trailing dim i is
+///   `floor((input_dims[rank - n + i] - window_shape[i]) / strides[i]) + 1`.
+///   A non-positive result is rejected as a `DimensionMismatch` per
+///   §2.3.1.
+#[allow(clippy::too_many_arguments)]
+fn infer_reduce_window_app(
+    list: &deep::List,
+    name: &str,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() != 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "{name} expects 3 arguments (tensor, window_shape, strides), got {}",
+                kids.len().saturating_sub(1)
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let window_ty = infer_expr(
+        &kids[2],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let stride_ty = infer_expr(
+        &kids[3],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+
+    if matches!(input_ty, Type::Error)
+        || matches!(window_ty, Type::Error)
+        || matches!(stride_ty, Type::Error)
+    {
+        return Type::Error;
+    }
+
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    if let Err(_te) = unify(&window_ty, &int_list, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "{name} expects window_shape to be List[int32], got {}",
+                    subst.apply(&window_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if let Err(_te) = unify(&stride_ty, &int_list, subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "{name} expects strides to be List[int32], got {}",
+                    subst.apply(&stride_ty)
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let input_resolved = type_for_readonly_check(&input_ty, subst);
+    let (dims, prec) = match input_resolved {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} expects tensor input, got {other}"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    // Extract literal window / stride entries. Non-literal arguments
+    // are accepted at infer time (the type is still `List[int32]`) but
+    // the output shape collapses to wildcards so the host runtime can
+    // do the final shape check.
+    let window_lit = cons_chain_int_list(&kids[2]);
+    let strides_lit = cons_chain_int_list(&kids[3]);
+    let (Some(window_shape), Some(strides)) = (window_lit, strides_lit) else {
+        return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
+    };
+
+    if window_shape.is_empty() || strides.is_empty() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("{name} requires a non-empty window_shape and strides"),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if window_shape.len() != strides.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "{name} window_shape (len {}) and strides (len {}) must agree",
+                    window_shape.len(),
+                    strides.len()
+                ),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    let n = window_shape.len();
+    if dims.len() < n {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("{name} window arity {n} exceeds tensor rank {}", dims.len()),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    for (i, &w) in window_shape.iter().enumerate() {
+        if w <= 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} window_shape[{i}] = {w} must be >= 1"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    }
+    for (i, &s) in strides.iter().enumerate() {
+        if s <= 0 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} strides[{i}] = {s} must be >= 1"),
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    }
+    let leading = dims.len() - n;
+    let mut out_dims = Vec::with_capacity(dims.len());
+    out_dims.extend(dims[..leading].iter().map(|d| subst.apply_dim(d)));
+    for i in 0..n {
+        let resolved = subst.apply_dim(&dims[leading + i]);
+        match &resolved {
+            Dim::Lit(in_dim) => {
+                let w = window_shape[i];
+                let s = strides[i];
+                if *in_dim < w {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "{name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
+                                leading + i
+                            ),
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                // `in_dim >= w` (checked above) and `s >= 1` guarantee
+                // `out = floor((in_dim - w) / s) + 1 >= 1`, so the Valid
+                // output extent is always positive here — the `in_dim < w`
+                // guard above is what rejects the empty-window case.
+                let out = (*in_dim - w) / s + 1;
+                out_dims.push(Dim::Lit(out));
+            }
+            _ => out_dims.push(Dim::Wildcard),
+        }
+    }
+
+    Type::Tensor(out_dims, prec)
+}
+
+/// Walk a `Cons(a, Cons(b, ..., Nil))` chain and return the literal
+/// integer entries (cast-aware via `extract_int_for_dim`). Returns
+/// `None` when any element is non-literal or when the structure does
+/// not terminate cleanly in `Nil`.
+///
+/// Shares the cons-chain walk with `collect_cons_chain_for_shape`
+/// (the structural recognizer) and only adds the per-element
+/// integer-literal extraction on top.
+fn cons_chain_int_list(expr: &deep::Expr) -> Option<Vec<i64>> {
+    collect_cons_chain_for_shape(expr)?
+        .iter()
+        .map(|e| extract_int_for_dim(e))
+        .collect()
 }
 
 /// Three-way result of inspecting a `[[s_0, e_0], [s_1, e_1], ...]` list
@@ -13273,7 +14352,7 @@ fn check_reduction_signature(
     subst: &mut Subst,
     errors: &mut Vec<CheckError>,
 ) -> Type {
-    if arg_tys.len() != 2 {
+    if arg_tys.len() < 2 {
         return Type::Error;
     }
 
@@ -13291,18 +14370,35 @@ fn check_reduction_signature(
         }
     };
 
-    // Negative axes index from the end (`-1` is the last axis), per
-    // spec/05-risc-primitives.md and the formula examples that already
-    // use `axis=-1`. `normalize_static_axis` maps `rank + axis` and
-    // bounds-checks; gather/scatter use the same helper, so reductions
-    // stay consistent with them and with IR lowering's `normalize_axis`.
+    // Resolve which axis (or axes) the reduction removes. Two modes:
     //
-    // Issue #216: cast-aware so reductions like `sum(x, cast(-1, int32))`
-    // or `max_reduce(x, cast(7, int32))` surface the bounds diagnostic
-    // at infer time rather than slipping through to host-runtime defense.
-    let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
-        Some(raw) => match normalize_static_axis(dims.len(), raw) {
-            Some(axis) => axis,
+    //  * Positional (legacy): a single compile-time-constant integer axis on a
+    //    *concrete-rank* operand (`sum(x, 0)` / `sum(x, cast(-1, int32))`).
+    //    `normalize_static_axis` handles negative indexing and bounds (issue
+    //    #216), consistent with gather/scatter and IR lowering's
+    //    `normalize_axis`.
+    //
+    //  * Named (Tier-3, spec/04-type-system.md §4.5.3): one or more axes named by
+    //    the dimension they remove (`sum(x, seq)` / `sum(x, seq, head)`). Named
+    //    axes are the only valid form on a rank-spread operand — a positional
+    //    index is meaningless at symbolic rank — and they preserve the
+    //    surviving named axes in the output.
+    let axis_exprs = &arg_exprs[1..];
+    let has_spread = dims.iter().any(|d| matches!(d, Dim::Rank(_)));
+
+    // The reduction HM schemes are arity-2, but the variadic named-axis form
+    // (`sum(x, seq, head)`, chelis#339) reaches this arm through the
+    // `infer_reduction_app` dispatcher with N axis exprs; the loop below
+    // resolves each named axis and rejects positional integers, unknown
+    // names, ambiguity, and duplicates. Composition
+    // (`sum(sum(x, head), seq)`) remains equivalent and order-insensitive.
+    let mut remove: Vec<usize> = Vec::new();
+    if axis_exprs.len() == 1
+        && !has_spread
+        && let Some(raw) = extract_int_for_dim(&axis_exprs[0])
+    {
+        match normalize_static_axis(dims.len(), raw) {
+            Some(axis) => remove.push(axis),
             None => {
                 errors.push(CheckError::new(
                     CheckErrorKind::DimensionMismatch,
@@ -13314,12 +14410,123 @@ fn check_reduction_signature(
                 ));
                 return Type::Error;
             }
-        },
-        None => return subst.apply(result_ty),
-    };
+        }
+    } else {
+        for ax in axis_exprs {
+            // A positional integer that reaches the named path: either the
+            // operand is rank-spread (index meaningless at symbolic rank) or it
+            // is mixed with other axes. Direct the user to name each axis.
+            if extract_int_for_dim(ax).is_some() {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "{name}: a positional integer axis is only valid as the single axis of a \
+                         concrete-rank operand; on a rank-spread operand or for multiple axes, \
+                         name each axis (e.g. `{name}(x, seq)` or `{name}(x, seq, head)`) so it \
+                         is located by name (spec/04-type-system.md \u{00a7}4.5.3)"
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+            // Issue #259: a non-literal, non-name axis (a runtime `int32`
+            // binding) cannot determine which dimension is removed; emit the
+            // targeted compile-time-constant diagnostic rather than leaking an
+            // unresolved output type downstream.
+            let Some(axis_name) = symbolic_dim_ref_name(ax) else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "{name} axis must be a compile-time constant or a named axis of the \
+                         operand, got {}",
+                        describe_axis_arg(Some(ax)),
+                    ),
+                    vec![format!(
+                        "Pass a literal axis (e.g. `{name}(x, 0)`) on a concrete-rank operand, or \
+                         name the axis (e.g. `{name}(x, seq)`) to reduce by name."
+                    )],
+                ));
+                return Type::Error;
+            };
+            let hits: Vec<usize> = dims
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| matches!(d, Dim::Name(n) if n == axis_name))
+                .map(|(i, _)| i)
+                .collect();
+            match hits.as_slice() {
+                [i] => {
+                    // chelis#339: a duplicate axis name in the variadic list
+                    // is a hard error, never a silent deduplication.
+                    if remove.contains(i) {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "{name}: duplicate reduction axis `{axis_name}`; each named \
+                                 axis may appear at most once in a variadic reduction \
+                                 (spec/04-type-system.md \u{00a7}4.5.3)"
+                            ),
+                            vec![],
+                        ));
+                        return Type::Error;
+                    }
+                    remove.push(*i);
+                }
+                [] if has_spread => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name}: rank-spread operand has no named `{axis_name}` axis to \
+                             reduce (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                [] => {
+                    // Concrete operand: `axis_name` is neither a literal nor a
+                    // named axis of the operand. Two causes share this arm — a
+                    // runtime `int32` binding (issue #259) and a mistyped/absent
+                    // axis name — so the message stays neutral between them
+                    // rather than asserting "runtime value".
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name} axis `{axis_name}` is neither a compile-time constant nor a \
+                             named axis of the operand: a reduction axis must be a literal or \
+                             `cast(N, int32)` constant, or the name of an existing axis"
+                        ),
+                        vec![format!(
+                            "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, int32)`, or \
+                             name an existing axis of the operand (e.g. `{name}(x, seq)`)."
+                        )],
+                    ));
+                    return Type::Error;
+                }
+                _ => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name}: named axis `{axis_name}` is ambiguous; it appears more than \
+                             once in the operand shape"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+            }
+        }
+    }
 
+    // Build the output by dropping the selected axes (descending so earlier
+    // indices stay valid). Surviving named/spread dims keep identity and
+    // order. Duplicates were rejected loudly above (chelis#339), so no
+    // silent dedup happens here.
     let mut out_dims = dims;
-    out_dims.remove(axis);
+    remove.sort_unstable();
+    for &idx in remove.iter().rev() {
+        out_dims.remove(idx);
+    }
 
     // RT-2 fixup B1: per spec/04-type-system.md §5.7.1, the result
     // precision of `reduce_sum` follows the §5.7.1 table — int8/int16
@@ -13409,10 +14616,11 @@ fn check_expand_signature(
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
+    axis_is_dim_name: bool,
     subst: &mut Subst,
     errors: &mut Vec<CheckError>,
 ) -> Type {
-    if arg_tys.len() != 3 {
+    if arg_tys.len() != 3 && arg_tys.len() != 4 {
         return Type::Error;
     }
 
@@ -13430,6 +14638,62 @@ fn check_expand_signature(
         }
     };
 
+    let has_spread = input_dims.iter().any(|d| matches!(d, Dim::Rank(_)));
+
+    // chelis#339 named-axis expand (spec/04-type-system.md §4.5.3): when the
+    // axis argument is a dimension NAME rather than an integer, the call
+    // inserts a new named axis — at the trailing end (3-arg form) or
+    // immediately before an existing named anchor (4-arg form). This is the
+    // only valid expand form on a rank-spread operand. `axis_is_dim_name` is
+    // scope-discriminated by the caller: a bare var bound in the value
+    // environment is a runtime value (issue #259), not a dim name, and falls
+    // through to the compile-time-constant rejection below.
+    if axis_is_dim_name
+        && arg_exprs.get(1).and_then(extract_int_for_dim).is_none()
+        && let Some(new_name) = arg_exprs.get(1).and_then(symbolic_dim_ref_name)
+    {
+        return check_named_expand_signature(
+            new_name,
+            arg_exprs,
+            &input_dims,
+            has_spread,
+            input_prec,
+            result_ty,
+            subst,
+            errors,
+        );
+    }
+
+    // From here on the call is the positional concrete-rank form. A fourth
+    // (anchor) argument is only meaningful in the named-axis form.
+    if arg_exprs.len() == 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            "expand takes a fourth (anchor) argument only in the named-axis form \
+             `expand(x, new, size, anchor)`, where `new` names the inserted axis \
+             (spec/04-type-system.md \u{00a7}4.5.3)"
+                .to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    // A positional index is meaningless at symbolic rank: against a spread
+    // there is no fixed position to insert at. Mirror the reduction arm —
+    // name the inserted axis instead.
+    if has_spread {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            "expand: a positional integer axis is only valid on a concrete-rank \
+             operand; on a rank-spread operand, name the inserted axis (e.g. \
+             `expand(x, one, 1)` for a trailing insert, or `expand(x, c, n, seq)` \
+             to insert before the named `seq` anchor) so the insertion point stays \
+             name-anchored (spec/04-type-system.md \u{00a7}4.5.3)"
+                .to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
     // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
     // axis/size reach the non-negative-axis and positive-size checks at
     // infer time (red team round 3 sibling sweep within the spec
@@ -13444,7 +14708,32 @@ fn check_expand_signature(
             ));
             return Type::Error;
         }
-        None => return subst.apply(result_ty),
+        // Issue #259: the input is a concrete tensor (past the
+        // `Var | Error` guard above), so the output shape is determinable
+        // once the insert axis is known. When the axis arg is not a
+        // compile-time constant, `extract_int_for_dim` returns `None` and
+        // we cannot place the inserted dimension. Pre-fix this arm returned
+        // the still-unresolved `Type::Var(out)` from `tensor_expand_to_out`,
+        // which leaked downstream and surfaced as a misleading
+        // `borrow requires tensor or tensor-carrying input, got ?N`. Emit a
+        // targeted diagnostic at the expand call site naming the root cause.
+        None => {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "expand axis must be a compile-time constant for the output \
+                     shape to be inferable, got {}",
+                    describe_axis_arg(arg_exprs.get(1)),
+                ),
+                vec![
+                    "Pass a literal axis (e.g. `expand(x, 0, n)`) or a `cast(N, int32)` \
+                     literal. The axis selects where the new dimension is inserted, so \
+                     it must be known at compile time."
+                        .to_string(),
+                ],
+            ));
+            return Type::Error;
+        }
     };
     let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
         Some(size) if size > 0 => Dim::Lit(size),
@@ -13532,6 +14821,153 @@ fn check_expand_signature(
         }
     };
 
+    if let Err(te) = unify(result_ty, &canonical, subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+    subst.apply(&canonical)
+}
+
+/// The named-axis expand arm (chelis#339, spec/04-type-system.md §4.5.3):
+/// insert a new axis named `new_name` into the operand's row form — at the
+/// trailing end (3-arg form) or immediately before the named `anchor` axis
+/// (4-arg form). Insertion is unitary: the position is an end of the row or
+/// fixed by an anchor located uniquely in the operand; everything else is a
+/// hard error, never a guessed placement. The inserted dim enters the
+/// symbolic output as `Dim::Name`, so declared results refer to it by name
+/// and call-site monomorphization carries it through.
+#[allow(clippy::too_many_arguments)]
+fn check_named_expand_signature(
+    new_name: &str,
+    arg_exprs: &[deep::Expr],
+    input_dims: &[Dim],
+    has_spread: bool,
+    input_prec: TensorPrec,
+    result_ty: &Type,
+    subst: &mut Subst,
+    errors: &mut Vec<CheckError>,
+) -> Type {
+    // The inserted name must not collide with an existing named axis: a
+    // duplicate dim name would make every later by-name lookup (reduction,
+    // anchor location) ambiguous.
+    if input_dims
+        .iter()
+        .any(|d| matches!(d, Dim::Name(n) if n == new_name))
+    {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "expand: inserted axis `{new_name}` already names an axis of the operand; \
+                 a duplicate dim name would make later by-name axis lookups ambiguous \
+                 (spec/04-type-system.md \u{00a7}4.5.3). Pick a fresh name for the inserted \
+                 axis."
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    // The named-insert size must be a positive compile-time literal (a bare
+    // int or `cast(N, int32)`). A symbolic-dim or runtime int32 size cannot
+    // be stamped onto the inserted named dim at lowering: the eval lane has
+    // no extent to stage and the C backend would emit an undeclared dim
+    // symbol (silent shape-0 output) — both verified failure modes, so the
+    // checker rejects the form outright rather than letting a check-clean
+    // program break downstream (chelis#339).
+    let Some(size) = arg_exprs.get(2).and_then(extract_int_for_dim) else {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "expand: the named-axis insert form requires a compile-time literal size \
+                 (a literal or `cast(N, int32)` constant), got {}; the inserted axis's \
+                 extent must be stampable onto the new named dim at lowering \
+                 (spec/04-type-system.md \u{00a7}4.5.3)",
+                describe_axis_arg(arg_exprs.get(2)),
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    };
+    if size <= 0 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!("expand requires positive size, got {size}"),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    // Resolve the insertion point: before the unique named anchor (4-arg
+    // form) or at the trailing end of the row (3-arg form).
+    let insert_at = match arg_exprs.get(3) {
+        Some(anchor_expr) => {
+            let Some(anchor) = symbolic_dim_ref_name(anchor_expr) else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "expand anchor must name an existing axis of the operand, got {} \
+                         (spec/04-type-system.md \u{00a7}4.5.3)",
+                        describe_axis_arg(arg_exprs.get(3)),
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            };
+            let hits: Vec<usize> = input_dims
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| matches!(d, Dim::Name(n) if n == anchor))
+                .map(|(i, _)| i)
+                .collect();
+            match hits.as_slice() {
+                [i] => *i,
+                [] if has_spread => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand: rank-spread operand has no named `{anchor}` axis to \
+                             anchor the insertion; insertion strictly inside an opaque \
+                             spread has no anchor and is rejected \
+                             (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                [] => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand anchor `{anchor}` is not a named axis of the operand: \
+                             the named-axis form inserts at the trailing end or immediately \
+                             before an existing named anchor (spec/04-type-system.md \
+                             \u{00a7}4.5.3)"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                _ => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand: anchor `{anchor}` is ambiguous; it appears more than \
+                             once in the operand shape (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+            }
+        }
+        None => input_dims.len(),
+    };
+
+    // Symbolic output: insert into the row form. Surviving dims (spreads
+    // included) keep identity and order; the new axis is a named dim.
+    let mut out_dims = input_dims.to_vec();
+    out_dims.insert(insert_at, Dim::Name(new_name.to_string()));
+    let canonical = Type::Tensor(out_dims, input_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
         errors.push(te.into());
         return Type::Error;
@@ -13780,6 +15216,23 @@ fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
     children(list).first().and_then(symbol_name)
 }
 
+/// Describe a non-literal axis argument for the issue #259 diagnostic.
+///
+/// When the axis is a `(var name)` (the common case: a function-parameter
+/// `int32` such as `mean(&x, ax)`), name it so the user can see which
+/// binding is the runtime value. Otherwise fall back to a generic
+/// "non-constant expression" phrasing. Kept deliberately small: this only
+/// feeds a user-facing message, not a control-flow decision.
+fn describe_axis_arg(axis_expr: Option<&deep::Expr>) -> String {
+    match axis_expr {
+        Some(expr) => match symbolic_dim_ref_name(expr) {
+            Some(name) => format!("a runtime value `{name}`"),
+            None => "a non-constant expression".to_string(),
+        },
+        None => "a missing argument".to_string(),
+    }
+}
+
 /// Post-body rigidity check for a def's declared dimension parameters.
 ///
 /// `declared_dvars` are the dim variables introduced by the declared
@@ -13854,6 +15307,115 @@ fn check_declared_dvars_rigid(
             }
         } else {
             seen.insert(resolved, *dv);
+        }
+    }
+}
+
+/// chelis#273 return-position rigidity guard.
+///
+/// `check_declared_dvars_rigid` collects declared dim parameters from
+/// the signature's *parameter* positions only, so a dim parameter
+/// appearing **only in the return type** was never checked and the body
+/// could silently pin it (`def f[k](a: tensor[2, f32]) ->
+/// tensor[k, f32] = a` pinned `k := 2`).
+///
+/// A return-only dim parameter is not fully rigid, though: the body is
+/// the only place the output dimension can come from (Chelis has no
+/// explicit dim application; callers instantiate dims by unification
+/// against *arguments*, which never mention a return-only dim). The
+/// legitimate **output-inferred** uses must stay green
+/// (spec/04-type-system.md §4.4.1):
+///
+/// - the body leaves the dim var unbound (a clean, generalizable dim,
+///   e.g. variable-fed `to_tensor`), or
+/// - the body resolves it to a **body-internal** concrete dim
+///   (`examples/hello_tensor.ch`: `def main() -> tensor[n, f32]` whose
+///   body builds a `tensor[3, f32]`); the registered scheme then
+///   resolves to the produced dim.
+///
+/// What is rejected is **input coupling** — the body deriving the
+/// promised-independent output dim from the caller-visible parameter
+/// world:
+///
+/// - `Dim::Var -> Dim::Lit` pin where the literal equals the
+///   post-unification resolution of a dimension occurring in a declared
+///   parameter position, or
+/// - collapse with a distinct *param-position* declared dim parameter
+///   (either binding orientation).
+///
+/// Two return-only dim parameters collapsing with each other are
+/// tolerated (both are output-inferred; no caller-visible coupling).
+/// Known residual: coupling through a named symbolic dim
+/// (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x` binds
+/// `m := Name("batch")`) is not flagged — `Dim::Name` unifies
+/// permissively by design (chelis#219) and no declared dim parameter
+/// participates.
+fn check_return_only_dvars_rigid(
+    decl_ty: &Type,
+    param_dvars: &[DimVar],
+    subst: &Subst,
+    errors: &mut Vec<CheckError>,
+) {
+    let Type::Fn(decl_params, decl_ret) = decl_ty else {
+        return;
+    };
+    let ret_only: Vec<DimVar> = crate::env::free_dvars(decl_ret)
+        .into_iter()
+        .filter(|dv| !param_dvars.contains(dv))
+        .collect();
+    if ret_only.is_empty() {
+        return;
+    }
+    // Every dimension occurring in a declared parameter position,
+    // resolved through the post-body substitution.
+    let mut param_dims: Vec<Dim> = Vec::new();
+    for t in decl_params {
+        crate::env::collect_dims(t, &mut param_dims);
+    }
+    let resolved_param_dims: Vec<Dim> = param_dims.iter().map(|d| subst.apply_dim(d)).collect();
+    for dv in &ret_only {
+        let resolved = subst.apply_dim(&Dim::Var(*dv));
+        if let Dim::Lit(n) = resolved {
+            if resolved_param_dims.contains(&Dim::Lit(n)) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "return-position dim parameter d{} was pinned to concrete \
+                         Lit({n}) flowing from a declared parameter dimension: a dim \
+                         parameter that appears only in the return type promises an \
+                         output dimension the body must not derive from the inputs \
+                         (spec/04-type-system.md \u{00a7}4.4.1)",
+                        dv.0
+                    ),
+                    vec![
+                        "Name the input dimension in the return type (reuse the \
+                         parameter's dim parameter or literal) if the output \
+                         genuinely tracks an input dimension, or fix the body so the \
+                         output dimension does not depend on the input dims"
+                            .to_string(),
+                    ],
+                ));
+            }
+        } else if let Some(pdv) = param_dvars
+            .iter()
+            .find(|pdv| subst.apply_dim(&Dim::Var(**pdv)) == resolved)
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "return-position dim parameter d{} was unified with the distinct \
+                     declared dim parameter d{} from a parameter position: declared \
+                     dim parameters are rigid and must remain distinct \
+                     (spec/04-type-system.md \u{00a7}4.4.1)",
+                    dv.0, pdv.0
+                ),
+                vec![
+                    "Use the same dim parameter in both positions if the return \
+                     dimension is meant to equal the input's, or fix the body so the \
+                     declared dims stay independent"
+                        .to_string(),
+                ],
+            ));
         }
     }
 }
@@ -14509,7 +16071,51 @@ fn pattern_bindings(
             }
             "pat-ctor" => {
                 if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
-                    covered_variants.push(ctor_name.to_string());
+                    // chelis#317: an out-of-scope constructor pattern (a type-
+                    // only import that names `| Alpha =>` without importing
+                    // `Alpha`) must be rejected at `check` here, the same way
+                    // the construction site is in `infer_var`. Without this the
+                    // fuzzy terminal fallback below binds the arm to a foreign
+                    // module's tag and the mismatch surfaces only as a runtime
+                    // non-exhaustive match. `constructor_pattern_out_of_scope`
+                    // rejects both the unique-fuzzy case and the non-unique /
+                    // unresolvable case; the latter would otherwise push a bare
+                    // name with no scheme into `covered_variants` and be silently
+                    // accepted under a `_` wildcard arm. Skip coverage/binding so
+                    // the bogus arm cannot also mask the real `non-exhaustive`
+                    // diagnostic.
+                    if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::UnknownConstructor,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!("unknown constructor: {ctor_name}"),
+                            ),
+                            vec![format!(
+                                "Constructor '{ctor_name}' is not in scope. Declare it \
+                                 locally or add it to an import (e.g. \
+                                 `import Mod ({ctor_name})`)"
+                            )],
+                        ));
+                        return;
+                    }
+                    // Record the *resolved* variant name for exhaustiveness,
+                    // not the bare pattern name. After reef's module-scoped
+                    // constructor mangling (chelis#157), the registry keys
+                    // variants by their package/module-qualified name, while
+                    // a pattern may still be written with the bare terminal
+                    // name (e.g. an unqualified `JsonNull` arm). Pushing the
+                    // bare name would leave the mangled variant uncovered and
+                    // fire a spurious `non-exhaustive match`. Resolve through
+                    // the registry's terminal-unique lookup so coverage is
+                    // compared on the same (mangled) key `variant_names`
+                    // returns.
+                    let covered_name = adt_reg
+                        .lookup_variant(ctor_name)
+                        .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name))
+                        .map(|(_, variant)| variant.name.clone())
+                        .unwrap_or_else(|| ctor_name.to_string());
+                    covered_variants.push(covered_name);
 
                     // RFC D-CHECK: constructor pattern match on an
                     // out-of-module opaque type is rejected; binding
@@ -14588,8 +16194,28 @@ fn pattern_bindings(
                 // (pat-record {} TypeName (kv {} k1 p1) ...): validate against ADT registry
                 // kids[0] = TypeName, kids[1..] = (kv {} key pat)
                 if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
-                    covered_variants.push(ctor_name.to_string());
-
+                    // chelis#317: same out-of-scope guard as the positional
+                    // `pat-ctor` arm — a record-shaped match against a
+                    // constructor that was never imported must be an `unknown
+                    // constructor` error, not a fuzzy bind to a foreign tag.
+                    // `constructor_pattern_out_of_scope` also rejects the
+                    // non-unique / unresolvable case a `_` wildcard arm would
+                    // otherwise silently accept.
+                    if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::UnknownConstructor,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!("unknown constructor: {ctor_name}"),
+                            ),
+                            vec![format!(
+                                "Constructor '{ctor_name}' is not in scope. Declare it \
+                                 locally or add it to an import (e.g. \
+                                 `import Mod ({ctor_name})`)"
+                            )],
+                        ));
+                        return;
+                    }
                     // Look up variant in ADT registry for the canonical
                     // field order and known field-name set used for
                     // validation diagnostics.
@@ -14608,6 +16234,14 @@ fn pattern_bindings(
                             errors,
                         );
                     }
+
+                    // Record the resolved (mangled) variant name for
+                    // exhaustiveness, mirroring `pat-ctor`. See that arm for
+                    // why the bare pattern name is not used (chelis#157).
+                    let covered_name = variant_info
+                        .map(|(_, vi)| vi.name.clone())
+                        .unwrap_or_else(|| ctor_name.to_string());
+                    covered_variants.push(covered_name);
                     let declared_field_names: Vec<Option<String>> = variant_info
                         .map(|(_, vi)| vi.fields.iter().map(|(n, _)| n.clone()).collect())
                         .unwrap_or_default();
@@ -15099,6 +16733,45 @@ fn infer_record(
         ));
         return Type::Error;
     };
+    // chelis#317: a registry-known but OUT-OF-SCOPE record constructor (a
+    // type-only import constructing e.g. `AdamState { ... }`, whose ADT is in
+    // the registry but whose constructor is not in scope at the use site) is
+    // unknown here. Opaque types are handled by the opacity check below
+    // instead, so only a non-opaque out-of-scope head is rejected here; this
+    // keeps the #317 record-constructor guard while leaving opacity rejection
+    // (D-CHECK) for opaque heads.
+    let head_is_opaque = adt_reg.lookup(adt_name).is_some_and(|d| d.opaque);
+    if !head_is_opaque && constructor_out_of_scope(head, env) {
+        for kv_expr in kids.iter().skip(1) {
+            if let deep::Expr::List(kv_list, _) = kv_expr
+                && get_tag(kv_list) == Some("kv")
+                && let Some(value) = children(kv_list).get(1)
+            {
+                infer_expr(
+                    value,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                );
+            }
+        }
+        errors.push(CheckError::new(
+            CheckErrorKind::UnknownConstructor,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("unknown constructor: {head}"),
+            ),
+            vec![format!(
+                "Constructor '{head}' is not in scope. Declare it locally or \
+                 add it to an import (e.g. `import Mod ({head})`)"
+            )],
+        ));
+        return Type::Error;
+    }
     // RFC D-CHECK: record construction of an out-of-module opaque
     // type is rejected; inference continues so the literal still
     // yields its true type (no cascades).
@@ -16044,7 +17717,8 @@ fn deep_type_to_type(
     tvar_map: &mut HashMap<String, TypeVar>,
 ) -> Type {
     let mut dvar_map = HashMap::new();
-    deep_type_to_type_inner(expr, vg, tvar_map, &mut dvar_map)
+    let mut rvar_map = HashMap::new();
+    deep_type_to_type_inner(expr, vg, tvar_map, &mut dvar_map, &mut rvar_map)
 }
 
 fn deep_type_to_type_inner(
@@ -16052,6 +17726,7 @@ fn deep_type_to_type_inner(
     vg: &mut VarGen,
     tvar_map: &mut HashMap<String, TypeVar>,
     dvar_map: &mut HashMap<String, DimVar>,
+    rvar_map: &mut HashMap<String, RankVar>,
 ) -> Type {
     match expr {
         deep::Expr::List(list, _) => {
@@ -16087,10 +17762,15 @@ fn deep_type_to_type_inner(
                     }
                     let args: Vec<Type> = kids[..kids.len() - 1]
                         .iter()
-                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map))
+                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
                         .collect();
-                    let ret =
-                        deep_type_to_type_inner(&kids[kids.len() - 1], vg, tvar_map, dvar_map);
+                    let ret = deep_type_to_type_inner(
+                        &kids[kids.len() - 1],
+                        vg,
+                        tvar_map,
+                        dvar_map,
+                        rvar_map,
+                    );
                     Type::Fn(args, Box::new(ret))
                 }
                 "t-ref" => {
@@ -16098,7 +17778,7 @@ fn deep_type_to_type_inner(
                         return Type::Error;
                     }
                     Type::Ref(Box::new(deep_type_to_type_inner(
-                        &kids[0], vg, tvar_map, dvar_map,
+                        &kids[0], vg, tvar_map, dvar_map, rvar_map,
                     )))
                 }
                 "t-tensor" => {
@@ -16112,14 +17792,16 @@ fn deep_type_to_type_inner(
                     // Both shapes are well-formed; any other shape (e.g.,
                     // a `t-fn` or a `t-prim` with an unknown name) is an
                     // ill-formed tensor and is reduced to `Type::Error`.
-                    let prec = match deep_type_to_type_inner(prec_expr, vg, tvar_map, dvar_map) {
+                    let prec = match deep_type_to_type_inner(
+                        prec_expr, vg, tvar_map, dvar_map, rvar_map,
+                    ) {
                         Type::Prim(p) => TensorPrec::Concrete(p),
                         Type::Var(v) => TensorPrec::Var(v),
                         _ => return Type::Error,
                     };
                     let dims: Vec<Dim> = kids[..kids.len() - 1]
                         .iter()
-                        .filter_map(|c| parse_dim(c, vg, dvar_map))
+                        .filter_map(|c| parse_dim(c, vg, dvar_map, rvar_map))
                         .collect();
                     Type::Tensor(dims, prec)
                 }
@@ -16127,7 +17809,7 @@ fn deep_type_to_type_inner(
                     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                         let args: Vec<Type> = kids[1..]
                             .iter()
-                            .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map))
+                            .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
                             .collect();
                         Type::Adt(name.to_string(), args)
                     } else {
@@ -16137,7 +17819,7 @@ fn deep_type_to_type_inner(
                 "t-tuple" => {
                     let elems: Vec<Type> = kids
                         .iter()
-                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map))
+                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
                         .collect();
                     Type::Tuple(elems)
                 }
@@ -16149,11 +17831,14 @@ fn deep_type_to_type_inner(
     }
 }
 
-/// Parse a dimension expression from Deep AST, with support for dim variables.
+/// Parse a dimension expression from Deep AST, with support for dim variables
+/// and rank variables. `rvar_map` memoizes `..r` names to a single `RankVar`
+/// so the same rank variable shared across tensor positions ties together.
 fn parse_dim(
     expr: &deep::Expr,
     vg: &mut VarGen,
     dvar_map: &mut HashMap<String, DimVar>,
+    rvar_map: &mut HashMap<String, RankVar>,
 ) -> Option<Dim> {
     match expr {
         deep::Expr::List(list, _) => {
@@ -16188,6 +17873,15 @@ fn parse_dim(
                         None
                     }
                 }
+                "d-rank" => {
+                    let name = kids
+                        .first()
+                        .and_then(|e| symbol_name(e))
+                        .unwrap_or("_")
+                        .to_string();
+                    let rv = *rvar_map.entry(name).or_insert_with(|| vg.fresh_rvar());
+                    Some(Dim::Rank(rv))
+                }
                 _ => None,
             }
         }
@@ -16208,6 +17902,15 @@ mod tests {
         let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
         check_ir_program(&exprs).expect("IR check")
+    }
+
+    /// Run the full Surf → desugar → infer pipeline and return the raw
+    /// `InferResult` (errors included) so a test can assert clean or assert
+    /// a specific failure mode end-to-end.
+    fn infer_surf(src: &str) -> InferResult {
+        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        infer_program(&exprs)
     }
 
     fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
@@ -17166,6 +18869,53 @@ mod tests {
         );
     }
 
+    // ── Duplicate def rejection (chelis#258) ─────────────────────
+    // A def's value binding is silent last-write-wins, and Chelis does
+    // not dispatch same-name defs by arg arity or tensor rank. Two
+    // same-name defs (e.g. rank-distinct "overloads") therefore leave
+    // one arm unreachable and surface a confusing DimensionMismatch at
+    // the other arm's call sites. `report_duplicate_defs` rejects them
+    // at the definition site instead. The tests below pin both sides.
+
+    #[test]
+    fn duplicate_def_in_same_program_is_rejected() {
+        check_err(
+            "(def {} f (fn {} (params {} x) (var {} x)))
+             (def {} f (fn {} (params {} y) (var {} y)))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn duplicate_value_def_in_same_program_is_rejected() {
+        // The rule keys on the `def` tag, so duplicate value defs collide too.
+        check_err(
+            "(def {} x (lit {type: (t-prim {} int32)} 1))
+             (def {} x (lit {type: (t-prim {} int32)} 2))",
+            CheckErrorKind::DuplicateDefinition,
+        );
+    }
+
+    #[test]
+    fn distinct_name_defs_are_accepted() {
+        // Only same-name collisions are duplicates; distinct names are fine.
+        check_ok(
+            "(def {} f (fn {} (params {} x) (var {} x)))
+             (def {} g (fn {} (params {} y) (var {} y)))",
+        );
+    }
+
+    #[test]
+    fn sig_plus_def_same_name_is_not_a_duplicate() {
+        // A `defsig` + a `def` for one name is the ordinary annotated-def
+        // shape (and an inline-annotated def desugars to exactly that pair),
+        // so it must not be flagged. Only two `def`s for one name collide.
+        check_ok(
+            "(defsig {} f (t-fn {} (t-var {} a) (t-var {} a)))
+             (def {} f (fn {} (params {} x) (var {} x)))",
+        );
+    }
+
     // ── Match tests ──────────────────────────────────────────────
 
     #[test]
@@ -17846,11 +19596,23 @@ mod tests {
         );
     }
 
+    // chelis#317: an in-scope constructor resolves through its *exact*
+    // (consistently mangled) name. Before #317 this test fed a half-mangled
+    // program — a bare `deftype KVCache` plus a `Pkg__..__KVCache` reference —
+    // and relied on the registry's fuzzy terminal-segment fallback to bind the
+    // two. That fuzzy bind is exactly the cross-module mis-resolution #317
+    // removes, so the program the real reef pipeline produces (deftype AND
+    // reference carry the same mangled name) is the one that must resolve. Both
+    // the construction site (`None => KVCache([])`) and the type annotations
+    // resolve against the same key without any terminal-match fuzziness.
     #[test]
-    fn ir_resolves_unique_terminal_constructor_names() {
+    fn ir_resolves_consistently_mangled_constructor_names() {
         let decls = chelis_surf::parser::parse_str(
-            "type KVCache[a] = | KVCache(List[a])\n\
-             def keep_cache[p](cache: Option[KVCache[p]]) -> KVCache[p] =\n\
+            "type Pkg__chelis__std__Std__Nn__Generate__KVCache[a] = \
+                | Pkg__chelis__std__Std__Nn__Generate__KVCache(List[a])\n\
+             def keep_cache[p](cache: \
+                 Option[Pkg__chelis__std__Std__Nn__Generate__KVCache[p]]) -> \
+                 Pkg__chelis__std__Std__Nn__Generate__KVCache[p] =\n\
                match cache with {\n\
                  | Some(value) => value\n\
                  | None => Pkg__chelis__std__Std__Nn__Generate__KVCache([])\n\
@@ -17861,11 +19623,39 @@ mod tests {
 
         let result = infer_ir_program(&exprs);
         assert!(
-            !result
-                .errors
-                .iter()
-                .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable)),
-            "expected qualified constructor names to resolve by unique terminal match, got {:?}",
+            !result.errors.iter().any(|error| matches!(
+                error.kind,
+                CheckErrorKind::UnboundVariable | CheckErrorKind::UnknownConstructor
+            )),
+            "expected the consistently mangled constructor to resolve clean, got {:?}",
+            result.errors
+        );
+    }
+
+    // chelis#317 negative parity: a bare constructor referenced against a
+    // registry that only holds a *different* (mangled) same-terminal name is
+    // out of scope and must be an `UnknownConstructor` error — not a silent
+    // fuzzy bind to the foreign tag that defers to a runtime non-exhaustive
+    // match. This is the half-mangled state the old
+    // `ir_resolves_unique_terminal_constructor_names` test accepted.
+    #[test]
+    fn ir_rejects_out_of_scope_terminal_constructor_name() {
+        let decls = chelis_surf::parser::parse_str(
+            "type Pkg__chelis__std__Std__Nn__Generate__KVCache[a] = \
+                | Pkg__chelis__std__Std__Nn__Generate__KVCache(List[a])\n\
+             def make_cache[p]() -> \
+                 Pkg__chelis__std__Std__Nn__Generate__KVCache[p] = KVCache([])\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+
+        let result = infer_ir_program(&exprs);
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error.kind,
+                CheckErrorKind::UnknownConstructor
+            ) && error.message.contains("KVCache")),
+            "expected an UnknownConstructor for the out-of-scope bare `KVCache`, got {:?}",
             result.errors
         );
     }
@@ -18852,6 +20642,125 @@ bad = chunk(xs, "two")
                 .iter()
                 .any(|e| matches!(e.kind, CheckErrorKind::CycleDetected)),
             "multiple independent Nautilus inputs must not trigger a cycle error; got {errors:?}"
+        );
+    }
+
+    // ── chelis#293: general type var through a function-typed parameter ──
+    //
+    // A def generic over a general type variable `P` declared in its
+    // explicit `[..]` quantifier list, where `P` is threaded through a
+    // function-typed parameter, must instantiate `P` to a fresh variable at
+    // each call site and unify it against the concrete callback argument.
+    // Before the fix, the Surf desugarer misclassified the uppercase `P` as
+    // a rigid ADT `(t-adt {} P)`, so every call site failed with
+    // `type mismatch: P vs tensor[..]`.
+
+    #[test]
+    fn issue_293_general_tvar_through_arrow_param_checks_clean() {
+        // Positive: the reproducer must check clean — no TypeMismatch.
+        let result = infer_surf(
+            r#"
+module Repro.GenericCallback
+def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner_p))
+def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, w, fn (t, q) -> mul(t, q))
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "expected the general-tvar-through-arrow reproducer to check clean, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn issue_293_apply_resid_checks_clean_in_isolation() {
+        // Control: the generic def alone already checked clean before the
+        // fix; it must keep checking clean.
+        let result = infer_surf(
+            r#"
+module Repro.GenericCallback
+def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner_p))
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "apply_resid must check clean in isolation, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn issue_293_dim_var_callback_variant_checks_clean() {
+        // Control (dim-var path): the same shape where the threaded
+        // parameter is a *dim* var `m` rather than a general type var
+        // already worked and must keep working.
+        let result = infer_surf(
+            r#"
+module Repro.DimCallback
+def apply_resid[n, m](x: tensor[n, f32], inner: tensor[m, f32], f: tensor[n, f32] -> tensor[m, f32] -> tensor[n, f32]) -> tensor[n, f32] =
+  f(x, inner)
+def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, w, fn (t, q) -> add(t, q))
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "the dim-var callback control must check clean, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn issue_293_monomorphic_callback_variant_checks_clean() {
+        // Control (monomorphic path): a fully concrete callback already
+        // worked and must keep working.
+        let result = infer_surf(
+            r#"
+module Repro.MonoCallback
+def apply_resid[n](x: tensor[n, f32], inner: tensor[n, f32], f: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner))
+def use_it(x: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, w, fn (t, q) -> mul(t, q))
+"#,
+        );
+        assert!(
+            result.errors.is_empty(),
+            "the monomorphic callback control must check clean, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn issue_293_incompatible_callback_still_rejected() {
+        // Negative parity: the fix must NOT over-loosen unification. Here
+        // the callback's second parameter `q` is multiplied with `t`
+        // (a `tensor[n, f32]`), so `q` must be `tensor[n, f32]`. But the
+        // `inner_p` argument supplied at the call site is a scalar `int32`,
+        // which is bound to the same `P`. `P` cannot be both a tensor and a
+        // scalar int32, so this must still produce a clear mismatch.
+        let result = infer_surf(
+            r#"
+module Repro.BadCallback
+def apply_resid[n, P](x: tensor[n, f32], inner_p: P, f: tensor[n, f32] -> P -> tensor[n, f32]) -> tensor[n, f32] =
+  add(x, f(x, inner_p))
+def use_it(x: tensor[3, f32]) -> tensor[3, f32] =
+  apply_resid(x, 1, fn (t, q) -> mul(t, q))
+"#,
+        );
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e.kind,
+                CheckErrorKind::TypeMismatch
+                    | CheckErrorKind::PrecisionMismatch
+                    | CheckErrorKind::DimensionMismatch
+            )),
+            "an incompatible callback/argument combination must still be rejected with a \
+             unification mismatch; unification must not have been over-loosened (chelis#293), \
+             got: {:?}",
+            result.errors
         );
     }
 }

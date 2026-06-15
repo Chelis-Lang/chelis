@@ -81,14 +81,14 @@ One module per file. `module Name` is the first non-comment line. Declarations f
 File path mapping: `module Foo.Bar` lives in `foo/bar.ch` relative to the project root.
 
 ```
-module Std.Nn.Linear
+module School.Nn.Linear
 
 import Std.Tensor (..)
 
 def forward(x, w, b) = add(matmul(x, w), b)
 ```
 
-**⟹** `(module {} std.nn.linear ...)` — module name lowercased and dot-joined in Deep.
+**⟹** `(module {} school.nn.linear ...)` — module name lowercased and dot-joined in Deep.
 
 ### P2: Import / Export
 
@@ -100,7 +100,70 @@ def forward(x, w, b) = add(matmul(x, w), b)
 
 Qualified access (`Foo.Bar.baz`) is always available after any import form. Selective import additionally brings names into unqualified scope.
 
-**Export:** Explicit. If no `export` declaration appears, all top-level `def` and `type` are public. Once any `export` appears, only listed names are public.
+A qualified reference names the module path followed by the exported name. The
+trailing name may be a value or a **constructor**, and the whole reference may
+be applied:
+
+```
+Foo.Bar.baz                 -- qualified value
+Demo.Dropout.Eval           -- qualified nullary constructor
+Demo.Dropout.use(mode)      -- qualified value applied to an argument
+Demo.List.Cons(x, xs)       -- qualified constructor applied to arguments
+```
+
+A constructor may also be qualified in **pattern** position, so a `match` can
+destructure one module's variant when same-named constructors are in scope:
+
+```
+match m with {
+  | Demo.Dropout.Train => 1
+  | Demo.Dropout.Eval  => 0
+}
+```
+
+A **type** name may be qualified the same way in any type position, so a
+consumer that imports two modules exporting the same type name can annotate
+against one:
+
+```
+def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)
+```
+
+This is the disambiguation escape hatch when two imported modules export the
+same constructor or type name (e.g. each defines `type Mode = | Train | Eval`):
+write `Demo.Dropout.Eval` and `Demo.Sd.Eval` to select each module's own
+constructor. Importing both names unqualified is rejected as an ambiguous
+reference; qualifying resolves it. In every position — value, constructor,
+pattern, and type — a qualified reference whose head names an imported module
+but whose trailing name that module does not export is rejected with a
+`module \`M\` does not export \`N\`` error, not silently accepted.
+
+**Constructor scope (unqualified references).** A bare (unqualified)
+constructor reference — at a construction site (`Alpha`, `Alpha(x)`,
+`Alpha { ... }`) or in a `match` **pattern** (`| Alpha => ...`) — is in scope
+only when the constructor is declared in the current module **or** named in an
+`import` that brings it into unqualified scope. Importing only the enclosing
+**type** is not sufficient: the constructor itself must be named in the import
+list (e.g. `import Pkg.Adt (Mode, Alpha, Beta, Gamma)`). A constructor that is
+not in scope is an `unknown constructor \`X\`` error at `chelis check` that
+names the constructor — the same way an unbound value is an `unbound variable`
+(type-checker diagnostics name the offending identifier; they do not yet carry
+a source span) — and must never silently bind to a same-named constructor
+declared in another module (which would defer the failure to a runtime
+non-exhaustive match). This applies to record-shaped constructors
+(`Alpha { ... }`) at both construction and match-pattern sites, and to the
+case where two other modules export a same-named constructor (the reference is
+rejected as unknown, not bound to either). The
+module-qualified forms above (`Pkg.Adt.Alpha`, `| Pkg.Adt.Alpha =>`) remain in
+scope without naming the constructor in the import list, because they name the
+declaring module explicitly.
+
+Naming a constructor in an `import` brings it into scope **even when the
+declaring module's `export` list names only the type**: exporting a type
+auto-exports its constructors (see Export below), so they are importable by
+name regardless of whether they appear in the `export` list.
+
+**Export:** Explicit. If no `export` declaration appears, all top-level `def` and `type` are public. Once any `export` appears, only listed names are public. Exporting a `type` also exports its constructors, so a downstream module can import them by name.
 
 ```
 export (forward, Linear)
@@ -132,6 +195,49 @@ def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] =
 
 **Disambiguation:** A name in a `dim` declaration or imported → concrete `d-name`. A name in a function's `[...]` → variable `d-var`. A lowercase name in a tensor type that is neither declared nor in brackets → parse error.
 
+### P3b: Rank Variables (`..r`)
+
+A **rank variable** `..r` is a *name-preserving spread* standing for a run of
+dimensions, letting one `def` be generic over tensor *rank*. It binds (by
+unification) to the actual named dims it covers, so per-axis names are
+preserved, not erased. See
+[`spec/design/rank_polymorphism.md`](design/rank_polymorphism.md) for the full
+design and soundness boundary, including §4.5.3 (named-axis reduction).
+
+**Tier-2 (identity):** `..r` as the sole shape element — one def, every rank:
+
+```
+def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+```
+
+**Tier-3 (name-preserving rank arithmetic, §4.5.3):** `..r` may be interleaved
+with concrete **named anchors** (`tensor[..pre, seq, ..post, f32]`). A
+named-axis reduction drops the named anchor and carries the surrounding spreads
+through — one def reduces a named axis at any rank:
+
+```
+def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+```
+
+**⟹**
+```
+(defsig {} reduce_seq
+  (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))
+           (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-prim {} f32))))
+```
+
+`..r` is introduced contextually (like a sig dim variable — no `[..r]`
+quantifier needed). A spread name may not repeat within one tensor shape (a
+**parse error**). A reduction names the axis it removes by the anchor's name
+(`sum(x, seq)`); multiple axes are reduced by composing single-axis reductions
+(`sum(sum(x, head), seq)`). The reduced axis must be a **named** anchor present
+exactly once in the operand — a fully-literal or differently-named operand is
+rejected (the Name↔Lit boundary, §4.5.3). A `def` whose signature mentions `..r`
+is restricted by the §4.2 Body-Discipline check to *name-trackable* operations:
+shape-identity (elementwise) ops and named-axis reductions only — never a
+positional shape-rewriter like `permute`/`reshape` (meaningless at symbolic
+rank).
+
 ### P4: Type Signatures
 
 Both inline and standalone forms. All types are optional — inference fills them in.
@@ -157,7 +263,7 @@ def multi_head_attn(q, k, v, mask) = ...
 
 **⟹** `(defsig {} multi_head_attn (t-fn {} ...arg_types... ret_type))`
 
-`sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type).
+`sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
 
 Phase 2a effect annotations are optional suffixes on either `sig` or `def`:
 
@@ -218,6 +324,30 @@ dim-var or a precision tvar depending on its position inside a
 `tensor[..]` type: the dim slots resolve to `d-var` and the
 precision slot resolves to `t-var`. Position determines kind; the
 quantifier list is unkinded.
+
+A name in a def's `[..]` clause is also a **general type variable**
+wherever it appears as a type by itself — as a bare parameter type, a
+return type, or an argument/return position of a function-typed
+(`->`) parameter. Such a name lowers to `(t-var {} <name>)` and is
+generalized into the def's scheme, so each call site instantiates a
+fresh variable that unifies against the concrete argument. The `[..]`
+clause is the authoritative quantifier source and **overrides the
+PascalCase-vs-snake_case case-split** (§3.1): a quantifier name that
+happens to be PascalCase (e.g. `P`) is a type variable, not a rigid
+ADT, because the user explicitly bound it. Threading such a name
+through a function-typed parameter — e.g.
+
+```text
+def apply_resid[n, P](
+  x: tensor[n, f32],
+  inner_p: P,
+  f: tensor[n, f32] -> P -> tensor[n, f32],
+) -> tensor[n, f32] = add(x, f(x, inner_p))
+```
+
+must therefore type-check both in isolation and at every call site
+(chelis#293). Outside an `[..]` clause the case-split still applies:
+an unquantified PascalCase name is an ADT.
 
 Examples:
 
@@ -583,6 +713,14 @@ positions is exactly:
 4. the first argument of an explicit `cast(literal, p)` expression — the
    literals bind at `p`
 
+Position 4 applies to a bare scalar numeric literal as well as to a
+tensor-literal body (issue #308): `cast(1.1, f64)` binds the decimal at
+`f64` directly (the desugarer emits `(lit {type: (t-prim {} f64)} 1.1)`),
+not "narrow to the f32 default, then widen". Suffixed literals keep their
+suffix binding (§P10a; `cast(1.1f32, f64)` widens the f32 value), and a
+float literal under an integer `p` keeps default-then-truncate cast
+semantics. See `spec/04-type-system.md` §5.6 for the full statement.
+
 Outside this closed set, numeric literals in a tensor body fall back to the
 §P10 literal defaults: integer literals to `int32`, float literals to `f32`.
 A bare `[1, 2, 3]` in an unannotated top-level binding evaluates to
@@ -797,7 +935,10 @@ TypeAtom      <- 'tensor' '[' S DimList S ',' S PrecType S ']'
                / '(' S TypeExpr S ',' S TypeExpr
                   (S ',' S TypeExpr)* (S ',')? S ')'
                / '(' S TypeExpr S ')'
-               / TypeIdent
+               / TypeName
+
+# Bare or module-qualified type name (`Mode`, `Demo.Dropout.Mode`).
+TypeName      <- TypeIdent ('.' TypeIdent)*
 
 PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
                / 'int8' / 'int16' / 'int32' / 'int64'
@@ -838,7 +979,10 @@ UnaryExpr     <- ('-' / '!') S UnaryExpr / AccessExpr
 
 # ── Postfix ──
 
-AccessExpr    <- AppExpr ('.' (Ident / IntLit))*
+AccessExpr    <- AppExpr AccessStep*
+AccessStep    <- '.' IntLit                              # tuple index
+               / '.' (Ident / TypeIdent) CallArgs*       # field / module path, optionally applied
+CallArgs      <- '(' S (Expr (S ',' S Expr)* (S ',')?)? S ')'
 AppExpr       <- AtomExpr (S !InfixOp AtomExpr)*
 
 # ── Atoms ──
@@ -878,12 +1022,15 @@ Pattern       <- PatAtom (S 'as' S Ident)?
 PatAtom       <- '(' S Pattern (S ',' S Pattern)+
                   (S ',')? S ')'
                / '(' S Pattern S ')'
-               / TypeIdent S '{' S RecordPatField
+               / CtorName S '{' S RecordPatField
                   (S ',' S RecordPatField)* (S ',')? S '}'
-               / TypeIdent PatAtom*
+               / CtorName PatAtom*
                / Literal
                / '_'
                / Ident
+
+# Bare or module-qualified constructor head (`Train`, `Demo.Dropout.Train`).
+CtorName       <- TypeIdent ('.' TypeIdent)*
 
 RecordPatField <- Ident S ':' S Pattern / Ident
 
@@ -1090,6 +1237,7 @@ tensor[batch, seq, f32]           ⟹  (t-tensor {} (d-name {} batch) (d-name {}
 tensor[a, b, f32]  (polymorphic)  ⟹  (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
 &tensor[batch, f32]               ⟹  (t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 A -> B -> C                       ⟹  (t-fn {} A' B' C')  -- flat, last is return
+(A -> B) -> C                     ⟹  (t-fn {} (t-fn {} A' B') C')  -- arg is a function
 Option[f32]                       ⟹  (t-adt {} Option (t-prim {} f32))
 (f32, f32)                        ⟹  (t-tuple {} (t-prim {} f32) (t-prim {} f32))
 ()                                ⟹  (t-unit {})

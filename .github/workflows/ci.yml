@@ -22,6 +22,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Free ~25-30 GB before the cargo build; see
+      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
 
@@ -57,6 +62,17 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+
+      # Run the scripts/ Python unit tests (gate.py, ci_free_disk.py, the
+      # CI/release-workflow guards, etc.). This is the only job that runs
+      # them, and it is the right host: cargo is present (so the release
+      # pyo3 dep-graph oracle works) but cargo-nextest is NOT installed
+      # here, so test_nextest_profile_partition's heavy `cargo nextest
+      # list --workspace` oracle self-skips. Uses the uv-managed .venv
+      # interpreter per repo policy. Not a cargo/chelis command, so the
+      # scripts/test_gate.py parity lock leaves it alone.
+      - name: Script unit tests (scripts/test_*.py)
+        run: .venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
 
       # The lint-and-unit gate subset (build, clippy, fmt, chelis lint
       # --check) is defined once in scripts/gate.py and run here via
@@ -109,6 +125,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      # Free ~25-30 GB before the cargo build; see
+      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
 
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
@@ -256,6 +277,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Free ~25-30 GB before the cargo build; see
+      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
 
@@ -329,6 +355,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      # Free ~25-30 GB before the cargo build; see
+      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

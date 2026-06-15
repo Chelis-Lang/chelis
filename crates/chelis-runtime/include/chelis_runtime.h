@@ -162,6 +162,7 @@ void chelis_f16_buffer_to_f32(const uint16_t *src, float *dst, int64_t n);
 void chelis_f32_buffer_to_f16(const float *src, uint16_t *dst, int64_t n);
 chelis_tensor *chelis_scalar_tensor_from_i64(int64_t value);
 chelis_tensor *chelis_scalar_tensor_from_f64(double value);
+chelis_tensor *chelis_scalar_tensor_from_f32(float value);
 double chelis_tensor_to_f64(const chelis_tensor *t);
 int64_t chelis_tensor_rank(const chelis_tensor *t);
 int64_t chelis_tensor_shape(const chelis_tensor *t, int64_t axis);

@@ -7,11 +7,11 @@ in `examples/illustrative/`.
 
 Use these files when you want examples that should survive the normal CLI loop:
 
-- `examples/hello_tensor.ch` — tensor construction and elementwise addition.
-- `examples/linreg.ch` — matmul, expand, copy, and reductions.
-- `examples/vmap_relu.ch` — transform-oriented tensor flow.
-- `examples/tensor_structural_ops.ch` — reshape, permute, pad, and related shape helpers.
-- `examples/transformer_block.ch` — larger model-style composition.
+- `examples/hello_tensor.ch`: tensor construction and elementwise addition.
+- `examples/linreg.ch`: matmul, expand, copy, and reductions.
+- `examples/vmap_relu.ch`: transform-oriented tensor flow.
+- `examples/tensor_structural_ops.ch`: reshape, permute, pad, and related shape helpers.
+- `examples/transformer_block.ch`: larger model-style composition.
 
 Check one example:
 
@@ -38,7 +38,7 @@ PY
 ## Illustrative Examples
 
 `examples/illustrative/` is for syntax and design sketches that are useful to read but
-are not the Phase 0 executable corpus. Do not use those files as package acceptance
+are not part of the executable corpus. Do not use those files as package acceptance
 evidence unless the owning docs say a specific file is executable.
 
 ## Package Examples

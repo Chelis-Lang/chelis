@@ -15,9 +15,9 @@ enum SparseSummaryKind {
 }
 
 use crate::emit::CEmitter;
-use chelis_ir::dag::{DimExpr, DimInfo, RiscOp};
+use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     // Emit helpers and functions into a body buffer first so we can detect which
@@ -49,6 +49,30 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     let header = emit_host_header_with_linkage(program, program_name, internal_linkage);
     if !header.is_empty() {
         body.push(header);
+        body.push(String::new());
+    }
+
+    // Issue #352: top-level bindings referenced inside a compiled host
+    // function would otherwise dangle -- `main()` declares every binding as
+    // a local, so a def body's `w` had no declaration in scope and the
+    // native compiler rejected the TU. Hoist captured bindings to file
+    // scope; `emit_main` assigns them in binding order instead of declaring
+    // locals, so function bodies and `main()` resolve the same object
+    // (mirroring eval's load-closure, which serves the binding's value at
+    // call time). Check-time name resolution rejects forward references
+    // from a use site to a later binding, so every hoisted binding is
+    // initialized before the first user call that reads it.
+    let captured_globals = captured_global_names(program);
+    if !captured_globals.is_empty() {
+        body.push("// Top-level bindings captured by compiled functions (issue #352):".to_string());
+        for name in &captured_globals {
+            let binding = program
+                .globals
+                .iter()
+                .find(|binding| binding.name == *name)
+                .expect("captured global name comes from program.globals");
+            body.push(format!("static {};", c_decl(&binding.ty, name)));
+        }
         body.push(String::new());
     }
 
@@ -87,7 +111,8 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     }
 
     if !program.globals.is_empty() {
-        emit_main(&mut body, program_name, program);
+        let hoisted: HashSet<&str> = captured_globals.iter().map(String::as_str).collect();
+        emit_main(&mut body, program_name, program, &hoisted);
     }
 
     let mut out: Vec<String> = vec![
@@ -183,7 +208,7 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("}".to_string());
     // Bucket 3 activation parity: `tanh`, `silu`, `gelu` mirror their
     // IR-evaluator counterparts in
-    // `crates/chelis-compiler-api/src/runtime.rs`. All math runs
+    // `crates/chelis-compiler-api/src/runtime/host_ops.rs`. All math runs
     // through `float` so the two lanes agree byte-for-byte (modulo
     // documented float ulp tolerance).
     out.push("static inline float chelis_host_tanh_f32(float x) {".to_string());
@@ -192,9 +217,8 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("static inline float chelis_host_silu_f32(float x) {".to_string());
     out.push("    return x * chelis_host_sigmoid_f32(x);".to_string());
     out.push("}".to_string());
-    // GELU tanh-approximation, matching `Std.Nn.Gelu.gelu_scalar` in
-    // `packages/chelis-std/src/nn/gelu.ch` and
-    // `activation_gelu_f32` in chelis-compiler-api/src/runtime.rs.
+    // GELU tanh-approximation, matching `School.Nn.Gelu.gelu_scalar` and
+    // `activation_gelu_f32` in chelis-compiler-api/src/runtime/host_ops.rs.
     out.push("static inline float chelis_host_gelu_f32(float x) {".to_string());
     out.push("    float c = 0.7978845608028654f;".to_string());
     out.push("    float k = 0.044715f;".to_string());
@@ -504,7 +528,12 @@ fn emit_function(
     out.push("}".to_string());
 }
 
-fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
+fn emit_main(
+    out: &mut Vec<String>,
+    program_name: &str,
+    program: &HostProgram,
+    hoisted: &HashSet<&str>,
+) {
     out.push("int main(void) {".to_string());
     let mut emitter = HostEmitter::new(
         "    ".to_string(),
@@ -519,11 +548,18 @@ fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
             &format!("__binding_{index}_value"),
             &binding.ty,
         );
-        emitter.lines.push(format!(
-            "    {} {} = __binding_{index}_value;",
-            c_type(&binding.ty),
-            binding.name
-        ));
+        if hoisted.contains(binding.name.as_str()) {
+            // Declared at file scope (issue #352); assign, don't shadow.
+            emitter
+                .lines
+                .push(format!("    {} = __binding_{index}_value;", binding.name));
+        } else {
+            emitter.lines.push(format!(
+                "    {} {} = __binding_{index}_value;",
+                c_type(&binding.ty),
+                binding.name
+            ));
+        }
     }
     for binding in &program.globals {
         if let Some(display_name) = binding.display_name.as_deref() {
@@ -533,6 +569,138 @@ fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
     out.extend(emitter.lines);
     out.push("    return 0;".to_string());
     out.push("}".to_string());
+}
+
+/// Top-level bindings referenced by name inside at least one compiled host
+/// function body (issue #352), in `program.globals` order, deduped.
+///
+/// Deliberately an over-approximation: the walk records every `Var` name
+/// without subtracting binders (params, let names, match bindings).
+/// Hoisting a binding that is shadowed inside a function body is harmless
+/// in C -- the local declaration shadows the file-scope static -- while
+/// missing a genuine capture reproduces the undeclared-identifier build
+/// break this pass exists to prevent.
+fn captured_global_names(program: &HostProgram) -> Vec<String> {
+    let mut referenced: HashSet<String> = HashSet::new();
+    for function in &program.functions {
+        collect_var_names(&function.body, &mut referenced);
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    program
+        .globals
+        .iter()
+        .filter(|binding| referenced.contains(&binding.name))
+        .filter(|binding| seen.insert(binding.name.as_str()))
+        .map(|binding| binding.name.clone())
+        .collect()
+}
+
+/// Record every `Var` name referenced anywhere in `expr`, including
+/// let-binding values, match arms, and inline-callback bodies. Exhaustive
+/// over `HostExprKind` so a new variant forces this walk to be revisited.
+fn collect_var_names(expr: &HostExpr, out: &mut HashSet<String>) {
+    match &expr.kind {
+        HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Unit => {}
+        HostExprKind::Var(name, _) => {
+            out.insert(name.clone());
+        }
+        HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
+            for item in items {
+                collect_var_names(item, out);
+            }
+        }
+        HostExprKind::Call { args, .. }
+        | HostExprKind::Builtin { args, .. }
+        | HostExprKind::TensorCall { args, .. } => {
+            for arg in args {
+                collect_var_names(arg, out);
+            }
+        }
+        HostExprKind::AdtConstruct { fields, .. } => {
+            for field in fields {
+                collect_var_names(field, out);
+            }
+        }
+        HostExprKind::AdtFieldAccess { base, .. } => collect_var_names(base, out),
+        HostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_var_names(cond, out);
+            collect_var_names(then_expr, out);
+            collect_var_names(else_expr, out);
+        }
+        HostExprKind::MatchOption {
+            scrutinee,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            collect_var_names(scrutinee, out);
+            collect_var_names(some_expr, out);
+            collect_var_names(none_expr, out);
+        }
+        HostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            collect_var_names(scrutinee, out);
+            for arm in arms {
+                collect_var_names(&arm.expr, out);
+            }
+            if let Some(default_expr) = default_expr {
+                collect_var_names(default_expr, out);
+            }
+        }
+        HostExprKind::Let { bindings, body, .. } => {
+            for binding in bindings {
+                collect_var_names(&binding.value, out);
+            }
+            collect_var_names(body, out);
+        }
+        HostExprKind::Map { callback, list, .. }
+        | HostExprKind::Filter { callback, list, .. }
+        | HostExprKind::Partition { callback, list, .. }
+        | HostExprKind::FlatMap { callback, list, .. } => {
+            collect_callback_var_names(callback, out);
+            collect_var_names(list, out);
+        }
+        HostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ..
+        }
+        | HostExprKind::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => {
+            collect_callback_var_names(callback, out);
+            collect_var_names(init, out);
+            collect_var_names(list, out);
+        }
+        HostExprKind::WithSeed { seed, body, .. } => {
+            collect_var_names(seed, out);
+            collect_var_names(body, out);
+        }
+    }
+}
+
+fn collect_callback_var_names(callback: &HostCallback, out: &mut HashSet<String>) {
+    match &callback.kind {
+        HostCallbackKind::Named { .. } => {}
+        HostCallbackKind::Inline { body, .. } => collect_var_names(body, out),
+    }
 }
 
 struct HostEmitter<'a> {
@@ -1569,9 +1737,25 @@ impl<'a> HostEmitter<'a> {
                 arg_vars[0].0.clone()
             }
             "tensor_to_scalar" => format!("chelis_tensor_to_f64({})", arg_vars[0].0),
-            "scalar_to_tensor" => match arg_vars[0].1 {
-                HostType::Int64 => format!("chelis_scalar_tensor_from_i64({})", arg_vars[0].0),
-                _ => format!("chelis_scalar_tensor_from_f64({})", arg_vars[0].0),
+            // Issue #300: dispatch on the *result* tensor precision, not just
+            // the (coarse) argument host type. `scalar_to_tensor(cast(c,
+            // f32))` must materialize an f32-backed rank-0 tensor: the f64
+            // constructor stores 8 bytes, and an f32 consumer (e.g. a DAG
+            // `expand` helper lowered at the operand's f32 precision) then
+            // decodes the low 4 bytes -- 0.0 for an exactly-representable
+            // value like 2.5. `Float64` host-classifies both f32 and f64, so
+            // the argument type alone cannot distinguish them; the result
+            // `ty` carries the real precision.
+            "scalar_to_tensor" => match (&arg_vars[0].1, ty) {
+                (HostType::Int64, _) => {
+                    format!("chelis_scalar_tensor_from_i64({})", arg_vars[0].0)
+                }
+                (_, HostType::Tensor(tensor_ty)) if matches!(tensor_ty.precision, Prim::F64) => {
+                    format!("chelis_scalar_tensor_from_f64({})", arg_vars[0].0)
+                }
+                // Default float storage is f32 (matches the IR's `Const`
+                // f32 default and the DAG-helper operand precision).
+                _ => format!("chelis_scalar_tensor_from_f32({})", arg_vars[0].0),
             },
             "len" => match arg_vars[0].1 {
                 HostType::Dict(_, _) => format!("chelis_dict_len({})", arg_vars[0].0),
@@ -2012,34 +2196,95 @@ impl<'a> HostEmitter<'a> {
                 }
             })
             .collect::<Vec<_>>();
-        let inputs_name = self.next_temp("inputs");
         let outputs_name = self.next_temp("outputs");
-        self.lines.push(format!(
-            "{}chelis_tensor *{}[{}];",
-            self.indent,
-            inputs_name,
-            tensor_args.len()
-        ));
-        for (index, (arg, _)) in tensor_args.iter().enumerate() {
+        // A constant-only tensor helper (e.g. `expand(scalar_to_tensor(c),
+        // 0, n)`) has zero inputs. ISO C forbids a zero-length array
+        // (`chelis_tensor *inputs[0];`), so pass a NULL inputs pointer with
+        // count 0 instead; the helper's `n_in == 0` guard never dereferences
+        // it (issue #300).
+        let inputs_arg = if tensor_args.is_empty() {
+            "NULL".to_string()
+        } else {
+            let inputs_name = self.next_temp("inputs");
             self.lines.push(format!(
-                "{}{}[{index}] = {};",
-                self.indent, inputs_name, arg
+                "{}chelis_tensor *{}[{}];",
+                self.indent,
+                inputs_name,
+                tensor_args.len()
             ));
-        }
+            for (index, (arg, _)) in tensor_args.iter().enumerate() {
+                self.lines.push(format!(
+                    "{}{}[{index}] = {};",
+                    self.indent, inputs_name, arg
+                ));
+            }
+            inputs_name
+        };
+        // Issue #309: a helper whose body has more than one DAG root
+        // (the canonical case is a multi-`wrt` `grad`) writes one
+        // tensor per root into `outputs[0..n_out]` and its emitted
+        // wrapper asserts `n_out == roots().len()`. Size the output
+        // array and the `n_out` argument from the helper's actual root
+        // count; the prior hard-coded `[1]` / `n_out = 1` both crashed
+        // the helper's arity guard for a multi-output grad and left the
+        // downstream `.N` projection reading a single tensor as if it
+        // were a tuple. When the call is tuple-typed, box each output
+        // tensor and assemble a real `chelis_tuple` so the subsequent
+        // `chelis_tuple_get` projection has a correctly-typed receiver.
+        let root_count = self
+            .tensor_helpers
+            .get(helper)
+            .map(|host_helper| host_helper.dag.roots().len().max(1))
+            .unwrap_or(1);
         self.lines.push(format!(
-            "{}chelis_tensor *{}[1] = {{ NULL }};",
-            self.indent, outputs_name
+            "{}chelis_tensor *{}[{}] = {{ NULL }};",
+            self.indent, outputs_name, root_count
         ));
         self.lines.push(format!(
-            "{}{}({}, {}, {}, 1);",
+            "{}{}({}, {}, {}, {});",
             self.indent,
             helper_name,
-            inputs_name,
+            inputs_arg,
             tensor_args.len(),
-            outputs_name
+            outputs_name,
+            root_count
         ));
-        self.lines
-            .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
+        if let HostType::Tuple(parts) = ty
+            && root_count > 1
+        {
+            let values_name = self.next_temp("tuple_values");
+            self.lines.push(format!(
+                "{}chelis_value {}[{}];",
+                self.indent, values_name, root_count
+            ));
+            for index in 0..root_count {
+                // Each helper output slot is a `chelis_tensor*`; box it as
+                // a tensor value regardless of the tuple part annotation
+                // (a multi-root tensor helper only ever produces tensors).
+                let elem_ty = parts
+                    .get(index)
+                    .filter(|part| matches!(part, HostType::Tensor(_)))
+                    .cloned()
+                    .unwrap_or(HostType::Tensor(TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::F32,
+                    }));
+                let slot_expr = format!("{outputs_name}[{index}]");
+                self.lines.push(format!(
+                    "{}{}[{index}] = {};",
+                    self.indent,
+                    values_name,
+                    self.box_value_expr(&slot_expr, &elem_ty)
+                ));
+            }
+            self.lines.push(format!(
+                "{}{target} = chelis_tuple_from_values({}, {});",
+                self.indent, values_name, root_count
+            ));
+        } else {
+            self.lines
+                .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
+        }
         for (_, boxed) in tensor_args {
             if let Some(boxed) = boxed {
                 self.lines
@@ -2796,29 +3041,38 @@ impl<'a> HostEmitter<'a> {
         fields: &[HostExpr],
         _ty: &HostType,
     ) {
-        let values_name = self.next_temp("adt_fields");
-        self.lines.push(format!(
-            "{}chelis_value {}[{}];",
-            self.indent,
-            values_name,
-            fields.len()
-        ));
-        for (index, field) in fields.iter().enumerate() {
-            let field_var = self.next_temp(&format!("adt_field{index}"));
-            let field_ty = host_type(field);
-            self.emit_expr_to_var(field, &field_var, &field_ty);
+        // A nullary variant (e.g. `Nothing`, `True`) has no payload fields.
+        // ISO C forbids a zero-length array (`chelis_value adt_fields[0];`),
+        // so pass a NULL fields pointer with count 0 instead; the runtime
+        // helper's `len <= 0` guard never dereferences it (issue #310).
+        let fields_arg = if fields.is_empty() {
+            "NULL".to_string()
+        } else {
+            let values_name = self.next_temp("adt_fields");
             self.lines.push(format!(
-                "{}{}[{index}] = {};",
+                "{}chelis_value {}[{}];",
                 self.indent,
                 values_name,
-                self.box_value_expr(&field_var, &field_ty)
+                fields.len()
             ));
-        }
+            for (index, field) in fields.iter().enumerate() {
+                let field_var = self.next_temp(&format!("adt_field{index}"));
+                let field_ty = host_type(field);
+                self.emit_expr_to_var(field, &field_var, &field_ty);
+                self.lines.push(format!(
+                    "{}{}[{index}] = {};",
+                    self.indent,
+                    values_name,
+                    self.box_value_expr(&field_var, &field_ty)
+                ));
+            }
+            values_name
+        };
         self.lines.push(format!(
             "{}{target} = chelis_adt_construct(chelis_string_from_cstr({:?}), {}, {});",
             self.indent,
             ctor,
-            values_name,
+            fields_arg,
             fields.len()
         ));
     }
@@ -2938,38 +3192,47 @@ impl<'a> HostEmitter<'a> {
     }
 
     fn assign_tuple_literal(&mut self, target: &str, items: &[HostExpr], ty: &HostType) {
-        let values_name = self.next_temp("tuple_values");
-        self.lines.push(format!(
-            "{}chelis_value {}[{}];",
-            self.indent,
-            values_name,
-            items.len()
-        ));
-        for (index, item) in items.iter().enumerate() {
-            let item_var = self.next_temp(&format!("tuple_item{index}"));
-            let inferred_ty = host_type(item);
-            let item_ty = if has_unknown(&inferred_ty) {
-                match ty {
-                    HostType::Tuple(item_tys) => {
-                        item_tys.get(index).cloned().unwrap_or(inferred_ty)
-                    }
-                    _ => inferred_ty,
-                }
-            } else {
-                inferred_ty
-            };
-            self.emit_expr_to_var(item, &item_var, &item_ty);
+        // An empty tuple has no elements. ISO C forbids a zero-length array
+        // (`chelis_value tuple_values[0];`), so pass a NULL items pointer with
+        // count 0 instead; the runtime helper's `len <= 0` guard never
+        // dereferences it (issue #310).
+        let items_arg = if items.is_empty() {
+            "NULL".to_string()
+        } else {
+            let values_name = self.next_temp("tuple_values");
             self.lines.push(format!(
-                "{}{}[{index}] = {};",
+                "{}chelis_value {}[{}];",
                 self.indent,
                 values_name,
-                self.box_value_expr(&item_var, &item_ty)
+                items.len()
             ));
-        }
+            for (index, item) in items.iter().enumerate() {
+                let item_var = self.next_temp(&format!("tuple_item{index}"));
+                let inferred_ty = host_type(item);
+                let item_ty = if has_unknown(&inferred_ty) {
+                    match ty {
+                        HostType::Tuple(item_tys) => {
+                            item_tys.get(index).cloned().unwrap_or(inferred_ty)
+                        }
+                        _ => inferred_ty,
+                    }
+                } else {
+                    inferred_ty
+                };
+                self.emit_expr_to_var(item, &item_var, &item_ty);
+                self.lines.push(format!(
+                    "{}{}[{index}] = {};",
+                    self.indent,
+                    values_name,
+                    self.box_value_expr(&item_var, &item_ty)
+                ));
+            }
+            values_name
+        };
         self.lines.push(format!(
             "{}{target} = chelis_tuple_from_values({}, {});",
             self.indent,
-            values_name,
+            items_arg,
             items.len()
         ));
     }

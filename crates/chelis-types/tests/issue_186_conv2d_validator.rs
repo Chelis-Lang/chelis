@@ -18,7 +18,7 @@
 //!   - The `expr_tensor_type_is_concrete` helper resolves args via
 //!     `expr_type_expr`, which does not peek through `(borrow {} ...)`.
 //!     Surf programs that use `&x` / `&k` (the idiomatic read-only form,
-//!     and what the `Std.Nn.Conv.conv2d_small` sig requires) therefore also
+//!     and what the `School.Nn.Conv.conv2d_small` sig requires) therefore also
 //!     fail the tensor-metadata check.
 //!   - The original issue's claim that `.skip(3).take(2)` lands on the
 //!     scalar `stride`/`padding` was wrong: for a 4-arg call
@@ -69,7 +69,7 @@ def call_conv(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[
 
 /// EXPECT: A Surf-source conv2d call with borrowed args (`&x`, `&k`) and
 /// fully-concrete shapes type-checks cleanly. This is the pattern the
-/// `Std.Nn.Conv.conv2d_small` signature requires: the `sig` declares
+/// `School.Nn.Conv.conv2d_small` signature requires: the `sig` declares
 /// `&tensor[...] -> &tensor[...] -> tensor[...]`, so any Surf consumer
 /// must pass borrowed args.
 ///
@@ -494,8 +494,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 10
     assert!(
         rep.errors
             .iter()
-            .any(|e| e.message.contains("Lit(6), Lit(6)")
-                && e.message.contains("Lit(100), Lit(100)")),
+            .any(|e| e.message.contains("6, 6") && e.message.contains("100, 100")),
         "expected message naming inferred [..6, 6..] vs declared [..100, 100..], got {:?}",
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
@@ -541,7 +540,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 4,
     assert!(
         rep.errors
             .iter()
-            .any(|e| e.message.contains("Lit(3), Lit(3)") && e.message.contains("Lit(4), Lit(4)")),
+            .any(|e| e.message.contains("3, 3") && e.message.contains("4, 4")),
         "expected message naming inferred 3x3 vs declared 4x4, got {:?}",
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );

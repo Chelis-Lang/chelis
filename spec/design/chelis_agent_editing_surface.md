@@ -32,7 +32,7 @@ structural editing primitives could be more reliable than text-based editing.
 This direction explores whether that hypothesis holds empirically with one
 bounded proof-of-concept tool.
 
-The architectural foundation is real: Deep is a 61-tag closed vocabulary
+The architectural foundation is real: Deep is a 62-tag closed vocabulary
 with 3-tuple uniformity and a metadata slot for provenance. Structural
 operations on that substrate (replace a function body, rename a symbol,
 change a signature) are well-defined in a way they are not on plain text.

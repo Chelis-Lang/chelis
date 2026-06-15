@@ -235,6 +235,7 @@ impl AdtRegistry {
                 let scheme = Scheme {
                     tvars: all_tvars,
                     dvars: vec![],
+                    rvars: vec![],
                     body: ctor_type,
                 };
 

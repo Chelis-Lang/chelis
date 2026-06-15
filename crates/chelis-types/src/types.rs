@@ -16,6 +16,11 @@ pub struct TypeVar(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DimVar(pub u32);
 
+/// A unique identifier for a *rank* variable — a `Dim::Rank` stands for an
+/// entire shape vector (Tier-2 rank polymorphism, `spec/design/rank_polymorphism.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RankVar(pub u32);
+
 /// Numeric precision types.
 ///
 /// The active numeric primitive set is pinned by `spec/04-type-system.md` §1.1:
@@ -249,6 +254,16 @@ pub enum Dim {
     Lit(i64),
     /// Wildcard — unknown/dynamic dimension.
     Wildcard,
+    /// Rank variable — a *name-preserving spread* standing for a run of dims
+    /// (rank polymorphism). Tier-2 used it only as the sole element of a shape
+    /// (`tensor[..r, p]`); Tier-3 allows it interleaved with concrete anchors
+    /// (`tensor[..pre, seq, ..post, p]`). Structural invariant: a given
+    /// `RankVar` appears at most once per tensor dim list, and two spreads are
+    /// never *split* against a ground while both unbound (an undetermined
+    /// boundary — rejected at unification). A spread binds to the actual named
+    /// dims it covers, so names are preserved, not erased. Eliminated by
+    /// monomorphization; no `Dim::Rank` reaches a backend.
+    Rank(RankVar),
 }
 
 /// Tensor element precision slot.
@@ -452,6 +467,9 @@ impl fmt::Display for EffectSet {
 pub struct Scheme {
     pub tvars: Vec<TypeVar>,
     pub dvars: Vec<DimVar>,
+    /// Quantified rank variables (Tier-2 rank polymorphism). Usually empty.
+    #[serde(default)]
+    pub rvars: Vec<RankVar>,
     pub body: Type,
 }
 
@@ -461,6 +479,7 @@ impl Scheme {
         Scheme {
             tvars: vec![],
             dvars: vec![],
+            rvars: vec![],
             body: ty,
         }
     }
@@ -476,7 +495,7 @@ impl fmt::Display for Type {
             }
             Type::Ref(inner) => write!(f, "&{inner}"),
             Type::Tensor(dims, prec) => {
-                let dim_strs: Vec<String> = dims.iter().map(|d| format!("{d:?}")).collect();
+                let dim_strs: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
                 write!(f, "tensor[{}, {}]", dim_strs.join(", "), prec.render())
             }
             Type::Adt(name, args) if args.is_empty() => write!(f, "{name}"),
@@ -491,6 +510,23 @@ impl fmt::Display for Type {
             }
             Type::Unit => write!(f, "unit"),
             Type::Error => write!(f, "<error>"),
+        }
+    }
+}
+
+impl fmt::Display for Dim {
+    /// User-facing rendering of a tensor dimension, matching the CLI surface
+    /// (`format_cli_dim`): a named dim by its name, a dim variable as `d<id>`, a
+    /// literal by its value, the wildcard as `*`, and a rank spread as `..r<id>`.
+    /// Used by `Type`'s `Display` so diagnostics read `tensor[..r0, seq, ..r1, f32]`
+    /// instead of the internal `Debug` form `Rank(RankVar(0)), Name("seq")`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Dim::Name(name) => write!(f, "{name}"),
+            Dim::Var(v) => write!(f, "d{}", v.0),
+            Dim::Lit(value) => write!(f, "{value}"),
+            Dim::Wildcard => write!(f, "*"),
+            Dim::Rank(r) => write!(f, "..r{}", r.0),
         }
     }
 }
@@ -668,6 +704,8 @@ mod prim_classification_tests {
 pub struct VarGen {
     next_tvar: u32,
     next_dvar: u32,
+    #[serde(default)]
+    next_rvar: u32,
 }
 
 impl VarGen {
@@ -680,6 +718,13 @@ impl VarGen {
     pub fn fresh_dvar(&mut self) -> DimVar {
         let v = DimVar(self.next_dvar);
         self.next_dvar += 1;
+        v
+    }
+
+    /// Fresh rank variable (Tier-2 rank polymorphism).
+    pub fn fresh_rvar(&mut self) -> RankVar {
+        let v = RankVar(self.next_rvar);
+        self.next_rvar += 1;
         v
     }
 

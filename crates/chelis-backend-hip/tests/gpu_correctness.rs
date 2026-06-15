@@ -330,9 +330,12 @@ fn append_case_lines(
             ));
             for (idx, value) in input.data.iter().enumerate() {
                 match input.dtype {
+                    // Sibling of #250/#251/#252: exact f32 bit pattern via
+                    // `chelis_f32_from_bits` (from the included
+                    // `chelis_runtime.h`), not a lossy `{:.8}f` decimal.
                     Prim::F32 => lines.push(format!(
-                        "    {prefix}_input_storage[{slot}]->data[{idx}] = {:.8}f;",
-                        value
+                        "    {prefix}_input_storage[{slot}]->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
+                        bits = value.to_bits()
                     )),
                     // WS-A4: i8/i16 inputs are written via reinterpret cast on
                     // `t->data` so the harness exercises the same memory layout
@@ -1858,10 +1861,12 @@ fn append_case_lines_f64(
             for (idx, value) in input.data.iter().enumerate() {
                 // Cast through `double *` because chelis_tensor.data is
                 // typed `float *` historically; the wheel runtime stores
-                // f64 in 8-byte slots (`chelis_dtype_size`).
+                // f64 in 8-byte slots (`chelis_dtype_size`). Sibling of
+                // #250/#251/#252: exact f64 bit pattern via
+                // `chelis_f64_from_bits`, not a lossy `{:.17e}` decimal.
                 lines.push(format!(
-                    "    ((double*){prefix}_input_storage[{slot}]->data)[{idx}] = {:.17e};",
-                    value
+                    "    ((double*){prefix}_input_storage[{slot}]->data)[{idx}] = chelis_f64_from_bits(0x{bits:016x}uLL);",
+                    bits = value.to_bits()
                 ));
             }
         }

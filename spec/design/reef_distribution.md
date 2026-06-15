@@ -138,14 +138,19 @@ Multiple `--from-github` flags are independent installs.
   subsequent fetches verify against the pinned hashes from the lockfile
   (same semantics as `--from-monorepo`).
 - Clear error categories: auth failure (`AuthMissing` for no token,
-  `AuthRejected` for 401/403 on either API endpoint), asset 404
-  (`ReleaseAssetNotFound` — split into "metadata 404" naming the tag
-  URL and "asset-list mismatch" naming the expected asset name plus
-  the assets actually present on the release), rate-limit
-  (`RateLimited` carrying `Retry-After`), 5xx (`ServerError`),
-  network/DNS (`Network`), hash mismatch on subsequent fetch
-  (`Validation` from the shared helper; do not auto-overwrite), I/O
-  error (`Io`).
+  `AuthRejected` for 401/403 on either API endpoint), metadata-step 404
+  (`ReleaseTagNotFoundOrUnauthorized` naming the tag URL; this 404 is
+  ambiguous because GitHub returns 404 both for a missing tag and for a
+  private repo the token cannot read, so the message names both
+  possibilities and points at `gh release view <tag> --repo
+  <org>/<repo>` for verification, per issue #147), asset-step 404
+  (`ReleaseAssetNotFound`, which fires only after metadata fetch
+  succeeded, so the repo is reachable and the tag exists; it names the
+  expected asset name plus the assets actually present on the release),
+  rate-limit (`RateLimited` carrying `Retry-After`), 5xx
+  (`ServerError`), network/DNS (`Network`), hash mismatch on subsequent
+  fetch (`Validation` from the shared helper; do not auto-overwrite),
+  I/O error (`Io`).
 
 **Acceptance oracle.**
 

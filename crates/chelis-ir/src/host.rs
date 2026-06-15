@@ -1138,6 +1138,21 @@ fn lower_host_program(
         if ty_expr.is_some_and(crate::lower::type_expr_has_precision_var) {
             continue;
         }
+        // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): skip
+        // rank-polymorphic sigs at host emission time, the exact analogue of
+        // the precision-var skip above. A `t-fn` whose tensor types carry a
+        // sole `(d-rank {} r)` rank slot has no standalone monomorphization;
+        // reaching `parse_host_type` for its parameters would trip the
+        // rank-poly lowering tripwire (a surviving `Dim::Rank` is a
+        // monomorphization bug, not a backend input). Such a def is reachable
+        // from concrete client code via call-site inlining (the inliner
+        // threads the call site's concrete shape into the body — see
+        // `tensor_rank_substitutions` in `lower.rs`); the standalone host
+        // symbol is intentionally omitted because no caller can use it
+        // without supplying the monomorphization binding the inliner provides.
+        if ty_expr.is_some_and(crate::lower::type_expr_has_rank_var) {
+            continue;
+        }
         // Pure-tensor top-level function defs are normally lowered to the
         // DAG. But when the program also has host-lane bindings (i.e. some
         // def is NOT DAG-lowerable), downstream host-lane callers still
@@ -2310,6 +2325,32 @@ fn finish_tensor_helper_call(
         .and_then(|id| dag.get(*id))
         .map(|node| node.output_type.clone())
         .unwrap_or_else(|| expected.clone());
+    // Issue #309: a helper whose body has more than one DAG root (the
+    // canonical case is a multi-`wrt` `grad`, which differentiates a
+    // scalar w.r.t. several tensor params and so produces one gradient
+    // tensor per param) returns a TUPLE of tensors, not a single
+    // tensor. The DAG emit wires `roots[i]` to `outputs[i]` with
+    // `n_out = roots().len()`, and a downstream `.N` projection reads
+    // root `N`. Typing the call as a single `Tensor` here made the
+    // projection emit `chelis_tuple_get` over a `chelis_tensor*`
+    // receiver (a mistyped crash) and sized the helper output array to
+    // one slot for a two-output helper. Mirror the IR/eval-lane
+    // `LoweredValue::Tuple` semantics by typing the multi-root call as
+    // a `Tuple` of the per-root tensor types, in root order.
+    let root_tys: Vec<HostType> = dag
+        .roots()
+        .iter()
+        .map(|id| {
+            dag.get(*id)
+                .map(|node| HostType::Tensor(node.output_type.clone()))
+                .unwrap_or_else(|| HostType::Tensor(expected.clone()))
+        })
+        .collect();
+    let call_ty = if root_tys.len() > 1 {
+        HostType::Tuple(root_tys)
+    } else {
+        HostType::Tensor(expected.clone())
+    };
     let args = tensor_helper_args(&inputs, scope);
     let (sparse_specialization, sparse_rejection) =
         match try_summarize_sparse_helper(&dag, &inputs, &output) {
@@ -2356,7 +2397,7 @@ fn finish_tensor_helper_call(
     HostExpr::new(HostExprKind::TensorCall {
         helper: helper_index,
         args,
-        ty: HostType::Tensor(expected),
+        ty: call_ty,
     })
 }
 
@@ -5178,7 +5219,16 @@ fn lower_app_host_expr(
     // concrete arg types. Force inlining for this case.
     let callee_is_polymorphic_precision = lookup_declared_type_expr(program, &name)
         .is_some_and(crate::lower::type_expr_has_precision_var);
-    if callee_is_polymorphic_precision
+    // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): the exact
+    // analogue of the precision case above. The host emitter elided the
+    // rank-poly callee's standalone definition (per the `type_expr_has_rank_var`
+    // skip in `lower_host_program`); calling such a name in C is an
+    // undefined-symbol link error. The only legal lowering is to inline the
+    // body at the call site so the rank var is monomorphized from the call's
+    // concrete arg shapes (via the DAG `tensor_rank_substitutions` path).
+    let callee_is_polymorphic_rank =
+        lookup_declared_type_expr(program, &name).is_some_and(crate::lower::type_expr_has_rank_var);
+    if (callee_is_polymorphic_precision || callee_is_polymorphic_rank)
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
     {
         let pushed = push_inlining(&name);
@@ -6102,6 +6152,7 @@ fn actualize_tensor_helper_types(
         .iter()
         .map(|node| node.id)
         .collect::<Vec<_>>();
+    let mut synthetic_renames = HashMap::<String, crate::dag::DimInfo>::new();
     for id in node_ids {
         let Some(node) = actualized.get(id).cloned() else {
             continue;
@@ -6112,12 +6163,51 @@ fn actualize_tensor_helper_types(
         if !synthetic_dims(&node.output_type) || node.output_type.dims.len() != actual.dims.len() {
             continue;
         }
+        // Record which minted `dN` alias each output axis resolved to,
+        // so op-internal references to the same alias can be renamed in
+        // lockstep below.
+        for (old_dim, new_dim) in node.output_type.dims.iter().zip(actual.dims.iter()) {
+            if let crate::dag::DimInfo::Named(name, None) = old_dim
+                && synthetic_dim(old_dim)
+                && old_dim != new_dim
+            {
+                match synthetic_renames.entry(name.clone()) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(new_dim.clone());
+                    }
+                    std::collections::hash_map::Entry::Occupied(existing) => {
+                        // A single checker dim-var has a single extent in
+                        // a well-typed program; a conflicting re-bind
+                        // means the helper DAG was already inconsistent.
+                        // Fail loudly in debug rather than renaming op
+                        // fields with the wrong extent (review #363 N1).
+                        debug_assert_eq!(
+                            existing.get(),
+                            new_dim,
+                            "synthetic dim `{name}` resolved to conflicting actuals"
+                        );
+                    }
+                }
+            }
+        }
         actualized.replace_node(id, node.op, node.inputs, actual.clone());
         if let Some(reusable_input) = node.reusable_input {
             actualized.set_reusable_input(id, reusable_input);
         }
     }
-    actualized
+    if synthetic_renames.is_empty() {
+        return actualized;
+    }
+    // chelis#345 (op-internal half): `replace_node` above rewrites
+    // OUTPUT types only, leaving op-internal fields (`Expand::size`,
+    // `Reshape::new_shape`, `BlasMatmul` dims) holding the stale minted
+    // names — the mixed state (`type: [Named("n")]` next to
+    // `size: Sym("d47")`) that `dag::symbolic_occurrences`' Bucket 4d
+    // sweep rejects because no Load declares the alias. Apply the
+    // collected renames to every dim reference so the helper DAG stays
+    // internally consistent. Non-synthetic (user-facing) names are
+    // never in the map and pass through untouched.
+    crate::lower::apply_dim_substitutions(&actualized, &synthetic_renames)
 }
 
 fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
@@ -6303,11 +6393,77 @@ fn infer_app_expr_host_type(
             }));
         }
     }
+    // Issue #308: `scalar_to_tensor` result precision must follow the
+    // operand's *float* precision. The coarse host lane collapses f32
+    // and f64 scalars into a single `HostType::Float64`, so the
+    // arg-ty-based fallback below cannot distinguish them and defaults
+    // to f32 — mis-typing an f64 const-broadcast
+    // (`scalar_to_tensor(cast(c, f64))`) as `Tensor(F32)`, which makes
+    // the C emitter select `chelis_scalar_tensor_from_f32` (4-byte
+    // storage) for an f64 value. Recover the precision from the Deep
+    // operand itself (checker annotation or explicit cast target)
+    // while it is still visible.
+    if name == "scalar_to_tensor"
+        && let Some(arg) = kids.get(1)
+        && let Some(precision) = expr_scalar_float_precision(arg)
+    {
+        return Some(HostType::Tensor(TensorType {
+            dims: vec![],
+            precision,
+        }));
+    }
     let arg_tys = kids[1..]
         .iter()
         .map(|arg| expr_host_type(arg, program, scope))
         .collect::<Vec<_>>();
     infer_builtin_host_type_from_arg_tys(name, &arg_tys)
+}
+
+/// Issue #308: recover the float precision of a scalar Deep expression
+/// for `scalar_to_tensor` result typing. Reads, in order:
+///
+///   1. the checker's `type` meta when it is a float `(t-prim {} p)`;
+///   2. an explicit `(cast {} _ (t-prim {} p))` target when `p` is a
+///      float precision.
+///
+/// Returns `None` for integer/bool operands (the coarse
+/// `infer_builtin_host_type_from_arg_tys` arms already type those
+/// correctly) and when the precision is not recoverable — in that case
+/// the caller falls back to the coarse f32 default, which the C emit
+/// dispatch and the consuming tensor-helper Load both share, so the
+/// write and read sides stay consistent even in the fallback.
+fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim> {
+    if let Expr::MetaExpr(meta, _) = expr {
+        return expr_scalar_float_precision(&meta.expr);
+    }
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    let prim_of_t_prim = |type_expr: &Expr| -> Option<chelis_types::types::Prim> {
+        let Expr::List(inner, _) = type_expr else {
+            return None;
+        };
+        if tag(inner) != Some("t-prim") {
+            return None;
+        }
+        children(inner)
+            .first()
+            .and_then(symbol_name)
+            .and_then(chelis_types::types::Prim::parse_name)
+    };
+    if let Some(Expr::Map(meta, _)) = list.elements.get(1)
+        && let Some((_, type_expr)) = meta.entries.iter().find(|(key, _)| key == "type")
+        && let Some(prim) = prim_of_t_prim(type_expr)
+    {
+        return prim.is_float().then_some(prim);
+    }
+    if tag(list) == Some("cast")
+        && let Some(target) = children(list).get(1)
+        && let Some(prim) = prim_of_t_prim(target)
+    {
+        return prim.is_float().then_some(prim);
+    }
+    None
 }
 
 fn should_prefer_inferred_app_type(explicit: &HostType, inferred: &HostType) -> bool {
@@ -6320,6 +6476,11 @@ fn should_prefer_inferred_app_type(explicit: &HostType, inferred: &HostType) -> 
 }
 
 fn host_type_has_synthetic_tensor_dims(ty: &HostType) -> bool {
+    // Known exposure (review #363 N5, pre-existing): a USER dim literally
+    // named `d2` matches this minted-name heuristic and would be treated
+    // as synthetic. The checker's dim-var minting owns the `d<digits>`
+    // namespace today; if user-facing single-letter+digit dims ever
+    // matter, the minting needs a reserved prefix instead.
     fn synthetic_dim_name(name: &str) -> bool {
         let mut chars = name.chars();
         matches!(chars.next(), Some('d')) && chars.all(|ch| ch.is_ascii_digit())
@@ -6375,6 +6536,18 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
         Expr::MetaExpr(meta, _) => expr_int_literal(&meta.expr),
         Expr::List(list, _) if tag(list) == Some("lit") => {
+            children(list).first().and_then(expr_int_literal)
+        }
+        // Movement-op axis/size args are routinely written as
+        // `cast(0, int32)` / `cast(2, int32)` (the canonical integer-
+        // literal form, since bare int literals default to int32 and the
+        // axis/size parameters are int32). A `cast` whose operand is an
+        // integer literal carries the same compile-time value, so see
+        // through it: otherwise `infer_app_expr_host_type`'s `expand`
+        // shape handler bails and the result type degrades to a
+        // dims-less placeholder, splitting a constant-broadcast `let`
+        // binding into an unsupported host-lane builtin (issue #300).
+        Expr::List(list, _) if tag(list) == Some("cast") => {
             children(list).first().and_then(expr_int_literal)
         }
         _ => None,
@@ -6549,7 +6722,18 @@ fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) ->
             // sig-parse path (e.g. `lookup_declared_fn_type` reached
             // from a call-site lookup of a polymorphic callee's
             // signature).
-            if crate::lower::type_expr_has_precision_var(expr) {
+            // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
+            // a `t-tensor` whose shape is a sole `(d-rank {} r)` rank slot is
+            // rank-polymorphic and has no concrete `HostType::Tensor`
+            // representation by itself — its rank is supplied by call-site
+            // inlining (which carries the caller's concrete shape). Surface it
+            // as `HostType::Unknown`, the exact analogue of the precision-var
+            // guard, so any secondary sig-parse path (e.g. a call-site lookup
+            // of a rank-poly callee's signature) never trips the rank-poly
+            // lowering tripwire.
+            if crate::lower::type_expr_has_precision_var(expr)
+                || crate::lower::type_expr_has_rank_var(expr)
+            {
                 HostType::Unknown
             } else {
                 HostType::Tensor(crate::lower::tensor_type_from_deep(expr))
@@ -6815,7 +6999,19 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             })),
             _ => Some(HostType::Bool),
         },
-        "reshape" => match arg_tys.first() {
+        // Movement ops preserve the element precision and stay tensors.
+        // The concrete output shape (e.g. `expand`'s broadcast axis) is
+        // recomputed inside the tensor-helper DAG; the host `HostType`
+        // is coarse (precision + a dims placeholder used only for the
+        // typed-runtime dispatch), so propagating the *input* tensor
+        // type here is sufficient to keep the result classified as a
+        // tensor. Without these arms `expand`/`pad`/`shrink`/`stride`/
+        // `permute` fell through to `None`, so a host-lane `let k =
+        // expand(scalar_to_tensor(c), 0, n)` binding lost its tensor
+        // type and was emitted as `void* k = /* unsupported builtin
+        // expand */ 0`, then mistyped as a scalar at the consuming
+        // tensor-helper callsite (`(float)(void* k)`, issue #300).
+        "reshape" | "expand" | "pad" | "shrink" | "stride" | "permute" => match arg_tys.first() {
             Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(tensor_ty.clone())),
             _ => Some(HostType::Unknown),
         },
@@ -7012,6 +7208,17 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             }),
             _ => Some(HostType::Float64),
         },
+        // Issue #308: `HostType::Float64` classifies BOTH f32 and f64
+        // host scalars, so this coarse arm cannot recover the true
+        // operand precision and defaults the float case to f32 (the
+        // IR `Const` default for unsuffixed float literals). The
+        // Deep-level `infer_app_expr_host_type` `scalar_to_tensor` arm
+        // overrides this with the real precision (checker annotation
+        // or explicit `cast(_, p)` target) whenever the Deep operand
+        // is still visible; this fallback only decides when nothing
+        // upstream knew better, and then both the C emit dispatch and
+        // the consuming tensor-helper Load share the same f32 answer,
+        // so storage width stays consistent.
         "scalar_to_tensor" => match arg_tys.first() {
             Some(HostType::Int64) => Some(HostType::Tensor(TensorType {
                 dims: vec![],
@@ -7410,6 +7617,111 @@ mod tests {
         );
     }
 
+    // ── Issue #308: scalar_to_tensor operand-precision plumbing ──
+    //
+    // `HostType::Float64` collapses f32 and f64, so the Deep-level
+    // `infer_app_expr_host_type` must recover the operand precision
+    // before the coarse arg-ty fallback erases it to f32.
+
+    fn parse_deep_app(src: &str) -> Expr {
+        chelis_deep::parser::parse_str(src)
+            .expect("parse failed")
+            .into_iter()
+            .next()
+            .expect("one expr")
+    }
+
+    fn infer_scalar_to_tensor_host_type(arg_src: &str) -> Option<HostType> {
+        let app = parse_deep_app(&format!("(app {{}} (var {{}} scalar_to_tensor) {arg_src})"));
+        let Expr::List(list, _) = &app else {
+            panic!("app expr must be a list");
+        };
+        // Empty checked program: the arm under test must not depend on
+        // program-level lookups for the precision recovery.
+        let program = surf_check("unrelated = 1\n");
+        infer_app_expr_host_type(list, &program, &HashMap::new())
+    }
+
+    #[test]
+    fn scalar_to_tensor_infers_f64_from_cast_target() {
+        // The #308 reproducer shape: `scalar_to_tensor(cast(1.1, f64))`
+        // with NO checker annotation on the app or the cast — the cast
+        // target alone must drive the result precision.
+        let inferred = infer_scalar_to_tensor_host_type(
+            "(cast {} (lit {type: (t-prim {} f32)} 1.1) (t-prim {} f64))",
+        );
+        assert_eq!(
+            inferred,
+            Some(HostType::Tensor(TensorType {
+                dims: vec![],
+                precision: Prim::F64,
+            })),
+            "scalar_to_tensor(cast(_, f64)) must infer a rank-0 f64 tensor",
+        );
+    }
+
+    #[test]
+    fn scalar_to_tensor_infers_f64_from_checker_annotation() {
+        let inferred = infer_scalar_to_tensor_host_type("(var {type: (t-prim {} f64)} c)");
+        assert_eq!(
+            inferred,
+            Some(HostType::Tensor(TensorType {
+                dims: vec![],
+                precision: Prim::F64,
+            })),
+            "scalar_to_tensor of an f64-annotated operand must infer a rank-0 f64 tensor",
+        );
+    }
+
+    #[test]
+    fn scalar_to_tensor_keeps_f32_default_for_f32_operand() {
+        // Negative parity (pins the #300/#306 f32 path): an f32 operand
+        // — whether via cast target or bare default literal — must keep
+        // the rank-0 f32 result so `chelis_scalar_tensor_from_f32`
+        // storage and the consuming helper's f32 read stay paired.
+        for arg_src in [
+            "(cast {} (lit {type: (t-prim {} f32)} 2.5) (t-prim {} f32))",
+            "(lit {type: (t-prim {} f32)} 2.5)",
+        ] {
+            let inferred = infer_scalar_to_tensor_host_type(arg_src);
+            assert_eq!(
+                inferred,
+                Some(HostType::Tensor(TensorType {
+                    dims: vec![],
+                    precision: Prim::F32,
+                })),
+                "scalar_to_tensor({arg_src}) must keep the f32 default",
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_to_tensor_float_recovery_does_not_hijack_integer_operands() {
+        // Negative parity: the #308 float-precision recovery must not
+        // claim integer operands. At this Deep-expr layer a
+        // cast-wrapped int infers `None` (pre-#308 behavior:
+        // `expr_host_type` does not see through `cast`, so the coarse
+        // fallback gets `Unknown` and abstains); the Int64 tensor
+        // typing happens post-lowering via `host_expr_type` on the
+        // lowered operand and the `infer_builtin_host_type_from_arg_tys`
+        // Int64 arm.
+        let inferred = infer_scalar_to_tensor_host_type(
+            "(cast {} (lit {type: (t-prim {} int32)} 3) (t-prim {} int32))",
+        );
+        assert_eq!(
+            inferred, None,
+            "integer operands must fall through unchanged (no float hijack)",
+        );
+        // The coarse arm still owns the lowered-lane integer answer.
+        assert_eq!(
+            infer_builtin_host_type_from_arg_tys("scalar_to_tensor", &[HostType::Int64]),
+            Some(HostType::Tensor(TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            })),
+        );
+    }
+
     /// E2 (WS-A0 RT-1 fixup): the `to_list` host classification arm
     /// must panic on an f8e4m3-precision tensor with the §1.1.1
     /// message rather than silently classifying as Float64.
@@ -7769,5 +8081,173 @@ mod tests {
                 "node retained synthetic dims: {node:?}"
             );
         }
+    }
+
+    /// chelis#345 (op-internal half): actualization rewrote OUTPUT
+    /// types via `replace_node` but left `node.op` untouched, so an
+    /// `Expand { size: Sym("dN") }` kept the stale checker-minted name
+    /// after its output dim had been rewritten to the user-facing
+    /// symbol. The Bucket 4d sweep in `dag.rs::symbolic_occurrences`
+    /// panics on exactly that mixed state (no Load declares `dN`), and
+    /// before the fix the `grad(residual, wrt=(theta))` host-wrapper
+    /// canary in `chelis-cli/tests/cli.rs`
+    /// (`build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds`)
+    /// tripped it. Pin that op-internal fields are renamed in lockstep
+    /// with output dims — and, negative parity, that user-facing
+    /// (non-`dN`) sizes are left alone.
+    #[test]
+    fn tensor_helper_actualization_rewrites_op_internal_expand_sizes() {
+        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+
+        let n = DimInfo::Named("n".into(), None);
+        let d47 = DimInfo::Named("d47".into(), None);
+        let mut dag = Dag::new();
+        // Load typed with the minted alias; the scope knows the
+        // user-facing symbol.
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![d47.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // Scalar upstream gradient, as the Sum adjoint produces.
+        let g = dag.add_node(
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // The Sum adjoint's expand-back: size and output dim both carry
+        // the minted alias.
+        let expanded_g = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Sym("d47".into()),
+            },
+            vec![g],
+            TensorType {
+                dims: vec![d47.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let root = dag.add_node(
+            RiscOp::Mul,
+            vec![expanded_g, x],
+            TensorType {
+                dims: vec![d47],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(root);
+
+        let mut scope = HashMap::new();
+        scope.insert(
+            "x".into(),
+            HostType::Tensor(TensorType {
+                dims: vec![n.clone()],
+                precision: Prim::F32,
+            }),
+        );
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        let expand = actualized.get(expanded_g).expect("expand node");
+        assert_eq!(
+            expand.output_type.dims,
+            vec![n],
+            "expand output dim must actualize to the user-facing symbol"
+        );
+        assert_eq!(
+            expand.op,
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Sym("n".into()),
+            },
+            "op-internal Expand size must be renamed in lockstep with \
+             the output dim (chelis#345); a stale `d47` is an undeclared \
+             identifier downstream"
+        );
+        // The whole helper must satisfy the Bucket 4d guard: no
+        // symbolic reference (output OR op-internal) without a
+        // declaring Load.
+        let _ = crate::dag::symbolic_occurrences(&actualized);
+    }
+
+    /// Negative parity for the rename: user-facing (non-minted) Expand
+    /// sizes must survive actualization untouched.
+    #[test]
+    fn tensor_helper_actualization_leaves_user_facing_expand_sizes_alone() {
+        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+
+        let batch = DimInfo::Named("batch".into(), None);
+        let mut dag = Dag::new();
+        let g = dag.add_node(
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let expanded = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Sym("batch".into()),
+            },
+            vec![g],
+            TensorType {
+                dims: vec![batch.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![batch.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let root = dag.add_node(
+            RiscOp::Mul,
+            vec![expanded, x],
+            TensorType {
+                dims: vec![batch],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(root);
+
+        let mut scope = HashMap::new();
+        scope.insert(
+            "x".into(),
+            HostType::Tensor(TensorType {
+                dims: vec![DimInfo::Named("batch".into(), None)],
+                precision: Prim::F32,
+            }),
+        );
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        let expand = actualized.get(expanded).expect("expand node");
+        assert_eq!(
+            expand.op,
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Sym("batch".into()),
+            },
+            "user-facing symbolic sizes are not synthetic and must not \
+             be rewritten"
+        );
     }
 }

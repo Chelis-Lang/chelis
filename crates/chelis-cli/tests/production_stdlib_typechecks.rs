@@ -65,46 +65,6 @@ fn assert_stdlib_clean(rel: &str) {
 }
 
 #[test]
-fn production_stdlib_nn_linear_typechecks() {
-    assert_stdlib_clean("src/nn/linear.ch");
-}
-
-#[test]
-fn production_stdlib_nn_embedding_typechecks() {
-    assert_stdlib_clean("src/nn/embedding.ch");
-}
-
-#[test]
-fn production_stdlib_nn_rmsnorm_typechecks() {
-    assert_stdlib_clean("src/nn/rmsnorm.ch");
-}
-
-#[test]
-fn production_stdlib_nn_silu_typechecks() {
-    assert_stdlib_clean("src/nn/silu.ch");
-}
-
-#[test]
-fn production_stdlib_nn_gelu_typechecks() {
-    assert_stdlib_clean("src/nn/gelu.ch");
-}
-
-#[test]
-fn production_stdlib_nn_attention_typechecks() {
-    assert_stdlib_clean("src/nn/attention.ch");
-}
-
-#[test]
-fn production_stdlib_nn_generate_typechecks() {
-    assert_stdlib_clean("src/nn/generate.ch");
-}
-
-#[test]
-fn production_stdlib_nn_conv_typechecks() {
-    assert_stdlib_clean("src/nn/conv.ch");
-}
-
-#[test]
 fn production_stdlib_init_random_typechecks() {
     assert_stdlib_clean("src/init/random.ch");
 }
@@ -125,33 +85,8 @@ fn production_stdlib_init_xavierext_typechecks() {
 }
 
 #[test]
-fn production_stdlib_loss_bce_typechecks() {
-    assert_stdlib_clean("src/loss/bce.ch");
-}
-
-#[test]
-fn production_stdlib_loss_crossentropy_typechecks() {
-    assert_stdlib_clean("src/loss/crossentropy.ch");
-}
-
-#[test]
-fn production_stdlib_loss_kldiv_typechecks() {
-    assert_stdlib_clean("src/loss/kldiv.ch");
-}
-
-#[test]
-fn production_stdlib_loss_metrics_typechecks() {
-    assert_stdlib_clean("src/loss/metrics.ch");
-}
-
-#[test]
 fn production_stdlib_tensor_reduce_typechecks() {
     assert_stdlib_clean("src/tensor/reduce.ch");
-}
-
-#[test]
-fn production_stdlib_optim_typechecks() {
-    assert_stdlib_clean("src/optim.ch");
 }
 
 #[test]

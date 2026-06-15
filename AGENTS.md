@@ -156,17 +156,45 @@ canonical list:
 
 ```sh
 python3 scripts/gate.py --list
-# cargo build --workspace --all-targets
-# cargo clippy --workspace --all-targets -- -D warnings
-# cargo fmt --all -- --check
-# cargo run -p chelis-cli --bin chelis --quiet -- lint --check .
-# cargo nextest run --workspace --profile ci
+# cargo build --workspace --all-targets  # ci-owned
+# cargo clippy --workspace --all-targets -- -D warnings  # local + ci
+# cargo fmt --all -- --check  # local + ci
+# cargo run -p chelis-cli --bin chelis --quiet -- lint --check .  # local + ci
+# cargo nextest run --workspace --profile ci  # ci-owned
+# # --local also runs: cargo nextest run -p <crate> for each crate changed vs origin/main
 ```
 
 The gate runs `cargo nextest run` (CI's actual runner), not `cargo test
 --workspace`, and includes `chelis lint --check .` (the §8.6 / §12
 naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
 docs, and smt-build CI jobs are out of scope for this script by design.
+
+Local pre-push gate (chelis#360):
+
+```sh
+python3 scripts/gate.py --local
+```
+
+`--local` runs the developer pre-push subset: workspace clippy
+(`-D warnings`, compile-only), `cargo fmt --check`,
+`chelis lint --check .`, and `cargo nextest run -p <crate>` for each
+crate changed vs `origin/main` (committed diff plus uncommitted work;
+owning packages are resolved from each member's `Cargo.toml`, not the
+directory name). The derived crate list is always printed; "no crate
+changes detected" means the per-crate stage was skipped, not silently
+empty. The workspace nextest stage is CI-owned: run `--local` before
+pushing, open a draft PR early, and let CI (macOS Smoke is the
+authoritative workspace oracle) run the full suite. See
+[`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+for why the workspace suite does not belong in the local loop on
+macOS.
+
+Documentation-only changes (Markdown/prose with no code, fixture, or
+example edits) are exempt from `--local`: skip the local gate, push,
+and require green CI instead. The gate's clippy/build/test stages
+cannot be affected by prose, and CI still runs the lint stage plus the
+Docs job (mdBook build and the `skill_suite` example validator), which
+cover everything a docs-only diff can break.
 
 Default-gate discipline:
 
@@ -179,6 +207,36 @@ Default-gate discipline:
 
 Phase-specific manual gates must be called out explicitly when they are not part of the
 default workspace run.
+
+## Build Concurrency And Process Hygiene
+
+- Concurrent agents or subagents that build or test MUST use an isolated target
+  directory: set `CARGO_TARGET_DIR=target/agents/<name>`, or use a separate git
+  worktree with its own `target/`. A relative `CARGO_TARGET_DIR` resolves
+  against the invocation cwd, not the workspace root, so run cargo from the
+  repo root or use an absolute path. Never share the primary `target/` with a
+  session that may be building concurrently; cargo's target-dir lock serializes
+  the builds and feature/profile differences invalidate each other's caches.
+- Before building, list orphaned cargo/rustc/cargo-nextest/chelis processes with
+  `python3 scripts/reap_orphans.py` and reap them with
+  `python3 scripts/reap_orphans.py --kill`. Review the dry-run listing first:
+  ppid==1 cannot distinguish an abandoned build from a deliberately detached
+  one (`nohup cargo build` you are still tailing). Run it from the checkout
+  whose `target/` you are about to use; scoping is per-checkout. Orphaned runs
+  keep burning CPU and hold the cargo lock across sessions.
+- Contention diagnostic: several unrelated tests FAILing at near-identical
+  wall-clock times (for example all ~217s, nextest's slow-kill) means CPU
+  starvation, not code breakage. Measured 2026-06-10: the 25-test
+  `rank_poly_tier3` suite took 2,434s under contention vs 24s on a quiet
+  machine. Re-run on a quiet machine before treating those as real failures.
+- Recommended inner loop: `cargo nextest run -p <crate> --test <file>` compiles
+  only that test target.
+- macOS workstation only: first-exec assessment can degrade under mass
+  fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
+  Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
+  slow) before trusting the gate's workspace nextest stage locally; when
+  degraded, fall back to CI (macOS Smoke) for that stage per
+  [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
 
 ## Local HIP Environment
 
@@ -285,7 +343,7 @@ When writing or rewriting Surf in this repository:
 
 - Every Deep node is a 3-tuple: `(tag {} children...)`
 - Metadata map is always present at element 1
-- 61-tag closed vocabulary; see `spec/03-deep-syntax.md`
+- 62-tag closed vocabulary; see `spec/03-deep-syntax.md`
 - Function application is `app`, names are `var`, literals are `lit`
 - RISC primitives are built-in functions, not tags
 
@@ -325,3 +383,19 @@ Current shared skill set:
 - `backend-numerics`
 - `example-corpus`
 - `cli-surface`
+
+## Downstream Shell Contract
+
+Downstream shell repos (every repo in the canonical-reference §Shell
+Ecosystem table) inherit this `AGENTS.md` verbatim (machine-local
+environment sections excepted; see the contract §1) AND must satisfy
+[`spec/design/shell_repo_contract.md`](spec/design/shell_repo_contract.md):
+pin hygiene with a mechanical multi-location consistency guard, a
+per-shell `docs/CHELIS_SURFACE.md` capability inventory, the
+narrowing-citation rule (every workaround cites `chelis#NNN` at the site —
+file upstream, never silently work around), expected-to-fail blocker
+probes under `tests_blocked/` re-run at every pin bump, negative-test
+sidecars, vendored shared skills, and uv-managed Python. The contract
+names `Chelis-Lang/school` as its reference implementation. Changes to the
+contract land here first and propagate to every shell per its scaffolding
+drift rule.

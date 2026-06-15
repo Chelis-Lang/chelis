@@ -1935,6 +1935,7 @@ fn wire_inferred_dim(dim: &Dim) -> WireInferredDim {
         Dim::Var(var) => WireInferredDim::Var { id: var.0 },
         Dim::Lit(value) => WireInferredDim::Lit { size: *value },
         Dim::Wildcard => WireInferredDim::Wildcard,
+        Dim::Rank(rank) => WireInferredDim::Rank { id: rank.0 },
     }
 }
 
@@ -2016,6 +2017,7 @@ fn format_cli_dim(dim: &Dim) -> String {
         Dim::Var(var) => format!("d{}", var.0),
         Dim::Lit(value) => value.to_string(),
         Dim::Wildcard => "*".to_string(),
+        Dim::Rank(rank) => format!("..r{}", rank.0),
     }
 }
 
@@ -2130,6 +2132,14 @@ fn cmd_build(
     reject_with_seed_for_build_target(&decls, target)?;
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
+    // chelis#334: drop dead library defs that use an eval-only host builtin
+    // (`process_run`) so an unused transitive dependency module — e.g.
+    // chelis-std's `Std.Process` — cannot force them into the compiled
+    // lowering target and trip the build gate. These defs can never appear
+    // in a compiled artifact, so they are not part of the host-library
+    // surface worth preserving. A *reachable* eval-only use is left in place
+    // for the build gate to reject with a clean diagnostic.
+    let full_deep_exprs = drop_unreachable_eval_only_defs(full_deep_exprs, &entry_deep_exprs);
     let pruned_deep_exprs =
         prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_deep_exprs);
 
@@ -2280,11 +2290,15 @@ fn cmd_build(
                 }
                 reject_eval_only_builtins_host(host_program)?;
                 reject_unsupported_c_precisions_host(host_program)?;
+                reject_symbolic_windowed_reduce_host(host_program, "c")?;
+                reject_unsupported_reduce_window_precision_host(host_program, "c")?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
                 reject_unsupported_c_precisions(&dag)?;
+                reject_symbolic_windowed_reduce(&dag, "c")?;
+                reject_unsupported_reduce_window_precision(&dag, "c")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
@@ -2521,11 +2535,15 @@ fn cmd_build_deep(
                 }
                 reject_eval_only_builtins_host(host_program)?;
                 reject_unsupported_c_precisions_host(host_program)?;
+                reject_symbolic_windowed_reduce_host(host_program, "c")?;
+                reject_unsupported_reduce_window_precision_host(host_program, "c")?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
                 reject_unsupported_c_precisions(&dag)?;
+                reject_symbolic_windowed_reduce(&dag, "c")?;
+                reject_unsupported_reduce_window_precision(&dag, "c")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
@@ -5119,6 +5137,27 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 )
                 .into());
             }
+            // `reduce_window_*` HIP codegen is deferred (spec §2.3.1). Reject
+            // cleanly here rather than reaching the launch-emit `todo!`, which
+            // would abort the build with an `internal error` panic.
+            chelis_ir::dag::RiscOp::ReduceWindow { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support `reduce_window_*`; \
+                     lowered node {} requires it. HIP windowed-reduction codegen is deferred \
+                     (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::ReduceWindowGrad { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support the `reduce_window_*` \
+                     adjoint; lowered node {} requires it. HIP windowed-reduction codegen is \
+                     deferred (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
+                    node.id.0
+                )
+                .into());
+            }
             chelis_ir::dag::RiscOp::OneHot { .. } => {
                 return Err(format!(
                     "`chelis build --target hip` cannot compile internal one_hot node {}: \
@@ -5466,13 +5505,15 @@ fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
 fn reject_eval_only_builtins_host(
     program: &chelis_ir::host::HostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if chelis_ir::host::host_program_uses_builtin(program, "process_run") {
-        return Err(
-            "process_run is an eval/test-only builtin; not available in compiled \
+    for builtin in EVAL_ONLY_HOST_BUILTINS {
+        if chelis_ir::host::host_program_uses_builtin(program, builtin) {
+            return Err(format!(
+                "{builtin} is an eval/test-only builtin; not available in compiled \
                     targets. Run the program with `chelis eval` or `chelis test` instead, \
-                    or remove the process_run call before building."
-                .into(),
-        );
+                    or remove the {builtin} call before building."
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -5649,6 +5690,126 @@ fn reject_unsupported_effect_ops(
                 "`chelis build --target {target}` does not yet codegen `dropout`; evaluate it under `with seed(...)` instead"
             )
             .into());
+        }
+    }
+    Ok(())
+}
+
+/// `reduce_window_*` over a runtime-symbolic windowed axis cannot be
+/// lowered to a correct static output shape on the build path: the
+/// windowed output extent `floor((d - window) / stride) + 1` is strictly
+/// smaller than the input extent `d` and is not representable as a
+/// `DimExpr` (no subtraction / floor), so the backend's symbolic-dim
+/// binding would tie the windowed output axis to the *input* extent —
+/// silently mis-allocating the output and emitting an out-of-bounds
+/// window read (build output then diverges from the IR evaluator / host
+/// runtime). Reject per spec/05-risc-primitives.md §2.3.1.
+///
+/// Mirrors `chelis_compiler_api::compiler::reject_symbolic_windowed_reduce`;
+/// the CLI build pipeline is independent of `compile_for_execution`, so
+/// the guard is duplicated here. Only the windowed (trailing
+/// `window_shape.len()`) axes are checked; leading pass-through axes may
+/// remain symbolic and bind correctly.
+fn reject_symbolic_windowed_reduce(
+    dag: &chelis_ir::dag::Dag,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use chelis_ir::dag::{DimInfo, RiscOp};
+    for node in dag.nodes() {
+        let RiscOp::ReduceWindow { window_shape, .. } = &node.op else {
+            continue;
+        };
+        let dims = &node.output_type.dims;
+        let leading = dims.len().saturating_sub(window_shape.len());
+        for (offset, dim) in dims.iter().enumerate().skip(leading) {
+            if let DimInfo::Named(name, None) = dim {
+                return Err(format!(
+                    "`chelis build --target {target}` requires statically-known \
+                     windowed-axis extents for `reduce_window_*`; node {} windowed axis \
+                     {offset} has runtime-only symbolic dimension `{name}`. The windowed \
+                     output extent floor((d - window) / stride) + 1 is not representable \
+                     for a runtime-only input extent, so the build cannot allocate a \
+                     correct output. Window over a statically-sized axis, or pad the \
+                     input to a concrete extent first. See spec/05-risc-primitives.md §2.3.1.",
+                    node.id.0
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply [`reject_symbolic_windowed_reduce`] to every tensor-helper DAG
+/// embedded in a host program. The host codegen path
+/// (`codegen_host_program`) lowers `reduce_window_*` from these helper
+/// DAGs, so the pure-DAG guard alone would miss the node.
+fn reject_symbolic_windowed_reduce_host(
+    program: &chelis_ir::host::HostProgram,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for helper in &program.global_tensor_helpers {
+        reject_symbolic_windowed_reduce(&helper.dag, target)?;
+    }
+    for function in &program.functions {
+        for helper in &function.tensor_helpers {
+            reject_symbolic_windowed_reduce(&helper.dag, target)?;
+        }
+    }
+    Ok(())
+}
+
+/// `reduce_window_*` (and its adjoint) are f32-only in the C backend:
+/// `emit_reduce_window{,_grad}` have no bf16/f16 convert-load path yet.
+/// `reject_unsupported_c_precisions` admits bf16/f16 generally, so without
+/// this guard a bf16/f16 windowed reduction reaches the emitter and aborts
+/// with an `internal error` panic instead of a clean diagnostic. Reject it
+/// at compile time; the emitter `panic!` stays as a defensive backstop.
+///
+/// Mirrors `chelis_compiler_api::compiler::reject_unsupported_reduce_window_precision`;
+/// the CLI build pipeline is independent of `compile_for_execution`, so the
+/// guard is duplicated here. See spec/05-risc-primitives.md §2.3.1.
+fn reject_unsupported_reduce_window_precision(
+    dag: &chelis_ir::dag::Dag,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use chelis_ir::dag::RiscOp;
+    for node in dag.nodes() {
+        let (op_label, reducer) = match &node.op {
+            RiscOp::ReduceWindow { reducer, .. } => ("reduce_window_*", reducer),
+            RiscOp::ReduceWindowGrad { reducer, .. } => ("reduce_window_* adjoint", reducer),
+            _ => continue,
+        };
+        let prec = node.output_type.precision;
+        if prec != chelis_types::types::Prim::F32 {
+            return Err(format!(
+                "`chelis build --target {target}` supports `{op_label}` (`{}`) on f32 \
+                 tensors only; node {} carries precision `{}`. bf16/f16 windowed \
+                 reductions are not yet lowered (no convert-load path); cast to f32 \
+                 before the windowed reduction. See spec/05-risc-primitives.md §2.3.1.",
+                reducer.surf_name(),
+                node.id.0,
+                prec.name(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Apply [`reject_unsupported_reduce_window_precision`] to every
+/// tensor-helper DAG embedded in a host program, mirroring
+/// [`reject_symbolic_windowed_reduce_host`].
+fn reject_unsupported_reduce_window_precision_host(
+    program: &chelis_ir::host::HostProgram,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for helper in &program.global_tensor_helpers {
+        reject_unsupported_reduce_window_precision(&helper.dag, target)?;
+    }
+    for function in &program.functions {
+        for helper in &function.tensor_helpers {
+            reject_unsupported_reduce_window_precision(&helper.dag, target)?;
         }
     }
     Ok(())
@@ -6433,6 +6594,56 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
     }
 }
 
+/// Host builtins that the IR evaluator (`chelis eval` / `chelis test`)
+/// supports but the compiled build backends deliberately do not. Kept in
+/// one place so [`reject_eval_only_builtins_host`] and
+/// [`drop_unreachable_eval_only_defs`] stay in agreement.
+const EVAL_ONLY_HOST_BUILTINS: &[&str] = &["process_run"];
+
+/// Drop top-level decls for any function whose body references an eval-only
+/// host builtin ([`EVAL_ONLY_HOST_BUILTINS`]) and is not reachable from the
+/// entry program. Such functions can never be lowered into a compiled
+/// artifact, so an unused transitive dependency module (e.g. chelis-std's
+/// `Std.Process`) must not drag them into the build's lowering target. Both
+/// the `def` body and its sibling `defsig` are removed by name. A reachable
+/// eval-only use is preserved so the build gate still rejects it. chelis#334.
+fn drop_unreachable_eval_only_defs(
+    exprs: Vec<DeepExpr>,
+    entry_exprs: &[DeepExpr],
+) -> Vec<DeepExpr> {
+    use std::collections::HashSet;
+
+    let reachable = prune_build_program_to_reachable_defs(&exprs, entry_exprs)
+        .iter()
+        .filter_map(|expr| deep_named_decl_name(expr).map(str::to_string))
+        .collect::<HashSet<_>>();
+
+    // Names of unreachable functions whose body uses an eval-only builtin.
+    // Collected first so both the `def` and its `defsig` are dropped.
+    let drop_names = exprs
+        .iter()
+        .filter_map(|expr| {
+            let name = deep_named_decl_name(expr)?;
+            if reachable.contains(name) {
+                return None;
+            }
+            deep_referenced_vars(expr)
+                .iter()
+                .any(|var| EVAL_ONLY_HOST_BUILTINS.contains(var))
+                .then(|| name.to_string())
+        })
+        .collect::<HashSet<_>>();
+
+    exprs
+        .into_iter()
+        .filter(|expr| {
+            deep_named_decl_name(expr)
+                .map(|name| !drop_names.contains(name))
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
 fn prune_build_program_to_reachable_defs(
     exprs: &[DeepExpr],
     entry_exprs: &[DeepExpr],
@@ -7165,4 +7376,57 @@ fn should_suppress_unfixable_violation(
         return false;
     }
     !fix_would_apply_for_violation(target, rule.as_ref(), &source, surface, violation)
+}
+
+#[cfg(test)]
+mod eval_only_pruning_tests {
+    use super::{
+        deep_named_decl_name, drop_unreachable_eval_only_defs, expanded_desugared_program,
+    };
+
+    fn desugar(src: &str) -> Vec<chelis_deep::ast::Expr> {
+        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+        expanded_desugared_program(&decls).expect("desugar")
+    }
+
+    /// chelis#334: a pure-tensor entry program plus an unused library def
+    /// that uses the eval-only `process_run` builtin (the shape of
+    /// chelis-std's `Std.Process`). The dead eval-only def must be dropped
+    /// so the build gate does not reject a program that never reaches it.
+    #[test]
+    fn drops_unreachable_eval_only_def_but_keeps_entry() {
+        let full = desugar(
+            "def unused_runner(cmd: string, args: List[string]) -> (int64, string, string) = process_run(cmd, args)\n\
+             def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
+        );
+        let entry = desugar(
+            "def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
+        );
+        let kept = drop_unreachable_eval_only_defs(full, &entry);
+        let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
+        assert!(
+            names.contains(&"main"),
+            "entry `main` must survive: {names:?}"
+        );
+        assert!(
+            !names.contains(&"unused_runner"),
+            "unreachable eval-only def must be dropped: {names:?}"
+        );
+    }
+
+    /// Negative parity: a *reachable* eval-only use is preserved so the
+    /// build gate still rejects it with a clean diagnostic instead of the
+    /// program silently building with a missing function.
+    #[test]
+    fn keeps_reachable_eval_only_def_for_the_gate() {
+        let exprs =
+            desugar("def main() -> (int64, string, string) = process_run(\"echo\", [\"hi\"])\n");
+        let entry = exprs.clone();
+        let kept = drop_unreachable_eval_only_defs(exprs, &entry);
+        let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
+        assert!(
+            names.contains(&"main"),
+            "reachable eval-only def must be preserved for the build gate: {names:?}"
+        );
+    }
 }
