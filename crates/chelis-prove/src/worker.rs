@@ -49,7 +49,13 @@ pub(crate) fn isolation_enabled() -> bool {
 pub fn run_worker_if_requested() {
     #[cfg(feature = "smt")]
     {
-        if std::env::var_os(WORKER_ENV).is_some() {
+        use std::io::IsTerminal;
+        // A real worker is always spawned with a PIPED stdin (the parent feeds
+        // the request that way). If the marker is set but stdin is a terminal,
+        // it is almost certainly a user who exported the internal env var by
+        // mistake -- do NOT hijack their command into the worker loop (which
+        // would block reading the terminal forever). Proceed normally instead.
+        if std::env::var_os(WORKER_ENV).is_some() && !std::io::stdin().is_terminal() {
             imp::run_worker_loop();
         }
     }
@@ -129,6 +135,11 @@ mod imp {
             match mode.to_str() {
                 Some("abort") => std::process::abort(),
                 Some("panic") => panic!("CHELIS_PROVE_WORKER_CRASH=panic (isolation self-test)"),
+                Some("hang") => loop {
+                    // Block forever; the parent's deadline watchdog must kill
+                    // this and recover (isolation self-test).
+                    std::thread::sleep(std::time::Duration::from_secs(3600));
+                },
                 Some("overflow") => {
                     // Deliberately unbounded recursion to overflow the stack
                     // (SIGABRT) -- the whole point of this self-test branch.
@@ -224,16 +235,22 @@ mod imp {
             let _ = stdin.write_all(&payload);
         }
 
-        // Drain stdout on a thread so a large model cannot deadlock against
-        // the child still writing while the parent waits on exit.
-        let stdout = child.stdout.take();
-        let reader = stdout.map(|mut out| {
+        // Drain stdout on a DETACHED thread that hands the bytes back over a
+        // channel, so the parent's wait for output is BOUNDED. `read_to_end`
+        // only returns on stdout EOF, which needs every write-end of the pipe
+        // closed; if a (hypothetical future) worker left a grandchild holding
+        // stdout, an unconditional `join` here would block the parent FOREVER
+        // even after the worker is killed. Bounding the receive guarantees the
+        // parent can never hang regardless of what the worker does with its
+        // stdout (RT-isolation F1).
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        if let Some(mut out) = child.stdout.take() {
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
                 let _ = out.read_to_end(&mut buf);
-                buf
-            })
-        });
+                let _ = tx.send(buf); // detached: a late send after we gave up is harmless.
+            });
+        }
 
         // Wait for the child, killing it past a generous deadline. cvc5
         // honors `tlimit-per` (= timeout_ms), so the kill only fires on a
@@ -262,12 +279,18 @@ mod imp {
             }
         };
 
-        let output = reader.and_then(|r| r.join().ok()).unwrap_or_default();
-
         if timed_out {
-            // A hung worker behaves like a solver timeout.
+            // A hung worker behaves like a solver timeout. Do NOT block on the
+            // reader (its EOF may never come); the thread is detached.
             return TierBResult::Unknown;
         }
+
+        // The worker has exited, so its stdout write-end is closed and the
+        // reader reaches EOF promptly -- but bound the wait anyway so a stray
+        // inherited write-end can never hang us.
+        let output = rx
+            .recv_timeout(Duration::from_millis(2_000))
+            .unwrap_or_default();
 
         match bincode::deserialize::<WireResult>(&output) {
             Ok(wire) => wire.into_tier_b(),
