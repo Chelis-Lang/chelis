@@ -240,3 +240,38 @@ def make(x: f32) -> Probability = Probability { value: x }
         "an infinite field is rejected"
     );
 }
+
+// Review-4 follow-up: the int-width sampling decision is single-source
+// (`int_sample_bounds`), and an int8/int16 field samples within its
+// representable range instead of an out-of-range value or a float that
+// would yield a spurious counterexample.
+#[test]
+fn int_sample_bounds_clamps_to_each_widths_representable_range() {
+    assert_eq!(super::int_sample_bounds("int8"), Some((-128, 127)));
+    assert_eq!(super::int_sample_bounds("int16"), Some((-1000, 1000)));
+    assert_eq!(super::int_sample_bounds("int32"), Some((-1000, 1000)));
+    assert_eq!(super::int_sample_bounds("int64"), Some((-1000, 1000)));
+    assert_eq!(super::int_sample_bounds("f32"), None);
+    assert_eq!(super::int_sample_bounds("bool"), None);
+}
+
+#[test]
+fn int8_field_samples_are_integers_within_int8_range() {
+    use super::{FieldType, GenRng, sample_field_into};
+    let mut rng = GenRng::new(0);
+    let fty = FieldType::Scalar("int8".to_string());
+    for _ in 0..200 {
+        let mut env = std::collections::BTreeMap::new();
+        sample_field_into("x", &fty, &mut rng, &mut env);
+        let v = env["x"];
+        assert_eq!(
+            v.fract(),
+            0.0,
+            "int8 sample must be integer-valued, got {v}"
+        );
+        assert!(
+            (-128.0..=127.0).contains(&v),
+            "int8 sample must be in [-128, 127], got {v}"
+        );
+    }
+}

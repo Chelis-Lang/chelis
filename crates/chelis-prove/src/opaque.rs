@@ -56,6 +56,24 @@ pub fn prim_to_smt_sort(prim: &str) -> SmtSort {
     }
 }
 
+/// Fuzz-sampling bounds for an integer width (F3, sampling axis): the
+/// `[-1000, 1000]` convenience range clamped to the width's representable
+/// range, so an `int8` field samples in `[-128, 127]` (never an
+/// unrepresentable value that would yield a spurious counterexample) while
+/// wider widths keep the convenience range. Single source for every
+/// opaque-field integer sampling site. Returns `None` for a non-integer
+/// primitive.
+pub fn int_sample_bounds(prim: &str) -> Option<(i64, i64)> {
+    let (ty_min, ty_max): (i64, i64) = match prim {
+        "int8" => (i8::MIN as i64, i8::MAX as i64),
+        "int16" => (i16::MIN as i64, i16::MAX as i64),
+        "int32" => (i32::MIN as i64, i32::MAX as i64),
+        "int64" => (i64::MIN, i64::MAX),
+        _ => return None,
+    };
+    Some((ty_min.max(-1000), ty_max.min(1000)))
+}
+
 /// A field of an opaque type's single record variant, in the V1 value
 /// class (RFC D-WF): a scalar prim, a fixed-shape numeric tensor, or a
 /// nested single-variant record of those.
@@ -1160,16 +1178,12 @@ fn sample_field_into(
 ) {
     match fty {
         FieldType::Scalar(name) => {
-            let v = match name.as_str() {
-                "int32" | "int64" => rng.next_i64(-1000, 1000) as f64,
-                "bool" => {
-                    if rng.next_bool() {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                _ => rng.next_f64(-10.0, 10.0),
+            let v = if let Some((lo, hi)) = int_sample_bounds(name) {
+                rng.next_i64(lo, hi) as f64
+            } else if name == "bool" {
+                if rng.next_bool() { 1.0 } else { 0.0 }
+            } else {
+                rng.next_f64(-10.0, 10.0)
             };
             env.insert(path.to_string(), v);
         }
@@ -1204,11 +1218,15 @@ fn record_value_expr(inv: &OpaqueInvariant, env: &BTreeMap<String, f64>) -> Expr
 
 fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, f64>) -> Expr {
     match fty {
-        FieldType::Scalar(name) => match name.as_str() {
-            "int32" | "int64" => int_lit(*env.get(path).unwrap_or(&0.0) as i64, name),
-            "bool" => bool_lit(*env.get(path).unwrap_or(&0.0) != 0.0),
-            _ => float_lit(*env.get(path).unwrap_or(&0.0), name),
-        },
+        FieldType::Scalar(name) => {
+            if is_int_width(name) {
+                int_lit(*env.get(path).unwrap_or(&0.0) as i64, name)
+            } else if name == "bool" {
+                bool_lit(*env.get(path).unwrap_or(&0.0) != 0.0)
+            } else {
+                float_lit(*env.get(path).unwrap_or(&0.0), name)
+            }
+        }
         FieldType::Tensor { dims, precision } => {
             let count = dims.iter().product::<usize>().max(1);
             let values: Vec<f64> = (0..count)
@@ -1382,11 +1400,15 @@ fn read_produced_field(
 
 fn sample_raw_input_expr(kind: &GenParamKind, rng: &mut GenRng) -> Expr {
     match kind {
-        GenParamKind::Scalar(name) => match name.as_str() {
-            "int32" | "int64" => int_lit(rng.next_i64(-1000, 1000), name),
-            "bool" => bool_lit(rng.next_bool()),
-            _ => float_lit(rng.next_f64(-10.0, 10.0), name),
-        },
+        GenParamKind::Scalar(name) => {
+            if let Some((lo, hi)) = int_sample_bounds(name) {
+                int_lit(rng.next_i64(lo, hi), name)
+            } else if name == "bool" {
+                bool_lit(rng.next_bool())
+            } else {
+                float_lit(rng.next_f64(-10.0, 10.0), name)
+            }
+        }
         GenParamKind::Tensor { dims, precision } => {
             let count = dims.iter().product::<usize>().max(1);
             let values: Vec<f64> = (0..count).map(|_| rng.next_f64(-10.0, 10.0)).collect();
