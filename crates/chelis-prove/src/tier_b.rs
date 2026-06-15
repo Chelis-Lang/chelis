@@ -184,18 +184,32 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
         sorts.insert(name.clone(), *sort);
     }
 
-    // 2. Assert preconditions
+    // 2. Assert preconditions. cvc5's `assert_formula` requires a Bool-sorted
+    //    term; asserting a non-Bool aborts ("Expected term with sort Bool"),
+    //    so a precondition that lowers to a non-Bool sort routes to Tier C.
     for pre in &property.preconditions {
         let term = match lower_to_cvc5(&tm, pre, &vars, &sorts) {
-            Ok((t, _)) => t,
+            Ok((t, SmtSort::Bool)) => t,
+            Ok((_, other)) => {
+                return TierBResult::Error(format!(
+                    "precondition lowers to sort {other:?}, expected Bool (routes to Tier C)"
+                ));
+            }
             Err(reason) => return TierBResult::Error(reason),
         };
         solver.assert_formula(term);
     }
 
-    // 3. Assert negation of postcondition
+    // 3. Assert negation of postcondition. cvc5's NOT requires a Bool operand;
+    //    `NOT(non-bool)` aborts ("expecting a Boolean subexpression"), so a
+    //    postcondition that lowers to a non-Bool sort routes to Tier C.
     let post_term = match lower_to_cvc5(&tm, &property.postcondition, &vars, &sorts) {
-        Ok((t, _)) => t,
+        Ok((t, SmtSort::Bool)) => t,
+        Ok((_, other)) => {
+            return TierBResult::Error(format!(
+                "postcondition lowers to sort {other:?}, expected Bool (routes to Tier C)"
+            ));
+        }
         Err(reason) => return TierBResult::Error(reason),
     };
     let negated = tm.mk_term(Kind::CVC5_KIND_NOT, &[post_term]);
@@ -429,6 +443,14 @@ pub fn lower_to_cvc5(
                 return Err(format!(
                     "quantifier body has sort {body_sort:?}, expected Bool (routes to Tier C)"
                 ));
+            }
+            // cvc5's VARIABLE_LIST requires >= 1 bound var; an empty binder
+            // list aborts the process (RT6 round-2). A quantifier over no
+            // variables is degenerate -- `forall (). P` and `exists (). P`
+            // both mean `P` -- so normalize it to the body directly rather
+            // than building an empty VARIABLE_LIST.
+            if bound_vars.is_empty() {
+                return Ok((body_term, SmtSort::Bool));
             }
             let bound_list = tm.mk_term(Kind::CVC5_KIND_VARIABLE_LIST, &bound_vars);
             let kind = if matches!(expr, SmtExpr::Forall(_, _)) {
@@ -1496,5 +1518,93 @@ mod tests {
                 "a non-finite real literal ({bad}) must be a clean Error, not a cvc5 abort"
             );
         }
+    }
+
+    // --- RT6 round-2: holes the fresh red-team / self-audit found after the
+    //     first total-lowering pass. Each is the SAME class (an mk_term /
+    //     assert_formula requirement not checked at its call site). ---
+
+    /// An empty quantifier binder list. cvc5's VARIABLE_LIST requires >= 1
+    /// bound var; `mk_term(VARIABLE_LIST, &[])` aborts. The lowering
+    /// normalizes `forall (). P` / `exists (). P` to `P` (both mean `P`), so
+    /// it decides cleanly instead of aborting.
+    #[test]
+    fn rt6_empty_quantifier_binder_does_not_abort() {
+        for forall in [true, false] {
+            // body: x*x >= 0 (always true over the reals), x is a free var.
+            let body = SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Mul,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::Var("x".to_string())),
+                )),
+                Box::new(SmtExpr::RealLit(0.0)),
+            );
+            let q = if forall {
+                SmtExpr::Forall(vec![], Box::new(body))
+            } else {
+                SmtExpr::Exists(vec![], Box::new(body))
+            };
+            let prop = SmtProperty {
+                variables: vec![("x".to_string(), SmtSort::Real)],
+                preconditions: vec![],
+                postcondition: q,
+            };
+            // `forall (). x*x >= 0` == `x*x >= 0`, which is valid -> Proved.
+            assert_eq!(
+                solve_property(&prop, 5000),
+                TierBResult::Proved,
+                "an empty-binder quantifier (forall={forall}) must normalize to its body and prove, not abort"
+            );
+        }
+    }
+
+    /// A postcondition that lowers to a non-Bool sort. `solve_property_cvc5`
+    /// negates the postcondition with cvc5 NOT, which aborts on a non-Bool
+    /// operand ("expecting a Boolean subexpression"). It must route to a
+    /// clean Error instead.
+    #[test]
+    fn rt6_non_bool_postcondition_is_clean_error_not_abort() {
+        for bad_post in [
+            SmtExpr::Var("x".to_string()),
+            SmtExpr::IntLit(5),
+            SmtExpr::Arith(
+                ArithOp::Add,
+                Box::new(SmtExpr::Var("x".to_string())),
+                Box::new(SmtExpr::RealLit(1.0)),
+            ),
+        ] {
+            let prop = SmtProperty {
+                variables: vec![("x".to_string(), SmtSort::Real)],
+                preconditions: vec![],
+                postcondition: bad_post,
+            };
+            assert!(
+                matches!(solve_property(&prop, 5000), TierBResult::Error(_)),
+                "a non-Bool postcondition must be a clean Error, not a cvc5 abort"
+            );
+        }
+    }
+
+    /// A precondition that lowers to a non-Bool sort. `solve_property_cvc5`
+    /// asserts each precondition, and cvc5's `assert_formula` aborts on a
+    /// non-Bool term ("Expected term with sort Bool"). It must route to a
+    /// clean Error instead.
+    #[test]
+    fn rt6_non_bool_precondition_is_clean_error_not_abort() {
+        let prop = SmtProperty {
+            variables: vec![("n".to_string(), SmtSort::Int)],
+            preconditions: vec![SmtExpr::Arith(
+                ArithOp::Add,
+                Box::new(SmtExpr::Var("n".to_string())),
+                Box::new(SmtExpr::IntLit(1)),
+            )],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        assert!(
+            matches!(solve_property(&prop, 5000), TierBResult::Error(_)),
+            "a non-Bool precondition must be a clean Error, not a cvc5 abort"
+        );
     }
 }
