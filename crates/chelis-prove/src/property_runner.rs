@@ -942,37 +942,51 @@ fn discover_deep_properties_expr(
     if list_tag(expr) == Some("def")
         && let Some(name) = list.elements.get(2).and_then(symbol_text)
         && let Some(meta) = list.elements.get(1).and_then(meta_map)
-        && property_is_user(meta)
     {
-        let fn_expr = list
-            .elements
-            .get(3)
-            .ok_or_else(|| format!("property `{name}` def is missing a fn body"))?;
-        let fn_params = deep_fn_params(fn_expr)
-            .ok_or_else(|| format!("property `{name}` def body must be a callable `fn`"))?;
-        let params = if let Some(params) = deep_property_params(meta) {
-            if !params_match(&params, &fn_params) {
-                return Err(format!(
-                    "property `{name}` property_quantifiers must match fn parameters"
-                ));
+        // Classify the def by source kind the SAME way the CLI discoverer
+        // does (F6): a `chelis_role: "property"` def with an absent or
+        // invalid `property_source_kind` is an ERROR (not silently skipped,
+        // which previously made tide report total:0 while the CLI errored).
+        // Only a `user` property is run by the shared runner; a
+        // `bridge:c-earchin` property is skipped here (the CLI's bridge path
+        // owns it, with its span/requirement rendering).
+        match deep_property_source_kind(meta, name)? {
+            Some(DeepSourceKind::User) => {
+                let fn_expr = list
+                    .elements
+                    .get(3)
+                    .ok_or_else(|| format!("property `{name}` def is missing a fn body"))?;
+                let fn_params = deep_fn_params(fn_expr).ok_or_else(|| {
+                    format!("property `{name}` def body must be a callable `fn`")
+                })?;
+                let params = if let Some(params) = deep_property_params(meta) {
+                    if !params_match(&params, &fn_params) {
+                        return Err(format!(
+                            "property `{name}` property_quantifiers must match fn parameters"
+                        ));
+                    }
+                    params
+                } else {
+                    return Err(format!(
+                        "property `{name}` metadata must include `property_quantifiers`"
+                    ));
+                };
+                if matches_filter(name, only) {
+                    out.push(DeepProperty {
+                        name: name.to_string(),
+                        params,
+                        preconditions: deep_property_preconditions(meta).unwrap_or_default(),
+                        body: deep_fn_body(fn_expr).cloned().ok_or_else(|| {
+                            format!("property `{name}` def body must be a callable `fn`")
+                        })?,
+                        samples: deep_int_meta(meta, "property_samples"),
+                        seed: deep_int_meta(meta, "property_seed").map(|value| value as u64),
+                    });
+                }
             }
-            params
-        } else {
-            return Err(format!(
-                "property `{name}` metadata must include `property_quantifiers`"
-            ));
-        };
-        if matches_filter(name, only) {
-            out.push(DeepProperty {
-                name: name.to_string(),
-                params,
-                preconditions: deep_property_preconditions(meta).unwrap_or_default(),
-                body: deep_fn_body(fn_expr)
-                    .cloned()
-                    .ok_or_else(|| format!("property `{name}` def body must be a callable `fn`"))?,
-                samples: deep_int_meta(meta, "property_samples"),
-                seed: deep_int_meta(meta, "property_seed").map(|value| value as u64),
-            });
+            // A bridge:c-earchin property is not the shared runner's concern;
+            // a non-property def has no role. Both are skipped.
+            Some(DeepSourceKind::Bridge) | None => {}
         }
     }
     for child in &list.elements {
@@ -981,22 +995,49 @@ fn discover_deep_properties_expr(
     Ok(())
 }
 
-/// Whether a def's metadata marks it a USER property (the
-/// `chelis_role: "property"` with `property_source_kind: "user"`). The
-/// bridge `c-earchin` properties are NOT user properties and are not run
-/// here (they go through the CLI's bridge path).
-fn property_is_user(meta: &MetaMap) -> bool {
-    let role_property = meta
+/// The source kind of a Deep `@property` def.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepSourceKind {
+    User,
+    Bridge,
+}
+
+/// Classify a Deep def's `chelis_role`/`property_source_kind` metadata,
+/// matching the CLI discoverer's `property_source_kind` (F6): `None` for a
+/// non-property def; `Err` for a `chelis_role: "property"` def with an
+/// absent or invalid `property_source_kind` (a malformed property is an
+/// error on BOTH surfaces, never silently skipped). The legacy
+/// `c_earchin_role` witness without an explicit kind defaults to Bridge.
+fn deep_property_source_kind(
+    meta: &MetaMap,
+    name: &str,
+) -> Result<Option<DeepSourceKind>, String> {
+    let has_chelis = meta
         .entries
         .iter()
         .any(|(k, v)| k == "chelis_role" && string_value(v) == Some("property"));
-    if !role_property {
-        return false;
+    let has_legacy = meta
+        .entries
+        .iter()
+        .any(|(k, v)| k == "c_earchin_role" && string_value(v) == Some("property_witness"));
+    if !has_chelis && !has_legacy {
+        return Ok(None);
     }
-    matches!(
-        deep_meta_value(meta, "property_source_kind").and_then(string_value),
-        Some("user")
-    )
+    let Some(kind) = deep_meta_value(meta, "property_source_kind").and_then(string_value) else {
+        if has_legacy {
+            return Ok(Some(DeepSourceKind::Bridge));
+        }
+        return Err(format!(
+            "property `{name}` metadata must include string `property_source_kind`"
+        ));
+    };
+    match kind {
+        "user" => Ok(Some(DeepSourceKind::User)),
+        "bridge:c-earchin" => Ok(Some(DeepSourceKind::Bridge)),
+        other => Err(format!(
+            "property `{name}` metadata has invalid property_source_kind `{other}`"
+        )),
+    }
 }
 
 fn prove_deep_property(

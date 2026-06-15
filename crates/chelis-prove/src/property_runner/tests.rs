@@ -223,3 +223,75 @@ fn f7_deep_auto_runs_the_fuzz_loop() {
     );
     assert!(outcomes[0].samples > 0);
 }
+
+// --- F6: the deep discoverer classifies source kind like the CLI ---
+
+/// A `chelis_role: "property"` def with NO `property_source_kind` is a
+/// malformed property: the shared discoverer must ERROR (matching the CLI
+/// discoverer), not silently skip it (which previously made tide report
+/// total:0 / ok:true while the CLI errored).
+#[test]
+fn f6_deep_chelis_role_property_without_source_kind_is_error() {
+    let source = r#"(module {}
+  m
+  (def {chelis_role: "property",
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)}))}
+    nameless_kind
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (app {} (var {} gte) (var {} x) (var {} x)))))
+"#;
+    let opts = PropertyRunOptions::default();
+    let result = run_deep_source_properties(source, &opts);
+    assert!(
+        result.is_err(),
+        "a chelis_role property with no property_source_kind must error, not be skipped: {result:?}"
+    );
+    assert!(
+        result.unwrap_err().contains("property_source_kind"),
+        "the error names the missing metadata"
+    );
+}
+
+/// A `chelis_role: "property"` def with an INVALID `property_source_kind`
+/// is likewise an error (matching the CLI), not silently skipped.
+#[test]
+fn f6_deep_invalid_source_kind_is_error() {
+    let source = r#"(module {}
+  m
+  (def {chelis_role: "property",
+         property_source_kind: "bogus",
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)}))}
+    bad_kind
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (app {} (var {} gte) (var {} x) (var {} x)))))
+"#;
+    let opts = PropertyRunOptions::default();
+    let result = run_deep_source_properties(source, &opts);
+    assert!(result.is_err(), "an invalid property_source_kind must error: {result:?}");
+}
+
+/// A `bridge:c-earchin` property is SKIPPED by the shared runner (the CLI
+/// bridge path owns it) -- not an error, not run. The shared runner returns
+/// an empty user-property set for a bridge-only module.
+#[test]
+fn f6_deep_bridge_source_kind_is_skipped_not_error() {
+    let source = r#"(module {}
+  m
+  (def {chelis_role: "property",
+         property_source_kind: "bridge:c-earchin",
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)}))}
+    bridged
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (app {} (var {} gte) (var {} x) (var {} x)))))
+"#;
+    let opts = PropertyRunOptions::default();
+    let PropertyRunResult::Ran(outcomes) =
+        run_deep_source_properties(source, &opts).expect("bridge module is not an error");
+    assert!(
+        outcomes.is_empty(),
+        "the shared runner skips bridge:c-earchin properties: {outcomes:?}"
+    );
+}

@@ -23,6 +23,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove-obligation review-5 fixes -->
+- The shared Deep property discoverer now classifies a `@property` def's
+  source kind exactly as the CLI discoverer does (review 5 / F6): a
+  `chelis_role: "property"` def with an absent or invalid
+  `property_source_kind` is an ERROR on both surfaces, not silently skipped
+  (which previously made the tide tool report `total:0` / `ok:true` while
+  the CLI errored), and a `bridge:c-earchin` property is skipped by the
+  shared runner (the CLI bridge path owns it). A user `@property` is now
+  discovered identically on the CLI and tide surfaces.
 - The signed-integer-width decision is now genuinely single-source across
   every prove site (review 5). The type system owns the int-width set
   (`chelis_types::types::Prim::is_integer`), the per-width representable
