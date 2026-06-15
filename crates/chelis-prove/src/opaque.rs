@@ -482,10 +482,19 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
     fn as_int_width(prim: String) -> Option<String> {
         is_int_width(&prim).then_some(prim)
     }
-    // Depth-bounded const -> const chain; the declared (defsig) type is
-    // authoritative over the body literal's own tag.
+    // Follow the const -> const chain to the FULL depth with cycle detection
+    // (F5): a magic depth cap silently dropped a long int alias chain to None
+    // (Real), mis-sorting it. A visited-set terminates a cyclic / self-
+    // referential chain instead. The declared (defsig) type is authoritative
+    // over the body literal's own tag.
     let mut current = name.to_string();
-    for _ in 0..4 {
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current.clone()) {
+            // Re-entered a name already on the chain: a cycle. No declared
+            // numeric type is reachable, so it is not an integer constant.
+            return None;
+        }
         if let Some(prim) = defsig_prim(exprs, &current) {
             return as_int_width(prim);
         }
@@ -498,7 +507,6 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
             None => return None,
         }
     }
-    None
 }
 
 /// Lower an invariant predicate to an [`SmtExpr`] over a *flattened*

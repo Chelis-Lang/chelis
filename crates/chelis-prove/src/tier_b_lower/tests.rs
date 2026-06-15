@@ -798,3 +798,49 @@ falias = fbase
         "an f32 alias chain stays Real (None)"
     );
 }
+
+#[test]
+fn f5_long_alias_chain_keeps_int_width_and_cycles_terminate() {
+    // F5: an int alias chain LONGER than the former depth cap (4) must still
+    // resolve its declared int width -- a 6-hop chain that the depth bound
+    // would have silently dropped to None (Real), mis-sorting the constant.
+    let surf = "module M
+def base() -> int64 = 7
+a5 = base
+a4 = a5
+a3 = a4
+a2 = a3
+a1 = a2
+a0 = a1
+";
+    let exprs = deep_of(surf);
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs, "a0").as_deref(),
+        Some("int64"),
+        "a 6-hop int alias chain keeps its declared int64 width"
+    );
+
+    // A cyclic alias chain must TERMINATE (cycle detection), not loop or
+    // wrongly resolve. `x = y; y = x` has no literal/defsig => None.
+    let cyclic = "module M
+x = y
+y = x
+";
+    let exprs_c = deep_of(cyclic);
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs_c, "x"),
+        None,
+        "a cyclic alias chain terminates with None (no infinite loop)"
+    );
+
+    // A self-referential constant likewise terminates.
+    let self_ref = "module M
+z = z
+";
+    let exprs_s = deep_of(self_ref);
+    assert_eq!(
+        crate::opaque::const_declared_int_type(&exprs_s, "z"),
+        None,
+        "a self-referential constant terminates with None"
+    );
+}
