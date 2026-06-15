@@ -203,12 +203,24 @@ fn infer_sort(expr: &SmtExpr, sorts: &std::collections::HashMap<&str, SmtSort>) 
             None => SortClass::Unknown,
         },
         SmtExpr::Cmp(_, _, _) | SmtExpr::Bool(_, _) | SmtExpr::Not(_) => SortClass::Bool,
+        // Unary `neg` carries a dummy second operand; its result sort is the
+        // sort of the real (first) operand (F2).
+        SmtExpr::Arith(ArithOp::Neg, l, _) => infer_sort(l, sorts),
         SmtExpr::Arith(_, l, r) => unify_sort(infer_sort(l, sorts), infer_sort(r, sorts)),
         SmtExpr::Ite(_, t, e) => unify_sort(infer_sort(t, sorts), infer_sort(e, sorts)),
-        // An intrinsic application (sqrt/exp/min/max/...) is Real-valued in
-        // cvc5; treat as Unknown so an int argument inside it does not trip a
-        // spurious clash (cvc5 coerces ints to reals inside these).
-        SmtExpr::Apply(_, _) => SortClass::Unknown,
+        // `min`/`max` SELECT one of their operands, so the result sort is the
+        // unified operand sort (cvc5 keeps it). `abs` preserves its operand
+        // sort. The transcendentals (sqrt/exp/sin/cos/log) are Real-valued in
+        // cvc5 regardless of argument sort. Any other application is Unknown.
+        SmtExpr::Apply(name, args) => match name.as_str() {
+            "min" | "max" | "abs" => args
+                .iter()
+                .map(|a| infer_sort(a, sorts))
+                .reduce(unify_sort)
+                .unwrap_or(SortClass::Unknown),
+            "sqrt" | "exp" | "sin" | "cos" | "log" => SortClass::Real,
+            _ => SortClass::Unknown,
+        },
         SmtExpr::Forall(_, _) | SmtExpr::Exists(_, _) => SortClass::Bool,
     }
 }
@@ -237,14 +249,12 @@ fn check_operand_sorts(
     expr: &SmtExpr,
     sorts: &std::collections::HashMap<&str, SmtSort>,
 ) -> Result<(), String> {
+    // Clash on a definite Int-vs-Real pair (F1 fail-safe). A pair where
+    // either side is `Unknown` cannot be proven mismatched here, but cvc5
+    // still aborts if the runtime sorts diverge; `args_definitely_mixed`
+    // handles the conservative n-ary route-out separately.
     let clash = |l: &SmtExpr, r: &SmtExpr, what: &str| -> Result<(), String> {
-        let ls = infer_sort(l, sorts);
-        let rs = infer_sort(r, sorts);
-        let mismatch = matches!(
-            (ls, rs),
-            (SortClass::Int, SortClass::Real) | (SortClass::Real, SortClass::Int)
-        );
-        if mismatch {
+        if definitely_mixed(infer_sort(l, sorts), infer_sort(r, sorts)) {
             Err(format!(
                 "operand sort mismatch in {what}: Int vs Real (routes to Tier C)"
             ))
@@ -258,6 +268,10 @@ fn check_operand_sorts(
             check_operand_sorts(l, sorts)?;
             check_operand_sorts(r, sorts)
         }
+        // Unary `neg` is represented as `Arith(Neg, x, RealLit(0.0))` with a
+        // DUMMY second operand cvc5 ignores (it lowers NEG as unary, F2). Do
+        // NOT clash-check the placeholder; only recurse into the real operand.
+        SmtExpr::Arith(ArithOp::Neg, l, _placeholder) => check_operand_sorts(l, sorts),
         SmtExpr::Arith(_, l, r) => {
             clash(l, r, "arithmetic")?;
             check_operand_sorts(l, sorts)?;
@@ -273,11 +287,29 @@ fn check_operand_sorts(
             check_operand_sorts(inner, sorts)
         }
         SmtExpr::Ite(c, t, e) => {
+            // The two branches of an ITE must share a cvc5 sort (cvc5 aborts
+            // otherwise). Clash-check them just like a binary op (F1).
+            clash(t, e, "if-then-else branches")?;
             check_operand_sorts(c, sorts)?;
             check_operand_sorts(t, sorts)?;
             check_operand_sorts(e, sorts)
         }
-        SmtExpr::Apply(_, args) => {
+        SmtExpr::Apply(name, args) => {
+            // An n-ary intrinsic such as `min`/`max` lowers to an internal
+            // `ITE(LT(a,b),a,b)` in cvc5, which ABORTS the process on an
+            // Int-vs-Real operand pair (F1). The earlier pre-check only
+            // recursed into each arg individually and never compared the args
+            // against EACH OTHER, so a mixed-sort min/max still aborted.
+            // Clash-check ALL operands pairwise here. `min`/`max` compare and
+            // select their args directly, so a mixed pair is the exact abort
+            // term cvc5 rejects.
+            if matches!(name.as_str(), "min" | "max") {
+                for (i, a) in args.iter().enumerate() {
+                    for b in &args[i + 1..] {
+                        clash(a, b, "min/max operands")?;
+                    }
+                }
+            }
             for a in args {
                 check_operand_sorts(a, sorts)?;
             }
@@ -285,6 +317,19 @@ fn check_operand_sorts(
         }
         SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => Ok(()),
     }
+}
+
+/// Whether two inferred sort classes are a DEFINITE Int-vs-Real mismatch
+/// (the cvc5 abort condition). A pair where either side is `Unknown` is not
+/// a definite mismatch (the conservative route-out for Unknown-vs-definite
+/// is handled at the comparison site, where an Apply result of `Unknown`
+/// sort compared against a definite Int/Real cannot be proven safe).
+#[cfg(feature = "smt")]
+fn definitely_mixed(a: SortClass, b: SortClass) -> bool {
+    matches!(
+        (a, b),
+        (SortClass::Int, SortClass::Real) | (SortClass::Real, SortClass::Int)
+    )
 }
 
 #[cfg(feature = "smt")]
@@ -954,5 +999,172 @@ mod tests {
             ),
         };
         assert_eq!(solve_property(&real_prop, 5000), TierBResult::Proved);
+    }
+
+    // --- F1 (review 4): min/max over a mixed-sort pair must NOT abort cvc5 ---
+    //
+    // cvc5 lowers min/max to an internal ITE(LT(a,b),a,b), which ABORTS the
+    // process ("Subexpressions must have the same type: Int/Real") on an
+    // Int-vs-Real operand pair. The sort pre-check only ever clash-checked a
+    // binary op's two operands against each other and recursed into an
+    // Apply's args INDIVIDUALLY, never against EACH OTHER, so min(int, real)
+    // still aborted. The pre-check must reject the whole property to Tier C.
+
+    fn min_max_prop_cmp(name: &str, a: SmtExpr, b: SmtExpr, rhs: SmtExpr) -> SmtProperty {
+        // (name(a, b)) >= rhs, with n declared Int.
+        SmtProperty {
+            variables: vec![("n".to_string(), SmtSort::Int)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Apply(name.to_string(), vec![a, b])),
+                Box::new(rhs),
+            ),
+        }
+    }
+
+    fn min_max_prop(name: &str, a: SmtExpr, b: SmtExpr) -> SmtProperty {
+        // A mixed-sort min/max: the comparison rhs sort is irrelevant because
+        // the abort is inside the intrinsic's own operand pair.
+        min_max_prop_cmp(name, a, b, SmtExpr::RealLit(0.0))
+    }
+
+    #[test]
+    fn f1_min_max_mixed_sort_is_clean_error_not_a_cvc5_abort() {
+        // min/max over (Int var, Real lit) and (Real lit, Int var): the
+        // intrinsic lowers to a sort-mismatched ITE in cvc5. Must be a clean
+        // TierBResult::Error (route to Tier C), NEVER a process abort.
+        for name in ["min", "max"] {
+            let a = min_max_prop(name, SmtExpr::Var("n".to_string()), SmtExpr::RealLit(1.5));
+            assert!(
+                matches!(solve_property(&a, 5000), TierBResult::Error(_)),
+                "{name}(int, real) must be a clean Error, not a cvc5 abort"
+            );
+            let b = min_max_prop(name, SmtExpr::RealLit(1.5), SmtExpr::Var("n".to_string()));
+            assert!(
+                matches!(solve_property(&b, 5000), TierBResult::Error(_)),
+                "{name}(real, int) must be a clean Error, not a cvc5 abort"
+            );
+        }
+    }
+
+    #[test]
+    fn f1_min_max_consistent_sort_still_proves() {
+        // Negative parity: an all-Int and an all-Real min/max still lower and
+        // prove -- the conservative route-out must not reject a sound term.
+        // max(n, 0) >= 0 with n: Int (the comparison rhs is also Int, so the
+        // whole term is Int-sorted and cvc5 accepts it).
+        let int_prop = min_max_prop_cmp(
+            "max",
+            SmtExpr::Var("n".to_string()),
+            SmtExpr::IntLit(0),
+            SmtExpr::IntLit(0),
+        );
+        assert_eq!(
+            solve_property(&int_prop, 5000),
+            TierBResult::Proved,
+            "all-Int max proves"
+        );
+        // max(x, 0.0) >= 0.0 with x: Real.
+        let real_prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Apply(
+                    "max".to_string(),
+                    vec![SmtExpr::Var("x".to_string()), SmtExpr::RealLit(0.0)],
+                )),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        };
+        assert_eq!(
+            solve_property(&real_prop, 5000),
+            TierBResult::Proved,
+            "all-Real max proves"
+        );
+    }
+
+    #[test]
+    fn f1_comparison_against_min_max_result_with_mixed_operands_is_clean_error() {
+        // A comparison whose operand is a min/max with a mixed-sort argument
+        // pair must also route out, not abort. min(n, 1.5) is itself the
+        // abort source; comparing it against an Int literal must still be a
+        // clean Error.
+        let prop = SmtProperty {
+            variables: vec![("n".to_string(), SmtSort::Int)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Apply(
+                    "min".to_string(),
+                    vec![SmtExpr::Var("n".to_string()), SmtExpr::RealLit(1.5)],
+                )),
+                Box::new(SmtExpr::IntLit(0)),
+            ),
+        };
+        assert!(
+            matches!(solve_property(&prop, 5000), TierBResult::Error(_)),
+            "comparison against a mixed-sort min result is a clean Error"
+        );
+    }
+
+    // --- F2 (review 4): unary neg must not be spuriously rejected ---
+    //
+    // neg is represented as Arith(Neg, x, RealLit(0.0)) with a DUMMY second
+    // operand. The pre-check treated it as binary and clash-checked x against
+    // the RealLit(0.0) placeholder, so neg(int) was spuriously rejected to
+    // Tier C even though cvc5 lowers NEG as unary and ignores the placeholder.
+
+    #[test]
+    fn f2_neg_of_int_proves_at_tier_b_not_spuriously_rejected() {
+        // neg(n) <= 0 with n: Int, n >= 0. The placeholder RealLit(0.0) must
+        // not trip the Int-vs-Real clash; this proves at Tier B.
+        let prop = SmtProperty {
+            variables: vec![("n".to_string(), SmtSort::Int)],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Var("n".to_string())),
+                Box::new(SmtExpr::IntLit(0)),
+            )],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Neg,
+                    Box::new(SmtExpr::Var("n".to_string())),
+                    Box::new(SmtExpr::RealLit(0.0)),
+                )),
+                Box::new(SmtExpr::IntLit(0)),
+            ),
+        };
+        assert_eq!(
+            solve_property(&prop, 5000),
+            TierBResult::Proved,
+            "neg(int) >= ... proves at Tier B, not spuriously routed to Tier C"
+        );
+    }
+
+    #[test]
+    fn f2_neg_of_real_still_proves() {
+        // Negative parity: neg of a real also proves (the placeholder is the
+        // same sort here, so this never regressed, but lock it).
+        let prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Var("x".to_string())),
+                Box::new(SmtExpr::RealLit(0.0)),
+            )],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(SmtExpr::Arith(
+                    ArithOp::Neg,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(0.0)),
+                )),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        };
+        assert_eq!(solve_property(&prop, 5000), TierBResult::Proved);
     }
 }
