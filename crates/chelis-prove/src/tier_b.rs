@@ -125,6 +125,51 @@ fn require_numeric_sort(sort: SmtSort, what: &str) -> Result<(), String> {
     }
 }
 
+/// Maximum `SmtExpr` nesting depth Tier B will lower. A property deeper than
+/// this routes to Tier C rather than risking a stack overflow in the
+/// recursive lowering / logic-selection walks (a stack overflow aborts the
+/// PROCESS, it does not return). Real invariant predicates are a few levels
+/// deep; this bound is far above any realistic predicate and far below the
+/// stack-overflow threshold observed even on small test-worker stacks (RT6
+/// round-2).
+#[cfg(feature = "smt")]
+const MAX_SMT_EXPR_DEPTH: usize = 256;
+
+/// Whether `expr` nests deeper than `max`, computed ITERATIVELY (an explicit
+/// work stack) so the bound check itself cannot overflow the call stack on a
+/// pathologically deep tree -- which is the whole point of running it before
+/// any recursive walk.
+#[cfg(feature = "smt")]
+fn smt_expr_exceeds_depth(expr: &SmtExpr, max: usize) -> bool {
+    let mut stack: Vec<(&SmtExpr, usize)> = vec![(expr, 1)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > max {
+            return true;
+        }
+        let next = depth + 1;
+        match node {
+            SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => {}
+            SmtExpr::Not(inner) => stack.push((&**inner, next)),
+            SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => stack.push((&**body, next)),
+            SmtExpr::Arith(_, l, r) | SmtExpr::Cmp(_, l, r) => {
+                stack.push((&**l, next));
+                stack.push((&**r, next));
+            }
+            SmtExpr::Bool(_, children) | SmtExpr::Apply(_, children) => {
+                for c in children {
+                    stack.push((c, next));
+                }
+            }
+            SmtExpr::Ite(c, t, e) => {
+                stack.push((&**c, next));
+                stack.push((&**t, next));
+                stack.push((&**e, next));
+            }
+        }
+    }
+    false
+}
+
 #[cfg(feature = "smt")]
 fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     use cvc5_rs::{Kind, Solver, TermManager};
@@ -144,6 +189,24 @@ fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     // check and the construction one bottom-up pass that returns the cvc5
     // sort it builds, so the two can no longer diverge: a term that reaches
     // `mk_term` is provably well-formed by construction.
+    //
+    // The bottom-up lowering and the `contains_*` logic-selection walks are
+    // RECURSIVE on `SmtExpr` depth; a pathologically deep tree overflows the
+    // stack, which aborts the process (SIGABRT) the same way a malformed term
+    // does -- and it happens on the way DOWN, before any `mk_term` check runs.
+    // Bound the depth FIRST, with an iterative check that cannot itself
+    // overflow, so every later recursive walk runs on a bounded tree (RT6
+    // round-2).
+    if smt_expr_exceeds_depth(&property.postcondition, MAX_SMT_EXPR_DEPTH)
+        || property
+            .preconditions
+            .iter()
+            .any(|p| smt_expr_exceeds_depth(p, MAX_SMT_EXPR_DEPTH))
+    {
+        return TierBResult::Error(format!(
+            "property nests deeper than {MAX_SMT_EXPR_DEPTH} levels (routes to Tier C)"
+        ));
+    }
 
     let tm = TermManager::new();
     let mut solver = Solver::new(&tm);
@@ -1605,6 +1668,64 @@ mod tests {
         assert!(
             matches!(solve_property(&prop, 5000), TierBResult::Error(_)),
             "a non-Bool precondition must be a clean Error, not a cvc5 abort"
+        );
+    }
+
+    /// A pathologically deep property. The recursive lowering and the
+    /// `contains_*` logic-selection walks would overflow the stack (SIGABRT,
+    /// not a returned result) on a deep-enough tree -- an abort on the way
+    /// DOWN, before any mk_term check runs. The iterative depth bound routes
+    /// it to a clean Error. The shallow twin still proves, confirming the
+    /// bound is far above realistic predicates (RT6 round-2).
+    #[test]
+    fn rt6_deeply_nested_property_is_clean_error_not_stack_overflow() {
+        // 5000 nested `not`, far past the depth bound and the overflow point.
+        let mut deep = SmtExpr::Cmp(
+            CmpOp::Ge,
+            Box::new(SmtExpr::Arith(
+                ArithOp::Mul,
+                Box::new(SmtExpr::Var("x".to_string())),
+                Box::new(SmtExpr::Var("x".to_string())),
+            )),
+            Box::new(SmtExpr::RealLit(0.0)),
+        );
+        for _ in 0..5000 {
+            deep = SmtExpr::Not(Box::new(deep));
+        }
+        let prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: deep,
+        };
+        // Reaching this assertion at all proves no stack overflow occurred.
+        assert!(
+            matches!(solve_property(&prop, 5000), TierBResult::Error(_)),
+            "a property past the depth bound must be a clean Error, not a stack-overflow abort"
+        );
+
+        // A shallow nesting (8 `not`) is well under the bound and still proves
+        // (not(not(...(x*x >= 0))) with an even count is x*x >= 0).
+        let mut shallow = SmtExpr::Cmp(
+            CmpOp::Ge,
+            Box::new(SmtExpr::Arith(
+                ArithOp::Mul,
+                Box::new(SmtExpr::Var("x".to_string())),
+                Box::new(SmtExpr::Var("x".to_string())),
+            )),
+            Box::new(SmtExpr::RealLit(0.0)),
+        );
+        for _ in 0..8 {
+            shallow = SmtExpr::Not(Box::new(shallow));
+        }
+        let prop_shallow = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: shallow,
+        };
+        assert_eq!(
+            solve_property(&prop_shallow, 5000),
+            TierBResult::Proved,
+            "a shallow nesting must still prove at the SMT tier"
         );
     }
 }
