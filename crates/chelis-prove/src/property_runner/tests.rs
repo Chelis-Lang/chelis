@@ -269,7 +269,10 @@ fn f6_deep_invalid_source_kind_is_error() {
 "#;
     let opts = PropertyRunOptions::default();
     let result = run_deep_source_properties(source, &opts);
-    assert!(result.is_err(), "an invalid property_source_kind must error: {result:?}");
+    assert!(
+        result.is_err(),
+        "an invalid property_source_kind must error: {result:?}"
+    );
 }
 
 /// A `bridge:c-earchin` property is SKIPPED by the shared runner (the CLI
