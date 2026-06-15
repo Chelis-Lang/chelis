@@ -23,6 +23,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove-obligation review-5 fixes -->
+- The signed-integer-width decision is now genuinely single-source across
+  every prove site (review 5). The type system owns the int-width set
+  (`chelis_types::types::Prim::is_integer`), the per-width representable
+  range (`Prim::integer_range`), and the fuzz-sampling window
+  (`Prim::integer_fuzz_bounds`); the prove layer's `is_int_width` /
+  `int_sample_bounds` are thin name-keyed wrappers, and every recognition /
+  sort / sampling / literal site (the obligation engine's `sample_scalar` +
+  `scalar_lit`, the property runner's `sample_value` + `unsupported_type`,
+  the injection path's `classify_binder` + `sample_scalar` + `scalar_lit`,
+  the opaque record-value `int_lit`, and the CLI's `unsupported_type` +
+  `sample_value`) routes through them. Previously several sites spelled the
+  width set independently and admitted only int32/int64, so an int8/int16
+  field, param, or constant was sampled as a float or built as a mistyped
+  literal -- now every width samples as a width-clamped integer (an int8 in
+  [-128, 127]) and builds a correctly-cast literal everywhere.
 - Tier B now gates lowering with a WHITELIST instead of a blacklist
   (`chelis_prove::tier_b::is_cvc5_lowerable`): a property is lowered to
   cvc5 ONLY IF every node is provably cvc5-safe (known, matching operand

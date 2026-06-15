@@ -545,11 +545,13 @@ fn unsupported_property_params(params: &[Param]) -> Option<String> {
 
 fn unsupported_type(ty: &TypeExpr) -> Option<String> {
     match ty {
+        // The supported scalar set: bool / f32 / f64 / string, plus EVERY
+        // signed integer width recognized through the single-source
+        // `is_int_width` (review 5), so the supported-type gate and the
+        // sampler agree on which integer widths are admissible.
         TypeExpr::Named(name, _)
-            if matches!(
-                name.as_str(),
-                "bool" | "int8" | "int16" | "int32" | "int64" | "f32" | "f64" | "string"
-            ) =>
+            if matches!(name.as_str(), "bool" | "f32" | "f64" | "string")
+                || crate::opaque::is_int_width(name) =>
         {
             None
         }
@@ -593,12 +595,17 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
                 serde_json::json!(value),
             ))
         }
-        TypeExpr::Named(type_name, _)
-            if matches!(type_name.as_str(), "int8" | "int16" | "int32" | "int64") =>
-        {
-            let value = rng.next_i64(-1000, 1000);
+        // Every signed integer width, recognized through the single-source
+        // `is_int_width` and sampled within the width's representable range
+        // via the single-source `int_sample_bounds` (review 5): an int8
+        // samples in [-128, 127], never an unrepresentable value.
+        TypeExpr::Named(type_name, _) if crate::opaque::is_int_width(type_name) => {
+            let (lo, hi) = crate::opaque::int_sample_bounds(type_name)
+                .expect("is_int_width implies int_sample_bounds");
+            let value = rng.next_i64(lo, hi);
             let lit = Expr::Lit(Literal::Int(value), sp);
             if type_name == "int32" {
+                // int32 is the integer-literal default; no cast needed.
                 Ok(scalar_sample(
                     name,
                     lit,

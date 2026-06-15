@@ -24,20 +24,17 @@ use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 /// flattening cap).
 pub const TIER_B_SCALAR_CAP: usize = 64;
 
-/// The integer primitive widths the prove layer treats as `SmtSort::Int`.
-/// This is the SINGLE source for the int-width set (F3 review-4
-/// unification): every site that decides "is this prim an integer" and
-/// "what SMT sort does it lower to" reads it (and [`prim_to_smt_sort`])
-/// rather than spelling out the widths independently, so the const
-/// recognizer, the field sort, and the producer-param sort can never
-/// disagree (which previously made an int8 constant lower as `IntLit`
-/// while an int8 field/param lowered as a Real-sorted var -- a sort
-/// mismatch that routed to Tier C).
-pub const INT_WIDTHS: &[&str] = &["int8", "int16", "int32", "int64"];
-
-/// Whether a primitive type name is one of the integer widths (F3).
+/// Whether a primitive type NAME is one of the signed integer widths (F3 /
+/// review-5). This defers to the type system's own integer recognizer
+/// ([`chelis_types::types::Prim::is_integer`]) so the int-width set has ONE
+/// definition for the whole workspace: a name is an int width iff it parses
+/// to a `Prim` the type system classifies as integer. Every prove-layer site
+/// that decides "is this prim an integer" / "what SMT sort" / "how to sample
+/// or build a literal" routes through this (and [`prim_to_smt_sort`] /
+/// [`int_sample_bounds`]), so a new integer width added to the type system
+/// cannot silently diverge across the prove paths.
 pub fn is_int_width(prim: &str) -> bool {
-    INT_WIDTHS.contains(&prim)
+    chelis_types::types::Prim::parse_name(prim).is_some_and(|p| p.is_integer())
 }
 
 /// The SMT sort a scalar primitive type lowers to (F3 single source). Every
@@ -64,14 +61,11 @@ pub fn prim_to_smt_sort(prim: &str) -> SmtSort {
 /// opaque-field integer sampling site. Returns `None` for a non-integer
 /// primitive.
 pub fn int_sample_bounds(prim: &str) -> Option<(i64, i64)> {
-    let (ty_min, ty_max): (i64, i64) = match prim {
-        "int8" => (i8::MIN as i64, i8::MAX as i64),
-        "int16" => (i16::MIN as i64, i16::MAX as i64),
-        "int32" => (i32::MIN as i64, i32::MAX as i64),
-        "int64" => (i64::MIN, i64::MAX),
-        _ => return None,
-    };
-    Some((ty_min.max(-1000), ty_max.min(1000)))
+    // The single workspace source for integer fuzz bounds is
+    // `Prim::integer_fuzz_bounds` (the per-width representable range clamped
+    // to the [-1000, 1000] convenience window); this is a thin name-keyed
+    // wrapper the prove paths call.
+    chelis_types::types::Prim::parse_name(prim)?.integer_fuzz_bounds()
 }
 
 /// A field of an opaque type's single record variant, in the V1 value
@@ -1579,12 +1573,16 @@ fn float_lit(v: f64, prim: &str) -> Expr {
         lit
     }
 }
+/// A width-appropriate integer literal for a record field value: int32 is
+/// the literal default; any other integer width casts an int32 literal to
+/// the target width (review 5), so an int8/int16/int64 field value is
+/// well-typed rather than a bare int32 literal that mismatches the field.
 fn int_lit(v: i64, prim: &str) -> Expr {
     let lit = typed_lit("int32", Expr::Atom(Atom::Int(v), span0()));
-    if prim == "int64" {
-        node("cast", vec![lit, node("t-prim", vec![sym("int64")])])
-    } else {
+    if prim == "int32" {
         lit
+    } else {
+        node("cast", vec![lit, node("t-prim", vec![sym(prim)])])
     }
 }
 fn bool_lit(v: bool) -> Expr {

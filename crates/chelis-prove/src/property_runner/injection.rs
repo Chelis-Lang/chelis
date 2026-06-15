@@ -237,7 +237,10 @@ enum Binder {
 fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> Option<Binder> {
     match p.ty.as_ref()? {
         TypeExpr::Named(name, _) => {
-            if matches!(name.as_str(), "f32" | "f64" | "int32" | "int64" | "bool") {
+            // A scalar binder: f32/f64/bool, or ANY signed integer width
+            // recognized through the single-source `is_int_width` (review 5).
+            if matches!(name.as_str(), "f32" | "f64" | "bool") || crate::opaque::is_int_width(name)
+            {
                 Some(Binder::Scalar {
                     name: p.name.clone(),
                     prim: name.clone(),
@@ -400,8 +403,13 @@ fn conjoin(exprs: &[Expr]) -> Expr {
 // --- sampling ---
 
 fn sample_scalar(prim: &str, rng: &mut crate::opaque::GenRng) -> f64 {
+    // Integer widths sample within the width's representable range via the
+    // single-source `int_sample_bounds` (review 5).
+    if let Some((lo, hi)) = crate::opaque::int_sample_bounds(prim) {
+        let span = (hi - lo + 1) as u64;
+        return (lo + (rng.next_u64() % span) as i64) as f64;
+    }
     match prim {
-        "int32" | "int64" => (rng.next_u64() % 2001) as f64 - 1000.0,
         "bool" => (rng.next_u64() & 1) as f64,
         _ => rng_f64(rng),
     }
@@ -441,15 +449,19 @@ fn typed_lit(prim: &str, value: Expr) -> Expr {
     )
 }
 fn scalar_lit(prim: &str, v: f64) -> Expr {
+    // Integer widths recognized through the single-source `is_int_width`
+    // (review 5): int32 is the literal default; the other widths cast an
+    // int32 literal to the target width, so an int8/int16/int64 binder value
+    // is a well-typed integer rather than a silently-mistyped float.
+    if crate::opaque::is_int_width(prim) {
+        let lit = typed_lit("int32", Expr::Atom(Atom::Int(v as i64), span0()));
+        return if prim == "int32" {
+            lit
+        } else {
+            node("cast", vec![lit, node("t-prim", vec![sym(prim)])])
+        };
+    }
     match prim {
-        "int32" => typed_lit("int32", Expr::Atom(Atom::Int(v as i64), span0())),
-        "int64" => node(
-            "cast",
-            vec![
-                typed_lit("int32", Expr::Atom(Atom::Int(v as i64), span0())),
-                node("t-prim", vec![sym("int64")]),
-            ],
-        ),
         "bool" => typed_lit("bool", Expr::Atom(Atom::Bool(v != 0.0), span0())),
         "f64" => node(
             "cast",

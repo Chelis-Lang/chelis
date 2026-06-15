@@ -1223,12 +1223,19 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
     }
 }
 
-/// Build a typed scalar literal Deep expr for a producer argument.
+/// Build a typed scalar literal Deep expr for a producer argument. Integer
+/// widths are recognized through the single-source `is_int_width` (review
+/// 5) and built width-appropriately: int32 is the literal default, the
+/// other widths cast an int32 literal to the target width (matching the
+/// generator's `int_lit`), so an int8/int16/int64 producer argument is a
+/// well-typed integer, not a silently-mistyped float.
 fn scalar_lit(prim: &str, v: f64) -> Expr {
-    match prim {
-        "int32" | "int64" => deep_int_lit(v as i64),
-        "bool" => deep_bool_lit(v != 0.0),
-        _ => deep_float_lit(v),
+    if crate::opaque::is_int_width(prim) {
+        deep_int_lit_for(v as i64, prim)
+    } else if prim == "bool" {
+        deep_bool_lit(v != 0.0)
+    } else {
+        deep_float_lit(v)
     }
 }
 
@@ -1266,8 +1273,13 @@ fn producer_param_names(exprs: &[Expr], producer: &str) -> Vec<String> {
 }
 
 fn sample_scalar(kind: &str, rng: &mut Lcg) -> f64 {
+    // Integer widths sample within the width's representable range via the
+    // single-source `int_sample_bounds` (review 5): an int8 producer arg
+    // samples in [-128, 127], never an unrepresentable value.
+    if let Some((lo, hi)) = crate::opaque::int_sample_bounds(kind) {
+        return rng.next_i64(lo, hi) as f64;
+    }
     match kind {
-        "int32" | "int64" => rng.next_i64(-1000, 1000) as f64,
         "bool" => {
             if rng.next_bool() {
                 1.0
@@ -1311,8 +1323,16 @@ fn deep_typed_lit(type_prim: &str, value: Expr) -> Expr {
 fn deep_float_lit(v: f64) -> Expr {
     deep_typed_lit("f32", Expr::Atom(Atom::Float(v), Span::new(0, 0)))
 }
-fn deep_int_lit(v: i64) -> Expr {
-    deep_typed_lit("int32", Expr::Atom(Atom::Int(v), Span::new(0, 0)))
+/// A width-appropriate integer literal Deep expr: an int32 literal for the
+/// default width, otherwise an int32 literal cast to the target width
+/// (review 5). `prim` must be an integer width (`is_int_width`).
+fn deep_int_lit_for(v: i64, prim: &str) -> Expr {
+    let lit = deep_typed_lit("int32", Expr::Atom(Atom::Int(v), Span::new(0, 0)));
+    if prim == "int32" {
+        lit
+    } else {
+        deep_node("cast", vec![lit, deep_node("t-prim", vec![deep_sym(prim)])])
+    }
 }
 fn deep_bool_lit(v: bool) -> Expr {
     deep_typed_lit("bool", Expr::Atom(Atom::Bool(v), Span::new(0, 0)))

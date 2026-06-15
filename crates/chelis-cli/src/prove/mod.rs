@@ -448,13 +448,20 @@ fn unsupported_property_params(params: &[Param]) -> Option<String> {
     None
 }
 
+/// Whether a primitive type name is a signed integer width, via the type
+/// system's single-source recognizer (review 5): a name is an int width iff
+/// it parses to a `Prim` the type system classifies as integer.
+fn is_int_width(name: &str) -> bool {
+    chelis_types::types::Prim::parse_name(name).is_some_and(|p| p.is_integer())
+}
+
 fn unsupported_type(ty: &TypeExpr) -> Option<String> {
     match ty {
+        // bool / f32 / f64 / string, plus EVERY signed integer width
+        // recognized through the type system (review 5), so the supported-
+        // type gate and the sampler agree on the admissible integer widths.
         TypeExpr::Named(name, _)
-            if matches!(
-                name.as_str(),
-                "bool" | "int32" | "int64" | "f32" | "f64" | "string"
-            ) =>
+            if matches!(name.as_str(), "bool" | "f32" | "f64" | "string") || is_int_width(name) =>
         {
             None
         }
@@ -499,21 +506,29 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
                 json!(value),
             ))
         }
-        TypeExpr::Named(type_name, _) if type_name == "int32" || type_name == "int64" => {
-            let value = rng.next_i64(-1000, 1000);
+        // Every signed integer width, recognized through the type system and
+        // sampled within the width's representable range via the single
+        // workspace source `Prim::integer_fuzz_bounds` (review 5). int32 is
+        // the literal default; the other widths cast an int32 literal to the
+        // target width so the value is well-typed.
+        TypeExpr::Named(type_name, _) if is_int_width(type_name) => {
+            let (lo, hi) = chelis_types::types::Prim::parse_name(type_name)
+                .and_then(|p| p.integer_fuzz_bounds())
+                .expect("is_int_width implies integer_fuzz_bounds");
+            let value = rng.next_i64(lo, hi);
             let lit = Expr::Lit(Literal::Int(value), sp);
-            if type_name == "int64" {
+            if type_name == "int32" {
                 Ok(scalar_sample(
                     name,
-                    cast_expr(lit, "int64"),
-                    deep_lit(deep_int(value), "int64"),
+                    lit,
+                    deep_lit(deep_int(value), "int32"),
                     json!(value),
                 ))
             } else {
                 Ok(scalar_sample(
                     name,
-                    lit,
-                    deep_lit(deep_int(value), "int32"),
+                    cast_expr(lit, type_name),
+                    deep_lit(deep_int(value), type_name),
                     json!(value),
                 ))
             }
