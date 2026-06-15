@@ -22,6 +22,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+<!-- opaque-types prove-obligation review-4 fixes -->
+- The Tier B sort pre-check no longer lets a `min`/`max` over a mixed
+  Int-vs-Real operand pair abort the cvc5 process (F1). cvc5 lowers
+  `min`/`max` to an internal `ITE(LT(a,b),a,b)` that aborts on mismatched
+  operand sorts; the pre-check now clash-checks all `min`/`max` operands
+  pairwise (and the two branches of an `ITE`), and infers a `min`/`max`
+  result sort from its operands, so a mixed-sort intrinsic routes the
+  whole property to a clean Tier-C result rather than crashing the prove
+  process. A sound all-Int or all-Real `min`/`max` still proves at Tier B.
+- The Tier B sort pre-check no longer spuriously routes `neg` of an
+  integer to Tier C (F2). Unary `neg` is represented with a dummy real
+  placeholder second operand that cvc5 ignores; the pre-check now skips
+  the placeholder, so `neg(int_field)` proves at Tier B.
+
 <!-- opaque-types prove-obligation unification (review 3) -->
 - User `@property` verification now runs through ONE shared property
   runner (`chelis_prove::property_runner`) that BOTH the CLI prove path
