@@ -41,7 +41,7 @@ pub trait Solver {
 ///
 /// Produced by the predicate lowering pass (`lower.rs`), consumed by
 /// solver-specific backends.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SmtExpr {
     /// Real-valued variable.
     Var(String),
@@ -69,7 +69,7 @@ pub enum SmtExpr {
     Ite(Box<SmtExpr>, Box<SmtExpr>, Box<SmtExpr>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ArithOp {
     Add,
     Sub,
@@ -78,7 +78,7 @@ pub enum ArithOp {
     Neg,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CmpOp {
     Lt,
     Le,
@@ -88,14 +88,14 @@ pub enum CmpOp {
     Ne,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BoolOp {
     And,
     Or,
     Implies,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SmtSort {
     Real,
     Int,

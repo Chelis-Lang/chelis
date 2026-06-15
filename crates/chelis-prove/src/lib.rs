@@ -23,6 +23,7 @@ pub mod tier_a;
 pub mod tier_b;
 pub mod tier_b_lower;
 pub mod tier_c;
+pub mod worker;
 
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
 pub use concrete_eval::{eval_arith, eval_bool};
@@ -33,3 +34,4 @@ pub use dispatch::{DispatchOptions, dispatch_property};
 pub use from_property_spec::{PropertySpecInput, to_dispatch_amenability, to_smt_property};
 pub use inlineability::{Fuzzability, Inlineability, classify_fuzzability, classify_inlineability};
 pub use tier_b::{SmtProperty, solve_property};
+pub use worker::{enable_isolation, run_worker_if_requested};

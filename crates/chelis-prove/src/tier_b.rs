@@ -31,7 +31,7 @@ pub enum TierBResult {
 }
 
 /// Structured property input for SMT solving.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SmtProperty {
     /// Variable names and their sorts.
     pub variables: Vec<(String, SmtSort)>,
@@ -64,7 +64,19 @@ pub fn solve(_property_source: &str, _property_name: &str, _timeout_ms: u64) -> 
 pub fn solve_property(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     #[cfg(feature = "smt")]
     {
-        solve_property_cvc5(property, timeout_ms)
+        // When a production host has enabled isolation (only the `chelis`
+        // binary does, via `chelis_prove::enable_isolation`), run cvc5 in a
+        // short-lived CHILD process so that ANY way the solve can take the
+        // process down -- a cvc5 C++ abort on a term the in-process guards
+        // somehow still admit, a cvc5-internal assertion on a well-formed
+        // formula, a stack overflow, an OOM kill, a panic -- becomes a clean
+        // Tier C result in the parent instead of a bare process exit. Tests
+        // do not enable isolation, so they solve in-process (no spawn).
+        if crate::worker::isolation_enabled() {
+            crate::worker::solve_property_isolated(property, timeout_ms)
+        } else {
+            solve_property_cvc5(property, timeout_ms)
+        }
     }
     #[cfg(not(feature = "smt"))]
     {
@@ -183,8 +195,11 @@ fn smt_name_is_cvc5_safe(name: &str) -> bool {
     !name.as_bytes().contains(&0)
 }
 
+/// Solve a property IN-PROCESS with cvc5. This is the function the isolation
+/// worker child actually runs; the parent reaches it only when isolation is
+/// disabled (every test, and any non-`chelis` host that does not opt in).
 #[cfg(feature = "smt")]
-fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
+pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     use cvc5_rs::{Kind, Solver, TermManager};
     use std::collections::HashMap;
 

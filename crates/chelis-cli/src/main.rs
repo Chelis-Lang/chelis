@@ -531,6 +531,17 @@ enum ReefCommand {
 }
 
 fn main() {
+    // Tier B process isolation: if this process was spawned as a prove worker,
+    // run one cvc5 solve and exit before doing anything else; otherwise enable
+    // isolation so every Tier B solve runs in a short-lived child whose crash
+    // (cvc5 C++ abort, stack overflow, OOM, panic) becomes a clean Tier C
+    // result instead of taking the `chelis` process down. smt-only -- without
+    // the feature there is no cvc5 and nothing to isolate.
+    #[cfg(feature = "smt")]
+    {
+        chelis_prove::run_worker_if_requested();
+        chelis_prove::enable_isolation();
+    }
     chelis_ir::lower::install_chelis_panic_hook();
     let cli = Cli::parse();
     let result = match cli.command {

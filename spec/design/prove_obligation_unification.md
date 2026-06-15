@@ -160,7 +160,16 @@ capability. Because tide and the capability-enabled CLI compute their
 verdict from the SAME runner, they agree by construction (test-locked
 parity).
 
-## W5 -- the Tier B whitelist invariant (supersedes the U3 blacklist)
+## W5 -- the Tier B whitelist invariant (supersedes the U3 blacklist; itself superseded by RT6 below)
+
+> SUPERSEDED by RT6 (total lowering + process isolation). The separate
+> `is_cvc5_lowerable` gate described here was DELETED: a sixth review proved
+> a separate sort gate and the term builder are two enumerations of cvc5's
+> rules that diverge (the gate checked sorts but not arity, so it ADMITTED an
+> empty/single-child `and`/`or`, a non-binary `implies`, an integer `/`
+> feeding a comparison, and a non-finite literal, all of which the builder
+> then aborted cvc5 on). RT6 folds the check into the builder. This section
+> is kept for history.
 
 Invariant: **Tier B lowers only provably-safe terms; anything else routes
 to Tier C; lowering never aborts cvc5.**
@@ -222,6 +231,56 @@ wrappers, and every recognition / sort / sampling / literal site routes
 through them, so an `int8`/`int16` field, param, or constant is handled
 identically to `int32`/`int64` everywhere.
 
+## RT6 -- total lowering + process isolation (supersedes the W5 whitelist)
+
+A sixth review found the W5 whitelist gate (`is_cvc5_lowerable`) and the
+term builder (`lower_to_cvc5`) were TWO enumerations of cvc5's requirements
+that DIVERGED: the gate checked operand SORTS but not cvc5's ARITY /
+kind-domain rules, so it ADMITTED terms the builder then aborted cvc5 on.
+The fix has two layers.
+
+### Layer 1 -- the lowering is TOTAL with respect to aborts
+
+The separate gate is DELETED. `lower_to_cvc5` now returns `(Term, SmtSort)`
+and is the SOLE authority: it is one bottom-up pass where every `mk_term`
+call site verifies cvc5's requirement for that kind FIRST -- operand sorts
+AND arity -- and returns `Err` (routed to a clean Tier C result) rather
+than handing cvc5 an aborting term. Because the sort it returns is the sort
+cvc5 actually builds (e.g. integer `/` reports `Real`, since cvc5 promotes
+it), a parent node's check sees the truth and can no longer diverge from
+the construction. Degenerate connective arities normalize to their logical
+identity (empty `and` -> true, empty `or` -> false, single-child -> the
+child) so a single-conjunct invariant still proves at the SMT tier rather
+than aborting or regressing to Tier C; `implies` requires exactly 2.
+Additional guards at their call sites: a non-finite `RealLit` (cvc5
+`mk_real_from_str` aborts on `inf`/`NaN`); an empty quantifier binder list
+(`mk_term(VARIABLE_LIST, &[])` aborts -- normalized to the body, since
+`forall (). P == P`); a non-Bool precondition / postcondition (cvc5
+`assert_formula` / `NOT` abort on a non-Bool); an interior-NUL
+variable/binder name (cvc5-rs `CString::new(...).unwrap()` PANICS); and an
+`SmtExpr` deeper than `MAX_SMT_EXPR_DEPTH` (the recursive walks overflow the
+stack -> SIGABRT), bounded by an ITERATIVE check at the entry that cannot
+itself overflow.
+
+### Layer 2 -- process isolation (the residual)
+
+cvc5 fails by PROCESS ABORT, which cannot be caught in-process, so Layer 1
+closes every KNOWN cause but cannot PROVE no unknown cvc5-internal abort
+remains. `chelis_prove::worker` makes it moot: the `chelis` binary's `main`
+calls `enable_isolation()`, and `solve_property` then runs every cvc5 solve
+in a short-lived CHILD process (a re-exec of `current_exe` carrying the
+`CHELIS_PROVE_WORKER` marker, fed a bincode-encoded `SmtProperty` over
+stdin, returning a result over stdout). ANY way the child can fail -- a
+cvc5 C++ abort, a cvc5-internal assertion on a well-formed formula, a stack
+overflow, an OOM kill, a panic, a hang past the deadline -- becomes a clean
+`TierBResult::Error`/`Unknown` in the parent (routed to Tier C); the
+`chelis` process is never taken down by a solve. Isolation is opt-in: only
+a host that calls `enable_isolation` spawns workers, so tests solve
+in-process (no spawn) and exercise the Layer-1 lowering directly, while the
+end-to-end isolated path -- including recovery from a worker that
+aborts/panics/overflows on every solve -- is locked by the
+`prove_isolation` integration test running the real `chelis` binary.
+
 ## Acceptance oracle
 
 Authoritative completion oracle for this rework:
@@ -234,7 +293,11 @@ cargo nextest run -p chelis-tide  --features smt
 
 all green, with the new red-tests below passing. The full repo gate
 (`scripts/gate.py`) plus `cargo build -p chelis-cli --features smt` must
-also be green.
+also be green. The RT6 process-isolation acceptance is the
+`prove_isolation` integration test (under the `chelis-cli --features smt`
+run above): the baseline proves obligations at the SMT tier through the
+worker, and a worker forced to abort / panic / overflow on every solve must
+leave the parent alive with obligations fallen to Tier C.
 
 ## Test matrix (union of all three reviews)
 

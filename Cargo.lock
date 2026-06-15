@@ -588,6 +588,7 @@ dependencies = [
 name = "chelis-prove"
 version = "0.7.21"
 dependencies = [
+ "bincode",
  "chelis-compiler-api",
  "chelis-deep",
  "chelis-pred",
