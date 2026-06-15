@@ -15,7 +15,7 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis eval` runs the host/runtime evaluator. `chelis eval --file`
   accepts both `.ch` and `.dp` inputs.
 - `chelis test` discovers and runs Chelis-native Reef package tests.
-- `chelis prove` discovers and runs Level 2 executable properties.
+- `chelis prove` discovers and runs executable properties.
 - `chelis validate` runs the executable-grammar validator on the input.
 - `chelis build` emits C or HIP source plus runtime artifacts and compile flags.
 - `chelis tide` exposes the HTTP/MCP tooling surface.
@@ -26,9 +26,9 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 `chelis eval --file` enforce a **style gate** on the input file before
 the front-end pipeline runs. The gate is two checks in one:
 
-1. **Formatter check** — the file must be byte-identical to its
+1. **Formatter check**: the file must be byte-identical to its
    canonical re-print (the same comparison `chelis fmt --check` does).
-2. **Lint check** — the file must pass every `chelis lint` rule that
+2. **Lint check**: the file must pass every `chelis lint` rule that
    applies to its surface in the blocking rule registry.
 
 A failure prints a one-line-per-issue diagnostic to stderr and exits
@@ -41,7 +41,7 @@ error: app.ch: not canonically formatted; run `chelis fmt --inplace app.ch` to f
 ```
 
 The gate runs only on the user-supplied source. Reef-imported library
-decls are not re-checked here — they were already gated when the
+decls are not re-checked here. They were already gated when the
 package was published.
 
 Advisory lint rules are not part of the style gate. They may print as
@@ -53,9 +53,9 @@ warnings on user-facing commands, but they do not block `build`,
 | Surface | Bypass | When to use |
 |---|---|---|
 | `--allow-style-violations` (CLI flag) | Per-command opt-out; logs a stderr warning. | Emergency local builds and one-off migrations. **CI must not pass this flag.** |
-| `CHELIS_STYLE_GATE_DISABLE=1` (env var) | Process-wide opt-out. | The integration-test corpus only — used by tests that synthesize ad-hoc Surf to exercise pipeline behavior independently of style. **Not for production builds or end-user scripts.** |
+| `CHELIS_STYLE_GATE_DISABLE=1` (env var) | Process-wide opt-out. | The integration-test corpus only, used by tests that synthesize ad-hoc Surf to exercise pipeline behavior independently of style. **Not for production builds or end-user scripts.** |
 
-`chelis eval EXPR` (the inline-expression form) is unaffected — there
+`chelis eval EXPR` (the inline-expression form) is unaffected. There
 is no on-disk source to canonicalize, so the gate does not apply.
 
 `--allow-style-violations` bypasses only the style gate. It does not
@@ -141,8 +141,7 @@ With no path, discovery scans the current package's `properties/**/*.ch` and
 `src/**/*.ch`, skipping `tests/`, hidden directories, `target/`, `dist/`, and
 dependency trees. Explicit `.ch` inputs discover properties only in that file;
 imports are for name resolution, not discovery. Explicit `.dp` inputs are
-validated first, then scanned for canonical `chelis_role: "property"` metadata
-or legacy `c_earchin_role: "property_witness"` metadata.
+validated first, then scanned for canonical `chelis_role: "property"` metadata.
 
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.

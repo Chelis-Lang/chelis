@@ -10,8 +10,8 @@ lockfile records.
 Chelis distinguishes a single **runtime** from a family of substitutable
 **shells**:
 
-- `chelis-std` is the language **runtime**. It is compiler-bundled —
-  every Chelis program depends on it implicitly the same way a Rust
+- `chelis-std` is the language **runtime**. It is compiler-bundled.
+  Every Chelis program depends on it implicitly the same way a Rust
   program depends on `core`/`std`. It version-marches with the
   toolchain and is **never** installed via reef.
 - The four canonical shells are `nautilus`, `coral`, `shoals`, and
@@ -31,12 +31,12 @@ Every reef package has a `reef.toml`:
 ```toml
 [package]
 name = "demo"
-version = "0.1.0"
-compiler = "=0.5.0"
+version = "<version>"
+compiler = "=<version>"
 module_prefix = "Demo"
 
 [dependencies]
-nautilus = { version = "0.5.0" }
+nautilus = { version = "<version>" }
 ```
 
 Package source normally lives under `src/`. Module declarations should line up with the
@@ -45,7 +45,7 @@ declare a module under `Demo.Nn.Linear`.
 
 The `compiler =` pin is exact (no version ranges in this round) and
 implicitly declares the chelis-std runtime version: a project that
-pins `compiler = "=0.5.0"` automatically gets chelis-std at the
+pins an exact compiler version automatically gets chelis-std at the
 runtime version that compiler ships. You can also list `chelis-std`
 explicitly in `[dependencies]` (the installer soft-verifies that the
 declared version matches the bundled version, mismatches surface a
@@ -60,8 +60,8 @@ typed error), but it is never required.
 chelis reef install --from-monorepo <path>
 
 # Fetch a single shell from the canonical hosting org's GitHub
-# release. Authentication is required (canonical repos are private
-# pre-launch); GITHUB_TOKEN must be set or `gh auth token` must work.
+# release. Authentication is required (the canonical repos are
+# private); GITHUB_TOKEN must be set or `gh auth token` must work.
 chelis reef install --from-github <org>/<repo>@<tag>
 
 # Install a topo-ordered set of shells. With no arguments, uses the
@@ -90,13 +90,13 @@ ships with the compiler; there is no separate install step.
 
 Each shell's GitHub release attaches two assets per published version:
 
-- `<name>-<version>.tar.zst` — the source archive
-- `<name>-<version>.chb` — the prebuilt shell artifact
+- `<name>-<version>.tar.zst`: the source archive
+- `<name>-<version>.chb`: the prebuilt shell artifact
 
 Note the convention: the **tag** is `v<version>` (with the leading
 `v`), but the **asset filenames** are `<name>-<version>.{tar.zst,chb}`
 without the leading `v`. Both forms are accepted by the
-`<org>/<repo>@<tag>` parser (`@v0.5.0` and `@0.5.0` are equivalent).
+`<org>/<repo>@<tag>` parser (`@v<version>` and `@<version>` are equivalent).
 
 ## Auto-fetch During Build
 
@@ -117,9 +117,8 @@ chelis reef build
 ```
 
 Auto-fetch handles the rest. `GITHUB_TOKEN` is mandatory because the
-canonical-org shell repositories are private during the pre-launch era;
-the install path hard-fails with a clear error if no token is
-available.
+canonical-org shell repositories are private; the install path
+hard-fails with a clear error if no token is available.
 
 ## Lockfile
 
@@ -128,15 +127,15 @@ available.
 shell_sha256)`. The `source-kind` discriminator (`LockSource`) has
 three variants:
 
-- `Path` — a path-source dependency (rare; mostly for local development)
-- `LocalRegistry { remote_origin }` — installed from the local
+- `Path`: a path-source dependency (rare; mostly for local development)
+- `LocalRegistry { remote_origin }`: installed from the local
   registry. The optional `remote_origin` records where the bytes were
   originally fetched from, in scheme-tagged URI form (currently
-  `github://<org>/<repo>@<tag>`); pre-Item-9 lockfiles omit the field
-  and round-trip cleanly without it.
-- `Bundled { compiler_version }` — the chelis-std runtime, served
+  `github://<org>/<repo>@<tag>`); lockfiles that omit the field
+  round-trip cleanly without it.
+- `Bundled { compiler_version }`: the chelis-std runtime, served
   from the compiler binary's embedded bundle. Recorded for
-  auditability — a lockfile reader can see which compiler version
+  auditability, so a lockfile reader can see which compiler version
   supplied the runtime bytes.
 
 **Project-driven blanket synthesis:** every reef.toml's `compiler =`
@@ -169,12 +168,12 @@ chelis reef build
 
 ## Environment Variables
 
-- `CHELIS_REEF_HOME` — local registry root. Default is
+- `CHELIS_REEF_HOME`: local registry root. Default is
   `~/.chelis/reef`.
-- `GITHUB_TOKEN` — required for any remote fetch
+- `GITHUB_TOKEN`: required for any remote fetch
   (`--from-github`, `--bootstrap`, auto-fetch during build). Falls
   back to `gh auth token` if unset.
-- `CHELIS_REEF_GITHUB_BASE_API`, `CHELIS_REEF_GITHUB_BASE` —
+- `CHELIS_REEF_GITHUB_BASE_API`, `CHELIS_REEF_GITHUB_BASE`:
   test-fixture overrides for the GitHub API and download base URLs.
   Production use defaults to `https://api.github.com` and
   `https://github.com` respectively.
@@ -188,9 +187,9 @@ without corrupting the registry.
 
 ## See Also
 
-- `spec/design/reef_distribution.md` — full distribution design,
+- `spec/design/reef_distribution.md`: full distribution design,
   including error categories and acceptance oracles.
-- `spec/design/chelis_canonical_reference.md` §5 — runtime-vs-shell
+- `spec/design/chelis_canonical_reference.md` §5: runtime-vs-shell
   distinction and the canonical shell roster.
-- `spec/design/phase3j_pre_release.md` — release contract and
+- `spec/design/phase3j_pre_release.md`: release contract and
   downstream pinning policy.
