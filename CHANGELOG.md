@@ -22,6 +22,24 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+<!-- opaque-types prove-obligation review-5 fixes -->
+- Tier B now gates lowering with a WHITELIST instead of a blacklist
+  (`chelis_prove::tier_b::is_cvc5_lowerable`): a property is lowered to
+  cvc5 ONLY IF every node is provably cvc5-safe (known, matching operand
+  sorts; transcendentals over Real arguments; quantifier bound vars seeded
+  into the sort environment), and anything else routes to Tier C. The old
+  pre-checks enumerated known aborting shapes and kept missing siblings;
+  three more abort shapes survived (a transcendental over an Int argument,
+  a Bool-vs-Int comparison, a quantifier whose bound-var sort mismatched a
+  literal). Because the whitelist default is NOT-lowerable, any shape no
+  review enumerated routes to Tier C automatically, so `lower_to_cvc5` is
+  only ever called on a provably-safe property and never aborts the cvc5
+  process (empty-stdout bare exit). The blacklist (`check_operand_sorts`,
+  `definitely_mixed`) and the separate arity guard (`validate_smt_arity`)
+  are subsumed by the single gate. Quantifier lowering now uses cvc5 bound
+  variables (`mk_var`) and selects a quantified (non-`QF_`) logic, so an
+  admitted quantifier lowers cleanly instead of aborting.
+
 <!-- opaque-types prove-obligation review-4 fixes -->
 - The CLI `.dp` path now runs USER `@property` declarations through the
   shared `chelis_prove::property_runner::run_deep_source_properties` -- the
