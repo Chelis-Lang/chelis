@@ -956,9 +956,8 @@ fn discover_deep_properties_expr(
                     .elements
                     .get(3)
                     .ok_or_else(|| format!("property `{name}` def is missing a fn body"))?;
-                let fn_params = deep_fn_params(fn_expr).ok_or_else(|| {
-                    format!("property `{name}` def body must be a callable `fn`")
-                })?;
+                let fn_params = deep_fn_params(fn_expr)
+                    .ok_or_else(|| format!("property `{name}` def body must be a callable `fn`"))?;
                 let params = if let Some(params) = deep_property_params(meta) {
                     if !params_match(&params, &fn_params) {
                         return Err(format!(
@@ -1008,10 +1007,7 @@ enum DeepSourceKind {
 /// absent or invalid `property_source_kind` (a malformed property is an
 /// error on BOTH surfaces, never silently skipped). The legacy
 /// `c_earchin_role` witness without an explicit kind defaults to Bridge.
-fn deep_property_source_kind(
-    meta: &MetaMap,
-    name: &str,
-) -> Result<Option<DeepSourceKind>, String> {
+fn deep_property_source_kind(meta: &MetaMap, name: &str) -> Result<Option<DeepSourceKind>, String> {
     let has_chelis = meta
         .entries
         .iter()
