@@ -16,7 +16,7 @@
 use std::path::Path;
 
 use chelis_prove::property_runner::{
-    PropertyOutcome, PropertyRunOptions, PropertyRunResult, PropertyStatus, PropertyTier,
+    PropertyOutcome, PropertyRunOptions, PropertyRunResult, PropertyTier,
     run_surf_source_properties,
 };
 use serde_json::json;
@@ -62,56 +62,31 @@ fn render_property(
     totals: &mut Summary,
 ) -> Status {
     totals.total += 1;
-    // A genuine pass is Passed with samples > 0 (fuzz) or an SMT proof
-    // (samples == 0, tier == Smt). A Passed-with-zero-fuzz sentinel is NOT a
-    // pass; bucket it as unsupported so it lowers the exit status and is
-    // visible (U4).
-    let bucket = if outcome.is_pass() {
-        Bucket::Passed
-    } else {
-        match outcome.status {
-            PropertyStatus::Failed => Bucket::Failed,
-            PropertyStatus::Unsupported => Bucket::Unsupported,
-            PropertyStatus::Error => Bucket::Error,
-            PropertyStatus::Passed => Bucket::Unsupported,
+    // The display status is the shared `is_pass`-bucketed label (F8): a
+    // zero-sample `Passed` sentinel is reported as "unsupported", matching
+    // the tide surface exactly. The exit/summary fold buckets off the same
+    // label, so CLI and tide agree on every property.
+    let label = outcome.display_status();
+    let status = match label {
+        "passed" => {
+            totals.passed += 1;
+            Status::Passed
+        }
+        "failed" => {
+            totals.failed += 1;
+            Status::Failed
+        }
+        "unsupported" => {
+            totals.unsupported += 1;
+            Status::Unsupported
+        }
+        _ => {
+            totals.errors += 1;
+            Status::Error
         }
     };
-    match bucket {
-        Bucket::Passed => totals.passed += 1,
-        Bucket::Failed => totals.failed += 1,
-        Bucket::Unsupported => totals.unsupported += 1,
-        Bucket::Error => totals.errors += 1,
-    }
-    emit(path, outcome, status_label(bucket), options);
-    bucket.status()
-}
-
-#[derive(Clone, Copy)]
-enum Bucket {
-    Passed,
-    Failed,
-    Unsupported,
-    Error,
-}
-
-impl Bucket {
-    fn status(self) -> Status {
-        match self {
-            Bucket::Passed => Status::Passed,
-            Bucket::Failed => Status::Failed,
-            Bucket::Unsupported => Status::Unsupported,
-            Bucket::Error => Status::Error,
-        }
-    }
-}
-
-fn status_label(bucket: Bucket) -> &'static str {
-    match bucket {
-        Bucket::Passed => "passed",
-        Bucket::Failed => "failed",
-        Bucket::Unsupported => "unsupported",
-        Bucket::Error => "error",
-    }
+    emit(path, outcome, label, options);
+    status
 }
 
 fn emit(path: &Path, outcome: &PropertyOutcome, status: &str, options: &ProveOptions<'_>) {

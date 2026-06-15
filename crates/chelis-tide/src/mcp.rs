@@ -456,19 +456,15 @@ fn handle_prove_tool(args: &Value) -> Value {
 }
 
 /// Render a property outcome into a JSON record (the same additive shape the
-/// CLI emits), so the cross-surface parity test can compare directly.
+/// CLI emits), so the cross-surface parity test can compare directly. The
+/// status is the `is_pass`-bucketed `display_status` (F8): a zero-sample
+/// `Passed` sentinel renders as "unsupported" exactly as the CLI does, so a
+/// property's reported status never diverges between the two surfaces.
 fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value {
-    use chelis_prove::property_runner::PropertyStatus;
-    let status = match o.status {
-        PropertyStatus::Passed => "passed",
-        PropertyStatus::Failed => "failed",
-        PropertyStatus::Unsupported => "unsupported",
-        PropertyStatus::Error => "error",
-    };
     let mut value = json!({
         "kind": "property",
         "name": o.name,
-        "status": status,
+        "status": o.display_status(),
         "proof_tier": o.proof_tier.as_str(),
         "samples": o.samples,
         "seed": o.seed,

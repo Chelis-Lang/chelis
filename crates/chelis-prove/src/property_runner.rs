@@ -82,6 +82,28 @@ impl PropertyOutcome {
         self.status == PropertyStatus::Passed
             && (self.proof_tier == PropertyTier::Smt || self.samples > 0)
     }
+
+    /// The display status label, bucketed through [`is_pass`] so a
+    /// zero-sample `Passed` sentinel renders as `"unsupported"` (not a
+    /// genuine pass) consistently across surfaces (F8 review-4). Both the
+    /// CLI's NDJSON render and the tide MCP JSON render use this single
+    /// method, so a property's reported status can never diverge between the
+    /// two surfaces.
+    pub fn display_status(&self) -> &'static str {
+        if self.is_pass() {
+            "passed"
+        } else {
+            match self.status {
+                PropertyStatus::Failed => "failed",
+                PropertyStatus::Unsupported => "unsupported",
+                PropertyStatus::Error => "error",
+                // A `Passed` that is NOT a genuine pass (zero-sample fuzz
+                // sentinel) is reported as unsupported -- it lowers the
+                // overall verdict and is visible, matching the fold.
+                PropertyStatus::Passed => "unsupported",
+            }
+        }
+    }
 }
 
 /// Options for a property run, mirroring the prove surface.

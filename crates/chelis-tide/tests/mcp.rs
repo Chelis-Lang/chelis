@@ -548,20 +548,74 @@ def square(x: f32) -> f32 = x * x
         "same property set across surfaces"
     );
 
-    use chelis_prove::property_runner::PropertyStatus;
     for (tide, eng) in tide_props.iter().zip(&engine) {
-        let expected = match eng.status {
-            PropertyStatus::Passed => "passed",
-            PropertyStatus::Failed => "failed",
-            PropertyStatus::Unsupported => "unsupported",
-            PropertyStatus::Error => "error",
-        };
+        // Compare against the is_pass-bucketed display status (F8), the same
+        // label the CLI render emits, so a zero-sample sentinel can never
+        // read "passed" on one surface and "unsupported" on the other.
         assert_eq!(
             tide["status"].as_str().unwrap(),
-            expected,
-            "same status per property across surfaces"
+            eng.display_status(),
+            "same display status per property across surfaces"
         );
     }
+}
+
+/// F8 (review 4): a zero-sample `@property` (a vacuous fuzz pass, NOT a
+/// genuine pass) must report status "unsupported" through tide -- matching
+/// the CLI's is_pass-bucketed render -- and lower `ok`. The tide render
+/// previously emitted the raw "passed" for the identical outcome.
+#[test]
+fn u4_f8_zero_sample_property_status_matches_cli() {
+    // `with samples = 0` makes the fuzz loop accept zero samples and return a
+    // Passed sentinel that is_pass() rejects.
+    let source = "module M
+@property vacuous forall(x: f32):
+  (x == x)
+  with samples = 0
+";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":40,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf","source": source, "tier":"fuzz-only"
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    let props = structured["properties"].as_array().expect("properties");
+    assert_eq!(props.len(), 1, "the property is discovered: {structured}");
+
+    // The shared runner's own verdict for the same module.
+    let chelis_prove::property_runner::PropertyRunResult::Ran(engine) =
+        chelis_prove::property_runner::run_surf_source_properties(
+            source,
+            &chelis_prove::property_runner::PropertyRunOptions {
+                tier: "fuzz-only".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("run");
+    assert_eq!(engine.len(), 1);
+    assert!(
+        !engine[0].is_pass(),
+        "a zero-sample fuzz outcome is NOT a genuine pass: {:?}",
+        engine[0]
+    );
+    assert_eq!(
+        engine[0].display_status(),
+        "unsupported",
+        "the zero-sample sentinel buckets as unsupported"
+    );
+    // Tide must report the same status, not the raw "passed".
+    assert_eq!(
+        props[0]["status"], "unsupported",
+        "tide reports the zero-sample sentinel as unsupported (matching the CLI): {structured}"
+    );
+    assert_eq!(
+        structured["ok"], false,
+        "a zero-sample property lowers ok: {structured}"
+    );
 }
 
 /// U4: the tide tool handles a Deep (`.dp`) module -- discovering user

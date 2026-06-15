@@ -23,6 +23,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 <!-- opaque-types prove-obligation review-4 fixes -->
+- Tide and the CLI now render a property's status through one shared
+  `is_pass`-bucketed `PropertyOutcome::display_status` (F8). The tide MCP
+  JSON previously rendered the raw status, so a zero-sample `Passed`
+  sentinel reported "passed" through tide while the CLI emitted
+  "unsupported" for the identical outcome. Both surfaces now report the
+  same status for every property.
 - The int-width to SMT-sort decision is now single source
   (`chelis_prove::opaque::prim_to_smt_sort` / `is_int_width` /
   `INT_WIDTHS`), consulted by every site (the opaque field sort, the
