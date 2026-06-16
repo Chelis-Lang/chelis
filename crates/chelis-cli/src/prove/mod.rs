@@ -922,9 +922,253 @@ fn prove_deep_file(
         let status = prove_deep_property(&exprs, &property, options, totals);
         file_status = combine_status(file_status, status);
     }
+    // Derived producer obligations (RFC D-OBLIG / D-PARITY) for the Deep
+    // surface. The Surf path (`prove_surf_file`) folds the SAME obligation
+    // engine in; without this the `.dp` surface runs ZERO producer-obligation
+    // verification, so a `.dp` opaque type declaring an `@invariant` and an
+    // UNSOUND producer would pass `chelis prove` silently. A `.dp` is already
+    // Deep, so it feeds the shared engine's Deep-program entry directly (no
+    // Surf parse/desugar) -- the SAME `run_module_obligations` the Surf source
+    // entry reaches after desugaring.
+    #[cfg(feature = "chelis-prove")]
+    {
+        let ob_status = run_deep_obligations(&exprs, options, totals);
+        file_status = combine_status(file_status, ob_status);
+    }
     #[cfg(not(feature = "smt"))]
     warn_obligations_skipped_without_smt(path, count_invariant_opaque_deep(&exprs));
     Ok(file_status)
+}
+
+/// Run every derived producer obligation discovered in a `.dp` module's Deep
+/// program (RFC D-OBLIG / D-PARITY). The `.dp` is already Deep, so it is fed
+/// to the shared `chelis_prove::obligation_engine` directly: the checker runs
+/// for inferred return types (a type-broken module is surfaced as an Error,
+/// never silent success -- RT3-F2 parity with the Surf path), then the SAME
+/// `run_module_obligations` the Surf source entry calls verifies each
+/// obligation. Outcomes are rendered as the additive NDJSON
+/// `{kind:"obligation", ...}` records and folded into the prove summary,
+/// byte-identically to the Surf path's `obligation_run::run_obligations`.
+#[cfg(feature = "chelis-prove")]
+fn run_deep_obligations(
+    exprs: &[DeepExpr],
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Status {
+    use chelis_prove::obligation_engine::{ObligationRunOptions, run_module_obligations};
+
+    // A `.dp` whose opaque type declares no invariant has nothing to verify;
+    // the engine returns an empty outcome set in that case anyway, but a
+    // type-check failure must surface as an Error (parity with RT3-F2), so we
+    // run the checker unconditionally when an invariant-carrying opaque type
+    // is present.
+    let sigs = match chelis_types::check_typed_program(exprs) {
+        Ok(checked) => checked
+            .signature_inference()
+            .functions
+            .iter()
+            .map(|(name, meta)| (name.clone(), meta.checked_signature.clone()))
+            .collect::<BTreeMap<_, _>>(),
+        // A type-broken module cannot have its obligations meaningfully
+        // verified (a rejectable producer can hide behind an unrelated type
+        // error): surface the check diagnostics and Error, never silent
+        // success. This mirrors `obligation_engine::run_surf_source_obligations`
+        // for the Surf surface.
+        Err(infer) => {
+            // No invariant-carrying opaque type => no obligations => a stray
+            // type error here is not an obligation concern (it is the user
+            // property / check pipeline's). Only escalate to an obligation
+            // Error when the module actually declares an invariant whose
+            // obligations we would otherwise be hiding.
+            if !deep_has_invariant_opaque(exprs) {
+                return Status::Passed;
+            }
+            let messages = infer
+                .errors
+                .iter()
+                .map(|err| err.message.clone())
+                .collect::<Vec<_>>();
+            emit_obligation_check_failure(options, &messages, totals);
+            return Status::Error;
+        }
+    };
+
+    let run_opts = ObligationRunOptions {
+        seed: options.seed.unwrap_or(0),
+        samples: options.samples.unwrap_or(100),
+        smt_timeout_ms: options.smt_timeout_ms,
+        tier: options.tier.to_string(),
+        only: options.only.map(str::to_string),
+        invariant_min_rate: options.invariant_min_rate,
+    };
+    let outcomes = run_module_obligations(exprs, &sigs, &run_opts);
+
+    let mut status = Status::Passed;
+    for outcome in &outcomes {
+        let s = render_obligation_outcome(outcome, options, totals);
+        status = combine_status(status, s);
+    }
+    status
+}
+
+/// Whether the Deep program declares at least one invariant-carrying opaque
+/// type, via the SHARED collector the obligation engine uses (so the
+/// "should this type error escalate to an obligation Error" decision agrees
+/// with what the engine would have collected). Used only to decide whether a
+/// type-check failure is an obligation concern.
+#[cfg(feature = "chelis-prove")]
+fn deep_has_invariant_opaque(exprs: &[DeepExpr]) -> bool {
+    !chelis_prove::opaque::collect_opaque_invariants(exprs).is_empty()
+}
+
+/// Emit a module type-check failure as a prove error record (RT3-F2 parity).
+/// Mirrors `obligation_run::emit_check_failure`: the check diagnostics are
+/// surfaced so the failure is visible, never hidden behind a silent pass.
+#[cfg(feature = "chelis-prove")]
+fn emit_obligation_check_failure(
+    options: &ProveOptions<'_>,
+    messages: &[String],
+    totals: &mut Summary,
+) {
+    totals.errors += 1;
+    let joined = messages.join("; ");
+    if options.json {
+        println!(
+            "{}",
+            json!({
+                "kind": "error",
+                "stage": "check",
+                "reason": format!("module does not type-check; obligations not verified: {joined}"),
+                "diagnostics": messages,
+            })
+        );
+    } else {
+        eprintln!("prove error: module does not type-check; obligations not verified:");
+        for m in messages {
+            eprintln!("  - {m}");
+        }
+    }
+}
+
+/// Fold one obligation outcome into the running totals and render it. Mirrors
+/// `obligation_run::render_outcome` so the Deep surface produces the SAME
+/// summary counts and exit-code contribution as the Surf surface.
+#[cfg(feature = "chelis-prove")]
+fn render_obligation_outcome(
+    outcome: &chelis_prove::obligation_engine::ObligationOutcome,
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Status {
+    use chelis_prove::obligation_engine::ObligationStatus;
+    match outcome.status {
+        ObligationStatus::Error => {
+            // A collection-time declaration error (covered-or-rejected /
+            // signature rejection). Always surfaces; not counted as an
+            // obligation (parity with the Surf renderer).
+            totals.errors += 1;
+            emit_obligation_record(outcome, options);
+            Status::Error
+        }
+        ObligationStatus::Passed => {
+            totals.total += 1;
+            totals.obligations += 1;
+            totals.passed += 1;
+            emit_obligation_record(outcome, options);
+            Status::Passed
+        }
+        ObligationStatus::Failed => {
+            totals.total += 1;
+            totals.obligations += 1;
+            totals.failed += 1;
+            emit_obligation_record(outcome, options);
+            Status::Failed
+        }
+        ObligationStatus::Unsupported => {
+            totals.total += 1;
+            totals.obligations += 1;
+            totals.unsupported += 1;
+            emit_obligation_record(outcome, options);
+            Status::Unsupported
+        }
+    }
+}
+
+/// Render one obligation outcome as the additive NDJSON `{kind:"obligation"}`
+/// record (or human-readable line). Byte-identical to
+/// `obligation_run::emit` so a `.dp` obligation record is shaped exactly like
+/// a `.ch` one.
+#[cfg(feature = "chelis-prove")]
+fn emit_obligation_record(
+    outcome: &chelis_prove::obligation_engine::ObligationOutcome,
+    options: &ProveOptions<'_>,
+) {
+    use chelis_prove::obligation_engine::{ObligationStatus, ObligationTier};
+    let status = match outcome.status {
+        ObligationStatus::Passed => "passed",
+        ObligationStatus::Failed => "failed",
+        ObligationStatus::Unsupported => "unsupported",
+        ObligationStatus::Error => "error",
+    };
+    if options.json {
+        if outcome.status == ObligationStatus::Error {
+            // Declaration errors carry no producer/name; emit a minimal
+            // record so the count of kind:"obligation" stays accurate while
+            // the reason names the offending producer.
+            println!(
+                "{}",
+                json!({
+                    "kind": "obligation",
+                    "obligation_kind": "invariant_producer",
+                    "status": "error",
+                    "reason": outcome.reason,
+                })
+            );
+            return;
+        }
+        let mut value = json!({
+            "kind": "obligation",
+            "obligation_kind": outcome.meta.obligation_kind,
+            "source_type": outcome.meta.source_type,
+            "producer": outcome.meta.producer,
+            "name": outcome.name,
+            "status": status,
+            "proof_tier": outcome.proof_tier.as_str(),
+            "samples": outcome.samples,
+            "seed": outcome.seed,
+        });
+        if outcome.proof_tier == ObligationTier::Smt {
+            value["arith_model"] = json!("real");
+        }
+        if let Some(cx) = &outcome.counterexample {
+            value["counterexample"] = cx.clone();
+        }
+        if let Some(r) = &outcome.reason {
+            value["reason"] = json!(r);
+        }
+        println!("{value}");
+    } else {
+        match outcome.status {
+            ObligationStatus::Passed => println!(
+                "obligation: {} -- proved ({})",
+                outcome.name,
+                outcome.proof_tier.as_str()
+            ),
+            ObligationStatus::Failed => println!(
+                "obligation failure: {} ({} counterexample)",
+                outcome.name,
+                outcome.proof_tier.as_str()
+            ),
+            ObligationStatus::Unsupported => println!(
+                "obligation unsupported: {}: {}",
+                outcome.name,
+                outcome.reason.clone().unwrap_or_default()
+            ),
+            ObligationStatus::Error => println!(
+                "obligation error: {}",
+                outcome.reason.clone().unwrap_or_default()
+            ),
+        }
+    }
 }
 
 /// Count opaque types that carry a declared invariant in flattened Surf
