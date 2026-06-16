@@ -34,6 +34,24 @@ use chelis_deep::{Atom, Expr};
 use chelis_pred::{PredAmenability, PredGrammarError};
 
 use crate::errors::{CheckError, CheckErrorKind};
+use crate::types::Prim;
+
+/// Whether a primitive name is a SCALAR in the V1 invariant value class: the
+/// numeric and boolean prims an invariant predicate can actually be verified
+/// over (`f32`, `f64`, the signed integer widths, `bool`). `string`,
+/// `f8e4m3`, and any other prim are NOT in the class -- the predicate grammar
+/// is arithmetic/comparison over numeric values, so no verifiable invariant
+/// can be expressed over them.
+///
+/// SHARED by the D-WF value-class check and the `chelis-prove` field model
+/// (`chelis_prove::opaque::field_type_from_deep`) so the checker and the
+/// prover agree on EXACTLY which representations carry a mechanically
+/// verifiable invariant -- the divergence the two had let a representation
+/// pass `chelis check` while `chelis prove` silently collected zero
+/// obligations for it.
+pub fn invariant_value_class_prim(name: &str) -> bool {
+    matches!(name, "f32" | "f64" | "bool") || Prim::parse_name(name).is_some_and(|p| p.is_integer())
+}
 
 /// Validate every declared type invariant in a program (RFC D-WF).
 /// Pushes one [`CheckError`] per well-formedness violation found.
@@ -178,15 +196,29 @@ fn is_value_class_type(
     visiting: &mut HashSet<String>,
 ) -> bool {
     match tag(ty) {
-        Some("t-prim") => true,
+        // Only the numeric/boolean scalar prims an invariant can be verified
+        // over (NOT `string`/`f8e4m3`/...) -- shared with the prover's field
+        // model so the two agree on the value class.
+        Some("t-prim") => children(ty)
+            .first()
+            .and_then(sym_str)
+            .is_some_and(invariant_value_class_prim),
         Some("t-tensor") => {
-            // All dims must be literal (`d-lit`) and the element a prim.
+            // All dims must be literal (`d-lit`) and the element an `f32`/`f64`
+            // prim: the prover only models `f32`/`f64` tensors, so a tensor of
+            // any other element (e.g. an int tensor) is outside the verifiable
+            // value class.
             let kids = children(ty);
             if kids.is_empty() {
                 return false;
             }
             let (dims, element) = kids.split_at(kids.len() - 1);
-            dims.iter().all(|d| tag(d) == Some("d-lit")) && tag(&element[0]) == Some("t-prim")
+            let element_is_float = tag(&element[0]) == Some("t-prim")
+                && matches!(
+                    children(&element[0]).first().and_then(sym_str),
+                    Some("f32" | "f64")
+                );
+            dims.iter().all(|d| tag(d) == Some("d-lit")) && element_is_float
         }
         Some("t-adt") => {
             // Resolve the referenced type against the program's deftypes.
@@ -325,9 +357,15 @@ fn is_boolean_shaped(body: &Expr) -> bool {
             )
         }
         Some("if") => {
-            // The branches must be boolean-shaped.
+            // The CONDITION and both branches must be boolean-shaped. Checking
+            // only the branches let `if p.value then true else false` (a
+            // non-boolean f32 condition) pass D-WF even though the type rule
+            // requires the condition to be `bool` (spec/04 type rule for `if`).
             let kids = children(body);
-            kids.len() == 3 && is_boolean_shaped(&kids[1]) && is_boolean_shaped(&kids[2])
+            kids.len() == 3
+                && is_boolean_shaped(&kids[0])
+                && is_boolean_shaped(&kids[1])
+                && is_boolean_shaped(&kids[2])
         }
         Some("lit") => is_bool_lit(body),
         _ => false,

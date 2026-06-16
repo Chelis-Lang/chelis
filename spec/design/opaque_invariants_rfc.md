@@ -354,8 +354,17 @@ parser-level twins for best-effort Surf diagnostics:
 
 - `invariant` requires `opaque: true`.
 - Representation: exactly one record-shaped variant; every field in
-  the V1 value class — scalar prims, fixed-shape numeric tensors
-  (all dims literal), or nested single-variant records of those.
+  the V1 value class — NUMERIC/BOOLEAN scalar prims (`f32`, `f64`,
+  the signed integer widths, `bool`; NOT `string`/`f8e4m3`),
+  fixed-shape `f32`/`f64` tensors (all dims literal), or nested
+  single-variant records of those. The class is exactly the
+  representations the prover can mechanically verify; the D-WF check
+  and the prover's field model share one definition
+  (`chelis_types::invariants::invariant_value_class_prim`), so a
+  checker-admitted representation always reaches obligation collection
+  and is NEVER silently dropped (covered-or-rejected). An
+  invariant-carrying opaque type the prover cannot model is a
+  collection-time `Error` outcome, not zero obligations.
 - Predicate grammar: literals, the binder and its field projections,
   arithmetic (`+ - * /`), comparisons, `and/or/not`, `if`,
   whitelisted `abs/min/max/sqrt/exp/log/sin/cos`, `sum` over a

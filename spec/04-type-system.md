@@ -522,11 +522,19 @@ post-desugar and raw `.dp`). The authoritative design record is
 - **Opaque required.** An `invariant` key requires `opaque: true`
   (assumption injection is unsound for a forgeable type).
 - **Value class.** The representation must be exactly one record-shaped
-  variant; every field must be in the V1 value class: a scalar
-  primitive, a fixed-shape numeric tensor (every dimension literal), or
-  a nested single-variant record whose fields are themselves value
-  class. `List`, function types, parameterized records, symbolic tensor
-  dimensions, and multi-variant ADTs are rejected, naming the field.
+  variant; every field must be in the V1 value class: a **numeric or
+  boolean** scalar primitive (`f32`, `f64`, the signed integer widths,
+  `bool`), a fixed-shape `f32`/`f64` tensor (every dimension literal), or
+  a nested single-variant record whose fields are themselves value class.
+  `List`, function types, parameterized records, symbolic tensor
+  dimensions, multi-variant ADTs, and **non-numeric scalar primitives
+  (`string`, `f8e4m3`) or non-`f32`/`f64`-element tensors** are rejected,
+  naming the field. The value class is exactly the set of representations
+  the prover can mechanically verify an invariant over: `chelis check` and
+  `chelis prove` share one definition
+  (`chelis_types::invariants::invariant_value_class_prim`), so a
+  representation the checker admits always has its producer obligations
+  collected -- it is never silently dropped (covered-or-rejected).
 - **Predicate grammar.** The predicate admits: literals; the binder and
   its field projections; arithmetic (`+ - * /`); comparisons;
   `and`/`or`/`not`; `if`; the whitelisted intrinsics

@@ -368,3 +368,66 @@ fn non_opaque_type_with_no_invariant_is_untouched() {
     let deep = deep_of_surf("module M\ntype Point = | Point { x: f32, y: f32 }");
     assert_no_invariant_violation(&errors(&deep));
 }
+
+// ── Review follow-up: the D-WF value class must match the prover's model, so
+//    a representation `chelis check` admits is one `chelis prove` can verify
+//    (covered-or-rejected). A wider check class silently dropped obligations.
+
+#[test]
+fn string_scalar_field_is_outside_the_value_class() {
+    // `string` is a prim but no arithmetic invariant can be verified over it;
+    // the prover does not model it, so the checker must reject it rather than
+    // admit a representation that yields zero obligations.
+    let deep = deep_of_surf(
+        "module M\n@opaque\n@invariant(p) p.value >= 0.0\n\
+         type Tagged = | Tagged { tag: string, value: f32 }",
+    );
+    assert_has_violation(&errors(&deep), "value class");
+}
+
+#[test]
+fn integer_element_tensor_field_is_outside_the_value_class() {
+    // The prover only models f32/f64 tensors; an int-element tensor field is
+    // not in the value class (it would otherwise be silently dropped).
+    let deep = deep_of_surf(
+        "module M\n@opaque\n@invariant(p) p.ok >= 0.0\n\
+         type T = | T { ok: f32, bad: tensor[4, int32] }",
+    );
+    assert_has_violation(&errors(&deep), "value class");
+}
+
+#[test]
+fn nested_record_of_value_class_fields_is_admitted() {
+    // Positive parity: a nested single-variant record of numeric fields IS in
+    // the value class (the prover models it as a flattened record), so it must
+    // NOT be rejected.
+    let deep = deep_of_surf(
+        "module M\ntype Inner = | Inner { value: f32 }\n\
+         @opaque\n@invariant(p) p.inner.value >= 0.0\n\
+         type Boxed = | Boxed { inner: Inner }",
+    );
+    assert_no_invariant_violation(&errors(&deep));
+}
+
+#[test]
+fn if_predicate_with_non_boolean_condition_is_rejected() {
+    // The `if` CONDITION must be boolean, not just the branches. Checking only
+    // the branches let an f32 condition `if p.value then true else false` pass
+    // D-WF even though the type rule requires a `bool` condition.
+    let deep = deep_of_surf(
+        "module M\n@opaque\n@invariant(p) if p.value then true else false\n\
+         type T = | T { value: f32 }",
+    );
+    assert_has_violation(&errors(&deep), "boolean predicate");
+}
+
+#[test]
+fn if_predicate_with_comparison_condition_is_admitted() {
+    // Positive parity: a boolean-shaped (comparison) condition is fine.
+    let deep = deep_of_surf(
+        "module M\n@opaque\n\
+         @invariant(p) if p.value >= 0.0 then p.value <= 1.0 else p.value >= -1.0\n\
+         type T = | T { value: f32 }",
+    );
+    assert_no_invariant_violation(&errors(&deep));
+}
