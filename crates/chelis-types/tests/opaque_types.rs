@@ -356,6 +356,34 @@ def peek(m: Meters) -> f32 = match m with {
 }
 
 #[test]
+fn outside_module_tuple_nested_pat_record_rejected() {
+    // Negative-parity twin of `outside_module_pat_record_rejected`:
+    // wrapping the out-of-module opaque scrutinee in a tuple
+    // (`(p, 0)`) desugars the destructure into a `pat-tuple` whose
+    // first child is the opaque `pat-record`. Before the `pat-tuple`
+    // arm in `pattern_bindings`, that child never reached
+    // `check_opaque_use` (the catch-all silently dropped tuple-nested
+    // sub-patterns), so the RFC D-CHECK opacity gate was bypassed for
+    // tuple-nested opaque destructure. The fix recurses each
+    // `pat-tuple` child, so this match is now rejected with the same
+    // `record pattern match on opaque type` violation as the direct
+    // form.
+    let outside = "module Agent.Strategy
+def peek(p: Probability) -> f32 = match (p, 0) with {
+  | (Probability { value: v }, _) => v
+}
+";
+    let exprs = deep_of_surf(&[PROB_MODULE, outside]);
+    assert_single_violation(
+        &errors_ir(&exprs),
+        &format!(
+            "in def `peek`: record pattern match on opaque type `Probability` outside its \
+             defining module `stats.prob`; exported producers of `stats.prob`: {PROB_PRODUCERS}"
+        ),
+    );
+}
+
+#[test]
 fn outside_module_field_access_on_annotated_param_rejected() {
     let outside = "module Agent.Strategy
 def leak(p: Probability) -> f32 = p.value

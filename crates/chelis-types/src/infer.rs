@@ -16403,6 +16403,46 @@ fn pattern_bindings(
                     }
                 }
             }
+            "pat-tuple" => {
+                // (pat-tuple {} sub0 sub1 ...): every child is itself a
+                // sub-pattern. Recurse into each so a nested
+                // `pat-record` / `pat-ctor` reaches the RFC D-CHECK
+                // opacity gate (and `pat-var` bindings get the right
+                // element type) exactly as a top-level destructure does.
+                // Without this recursion the catch-all below silently
+                // dropped tuple-nested patterns, bypassing
+                // `check_opaque_use` for out-of-module opaque types wrapped
+                // in a tuple scrutinee.
+                let resolved = subst.apply(scrutinee_ty);
+                // Pair each child sub-pattern with the matching tuple
+                // element type when the resolved scrutinee is a tuple of
+                // equal arity; otherwise hand each child a fresh type
+                // variable. The opacity check inside the nested
+                // `pat-record` / `pat-ctor` arms keys off the pattern's
+                // constructor name, not the scrutinee type, so the gate
+                // still fires under a fresh-var element type.
+                let elem_tys: Option<&[Type]> = match &resolved {
+                    Type::Tuple(ts) if ts.len() == kids.len() => Some(ts.as_slice()),
+                    _ => None,
+                };
+                for (i, sub_pat) in kids.iter().enumerate() {
+                    let elem_ty = match elem_tys {
+                        Some(ts) => subst.apply(&ts[i]),
+                        None => vg.fresh_type(),
+                    };
+                    pattern_bindings(
+                        sub_pat,
+                        &elem_ty,
+                        env,
+                        vg,
+                        subst,
+                        adt_reg,
+                        errors,
+                        covered_variants,
+                        has_wildcard,
+                    );
+                }
+            }
             _ => {}
         }
     }
