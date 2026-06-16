@@ -676,7 +676,13 @@ fn producer_param_types(
 }
 
 fn prim_name(p: &Prim) -> String {
-    format!("{p:?}").to_lowercase()
+    // Use the canonical `Prim::name()` spelling (the single type-system
+    // source decode.rs also reads), NOT `format!("{p:?}").to_lowercase()`.
+    // The Debug spelling coincidentally lowercases to the canonical name
+    // for every variant today, but a future variant whose Debug spelling
+    // diverges from its canonical name would feed a wrong dtype string into
+    // scalar sampling / tensor-precision selection.
+    p.name().to_string()
 }
 
 fn matches_filter(name: &str, pattern: &str) -> bool {
@@ -1078,11 +1084,24 @@ fn opaque_record_env(
     value: &ExecutionValue,
     inv: &OpaqueInvariant,
 ) -> Result<BTreeMap<String, f64>, String> {
-    let ExecutionValue::Adt { fields, .. } = value else {
+    let ExecutionValue::Adt { ctor, fields } = value else {
         return Err(format!(
             "expected an opaque record value at a Direct position, got {value:?}"
         ));
     };
+    // Compare the produced value's ctor to the declared one (matching how
+    // the Option/tuple arms in `validate_value` compare ctor), FAIL-CLOSED
+    // on mismatch. Without this, a Direct-position value that is a DIFFERENT
+    // same-arity ADT than `inv.ctor_name` would be flattened field-by-field
+    // and validated as if it were the opaque record (a spurious Passed).
+    // The producer return type is checker-pinned so a wrong-ctor value
+    // should not reach here, but the asymmetry would be a latent fail-open.
+    if ctor != &inv.ctor_name {
+        return Err(format!(
+            "opaque record ctor mismatch: produced `{ctor}` but the invariant declares `{}`",
+            inv.ctor_name
+        ));
+    }
     if fields.len() != inv.fields.len() {
         return Err(format!(
             "opaque record arity mismatch: {} runtime fields vs {} declared",
@@ -1128,7 +1147,18 @@ fn flatten_field_value(
                         0.0
                     }
                 }
-                ExecutionValue::Tensor { value } if !value.data.is_empty() => value.data[0],
+                // A 1-element tensor is a legitimate scalar carrier. A
+                // MULTI-element tensor is a declared-vs-produced shape drift:
+                // FAIL-CLOSED naming the mismatch rather than silently using
+                // `data[0]` and dropping the rest (which could hide a NaN or
+                // out-of-band remaining element that is never checked).
+                ExecutionValue::Tensor { value } if value.data.len() == 1 => value.data[0],
+                ExecutionValue::Tensor { value } => {
+                    return Err(format!(
+                        "scalar field shape mismatch: declared Scalar but produced a tensor with {} elements",
+                        value.data.len()
+                    ));
+                }
                 other => return Err(format!("scalar field is not a scalar value: {other:?}")),
             };
             env.insert(field_path.to_string(), v);
@@ -1387,3 +1417,165 @@ impl Lcg {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod finding_tests {
+    //! Unit tests for the PR #386 fresh-context review findings #7, #8, #11.
+    //! These drive the private flatten/validate helpers directly with
+    //! constructed values so the fail-closed boundaries are exercised at the
+    //! unit level (no full CLI pipeline needed).
+    // `super::*` already brings `ExecutionValue`, `OpaqueInvariant`, `Prim`,
+    // `BTreeMap`, and the private flatten/validate helpers into scope.
+    use super::*;
+    use crate::opaque::FieldType;
+    use chelis_compiler_api::schema::TensorValue;
+    use chelis_pred::PredAmenability;
+
+    /// A minimal single-scalar-field opaque invariant. `opaque_record_env`
+    /// and `flatten_field_value` read only `ctor_name`, `binder`, and
+    /// `fields`; the `predicate`/`amenability` are placeholders here.
+    fn scalar_inv(type_name: &str, ctor_name: &str, field: &str) -> OpaqueInvariant {
+        OpaqueInvariant {
+            type_name: type_name.to_string(),
+            ctor_name: ctor_name.to_string(),
+            fields: vec![(field.to_string(), FieldType::Scalar("f32".to_string()))],
+            // Never read by the flatten helpers under test; a placeholder
+            // `fn` node keeps the struct well-formed.
+            predicate: deep_node("fn", vec![]),
+            binder: "p".to_string(),
+            amenability: PredAmenability::Linear,
+        }
+    }
+
+    // --- Finding #7: ctor mismatch at a Direct position must fail-closed ---
+
+    #[test]
+    fn f7_wrong_ctor_same_arity_adt_is_rejected() {
+        // The invariant declares ctor `Probability`, but the produced value
+        // is a DIFFERENT same-arity ADT (`Velocity`). Without the ctor check
+        // this would flatten field-by-field and validate as if it were the
+        // opaque record (a spurious Passed). It must FAIL-CLOSED with an
+        // error naming the mismatch.
+        let inv = scalar_inv("Probability", "Probability", "value");
+        let wrong = ExecutionValue::Adt {
+            ctor: "Velocity".to_string(),
+            fields: vec![ExecutionValue::Float64 { value: 0.5 }],
+        };
+        let err = opaque_record_env(&wrong, &inv)
+            .expect_err("a wrong-ctor same-arity ADT must be rejected, not flattened");
+        assert!(
+            err.contains("ctor mismatch")
+                && err.contains("Velocity")
+                && err.contains("Probability"),
+            "the error must name the produced and declared ctor: {err}"
+        );
+    }
+
+    #[test]
+    fn f7_matching_ctor_still_flattens() {
+        // The correct case (produced ctor == inv.ctor_name) must still work:
+        // the field flattens into the binder-dotted env.
+        let inv = scalar_inv("Probability", "Probability", "value");
+        let right = ExecutionValue::Adt {
+            ctor: "Probability".to_string(),
+            fields: vec![ExecutionValue::Float64 { value: 0.5 }],
+        };
+        let env =
+            opaque_record_env(&right, &inv).expect("the matching-ctor case must flatten cleanly");
+        assert_eq!(
+            env.get("p.value").copied(),
+            Some(0.5),
+            "the scalar field flattens to its binder-dotted path"
+        );
+    }
+
+    // --- Finding #8: multi-element tensor for a Scalar field fails-closed ---
+
+    #[test]
+    fn f8_multi_element_tensor_for_scalar_field_fails_closed() {
+        // The invariant declares a Scalar field, but the produced value is a
+        // 3-element tensor (the 2nd element is NaN). The pre-fix code used
+        // only `data[0]` (0.5) and silently dropped the NaN. It must now
+        // FAIL-CLOSED naming the shape mismatch.
+        let fty = FieldType::Scalar("f32".to_string());
+        let mut env = BTreeMap::new();
+        let multi = ExecutionValue::Tensor {
+            value: TensorValue {
+                shape: vec![3],
+                data: vec![0.5, f64::NAN, 0.5],
+            },
+        };
+        let err = flatten_field_value(&multi, &fty, "p.value", &mut env)
+            .expect_err("a multi-element tensor for a Scalar field must fail-closed");
+        assert!(
+            err.contains("shape mismatch") && err.contains('3'),
+            "the error must name the shape drift and the element count: {err}"
+        );
+        assert!(
+            env.is_empty(),
+            "no scalar value is recorded when the shape drifts"
+        );
+    }
+
+    #[test]
+    fn f8_single_element_tensor_for_scalar_field_still_works() {
+        // A genuine 1-element tensor carrier for a Scalar field is still
+        // legitimate and flattens to that element.
+        let fty = FieldType::Scalar("f32".to_string());
+        let mut env = BTreeMap::new();
+        let single = ExecutionValue::Tensor {
+            value: TensorValue {
+                shape: vec![1],
+                data: vec![0.5],
+            },
+        };
+        flatten_field_value(&single, &fty, "p.value", &mut env)
+            .expect("a 1-element tensor scalar carrier still works");
+        assert_eq!(env.get("p.value").copied(), Some(0.5));
+    }
+
+    #[test]
+    fn f8_true_scalar_for_scalar_field_still_works() {
+        // A plain Float64 scalar (the common case) is unaffected by the fix.
+        let fty = FieldType::Scalar("f32".to_string());
+        let mut env = BTreeMap::new();
+        flatten_field_value(
+            &ExecutionValue::Float64 { value: 0.25 },
+            &fty,
+            "p.value",
+            &mut env,
+        )
+        .expect("a true scalar still flattens");
+        assert_eq!(env.get("p.value").copied(), Some(0.25));
+    }
+
+    // --- Finding #11: prim_name returns the canonical Prim::name() ---
+
+    #[test]
+    fn f11_prim_name_is_the_canonical_name() {
+        // The canonical spelling, not the Debug-lowercased spelling, for a
+        // representative width (and a couple of others for good measure).
+        assert_eq!(prim_name(&Prim::Bf16), "bf16");
+        assert_eq!(prim_name(&Prim::F32), "f32");
+        assert_eq!(prim_name(&Prim::Int64), "int64");
+        // Every variant's canonical name must match `prim_name` exactly.
+        for p in [
+            Prim::F32,
+            Prim::F64,
+            Prim::F16,
+            Prim::Bf16,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+            Prim::String,
+        ] {
+            assert_eq!(
+                prim_name(&p),
+                p.name(),
+                "prim_name must route through the canonical Prim::name()"
+            );
+        }
+    }
+}
