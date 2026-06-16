@@ -329,6 +329,244 @@ iteration surface are already shipped today.
 
 The type checker verifies that `match` expressions cover all variants. Missing variants are a type error, not a warning.
 
+A top-level irrefutable arm covers the match: a bare variable pattern
+(`| x =>`) or an as-pattern whose inner pattern is irrefutable
+(`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm level
+only; a variable pattern NESTED inside a constructor or record pattern
+does not cover the other variants.
+
+### 2.5 Opaque Types
+
+A `deftype` carrying `opaque: true` metadata (Surf: the `@opaque`
+annotation, spec/02 §5.2) declares an opaque type: constructible and
+inspectable only inside its defining module, enforced by the type
+checker during inference. The authoritative design record is
+`spec/design/opaque_invariants_rfc.md` (D-CHECK); this section is the
+normative summary.
+
+**Named-module requirement.** `@opaque` requires a named enclosing
+module. A top-level opaque declaration has no module identity (all
+top-level code in a check unit shares one anonymous key), so the
+declaration is rejected: `@opaque type X requires a named enclosing
+module`.
+
+**One wrapper per module.** A named module may be opened by at most
+one `(module ...)` wrapper per check unit. Module identity is
+otherwise a forgeable string: a second `(module Stats.Prob ...)`
+wrapper would let its declarations construct and inspect
+`Stats.Prob`'s opaque types as if they were inside the defining
+module. Re-opening a module name is a `DuplicateModule` checker error
+(same ambiguity rationale as the named-module requirement). Surf emits
+one module per file and the reef package linker strips wrappers before
+inference, so this rule only constrains hand-written Deep. Distinct
+module wrappers in one check unit (the ordinary out-of-module setup)
+are unaffected.
+
+**Module identity.** Each top-level item keys to a module:
+
+- Lexical encoding: the enclosing `(module ...)` wrapper names, with
+  nested wrappers joined by `.` (Surf `module Stats.Prob` desugars to
+  the key `stats.prob`).
+- Package-linker encoding: reef rewrites top-level names to
+  `Pkg__<pkg>__<Module>__<Name>` (or the lowercase `pkg__` twin); the
+  stem between the marker and the trailing name is the module key,
+  rendered with `.` separators (`Pkg__opq__Demo__Types__Probability`
+  keys to `opq.Demo.Types`). The lexical wrapper wins when both are
+  present.
+
+The defining module is recorded on the registry entry at `deftype`
+registration and persists through the compiled-context caches.
+
+**Reserved linker name format.** The package-linker encoding
+(`Pkg__<pkg>__<Module>__<Name>` / lowercase twin) is the reef linker's
+PRIVATE output. Because module identity derives from it, a
+hand-authored program of mangled names self-keys to a module and would
+construct and inspect its opaque types as if in-module. So a top-level
+`deftype`/`def`/`defsig`/`typealias`/`defmacro` whose binding name
+matches that format is a `ReservedLinkerName` declaration error in any
+program NOT produced by the linker. Provenance is an in-process flag
+set at the reef link boundary (`prepare_program_for_file` and the
+reef-aware check/eval/build entry points), never filesystem or name
+heuristics; raw `.ch`/`.dp` ingestion keeps it FALSE. The linker feeds
+linked Deep to the checker in-process, and re-mangles every user source
+name, so its own output checks clean while a user cannot smuggle a
+clean mangled name into linked output. As belt-and-suspenders, a
+stem-derived module identity colliding with a lexical wrapper key in
+one check unit is also a `DuplicateModule` error (genuine linker output
+has no lexical wrappers, so this never fires on it). `validate --deep`
+applies the reserved-name rejection unconditionally, since the linker
+never writes `.dp` for re-ingestion.
+
+The provenance flag answers "did the LINKER produce this decl," not
+"is there linked content in this check unit." The linker re-mangles
+the names of decls it admits at each boundary: the package/source
+rewrite (`rewrite_module_decls`, used by `check`/`build`/the library
+context) rewrites every binding name through `internal_name`. The
+eval/test entry rewrite (`rewrite_eval_module_decls`, used by `chelis
+test`, `chelis eval`'s in-context path, module-init, and the legacy
+batch path) keeps user-authored binding names (so eval can report
+roots and the test runner can select synthetic roots by name) and
+therefore rejects the reserved format at that boundary directly: a
+user entry/test decl whose name matches the reserved format is a
+declaration error regardless of the surrounding linked flag, because
+user entry decls are never linker output. This pairing — every
+flag-TRUE boundary either re-mangles the names it admits or rejects
+the reserved format on the user decls it admits — is the structural
+invariant that prevents a hand-authored mangled name from self-keying
+to a victim module on any surface.
+
+**The rejection set.** Outside the defining module, each of the
+following is a `CheckErrorKind::OpaqueTypeViolation`. Every rejection
+returns the expression's TRUE type, so a violation never cascades into
+secondary type errors:
+
+1. Record-literal construction (`Probability { value: x }`).
+2. Positional constructor application (`Meters(x)`).
+3. Bare constructor reference (`grab = Probability`): the constructor
+   binding itself is hidden, including nullary constructors.
+4. Pattern inspection: `pat-record` and `pat-ctor` patterns naming an
+   opaque type's constructor.
+5. Field access and Deep `record-update`. Targets whose type is still
+   an unresolved variable when the site is inferred are recorded in a
+   deferred ledger and re-checked after def-level resolution; a target
+   that is NEVER pinned (e.g. an unannotated accessor lambda that
+   let-generalization makes polymorphic) is rejected fail-closed when
+   the check unit declares any opaque type.
+6. Forging: Deep `cast` into the type (both `t-prim` and `t-adt`
+   target shapes), `cast` out of an opaque value, and
+   `{type: (t-adt ...)}` literal metadata -- which is reachable from
+   BOTH surfaces, because Surf expression ascription
+   (`0.5 : Probability`) and block-binding ascription desugar to
+   exactly that metadata.
+
+**The sixth rejection (unexported references).** An out-of-module
+reference to an *unexported* binding of the defining module whose
+signature mentions the opaque type is rejected -- in the result, in
+any parameter, in function-typed parameter domains, or as a
+non-function binding's type. "Mentions" is containment chased through
+named type definitions (an unexported `helper -> WrapRec` where the
+non-opaque `WrapRec` carries a `Probability` field mentions
+`Probability`). A defining module with no `export` decl is fully
+sealed for its T-mentioning bindings. Names the checker cannot
+attribute to a module with a known export set are never flagged
+(fail-open), so pipelines that do not carry export information cannot
+reject legitimately exported producers.
+
+**Alias transparency.** Opacity is keyed to the nominal registry
+entry. A transparent alias (`type P2 = Probability`) resolves to the
+nominal type at construction heads, cast targets, and literal
+ascriptions, so aliases cannot launder any rejection.
+
+**Macro attribution.** Macro expansion is in-place: an expansion lands
+in the CALLER's module subtree and is checked under the caller's
+module key. A macro defined in the defining module but expanded
+outside it is rejected at the call site (fail-closed).
+
+**Duplicate declarations.** A same-name `deftype` in another module is
+already a `DuplicateDefinition` error; that rejection is part of the
+opacity invariant set (nominal keying would otherwise be
+last-write-wins).
+
+**Exhaustiveness over opaque scrutinees.** Outside code may match an
+opaque scrutinee only with irrefutable patterns; with §2.4's
+irrefutable-arm rule, `| x =>`, `| q @ x =>`, and `| _ =>` all cover
+such a match without naming constructors.
+
+**Error contract.** The violation message names the type, the defining
+module, and the exported producers of that module with signatures;
+location context is the enclosing def name embedded in the message:
+
+```
+in def `bad`: record construction of opaque type `Probability`
+outside its defining module `stats.prob`; exported producers of
+`stats.prob`: probability: (f32) -> Probability
+```
+
+On the reef package surface the message renders user-facing
+(de-mangled) names, not the package linker's internal
+`Pkg__<pkg>__<Module>__<Name>` forms: type, def, binding, and producer
+identifiers show their trailing user-written segment, and the defining
+module shows its source module path (`Demo.Types`) with the package
+prefix stripped. The same out-of-module construction in a package
+named `opq` reads `in def `bad`: ... opaque type `Probability` ...
+defining module `Demo.Types`; exported producers of `Demo.Types`:
+probability: (f32) -> Probability`.
+
+**Solver-free.** Opacity is a module-identity check inside ordinary
+inference. `chelis check` stays solver-free: the optional declared
+invariant (RFC D-WF and later workstreams) is never evaluated by the
+checker.
+
+**Gating.** `chelis check` is a scorer-with-exit-code: it always reports a
+fitness score and the full error list, and its exit code mirrors that list
+(`0` iff empty, non-zero otherwise; Issue #207). A declaration error such
+as `OpaqueTypeViolation` is therefore visible on `check` (a non-zero exit
+with the error listed), never a silent score-1 pass. The front-end
+surfaces that consume a program -- `chelis build`, `chelis eval --file`,
+and the in-process check entry the prove pipeline calls -- gate on a
+non-empty error list and refuse to proceed. `chelis validate` is a
+structural Deep/Surf well-formedness validator and does not run the type
+or opacity checker, so it does not gate on these semantic declaration
+errors; use `check`/`build`/`eval` for that.
+
+#### 2.5.1 Invariant Declaration Well-Formedness
+
+An opaque type may carry one declared invariant (Surf:
+`@invariant(<binder>) <expr>`, spec/02 §P16a; Deep: the `invariant` and
+`invariant_amenability` metadata keys, spec/03 §2.2). The checker runs a
+declaration-time **well-formedness** pass over Deep (covering both `.ch`
+post-desugar and raw `.dp`). The authoritative design record is
+`spec/design/opaque_invariants_rfc.md` (D-WF). Each failure is an
+`OpaqueTypeViolation` declaration error:
+
+- **Opaque required.** An `invariant` key requires `opaque: true`
+  (assumption injection is unsound for a forgeable type).
+- **Value class.** The representation must be exactly one record-shaped
+  variant; every field must be in the V1 value class: a **numeric or
+  boolean** scalar primitive (`f32`, `f64`, the signed integer widths,
+  `bool`), a fixed-shape `f32`/`f64` tensor (every dimension literal), or
+  a nested single-variant record whose fields are themselves value class.
+  `List`, function types, parameterized records, symbolic tensor
+  dimensions, multi-variant ADTs, and **non-numeric scalar primitives
+  (`string`, `f8e4m3`) or non-`f32`/`f64`-element tensors** are rejected,
+  naming the field. The value class is exactly the set of representations
+  the prover can mechanically verify an invariant over: `chelis check` and
+  `chelis prove` share one definition
+  (`chelis_types::invariants::invariant_value_class_prim`), so a
+  representation the checker admits always has its producer obligations
+  collected -- it is never silently dropped (covered-or-rejected).
+- **Predicate grammar.** The predicate admits: literals; the binder and
+  its field projections; arithmetic (`+ - * /`); comparisons;
+  `and`/`or`/`not`; `if`; the whitelisted intrinsics
+  `abs`/`min`/`max`/`sqrt`/`exp`/`log`/`sin`/`cos`; `sum` over a binder
+  field projection; and references to in-module zero-argument constant
+  defs. Anything else (general calls, `match`, lambdas, other tensor
+  ops, effects) is a declaration error. The grammar admits partial
+  functions (`/`, `log`, `sqrt`); totality is not guaranteed here (the
+  partial-eval semantics are pinned downstream, RFC D-WF).
+- **Free variables.** Every free reference must be the binder or an
+  in-module zero-argument constant def.
+- **Boolean-shaped.** The predicate must be boolean at the top.
+- **Amenability recording.** `invariant_amenability` is recorded at
+  desugar (`chelis_pred::classify_predicate`) and the checker
+  **recomputes** it, erroring on a mismatch or a missing key. This
+  protects hand-written `.dp`. The language rejects nothing on
+  amenability grounds; it records.
+- **Exact float equality** in a predicate (`==` over a representation
+  field) draws an advisory lint (`invariant-float-equality`), not an
+  error: exact float equality starves Tier C generation by design (RFC
+  D-STARVE). The advisory points at the tolerance-band idiom.
+
+**Invariant invisible to type checking.** This is not refinement
+typing. The checker records the invariant and never evaluates it: there
+are no predicates in the typing judgment, no verification conditions at
+use sites, and no solver in the check loop. A program whose invariant
+is **violated** by an in-module constructor (e.g. constructing a
+`Probability { value: 5.0 }` under `value <= 1.0`) still type-checks.
+The invariant is consumed by `chelis prove` (derived producer
+obligations and assumption injection) in later workstreams, not by
+`chelis check`.
+
 ---
 
 ## 3. Hindley-Milner Inference

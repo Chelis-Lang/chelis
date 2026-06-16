@@ -83,6 +83,43 @@ jobs:
       - name: Gate (lint-and-unit subset)
         run: python3 scripts/gate.py lint-and-unit
 
+  # Non-gate job (see NON_GATE_JOBS in scripts/test_gate.py, rule-id
+  # GATE-SCOPE-SMT): builds the cvc5-backed `smt` feature so Tier B
+  # prove code keeps compiling, and runs the smt-gated chelis-prove
+  # suite. Out of scripts/gate.py scope by design — cvc5 builds from
+  # source (cmake/g++/libclang) and is not a per-PR developer-loop
+  # prerequisite. Runbook: docs/smt_build_setup.md.
+  smt-build:
+    name: SMT Feature Build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install C dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc g++ cmake libclang-dev libopenblas-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # cvc5 builds from source into target/; key separately from
+          # the gate jobs so their caches stay lean.
+          key: smt
+
+      - name: Build smt feature
+        run: cargo build -p chelis-cli --features smt
+
+      - name: Run smt-gated chelis-prove tests
+        run: cargo test -p chelis-prove --features smt
+
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest

@@ -268,11 +268,19 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
 
+    // RFC v4b (RT-1 F2): reject a named module opened by more than one
+    // wrapper in this check unit (module-identity forgery).
+    detect_module_reopens(exprs, &mut errors);
+    // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
+    // internal-name format in programs not produced by the linker.
+    detect_forged_linker_names(exprs, &mut errors);
+
     // First pass: collect deftype and defsig declarations. Descend through
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
+    let items = top_level_decl_items_with_modules(exprs);
     collect_all_declarations(
-        &top_level_decl_items(exprs),
+        &items,
         &mut env,
         &mut vg,
         &mut subst,
@@ -280,11 +288,24 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
         &mut errors,
     );
 
+    // Checker-enforced opacity (RFC D-CHECK): install the per-run
+    // context so the inference hooks see module identity, exports,
+    // and producer text. Dropped at the end of this function.
+    let opacity_meta = build_opacity_meta(&items, &adt_reg, &mut vg);
+    let _opacity_guard = crate::opacity::install_opacity_context(
+        crate::opacity::OpacityContextData::from_meta(opacity_meta),
+    );
+
     // Second pass: infer def bodies. Same module-descent rationale as the
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    for expr in top_level_decl_items(exprs) {
+    for (module, expr) in &items {
+        let decl_name = top_level_decl_name(expr);
+        crate::opacity::set_current_item(
+            crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+            decl_name.map(str::to_string),
+        );
         infer_top_level(
             expr,
             &mut env,
@@ -299,13 +320,18 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
         // Issue #256 round 2: re-check each deferred borrow against the
         // now-complete substitution (see `validate_deferred_borrow_vars`).
         validate_deferred_borrow_vars(&subst, &adt_reg, &mut errors);
+        // D-CHECK: drain the per-def deferred-access ledger (see
+        // `validate_deferred_opaque_uses`).
+        validate_deferred_opaque_uses(&subst, &adt_reg, &mut errors);
     }
+    crate::opacity::set_current_item(None, None);
 
     // Third pass: reject tensor types whose element precision isn't supported
     // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
     // downcast to f32 by the current build targets, violating the "no implicit
     // precision promotion" rule. f64 is supported as of v0.2.3.
     validate_tensor_precisions_in_program(exprs, &mut errors);
+    crate::invariants::validate_type_invariants_in_program(exprs, &mut errors);
 
     // WS-A8 cross-row enforcement: reject `matmul`/transcendental ops that
     // are reached through a polymorphic-precision sig instantiated at a
@@ -369,6 +395,7 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
     validate_ir_program(library_exprs, &library_ir, &mut result.errors);
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
@@ -429,6 +456,7 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
         adt_reg: state.adt_reg,
         ir_types: library_ir_annotated,
         library_def_names,
+        opacity: state.opacity,
     }))
 }
 
@@ -486,6 +514,7 @@ pub fn build_compiled_library_context(
     );
     validate_ir_program(library_exprs, &library_ir, &mut result.errors);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
     if !result.errors.is_empty() {
@@ -535,6 +564,7 @@ pub fn build_compiled_library_context(
         adt_reg: state.adt_reg,
         ir_types: library_ir_annotated.clone(),
         library_def_names,
+        opacity: state.opacity,
     });
 
     // Build the CheckedProgram with the same `annotated_type_env` shape
@@ -607,6 +637,7 @@ pub fn build_compiled_library_context_with_base(
     );
     validate_ir_program(library_exprs, &combined_ir, &mut result.errors);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
     validate_polymorphic_op_constraints(library_exprs, &combined_ir, &mut result.errors);
     suppress_unbound_for_cycle_members_against_context(
         library_exprs,
@@ -662,6 +693,7 @@ pub fn build_compiled_library_context_with_base(
         adt_reg: state.adt_reg,
         ir_types: combined_ir_annotated,
         library_def_names,
+        opacity: state.opacity,
     });
 
     // The CheckedProgram carries this layer's annotated bodies plus a
@@ -757,6 +789,7 @@ pub fn check_ir_with_signature_context(
     validate_ir_program(new_exprs, &combined_ir, &mut result.errors);
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(new_exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(new_exprs, &mut result.errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
     validate_polymorphic_op_constraints(new_exprs, &combined_ir, &mut result.errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
@@ -811,6 +844,7 @@ pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
     let mut result = infer_ir_program_with_env(exprs, &type_env);
     validate_ir_program(exprs, &type_env, &mut result.errors);
     validate_tensor_precisions_in_program(exprs, &mut result.errors);
+    crate::invariants::validate_type_invariants_in_program(exprs, &mut result.errors);
     validate_polymorphic_op_constraints(exprs, &type_env, &mut result.errors);
     suppress_unbound_for_cycle_members(exprs, &mut result.errors);
     result
@@ -914,16 +948,35 @@ fn infer_ir_program_with_state(
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
 
+    // RFC v4b (RT-1 F2): reject a named module opened by more than one
+    // wrapper in this check unit (module-identity forgery). Reef-linked
+    // decls carry no wrappers, so this only fires on hand-written `.dp`.
+    detect_module_reopens(exprs, &mut errors);
+    // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
+    // internal-name format in programs not produced by the linker.
+    detect_forged_linker_names(exprs, &mut errors);
+
     // Descend through `(module {} name ...)` wrappers: every idiomatic
     // Surf source wraps its declarations in `module X`, and without
     // flattening none of the walkers below see any def/defsig/deftype.
+    let items = top_level_decl_items_with_modules(exprs);
     collect_all_declarations(
-        &top_level_decl_items(exprs),
+        &items,
         &mut state.env,
         &mut state.var_gen,
         &mut state.subst,
         &mut state.adt_reg,
         &mut errors,
+    );
+
+    // Checker-enforced opacity (RFC D-CHECK): accumulate this phase's
+    // program-shape metadata into the persistent state (so the
+    // stacked library/new-code paths keep library exports visible)
+    // and install the per-run context for the inference hooks.
+    let phase_meta = build_opacity_meta(&items, &state.adt_reg, &mut state.var_gen);
+    state.opacity.merge_from(&phase_meta);
+    let _opacity_guard = crate::opacity::install_opacity_context(
+        crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
 
     for (name, ty_expr) in new_ir_types {
@@ -944,12 +997,17 @@ fn infer_ir_program_with_state(
         .map(|v| v == "1")
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    for expr in top_level_decl_items(exprs) {
+    for (module, expr) in &items {
         let t0 = if detail_profile {
             Some(std::time::Instant::now())
         } else {
             None
         };
+        let decl_name = top_level_decl_name(expr);
+        crate::opacity::set_current_item(
+            crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+            decl_name.map(str::to_string),
+        );
         infer_top_level(
             expr,
             &mut state.env,
@@ -971,7 +1029,11 @@ fn infer_ir_program_with_state(
         // substitution. Draining per-def keeps error attribution local and
         // prevents one def's deferrals from leaking into the next.
         validate_deferred_borrow_vars(&state.subst, &state.adt_reg, &mut errors);
+        // D-CHECK: drain the per-def deferred-access ledger (see
+        // `validate_deferred_opaque_uses`).
+        validate_deferred_opaque_uses(&state.subst, &state.adt_reg, &mut errors);
     }
+    crate::opacity::set_current_item(None, None);
 
     for warning in chelis_deep::validate::validate(exprs) {
         errors.push(CheckError::new(
@@ -1388,6 +1450,171 @@ fn top_level_decl_items(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
         push(expr, &mut out);
     }
     out
+}
+
+/// Like [`top_level_decl_items`] but pairs each flattened item with
+/// its enclosing lexical module key: nested `(module ...)` names
+/// joined with `.`, `None` for items outside any wrapper. This is the
+/// module-identity source for checker-enforced opacity (RFC D-CHECK);
+/// reef package-linked items carry no wrapper and key through their
+/// internal-name stem instead (see `opacity::module_key_for_item`).
+fn top_level_decl_items_with_modules(exprs: &[deep::Expr]) -> Vec<(Option<String>, &deep::Expr)> {
+    fn push<'a>(
+        expr: &'a deep::Expr,
+        prefix: Option<&str>,
+        out: &mut Vec<(Option<String>, &'a deep::Expr)>,
+    ) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("module")
+        {
+            // `(module {} name children...)` — skip tag, meta, name.
+            let name = list.elements.get(2).and_then(symbol_name);
+            let key = match (prefix, name) {
+                (Some(p), Some(n)) => Some(format!("{p}.{n}")),
+                (None, Some(n)) => Some(n.to_string()),
+                (p, None) => p.map(str::to_string),
+            };
+            for child in list.elements.iter().skip(3) {
+                push(child, key.as_deref(), out);
+            }
+            return;
+        }
+        out.push((prefix.map(str::to_string), expr));
+    }
+    let mut out = Vec::new();
+    for expr in exprs {
+        push(expr, None, &mut out);
+    }
+    out
+}
+
+/// RFC v4b (RT-1 F2): a named module may be opened by at most one
+/// `(module ...)` wrapper per check unit. Module identity is otherwise
+/// a forgeable string -- a second wrapper of an opaque type's defining
+/// module would construct and inspect the type as if it were inside.
+/// Walks every wrapper (including nested ones, keyed by their full
+/// `.`-joined path) and emits ONE `DuplicateModule` error per
+/// re-opened name. Surf emits one module per file and reef strips
+/// wrappers before inference, so this only fires on hand-written `.dp`
+/// (the forge surface).
+fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+    fn walk(
+        expr: &deep::Expr,
+        prefix: Option<&str>,
+        seen: &mut HashSet<String>,
+        reported: &mut HashSet<String>,
+        errors: &mut Vec<CheckError>,
+    ) {
+        let deep::Expr::List(list, _) = expr else {
+            return;
+        };
+        if get_tag(list) != Some("module") {
+            return;
+        }
+        let name = list.elements.get(2).and_then(symbol_name);
+        let key = match (prefix, name) {
+            (Some(p), Some(n)) => Some(format!("{p}.{n}")),
+            (None, Some(n)) => Some(n.to_string()),
+            (p, None) => p.map(str::to_string),
+        };
+        if let Some(key) = &key
+            && !seen.insert(key.clone())
+            && reported.insert(key.clone())
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::DuplicateModule,
+                format!(
+                    "module `{key}` is opened by more than one module wrapper in this \
+                     check unit; a named module may be opened at most once"
+                ),
+                vec![format!(
+                    "merge the `{key}` wrappers into one, or rename one of them"
+                )],
+            ));
+        }
+        for child in list.elements.iter().skip(3) {
+            walk(child, key.as_deref(), seen, reported, errors);
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut reported = HashSet::new();
+    for expr in exprs {
+        walk(expr, None, &mut seen, &mut reported, errors);
+    }
+
+    // RFC v5 belt-and-suspenders (RT-1 F2 bypass): a stem-derived
+    // module identity (from a top-level mangled `deftype`/`def` name)
+    // that collides with a lexical wrapper key in the same check unit
+    // is also a `DuplicateModule` error. Genuine linker output has NO
+    // lexical wrappers, so this never fires on it; it defends the
+    // stem-plus-wrapper forge shapes even if the name-format check is
+    // somehow bypassed. Runs unconditionally (structural).
+    for (lexical, expr) in top_level_decl_items_with_modules(exprs) {
+        // Only flat (non-wrapped) mangled declarations introduce a
+        // stem-derived module identity; a name inside a lexical
+        // wrapper keys to the wrapper, not its stem.
+        if lexical.is_some() {
+            continue;
+        }
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if !matches!(get_tag(list), Some("deftype" | "def")) {
+            continue;
+        }
+        let Some(name) = children(list).first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(stem_key) = crate::opacity::reef_module_stem(name) else {
+            continue;
+        };
+        if seen.contains(&stem_key) && reported.insert(stem_key.clone()) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DuplicateModule,
+                format!(
+                    "module `{stem_key}` is opened by both a lexical wrapper and a \
+                     reef-stem mangled name in this check unit; a named module may be \
+                     opened at most once"
+                ),
+                vec![format!(
+                    "rename the mangled declaration; the `{stem_key}` lexical module \
+                     already exists"
+                )],
+            ));
+        }
+    }
+}
+
+/// RFC v5 (RT-1 F2 bypass): the reef package-linker's internal-name
+/// format (`Pkg__<pkg>__<Module>__<Name>` / lowercase twin) is the
+/// linker's PRIVATE output. A program NOT produced by the linker
+/// (raw `.ch` or raw `.dp`) that uses it forges module identity
+/// through the reef-stem channel, so any top-level declaration whose
+/// binding name matches the format is a declaration error. Skipped
+/// entirely when the linked-program provenance flag is set (the
+/// linker's own output is accepted). The linker also re-mangles every
+/// user source name, so user code inside a real package cannot smuggle
+/// a clean mangled name into linked output.
+fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+    if crate::opacity::linked_program() {
+        return;
+    }
+    for expr in top_level_decl_items(exprs) {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if !matches!(
+            get_tag(list),
+            Some("deftype" | "def" | "defsig" | "typealias" | "defmacro")
+        ) {
+            continue;
+        }
+        if let Some(name) = children(list).first().and_then(symbol_name)
+            && crate::opacity::is_linker_format_name(name)
+        {
+            errors.push(crate::opacity::forged_linker_name_error(name));
+        }
+    }
 }
 
 fn infer_signature_metadata(
@@ -2202,6 +2429,60 @@ fn validate_deferred_borrow_vars(
                 format!("borrow requires tensor or tensor-carrying input, got {peeled}"),
                 vec!["Use `&x` only with tensor values".to_string()],
             ));
+        }
+    }
+}
+
+/// RFC D-CHECK: drain the deferred-access ledger after a def body's
+/// inference completes and re-check each recorded target variable
+/// against the final substitution: a target pinned to an
+/// out-of-module opaque ADT (e.g. an unannotated lambda parameter
+/// pinned by a later call) is rejected with the same action text as
+/// the typed path. Draining per def keeps attribution exact and
+/// prevents one def's deferrals from leaking into the next,
+/// mirroring `validate_deferred_borrow_vars`.
+fn validate_deferred_opaque_uses(
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+) {
+    let mut any_opaque_in_scope: Option<bool> = None;
+    for (tv, use_kind) in subst.take_deferred_opaque_uses() {
+        let resolved = subst.apply(&Type::Var(tv));
+        let mut peeled = &resolved;
+        while let Type::Ref(inner) = peeled {
+            peeled = inner.as_ref();
+        }
+        let action = match use_kind {
+            crate::unify::DeferredOpaqueUse::Access => crate::opacity::OpaqueAction::FieldAccess,
+            crate::unify::DeferredOpaqueUse::RecordUpdate => {
+                crate::opacity::OpaqueAction::RecordUpdate
+            }
+        };
+        match peeled {
+            Type::Adt(adt_name, _) => {
+                crate::opacity::check_opaque_use(action, adt_name, adt_reg, errors);
+            }
+            // Never pinned: let-generalization makes an unannotated
+            // accessor polymorphic, so callers instantiate FRESH
+            // variables and the recorded one stays unbound -- a
+            // laundering channel for opaque values. Mirror the
+            // deferred-borrow ledger's never-pinned rejection,
+            // fail-closed, scoped to check units that declare any
+            // opaque type so opaque-free programs keep the lenient
+            // status quo.
+            Type::Var(_) => {
+                let opaque_in_scope = *any_opaque_in_scope
+                    .get_or_insert_with(|| adt_reg.defs.values().any(|def| def.opaque));
+                if opaque_in_scope
+                    && let Some(error) = crate::opacity::with_context(|ctx| {
+                        crate::opacity::unresolved_target_error(ctx, action)
+                    })
+                {
+                    errors.push(error);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -4424,7 +4705,7 @@ fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     // name silently misses. See `infer_program` for the parallel
     // iteration.
     collect_all_declarations(
-        &top_level_decl_items(exprs),
+        &top_level_decl_items_with_modules(exprs),
         &mut env,
         &mut vg,
         &mut subst,
@@ -4510,7 +4791,7 @@ fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> 
     // declarations; mirrors the `infer_program` shape and the parallel
     // fix in `annotate_ir_program`. (closes #181)
     collect_all_declarations(
-        &top_level_decl_items(exprs),
+        &top_level_decl_items_with_modules(exprs),
         &mut state.env,
         &mut state.var_gen,
         &mut state.subst,
@@ -6390,6 +6671,16 @@ fn get_meta(list: &deep::List) -> Option<&deep::MetaMap> {
     None
 }
 
+/// True when a `deftype` node carries `opaque: true` metadata
+/// (RFC D-META; the key is unprefixed language semantics).
+fn deftype_opaque_meta(list: &deep::List) -> bool {
+    get_meta(list).is_some_and(|meta| {
+        meta.entries.iter().any(|(key, value)| {
+            key == "opaque" && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
+        })
+    })
+}
+
 /// Extract a symbol name from an Expr.
 fn symbol_name(expr: &deep::Expr) -> Option<&str> {
     match expr {
@@ -6787,23 +7078,169 @@ enum DeclPhase {
 }
 
 /// Run the two-phase declaration collection over `items` (already flattened
-/// past `module` wrappers): register all type aliases, then everything else.
+/// past `module` wrappers, each paired with its lexical module key):
+/// register all type aliases, then everything else.
 fn collect_all_declarations(
-    items: &[&deep::Expr],
+    items: &[(Option<String>, &deep::Expr)],
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
     errors: &mut Vec<CheckError>,
 ) {
-    report_duplicate_defs(items, errors);
-    report_builtin_shadowing(items, errors);
-    for expr in items {
-        collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Aliases);
+    // chelis#258 (main): duplicate-def / builtin-shadowing rejection runs
+    // over the bare item list. Our `items` is paired with module keys, so
+    // project to the `&deep::Expr` slice the reporters expect.
+    let bare_items: Vec<&deep::Expr> = items.iter().map(|(_, expr)| *expr).collect();
+    report_duplicate_defs(&bare_items, errors);
+    report_builtin_shadowing(&bare_items, errors);
+    for (module, expr) in items {
+        collect_declarations(
+            expr,
+            module.as_deref(),
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            DeclPhase::Aliases,
+        );
     }
-    for expr in items {
-        collect_declarations(expr, env, vg, subst, adt_reg, errors, DeclPhase::Rest);
+    for (module, expr) in items {
+        collect_declarations(
+            expr,
+            module.as_deref(),
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            DeclPhase::Rest,
+        );
     }
+}
+
+/// Build the program-shape opacity metadata (RFC D-CHECK) from the
+/// flattened `(module key, item)` list: per-module export sets, the
+/// top-level binding -> module map, and the formatted "exported
+/// producers with signatures" entries per opaque type used by the
+/// violation error contract. Runs after declaration collection so the
+/// registry already carries every `deftype`'s `opaque` flag and
+/// defining module.
+fn build_opacity_meta(
+    items: &[(Option<String>, &deep::Expr)],
+    adt_reg: &AdtRegistry,
+    vg: &mut VarGen,
+) -> crate::opacity::OpacityModuleMeta {
+    let mut meta = crate::opacity::OpacityModuleMeta::default();
+    // Declared signature types (from `defsig` nodes) for producer
+    // display; keyed by binding name like `meta.bindings`.
+    let mut declared_sigs: HashMap<String, Type> = HashMap::new();
+    // Pass 1: export sets. Lexical `(export ...)` nodes attribute to
+    // their module wrapper; package-linked exports arrive as
+    // top-level nodes whose names carry the reef internal-name stem
+    // (the reef rewrite emits them with internal names), so each
+    // exported name self-attributes through its stem.
+    for (module, item) in items {
+        let deep::Expr::List(list, _) = item else {
+            continue;
+        };
+        if get_tag(list) != Some("export") {
+            continue;
+        }
+        for child in children(list) {
+            let Some(name) = symbol_name(child) else {
+                continue;
+            };
+            let target = match module {
+                Some(module) => Some(module.clone()),
+                None => crate::opacity::reef_module_stem(name),
+            };
+            if let Some(target) = target {
+                meta.exports
+                    .entry(target)
+                    .or_default()
+                    .insert(name.to_string());
+            }
+        }
+    }
+    // Pass 2: binding -> module attribution and declared sigs.
+    // Stem-attributed (package-linked) bindings are recorded only
+    // when their module's export set is known: without it, the sixth
+    // rejection's no-export-decl-means-sealed rule would reject
+    // legitimately exported producers in pipelines that strip Export
+    // decls (fail-open for unattributable names by design).
+    for (module, item) in items {
+        let deep::Expr::List(list, _) = item else {
+            continue;
+        };
+        if !matches!(get_tag(list), Some("def") | Some("defsig")) {
+            continue;
+        }
+        let kids = children(list);
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let target = match module {
+            Some(module) => Some(module.clone()),
+            None => crate::opacity::reef_module_stem(name)
+                .filter(|stem| meta.exports.contains_key(stem)),
+        };
+        let Some(target) = target else {
+            continue;
+        };
+        meta.bindings.insert(name.to_string(), target);
+        if get_tag(list) == Some("defsig")
+            && let Some(ty_expr) = kids.get(1)
+        {
+            let ty = deep_type_to_resolved_type(ty_expr, vg, adt_reg, &mut HashMap::new());
+            declared_sigs.insert(name.to_string(), ty);
+        }
+    }
+    // Producer enumeration per opaque type: exported bindings of the
+    // defining module whose declared RESULT type mentions the type
+    // (containment chased through named type definitions).
+    for (adt_name, def) in &adt_reg.defs {
+        if !def.opaque {
+            continue;
+        }
+        let Some(module) = &def.defining_module else {
+            continue;
+        };
+        let Some(export_set) = meta.exports.get(module) else {
+            continue;
+        };
+        let mut entries: std::collections::BTreeSet<String> = Default::default();
+        for name in export_set {
+            if meta.bindings.get(name) != Some(module) {
+                continue;
+            }
+            let Some(sig) = declared_sigs.get(name) else {
+                continue;
+            };
+            let result = match sig {
+                Type::Fn(_, ret) => ret.as_ref(),
+                other => other,
+            };
+            if crate::opacity::type_mentions_adt(result, adt_name, adt_reg) {
+                // RT-1 F3: store the producer entry de-mangled so the
+                // reef surface renders `probability: (f32) -> Probability`
+                // rather than the internal `pkg__...` names.
+                entries.insert(format!(
+                    "{}: {}",
+                    crate::opacity::demangle_ident(name),
+                    crate::opacity::demangle_type(sig)
+                ));
+            }
+        }
+        if !entries.is_empty() {
+            meta.producer_entries
+                .entry(adt_name.clone())
+                .or_default()
+                .extend(entries);
+        }
+    }
+    meta
 }
 
 /// Reject two same-name `def` declarations in one program (chelis#258).
@@ -6924,8 +7361,10 @@ fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Vec<CheckError>)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_declarations(
     expr: &deep::Expr,
+    lexical_module: Option<&str>,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -6976,7 +7415,26 @@ fn collect_declarations(
                 ));
                 return;
             }
-            let ctors = adt_reg.register_deftype(kids, vg);
+            // RFC D-CHECK: record opacity + module identity on the
+            // registered AdtDef. The module key is the lexical
+            // wrapper when present, else the reef internal-name stem
+            // of the deftype's own (rewritten) name. `@opaque`
+            // requires a named module (RT-0 M6): a top-level opaque
+            // declaration has no module identity, which would make
+            // the enforcement boundary collide across combined
+            // sources.
+            let opaque = deftype_opaque_meta(list);
+            let defining_module = crate::opacity::module_key_for_item(
+                lexical_module,
+                kids.first().and_then(symbol_name),
+            );
+            if opaque
+                && defining_module.is_none()
+                && let Some(name) = kids.first().and_then(symbol_name)
+            {
+                errors.push(crate::opacity::unmoduled_opaque_error(name));
+            }
+            let ctors = adt_reg.register_deftype(kids, vg, opaque, defining_module);
             for (name, scheme) in ctors {
                 env.bind(name, scheme);
             }
@@ -7503,7 +7961,7 @@ fn infer_expr(
         deep::Expr::List(list, _) => {
             let tag = get_tag(list);
             match tag {
-                Some("var") => infer_var(list, env, vg, subst, errors),
+                Some("var") => infer_var(list, env, vg, subst, adt_reg, errors),
                 Some("lit") => infer_lit(list, vg, adt_reg, errors),
                 Some("app") => infer_app(
                     list,
@@ -7576,6 +8034,36 @@ fn infer_expr(
                     total_nodes,
                 ),
                 Some("tuple-get") => infer_tuple_get(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                ),
+                Some("record") => infer_record(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                ),
+                Some("access") => infer_access(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                ),
+                Some("record-update") => infer_record_update(
                     list,
                     env,
                     vg,
@@ -7785,61 +8273,6 @@ fn infer_expr(
                         Type::Error
                     }
                 }
-                Some("record") => {
-                    // (record {} Name (kv {} field value) ...): record-shaped
-                    // construction. The type checker does not otherwise infer a
-                    // type for record construction (it lowers through a separate
-                    // IR builder), so this arm exists only to (a) re-enter
-                    // inference on each field value so a nested out-of-scope
-                    // constructor in a field is still diagnosed, and (b) reject an
-                    // out-of-scope record constructor head (chelis#317).
-                    //
-                    // Without this arm a record node fell straight to the unknown-
-                    // tag `_ => Type::Error` branch below, so a type-only import
-                    // that constructs `AdamState { ... }` (the issue's named
-                    // record-constructor regression) checked clean and then
-                    // mis-resolved to a foreign module's mangled tag at runtime —
-                    // the exact silent failure #317 reports, for the construction
-                    // dual of the already-guarded `pat-record` match arm.
-                    let kids = children(list);
-                    for kid in kids.iter().skip(1) {
-                        if let deep::Expr::List(kv, _) = kid
-                            && get_tag(kv) == Some("kv")
-                            && let Some(value) = children(kv).get(1)
-                        {
-                            let _ = infer_expr(
-                                value,
-                                env,
-                                vg,
-                                subst,
-                                adt_reg,
-                                errors,
-                                typed_nodes,
-                                total_nodes,
-                            );
-                        }
-                    }
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e))
-                        && constructor_out_of_scope(name, env)
-                    {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::UnknownConstructor,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("unknown constructor: {name}"),
-                            ),
-                            vec![format!(
-                                "Constructor '{name}' is not in scope. Declare it locally or \
-                                 add it to an import (e.g. `import Mod ({name})`)"
-                            )],
-                        ));
-                    }
-                    // Record construction is otherwise type-inferred through the
-                    // IR builder, not here; keep the historical `Type::Error`
-                    // result so an in-scope record constructor's score is
-                    // unchanged (chelis#148 mixed-shape record-call tests).
-                    Type::Error
-                }
                 _ => {
                     // Unknown tag -- try to infer children
                     Type::Error
@@ -7896,6 +8329,7 @@ fn infer_var(
     env: &mut Env,
     vg: &mut VarGen,
     subst: &Subst,
+    adt_reg: &AdtRegistry,
     errors: &mut Vec<CheckError>,
 ) -> Type {
     let kids = children(list);
@@ -7927,7 +8361,16 @@ fn infer_var(
         {
             let scheme = scheme.clone();
             let ty = env.instantiate(&scheme, vg);
-            subst.apply(&ty)
+            let resolved = subst.apply(&ty);
+            // RFC D-CHECK: a bare reference to an out-of-module
+            // opaque constructor is hidden, and an out-of-module
+            // reference to an unexported binding whose signature
+            // mentions an opaque type is the sixth rejection. Both
+            // return the true type so no error cascades.
+            if !crate::opacity::check_ctor_reference(name, adt_reg, errors) {
+                crate::opacity::check_unexported_reference(name, &resolved, adt_reg, errors);
+            }
+            resolved
         } else {
             errors.push(CheckError::new(
                 CheckErrorKind::UnboundVariable,
@@ -8052,7 +8495,25 @@ fn infer_lit(
     if let Some(meta) = meta {
         for (key, val) in &meta.entries {
             if key == "type" {
-                return deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new());
+                let resolved = deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new());
+                // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
+                // metadata on a literal outside the defining module
+                // forges an opaque value. Reachable from BOTH
+                // surfaces: Surf expression ascription
+                // (`0.5 : Probability`) and block-binding ascription
+                // desugar to exactly this metadata (RT-0), so the
+                // gate is not scoped to `.dp` ingestion.
+                // `deep_type_to_resolved_type` expands transparent
+                // aliases, so `0.5 : P2` cannot launder the gate.
+                if let Type::Adt(adt_name, _) = &resolved {
+                    crate::opacity::check_opaque_use(
+                        crate::opacity::OpaqueAction::LitForge,
+                        adt_name,
+                        adt_reg,
+                        errors,
+                    );
+                }
+                return resolved;
             }
         }
     }
@@ -8284,6 +8745,25 @@ fn infer_app(
     // fields" error when EVERY same-named variant in scope is record-
     // shaped, which is the original single-package case the error was
     // written for.
+    // RFC D-CHECK: positional application of an out-of-module opaque
+    // constructor is rejected (one violation per call site; the
+    // callee `var`'s constructor-reference check is suppressed below
+    // so the application does not double-report). Inference continues
+    // so the call still yields its true type.
+    if let Some(ref fname) = ctor_lookup_name
+        && let Some((adt_name, _)) = adt_reg
+            .lookup_variant_preferring_shape(fname, CallShape::Positional)
+            .or_else(|| adt_reg.lookup_variant_terminal_unique(fname))
+    {
+        let adt_name = adt_name.to_string();
+        crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::CtorApplication,
+            &adt_name,
+            adt_reg,
+            errors,
+        );
+    }
+
     // chelis#317: do not emit the record-shape diagnostic for an applied
     // constructor whose name is out of scope (a type-only import that calls
     // `Alpha(...)`). The shape check resolves through the same fuzzy
@@ -8313,16 +8793,21 @@ fn infer_app(
         return Type::Error;
     }
 
-    let func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let func_ty = {
+        let _ctor_guard = ctor_lookup_name
+            .as_ref()
+            .map(|_| crate::opacity::suppress_ctor_reference_check());
+        infer_expr(
+            &kids[0],
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        )
+    };
     // A reduction's axis argument may name a *dimension* of the operand
     // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
     // *value*. Like `expand`'s symbolic size arg below, such a name is typed as
@@ -15467,6 +15952,15 @@ fn infer_match(
             if arm_kids.len() >= 3 {
                 let mut arm_env = env.clone();
                 let pat = &arm_kids[0];
+                // RFC D-CHECK exhaustiveness fix (RT-0 verified false
+                // positives): a TOP-LEVEL irrefutable arm covers the
+                // match -- a bare `pat-var`, or a `pat-as` whose
+                // inner pattern is irrefutable. Nested `pat-var`
+                // keeps not-covering so exhaustiveness is not
+                // weakened on ordinary ADTs.
+                if top_level_arm_is_irrefutable(pat) {
+                    has_wildcard = true;
+                }
                 pattern_bindings(
                     pat,
                     &scrutinee_ty,
@@ -15528,6 +16022,22 @@ fn infer_match(
     }
 
     result_ty.unwrap_or(Type::Error)
+}
+
+/// True for arm patterns that match every value of the scrutinee:
+/// `pat-var`, `pat-wild`, and `pat-as` wrapping an irrefutable inner
+/// pattern (`q @ x`). Applies at the ARM level only.
+fn top_level_arm_is_irrefutable(pat: &deep::Expr) -> bool {
+    let deep::Expr::List(list, _) = pat else {
+        return false;
+    };
+    match get_tag(list) {
+        Some("pat-var") | Some("pat-wild") => true,
+        Some("pat-as") => children(list)
+            .get(1)
+            .is_some_and(top_level_arm_is_irrefutable),
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -15606,6 +16116,22 @@ fn pattern_bindings(
                         .map(|(_, variant)| variant.name.clone())
                         .unwrap_or_else(|| ctor_name.to_string());
                     covered_variants.push(covered_name);
+
+                    // RFC D-CHECK: constructor pattern match on an
+                    // out-of-module opaque type is rejected; binding
+                    // inference continues so no error cascades.
+                    if let Some((adt_name, _)) = adt_reg
+                        .lookup_variant(ctor_name)
+                        .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name))
+                    {
+                        let adt_name = adt_name.to_string();
+                        crate::opacity::check_opaque_use(
+                            crate::opacity::OpaqueAction::PatCtor,
+                            &adt_name,
+                            adt_reg,
+                            errors,
+                        );
+                    }
 
                     // Look up constructor in env and decompose
                     if let Some(scheme) = env
@@ -15696,6 +16222,18 @@ fn pattern_bindings(
                     let variant_info = adt_reg
                         .lookup_variant(ctor_name)
                         .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name));
+                    // RFC D-CHECK: record pattern match on an
+                    // out-of-module opaque type is rejected; binding
+                    // inference continues so no error cascades.
+                    if let Some((adt_name, _)) = variant_info {
+                        let adt_name = adt_name.to_string();
+                        crate::opacity::check_opaque_use(
+                            crate::opacity::OpaqueAction::PatRecord,
+                            &adt_name,
+                            adt_reg,
+                            errors,
+                        );
+                    }
 
                     // Record the resolved (mangled) variant name for
                     // exhaustiveness, mirroring `pat-ctor`. See that arm for
@@ -15863,6 +16401,46 @@ fn pattern_bindings(
                             }
                         }
                     }
+                }
+            }
+            "pat-tuple" => {
+                // (pat-tuple {} sub0 sub1 ...): every child is itself a
+                // sub-pattern. Recurse into each so a nested
+                // `pat-record` / `pat-ctor` reaches the RFC D-CHECK
+                // opacity gate (and `pat-var` bindings get the right
+                // element type) exactly as a top-level destructure does.
+                // Without this recursion the catch-all below silently
+                // dropped tuple-nested patterns, bypassing
+                // `check_opaque_use` for out-of-module opaque types wrapped
+                // in a tuple scrutinee.
+                let resolved = subst.apply(scrutinee_ty);
+                // Pair each child sub-pattern with the matching tuple
+                // element type when the resolved scrutinee is a tuple of
+                // equal arity; otherwise hand each child a fresh type
+                // variable. The opacity check inside the nested
+                // `pat-record` / `pat-ctor` arms keys off the pattern's
+                // constructor name, not the scrutinee type, so the gate
+                // still fires under a fresh-var element type.
+                let elem_tys: Option<&[Type]> = match &resolved {
+                    Type::Tuple(ts) if ts.len() == kids.len() => Some(ts.as_slice()),
+                    _ => None,
+                };
+                for (i, sub_pat) in kids.iter().enumerate() {
+                    let elem_ty = match elem_tys {
+                        Some(ts) => subst.apply(&ts[i]),
+                        None => vg.fresh_type(),
+                    };
+                    pattern_bindings(
+                        sub_pat,
+                        &elem_ty,
+                        env,
+                        vg,
+                        subst,
+                        adt_reg,
+                        errors,
+                        covered_variants,
+                        has_wildcard,
+                    );
                 }
             }
             _ => {}
@@ -16122,6 +16700,481 @@ fn infer_tuple_get(
     }
 }
 
+/// Resolve a record head name to its constructor. The head is a
+/// variant name (`Probability { ... }`); when it names a transparent
+/// type alias instead, resolve through the alias to the nominal ADT
+/// and use that ADT's same-named variant (alias transparency,
+/// spec/02; this is also what keeps alias laundering from bypassing
+/// opacity, RFC D-CHECK). Returns the canonical constructor name.
+fn resolve_record_head<'a>(
+    head: &'a str,
+    adt_reg: &'a AdtRegistry,
+) -> Option<(&'a str, &'a crate::adt::VariantInfo, String)> {
+    if let Some((adt_name, variant)) = adt_reg
+        .lookup_variant_preferring_shape(head, CallShape::Record)
+        .or_else(|| adt_reg.lookup_variant_terminal_unique(head))
+    {
+        return Some((adt_name, variant, variant.name.clone()));
+    }
+    // Alias head: `type P2 = Probability` makes `P2 { ... }` mean
+    // `Probability { ... }`.
+    let alias = adt_reg.resolve_alias(head)?;
+    if let Type::Adt(target, _) = &alias.body {
+        let (adt_name, variant) = adt_reg.lookup_variant(target)?;
+        return Some((adt_name, variant, variant.name.clone()));
+    }
+    None
+}
+
+/// Infer `(record {} Ctor (kv {} field value)...)` — named-field
+/// record construction (RFC D-CHECK prerequisite inference; closes
+/// the latent bogus-field hole: unknown fields are now TypeMismatch
+/// errors instead of silently untyped).
+#[allow(clippy::too_many_arguments)]
+fn infer_record(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    let Some(head) = kids.first().and_then(symbol_name) else {
+        return Type::Error;
+    };
+
+    let Some((adt_name, variant, ctor_name)) = resolve_record_head(head, adt_reg) else {
+        // Infer field values so nested errors still surface, then
+        // reject the unknown constructor.
+        for kv_expr in kids.iter().skip(1) {
+            if let deep::Expr::List(kv_list, _) = kv_expr
+                && get_tag(kv_list) == Some("kv")
+                && let Some(value) = children(kv_list).get(1)
+            {
+                infer_expr(
+                    value,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                );
+            }
+        }
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!("unknown record constructor `{head}`"),
+            vec![format!("declare `type {head} = | {head} {{ ... }}`")],
+        ));
+        return Type::Error;
+    };
+    // chelis#317: a registry-known but OUT-OF-SCOPE record constructor (a
+    // type-only import constructing e.g. `AdamState { ... }`, whose ADT is in
+    // the registry but whose constructor is not in scope at the use site) is
+    // unknown here. Opaque types are handled by the opacity check below
+    // instead, so only a non-opaque out-of-scope head is rejected here; this
+    // keeps the #317 record-constructor guard while leaving opacity rejection
+    // (D-CHECK) for opaque heads.
+    let head_is_opaque = adt_reg.lookup(adt_name).is_some_and(|d| d.opaque);
+    if !head_is_opaque && constructor_out_of_scope(head, env) {
+        for kv_expr in kids.iter().skip(1) {
+            if let deep::Expr::List(kv_list, _) = kv_expr
+                && get_tag(kv_list) == Some("kv")
+                && let Some(value) = children(kv_list).get(1)
+            {
+                infer_expr(
+                    value,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                );
+            }
+        }
+        errors.push(CheckError::new(
+            CheckErrorKind::UnknownConstructor,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("unknown constructor: {head}"),
+            ),
+            vec![format!(
+                "Constructor '{head}' is not in scope. Declare it locally or \
+                 add it to an import (e.g. `import Mod ({head})`)"
+            )],
+        ));
+        return Type::Error;
+    }
+    // RFC D-CHECK: record construction of an out-of-module opaque
+    // type is rejected; inference continues so the literal still
+    // yields its true type (no cascades).
+    crate::opacity::check_opaque_use(
+        crate::opacity::OpaqueAction::RecordConstruction,
+        adt_name,
+        adt_reg,
+        errors,
+    );
+
+    let declared_field_names: Vec<Option<String>> =
+        variant.fields.iter().map(|(n, _)| n.clone()).collect();
+    let known_field_set: HashSet<&str> = declared_field_names
+        .iter()
+        .filter_map(|n| n.as_deref())
+        .collect();
+
+    // Instantiate the resolved ADT's constructor directly from its
+    // registry definition (the issue #181 pat-record intent, made
+    // collision-proof): the name-keyed env holds ONE scheme per
+    // constructor name, so same-named constructors from colliding
+    // ADTs (chelis#148) would dispatch the field types to whichever
+    // deftype registered last.
+    let (instantiated_arg_types, instantiated_ret) = match adt_reg.lookup(adt_name) {
+        Some(adt_def) => instantiate_variant_of(adt_def, variant, vg),
+        None => (Vec::new(), Type::Error),
+    };
+
+    for kv_expr in kids.iter().skip(1) {
+        let deep::Expr::List(kv_list, _) = kv_expr else {
+            continue;
+        };
+        if get_tag(kv_list) != Some("kv") {
+            continue;
+        }
+        let kv_kids = children(kv_list);
+        let (Some(field_name), Some(value)) =
+            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
+        else {
+            continue;
+        };
+        let value_ty = infer_expr(
+            value,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+        if known_field_set.contains(field_name) {
+            let pos = declared_field_names
+                .iter()
+                .position(|n| n.as_deref() == Some(field_name));
+            if let Some(field_ty) = pos.and_then(|i| instantiated_arg_types.get(i))
+                && let Err(te) = unify(&value_ty, field_ty, subst)
+            {
+                errors.push(te.into());
+            }
+        } else {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("unknown record field '{field_name}' in construction of {ctor_name}"),
+                vec![format!(
+                    "known fields: {:?}",
+                    declared_field_names
+                        .iter()
+                        .filter_map(|f| f.as_deref())
+                        .collect::<Vec<_>>()
+                )],
+            ));
+        }
+    }
+
+    subst.apply(&instantiated_ret)
+}
+
+/// The single record-shaped variant of an ADT, when it has exactly
+/// one variant and every field is named — the representation idiom
+/// `access`/`record-update` resolve against.
+fn single_record_variant<'a>(
+    adt_reg: &'a AdtRegistry,
+    adt_name: &str,
+) -> Option<&'a crate::adt::VariantInfo> {
+    let def = adt_reg.lookup(adt_name)?;
+    if def.variants.len() != 1 {
+        return None;
+    }
+    let variant = &def.variants[0];
+    (!variant.fields.is_empty() && variant.fields.iter().all(|(n, _)| n.is_some()))
+        .then_some(variant)
+}
+
+/// Instantiate `variant` of `adt_def` with fresh type variables:
+/// returns the per-field types and the ADT result type with the
+/// def's registration-time param vars renamed fresh. Bypasses the
+/// name-keyed env so same-named constructors from colliding ADTs
+/// (chelis#148) cannot cross-wire field types.
+fn instantiate_variant_of(
+    adt_def: &crate::adt::AdtDef,
+    variant: &crate::adt::VariantInfo,
+    vg: &mut VarGen,
+) -> (Vec<Type>, Type) {
+    let map: HashMap<TypeVar, Type> = adt_def
+        .param_vars
+        .iter()
+        .map(|tv| (*tv, vg.fresh_type()))
+        .collect();
+    let args: Vec<Type> = variant
+        .fields
+        .iter()
+        .map(|(_, t)| crate::adt::substitute_alias_type(t, &map))
+        .collect();
+    let ret = Type::Adt(
+        adt_def.name.clone(),
+        adt_def
+            .param_vars
+            .iter()
+            .map(|tv| map.get(tv).cloned().expect("map covers param_vars"))
+            .collect(),
+    );
+    (args, ret)
+}
+
+/// Instantiate the single record variant of the ADT named by
+/// `target_ty` and unify the instantiated result with the target,
+/// returning the per-field types aligned with `variant.fields` so
+/// they reflect the target's concrete type arguments.
+fn instantiated_field_types(
+    adt_name: &str,
+    variant: &crate::adt::VariantInfo,
+    target_ty: &Type,
+    adt_reg: &AdtRegistry,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+) -> Vec<Type> {
+    let Some(adt_def) = adt_reg.lookup(adt_name) else {
+        return Vec::new();
+    };
+    let (args, ret) = instantiate_variant_of(adt_def, variant, vg);
+    let _ = unify(&ret, target_ty, subst);
+    args
+}
+
+/// Infer `(access {} target field)` — record field access (RFC
+/// D-CHECK prerequisite inference).
+#[allow(clippy::too_many_arguments)]
+fn infer_access(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() < 2 {
+        return Type::Error;
+    }
+    let target_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let Some(field_name) = symbol_name(&kids[1]) else {
+        return Type::Error;
+    };
+    // Peel borrow layers: an `&T` target reads through the borrow.
+    let mut resolved = subst.apply(&target_ty);
+    while let Type::Ref(inner) = resolved {
+        resolved = *inner;
+    }
+    match resolved {
+        Type::Adt(ref adt_name, _) => {
+            // RFC D-CHECK: field access on an out-of-module opaque
+            // type is rejected; inference continues so the access
+            // still yields its true field type (no cascades).
+            crate::opacity::check_opaque_use(
+                crate::opacity::OpaqueAction::FieldAccess,
+                adt_name,
+                adt_reg,
+                errors,
+            );
+            let Some(variant) = single_record_variant(adt_reg, adt_name) else {
+                // Multi-variant or positional-field ADT: field access
+                // is not defined for it; conservative status quo
+                // (silently untyped) to keep the blast radius of the
+                // new inference at the single-record idiom.
+                return Type::Error;
+            };
+            let pos = variant
+                .fields
+                .iter()
+                .position(|(n, _)| n.as_deref() == Some(field_name));
+            let Some(pos) = pos else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("unknown record field '{field_name}' on {adt_name}"),
+                    vec![format!(
+                        "known fields: {:?}",
+                        variant
+                            .fields
+                            .iter()
+                            .filter_map(|(n, _)| n.as_deref())
+                            .collect::<Vec<_>>()
+                    )],
+                ));
+                return Type::Error;
+            };
+            let field_types =
+                instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
+            match field_types.get(pos) {
+                Some(ty) => subst.apply(ty),
+                None => Type::Error,
+            }
+        }
+        Type::Var(tv) => {
+            // Target not yet pinned (e.g. unannotated lambda param):
+            // register in the deferred-access ledger so a later pin to
+            // an out-of-module opaque ADT is still rejected at
+            // def-level resolution (D-CHECK). The result type keeps
+            // the conservative status quo.
+            subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::Access);
+            Type::Error
+        }
+        // Conservative status quo for non-record targets: `access` on
+        // tensors/prims/tuples stays silently untyped in W1 rather
+        // than newly rejecting shapes the corpus may rely on.
+        _ => Type::Error,
+    }
+}
+
+/// Infer `(record-update {} target (kv {} field value)...)` — Deep
+/// functional record update (RFC D-CHECK prerequisite inference).
+#[allow(clippy::too_many_arguments)]
+fn infer_record_update(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.is_empty() {
+        return Type::Error;
+    }
+    let target_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    // Infer the update values regardless of target resolution so
+    // nested errors surface exactly once.
+    let mut kv_pairs: Vec<(&str, Type)> = Vec::new();
+    for kv_expr in kids.iter().skip(1) {
+        let deep::Expr::List(kv_list, _) = kv_expr else {
+            continue;
+        };
+        if get_tag(kv_list) != Some("kv") {
+            continue;
+        }
+        let kv_kids = children(kv_list);
+        let (Some(field_name), Some(value)) =
+            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
+        else {
+            continue;
+        };
+        let value_ty = infer_expr(
+            value,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+        kv_pairs.push((field_name, value_ty));
+    }
+    let mut resolved = subst.apply(&target_ty);
+    while let Type::Ref(inner) = resolved {
+        resolved = *inner;
+    }
+    match resolved {
+        Type::Adt(ref adt_name, _) => {
+            // RFC D-CHECK: record update of an out-of-module opaque
+            // type is rejected; inference continues and returns the
+            // target's true type (no cascades).
+            crate::opacity::check_opaque_use(
+                crate::opacity::OpaqueAction::RecordUpdate,
+                adt_name,
+                adt_reg,
+                errors,
+            );
+            let Some(variant) = single_record_variant(adt_reg, adt_name) else {
+                return Type::Error;
+            };
+            let field_types =
+                instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
+            for (field_name, value_ty) in &kv_pairs {
+                let pos = variant
+                    .fields
+                    .iter()
+                    .position(|(n, _)| n.as_deref() == Some(*field_name));
+                match pos {
+                    Some(pos) => {
+                        if let Some(field_ty) = field_types.get(pos)
+                            && let Err(te) = unify(value_ty, field_ty, subst)
+                        {
+                            errors.push(te.into());
+                        }
+                    }
+                    None => {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!("unknown record field '{field_name}' on {adt_name}"),
+                            vec![format!(
+                                "known fields: {:?}",
+                                variant
+                                    .fields
+                                    .iter()
+                                    .filter_map(|(n, _)| n.as_deref())
+                                    .collect::<Vec<_>>()
+                            )],
+                        ));
+                    }
+                }
+            }
+            subst.apply(&resolved)
+        }
+        Type::Var(tv) => {
+            subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::RecordUpdate);
+            // The update returns the target's (still-unresolved) type.
+            Type::Var(tv)
+        }
+        Type::Error => Type::Error,
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("record-update requires a record-typed target, got {other}"),
+                vec![],
+            ));
+            Type::Error
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn infer_cast(
     list: &deep::List,
@@ -16149,6 +17202,44 @@ fn infer_cast(
         total_nodes,
     );
     let resolved = subst.apply(&expr_ty);
+
+    // RFC D-CHECK cast gates: cast-into an out-of-module opaque type
+    // (both Deep target shapes, `t-prim` and `t-adt`, with aliases
+    // expanded) and cast-out of an out-of-module opaque value. Each
+    // pushes one OpaqueTypeViolation and returns the TRUE type of the
+    // expression so no error cascades; inside the defining module the
+    // existing cast semantics (including `CastNonTensor` for ADT
+    // sources) are unchanged.
+    if let Some(target_adt) = cast_target_adt_name(&kids[1], adt_reg) {
+        if crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::CastInto,
+            &target_adt,
+            adt_reg,
+            errors,
+        ) {
+            return Type::Adt(target_adt, Vec::new());
+        }
+    } else {
+        let mut peeled = &resolved;
+        while let Type::Ref(inner) = peeled {
+            peeled = inner.as_ref();
+        }
+        if let Type::Adt(source_adt, _) = peeled {
+            let source_adt = source_adt.clone();
+            if crate::opacity::check_opaque_use(
+                crate::opacity::OpaqueAction::CastOut,
+                &source_adt,
+                adt_reg,
+                errors,
+            ) {
+                return match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new())
+                {
+                    Type::Prim(p) => Type::Prim(p),
+                    _ => Type::Error,
+                };
+            }
+        }
+    }
 
     // kids[1] = (t-prim {} new_precision)
     // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2, unsigned
@@ -16194,6 +17285,35 @@ fn infer_cast(
             Type::Error
         }
     }
+}
+
+/// The nominal ADT a cast target names, if any: `(t-adt {} Name)` or
+/// a `(t-prim {} Name)` whose name is not a primitive but resolves in
+/// the ADT registry, with transparent aliases expanded to the nominal
+/// entry. Returns `None` for genuine primitive targets.
+fn cast_target_adt_name(expr: &deep::Expr, adt_reg: &AdtRegistry) -> Option<String> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    let name = children(list).first().and_then(symbol_name)?;
+    match get_tag(list) {
+        Some("t-adt") => {}
+        Some("t-prim") => {
+            if Prim::parse_name(name).is_some() {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    if adt_reg.lookup(name).is_some() {
+        return Some(name.to_string());
+    }
+    if let Some(alias) = adt_reg.resolve_alias(name)
+        && let Type::Adt(target, _) = &alias.body
+    {
+        return Some(target.clone());
+    }
+    None
 }
 
 /// Extract the symbol-name from a `(t-prim {} <name>)` Deep node so a

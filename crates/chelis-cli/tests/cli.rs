@@ -57,7 +57,15 @@ fn transformer_block_example() -> PathBuf {
     example_path("../../examples/transformer_block.ch")
 }
 
-fn executable_examples() -> [PathBuf; 10] {
+fn opaque_invariants_example() -> PathBuf {
+    example_path("../../examples/opaque_invariants.ch")
+}
+
+fn opaque_invariants_simplex_example() -> PathBuf {
+    example_path("../../examples/opaque_invariants_simplex.ch")
+}
+
+fn executable_examples() -> [PathBuf; 12] {
     [
         dict_foundation_example(),
         hello_tensor_example(),
@@ -65,6 +73,8 @@ fn executable_examples() -> [PathBuf; 10] {
         list_foundation_example(),
         linreg_example(),
         mnist_example(),
+        opaque_invariants_example(),
+        opaque_invariants_simplex_example(),
         scalar_string_foundation_example(),
         tensor_structural_ops_example(),
         transformer_block_example(),

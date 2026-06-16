@@ -2458,6 +2458,20 @@ fn if_expr_is_dag_lowerable(list: &List) -> bool {
 fn assert_ir_lowerable(expr: &Expr) {
     match expr {
         Expr::List(list, _) => {
+            // Declaration nodes carry no runtime IR. Their meta map holds
+            // spec artifacts (e.g. a `deftype`'s declared `invariant`
+            // predicate, consumed only by `chelis prove`) and their
+            // children are type-level expressions, never runtime app
+            // nodes. `lower_top_level` already returns early for these
+            // tags before any lowering; the runtime IR audit mirrors that
+            // skip so it never validates declaration metadata as runtime
+            // IR. Without this skip, a tensor-field invariant such as
+            // `sum(p.weights)` is wrongly audited as a runtime node.
+            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
+                && matches!(tag.as_str(), "deftype" | "defsig" | "typealias")
+            {
+                return;
+            }
             if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
                 && ((tag == "if" && !if_expr_is_dag_lowerable(list)) || tag == "match")
             {
@@ -2488,6 +2502,19 @@ fn assert_ir_lowerable(expr: &Expr) {
 fn assert_ir_typed(expr: &Expr) {
     match expr {
         Expr::List(list, _) => {
+            // Declaration nodes carry no runtime IR. A `deftype`'s meta
+            // map holds the declared `invariant` predicate (spec metadata
+            // for `chelis prove`, never lowered to runtime IR), which can
+            // contain shape-sensitive apps such as `sum(p.weights)` with
+            // no runtime `type` metadata. `lower_top_level` returns early
+            // for these tags before lowering; the runtime IR audit
+            // mirrors that skip so it never validates declaration
+            // metadata as runtime IR.
+            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
+                && matches!(tag.as_str(), "deftype" | "defsig" | "typealias")
+            {
+                return;
+            }
             if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
                 && tag == "app"
                 && is_shape_sensitive_builtin_app(list)
@@ -10041,6 +10068,105 @@ mod regression_tests {
             }
         })
         .expect_err("missing type metadata should panic during lowering preflight");
+        let message = if let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() {
+            diagnostic.to_string()
+        } else if let Some(message) = err.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = err.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else {
+            String::new()
+        };
+        assert!(
+            message.contains(
+                "shape-sensitive IR app nodes must carry explicit type metadata before lowering"
+            ),
+            "unexpected panic message: {message}"
+        );
+    }
+
+    // The runtime IR audits must NOT descend into declaration metadata.
+    // A `deftype` carries its declared invariant predicate in the meta map
+    // at element 1. That predicate is spec metadata consumed only by
+    // `chelis prove`; it is never lowered to runtime IR (see the early
+    // return for `deftype`/`defsig`/`typealias` in `lower_top_level`).
+    // A tensor-field invariant such as `sum(p.weights)` contains a
+    // shape-sensitive app node without runtime `type` metadata, so the
+    // audit would wrongly reject it if it walked into the meta map.
+    #[test]
+    fn deftype_tensor_invariant_metadata_does_not_trip_runtime_audit() {
+        let src = r#"
+            (deftype {invariant: (fn {}
+                                   (params {} p)
+                                   (app {}
+                                     (var {} gte)
+                                     (app {}
+                                       (var {} sum)
+                                       (access {} (var {} p) weights))
+                                     (lit {type: (t-prim {} f32)} 1.0)))}
+              Simplex
+              ()
+              (variant {}
+                Simplex
+                (field {} weights (t-tensor {} (d-lit {} 3) (t-prim {} f32)))))
+        "#;
+        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        // Neither audit may panic on declaration metadata.
+        for expr in &exprs {
+            assert_ir_typed(expr);
+            assert_ir_lowerable(expr);
+        }
+    }
+
+    // Scalar-field invariants (the `Probability` shape) also live in the
+    // declaration meta map and must not be audited as runtime IR. They
+    // only passed before by accident (their `>=`/`<=`/`&&` ops are not
+    // shape-sensitive); the principled behaviour is that NO declaration
+    // metadata is runtime IR.
+    #[test]
+    fn deftype_scalar_invariant_metadata_does_not_trip_runtime_audit() {
+        let src = r#"
+            (deftype {invariant: (fn {}
+                                   (params {} p)
+                                   (app {}
+                                     (var {} and)
+                                     (app {}
+                                       (var {} gte)
+                                       (access {} (var {} p) value)
+                                       (lit {type: (t-prim {} f32)} 0.0))
+                                     (app {}
+                                       (var {} lte)
+                                       (access {} (var {} p) value)
+                                       (lit {type: (t-prim {} f32)} 1.0))))}
+              Probability
+              ()
+              (variant {}
+                Probability
+                (field {} value (t-prim {} f32))))
+        "#;
+        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        for expr in &exprs {
+            assert_ir_typed(expr);
+            assert_ir_lowerable(expr);
+        }
+    }
+
+    // Negative parity: skipping declaration metadata must NOT weaken the
+    // audit for genuine runtime app nodes. A `def` body with a
+    // shape-sensitive app missing `type` metadata must still be rejected.
+    #[test]
+    fn def_body_shape_sensitive_app_still_rejected_after_decl_skip() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} x (lit {} 1.0))
+             (def {} y (app {} (var {} reshape) (var {} x)))",
+        )
+        .expect("parse failed");
+        let err = std::panic::catch_unwind(|| {
+            for expr in &exprs {
+                assert_ir_typed(expr);
+            }
+        })
+        .expect_err("missing type metadata in a def body must still panic");
         let message = if let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() {
             diagnostic.to_string()
         } else if let Some(message) = err.downcast_ref::<String>() {

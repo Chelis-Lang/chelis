@@ -187,6 +187,7 @@ fn validate_tag_shape(
 
     match tag {
         "def" => validate_property_def_metadata(list, offset, warnings),
+        "deftype" => validate_deftype_invariant_metadata(list, offset, warnings),
         "if" | "arm" if child_count != 3 => {
             warn_arity(warnings, "exactly 3 children");
         }
@@ -357,6 +358,84 @@ fn validate_property_def_metadata(
     }
 }
 
+/// Structural shape check of the opaque-invariant metadata keys on a
+/// `deftype` (RFC D-META, warning-level; mirrors the property-metadata
+/// check). When an `invariant` key is present it must be a predicate fn
+/// `(fn {} (params {} <one symbol>) <expr>)`, and any
+/// `invariant_amenability` key must be one of the four canonical strings.
+/// The deeper well-formedness (grammar, value class, amenability match)
+/// is the checker's job (chelis-types); this is the cheap shape gate.
+fn validate_deftype_invariant_metadata(
+    list: &crate::ast::List,
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
+        return;
+    };
+    if let Some((_, value)) = meta.entries.iter().find(|(key, _)| key == "invariant")
+        && !is_predicate_fn_shape(value)
+    {
+        warnings.push(ValidationWarning {
+            kind: WarningKind::Structural,
+            offset,
+            message: "`invariant` metadata must be `(fn {} (params {} <binder>) <expr>)`"
+                .to_string(),
+        });
+    }
+    if let Some((_, value)) = meta
+        .entries
+        .iter()
+        .find(|(key, _)| key == "invariant_amenability")
+        && !is_canonical_amenability(value)
+    {
+        warnings.push(ValidationWarning {
+            kind: WarningKind::Structural,
+            offset,
+            message: "`invariant_amenability` must be one of \
+                      \"linear\"|\"polynomial\"|\"transcendental\"|\"opaque\""
+                .to_string(),
+        });
+    }
+}
+
+/// Whether `expr` is a predicate fn `(fn {} (params {} <one symbol>)
+/// <body>)`: a `fn` node whose first child is a `params` node holding
+/// exactly one bare-symbol binder, and which has a body child.
+fn is_predicate_fn_shape(expr: &Expr) -> bool {
+    let Expr::List(fn_list, _) = expr else {
+        return false;
+    };
+    let is_fn = matches!(
+        fn_list.elements.first(),
+        Some(Expr::Atom(crate::ast::Atom::Symbol(t), _)) if t == "fn"
+    ) && matches!(fn_list.elements.get(1), Some(Expr::Map(_, _)));
+    if !is_fn || fn_list.elements.len() != 4 {
+        return false;
+    }
+    // params node with exactly one bare-symbol binder.
+    let Some(Expr::List(params, _)) = fn_list.elements.get(2) else {
+        return false;
+    };
+    matches!(
+        params.elements.first(),
+        Some(Expr::Atom(crate::ast::Atom::Symbol(t), _)) if t == "params"
+    ) && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
+        && params.elements.len() == 3
+        && matches!(
+            params.elements.get(2),
+            Some(Expr::Atom(crate::ast::Atom::Symbol(_), _))
+        )
+}
+
+fn is_canonical_amenability(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Atom(crate::ast::Atom::Str(s), _)
+            if matches!(s.as_str(), "linear" | "polynomial" | "transcendental" | "opaque")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,6 +588,85 @@ mod tests {
         assert!(
             warnings.is_empty(),
             "t-ref should be part of the closed Deep type vocabulary: {warnings:?}"
+        );
+    }
+
+    // ── Opaque-invariant metadata shape (RFC D-META) ─────────────────
+
+    fn structural_messages(src: &str) -> Vec<String> {
+        let exprs = crate::parser::parse_str(src).expect("deep parses");
+        validate(&exprs)
+            .into_iter()
+            .filter(|w| matches!(w.kind, WarningKind::Structural))
+            .map(|w| w.message)
+            .collect()
+    }
+
+    #[test]
+    fn well_formed_invariant_metadata_passes() {
+        let msgs = structural_messages(
+            "(deftype {opaque: true, \
+                invariant: (fn {} (params {} p) \
+                    (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))), \
+                invariant_amenability: \"linear\"} \
+                T () (variant {} T (field {} value (t-prim {} f32))))",
+        );
+        assert!(
+            msgs.is_empty(),
+            "expected no structural warnings, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn invariant_not_a_fn_warns() {
+        let msgs = structural_messages(
+            "(deftype {opaque: true, invariant: (var {} p), invariant_amenability: \"linear\"} \
+                T () (variant {} T (field {} value (t-prim {} f32))))",
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("`invariant` metadata must be")),
+            "expected invariant-shape warning, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn invariant_multi_binder_warns() {
+        // params node with two binders is not the predicate-fn shape.
+        let msgs = structural_messages(
+            "(deftype {opaque: true, invariant: (fn {} (params {} p q) (var {} p)), \
+                invariant_amenability: \"linear\"} \
+                T () (variant {} T (field {} value (t-prim {} f32))))",
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("`invariant` metadata must be")),
+            "expected invariant-shape warning for multi-binder, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_amenability_string_warns() {
+        let msgs = structural_messages(
+            "(deftype {opaque: true, \
+                invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))), \
+                invariant_amenability: \"nonlinear\"} \
+                T () (variant {} T (field {} value (t-prim {} f32))))",
+        );
+        assert!(
+            msgs.iter().any(|m| m.contains("invariant_amenability")),
+            "expected amenability-vocabulary warning, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn deftype_without_invariant_metadata_unaffected() {
+        let msgs = structural_messages(
+            "(deftype {opaque: true} T () (variant {} T (field {} value (t-prim {} f32))))",
+        );
+        assert!(
+            msgs.is_empty(),
+            "plain opaque deftype must not warn, got: {msgs:?}"
         );
     }
 }

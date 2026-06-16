@@ -72,6 +72,24 @@ The shipped MCP tool surface is:
 - `chelis_grad`
 - `chelis_prove`
 - `chelis_validate`
+- `chelis_prove`
+
+`chelis_prove` runs the same property + derived producer-obligation
+verification as the CLI `chelis prove` on the same module source — the
+obligation collection, synthesis, assumption injection, and tiered
+dispatch live in `chelis-prove` and are shared across both surfaces
+(`opaque_invariants_rfc.md` D-PARITY). The MCP response carries the
+derived `obligation` records and a summary `obligations` count alongside
+the property result; a prove through tide is identical to the CLI on the
+same module (locked by a cross-surface parity test).
+
+**SMT proofs are over the reals.** A `proof_tier:"smt"` obligation or
+property is discharged by the solver over the reals while runtime
+arithmetic is IEEE floating-point; such artifacts carry
+`arith_model:"real"`. No float-level soundness is claimed from a Tier B
+proof. Admission policies that quote the composed opaque-invariant
+guarantee quote this gap. See `spec/design/chelis_property_spec.md`
+(Derived obligation records / Tier B SMT note) for the record schema.
 
 ### `chelis tide lsp`
 

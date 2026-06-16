@@ -1,0 +1,6 @@
+(module {}
+  m.wf
+  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))), invariant_amenability: "linear"}
+    T
+    ()
+    (variant {} T (field {} value (t-adt {} List (t-prim {} f32))))))

@@ -537,7 +537,7 @@ impl Parser {
             }
             TokenKind::Import => self.parse_import(),
             TokenKind::Export => self.parse_export(),
-            TokenKind::At => self.parse_property_decl(),
+            TokenKind::At => self.parse_at_decl(),
             _ => Err(ParseError::Expected {
                 expected:
                     "declaration (def, sig, binding, type, dim, macro, module, import, export, @property)"
@@ -552,16 +552,30 @@ impl Parser {
     // Declarations
     // ---------------------------------------------------------------------------
 
-    fn parse_property_decl(&mut self) -> Result<Decl, ParseError> {
+    fn parse_at_decl(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume @
         let (keyword, _) = self.expect_ident()?;
-        if keyword != "property" {
-            return Err(ParseError::Expected {
-                expected: "`property` after `@`".into(),
+        match keyword.as_str() {
+            "property" => self.parse_property_decl_after_at(start),
+            "opaque" => self.parse_opaque_type_decl(start),
+            // `@invariant` may only appear AFTER `@opaque` (RFC
+            // D-SYNTAX). Reaching it here as the leading annotation
+            // means it has no `@opaque`: assumption injection would be
+            // unsound for a forgeable type.
+            "invariant" => Err(ParseError::Expected {
+                expected: "invariant requires @opaque".into(),
+                found: "@invariant".into(),
+                offset: start.offset,
+            }),
+            _ => Err(ParseError::Expected {
+                expected: "`property` or `opaque` after `@`".into(),
                 found: keyword,
                 offset: self.current_offset(),
-            });
+            }),
         }
+    }
+
+    fn parse_property_decl_after_at(&mut self, start: Span) -> Result<Decl, ParseError> {
         let (name, _) = self.expect_ident()?;
         let (forall, _) = self.expect_ident()?;
         if forall != "forall" {
@@ -611,6 +625,133 @@ impl Parser {
             options,
             span: start.merge(end),
         })
+    }
+
+    fn parse_opaque_type_decl(&mut self, start: Span) -> Result<Decl, ParseError> {
+        // Optional `@invariant(<binder>) <expr>` block, which must appear
+        // AFTER `@opaque` and BEFORE `type` (RFC D-SYNTAX). Exactly one
+        // invariant; exactly one binder.
+        let invariant = self.parse_optional_invariant_block(start)?;
+
+        if *self.peek() != TokenKind::Type {
+            return Err(ParseError::Expected {
+                expected: "`type` declaration after `@opaque`".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
+        }
+        let decl = self.parse_type_decl_with_opaque(true)?;
+        match decl {
+            Decl::TypeDef {
+                name,
+                params,
+                variants,
+                span,
+                ..
+            } => Ok(Decl::TypeDef {
+                name,
+                params,
+                variants,
+                opaque: true,
+                invariant,
+                span: start.merge(span),
+            }),
+            _ => Err(ParseError::Expected {
+                expected: "ADT type declaration after `@opaque`".into(),
+                found: "type alias".into(),
+                offset: start.offset,
+            }),
+        }
+    }
+
+    /// Parse an optional `@invariant(<binder>) <expr>` block following
+    /// `@opaque`. Returns `None` when no `@invariant` follows. Rejects a
+    /// second `@invariant` (only one allowed), a multi-binder binder
+    /// list, and an `@invariant` whose annotation keyword is not
+    /// `invariant` (RFC D-SYNTAX).
+    fn parse_optional_invariant_block(
+        &mut self,
+        opaque_start: Span,
+    ) -> Result<Option<TypeInvariant>, ParseError> {
+        if *self.peek() != TokenKind::At {
+            return Ok(None);
+        }
+        let at_span = self.advance().span; // consume @
+        let (keyword, kw_span) = self.expect_ident()?;
+        if keyword != "invariant" {
+            return Err(ParseError::Expected {
+                expected: "`invariant` after `@opaque`".into(),
+                found: format!("@{keyword}"),
+                offset: kw_span.offset,
+            });
+        }
+        // Binder list: exactly one binder.
+        self.expect(&TokenKind::LParen)?;
+        let (binder, _) = self.expect_ident()?;
+        if *self.peek() == TokenKind::Comma {
+            return Err(ParseError::Expected {
+                expected: "exactly one invariant binder".into(),
+                found: "multiple binders".into(),
+                offset: self.current_offset(),
+            });
+        }
+        self.expect(&TokenKind::RParen)?;
+
+        // The predicate body runs up to the `type` keyword at depth 0.
+        let end = self.invariant_expr_end();
+        let body = self.parse_expr_in_range(end, "`type` after @invariant predicate")?;
+        let span = at_span.merge(expr_span(&body)).merge(opaque_start);
+
+        // A second `@invariant` is an error (exactly one allowed).
+        if *self.peek() == TokenKind::At {
+            let probe = self.pos;
+            let at = self.advance();
+            if let TokenKind::Ident(word) = self.peek()
+                && word == "invariant"
+            {
+                return Err(ParseError::Expected {
+                    expected: "exactly one @invariant".into(),
+                    found: "second @invariant".into(),
+                    offset: at.span.offset,
+                });
+            }
+            // Not a second invariant; rewind so the next stage sees it.
+            self.pos = probe;
+        }
+
+        Ok(Some(TypeInvariant { binder, body, span }))
+    }
+
+    /// The token index where an `@invariant` predicate body ends: the
+    /// `type` keyword at bracket depth 0. Errors are surfaced by the
+    /// subsequent `type` expectation, so this returns the scan position.
+    fn invariant_expr_end(&self) -> usize {
+        let mut pos = self.pos;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        while let Some(token) = self.tokens.get(pos) {
+            match token.kind {
+                TokenKind::Type if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                    break;
+                }
+                TokenKind::At if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                    // A following `@` (e.g. a stray second annotation)
+                    // also terminates the predicate scan.
+                    break;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen if paren_depth > 0 => paren_depth -= 1,
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket if bracket_depth > 0 => bracket_depth -= 1,
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace if brace_depth > 0 => brace_depth -= 1,
+                TokenKind::Eof => break,
+                _ => {}
+            }
+            pos += 1;
+        }
+        pos
     }
 
     fn parse_exprs_until_colon(&mut self) -> Result<Vec<Expr>, ParseError> {
@@ -839,6 +980,10 @@ impl Parser {
     }
 
     fn parse_type_decl(&mut self) -> Result<Decl, ParseError> {
+        self.parse_type_decl_with_opaque(false)
+    }
+
+    fn parse_type_decl_with_opaque(&mut self, opaque: bool) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Type
         let (name, _) = self.expect_type_ident()?;
         let params = if *self.peek() == TokenKind::LBracket {
@@ -862,6 +1007,8 @@ impl Parser {
                 name,
                 params,
                 variants,
+                opaque,
+                invariant: None,
                 span: start.merge(last_span),
             })
         } else {
@@ -3828,6 +3975,146 @@ mod tests {
             }
             _ => panic!("expected Match, got {e:?}"),
         }
+    }
+
+    // ===== Opaque invariant declarations (RFC D-SYNTAX) =====
+
+    /// Extract the single `TypeDef` from a parsed program, descending
+    /// into module wrappers.
+    fn type_def(src: &str) -> (bool, Option<TypeInvariant>) {
+        fn find(decls: Vec<Decl>) -> Option<(bool, Option<TypeInvariant>)> {
+            for decl in decls {
+                match decl {
+                    Decl::TypeDef {
+                        opaque, invariant, ..
+                    } => return Some((opaque, invariant)),
+                    Decl::Module { decls, .. } => {
+                        if let Some(found) = find(decls) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        find(p(src)).unwrap_or_else(|| panic!("no TypeDef in: {src}"))
+    }
+
+    #[test]
+    fn opaque_without_invariant_parses_none() {
+        let (opaque, invariant) =
+            type_def("module M\n@opaque\ntype Probability = | Probability { value: f32 }");
+        assert!(opaque);
+        assert!(invariant.is_none());
+    }
+
+    #[test]
+    fn opaque_with_invariant_parses() {
+        let (opaque, invariant) = type_def(
+            "module M\n@opaque\n@invariant(p) (p.value >= 0.0) && (p.value <= 1.0)\n\
+             type Probability = | Probability { value: f32 }",
+        );
+        assert!(opaque);
+        let inv = invariant.expect("invariant parsed");
+        assert_eq!(inv.binder, "p");
+        // Body is the boolean `and` expression.
+        assert!(
+            matches!(inv.body, Expr::Binary(BinOp::And, _, _, _)),
+            "expected And binary, got {:?}",
+            inv.body
+        );
+    }
+
+    #[test]
+    fn invariant_polynomial_body_parses() {
+        let (_, invariant) = type_def(
+            "module M\n@opaque\n@invariant(p) (p.value * p.value) <= 1.0\n\
+             type Probability = | Probability { value: f32 }",
+        );
+        assert_eq!(invariant.unwrap().binder, "p");
+    }
+
+    #[test]
+    fn invariant_transcendental_body_parses() {
+        let (_, invariant) = type_def(
+            "module M\n@opaque\n@invariant(p) exp(p.value) <= 3.0\n\
+             type Probability = | Probability { value: f32 }",
+        );
+        assert_eq!(invariant.unwrap().binder, "p");
+    }
+
+    #[test]
+    fn simplex_tolerance_band_invariant_parses() {
+        // The W6 flagship declaration: sum over a tensor field with a
+        // module-constant tolerance band.
+        let (_, invariant) = type_def(
+            "module M\n@opaque\n\
+             @invariant(p) (sum(p.weights) >= (1.0 - eps)) && (sum(p.weights) <= (1.0 + eps))\n\
+             type Simplex = | Simplex { weights: tensor[3, f32] }",
+        );
+        assert_eq!(invariant.unwrap().binder, "p");
+    }
+
+    #[test]
+    fn invariant_without_opaque_is_error() {
+        let e = p_err("module M\n@invariant(p) p.value >= 0.0\ntype T = | T { value: f32 }");
+        match e {
+            ParseError::Expected { expected, .. } => {
+                assert_eq!(expected, "invariant requires @opaque");
+            }
+            other => panic!("expected invariant-requires-opaque error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invariant_after_type_is_error() {
+        // `@invariant` cannot follow `type`; it must precede it. Here the
+        // type decl is parsed, then a leading `@invariant` is seen as a
+        // fresh declaration with no `@opaque`.
+        let e =
+            p_err("module M\n@opaque\ntype T = | T { value: f32 }\n@invariant(p) p.value >= 0.0");
+        match e {
+            ParseError::Expected { expected, .. } => {
+                assert_eq!(expected, "invariant requires @opaque");
+            }
+            other => panic!("expected error for @invariant after type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn double_invariant_is_error() {
+        let e = p_err(
+            "module M\n@opaque\n@invariant(p) p.value >= 0.0\n\
+             @invariant(p) p.value <= 1.0\ntype T = | T { value: f32 }",
+        );
+        match e {
+            ParseError::Expected { expected, .. } => {
+                assert_eq!(expected, "exactly one @invariant");
+            }
+            other => panic!("expected double-invariant error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_binder_invariant_is_error() {
+        let e = p_err(
+            "module M\n@opaque\n@invariant(p, q) p.value >= 0.0\ntype T = | T { value: f32 }",
+        );
+        match e {
+            ParseError::Expected { expected, .. } => {
+                assert_eq!(expected, "exactly one invariant binder");
+            }
+            other => panic!("expected multi-binder error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invariant_on_type_alias_is_error() {
+        // `@opaque` (and so `@invariant`) on a type alias is rejected:
+        // the ADT form is required.
+        let e = p_err("module M\n@opaque\n@invariant(p) p.value >= 0.0\ntype T = f32");
+        assert!(matches!(e, ParseError::Expected { .. }));
     }
 
     // ===== Module-qualified path tests (chelis#316) =====

@@ -6,10 +6,16 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Forward the SMT toolchain so the tide obligation path proves at the
+# same Tier B as the CLI (RFC D-PARITY); without it tide runs Tier C.
+smt = ["chelis-prove/smt"]
+
 [dependencies]
 axum = "0.7"
 chelis-compiler-api.workspace = true
 chelis-prove = { path = "../chelis-prove" }
+chelis-surf.workspace = true
 schemars = { version = "0.8", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

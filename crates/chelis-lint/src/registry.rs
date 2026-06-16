@@ -19,6 +19,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(rules::surf_test_name_prefix::SurfTestNamePrefix),
         Box::new(rules::surf_def_arrow_form::SurfDefArrowForm),
         Box::new(rules::no_em_dash_in_public_strings::NoEmDashInPublicStrings),
+        Box::new(rules::opaque_domain_construction::OpaqueDomainConstruction),
     ]
 }
 
@@ -29,6 +30,10 @@ pub fn non_blocking_rules() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(rules::redundant_linearity_call::RedundantLinearityCall),
         Box::new(rules::prefer_pipe_operator::PreferPipeOperator),
+        Box::new(rules::opaque_without_invariant::OpaqueWithoutInvariant),
+        Box::new(rules::invariant_float_equality::InvariantFloatEquality),
+        Box::new(rules::unreachable_producer::UnreachableProducer),
+        Box::new(rules::opaque_escape_site::OpaqueEscapeSite),
     ]
 }
 

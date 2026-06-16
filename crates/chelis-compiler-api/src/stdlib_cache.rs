@@ -63,7 +63,7 @@ use crate::compiler::CompilerError;
 /// Internal struct-format version. Bumped when [`StdLibContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
 /// Mixed into the content-addressed key.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 1;
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 2;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -306,6 +306,10 @@ pub fn load_or_build_stdlib_context(
 pub fn build_stdlib_context(
     stdlib_decls: &[chelis_surf::ast::Decl],
 ) -> Result<StdLibContext, CompilerError> {
+    // RFC v5: chelis-std decls are reef-linker output (internal-name
+    // mangled); accept the linker name format while building the
+    // context, including via direct callers and the cache-miss path.
+    let _linked = chelis_types::install_linked_program_guard();
     let desugared = chelis_surf::desugar::desugar_program(stdlib_decls);
     let deep_library_decls =
         chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())

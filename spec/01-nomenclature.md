@@ -1130,7 +1130,93 @@ are build-time errors. This discipline closes the loophole that lets
 post-hoc justifications accrete in the lint config: every waiver has
 to point at a documented rule that explicitly carves out the case.
 
-### 12.1 Future rule queue
+### 12.1 Opaque Domain Construction
+
+Types marked with `opaque: true` metadata participate in a
+verified-constructor discipline. Outside the defining module, code must
+obtain values of that type through exported constructor functions rather
+than materializing the representation directly.
+
+The AUTHORITATIVE gate is the type checker: opacity is enforced during
+inference as `CheckErrorKind::OpaqueTypeViolation`, covering
+construction, constructor references, pattern inspection, field
+access, record update, casts, literal ascription, and out-of-module
+references to unexported producer bindings. The full rejection set and
+module-identity rules are normative in `spec/04-type-system.md` §2.5.
+
+The lint rule `opaque-domain-construction` is kept as
+defense-in-depth: per-file, no type context, fast editor/agent
+feedback ahead of a full check, and its fail-closed
+untyped-`record-update` arm complements the checker's deferred-target
+ledger. The lint is fast feedback; the typing judgment is the
+guarantee. The blocking lint rule rejects:
+
+- Surf record construction of a marked ADT outside the defining module.
+- Deep `record` construction of a marked ADT outside the defining module.
+- Deep or Surf casts whose target is a marked domain type.
+- Deep `record-update` when the node or updated value carries type
+  metadata naming a marked domain type.
+- Untyped Deep `record-update` outside every marked type's defining
+  module when a marked type is in scope. This is fail-closed: without
+  type metadata the rule cannot verify that the update is not
+  materializing an opaque domain value.
+
+The lint rule is a per-file construction-discipline gate layered
+under the checker's constructor privacy. Downstream reports may cite
+"checker-enforced opaque types plus lint defense-in-depth"; the
+checker-level guarantee is the one specified in
+`spec/04-type-system.md` §2.5.
+
+Both layers deliberately allow direct construction inside the
+defining module so the module can implement and prove its smart
+constructors. Outside the defining module the checker rejects
+constructor patterns and field access on the opaque type itself;
+matching with irrefutable patterns and calling exported readers remain
+available.
+
+An opaque type may carry one declared invariant
+(`@invariant(<binder>) <expr>`), extending the proven-constructor
+discipline: a value of the type carries not only the provenance
+guarantee (it originated inside the defining module) but the declared
+boolean property of its representation. The invariant is recorded as
+Deep metadata and checked for well-formedness at declaration time
+(`spec/04-type-system.md` §2.5.1); the everyday checker never evaluates
+it. The proven-constructor discipline is *discharged*, not merely
+declared: `chelis prove` derives one obligation per exported producer of
+the type (`opaque_invariants_rfc.md` D-PRODUCER / D-OBLIG) and proves —
+at the SMT tier where the constructor lowers, otherwise by validated
+sampling — that every produced value establishes the invariant. The
+producer set is covered-or-rejected: an exported producer whose result
+reaches the type through an unsupported container, or whose signature
+hands caller-supplied code an unobligated value, is a declaration error,
+so the discipline has no silent gaps.
+
+Advisory (non-blocking) lint rules support the invariant workflow:
+
+- `opaque-without-invariant` (note): an opaque type with no declared
+  `@invariant` carries only the construction guarantee; adding one lets
+  `chelis prove` derive producer obligations.
+- `invariant-float-equality`: exact `==` over a representation field in
+  an invariant starves generation by design; the documented idiom is a
+  tolerance band over a module constant.
+- `unreachable-producer` (note): an opaque type with no exported
+  producers is fully sealed and has an empty obligation set; the lint
+  flags the dead declaration so the author either exports a producer or
+  removes the type.
+- `opaque-escape-site`: enumerates every in-module argument-egress site
+  of a value of the type (or a function value capable of producing it)
+  passed to an out-of-module callee, labelled by local provenance — a
+  `note` when the value traces to a producer call or a type-T input of
+  the enclosing function (locally attested), a `warning` when it traces
+  to a raw construction or representation update (unattested). This is
+  the audit surface for the explicit argument-egress trust caveat
+  (`opaque_invariants_rfc.md` D-SOUND / D-LINT): return-egress is
+  mechanically obligated, argument-egress is module-audited.
+
+The authoritative design record is
+`spec/design/opaque_invariants_rfc.md`.
+
+### 12.2 Future rule queue
 
 The following rules are intentionally queued, not currently part of
 the blocking registry:

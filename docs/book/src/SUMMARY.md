@@ -8,6 +8,7 @@
 - [Effects And Handlers](effects.md)
 - [Transforms: grad and vmap](transforms.md)
 - [Reef and Packages](reef.md)
+- [Opaque Types With Declared Invariants](opaque-invariants.md)
 - [Examples](examples.md)
 
 # Language Reference

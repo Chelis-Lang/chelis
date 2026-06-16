@@ -1,11 +1,13 @@
 pub(crate) mod cache_envelope;
 pub mod compiler;
 pub mod context;
+pub mod decode;
 pub mod layered;
 pub(crate) mod runtime;
 pub mod schema;
 pub mod stdlib_cache;
 
+pub use chelis_types::{LinkedProgramGuard, install_linked_program_guard};
 pub use compiler::{
     PreparedEvalInContext, check_in_context, eval_in_context, eval_many_in_context,
     prepare_eval_in_context,
@@ -14,7 +16,15 @@ pub use context::{
     CacheError, CacheIdentity, CompiledContext, ContextHash, compile_reef_context,
     load_or_compile_for_package,
 };
+/// Experimental decode chokepoint for opaque-type invariant revalidation
+/// (RFC `opaque_invariants_rfc.md` D-DECODE). No production codec consumes
+/// it in V1 -- see `decode` module docs.
+pub use decode::{DecodeError, decode_adt_value, try_decode_adt_value};
 pub use layered::{LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats};
+/// The host-runtime value type returned by the decode chokepoint.
+/// Experimental: surfaced for the decode contract point; its shape is not
+/// yet a stable public commitment (V1 has no production decode caller).
+pub use runtime::RuntimeValue;
 pub use stdlib_cache::{
     StdLibContext, build_stdlib_context, cache_disabled, load_or_build_stdlib_context,
     stdlib_cache_key, typecheck_cache_dir,

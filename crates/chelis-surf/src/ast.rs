@@ -29,6 +29,11 @@ pub enum Decl {
         name: String,
         params: Vec<String>,
         variants: Vec<Variant>,
+        opaque: bool,
+        /// Declared invariant for an opaque type (RFC D-SYNTAX). Always
+        /// `None` for a non-opaque type; an `@invariant` without
+        /// `@opaque` is a parse error.
+        invariant: Option<TypeInvariant>,
         span: Span,
     },
     TypeAlias {
@@ -89,6 +94,20 @@ impl Decl {
             | Decl::Export { span, .. } => *span,
         }
     }
+}
+
+/// A declared invariant on an opaque type (RFC D-SYNTAX): a boolean
+/// predicate over a single binder of the representation, written in Surf
+/// at the declaration site. Recorded as the `invariant` metadata key on
+/// the Deep `deftype` (RFC D-META).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypeInvariant {
+    /// The single binder name bound to a representation value.
+    pub binder: String,
+    /// The predicate body, evaluated with `binder` in scope.
+    pub body: Expr,
+    /// Byte span of the `@invariant(...) ...` block in the Surf source.
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

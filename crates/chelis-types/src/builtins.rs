@@ -1115,6 +1115,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "Option".to_string(),
             type_params: vec!["a".to_string()],
+            param_vars: vec![option_tvar],
+            opaque: false,
+            defining_module: None,
             variants: vec![
                 VariantInfo {
                     name: "Some".to_string(),
@@ -1158,6 +1161,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "List".to_string(),
             type_params: vec!["a".to_string()],
+            param_vars: vec![list_tvar],
+            opaque: false,
+            defining_module: None,
             variants: vec![
                 VariantInfo {
                     name: "Cons".to_string(),
@@ -1176,6 +1182,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "MappedFile".to_string(),
             type_params: Vec::new(),
+            param_vars: Vec::new(),
+            opaque: false,
+            defining_module: None,
             variants: Vec::new(),
         });
 }

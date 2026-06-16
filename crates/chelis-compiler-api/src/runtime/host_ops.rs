@@ -135,7 +135,7 @@ pub(super) fn pattern_matches(
     }
 }
 
-pub(super) fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<String>> {
+pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<String>> {
     let mut out = HashMap::new();
     for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {

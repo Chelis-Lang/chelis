@@ -631,13 +631,13 @@ pub fn load_or_compile_for_package(
 /// Magic header bytes for the Phase I disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V4\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V5\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 4;
+const CACHE_FORMAT_VERSION: u32 = 5;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -815,6 +815,10 @@ pub fn compile_reef_context(
     _reef_home: &Path,
     package_dir: &Path,
 ) -> Result<CompiledContext, CompilerError> {
+    // RFC v5 (RT-1 F2 bypass): the entire reef library is linker output
+    // (internal-name-mangled), so the reserved linker-name rejection is
+    // off for this whole context build.
+    let _linked = chelis_types::install_linked_program_guard();
     // Phase K profile instrumentation: when `CHELIS_PROFILE_COMPILE_CONTEXT=1`
     // is set, emit per-phase wall-clock to stderr so the operator can see
     // which stage dominates. Off by default — zero cost on the hot path.

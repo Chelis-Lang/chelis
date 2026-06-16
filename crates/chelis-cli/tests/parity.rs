@@ -458,6 +458,29 @@ fn parity_vmap_relu_library_only() {
     drive_parity(&examples_root().join("vmap_relu.ch"), false);
 }
 
+// The opaque-invariants worked example (RFC `opaque_invariants_rfc.md`).
+// Library-only: `@opaque`/`@invariant` declare the `Probability` type and
+// `@property` desugars to a `bool` def, so there is no top-level work and both
+// lanes emit nothing. The scalar unit-interval invariant lowers cleanly
+// through the C backend.
+#[test]
+fn parity_opaque_invariants_library_only() {
+    drive_parity(&examples_root().join("opaque_invariants.ch"), false);
+}
+
+// The `Simplex` tolerance-band variant: a tensor-field `sum(p.weights)`
+// invariant. Like `Probability` it is library-only (only `@opaque`/
+// `@invariant` declarations plus exported producers and a `@property`, so
+// both lanes emit nothing). The invariant predicate is declaration metadata
+// consumed only by `chelis prove`; it is never lowered to runtime IR, so the
+// runtime IR audit now skips it and the example lowers cleanly through the C
+// backend. Promoted from `examples/illustrative/` once that audit stopped
+// rejecting the declaration metadata.
+#[test]
+fn parity_opaque_invariants_simplex_library_only() {
+    drive_parity(&examples_root().join("opaque_invariants_simplex.ch"), false);
+}
+
 #[test]
 fn parity_rank_poly_borrow_library_only() {
     drive_parity(&examples_root().join("rank_poly_borrow.ch"), false);
@@ -479,6 +502,8 @@ fn parity_corpus_is_complete() {
         "linreg.ch",
         "list_foundation.ch",
         "mnist.ch",
+        "opaque_invariants.ch",
+        "opaque_invariants_simplex.ch",
         "rank_poly_borrow.ch",
         "scalar_string_foundation.ch",
         "tensor_structural_ops.ch",

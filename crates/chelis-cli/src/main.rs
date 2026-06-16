@@ -334,6 +334,11 @@ enum Command {
         /// SMT solver timeout in milliseconds (default 5000)
         #[clap(long, default_value = "5000")]
         smt_timeout: u64,
+        /// Floor for invariant rejection-sampling acceptance rate before
+        /// the generator-starvation classifier fires (RFC D-STARVE). 0.0
+        /// disables the classifier (legacy exhaustion => error path).
+        #[clap(long, default_value = "0.01")]
+        invariant_min_rate: f64,
     },
     /// Lint naming conventions per `spec/01-nomenclature.md`
     Lint {
@@ -526,6 +531,17 @@ enum ReefCommand {
 }
 
 fn main() {
+    // Tier B process isolation: if this process was spawned as a prove worker,
+    // run one cvc5 solve and exit before doing anything else; otherwise enable
+    // isolation so every Tier B solve runs in a short-lived child whose crash
+    // (cvc5 C++ abort, stack overflow, OOM, panic) becomes a clean Tier C
+    // result instead of taking the `chelis` process down. smt-only -- without
+    // the feature there is no cvc5 and nothing to isolate.
+    #[cfg(feature = "smt")]
+    {
+        chelis_prove::run_worker_if_requested();
+        chelis_prove::enable_isolation();
+    }
     chelis_ir::lower::install_chelis_panic_hook();
     let cli = Cli::parse();
     let result = match cli.command {
@@ -645,6 +661,7 @@ fn main() {
             spans,
             tier: _tier,
             smt_timeout: _smt_timeout,
+            invariant_min_rate,
         }) => match prove::cmd_prove(prove::ProveOptions {
             path: path.as_deref(),
             only: only.as_deref(),
@@ -655,6 +672,7 @@ fn main() {
             spans: spans.as_deref(),
             tier: &_tier,
             smt_timeout_ms: _smt_timeout,
+            invariant_min_rate,
         }) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
@@ -833,9 +851,20 @@ fn cmd_eval(
                     run_eval_emit(try_eval(SourceKind::Deep, &deep_source, None))
                 };
             }
-            if let Some(package_root) = detect_eval_package_root(path)? {
+            // RFC v5 (RT-1 F2 bypass): a `--file` resolving into a reef
+            // package evaluates reef-linker output (mangled), through the
+            // fast path AND the `load_eval_decls` fallback below (which
+            // re-formats + re-evaluates the linked decls). Accept the
+            // linker name format for the rest of this arm. The raw `.dp`
+            // case returned above, so it keeps the flag FALSE and rejects
+            // mangled names as a forge.
+            let eval_package_root = detect_eval_package_root(path)?;
+            let _linked_guard = eval_package_root
+                .is_some()
+                .then(chelis_types::install_linked_program_guard);
+            if let Some(package_root) = &eval_package_root {
                 let source = fs::read_to_string(path)?;
-                match run_eval_in_context(&package_root, &source, json) {
+                match run_eval_in_context(package_root, &source, json) {
                     Ok(()) => return Ok(()),
                     Err(EvalInContextError::HashUnsupported) => {
                         // The Phase G hash step does not yet cover
@@ -1471,6 +1500,17 @@ fn cmd_check_one(
         return Ok((json, true));
     }
 
+    // RFC v5 (RT-1 F2 bypass): inside a reef package every decl checked
+    // below (layered fast path AND the monolithic fallback on
+    // `prepared.decls`) is reef-linker output, so accept the linker's
+    // reserved internal-name format for the rest of this function. Raw
+    // single-file `.ch` (prepared == None) and `.dp` (routed earlier
+    // through the deep helper) keep the flag FALSE and reject mangled
+    // names as forged module identity.
+    let _linked_guard = prepared
+        .is_some()
+        .then(chelis_types::install_linked_program_guard);
+
     // Layered fast path: when the input resolves inside a reef package
     // (so the chelis-std / non-chelis-std partition is available) and the
     // chelis-std typecheck cache is not disabled, check the non-chelis-std
@@ -2063,6 +2103,12 @@ fn cmd_build(
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     }
     let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
+    // RFC v5 (RT-1 F2 bypass): a reef-prepared build checks reef-linker
+    // output; accept the linker's reserved internal-name format. Raw
+    // `.ch`/`.dp` builds keep the flag FALSE and reject mangled names.
+    let _linked_guard = prepared
+        .is_some()
+        .then(chelis_types::install_linked_program_guard);
     let (decls, entry_decls) = match &prepared {
         Some(prepared) => (prepared.decls.clone(), prepared.entry_decls.clone()),
         None => {
@@ -4778,6 +4824,14 @@ fn prepare_eval_in_exec_context(
     exec_context: &TestExecutionContext,
     synth_decls: &[Decl],
 ) -> Result<PreparedTestEval, String> {
+    // RFC v5 (RT-1 F2 bypass): both branches feed reef-linked decls to
+    // the checker -- the Context branch through `prepare_eval_in_context`
+    // (which rewrites + checks internally) and the ReefGraph branch by
+    // formatting linked decls to Surf text and re-evaluating via
+    // `prepare_eval`, which loses the in-process provenance across the
+    // text round-trip. Re-assert the linked flag for both so the
+    // linker's internal names are accepted.
+    let _linked = chelis_types::install_linked_program_guard();
     match exec_context {
         TestExecutionContext::Context(ctx) => {
             // `prepare_eval_in_context` runs the reef rewriter
@@ -4986,6 +5040,13 @@ fn eval_module_init(
     let source_text = chelis_surf::format::format_program(&prepared.decls);
     let outcome = run_test_with_timeout(
         move || {
+            // RFC v5 (RT-1 F2 bypass): `source_text` is the reef-linked
+            // module formatted back to Surf (internal-name mangled);
+            // `eval_selected` re-parses + re-checks it. This closure
+            // runs on a SPAWNED worker thread, so the main-thread
+            // linked-program guard does not apply -- install it here so
+            // the linker's own names are accepted in this thread.
+            let _linked = chelis_types::install_linked_program_guard();
             let request = EvalRequest {
                 source_kind: SourceKind::Surf,
                 source: source_text,

@@ -100,6 +100,31 @@ impl Prim {
         matches!(self, Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64)
     }
 
+    /// The representable `[min, max]` range of a signed integer width, or
+    /// `None` for a non-integer primitive. The single type-system source for
+    /// the per-width integer range.
+    pub fn integer_range(&self) -> Option<(i64, i64)> {
+        Some(match self {
+            Prim::Int8 => (i8::MIN as i64, i8::MAX as i64),
+            Prim::Int16 => (i16::MIN as i64, i16::MAX as i64),
+            Prim::Int32 => (i32::MIN as i64, i32::MAX as i64),
+            Prim::Int64 => (i64::MIN, i64::MAX),
+            _ => return None,
+        })
+    }
+
+    /// The integer fuzz-sampling `[min, max]` window: the `[-1000, 1000]`
+    /// convenience range clamped to the width's [`integer_range`], or `None`
+    /// for a non-integer primitive. The SINGLE source every prove-path
+    /// integer sampler (the obligation engine, the property runner, the
+    /// injection path, and the CLI fuzz sampler) shares, so a narrow width
+    /// (e.g. int8) samples in `[-128, 127]` everywhere -- never an
+    /// unrepresentable value that would yield a spurious counterexample.
+    pub fn integer_fuzz_bounds(&self) -> Option<(i64, i64)> {
+        let (lo, hi) = self.integer_range()?;
+        Some((lo.max(-1000), hi.min(1000)))
+    }
+
     /// True if this primitive is in the **active** numeric/scalar set per
     /// `spec/04-type-system.md` §1.1. Excludes the deferred `f8e4m3`
     /// (§1.1.1). Use this predicate as the canonical "is this dtype

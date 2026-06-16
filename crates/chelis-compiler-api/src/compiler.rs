@@ -27,7 +27,8 @@ use crate::schema::{
     WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm,
     WireMetaEntry, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
     WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireSurfDecl, WireSurfExpr,
-    WireSurfTypeExpr, WireTensorType, WireUnaryOp, WireVariant, WireVariantFields,
+    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireVariantFields,
 };
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -412,6 +413,11 @@ fn compile_new_source_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<CompiledSource> {
+    // RFC v5 (RT-1 F2 bypass): the new entry decls are reef-rewritten
+    // (`rewrite_entry_decls_with_reef_graph` mangles them) before this
+    // checks them against the linked library, so the linker name format
+    // is expected here.
+    let _linked = chelis_types::install_linked_program_guard();
     // Phase G inputs are always Surf — `compile_reef_context` already
     // resolved the package's library decls; the new source is whatever
     // the user typed into a `chelis eval --file` / `chelis test` worker /
@@ -2070,11 +2076,19 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             name,
             params,
             variants,
+            opaque,
+            invariant,
             span: s,
         } => WireSurfDecl::TypeDef {
             name: name.clone(),
             params: params.clone(),
             variants: variants.iter().map(wire_variant).collect(),
+            opaque: *opaque,
+            invariant: invariant.as_ref().map(|inv| WireTypeInvariant {
+                binder: inv.binder.clone(),
+                body: wire_expr(&inv.body),
+                span: span(inv.span),
+            }),
             span: span(*s),
         },
         Decl::TypeAlias {

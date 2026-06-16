@@ -542,6 +542,7 @@ version = "0.7.25"
 dependencies = [
  "assert_cmd",
  "chelis-deep",
+ "chelis-surf",
  "predicates",
  "regex",
  "tempfile",
@@ -576,11 +577,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-pred"
+version = "0.7.25"
+dependencies = [
+ "chelis-deep",
+ "thiserror",
+]
+
+[[package]]
 name = "chelis-prove"
 version = "0.7.25"
 dependencies = [
+ "bincode",
  "chelis-compiler-api",
  "chelis-deep",
+ "chelis-pred",
  "chelis-surf",
  "chelis-types",
  "cvc5-rs",
@@ -663,6 +674,7 @@ name = "chelis-surf"
 version = "0.7.25"
 dependencies = [
  "chelis-deep",
+ "chelis-pred",
  "miette",
  "proptest",
  "serde",
@@ -677,6 +689,7 @@ dependencies = [
  "axum",
  "chelis-compiler-api",
  "chelis-prove",
+ "chelis-surf",
  "http-body-util",
  "schemars",
  "serde",
@@ -692,6 +705,7 @@ version = "0.7.25"
 dependencies = [
  "chelis-deep",
  "chelis-macros",
+ "chelis-pred",
  "chelis-surf",
  "serde",
  "thiserror",

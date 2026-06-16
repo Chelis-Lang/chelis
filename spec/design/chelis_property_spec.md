@@ -141,6 +141,14 @@ Exit codes:
 
 Precedence is `3 > 2 > 1 > 0`.
 
+A module that does not type-check is an `Error` (exit `3`): `chelis prove`
+surfaces the check diagnostics and never reports success on a type-broken
+module. Derived producer obligations cannot be meaningfully verified
+without the checker-inferred signatures, so a rejectable producer must not
+be hidden behind an unrelated type error. Strict downstream prove-compat
+admission (FlukeBall) relies on this: a `prove` that exits `0` warrants
+that the module type-checked and every obligation was discharged.
+
 ## JSON Output
 
 `--json` emits NDJSON. Each selected property emits one record, followed by one
@@ -152,6 +160,68 @@ summary record.
 {"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","reason":"symbolic tensor dimensions are not supported in L2 v1"}
 {"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0}
 ```
+
+### Derived obligation records (additive — `opaque_invariants_rfc.md` D-OBLIG)
+
+In addition to `{kind:"property"}` records, `chelis prove` emits one
+`{kind:"obligation"}` record per derived producer obligation of an
+invariant-carrying opaque type, and the `{kind:"summary"}` record gains an
+`obligations` field. These are **additive**: existing `kind:"property"` and
+`kind:"summary"` records and fields are unchanged in meaning, and a strict
+admission parser (FlukeBall) must add `kind:"obligation"` to its accepted
+record set deliberately at pin time — it is a new record kind, not a change
+to an existing one.
+
+```json
+{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"probability","name":"invariant:Probability:probability","status":"passed","proof_tier":"smt","samples":0,"seed":0,"arith_model":"real"}
+{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"bad_prob","name":"invariant:Probability:bad_prob","status":"failed","proof_tier":"smt","samples":0,"seed":0,"arith_model":"real","counterexample":{"__arg0":"2.0"}}
+{"kind":"obligation","obligation_kind":"invariant_producer","status":"error","reason":"opaque type `Probability`: exported producer `many` returns the type through an unsupported container (generic `List`); decompose-or-reject (RFC D-PRODUCER)"}
+{"kind":"summary","total":1,"passed":1,"failed":0,"unsupported":0,"errors":0,"obligations":1}
+```
+
+Fields: `obligation_kind` is `"invariant_producer"` in V1; `source_type`
+is the opaque type; `producer` is the exported def (or constant) under
+obligation; `name` is `invariant:<Type>:<producer>`; `status` is one of
+`passed`/`failed`/`unsupported`/`error`; `proof_tier` is `"smt"` (Tier B)
+or `"fuzz"` (Tier C); `samples`/`seed` mirror the property records;
+`counterexample` and `reason` are optional. A `counterexample` keys the
+producer's inputs by **positional placeholder** (`__arg0`, `__arg1`, ...),
+not by source parameter name. `arith_model:"real"` is
+present on `proof_tier:"smt"` records (the SMT-over-reals caveat — see
+the Tier B note below). A `status:"error"` record is a declaration-time
+covered-or-rejected / signature-rejection failure and carries only
+`obligation_kind`, `status`, and `reason`. Exit codes are unchanged in
+meaning: a failed or errored obligation participates in the same
+worst-status exit code as user properties (`Passed=0`, `Failed=1`,
+`Unsupported=2`, `Error=3`).
+
+### Invariant-binder generation and starvation (`--invariant-min-rate`)
+
+A binder whose type is an invariant-carrying opaque type — in a derived
+obligation or in a user `@property` — is generated only over
+invariant-satisfying values: tiered rejection sampling then
+constructor-based generation, with every accepted sample
+predicate-validated (full design in `opaque_invariants_rfc.md` D-STARVE /
+D-INJECT). When both tiers fall below the floor the binder starves and its
+record is `status:"unsupported"` (exit `2`) with a `reason` naming the
+type, per-method accepted/attempted counts, the rate, the floor, the
+predicate-shape classification, and the recommended route. This is
+distinct from user-precondition generator exhaustion, which stays an
+`Error` (exit `3`): the two failure modes remain separable. The
+`--invariant-min-rate <f64>` flag (default `0.01`) sets the floor for the
+rejection tier; `--invariant-min-rate 0.0` disables the starvation
+classification and preserves the legacy exhaustion-as-`Error` path.
+Generation is deterministic under a fixed seed.
+
+### Tier B SMT proofs are over the reals (caveat)
+
+A `proof_tier:"smt"` obligation (or property) is discharged by the SMT
+solver over the **reals**, while runtime arithmetic is IEEE
+floating-point. Such artifacts carry `arith_model:"real"`. No
+float-level soundness is claimed from a Tier B proof; admission policies
+that quote the composed opaque-invariant guarantee must quote this gap
+rather than rediscovering it. Tier C (`proof_tier:"fuzz"`) validates
+concrete float samples and carries no `arith_model` field.
 
 ## Relationship To `chelis test`
 

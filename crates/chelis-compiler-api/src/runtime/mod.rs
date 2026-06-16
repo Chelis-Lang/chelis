@@ -9,16 +9,23 @@ use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 
 mod eval;
 mod host_ops;
+mod invariant;
 mod named_axis;
 #[cfg(test)]
 mod tests;
 mod transforms;
 
-use host_ops::collect_adt_ctor_fields;
+pub(crate) use host_ops::collect_adt_ctor_fields;
+// Decode-boundary invariant revalidation surface (RFC D-DECODE). The
+// `crate::decode` chokepoint imports these as `crate::runtime::<name>`.
+pub(crate) use invariant::{
+    DecodeField, DecodeFieldType, InvariantEntry, collect_ctor_field_types,
+    collect_type_invariants, collect_zero_arg_constants, revalidate_adt_value,
+};
 use transforms::extract_prim_from_type_expr;
 
 #[derive(Debug, Clone)]
-pub(crate) struct RuntimeTensorValue {
+pub struct RuntimeTensorValue {
     pub(crate) value: IrTensorValue,
     pub(crate) precision: Prim,
 }
@@ -33,7 +40,7 @@ pub(crate) struct RuntimeTensorValue {
 /// [`chelis_ir::lower::lower_subexpr_program`] + the forward DAG
 /// evaluator — the same machinery the C backend uses.
 #[derive(Debug, Clone)]
-pub(crate) enum TransformKind {
+pub enum TransformKind {
     /// `(grad {wrt: ...} fn-expr [index-expr])` — reverse-mode autodiff.
     Grad,
     /// `(vmap {} fn-expr axis-lit)` — vectorize the leading axis (or
@@ -50,7 +57,7 @@ pub(crate) enum TransformKind {
 /// `dtype`-vs-`bits` invariant cannot be silently violated. See
 /// `spec/04-type-system.md` §1.1 for the active dtype set.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum ScalarBits {
+pub enum ScalarBits {
     I8(i8),
     I16(i16),
     I32(i32),
@@ -164,7 +171,7 @@ impl ScalarBits {
 /// `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
 /// directly and skip the `RuntimeValue::scalar()` invariant check.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ScalarPayload {
+pub struct ScalarPayload {
     dtype: Prim,
     bits: ScalarBits,
 }
@@ -219,7 +226,7 @@ impl ScalarPayload {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum RuntimeValue {
+pub enum RuntimeValue {
     Tensor(RuntimeTensorValue),
     /// First-class numeric scalar tagged with its source-level dtype.
     /// Construction must go through [`RuntimeValue::scalar`] (or one of
@@ -364,7 +371,7 @@ impl RuntimeValue {
     }
 
     /// View this value as i64 if it is an integer-typed scalar.
-    pub(crate) fn as_i64(&self) -> Option<i64> {
+    pub fn as_i64(&self) -> Option<i64> {
         match self {
             RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
                 Some(payload.bits().as_i64())
@@ -375,17 +382,42 @@ impl RuntimeValue {
 
     /// View this value as f64 if it is a float-typed scalar. Mirrors
     /// `as_i64` for the float row.
-    #[allow(
-        dead_code,
-        reason = "test surface mirror of as_i64; used by acceptance tests"
-    )]
-    pub(crate) fn as_f64(&self) -> Option<f64> {
+    pub fn as_f64(&self) -> Option<f64> {
         match self {
             RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
                 Some(payload.bits().as_f64())
             }
             _ => None,
         }
+    }
+
+    /// View this value as a bool if it is a [`RuntimeValue::Bool`].
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            RuntimeValue::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Borrow this value as an ADT `(ctor, fields)` pair if it is one.
+    /// Read accessor for the decode chokepoint's consumers; field names are
+    /// available via the public `RuntimeValue::Adt { field_names, .. }`
+    /// variant binding when needed.
+    pub fn as_adt(&self) -> Option<(&str, &[RuntimeValue])> {
+        match self {
+            RuntimeValue::Adt { ctor, fields, .. } => Some((ctor.as_str(), fields.as_slice())),
+            _ => None,
+        }
+    }
+
+    /// Re-encode this value to the machine-facing [`ExecutionValue`] wire
+    /// shape. The inverse direction of the decode chokepoint: a value the
+    /// chokepoint produced from an `ExecutionValue::Adt` re-encodes to a
+    /// value-identical `ExecutionValue::Adt`, so the conformance suite can
+    /// assert the decode round-trips its input bit-for-bit. Errors only for
+    /// values with no wire shape (mapped files), which decode never yields.
+    pub fn to_execution_value(&self) -> Result<ExecutionValue, String> {
+        runtime_value_to_schema(self)
     }
 }
 

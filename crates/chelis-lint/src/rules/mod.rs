@@ -5,10 +5,14 @@
 
 pub mod deep_user_symbol_charset;
 pub mod doc_filename_convention;
+pub mod invariant_float_equality;
 pub mod module_compound_titlecase;
 pub mod module_decl;
 pub mod no_em_dash_in_public_strings;
 pub mod no_shell_scripts;
+pub mod opaque_domain_construction;
+pub mod opaque_escape_site;
+pub mod opaque_without_invariant;
 pub mod phase_identifier_case;
 pub mod prefer_pipe_operator;
 pub mod prefix_namespace;
@@ -19,3 +23,4 @@ pub mod surf_test_name_prefix;
 pub mod surf_type_pascal_case;
 pub mod surf_value_snake_case;
 pub mod type_suffix_policy;
+pub mod unreachable_producer;

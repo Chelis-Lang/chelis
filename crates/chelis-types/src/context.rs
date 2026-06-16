@@ -89,6 +89,13 @@ pub(crate) struct TypeEnvInner {
     /// cycle / unbound suppression logic to distinguish library
     /// references from new-code references.
     pub(crate) library_def_names: HashSet<String>,
+    /// Checker-enforced opacity metadata (RFC D-CHECK): per-module
+    /// export sets, binding -> module attribution, and producer text,
+    /// accumulated across the library and new-code phases. Defaults
+    /// so older serialized payloads remain decodable in principle;
+    /// the cache format version still gates real reuse.
+    #[serde(default)]
+    pub(crate) opacity: crate::opacity::OpacityModuleMeta,
 }
 
 impl TypeEnv {
@@ -110,6 +117,7 @@ impl TypeEnv {
                 adt_reg,
                 ir_types: HashMap::new(),
                 library_def_names: HashSet::new(),
+                opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
         }
     }

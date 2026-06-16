@@ -6,7 +6,9 @@ pub mod env;
 pub mod errors;
 pub mod fitness;
 pub mod infer;
+pub mod invariants;
 pub mod linearity;
+pub(crate) mod opacity;
 pub(crate) mod pipe_stage;
 pub mod types;
 pub mod unify;
@@ -25,3 +27,4 @@ pub use infer::{
     infer_program,
 };
 pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
+pub use opacity::{LinkedProgramGuard, install_linked_program_guard, is_linker_format_name};

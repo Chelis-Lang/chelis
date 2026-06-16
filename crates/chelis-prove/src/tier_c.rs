@@ -75,7 +75,7 @@ pub fn fuzz(property_source: &str, property_name: &str, samples: usize, _seed: u
 
 // --- SmtProperty-based fuzzer (used by --tier auto) ---
 
-use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
+use crate::concrete_eval::eval_bool;
 use crate::tier_b::SmtProperty;
 use std::collections::HashMap;
 
@@ -136,113 +136,6 @@ pub fn fuzz_smt_property(property: &SmtProperty, samples: usize, seed: u64) -> T
     TierCResult::AllPassed(accepted)
 }
 
-fn eval_bool(expr: &SmtExpr, env: &HashMap<String, f64>) -> bool {
-    match expr {
-        SmtExpr::BoolLit(v) => *v,
-        SmtExpr::Cmp(op, left, right) => {
-            let l = eval_arith(left, env);
-            let r = eval_arith(right, env);
-            match op {
-                CmpOp::Lt => l < r,
-                CmpOp::Le => l <= r,
-                CmpOp::Gt => l > r,
-                CmpOp::Ge => l >= r,
-                CmpOp::Eq => (l - r).abs() < 1e-10,
-                CmpOp::Ne => (l - r).abs() >= 1e-10,
-            }
-        }
-        SmtExpr::Bool(BoolOp::And, children) => children.iter().all(|c| eval_bool(c, env)),
-        SmtExpr::Bool(BoolOp::Or, children) => children.iter().any(|c| eval_bool(c, env)),
-        SmtExpr::Bool(BoolOp::Implies, children) if children.len() == 2 => {
-            !eval_bool(&children[0], env) || eval_bool(&children[1], env)
-        }
-        SmtExpr::Not(inner) => !eval_bool(inner, env),
-        SmtExpr::Ite(cond, then_e, else_e) => {
-            if eval_bool(cond, env) {
-                eval_bool(then_e, env)
-            } else {
-                eval_bool(else_e, env)
-            }
-        }
-        // Arithmetic expressions used in boolean context: nonzero = true
-        _ => eval_arith(expr, env) != 0.0,
-    }
-}
-
-fn eval_arith(expr: &SmtExpr, env: &HashMap<String, f64>) -> f64 {
-    match expr {
-        SmtExpr::Var(name) => env.get(name).copied().unwrap_or(0.0),
-        SmtExpr::RealLit(v) => *v,
-        SmtExpr::IntLit(v) => *v as f64,
-        SmtExpr::BoolLit(v) => {
-            if *v {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        SmtExpr::Arith(op, left, right) => {
-            let l = eval_arith(left, env);
-            let r = eval_arith(right, env);
-            match op {
-                ArithOp::Add => l + r,
-                ArithOp::Sub => l - r,
-                ArithOp::Mul => l * r,
-                ArithOp::Div => {
-                    if r != 0.0 {
-                        l / r
-                    } else {
-                        f64::NAN
-                    }
-                }
-                ArithOp::Neg => -l,
-            }
-        }
-        SmtExpr::Apply(name, args) => {
-            let a: Vec<f64> = args.iter().map(|a| eval_arith(a, env)).collect();
-            match name.as_str() {
-                "exp" => a[0].exp(),
-                "log" => a[0].ln(),
-                "sqrt" => a[0].sqrt(),
-                "sin" => a[0].sin(),
-                "cos" => a[0].cos(),
-                "abs" => a[0].abs(),
-                "min" if a.len() == 2 => a[0].min(a[1]),
-                "max" if a.len() == 2 => a[0].max(a[1]),
-                _ => f64::NAN,
-            }
-        }
-        SmtExpr::Ite(cond, then_e, else_e) => {
-            if eval_bool(cond, env) {
-                eval_arith(then_e, env)
-            } else {
-                eval_arith(else_e, env)
-            }
-        }
-        SmtExpr::Cmp(op, left, right) => {
-            let l = eval_arith(left, env);
-            let r = eval_arith(right, env);
-            let result = match op {
-                CmpOp::Lt => l < r,
-                CmpOp::Le => l <= r,
-                CmpOp::Gt => l > r,
-                CmpOp::Ge => l >= r,
-                CmpOp::Eq => (l - r).abs() < 1e-10,
-                CmpOp::Ne => (l - r).abs() >= 1e-10,
-            };
-            if result { 1.0 } else { 0.0 }
-        }
-        SmtExpr::Bool(_, _) | SmtExpr::Not(_) => {
-            if eval_bool(expr, env) {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        SmtExpr::Forall(_, _) | SmtExpr::Exists(_, _) => f64::NAN, // unreachable after fuzzability check
-    }
-}
-
 struct Lcg {
     state: u64,
 }
@@ -268,7 +161,7 @@ impl Lcg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solver::SmtSort;
+    use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
 
     #[test]
     fn fuzz_x_squared_non_negative_passes() {

@@ -3,7 +3,7 @@ use chelis_shell::{
 };
 use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
-    PropertyOption, TypeExpr, Variant, VariantFields,
+    PropertyOption, TypeExpr, TypeInvariant, Variant, VariantFields,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -4858,7 +4858,28 @@ fn rewrite_module_decls(
     let mut out = Vec::new();
     for decl in &module.decls {
         match decl {
-            Decl::Import { .. } | Decl::Export { .. } => {}
+            Decl::Import { .. } => {}
+            // Export decls survive the rewrite with internal names so
+            // the checker-enforced opacity layer (RFC D-CHECK sixth
+            // rejection / producer enumeration) can recover each
+            // module's export set from the linked decl stream; they
+            // desugar to inert `(export ...)` Deep nodes. Names that
+            // do not resolve to a module decl pass through unmapped
+            // (the resolver tolerated unknown exports by dropping
+            // them before; an inert unmapped symbol is equivalent).
+            Decl::Export { names, span } => out.push(Decl::Export {
+                names: names
+                    .iter()
+                    .map(|name| {
+                        resolver
+                            .own_names
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| name.clone())
+                    })
+                    .collect(),
+                span: *span,
+            }),
             Decl::Module { .. } => unreachable!("module wrappers already stripped"),
             _ => out.push(rewrite_decl(
                 decl,
@@ -4891,6 +4912,25 @@ fn rewrite_eval_module_decls(
     let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
     let mut out = Vec::new();
     for decl in &module.decls {
+        // RFC v6 (RT-1 F2-bypass): user-authored entry/test decls keep
+        // their own names through the eval rewrite (unlike the library
+        // rewrite, which re-mangles via `internal_name`). A name in the
+        // reef linker's reserved internal-name format would then
+        // self-key via `reef_module_stem` to a victim module and forge
+        // its opaque types as in-module, while the linked-program flag
+        // suppresses the checker's reserved-name rejection. Reject the
+        // reserved format here, at the single boundary every test/eval
+        // entry path passes through, before these decls combine with the
+        // linked library. This is flag-independent: user entry decls are
+        // never linker output.
+        if let Some(name) = entry_decl_binding_name(decl)
+            && chelis_types::is_linker_format_name(name)
+        {
+            return Err(format!(
+                "`{name}` uses the reef package-linker's reserved internal-name format \
+                 (`Pkg__`/`pkg__`...), which only the linker may produce; rename the declaration"
+            ));
+        }
         match decl {
             Decl::Import { .. } | Decl::Export { .. } => {}
             Decl::Module { .. } => unreachable!("module wrappers already stripped"),
@@ -4899,6 +4939,22 @@ fn rewrite_eval_module_decls(
     }
     drain_qualified_failures(&resolver)?;
     Ok(out)
+}
+
+/// The top-level binding name a declaration introduces, for the
+/// reserved-name check (RFC v6). Returns `None` for decls that bind no
+/// name (import/export/module/dim).
+fn entry_decl_binding_name(decl: &Decl) -> Option<&str> {
+    match decl {
+        Decl::FunDef { name, .. }
+        | Decl::LetDef { name, .. }
+        | Decl::Sig { name, .. }
+        | Decl::TypeDef { name, .. }
+        | Decl::TypeAlias { name, .. }
+        | Decl::MacroDef { name, .. }
+        | Decl::Property { name, .. } => Some(name.as_str()),
+        Decl::Import { .. } | Decl::Export { .. } | Decl::Module { .. } | Decl::Dim { .. } => None,
+    }
 }
 
 fn dep_public_exports(shell: &ShellPackage, module: &str) -> Result<BTreeSet<String>, String> {
@@ -5069,6 +5125,8 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             name,
             params,
             variants,
+            opaque,
+            invariant,
             span,
         } => Decl::TypeDef {
             name: internal_name(package, module, name),
@@ -5077,6 +5135,10 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
                 .iter()
                 .map(|variant| rewrite_variant(variant, resolver, package, module))
                 .collect(),
+            opaque: *opaque,
+            invariant: invariant
+                .as_ref()
+                .map(|inv| rewrite_invariant(inv, resolver)),
             span: *span,
         },
         Decl::TypeAlias {
@@ -5197,6 +5259,8 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             name,
             params,
             variants,
+            opaque,
+            invariant,
             span,
         } => Decl::TypeDef {
             // Eval-entry decls are the user's bare program: the type name
@@ -5211,6 +5275,10 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
                 .iter()
                 .map(|variant| rewrite_eval_variant(variant, resolver))
                 .collect(),
+            opaque: *opaque,
+            invariant: invariant
+                .as_ref()
+                .map(|inv| rewrite_invariant(inv, resolver)),
             span: *span,
         },
         Decl::TypeAlias {
@@ -5301,6 +5369,20 @@ fn rewrite_variant_fields(fields: &VariantFields, resolver: &NameResolver) -> Va
                 .map(|(name, ty)| (name.clone(), rewrite_type(ty, resolver)))
                 .collect(),
         ),
+    }
+}
+
+/// Rewrite a declared type invariant under package linking: the predicate
+/// body is rewritten with the invariant binder as a local, so references
+/// to in-module zero-arg constants get reef-mangled while the binder
+/// stays bare (mirrors the `Decl::Property` precondition/body rewrite).
+fn rewrite_invariant(invariant: &TypeInvariant, resolver: &NameResolver) -> TypeInvariant {
+    let mut locals = HashSet::new();
+    locals.insert(invariant.binder.clone());
+    TypeInvariant {
+        binder: invariant.binder.clone(),
+        body: rewrite_expr(&invariant.body, resolver, &mut locals),
+        span: invariant.span,
     }
 }
 
@@ -5757,6 +5839,11 @@ fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Ex
 fn checked_program_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_types::CheckedProgram, String> {
+    // RFC v5 (RT-1 F2 bypass): this checks the fully linked package
+    // (`build_package_with_options` flattens `link_graph` output), which
+    // is reef-linker output carrying internal-name-mangled bindings.
+    // Accept the linker name format for this check.
+    let _linked = chelis_types::install_linked_program_guard();
     let checked = chelis_types::check_ir_program(deep_exprs)
         .map_err(|r| format!("Type errors: {:?}", r.errors))?;
     let checked = chelis_effects::check_program(&checked).map_err(|errors| {
@@ -5779,6 +5866,62 @@ fn checked_program_with_effects(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn reserved_linker_name_predicate_matches_only_full_mangled_names() {
+        // RFC v6: the entry-boundary reserved-name reject must match
+        // exactly the names that could self-key via `reef_module_stem`.
+        // CR-7: reef shares the single chelis-types predicate.
+        use chelis_types::is_linker_format_name as is_reserved;
+        assert!(is_reserved("pkg__opq__Demo__Types__forge"));
+        assert!(is_reserved("Pkg__opq__Demo__Types__Probability"));
+        assert!(is_reserved("pkg__forgepkg__Smoke__Types__forge"));
+        // Marker prefix but no module stem -> cannot key to a module.
+        assert!(!is_reserved("pkg__lonely"));
+        assert!(!is_reserved("Pkg__lonely"));
+        // Ordinary user identifiers (test fns, helpers, synth roots).
+        assert!(!is_reserved("test_forge"));
+        assert!(!is_reserved("normal_helper"));
+        assert!(!is_reserved("__chelis_test_0"));
+        assert!(!is_reserved("probability"));
+    }
+
+    #[test]
+    fn reserved_name_predicate_agrees_on_borderline_names_cr7() {
+        // CR-7: the reef entry-boundary reject and the chelis-types
+        // checker now use ONE predicate, so they cannot drift. Pin the
+        // borderline cases from the review: a single-underscore name
+        // (`pkg_count`) is NOT reserved; the full mangled form is.
+        use chelis_types::is_linker_format_name as is_reserved;
+        assert!(!is_reserved("pkg_count"));
+        assert!(!is_reserved("pkg"));
+        assert!(!is_reserved("count_pkg"));
+        assert!(is_reserved("Pkg__X__Y"));
+        assert!(is_reserved("pkg__a__b"));
+    }
+
+    #[test]
+    fn entry_decl_binding_name_covers_binding_decls() {
+        use chelis_deep::Span;
+        use chelis_surf::ast::{Decl, Expr};
+        let span = Span::new(0, 0);
+        let fun = Decl::FunDef {
+            name: "pkg__a__B__c".to_string(),
+            dim_params: vec![],
+            params: vec![],
+            ret_ty: None,
+            effects: None,
+            body: Expr::Lit(chelis_surf::ast::Literal::Int(0), span),
+            span,
+        };
+        assert_eq!(entry_decl_binding_name(&fun), Some("pkg__a__B__c"));
+        let import = Decl::Import {
+            module: "Std".to_string(),
+            kind: chelis_surf::ast::ImportKind::Qualified,
+            span,
+        };
+        assert_eq!(entry_decl_binding_name(&import), None);
+    }
 
     /// Process-shared lock for tests that mutate `CHELIS_REEF_HOME`
     /// (or other process env). Cargo runs unit tests in this binary

@@ -1,0 +1,6 @@
+(module {}
+  m.wf
+  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (app {} (var {} tanh) (access {} (var {} p) value)) (lit {type: (t-prim {} f32)} 0.0))), invariant_amenability: "transcendental"}
+    T
+    ()
+    (variant {} T (field {} value (t-prim {} f32)))))

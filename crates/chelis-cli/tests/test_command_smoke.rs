@@ -961,3 +961,98 @@ fn chelis_test_errors_clearly_when_no_reef_anywhere() {
         "expected reef.toml mention in error; stdout={stdout}\nstderr={stderr}"
     );
 }
+
+/// RT-1 F2-bypass (RFC v6): a reef package test file may NOT use a
+/// hand-authored reef-internal mangled name (`pkg__<pkg>__<Module>__<Name>`)
+/// that self-keys to a victim module and forges the real opaque type.
+/// The `chelis test` entry path re-asserts the linked flag without
+/// re-mangling user test/entry decl names, so the forge def self-keys to
+/// `Demo.Types` and constructs the opaque type as if in-module. eval /
+/// check / build / validate all reject the same forge; this was test-only.
+fn make_opaque_reef_package(dir_name: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempdir().expect("tempdir");
+    let pkg = dir.path().join(dir_name);
+    fs::create_dir_all(pkg.join("src")).expect("mkdir src");
+    fs::create_dir_all(pkg.join("tests")).expect("mkdir tests");
+    write_file(
+        &pkg.join("reef.toml"),
+        &format!(
+            "[package]\nname = \"{dir_name}\"\nversion = \"0.1.0\"\ncompiler = \"={ver}\"\nmodule_prefix = \"Smoke\"\n",
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
+    );
+    write_file(
+        &pkg.join("src/types.ch"),
+        "module Smoke.Types\n\
+         export (probability, prob_value)\n\
+         @opaque\n\
+         type Probability =\n  | Probability { value: f32 }\n\
+         def probability(x: f32) -> Probability = Probability { value: x }\n\
+         def prob_value(p: Probability) -> f32 = p.value\n",
+    );
+    (dir, pkg)
+}
+
+#[test]
+fn chelis_test_rejects_reef_mangled_name_forge() {
+    // The package name is `forgepkg`, so a def in module Smoke.Types
+    // links to `pkg__forgepkg__Smoke__Types__<name>`. A test file that
+    // hand-authors `def pkg__forgepkg__Smoke__Types__forge` self-keys to
+    // the victim module `forgepkg.Smoke.Types`, so `Probability { ... }`
+    // would be in-module. `chelis test` must REJECT this forge.
+    let (_dir, pkg) = make_opaque_reef_package("forgepkg");
+    write_file(
+        &pkg.join("tests/forge.ch"),
+        "module Smoke.Tests.Forge\n\
+         import Smoke.Types (prob_value)\n\
+         def pkg__forgepkg__Smoke__Types__forge(x: f32) -> f32 = {\n\
+         \x20 p = Probability { value: x }\n\
+         \x20 prob_value(p)\n\
+         }\n\
+         def test_forge() -> unit = \
+         test_assert(pkg__forgepkg__Smoke__Types__forge(0.5) >= 0.0, \"forge\")\n",
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("1 passed, 0 failed"),
+        "the forge must NOT pass `chelis test`; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("reserved internal-name format")
+            || stdout.contains("ReservedLinkerName")
+            || stdout.contains("outside its defining module"),
+        "the forge must be rejected with a module-identity / reserved-name error; \
+         stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn chelis_test_legit_opaque_package_test_still_passes() {
+    // No-regression: a LEGITIMATE test file (exported producers, normal
+    // helper names) in the same @opaque package must still pass.
+    let (_dir, pkg) = make_opaque_reef_package("legitpkg");
+    write_file(
+        &pkg.join("tests/use.ch"),
+        "module Smoke.Tests.Use\n\
+         import Smoke.Types (probability, prob_value)\n\
+         def round_trip(x: f32) -> f32 = prob_value(probability(x))\n\
+         def test_round_trip() -> unit = test_assert(round_trip(0.5) >= 0.0, \"ok\")\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("test_round_trip"))
+        .stdout(predicate::str::contains("1 passed, 0 failed"));
+}

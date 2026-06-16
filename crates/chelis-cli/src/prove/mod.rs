@@ -4,9 +4,23 @@ use std::path::{Path, PathBuf};
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, MetaMap};
-use chelis_surf::ast::{BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, TypeExpr};
+#[cfg(not(feature = "chelis-prove"))]
+use chelis_surf::ast::{BinOp, LetBinding, LetPattern};
+use chelis_surf::ast::{Decl, Expr, Literal, Param, TypeExpr};
 use serde_json::json;
 use walkdir::WalkDir;
+
+// Under `chelis-prove` the user-property running -- discovery, Tier B
+// (SMT), Tier C (fuzz), and assumption injection -- is the shared
+// `chelis_prove::property_runner` the tide MCP tool also drives (U4). The
+// CLI's own Surf->SMT lowering and injection modules were retired in favour
+// of that single runner; the no-`chelis-prove` build keeps only a local
+// Tier-C-fuzz property path (no SMT, no injection -- that machinery lives
+// behind the capability).
+#[cfg(feature = "chelis-prove")]
+mod obligation_run;
+#[cfg(feature = "chelis-prove")]
+mod property_run;
 
 #[derive(Debug, Clone)]
 pub struct ProveOptions<'a> {
@@ -21,6 +35,11 @@ pub struct ProveOptions<'a> {
     pub tier: &'a str,
     #[allow(dead_code)]
     pub smt_timeout_ms: u64,
+    /// Floor for invariant rejection-sampling acceptance rate before the
+    /// starvation classifier fires (RFC D-STARVE). `0.0` disables the
+    /// classifier and preserves the legacy exhaustion => Error path.
+    #[allow(dead_code)]
+    pub invariant_min_rate: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +68,7 @@ impl ProveOptions<'_> {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(not(feature = "chelis-prove"))]
 struct Property {
     name: String,
     source: PathBuf,
@@ -68,6 +88,9 @@ struct Sample {
 #[derive(Debug, Clone)]
 struct SampleValue {
     name: String,
+    // Read only by the CLI-local Surf property runner (the no-`chelis-prove`
+    // build); the shared runner under `chelis-prove` uses `deep_expr`.
+    #[cfg_attr(feature = "chelis-prove", allow(dead_code))]
     surf_expr: Expr,
     deep_expr: DeepExpr,
     json: serde_json::Value,
@@ -94,6 +117,9 @@ struct Summary {
     failed: usize,
     unsupported: usize,
     errors: usize,
+    /// Count of derived producer obligations run (RFC D-OBLIG: summary
+    /// gains `obligations: N`). These are also counted in `total`.
+    obligations: usize,
 }
 
 pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
@@ -126,6 +152,7 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
                 "failed": totals.failed,
                 "unsupported": totals.unsupported,
                 "errors": totals.errors,
+                "obligations": totals.obligations,
             })
         );
     } else {
@@ -145,10 +172,16 @@ fn is_single_explicit_deep_input(path: Option<&Path>, inputs: &[PathBuf]) -> boo
 
 fn combine_status(lhs: Status, rhs: Status) -> Status {
     use Status::*;
+    // Precedence, worst wins: Error > Failed > Unsupported > Passed. A
+    // DISPROVED property (Failed, exit 1) outranks an Unsupported one
+    // (exit 2), so a genuine falsification is never masked by a co-occurring
+    // "the prover could not handle this" -- a CI gate keying on exit 1 ("a
+    // property was disproved") sees the failure instead of a misleading
+    // exit 2 (RT #9).
     match (lhs, rhs) {
         (Error, _) | (_, Error) => Error,
-        (Unsupported, _) | (_, Unsupported) => Unsupported,
         (Failed, _) | (_, Failed) => Failed,
+        (Unsupported, _) | (_, Unsupported) => Unsupported,
         _ => Passed,
     }
 }
@@ -219,12 +252,63 @@ fn prove_surf_file(
     let parsed = chelis_surf::parser::parse_str(&source)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
     let flat = flatten_module_decls(&parsed);
-    let properties = collect_surf_properties(path, &flat, options.only);
     let mut file_status = Status::Passed;
-    for property in properties {
-        let status = prove_surf_property(&flat, &property, options, totals);
-        file_status = combine_status(file_status, status);
+    // Default (no obligation engine) build: type-check the module up-front so a
+    // type-broken module errors instead of silently passing. A capability
+    // build gets this from the obligation path (`obligation_run::run_obligations`,
+    // which desugars + checks); without it nothing else here type-checks the
+    // module. Use the SAME bare desugar + check the engine uses
+    // (`desugar_program` then `check_typed_program`) so the default and
+    // capability builds agree on what is type-broken.
+    #[cfg(not(feature = "chelis-prove"))]
+    {
+        let deep_exprs = chelis_surf::desugar::desugar_program(&parsed);
+        if let Err(infer) = chelis_types::check_typed_program(&deep_exprs) {
+            let messages = infer
+                .errors
+                .iter()
+                .map(|err| err.message.clone())
+                .collect::<Vec<_>>();
+            emit_module_check_failure(options, &messages, totals);
+            return Ok(Status::Error);
+        }
     }
+    // Under the `chelis-prove` capability the user @property declarations run
+    // through the SHARED property runner (U4 / D-PARITY): the SAME discovery
+    // + engine the tide MCP tool uses, so a CLI prove and a tide prove agree
+    // on the same module. The CLI renders the outcomes as the NDJSON
+    // `{kind:"property"}` records and folds them into the summary. Without the
+    // capability, fall back to the CLI-local Tier-C-only property path.
+    #[cfg(feature = "chelis-prove")]
+    {
+        let _ = (&flat, &parsed);
+        let prop_status = property_run::run_surf_properties_shared(path, &source, options, totals);
+        file_status = combine_status(file_status, prop_status);
+    }
+    #[cfg(not(feature = "chelis-prove"))]
+    {
+        let properties = collect_surf_properties(path, &flat, options.only);
+        for property in properties {
+            let status = prove_surf_property(&flat, &parsed, &property, options, totals);
+            file_status = combine_status(file_status, status);
+        }
+    }
+    // Derived producer obligations (RFC D-OBLIG): collected from the
+    // FULL module-bearing decls so the export/module wrappers survive.
+    #[cfg(feature = "chelis-prove")]
+    {
+        let ob_status = obligation_run::run_obligations(&parsed, options, totals);
+        file_status = combine_status(file_status, ob_status);
+    }
+    // CR2-5: warn whenever obligations were NOT SMT-verified, gated on the
+    // actual capability (`smt`) rather than on the optional `chelis-prove`
+    // dependency. A `chelis-prove`-without-`smt` build compiles the
+    // obligation machinery and runs it via Tier C (fuzz) -- NOT cvc5 -- so a
+    // clean run must still be flagged as not formally verified. The warning
+    // is stderr-only and never touches the stdout NDJSON stream or the exit
+    // code.
+    #[cfg(not(feature = "smt"))]
+    warn_obligations_skipped_without_smt(path, count_invariant_opaque_surf(&flat), options);
     Ok(file_status)
 }
 
@@ -239,6 +323,39 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
     out
 }
 
+/// Emit a module type-check failure as a prove error record, for the default
+/// (no obligation engine) build's up-front type-check. Mirrors the shape of
+/// the capability path's check-failure record (`kind:"error", stage:"check"`)
+/// so a type-broken module reports identically whether or not the obligation
+/// engine is compiled in. The diagnostics go to the stdout NDJSON stream under
+/// `--json` and to stderr otherwise; the caller returns `Status::Error`.
+#[cfg(not(feature = "chelis-prove"))]
+fn emit_module_check_failure(
+    options: &ProveOptions<'_>,
+    messages: &[String],
+    totals: &mut Summary,
+) {
+    totals.errors += 1;
+    let joined = messages.join("; ");
+    if options.json {
+        println!(
+            "{}",
+            json!({
+                "kind": "error",
+                "stage": "check",
+                "reason": format!("module does not type-check: {joined}"),
+                "diagnostics": messages,
+            })
+        );
+    } else {
+        eprintln!("prove error: module does not type-check:");
+        for m in messages {
+            eprintln!("  - {m}");
+        }
+    }
+}
+
+#[cfg(not(feature = "chelis-prove"))]
 fn collect_surf_properties(path: &Path, decls: &[Decl], only: Option<&str>) -> Vec<Property> {
     decls
         .iter()
@@ -264,6 +381,7 @@ fn collect_surf_properties(path: &Path, decls: &[Decl], only: Option<&str>) -> V
         .collect()
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn property_samples(options: &[chelis_surf::ast::PropertyOption]) -> Option<usize> {
     options.iter().find_map(|option| match option {
         chelis_surf::ast::PropertyOption::Samples(Expr::Lit(Literal::Int(value), _), _) => {
@@ -273,6 +391,7 @@ fn property_samples(options: &[chelis_surf::ast::PropertyOption]) -> Option<usiz
     })
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn property_seed(options: &[chelis_surf::ast::PropertyOption]) -> Option<u64> {
     options.iter().find_map(|option| match option {
         chelis_surf::ast::PropertyOption::Seed(Expr::Lit(Literal::Int(value), _), _) => {
@@ -282,105 +401,19 @@ fn property_seed(options: &[chelis_surf::ast::PropertyOption]) -> Option<u64> {
     })
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn prove_surf_property(
     decls: &[Decl],
+    module_decls: &[Decl],
     property: &Property,
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
+    let _ = module_decls;
+    // The no-`chelis-prove` build runs only Tier C (fuzz). Tier B (SMT) and
+    // assumption injection require the capability and live in the shared
+    // `chelis_prove::property_runner`, which this build does not reach.
     totals.total += 1;
-
-    // Tier B: attempt SMT proof when --tier auto
-    #[cfg(feature = "chelis-prove")]
-    if (options.tier == "auto" || options.tier == "smt-only")
-        && let Some(postcondition) = surf_expr_to_smt(
-            &property.body,
-            &InlineCtx {
-                decls,
-                depth: 0,
-                max_depth: 3,
-                call_stack: vec![],
-            },
-        )
-    {
-        let variables: Vec<(String, chelis_prove::solver::SmtSort)> = property
-            .params
-            .iter()
-            .filter_map(|p| {
-                let sort = match p.ty.as_ref()? {
-                    TypeExpr::Named(name, _) => match name.as_str() {
-                        "f32" | "f64" => chelis_prove::solver::SmtSort::Real,
-                        "int32" | "int64" => chelis_prove::solver::SmtSort::Int,
-                        "bool" => chelis_prove::solver::SmtSort::Bool,
-                        _ => return None,
-                    },
-                    _ => return None,
-                };
-                Some((p.name.clone(), sort))
-            })
-            .collect();
-        if variables.len() == property.params.len() {
-            let preconditions: Vec<chelis_prove::solver::SmtExpr> = property
-                .preconditions
-                .iter()
-                .filter_map(|e| {
-                    surf_expr_to_smt(
-                        e,
-                        &InlineCtx {
-                            decls,
-                            depth: 0,
-                            max_depth: 3,
-                            call_stack: vec![],
-                        },
-                    )
-                })
-                .collect();
-            if preconditions.len() == property.preconditions.len() {
-                let smt_prop = chelis_prove::tier_b::SmtProperty {
-                    variables,
-                    preconditions,
-                    postcondition,
-                };
-                if let chelis_prove::Inlineability::Inlineable =
-                    chelis_prove::classify_inlineability(&smt_prop.postcondition)
-                {
-                    match chelis_prove::solve_property(&smt_prop, options.smt_timeout_ms) {
-                        chelis_prove::tier_b::TierBResult::Proved => {
-                            totals.passed += 1;
-                            if options.json {
-                                println!(
-                                    "{}",
-                                    serde_json::json!({"kind":"property","name":property.name,"status":"passed","proof_tier":"smt","samples":0,"seed":options.effective_seed(property.seed)})
-                                );
-                            } else {
-                                println!("property: {} -- proved (smt)", property.name);
-                            }
-                            return Status::Passed;
-                        }
-                        chelis_prove::tier_b::TierBResult::Disproved(_model) => {
-                            totals.failed += 1;
-                            if options.json {
-                                println!(
-                                    "{}",
-                                    serde_json::json!({"kind":"property","name":property.name,"status":"failed","proof_tier":"smt","samples":0,"seed":options.effective_seed(property.seed)})
-                                );
-                            } else {
-                                println!(
-                                    "property failure: {} (smt counterexample)",
-                                    property.name
-                                );
-                            }
-                            return Status::Failed;
-                        }
-                        chelis_prove::tier_b::TierBResult::Timeout
-                        | chelis_prove::tier_b::TierBResult::Unknown => {
-                            // Fall through to fuzz (Tier C)
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     let samples_needed = options.samples.or(property.samples).unwrap_or(100);
     let max_attempts = options
@@ -459,6 +492,7 @@ fn prove_surf_property(
     Status::Passed
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn unsupported_property(property: &Property) -> Option<String> {
     unsupported_property_params(&property.params)
 }
@@ -472,13 +506,20 @@ fn unsupported_property_params(params: &[Param]) -> Option<String> {
     None
 }
 
+/// Whether a primitive type name is a signed integer width, via the type
+/// system's single-source recognizer (review 5): a name is an int width iff
+/// it parses to a `Prim` the type system classifies as integer.
+fn is_int_width(name: &str) -> bool {
+    chelis_types::types::Prim::parse_name(name).is_some_and(|p| p.is_integer())
+}
+
 fn unsupported_type(ty: &TypeExpr) -> Option<String> {
     match ty {
+        // bool / f32 / f64 / string, plus EVERY signed integer width
+        // recognized through the type system (review 5), so the supported-
+        // type gate and the sampler agree on the admissible integer widths.
         TypeExpr::Named(name, _)
-            if matches!(
-                name.as_str(),
-                "bool" | "int32" | "int64" | "f32" | "f64" | "string"
-            ) =>
+            if matches!(name.as_str(), "bool" | "f32" | "f64" | "string") || is_int_width(name) =>
         {
             None
         }
@@ -498,6 +539,7 @@ fn unsupported_type(ty: &TypeExpr) -> Option<String> {
     }
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn sample_property(property: &Property, rng: &mut Lcg) -> Result<Sample, String> {
     let mut values = Vec::new();
     for param in &property.params {
@@ -522,21 +564,29 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
                 json!(value),
             ))
         }
-        TypeExpr::Named(type_name, _) if type_name == "int32" || type_name == "int64" => {
-            let value = rng.next_i64(-1000, 1000);
+        // Every signed integer width, recognized through the type system and
+        // sampled within the width's representable range via the single
+        // workspace source `Prim::integer_fuzz_bounds` (review 5). int32 is
+        // the literal default; the other widths cast an int32 literal to the
+        // target width so the value is well-typed.
+        TypeExpr::Named(type_name, _) if is_int_width(type_name) => {
+            let (lo, hi) = chelis_types::types::Prim::parse_name(type_name)
+                .and_then(|p| p.integer_fuzz_bounds())
+                .expect("is_int_width implies integer_fuzz_bounds");
+            let value = rng.next_i64(lo, hi);
             let lit = Expr::Lit(Literal::Int(value), sp);
-            if type_name == "int64" {
+            if type_name == "int32" {
                 Ok(scalar_sample(
                     name,
-                    cast_expr(lit, "int64"),
-                    deep_lit(deep_int(value), "int64"),
+                    lit,
+                    deep_lit(deep_int(value), "int32"),
                     json!(value),
                 ))
             } else {
                 Ok(scalar_sample(
                     name,
-                    lit,
-                    deep_lit(deep_int(value), "int32"),
+                    cast_expr(lit, type_name),
+                    deep_lit(deep_int(value), type_name),
                     json!(value),
                 ))
             }
@@ -764,6 +814,7 @@ fn deep_lit(value: DeepExpr, ty_name: &str) -> DeepExpr {
     )
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn eval_surf_sample(
     decls: &[Decl],
     property: &Property,
@@ -802,6 +853,7 @@ fn eval_surf_sample(
     eval_bool_with_bindings(SourceKind::Surf, source, root, sample_bindings(sample))
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn sample_block_expr(property: &Property, sample: &Sample, precondition: bool) -> Expr {
     let sp = chelis_deep::Span::new(0, 0);
     let bindings = sample
@@ -829,6 +881,7 @@ fn sample_block_expr(property: &Property, sample: &Sample, precondition: bool) -
     Expr::Block(bindings, Box::new(body), sp)
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn combine_preconditions(preconditions: &[Expr]) -> Expr {
     let sp = chelis_deep::Span::new(0, 0);
     preconditions
@@ -901,13 +954,375 @@ fn prove_deep_file(
     if let Err(err) = chelis_validate::validate_deep(&source) {
         return Err(format!("validate {}: {err}", path.display()));
     }
+    // Default (no obligation engine) build: type-check the module up-front so a
+    // type-broken `.dp` errors instead of silently passing. A capability build
+    // gets this from the obligation path (`run_deep_obligations`); without it,
+    // nothing else here type-checks the module. Uses the SAME bare
+    // `check_typed_program` the engine uses, so the default and capability
+    // builds agree on what is type-broken (the checker needs no solver).
+    #[cfg(not(feature = "chelis-prove"))]
+    if let Err(infer) = chelis_types::check_typed_program(&exprs) {
+        let messages = infer
+            .errors
+            .iter()
+            .map(|err| err.message.clone())
+            .collect::<Vec<_>>();
+        emit_module_check_failure(options, &messages, totals);
+        return Ok(Status::Error);
+    }
     let properties = discover_deep_properties(path, &exprs, options.only)?;
     let mut file_status = Status::Passed;
+
+    // User `@property` declarations run through the SHARED property runner
+    // (the SAME engine the tide MCP tool drives, U4 / F6), so a CLI prove and
+    // a tide prove of the same `.dp` module agree. Run the shared runner once
+    // for ALL user properties, then render each. The c-earchin bridge
+    // properties keep the CLI-local path with their span/requirement
+    // rendering (a CLI-only surface tide does not run).
+    #[cfg(feature = "chelis-prove")]
+    {
+        let user_status = property_run::run_deep_properties_shared(path, &source, options, totals);
+        file_status = combine_status(file_status, user_status);
+    }
+
     for property in properties {
+        // Under `chelis-prove` the user properties were already run above by
+        // the shared runner; only bridge properties remain for the local
+        // path. Without the capability, the local path runs everything.
+        #[cfg(feature = "chelis-prove")]
+        if property.source_kind == "user" {
+            continue;
+        }
         let status = prove_deep_property(&exprs, &property, options, totals);
         file_status = combine_status(file_status, status);
     }
+    // Derived producer obligations (RFC D-OBLIG / D-PARITY) for the Deep
+    // surface. The Surf path (`prove_surf_file`) folds the SAME obligation
+    // engine in; without this the `.dp` surface runs ZERO producer-obligation
+    // verification, so a `.dp` opaque type declaring an `@invariant` and an
+    // UNSOUND producer would pass `chelis prove` silently. A `.dp` is already
+    // Deep, so it feeds the shared engine's Deep-program entry directly (no
+    // Surf parse/desugar) -- the SAME `run_module_obligations` the Surf source
+    // entry reaches after desugaring.
+    #[cfg(feature = "chelis-prove")]
+    {
+        let ob_status = run_deep_obligations(&exprs, options, totals);
+        file_status = combine_status(file_status, ob_status);
+    }
+    #[cfg(not(feature = "smt"))]
+    warn_obligations_skipped_without_smt(path, count_invariant_opaque_deep(&exprs), options);
     Ok(file_status)
+}
+
+/// Run every derived producer obligation discovered in a `.dp` module's Deep
+/// program (RFC D-OBLIG / D-PARITY). The `.dp` is already Deep, so it is fed
+/// to the shared `chelis_prove::obligation_engine` directly: the checker runs
+/// for inferred return types (a type-broken module is surfaced as an Error,
+/// never silent success -- RT3-F2 parity with the Surf path), then the SAME
+/// `run_module_obligations` the Surf source entry calls verifies each
+/// obligation. Outcomes are rendered as the additive NDJSON
+/// `{kind:"obligation", ...}` records and folded into the prove summary,
+/// byte-identically to the Surf path's `obligation_run::run_obligations`.
+#[cfg(feature = "chelis-prove")]
+fn run_deep_obligations(
+    exprs: &[DeepExpr],
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Status {
+    use chelis_prove::obligation_engine::{ObligationRunOptions, run_module_obligations};
+
+    // Type-check the module unconditionally for inferred return types. A
+    // `.dp` declaring no invariant has nothing to verify (the engine returns
+    // an empty outcome set), but a type-check FAILURE must surface as an Error
+    // regardless -- the Deep prove path has no other whole-module type-check
+    // stage, so this is what keeps a type-broken `.dp` from silently passing
+    // (RT3-F2 parity with the Surf path).
+    let sigs = match chelis_types::check_typed_program(exprs) {
+        Ok(checked) => checked
+            .signature_inference()
+            .functions
+            .iter()
+            .map(|(name, meta)| (name.clone(), meta.checked_signature.clone()))
+            .collect::<BTreeMap<_, _>>(),
+        // A type-broken module cannot have its obligations meaningfully
+        // verified (a rejectable producer can hide behind an unrelated type
+        // error): surface the check diagnostics and Error, never silent
+        // success. This mirrors `obligation_engine::run_surf_source_obligations`
+        // for the Surf surface.
+        Err(infer) => {
+            // A type-broken `.dp` module is surfaced as an Error here, exactly
+            // as the Surf path's `obligation_run::run_obligations` does on any
+            // CheckFailed (regardless of whether an opaque invariant is
+            // declared). The Deep prove path has no other stage that
+            // type-checks the whole module, so escalating here is the ONLY
+            // thing that keeps `chelis prove foo.dp` from silently passing a
+            // module that `chelis prove foo.ch` rejects (RT3-F2 parity; the
+            // re-review caught the no-invariant case slipping through).
+            let messages = infer
+                .errors
+                .iter()
+                .map(|err| err.message.clone())
+                .collect::<Vec<_>>();
+            emit_obligation_check_failure(options, &messages, totals);
+            return Status::Error;
+        }
+    };
+
+    let run_opts = ObligationRunOptions {
+        seed: options.seed.unwrap_or(0),
+        samples: options.samples.unwrap_or(100),
+        smt_timeout_ms: options.smt_timeout_ms,
+        tier: options.tier.to_string(),
+        only: options.only.map(str::to_string),
+        invariant_min_rate: options.invariant_min_rate,
+    };
+    let outcomes = run_module_obligations(exprs, &sigs, &run_opts);
+
+    let mut status = Status::Passed;
+    for outcome in &outcomes {
+        let s = render_obligation_outcome(outcome, options, totals);
+        status = combine_status(status, s);
+    }
+    status
+}
+
+/// Emit a module type-check failure as a prove error record (RT3-F2 parity).
+/// Mirrors `obligation_run::emit_check_failure`: the check diagnostics are
+/// surfaced so the failure is visible, never hidden behind a silent pass.
+#[cfg(feature = "chelis-prove")]
+fn emit_obligation_check_failure(
+    options: &ProveOptions<'_>,
+    messages: &[String],
+    totals: &mut Summary,
+) {
+    totals.errors += 1;
+    let joined = messages.join("; ");
+    if options.json {
+        println!(
+            "{}",
+            json!({
+                "kind": "error",
+                "stage": "check",
+                "reason": format!("module does not type-check; obligations not verified: {joined}"),
+                "diagnostics": messages,
+            })
+        );
+    } else {
+        eprintln!("prove error: module does not type-check; obligations not verified:");
+        for m in messages {
+            eprintln!("  - {m}");
+        }
+    }
+}
+
+/// Fold one obligation outcome into the running totals and render it. Mirrors
+/// `obligation_run::render_outcome` so the Deep surface produces the SAME
+/// summary counts and exit-code contribution as the Surf surface.
+#[cfg(feature = "chelis-prove")]
+fn render_obligation_outcome(
+    outcome: &chelis_prove::obligation_engine::ObligationOutcome,
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Status {
+    use chelis_prove::obligation_engine::ObligationStatus;
+    match outcome.status {
+        ObligationStatus::Error => {
+            // A collection-time declaration error (covered-or-rejected /
+            // signature rejection). Always surfaces; not counted as an
+            // obligation (parity with the Surf renderer).
+            totals.errors += 1;
+            emit_obligation_record(outcome, options);
+            Status::Error
+        }
+        ObligationStatus::Passed => {
+            totals.total += 1;
+            totals.obligations += 1;
+            totals.passed += 1;
+            emit_obligation_record(outcome, options);
+            Status::Passed
+        }
+        ObligationStatus::Failed => {
+            totals.total += 1;
+            totals.obligations += 1;
+            totals.failed += 1;
+            emit_obligation_record(outcome, options);
+            Status::Failed
+        }
+        ObligationStatus::Unsupported => {
+            totals.total += 1;
+            totals.obligations += 1;
+            totals.unsupported += 1;
+            emit_obligation_record(outcome, options);
+            Status::Unsupported
+        }
+    }
+}
+
+/// Render one obligation outcome as the additive NDJSON `{kind:"obligation"}`
+/// record (or human-readable line). Byte-identical to
+/// `obligation_run::emit` so a `.dp` obligation record is shaped exactly like
+/// a `.ch` one.
+#[cfg(feature = "chelis-prove")]
+fn emit_obligation_record(
+    outcome: &chelis_prove::obligation_engine::ObligationOutcome,
+    options: &ProveOptions<'_>,
+) {
+    use chelis_prove::obligation_engine::{ObligationStatus, ObligationTier};
+    let status = match outcome.status {
+        ObligationStatus::Passed => "passed",
+        ObligationStatus::Failed => "failed",
+        ObligationStatus::Unsupported => "unsupported",
+        ObligationStatus::Error => "error",
+    };
+    if options.json {
+        if outcome.status == ObligationStatus::Error {
+            // Declaration errors carry no producer/name; emit a minimal
+            // record so the count of kind:"obligation" stays accurate while
+            // the reason names the offending producer.
+            println!(
+                "{}",
+                json!({
+                    "kind": "obligation",
+                    "obligation_kind": "invariant_producer",
+                    "status": "error",
+                    "reason": outcome.reason,
+                })
+            );
+            return;
+        }
+        let mut value = json!({
+            "kind": "obligation",
+            "obligation_kind": outcome.meta.obligation_kind,
+            "source_type": outcome.meta.source_type,
+            "producer": outcome.meta.producer,
+            "name": outcome.name,
+            "status": status,
+            "proof_tier": outcome.proof_tier.as_str(),
+            "samples": outcome.samples,
+            "seed": outcome.seed,
+        });
+        if outcome.proof_tier == ObligationTier::Smt {
+            value["arith_model"] = json!("real");
+        }
+        if let Some(cx) = &outcome.counterexample {
+            value["counterexample"] = cx.clone();
+        }
+        if let Some(r) = &outcome.reason {
+            value["reason"] = json!(r);
+        }
+        println!("{value}");
+    } else {
+        match outcome.status {
+            ObligationStatus::Passed => println!(
+                "obligation: {} -- proved ({})",
+                outcome.name,
+                outcome.proof_tier.as_str()
+            ),
+            ObligationStatus::Failed => println!(
+                "obligation failure: {} ({} counterexample)",
+                outcome.name,
+                outcome.proof_tier.as_str()
+            ),
+            ObligationStatus::Unsupported => println!(
+                "obligation unsupported: {}: {}",
+                outcome.name,
+                outcome.reason.clone().unwrap_or_default()
+            ),
+            ObligationStatus::Error => println!(
+                "obligation error: {}",
+                outcome.reason.clone().unwrap_or_default()
+            ),
+        }
+    }
+}
+
+/// Count opaque types that carry a declared invariant in flattened Surf
+/// decls. Used only in non-smt builds to warn that their producer
+/// obligations were not SMT-verified.
+#[cfg(not(feature = "smt"))]
+fn count_invariant_opaque_surf(decls: &[Decl]) -> usize {
+    decls
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl,
+                Decl::TypeDef {
+                    opaque: true,
+                    invariant: Some(_),
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// Deep twin of `count_invariant_opaque_surf`: a `deftype` whose metadata
+/// carries both `opaque: true` and an `invariant` entry.
+#[cfg(not(feature = "smt"))]
+fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
+    fn scan(expr: &DeepExpr, acc: &mut usize) {
+        if let DeepExpr::List(list, _) = expr {
+            let tag = list.elements.first().and_then(|head| match head {
+                DeepExpr::Atom(DeepAtom::Symbol(sym), _) => Some(sym.as_str()),
+                _ => None,
+            });
+            if tag == Some("deftype")
+                && let Some(DeepExpr::Map(meta, _)) = list.elements.get(1)
+            {
+                let opaque = meta.entries.iter().any(|(key, value)| {
+                    key == "opaque" && matches!(value, DeepExpr::Atom(DeepAtom::Bool(true), _))
+                });
+                let has_invariant = meta.entries.iter().any(|(key, _)| key == "invariant");
+                if opaque && has_invariant {
+                    *acc += 1;
+                }
+            }
+            for child in &list.elements {
+                scan(child, acc);
+            }
+        }
+    }
+    let mut acc = 0;
+    for expr in exprs {
+        scan(expr, &mut acc);
+    }
+    acc
+}
+
+/// Emit a one-line stderr warning (never touching stdout or the exit code)
+/// when a non-smt build proves a module declaring invariant-carrying opaque
+/// types, so a clean run is not mistaken for formally verified producer
+/// obligations. CR2-5: this fires in EVERY non-`smt` build -- including a
+/// `chelis-prove`-without-`smt` build, where the obligation machinery runs
+/// but only at Tier C (fuzz), not cvc5 -- because the SMT verification the
+/// flag promises is unavailable.
+#[cfg(not(feature = "smt"))]
+fn warn_obligations_skipped_without_smt(path: &Path, count: usize, options: &ProveOptions<'_>) {
+    if count == 0 {
+        return;
+    }
+    // Machine-facing (review residual-risk): a clean stdout summary alone must
+    // not read as a verified proof run. Under `--json`, emit a record so a
+    // consumer sees that producer obligations were NOT verified in this
+    // non-smt build -- not only the stderr warning below.
+    if options.json {
+        println!(
+            "{}",
+            json!({
+                "kind": "warning",
+                "stage": "obligations",
+                "skipped": count,
+                "reason": "producer obligation verification requires the smt-enabled build \
+                           (--features smt); obligations were not SMT-verified in this build",
+            })
+        );
+    }
+    eprintln!(
+        "warning: producer obligation verification requires the smt-enabled build; {count} \
+         invariant-carrying opaque type(s) in {} did not have their obligations SMT-verified. \
+         Rebuild with --features smt to verify them.",
+        path.display()
+    );
 }
 
 fn prove_deep_property(
@@ -1414,6 +1829,7 @@ fn matches_filter(name: &str, only: Option<&str>) -> bool {
     name.contains(pattern)
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn emit_record(
     options: &ProveOptions<'_>,
     property: &Property,
@@ -1458,6 +1874,7 @@ fn emit_record(
     }
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn emit_error(options: &ProveOptions<'_>, property: &Property, message: &str) {
     if options.json {
         println!(
@@ -1561,6 +1978,7 @@ fn emit_deep_error(options: &ProveOptions<'_>, property: &DeepProperty, message:
     }
 }
 
+#[cfg(not(feature = "chelis-prove"))]
 fn source_json(property: &Property, options: &ProveOptions<'_>) -> serde_json::Value {
     if property.source.extension().and_then(|ext| ext.to_str()) == Some("dp") {
         let spans = options
@@ -1653,344 +2071,6 @@ fn sibling_spans_path(path: &Path) -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-#[cfg(feature = "chelis-prove")]
-struct InlineCtx<'a> {
-    decls: &'a [Decl],
-    depth: usize,
-    max_depth: usize,
-    call_stack: Vec<String>,
-}
-
-#[cfg(feature = "chelis-prove")]
-fn lookup_fun_body<'a>(decls: &'a [Decl], name: &str) -> Option<(&'a [Param], &'a Expr)> {
-    decls.iter().find_map(|d| match d {
-        Decl::FunDef {
-            name: n,
-            params,
-            body,
-            ..
-        } if n == name => Some((params.as_slice(), body)),
-        _ => None,
-    })
-}
-
-#[cfg(feature = "chelis-prove")]
-fn surf_expr_to_smt(expr: &Expr, ctx: &InlineCtx) -> Option<chelis_prove::solver::SmtExpr> {
-    use chelis_prove::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
-    match expr {
-        Expr::Binary(BinOp::Ge, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Ge,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Binary(BinOp::Le, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Le,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Binary(BinOp::Gt, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Gt,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Binary(BinOp::Lt, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Lt,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Binary(BinOp::Eq, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Eq,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Binary(BinOp::Ne, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Ne,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Binary(BinOp::And, l, r, _) => Some(SmtExpr::Bool(
-            SB::And,
-            vec![surf_expr_to_smt(l, ctx)?, surf_expr_to_smt(r, ctx)?],
-        )),
-        Expr::Binary(BinOp::Or, l, r, _) => Some(SmtExpr::Bool(
-            SB::Or,
-            vec![surf_expr_to_smt(l, ctx)?, surf_expr_to_smt(r, ctx)?],
-        )),
-        Expr::Lit(Literal::Bool(v), _) => Some(SmtExpr::BoolLit(*v)),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "chelis-prove")]
-fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<chelis_prove::solver::SmtExpr> {
-    use chelis_prove::solver::{ArithOp as SA, SmtExpr};
-    match expr {
-        Expr::Var(name, _) => Some(SmtExpr::Var(name.clone())),
-        Expr::Lit(Literal::Float(v), _) => Some(SmtExpr::RealLit(*v)),
-        Expr::Lit(Literal::Int(v), _) => Some(SmtExpr::IntLit(*v)),
-        Expr::Binary(BinOp::Add, l, r, _) => Some(SmtExpr::Arith(
-            SA::Add,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Binary(BinOp::Sub, l, r, _) => Some(SmtExpr::Arith(
-            SA::Sub,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Binary(BinOp::Mul, l, r, _) => Some(SmtExpr::Arith(
-            SA::Mul,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Binary(BinOp::Div, l, r, _) => Some(SmtExpr::Arith(
-            SA::Div,
-            Box::new(surf_arith(l, ctx)?),
-            Box::new(surf_arith(r, ctx)?),
-        )),
-        Expr::Apply(func, args, _) => {
-            let name = match func.as_ref() {
-                Expr::Var(n, _) => n.clone(),
-                _ => return None,
-            };
-            let smt_args: Option<Vec<_>> = args.iter().map(|a| surf_arith(a, ctx)).collect();
-            let smt_args = smt_args?;
-            if let Some((params, body)) = lookup_fun_body(ctx.decls, &name) {
-                if ctx.call_stack.contains(&name) {
-                    return None;
-                }
-                if ctx.depth >= ctx.max_depth {
-                    return None;
-                }
-                if params.len() != args.len() {
-                    return None;
-                }
-                let subst: std::collections::HashMap<String, &Expr> = params
-                    .iter()
-                    .zip(args.iter())
-                    .map(|(p, a)| (p.name.clone(), a))
-                    .collect();
-                let deeper = InlineCtx {
-                    decls: ctx.decls,
-                    depth: ctx.depth + 1,
-                    max_depth: ctx.max_depth,
-                    call_stack: {
-                        let mut s = ctx.call_stack.clone();
-                        s.push(name.clone());
-                        s
-                    },
-                };
-                return surf_arith_subst(body, &subst, &deeper);
-            }
-            Some(SmtExpr::Apply(name, smt_args))
-        }
-        Expr::If(cond, then_e, else_e, _) => Some(SmtExpr::Ite(
-            Box::new(surf_expr_to_smt(cond, ctx)?),
-            Box::new(surf_arith(then_e, ctx)?),
-            Box::new(surf_arith(else_e, ctx)?),
-        )),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "chelis-prove")]
-fn surf_arith_subst(
-    expr: &Expr,
-    subst: &std::collections::HashMap<String, &Expr>,
-    ctx: &InlineCtx,
-) -> Option<chelis_prove::solver::SmtExpr> {
-    use chelis_prove::solver::{ArithOp as SA, BoolOp as SB, CmpOp as SC, SmtExpr};
-    match expr {
-        Expr::Var(name, _) => {
-            if let Some(replacement) = subst.get(name.as_str()) {
-                surf_arith(replacement, ctx)
-            } else {
-                Some(SmtExpr::Var(name.clone()))
-            }
-        }
-        Expr::Lit(Literal::Float(v), _) => Some(SmtExpr::RealLit(*v)),
-        Expr::Lit(Literal::Int(v), _) => Some(SmtExpr::IntLit(*v)),
-        Expr::Binary(BinOp::Add, l, r, _) => Some(SmtExpr::Arith(
-            SA::Add,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Sub, l, r, _) => Some(SmtExpr::Arith(
-            SA::Sub,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Mul, l, r, _) => Some(SmtExpr::Arith(
-            SA::Mul,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Div, l, r, _) => Some(SmtExpr::Arith(
-            SA::Div,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Ge, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Ge,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Le, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Le,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Gt, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Gt,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Lt, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Lt,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Eq, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Eq,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Ne, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Ne,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::And, l, r, _) => Some(SmtExpr::Bool(
-            SB::And,
-            vec![
-                surf_expr_to_smt_subst(l, subst, ctx)?,
-                surf_expr_to_smt_subst(r, subst, ctx)?,
-            ],
-        )),
-        Expr::Binary(BinOp::Or, l, r, _) => Some(SmtExpr::Bool(
-            SB::Or,
-            vec![
-                surf_expr_to_smt_subst(l, subst, ctx)?,
-                surf_expr_to_smt_subst(r, subst, ctx)?,
-            ],
-        )),
-        Expr::If(cond, then_e, else_e, _) => {
-            let c = surf_expr_to_smt_subst(cond, subst, ctx)?;
-            let t = surf_arith_subst(then_e, subst, ctx)?;
-            let e = surf_arith_subst(else_e, subst, ctx)?;
-            Some(SmtExpr::Ite(Box::new(c), Box::new(t), Box::new(e)))
-        }
-        Expr::Apply(func, args, _) => {
-            let name = match func.as_ref() {
-                Expr::Var(n, _) => n.clone(),
-                _ => return None,
-            };
-            let smt_args: Option<Vec<_>> = args
-                .iter()
-                .map(|a| surf_arith_subst(a, subst, ctx))
-                .collect();
-            let smt_args = smt_args?;
-            if let Some((params, body)) = lookup_fun_body(ctx.decls, &name) {
-                if ctx.call_stack.contains(&name) {
-                    return None;
-                }
-                if ctx.depth >= ctx.max_depth {
-                    return None;
-                }
-                if params.len() != args.len() {
-                    return None;
-                }
-                let inner_subst: std::collections::HashMap<String, &Expr> = params
-                    .iter()
-                    .zip(args.iter())
-                    .map(|(p, a)| (p.name.clone(), a))
-                    .collect();
-                let deeper = InlineCtx {
-                    decls: ctx.decls,
-                    depth: ctx.depth + 1,
-                    max_depth: ctx.max_depth,
-                    call_stack: {
-                        let mut s = ctx.call_stack.clone();
-                        s.push(name);
-                        s
-                    },
-                };
-                return surf_arith_subst(body, &inner_subst, &deeper);
-            }
-            Some(SmtExpr::Apply(name, smt_args))
-        }
-        Expr::Block(bindings, body, _) => {
-            let mut extended_subst = subst.clone();
-            for binding in bindings {
-                if let LetPattern::Var(name, _) = &binding.pattern {
-                    extended_subst.insert(name.clone(), &binding.value);
-                } else {
-                    return None;
-                }
-            }
-            surf_arith_subst(body, &extended_subst, ctx)
-        }
-        _ => None,
-    }
-}
-
-#[cfg(feature = "chelis-prove")]
-fn surf_expr_to_smt_subst(
-    expr: &Expr,
-    subst: &std::collections::HashMap<String, &Expr>,
-    ctx: &InlineCtx,
-) -> Option<chelis_prove::solver::SmtExpr> {
-    use chelis_prove::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
-    match expr {
-        Expr::Binary(BinOp::Ge, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Ge,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Le, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Le,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Gt, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Gt,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Lt, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Lt,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Eq, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Eq,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::Ne, l, r, _) => Some(SmtExpr::Cmp(
-            SC::Ne,
-            Box::new(surf_arith_subst(l, subst, ctx)?),
-            Box::new(surf_arith_subst(r, subst, ctx)?),
-        )),
-        Expr::Binary(BinOp::And, l, r, _) => Some(SmtExpr::Bool(
-            SB::And,
-            vec![
-                surf_expr_to_smt_subst(l, subst, ctx)?,
-                surf_expr_to_smt_subst(r, subst, ctx)?,
-            ],
-        )),
-        Expr::Binary(BinOp::Or, l, r, _) => Some(SmtExpr::Bool(
-            SB::Or,
-            vec![
-                surf_expr_to_smt_subst(l, subst, ctx)?,
-                surf_expr_to_smt_subst(r, subst, ctx)?,
-            ],
-        )),
-        Expr::Lit(Literal::Bool(v), _) => Some(SmtExpr::BoolLit(*v)),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone)]
 struct Lcg {
     state: u64,
@@ -2023,5 +2103,47 @@ impl Lcg {
     fn next_f64(&mut self, min: f64, max: f64) -> f64 {
         let unit = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
         min + (max - min) * unit
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combine_status_failed_outranks_unsupported() {
+        // RT #9: a DISPROVED property (Failed, exit 1) must win over a
+        // co-occurring Unsupported one (exit 2), so a CI gate keying on exit 1
+        // sees the falsification instead of a masking exit 2.
+        assert_eq!(
+            combine_status(Status::Failed, Status::Unsupported),
+            Status::Failed
+        );
+        assert_eq!(
+            combine_status(Status::Unsupported, Status::Failed),
+            Status::Failed
+        );
+        // The rest of the worst-wins ladder is unchanged: Error dominates all,
+        // Unsupported still beats Passed, Passed is the identity.
+        assert_eq!(combine_status(Status::Error, Status::Failed), Status::Error);
+        assert_eq!(
+            combine_status(Status::Error, Status::Unsupported),
+            Status::Error
+        );
+        assert_eq!(
+            combine_status(Status::Unsupported, Status::Passed),
+            Status::Unsupported
+        );
+        assert_eq!(
+            combine_status(Status::Failed, Status::Passed),
+            Status::Failed
+        );
+        assert_eq!(
+            combine_status(Status::Passed, Status::Passed),
+            Status::Passed
+        );
+        // Per-status exit codes are unchanged; only the combine precedence moved.
+        assert_eq!(Status::Failed.exit_code(), 1);
+        assert_eq!(Status::Unsupported.exit_code(), 2);
     }
 }

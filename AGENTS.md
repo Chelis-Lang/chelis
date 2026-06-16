@@ -167,7 +167,7 @@ python3 scripts/gate.py --list
 The gate runs `cargo nextest run` (CI's actual runner), not `cargo test
 --workspace`, and includes `chelis lint --check .` (the §8.6 / §12
 naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
-and docs CI jobs are out of scope for this script by design.
+docs, and smt-build CI jobs are out of scope for this script by design.
 
 Local pre-push gate (chelis#360):
 

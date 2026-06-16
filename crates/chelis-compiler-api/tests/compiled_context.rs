@@ -126,6 +126,12 @@ fn collect_named_roots_json(roots: &[EvaluatedRoot], names: &[&str]) -> BTreeMap
 
 #[test]
 fn eval_in_context_matches_prepare_eval_for_int_snippets() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it, modeling the
+    // production path that is now guarded (chelis test legacy / eval
+    // fallback). Re-assert the linked flag so the linker's own names are
+    // accepted, matching production.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     // Each case: a snippet importing from the library fixture, plus the
     // single named root whose eval value must match between the
     // monolithic `prepare_eval(format(library + snippet))` baseline and
@@ -179,6 +185,12 @@ fn eval_in_context_matches_prepare_eval_for_int_snippets() {
 
 #[test]
 fn eval_in_context_uses_context_lowering_map_for_host_library_calls() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it, modeling the
+    // production path that is now guarded (chelis test legacy / eval
+    // fallback). Re-assert the linked flag so the linker's own names are
+    // accepted, matching production.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     let (_dir, root) = library_fixture();
     let snippet = "module App.Eval\nimport Mylib.Math (host_len)\n\n\
                    def length_from_host -> int64 = host_len(to_tensor([1.0, 2.0]))\n";
@@ -291,6 +303,12 @@ fn eval_many_in_context_per_root_isolation_matches_independent_calls() {
 /// missing every library def.
 #[test]
 fn eval_in_context_resolves_library_string_call_in_host_runtime() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it, modeling the
+    // production path that is now guarded (chelis test legacy / eval
+    // fallback). Re-assert the linked flag so the linker's own names are
+    // accepted, matching production.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     let dir = TempDir::new().expect("tempdir");
     let root = dir.path().join("myapp");
     fs::create_dir_all(root.join("src")).expect("mkdir src");
@@ -352,6 +370,12 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
 /// the wire-bytes but not in the in-process-only path.
 #[test]
 fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it, modeling the
+    // production path that is now guarded (chelis test legacy / eval
+    // fallback). Re-assert the linked flag so the linker's own names are
+    // accepted, matching production.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     let dir = TempDir::new().expect("tempdir");
     let root = dir.path().join("myapp");
     fs::create_dir_all(root.join("src")).expect("mkdir src");
@@ -494,6 +518,12 @@ fn microbench_fixture() -> (TempDir, PathBuf) {
 #[test]
 #[ignore = "manual gate: Phase G compiled-context microbench exceeds the default inner-loop budget"]
 fn microbench_in_context_is_at_least_10x_faster_than_prepare_eval_for_50_snippets() {
+    // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
+    // library (internal-name mangled) and evaluates it, modeling the
+    // production path that is now guarded (chelis test legacy / eval
+    // fallback). Re-assert the linked flag so the linker's own names are
+    // accepted, matching production.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
     // Microbench: 50 snippets, each evaluated against a single
     // CompiledContext vs 50 independent `prepare_eval` runs that each
     // re-compile the library text from scratch. CLAUDE.md target:

@@ -37,7 +37,7 @@ tempfile = "3"
 walkdir = "2"
 
 [features]
-smt = ["chelis-prove/smt"]
+smt = ["chelis-prove/smt", "chelis-tide/smt"]
 
 [dev-dependencies]
 assert_cmd = "2"

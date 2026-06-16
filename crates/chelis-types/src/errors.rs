@@ -56,6 +56,30 @@ pub enum CheckErrorKind {
     /// dependent borrow semantics. Reject the collision at declaration
     /// time instead.
     DuplicateDefinition,
+    /// RFC v4b (RT-1 F2): a named module is opened by more than one
+    /// `(module ...)` wrapper in the same check unit. Module identity
+    /// is otherwise a forgeable string -- a second wrapper of an
+    /// opaque type's defining module would construct and inspect the
+    /// type as if it were inside. A named module may be opened at most
+    /// once per check unit (the same ambiguity rationale as the
+    /// named-module requirement for `@opaque`).
+    DuplicateModule,
+    /// RFC D-CHECK (spec/design/opaque_invariants_rfc.md): a type
+    /// declared `@opaque` was constructed, inspected, forged, or
+    /// reached through an unexported binding outside its defining
+    /// module, or `@opaque` was declared outside a named module. The
+    /// message names the type, the defining module, and the exported
+    /// producers with signatures; location context is the enclosing
+    /// def name embedded in the message.
+    OpaqueTypeViolation,
+    /// RFC v5 (RT-1 F2 bypass): a top-level declaration's binding name
+    /// matches the reef package-linker's reserved internal-name format
+    /// (`Pkg__<pkg>__<Module>__<Name>` / lowercase twin) in a program
+    /// NOT produced by the linker. That format is the linker's private
+    /// output; hand-authoring it forges module identity through the
+    /// reef-stem channel (a flat program of mangled names self-keys to
+    /// one module and constructs/inspects opaque types as in-module).
+    ReservedLinkerName,
     /// A top-level `def` or `sig` (Deep `defsig`) reuses a name from the
     /// closed builtin vocabulary (`BUILTIN_NAMES`). Call sites are
     /// dispatched builtin-first by name in both the host evaluator
@@ -91,6 +115,9 @@ impl CheckErrorKind {
             CheckErrorKind::CycleDetected => 0.9,
             CheckErrorKind::UnsupportedTensorPrecision => 0.8,
             CheckErrorKind::DuplicateDefinition => 0.9,
+            CheckErrorKind::DuplicateModule => 0.9,
+            CheckErrorKind::OpaqueTypeViolation => 0.8,
+            CheckErrorKind::ReservedLinkerName => 0.9,
             CheckErrorKind::BuiltinShadowing => 0.9,
             CheckErrorKind::Other => 0.5,
         }

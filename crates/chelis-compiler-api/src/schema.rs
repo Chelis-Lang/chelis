@@ -463,6 +463,14 @@ pub struct WireMetaEntry {
     pub value: WireDeepExpr,
 }
 
+/// Wire form of a declared opaque-type invariant (RFC D-SYNTAX).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireTypeInvariant {
+    pub binder: String,
+    pub body: WireSurfExpr,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireSurfDecl {
@@ -489,6 +497,12 @@ pub enum WireSurfDecl {
         name: String,
         params: Vec<String>,
         variants: Vec<WireVariant>,
+        opaque: bool,
+        /// Declared invariant for an opaque type (RFC D-SYNTAX).
+        /// Additive: absent on the wire for non-opaque or
+        /// invariant-free types.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invariant: Option<WireTypeInvariant>,
         span: Span,
     },
     TypeAlias {
