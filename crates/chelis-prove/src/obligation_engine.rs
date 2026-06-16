@@ -151,14 +151,36 @@ pub fn run_module_obligations(
     sigs: &BTreeMap<String, Type>,
     options: &ObligationRunOptions,
 ) -> Vec<ObligationOutcome> {
-    let invariants = crate::opaque::collect_opaque_invariants(exprs);
-    if invariants.is_empty() {
+    let (invariants, rejections) = crate::opaque::collect_opaque_invariants_and_rejections(exprs);
+    if invariants.is_empty() && rejections.is_empty() {
         return Vec::new();
     }
+
+    let mut out = Vec::new();
+    // Covered-or-rejected: an invariant-carrying opaque type whose
+    // representation the prover cannot model is surfaced as an `Error`
+    // outcome, NEVER silently dropped. Dropping it would let a violating
+    // exported producer pass `chelis prove` with zero obligations.
+    for rej in &rejections {
+        out.push(ObligationOutcome {
+            name: format!("invariant:{}", rej.type_name),
+            meta: ObligationMeta {
+                obligation_kind: "invariant_producer".to_string(),
+                source_type: rej.type_name.clone(),
+                producer: String::new(),
+            },
+            status: ObligationStatus::Error,
+            proof_tier: ObligationTier::None,
+            samples: 0,
+            seed: options.seed,
+            counterexample: None,
+            reason: Some(rej.reason.clone()),
+        });
+    }
+
     let consts = resolve_module_constants(exprs, &invariants);
     let collection = crate::obligations::collect_obligations(exprs, &invariants, sigs);
 
-    let mut out = Vec::new();
     for err in &collection.errors {
         out.push(ObligationOutcome {
             name: String::new(),

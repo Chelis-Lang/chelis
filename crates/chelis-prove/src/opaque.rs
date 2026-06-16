@@ -14,6 +14,8 @@
 //! `invariant_amenability` recorded on a `.dp` is NOT trusted: it is
 //! recomputed from the predicate via `chelis_pred::classify_predicate`.
 
+use std::collections::{HashMap, HashSet};
+
 use chelis_deep::ast::{Atom, Expr};
 use chelis_pred::PredAmenability;
 
@@ -185,29 +187,92 @@ fn meta_value<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
 /// are skipped (the latter is plain opacity, unaffected by injection;
 /// RFC D-INJECT test-lock).
 pub fn collect_opaque_invariants(exprs: &[Expr]) -> Vec<OpaqueInvariant> {
-    let mut out = Vec::new();
-    for expr in exprs {
-        collect_in(expr, &mut out);
-    }
-    out
+    collect_opaque_invariants_and_rejections(exprs).0
 }
 
-fn collect_in(expr: &Expr, out: &mut Vec<OpaqueInvariant>) {
-    if tag(expr) == Some("deftype")
-        && let Some(inv) = opaque_invariant_from_deftype(expr)
-    {
-        out.push(inv);
+/// An invariant-carrying opaque type whose representation the prover CANNOT
+/// model, with a human reason. The obligation engine turns each into a
+/// covered-or-rejected `Error` outcome so such a type is never silently
+/// dropped -- dropping it would let a VIOLATING exported producer pass with
+/// zero obligations (the exact "covered-or-rejected" hole a review found).
+#[derive(Debug, Clone)]
+pub struct OpaqueInvariantRejection {
+    pub type_name: String,
+    pub reason: String,
+}
+
+/// Collect the modelable invariants AND the rejections in one pass. Building
+/// the program's `deftype` index once lets a nested-record field resolve the
+/// record it references.
+pub fn collect_opaque_invariants_and_rejections(
+    exprs: &[Expr],
+) -> (Vec<OpaqueInvariant>, Vec<OpaqueInvariantRejection>) {
+    let mut deftypes: HashMap<String, &Expr> = HashMap::new();
+    index_deftypes(exprs, &mut deftypes);
+    let mut oks = Vec::new();
+    let mut errs = Vec::new();
+    for expr in exprs {
+        collect_in(expr, &deftypes, &mut oks, &mut errs);
     }
-    // Recurse into module wrappers and any nesting.
-    if let Expr::List(list, _) = expr {
-        for child in list.elements.iter().skip(2) {
-            collect_in(child, out);
+    (oks, errs)
+}
+
+/// Collect ONLY the rejections (see
+/// [`collect_opaque_invariants_and_rejections`]).
+pub fn collect_opaque_invariant_rejections(exprs: &[Expr]) -> Vec<OpaqueInvariantRejection> {
+    collect_opaque_invariants_and_rejections(exprs).1
+}
+
+/// Index every `deftype` in the program (recursing module wrappers) by its
+/// type name, so a nested-record field type (`t-adt` naming another record)
+/// resolves while the field model is built.
+fn index_deftypes<'a>(exprs: &'a [Expr], out: &mut HashMap<String, &'a Expr>) {
+    for expr in exprs {
+        if tag(expr) == Some("deftype")
+            && let Some(name) = children(expr).first().and_then(|n| symbol_text(n))
+        {
+            out.entry(name.to_string()).or_insert(expr);
+        }
+        if let Expr::List(list, _) = expr {
+            for child in list.elements.iter().skip(2) {
+                index_deftypes(std::slice::from_ref(child), out);
+            }
         }
     }
 }
 
-fn opaque_invariant_from_deftype(deftype: &Expr) -> Option<OpaqueInvariant> {
-    // Require opaque: true and an invariant fn node in the metadata.
+fn collect_in<'a>(
+    expr: &'a Expr,
+    deftypes: &HashMap<String, &'a Expr>,
+    oks: &mut Vec<OpaqueInvariant>,
+    errs: &mut Vec<OpaqueInvariantRejection>,
+) {
+    if tag(expr) == Some("deftype") {
+        match opaque_invariant_from_deftype(expr, deftypes) {
+            Some(Ok(inv)) => oks.push(inv),
+            Some(Err(rej)) => errs.push(rej),
+            None => {}
+        }
+    }
+    // Recurse into module wrappers and any nesting.
+    if let Expr::List(list, _) = expr {
+        for child in list.elements.iter().skip(2) {
+            collect_in(child, deftypes, oks, errs);
+        }
+    }
+}
+
+/// Model a single `deftype`. Returns:
+/// - `None` -- not an invariant-carrying opaque type (legitimately skipped).
+/// - `Some(Err(_))` -- an invariant-carrying opaque type the prover cannot
+///   model (covered-or-rejected; NEVER a silent skip).
+/// - `Some(Ok(_))` -- a modelable invariant.
+fn opaque_invariant_from_deftype(
+    deftype: &Expr,
+    deftypes: &HashMap<String, &Expr>,
+) -> Option<Result<OpaqueInvariant, OpaqueInvariantRejection>> {
+    // Require opaque: true and an invariant fn node in the metadata. Absent
+    // either, this is not an invariant-carrying opaque type -> skip.
     let opaque = matches!(
         meta_value(deftype, "opaque"),
         Some(Expr::Atom(Atom::Bool(true), _))
@@ -219,44 +284,87 @@ fn opaque_invariant_from_deftype(deftype: &Expr) -> Option<OpaqueInvariant> {
     if tag(&predicate) != Some("fn") {
         return None;
     }
-    let binder = predicate_binder(&predicate)?;
 
-    // children: type-name, (params...), variant...
+    // From here it IS an invariant-carrying opaque type. ANY failure to model
+    // its representation is a covered-or-rejected ERROR, never a silent skip.
     let kids = children(deftype);
-    let type_name = symbol_text(kids.first()?)?.to_string();
+    let type_name = kids
+        .first()
+        .and_then(|n| symbol_text(n))
+        .map(str::to_string)
+        .unwrap_or_else(|| "<anonymous>".to_string());
+    let reject = |reason: String| {
+        Some(Err(OpaqueInvariantRejection {
+            type_name: type_name.clone(),
+            reason,
+        }))
+    };
 
-    // Find the single record variant.
-    let variant = kids.iter().find(|c| tag(c) == Some("variant"))?;
+    let Some(binder) = predicate_binder(&predicate) else {
+        return reject(format!(
+            "invariant on opaque type `{type_name}` has a malformed binder"
+        ));
+    };
+    let Some(variant) = kids.iter().find(|c| tag(c) == Some("variant")) else {
+        return reject(format!(
+            "opaque type `{type_name}` carries an invariant but is not a single record variant"
+        ));
+    };
     let var_kids = children(variant);
-    let ctor_name = symbol_text(var_kids.first()?)?.to_string();
+    let Some(ctor_name) = var_kids
+        .first()
+        .and_then(|n| symbol_text(n))
+        .map(str::to_string)
+    else {
+        return reject(format!(
+            "opaque type `{type_name}` has a malformed record variant"
+        ));
+    };
     let mut fields = Vec::new();
     for field in var_kids.iter().skip(1) {
         if tag(field) != Some("field") {
-            // A positional variant has no `field` children; not a record
-            // representation. Such a type is outside the V1 value class.
-            return None;
+            return reject(format!(
+                "opaque type `{type_name}` is a positional variant, which cannot carry a \
+                 mechanically verifiable invariant"
+            ));
         }
         let fk = children(field);
-        let fname = symbol_text(fk.first()?)?.to_string();
-        let fty = field_type_from_deep(fk.get(1)?)?;
+        let Some(fname) = fk.first().and_then(|n| symbol_text(n)).map(str::to_string) else {
+            return reject(format!("opaque type `{type_name}` has a malformed field"));
+        };
+        let Some(fty_node) = fk.get(1) else {
+            return reject(format!(
+                "field `{fname}` of opaque type `{type_name}` has no type"
+            ));
+        };
+        let mut visiting = HashSet::new();
+        let Some(fty) = field_type_from_deep(fty_node, deftypes, &mut visiting) else {
+            return reject(format!(
+                "field `{fname}` of opaque type `{type_name}` has a representation type the prover \
+                 cannot model, so its invariant cannot be mechanically verified (V1 value class: \
+                 numeric/bool scalars, f32/f64 tensors, or nested single-variant records of those)"
+            ));
+        };
         fields.push((fname, fty));
     }
     if fields.is_empty() {
-        return None;
+        return reject(format!(
+            "opaque type `{type_name}` has an empty record representation"
+        ));
     }
 
     // RFC D-META: recompute amenability from the predicate; do not trust
     // the recorded `invariant_amenability` string.
     let amenability = chelis_pred::classify_predicate(&predicate);
 
-    Some(OpaqueInvariant {
+    Some(Ok(OpaqueInvariant {
         type_name,
         ctor_name,
         fields,
         predicate,
         binder,
         amenability,
-    })
+    }))
 }
 
 fn predicate_binder(fn_node: &Expr) -> Option<String> {
@@ -281,17 +389,22 @@ fn predicate_binder(fn_node: &Expr) -> Option<String> {
 }
 
 /// Parse a Deep type node into a [`FieldType`] in the V1 value class.
-/// Returns `None` for anything outside the class (functions, ADTs, lists,
-/// symbolic-dim or non-numeric tensors).
-fn field_type_from_deep(ty: &Expr) -> Option<FieldType> {
+/// Returns `None` for anything outside the class (functions, lists,
+/// symbolic-dim or non-numeric tensors, non-numeric scalar prims such as
+/// `string`/`f8e4m3`, multi-variant or generic ADTs). `deftypes` resolves a
+/// nested-record `t-adt` reference to its record; `visiting` breaks recursive
+/// type cycles (a recursive ADT is not value-class). The scalar-prim class is
+/// the SAME `chelis_types::invariants::invariant_value_class_prim` the D-WF
+/// checker uses, so the checker and the prover agree on the value class.
+fn field_type_from_deep(
+    ty: &Expr,
+    deftypes: &HashMap<String, &Expr>,
+    visiting: &mut HashSet<String>,
+) -> Option<FieldType> {
     match tag(ty)? {
         "t-prim" => {
             let name = symbol_text(children(ty).first()?)?;
-            // f32/f64, EVERY integer width (int8/int16/int32/int64), and
-            // bool are scalar fields in the value class (F3). The integer
-            // widths share the single-source recognizer so the field value
-            // class and the int-width->sort decision agree.
-            (matches!(name, "f32" | "f64" | "bool") || is_int_width(name))
+            chelis_types::invariants::invariant_value_class_prim(name)
                 .then(|| FieldType::Scalar(name.to_string()))
         }
         "t-tensor" => {
@@ -324,15 +437,57 @@ fn field_type_from_deep(ty: &Expr) -> Option<FieldType> {
             })
         }
         "t-adt" => {
-            // A nested record ADT reference: not resolvable from the type
-            // node alone (it names another deftype). V1 nested records are
-            // handled by name resolution at a higher level; here we reject
-            // so the producer/binder is flagged covered-or-rejected rather
-            // than silently mis-sampled.
-            None
+            // A nested single-variant record: resolve the referenced deftype
+            // and model it as `FieldType::Record` (the V1 nested-record class,
+            // spec/04 / RFC D-WF). A generic instantiation (a type argument) or
+            // an unresolvable / recursive reference is out of the class.
+            let adt_kids = children(ty);
+            let name = symbol_text(adt_kids.first()?)?;
+            if adt_kids.len() > 1 {
+                return None; // parameterized record: out of V1 class
+            }
+            if !visiting.insert(name.to_string()) {
+                return None; // cycle: recursive ADT, not value-class
+            }
+            let resolved = deftypes
+                .get(name)
+                .and_then(|referenced| record_field_type(referenced, deftypes, visiting));
+            visiting.remove(name);
+            resolved
         }
         _ => None,
     }
+}
+
+/// Model a referenced `deftype` as a nested-record [`FieldType::Record`]: it
+/// must be a single record variant whose every field is itself in the value
+/// class. Mirrors D-WF's `is_single_record_of_value_class` but BUILDS the
+/// field model the prover flattens (`p.inner.value`).
+fn record_field_type(
+    deftype: &Expr,
+    deftypes: &HashMap<String, &Expr>,
+    visiting: &mut HashSet<String>,
+) -> Option<FieldType> {
+    let kids = children(deftype);
+    let variants: Vec<_> = kids.iter().filter(|c| tag(c) == Some("variant")).collect();
+    if variants.len() != 1 {
+        return None;
+    }
+    let var_kids = children(variants[0]);
+    let mut fields = Vec::new();
+    for field in var_kids.iter().skip(1) {
+        if tag(field) != Some("field") {
+            return None;
+        }
+        let fk = children(field);
+        let fname = symbol_text(fk.first()?)?.to_string();
+        let fty = field_type_from_deep(fk.get(1)?, deftypes, visiting)?;
+        fields.push((fname, fty));
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    Some(FieldType::Record(fields))
 }
 
 // ===========================================================================

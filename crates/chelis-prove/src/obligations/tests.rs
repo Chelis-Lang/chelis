@@ -522,3 +522,56 @@ def make_w(d: tensor[3, f32]) -> Box = Box { data: d }
     );
     assert!(col.obligations.is_empty());
 }
+
+// ── Review follow-up: covered-or-rejected. An invariant-carrying opaque type
+//    the prover cannot model must be a REJECTION, never silently dropped.
+
+#[test]
+fn unmodelable_invariant_type_is_rejected_not_silently_dropped() {
+    // A `string` scalar field is outside the prover's value class. The
+    // collector must report it as a rejection, not drop it -- a dropped
+    // invariant lets a VIOLATING producer pass with zero obligations.
+    let exprs = deep_of(
+        "module M\nexport (make)\n@opaque\n@invariant(p) p.value >= 0.0\n\
+         type Tagged = | Tagged { tag: string, value: f32 }\n\
+         def make() -> Tagged = Tagged { tag: \"bad\", value: 0.0 }",
+    );
+    let (oks, rejections) = crate::opaque::collect_opaque_invariants_and_rejections(&exprs);
+    assert!(
+        oks.is_empty(),
+        "an unmodelable type must not be collected as an OK invariant: {oks:?}"
+    );
+    assert_eq!(
+        rejections.len(),
+        1,
+        "an unmodelable invariant-carrying type must be a covered-or-rejected rejection: {rejections:?}"
+    );
+    assert_eq!(rejections[0].type_name, "Tagged");
+}
+
+#[test]
+fn nested_record_invariant_type_is_modeled_as_a_record_field() {
+    // A nested single-variant record field resolves to `FieldType::Record`, so
+    // the invariant over `p.inner.value` is modelable (it was silently dropped
+    // before, leaving a violating producer unchecked).
+    let exprs = deep_of(
+        "module M\nexport (make)\ntype Inner = | Inner { value: f32 }\n\
+         @opaque\n@invariant(p) p.inner.value >= 0.0\n\
+         type Boxed = | Boxed { inner: Inner }\n\
+         def make() -> Boxed = Boxed { inner: Inner { value: 0.0 } }",
+    );
+    let (oks, rejections) = crate::opaque::collect_opaque_invariants_and_rejections(&exprs);
+    assert!(
+        rejections.is_empty(),
+        "a nested record of value-class fields must be modeled, not rejected: {rejections:?}"
+    );
+    assert_eq!(oks.len(), 1);
+    assert!(
+        matches!(
+            oks[0].fields.first(),
+            Some((name, crate::opaque::FieldType::Record(_))) if name == "inner"
+        ),
+        "the `inner` field must model as a nested Record: {:?}",
+        oks[0].fields
+    );
+}
