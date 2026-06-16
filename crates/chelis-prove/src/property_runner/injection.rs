@@ -83,8 +83,15 @@ pub(super) fn prove_with_injection(
     let mut rng = crate::opaque::GenRng::new(seed);
     let mut accepted = 0usize;
     let gen_budget = samples_needed.saturating_mul(100).max(200);
+    // Outer rejection-loop cap, mirroring the surf/deep fuzz loops
+    // (property_runner.rs): a precondition that no invariant-valid binder can
+    // satisfy must report generator exhaustion rather than spin forever.
+    // `gen_budget` only bounds the inner per-binder generator, not this loop.
+    let max_attempts = max_injection_attempts(samples_needed, options.max_attempts);
+    let mut attempts = 0usize;
 
-    while accepted < samples_needed {
+    while accepted < samples_needed && attempts < max_attempts {
+        attempts += 1;
         // Sample each binder. Opaque binders are generated invariant-valid
         // (the injected assumption); on starvation, report. Each binding
         // carries its Deep value expr and a JSON repr for counterexamples.
@@ -177,6 +184,14 @@ pub(super) fn prove_with_injection(
         }
     }
 
+    if accepted < samples_needed {
+        return outcome_error(
+            property_name,
+            seed,
+            exhaustion_reason(attempts, samples_needed),
+        );
+    }
+
     outcome(
         property_name,
         PropertyStatus::Passed,
@@ -184,6 +199,23 @@ pub(super) fn prove_with_injection(
         seed,
         None,
         None,
+    )
+}
+
+/// Outer rejection-loop attempt cap, computed exactly as the surf/deep fuzz
+/// loops in `property_runner.rs`: honor an explicit `max_attempts` override,
+/// otherwise derive `samples_needed * 100` (with a floor of `samples_needed`).
+/// Bounding this loop is what prevents an unsatisfiable-precondition spin.
+fn max_injection_attempts(samples_needed: usize, override_attempts: Option<usize>) -> usize {
+    override_attempts.unwrap_or_else(|| samples_needed.saturating_mul(100).max(samples_needed))
+}
+
+/// The generator-exhaustion diagnostic reported when the rejection loop hits
+/// its attempt cap before collecting `samples_needed` accepted samples. Same
+/// wording as the surf/deep fuzz loops for a single exhaustion message shape.
+fn exhaustion_reason(attempts: usize, samples_needed: usize) -> String {
+    format!(
+        "generator exhausted after {attempts} attempts before collecting {samples_needed} valid samples"
     )
 }
 
@@ -552,5 +584,76 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
             Expr::List(List { elements }, *span)
         }
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn injection_attempt_cap_is_finite_and_honors_override() {
+        // Without an override, the cap derives from samples_needed (the
+        // surf/deep parity formula) and is a finite, positive bound -- this
+        // is the value that now terminates the outer rejection loop.
+        assert_eq!(max_injection_attempts(10, None), 1000);
+        // A floor of samples_needed protects the zero-multiplier edge.
+        assert_eq!(max_injection_attempts(0, None), 0);
+        // An explicit override is honored verbatim (used by the loop below).
+        assert_eq!(max_injection_attempts(10, Some(7)), 7);
+    }
+
+    /// Faithful model of the outer rejection loop in `prove_with_injection`:
+    /// every iteration generates a (conceptually valid) binder, the
+    /// precondition rejects it (`Ok(false)` -> `continue` without advancing
+    /// `accepted`), and the body never runs. The `never_accepts` flag stands
+    /// in for "no invariant-valid binder can satisfy the precondition." The
+    /// return mirrors the production control flow: a determinate
+    /// generator-exhausted reason when the cap is hit, else `Ok`.
+    fn run_rejection_loop(
+        samples_needed: usize,
+        max_attempts: Option<usize>,
+        never_accepts: bool,
+    ) -> Result<usize, String> {
+        let cap = max_injection_attempts(samples_needed, max_attempts);
+        let mut accepted = 0usize;
+        let mut attempts = 0usize;
+        while accepted < samples_needed && attempts < cap {
+            attempts += 1;
+            if never_accepts {
+                // precondition evaluated Ok(false): skip without advancing.
+                continue;
+            }
+            accepted += 1;
+        }
+        if accepted < samples_needed {
+            return Err(exhaustion_reason(attempts, samples_needed));
+        }
+        Ok(accepted)
+    }
+
+    #[test]
+    fn unsatisfiable_precondition_terminates_with_exhaustion_not_hang() {
+        // Regression for the no-cap spin: a precondition no valid binder can
+        // satisfy used to loop forever (each iteration `continue`d without
+        // incrementing `accepted`). With the cap, the loop terminates at the
+        // (tiny) attempt bound and returns the determinate generator-exhausted
+        // outcome the surf/deep loops return. Without the `attempts < cap`
+        // bound this call would never return.
+        let result = run_rejection_loop(5, Some(3), /* never_accepts */ true);
+        let reason = result.expect_err("unsatisfiable precondition must report exhaustion");
+        assert_eq!(
+            reason,
+            "generator exhausted after 3 attempts before collecting 5 valid samples"
+        );
+    }
+
+    #[test]
+    fn satisfiable_precondition_path_collects_all_samples() {
+        // The normal path is unchanged: when every sample is accepted the
+        // loop collects exactly `samples_needed` and does not report
+        // exhaustion (it never reaches the cap).
+        let result = run_rejection_loop(5, Some(1000), /* never_accepts */ false);
+        assert_eq!(result.expect("accepting path succeeds"), 5);
     }
 }
