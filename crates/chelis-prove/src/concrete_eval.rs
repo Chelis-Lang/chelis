@@ -48,8 +48,13 @@ fn eval_bool_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> b
     match expr {
         SmtExpr::BoolLit(v) => *v,
         SmtExpr::Cmp(op, left, right) => {
-            let l = eval_arith(left, env);
-            let r = eval_arith(right, env);
+            // Thread `strict` into the operands so a nested `==`/`!=` (or an
+            // `ite` whose condition compares for equality) used as a Cmp
+            // operand keeps the exact-equality semantics under
+            // `eval_bool_strict`, instead of silently reverting to the
+            // 1e-10 fuzz tolerance via `eval_arith` (strict = false).
+            let l = eval_arith_with(left, env, strict);
+            let r = eval_arith_with(right, env, strict);
             eval_cmp(*op, l, r, strict)
         }
         SmtExpr::Bool(BoolOp::And, children) => {
@@ -61,6 +66,28 @@ fn eval_bool_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> b
         SmtExpr::Bool(BoolOp::Implies, children) if children.len() == 2 => {
             !eval_bool_with(&children[0], env, strict) || eval_bool_with(&children[1], env, strict)
         }
+        // Non-binary `Implies` (or any other malformed boolean connective)
+        // must NOT fall through to the arithmetic catch-all below: that path
+        // re-enters `eval_arith_with` -> its `Bool(_, _)` arm -> back here,
+        // which would recurse without bound and overflow the stack. Evaluate
+        // each connective with a recursion-free, conservative reading:
+        //   - `Implies` with != 2 children: treat the last child as the
+        //     consequent and the conjunction of the rest as the antecedent;
+        //     a 0/1-child `Implies` has no antecedent, so it reduces to its
+        //     consequent (true when empty).
+        //   - `And`/`Or` are already handled above and are well-defined for
+        //     0 or 1 child (And of nothing = true, Or of nothing = false).
+        SmtExpr::Bool(BoolOp::Implies, children) => {
+            let antecedent = children
+                .split_last()
+                .map(|(_, rest)| rest.iter().all(|c| eval_bool_with(c, env, strict)))
+                .unwrap_or(true);
+            let consequent = children
+                .last()
+                .map(|c| eval_bool_with(c, env, strict))
+                .unwrap_or(true);
+            !antecedent || consequent
+        }
         SmtExpr::Not(inner) => !eval_bool_with(inner, env, strict),
         SmtExpr::Ite(cond, then_e, else_e) => {
             if eval_bool_with(cond, env, strict) {
@@ -69,8 +96,14 @@ fn eval_bool_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> b
                 eval_bool_with(else_e, env, strict)
             }
         }
-        // Arithmetic expressions used in boolean context: nonzero = true
-        _ => eval_arith(expr, env) != 0.0,
+        // Genuinely arithmetic-shaped expressions used in boolean context:
+        // nonzero = true. Thread `strict` so any nested `==`/`!=` inside the
+        // arithmetic keeps exact-equality semantics under
+        // `eval_bool_strict`. Every boolean-shaped variant (`Bool` in all
+        // its forms, `Not`, `Cmp`, `Ite`, `BoolLit`) is handled above, so
+        // this arm only ever sees arithmetic variants and cannot re-enter
+        // `eval_bool_with` for the same `expr` (no unbounded recursion).
+        _ => eval_arith_with(expr, env, strict) != 0.0,
     }
 }
 
@@ -308,6 +341,81 @@ mod tests {
         // a panic.
         let e = SmtExpr::Apply("min".into(), vec![SmtExpr::RealLit(1.0)]);
         assert!(eval_arith(&e, &env(&[])).is_nan());
+    }
+
+    #[test]
+    fn strict_propagates_into_cmp_operand_nested_equality() {
+        // FINDING #1: strict `==`/`!=` semantics must propagate into the
+        // OPERANDS of an outer comparison, not just the top-level Cmp.
+        //
+        // Build a nested equality `eq(a, b)` with a = 0.0, b = 1e-11 so that
+        // |a - b| = 1e-11 sits JUST UNDER the 1e-10 fuzz tolerance:
+        //   - strict: a == b is false  -> the eq operand reads 0.0
+        //   - fuzz:   |a - b| < 1e-10  -> the eq operand reads 1.0
+        // Wrap it in an `ite(eq(a, b), 1.0, 0.0)` arithmetic operand of an
+        // outer comparison `ite(...) >= 0.5`:
+        //   - strict outer: 0.0 >= 0.5 -> false (EXACT-equality answer)
+        //   - fuzz   outer: 1.0 >= 0.5 -> true
+        // Before the fix the Cmp arm called eval_arith (strict = false), so
+        // eval_bool_strict wrongly returned the fuzz answer (true).
+        let inner_eq = SmtExpr::Cmp(
+            CmpOp::Eq,
+            Box::new(SmtExpr::Var("a".into())),
+            Box::new(SmtExpr::Var("b".into())),
+        );
+        let ite_operand = SmtExpr::Ite(
+            Box::new(inner_eq),
+            Box::new(SmtExpr::RealLit(1.0)),
+            Box::new(SmtExpr::RealLit(0.0)),
+        );
+        let outer = SmtExpr::Cmp(
+            CmpOp::Ge,
+            Box::new(ite_operand),
+            Box::new(SmtExpr::RealLit(0.5)),
+        );
+        let e = env(&[("a", 0.0), ("b", 1e-11)]);
+        assert!(
+            !eval_bool_strict(&outer, &e),
+            "strict must propagate into the Cmp operand: a == b is exactly false, so ite -> 0.0 and 0.0 >= 0.5 is false"
+        );
+        assert!(
+            eval_bool(&outer, &e),
+            "fuzz path still tolerates |a - b| < 1e-10: a == b reads true, so ite -> 1.0 and 1.0 >= 0.5 is true"
+        );
+    }
+
+    #[test]
+    fn nonbinary_implies_is_determinate_and_recursion_free() {
+        // FINDING #6: a 1-child `Implies` previously fell through to the
+        // arithmetic catch-all, which re-entered eval_arith_with -> its
+        // Bool(_, _) arm -> eval_bool_with -> the same len != 2 mismatch ->
+        // unbounded recursion -> stack overflow. It must now evaluate to a
+        // determinate value without recursing.
+        //
+        // A 1-child Implies has no antecedent; it reduces to its consequent.
+        let implies_true = SmtExpr::Bool(BoolOp::Implies, vec![SmtExpr::BoolLit(true)]);
+        assert!(
+            eval_bool(&implies_true, &env(&[])),
+            "1-child Implies reduces to its (true) consequent"
+        );
+        let implies_false = SmtExpr::Bool(BoolOp::Implies, vec![SmtExpr::BoolLit(false)]);
+        assert!(
+            !eval_bool(&implies_false, &env(&[])),
+            "1-child Implies reduces to its (false) consequent"
+        );
+        // Reaching it via the arithmetic Bool(_, _) bridge must also be
+        // recursion-free (this is the exact path that used to overflow).
+        assert_eq!(
+            eval_arith(&implies_true, &env(&[])),
+            1.0,
+            "1-child Implies in arithmetic position is 1.0, not a stack overflow"
+        );
+        // Strict path must be equally determinate.
+        assert!(eval_bool_strict(&implies_true, &env(&[])));
+        // A zero-child Implies is vacuously true (no antecedent, empty
+        // consequent defaults true) and must not panic or recurse.
+        let implies_empty = SmtExpr::Bool(BoolOp::Implies, vec![]);
+        assert!(eval_bool(&implies_empty, &env(&[])));
     }
 
     #[test]
