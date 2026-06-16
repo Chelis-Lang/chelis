@@ -1558,12 +1558,15 @@ mod finding_tests {
         assert_eq!(prim_name(&Prim::Bf16), "bf16");
         assert_eq!(prim_name(&Prim::F32), "f32");
         assert_eq!(prim_name(&Prim::Int64), "int64");
-        // Every variant's canonical name must match `prim_name` exactly.
+        // Every variant's canonical name must match `prim_name` exactly. This
+        // list must enumerate the WHOLE `Prim` vocabulary (including the f8
+        // widths) or the "every variant" claim is hollow.
         for p in [
             Prim::F32,
             Prim::F64,
             Prim::F16,
             Prim::Bf16,
+            Prim::F8e4m3,
             Prim::Int8,
             Prim::Int16,
             Prim::Int32,
