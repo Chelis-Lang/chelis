@@ -583,3 +583,56 @@ def make_ok(x: f32) -> Probability = Probability { value: 0.25 }
     );
     assert_eq!(code, 0);
 }
+
+// ── Review follow-up: covered-or-rejected end-to-end ──────────────────────
+
+#[test]
+fn nested_record_violating_producer_is_caught() {
+    // A nested single-variant record representation with a producer that
+    // violates the invariant over the NESTED field must be CAUGHT (the
+    // collector silently dropped nested-record types before, so this exported
+    // violating producer passed with zero obligations).
+    let (code, records) = prove_json(
+        "module M\nexport (make)\ntype Inner = | Inner { value: f32 }\n\
+         @opaque\n@invariant(p) p.inner.value >= 0.0\n\
+         type Boxed = | Boxed { inner: Inner }\n\
+         def make() -> Boxed = Boxed { inner: Inner { value: -1.0 } }",
+        &[],
+    );
+    let obs = obligations(&records);
+    assert_eq!(
+        obs.len(),
+        1,
+        "the nested-record producer must yield an obligation: {records:?}"
+    );
+    assert_eq!(
+        obs[0]["status"], "failed",
+        "a producer violating the nested-field invariant must FAIL, not be dropped: {}",
+        obs[0]
+    );
+    assert_eq!(code, 1);
+}
+
+#[test]
+fn unmodelable_string_field_type_is_not_a_silent_pass() {
+    // A `string` scalar field is outside the value class. `chelis prove` must
+    // NOT report a clean pass with zero obligations -- it is covered-or-
+    // rejected (an error), whether surfaced at the type-check or as a
+    // collection-time obligation error.
+    let (code, records) = prove_json(
+        "module M\nexport (make)\n@opaque\n@invariant(p) p.value >= 0.0\n\
+         type Tagged = | Tagged { tag: string, value: f32 }\n\
+         def make() -> Tagged = Tagged { tag: \"bad\", value: -1.0 }",
+        &[],
+    );
+    assert_ne!(
+        code, 0,
+        "an unmodelable invariant representation must not pass silently: {records:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| r["kind"] == "error" || r["status"] == "error"),
+        "the rejection must be surfaced as an error record: {records:?}"
+    );
+}

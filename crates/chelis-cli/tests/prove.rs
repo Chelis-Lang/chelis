@@ -610,16 +610,25 @@ fn non_smt_prove_warns_for_invariant_carrying_opaque_types() {
             && stderr.contains("Rebuild with --features smt"),
         "expected stderr warning; stderr={stderr}"
     );
-    // Stdout is the clean NDJSON summary only -- no obligation records, no
-    // warning text leaked into the machine stream.
-    assert!(
-        !stdout.contains("obligation verification requires"),
-        "warning must not leak into stdout; stdout={stdout}"
-    );
-    let summary = stdout
+    // Machine-facing (review residual-risk): under --json the skipped
+    // obligation verification is ALSO surfaced as a stdout record, so a
+    // consumer reading stdout alone does not mistake a clean summary for a
+    // verified proof run.
+    let records: Vec<Value> = stdout
         .lines()
-        .find_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|v| v["kind"] == "summary")
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    let skipped = records
+        .iter()
+        .find(|v| v["kind"] == "warning" && v["stage"] == "obligations")
+        .expect("a machine-facing skipped-obligations warning record on stdout");
+    assert_eq!(
+        skipped["skipped"], 1,
+        "the record names the count of unverified invariant-carrying types: {skipped}"
+    );
+    let summary = records
+        .iter()
+        .find(|v| v["kind"] == "summary")
         .expect("a summary record on stdout");
     assert_eq!(
         summary["obligations"], 0,

@@ -308,7 +308,7 @@ fn prove_surf_file(
     // is stderr-only and never touches the stdout NDJSON stream or the exit
     // code.
     #[cfg(not(feature = "smt"))]
-    warn_obligations_skipped_without_smt(path, count_invariant_opaque_surf(&flat));
+    warn_obligations_skipped_without_smt(path, count_invariant_opaque_surf(&flat), options);
     Ok(file_status)
 }
 
@@ -1010,7 +1010,7 @@ fn prove_deep_file(
         file_status = combine_status(file_status, ob_status);
     }
     #[cfg(not(feature = "smt"))]
-    warn_obligations_skipped_without_smt(path, count_invariant_opaque_deep(&exprs));
+    warn_obligations_skipped_without_smt(path, count_invariant_opaque_deep(&exprs), options);
     Ok(file_status)
 }
 
@@ -1297,15 +1297,32 @@ fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
 /// but only at Tier C (fuzz), not cvc5 -- because the SMT verification the
 /// flag promises is unavailable.
 #[cfg(not(feature = "smt"))]
-fn warn_obligations_skipped_without_smt(path: &Path, count: usize) {
-    if count > 0 {
-        eprintln!(
-            "warning: producer obligation verification requires the smt-enabled build; {count} \
-             invariant-carrying opaque type(s) in {} did not have their obligations SMT-verified. \
-             Rebuild with --features smt to verify them.",
-            path.display()
+fn warn_obligations_skipped_without_smt(path: &Path, count: usize, options: &ProveOptions<'_>) {
+    if count == 0 {
+        return;
+    }
+    // Machine-facing (review residual-risk): a clean stdout summary alone must
+    // not read as a verified proof run. Under `--json`, emit a record so a
+    // consumer sees that producer obligations were NOT verified in this
+    // non-smt build -- not only the stderr warning below.
+    if options.json {
+        println!(
+            "{}",
+            json!({
+                "kind": "warning",
+                "stage": "obligations",
+                "skipped": count,
+                "reason": "producer obligation verification requires the smt-enabled build \
+                           (--features smt); obligations were not SMT-verified in this build",
+            })
         );
     }
+    eprintln!(
+        "warning: producer obligation verification requires the smt-enabled build; {count} \
+         invariant-carrying opaque type(s) in {} did not have their obligations SMT-verified. \
+         Rebuild with --features smt to verify them.",
+        path.display()
+    );
 }
 
 fn prove_deep_property(
