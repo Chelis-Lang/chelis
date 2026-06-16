@@ -6,8 +6,34 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.26] — 2026-06-16
+
 ### Changed
 
+- **Opaque types with declared invariants (Option 1.5, #386)**: a type
+  declared `@opaque` is constructible and inspectable only inside its
+  defining module — the type checker rejects out-of-module record
+  construction, constructor application, field access, pattern
+  destructuring, casts, and `.dp` literal forgery, returning the true
+  type so no error cascades. An optional `@invariant(p) <expr>`
+  predicate over the representation is recorded as Deep metadata,
+  invisible to `chelis check`, and consumed by `chelis prove`: every
+  exported producer of the type gets a derived producer obligation
+  (covered-or-rejected — an unsupported return container is an error
+  naming the producer, never silently skipped), and the invariant is
+  injected as an assumption on opaque-typed inputs. Guarded-`Option`
+  constructors prove at the SMT tier (`proof_tier:"smt"`);
+  equality-constrained invariants (e.g. a simplex's sum-to-one) route to
+  constructor-based generation rather than starving rejection sampling.
+  Decode of an ADT value at a codec boundary revalidates the invariant
+  and fails closed (never repairs). Tier B cvc5 lowering is now total
+  (every term checks arity + sort) and runs in a crash-isolated
+  subprocess so an uncatchable solver abort cannot take down the prove
+  run. The lint rule `opaque-domain-construction` remains as fast
+  per-file feedback; the typing judgment is the guarantee. Explicitly
+  not refinement typing: no predicates in the typing judgment, no solver
+  in `chelis check`. The new `kind:"obligation"` JSON records are
+  additive — downstream admission parsers should update at pin time.
 - The reef package linker's reserved-name predicate is now a single
   shared definition (`chelis_types::is_linker_format_name`): the reef
   entry/test reserved-name reject (RFC v6) and the checker's

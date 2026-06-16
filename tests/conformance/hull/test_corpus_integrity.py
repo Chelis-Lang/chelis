@@ -89,8 +89,8 @@ class CorpusIntegrityTests(unittest.TestCase):
         self.assertEqual(self.manifest["eval_count"], eval_)
         self.assertEqual(self.manifest["reject_sentinel_count"], reject)
 
-    def test_pinned_version_is_0_7_25(self):
-        self.assertEqual(self.manifest["chelis_version_pinned"], "0.7.25")
+    def test_pinned_version_is_0_7_26(self):
+        self.assertEqual(self.manifest["chelis_version_pinned"], "0.7.26")
 
     def test_accept_check_records_have_canonical_type(self):
         for v in self.verdicts:
