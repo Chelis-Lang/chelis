@@ -771,3 +771,131 @@ fn f6_cli_and_tide_agree_on_deep_user_property_verdicts() {
         Some("failed")
     );
 }
+
+/// Desugar Surf source to the canonical Deep text the CLI `.dp` path
+/// consumes. This is the SAME desugaring the `chelis_desugar` MCP tool and
+/// the CLI Surf path use, so the produced `.dp` carries the `@opaque` +
+/// `@invariant` metadata the obligation engine reads.
+fn surf_to_deep(source: &str) -> String {
+    chelis_compiler_api::compiler::desugar(chelis_compiler_api::schema::DesugarRequest {
+        source: source.to_string(),
+    })
+    .expect("desugar surf to deep")
+    .deep_text
+}
+
+/// D-PARITY (Deep obligation parity): the tide `chelis_prove` tool, for a
+/// `source_kind:"deep"` module, MUST run the derived producer obligations
+/// (and the whole-module type-check) exactly as the CLI `chelis prove
+/// foo.dp` path does. It previously ran ONLY user-property discovery and
+/// skipped obligations for deep, so a Deep module with a VIOLATING opaque
+/// producer reported `ok:true, obligations:[]` while the CLI exits 1.
+///
+/// Case (a): a Deep opaque type with an invariant and a violating producer
+/// must lower `ok` to false and surface a `kind:"obligation"` record with
+/// `status:"failed"` -- NOT an empty obligations array.
+#[test]
+fn deep_violating_obligation_lowers_tide_status() {
+    // The canonical Deep of the same violating opaque module the surf
+    // `cr12_failing_obligation_lowers_tide_status` test drives.
+    let deep_source = surf_to_deep(VIOLATING_OBLIGATION_MODULE);
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":51,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"deep","source": deep_source, "seed": 0
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["ok"], false,
+        "a failing producer obligation in a DEEP module makes the response not-ok \
+         (not the pre-fix ok:true with obligations:[]): {structured}"
+    );
+    let obs = structured["obligations"]
+        .as_array()
+        .expect("obligations array");
+    assert!(
+        !obs.is_empty(),
+        "deep obligations must NOT be skipped (pre-fix returned []): {structured}"
+    );
+    assert!(
+        obs.iter()
+            .any(|o| o["kind"] == "obligation" && o["status"] == "failed"),
+        "a violating deep producer surfaces a failed obligation record: {structured}"
+    );
+    assert!(
+        structured["summary"]["failed"].as_u64().unwrap_or(0) >= 1,
+        "the failed deep obligation is counted in the summary: {structured}"
+    );
+
+    // CLI<->tide parity: the same module fed to the shared obligation engine's
+    // Deep source entry (the one the CLI `.dp` path calls) produces the SAME
+    // obligation set, so tide is not running a weaker check for deep.
+    let engine_out = match chelis_prove::obligation_engine::run_deep_source_obligations(
+        &deep_source,
+        &chelis_prove::obligation_engine::ObligationRunOptions::default(),
+    )
+    .expect("engine run")
+    {
+        chelis_prove::obligation_engine::ObligationRunResult::Ran(o) => o,
+        other => panic!("expected the violating deep module to run, got {other:?}"),
+    };
+    assert!(
+        engine_out
+            .iter()
+            .any(|o| o.status == chelis_prove::obligation_engine::ObligationStatus::Failed),
+        "the shared Deep engine entry also disproves the producer: {engine_out:?}"
+    );
+    let tide_names: Vec<&str> = obs.iter().map(|o| o["name"].as_str().unwrap()).collect();
+    let engine_names: Vec<&str> = engine_out.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(
+        tide_names, engine_names,
+        "same deep obligation set across the tide and shared-engine surfaces"
+    );
+}
+
+/// D-PARITY case (b): a type-broken DEEP module must be not-ok through tide,
+/// surfacing a `stage:"check"` error record -- matching the CLI exit-3 /
+/// RT3-F2 contract. The pre-fix tide handler skipped the whole-module
+/// type-check for deep, so a type-broken `.dp` reported ok:true.
+#[test]
+fn deep_type_broken_module_is_not_ok_through_tide() {
+    // The canonical Deep of the same type-broken opaque module the surf
+    // `cr12_type_broken_module_is_not_ok_through_tide` test drives: `broken`
+    // claims `-> f32` but returns a tensor, so the module does not type-check.
+    let surf = "module Stats.Prob
+export (bad_prob)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+def bad_prob(x: f32) -> Probability = Probability { value: x }
+def broken(x: f32) -> f32 = to_tensor([x])
+";
+    let deep_source = surf_to_deep(surf);
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":52,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"deep","source": deep_source
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["ok"], false,
+        "a type-broken DEEP module is not-ok through tide (parity with CLI exit 3): {structured}"
+    );
+    let obs = structured["obligations"]
+        .as_array()
+        .expect("obligations array");
+    assert!(
+        obs.iter()
+            .any(|o| o["kind"] == "error" && o["stage"] == "check"),
+        "a type-broken deep module surfaces a stage:\"check\" error record: {structured}"
+    );
+}

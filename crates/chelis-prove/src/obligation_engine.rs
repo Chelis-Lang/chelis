@@ -142,6 +142,47 @@ pub fn run_surf_source_obligations(
     )))
 }
 
+/// Run obligations directly from Deep module SOURCE (`.dp` text). This is
+/// the Deep sibling of [`run_surf_source_obligations`]: it is the entry the
+/// chelis-tide MCP tool calls for a `source_kind:"deep"` module so a prove
+/// through tide is identical to the CLI `chelis prove foo.dp` path
+/// (`run_deep_obligations`). A `.dp` is already Deep, so it is parsed but NOT
+/// desugared; the checker then runs for inferred return types (a type-broken
+/// module surfaces a `CheckFailed`, never a silent zero-obligation pass --
+/// RT3-F2 parity), and the SAME `run_module_obligations` the Surf source
+/// entry reaches verifies each obligation. Returns `Err` if the source does
+/// not parse; `Ok(CheckFailed)` if it does not type-check; `Ok(Ran(..))`
+/// otherwise.
+pub fn run_deep_source_obligations(
+    source: &str,
+    options: &ObligationRunOptions,
+) -> Result<ObligationRunResult, String> {
+    let exprs = chelis_deep::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+    let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
+        Ok(checked) => checked
+            .signature_inference()
+            .functions
+            .iter()
+            .map(|(n, s)| (n.clone(), s.checked_signature.clone()))
+            .collect(),
+        // A type-broken module cannot have its obligations meaningfully
+        // verified: the checker-inferred sigs are unavailable, so the
+        // producer set would be empty and a violating producer hidden.
+        // Surface the check diagnostics as a CheckFailed result (RT3-F2).
+        Err(infer) => {
+            let messages = infer
+                .errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>();
+            return Ok(ObligationRunResult::CheckFailed(messages));
+        }
+    };
+    Ok(ObligationRunResult::Ran(run_module_obligations(
+        &exprs, &sigs, options,
+    )))
+}
+
 /// Run all derived producer obligations of a desugared Deep program.
 /// `sigs` is the checker-inferred def-name -> type map (from
 /// `chelis_types::check_typed_program`). Returns one outcome per

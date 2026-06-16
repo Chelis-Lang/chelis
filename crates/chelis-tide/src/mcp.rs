@@ -384,44 +384,53 @@ fn handle_prove_tool(args: &Value) -> Value {
     };
     // Derived obligations. A type-broken module surfaces a check-failure
     // record rather than silently reporting zero obligations (RT3-F2).
-    use chelis_prove::obligation_engine::{ObligationRunResult, ObligationStatus};
+    use chelis_prove::obligation_engine::{
+        ObligationRunResult, ObligationStatus, run_deep_source_obligations,
+        run_surf_source_obligations,
+    };
     let mut obligation_records: Vec<serde_json::Value> = Vec::new();
     let mut ob_failed = 0usize;
     let mut ob_unsupported = 0usize;
     let mut ob_errored = 0usize;
     let mut check_failed = false;
-    // The obligation engine takes Surf source today; a Deep module has no
-    // derived producer obligations through this entry, so skip it for deep.
-    if !source_is_deep {
-        match chelis_prove::obligation_engine::run_surf_source_obligations(&source, &ob_options) {
-            Ok(ObligationRunResult::Ran(outcomes)) => {
-                for o in &outcomes {
-                    match o.status {
-                        ObligationStatus::Failed => ob_failed += 1,
-                        ObligationStatus::Unsupported => ob_unsupported += 1,
-                        ObligationStatus::Error => ob_errored += 1,
-                        ObligationStatus::Passed => {}
-                    }
+    // Dispatch the obligation run on source kind exactly as the property run
+    // above does (D-PARITY): a `.dp` is fed to the Deep source entry, a `.ch`
+    // to the Surf one. Both go through the SAME `run_module_obligations`, so a
+    // Deep module's derived producer obligations and whole-module type-check
+    // run identically to the CLI `chelis prove foo.dp` path -- never skipped.
+    let ob_result = if source_is_deep {
+        run_deep_source_obligations(&source, &ob_options)
+    } else {
+        run_surf_source_obligations(&source, &ob_options)
+    };
+    match ob_result {
+        Ok(ObligationRunResult::Ran(outcomes)) => {
+            for o in &outcomes {
+                match o.status {
+                    ObligationStatus::Failed => ob_failed += 1,
+                    ObligationStatus::Unsupported => ob_unsupported += 1,
+                    ObligationStatus::Error => ob_errored += 1,
+                    ObligationStatus::Passed => {}
                 }
-                obligation_records = outcomes.into_iter().map(obligation_to_json).collect();
             }
-            Ok(ObligationRunResult::CheckFailed(messages)) => {
-                check_failed = true;
-                obligation_records.push(json!({
-                    "kind": "error",
-                    "stage": "check",
-                    "reason": "module does not type-check; obligations not verified",
-                    "diagnostics": messages,
-                }));
-            }
-            Err(message) => {
-                check_failed = true;
-                obligation_records.push(json!({
-                    "kind": "error",
-                    "stage": "parse",
-                    "reason": message,
-                }));
-            }
+            obligation_records = outcomes.into_iter().map(obligation_to_json).collect();
+        }
+        Ok(ObligationRunResult::CheckFailed(messages)) => {
+            check_failed = true;
+            obligation_records.push(json!({
+                "kind": "error",
+                "stage": "check",
+                "reason": "module does not type-check; obligations not verified",
+                "diagnostics": messages,
+            }));
+        }
+        Err(message) => {
+            check_failed = true;
+            obligation_records.push(json!({
+                "kind": "error",
+                "stage": "parse",
+                "reason": message,
+            }));
         }
     }
     let obligations_count = obligation_records.len();
