@@ -66,9 +66,61 @@ pub(super) fn run_deep_properties_shared(
 ) -> Status {
     let outcomes = match run_deep_source_properties(source, &run_opts(options)) {
         Ok(PropertyRunResult::Ran(o)) => o,
-        Err(_) => return Status::Passed,
+        // `run_deep_source_properties` returns `Err` for two distinct
+        // reasons. A parse failure (prefixed `parse:`) already surfaced
+        // upstream -- `prove_deep_file` parses the module first and returns
+        // that error before this runs -- so it is benign here. Every OTHER
+        // `Err` is a malformed-yet-parseable `@property` discovery error (a
+        // missing `property_quantifiers`, a quantifier/param mismatch, an
+        // absent/invalid `property_source_kind`, or a non-callable fn body).
+        // `validate_deep` does not check property-metadata wellformedness, so
+        // those reach here un-surfaced; swallowing them as a pass would report
+        // the malformed property as PASSED (exit 0), re-introducing the
+        // silent skip the shared discoverer's `Err` exists to prevent.
+        // Surface it as a prove error (exit 3), the way the obligation path
+        // surfaces its discovery/check errors.
+        Err(message) if is_parse_error(&message) => return Status::Passed,
+        Err(message) => return emit_discovery_error(path, &message, options, totals),
     };
     render_all(path, &outcomes, "user", options, totals)
+}
+
+/// Whether a `run_deep_source_properties` error is a parse failure (which
+/// already surfaced upstream in `prove_deep_file`) rather than a
+/// malformed-property discovery error. The shared runner prefixes parse
+/// errors with `parse:` (see `chelis_prove::property_runner`).
+fn is_parse_error(message: &str) -> bool {
+    message.starts_with("parse:")
+}
+
+/// Emit a malformed-`@property` discovery failure as a prove error record and
+/// fold an error into `totals`, mirroring the obligation path's
+/// type-check-failure surfacing. A malformed property must lower the verdict
+/// to Error (never a silent pass), so `chelis prove file.dp` exits non-zero.
+fn emit_discovery_error(
+    path: &Path,
+    message: &str,
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Status {
+    totals.errors += 1;
+    if options.json {
+        println!(
+            "{}",
+            json!({
+                "kind": "error",
+                "stage": "property-discovery",
+                "reason": format!("malformed @property; not verified: {message}"),
+                "source": json!({ "kind": "user", "file": path.display().to_string() }),
+            })
+        );
+    } else {
+        eprintln!(
+            "prove error: malformed @property in {}; not verified: {message}",
+            path.display()
+        );
+    }
+    Status::Error
 }
 
 fn render_all(
