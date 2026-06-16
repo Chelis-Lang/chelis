@@ -150,6 +150,28 @@ fn precondition_other_direction_filters_then_body_fails() {
 }
 
 #[test]
+fn unsatisfiable_injection_precondition_terminates_not_hangs() {
+    // The precondition `prob_value(p) >= 2.0` CONTRADICTS the injected
+    // invariant `0 <= value <= 1`: no invariant-valid binder can ever satisfy
+    // it, so the outer rejection loop accepts ZERO samples. Without the
+    // attempt cap (RT #4) this spins forever; with it the run TERMINATES and
+    // reports the generator-exhausted error. Unlike the in-file unit model,
+    // this drives the real `prove_with_injection` loop end-to-end through the
+    // `chelis` binary, so it fails (hangs to the harness timeout) if the cap
+    // or the post-loop exhaustion return is reverted (re-review RT2).
+    let source = format!(
+        "{PROB_DEFS}@property starves forall(p: Probability) where prob_value(p) >= 2.0:\n  prob_value(p) <= 1.0\n"
+    );
+    let (code, records) = prove_json(&source, &["--samples", "5", "--only", "starves"]);
+    let prop = property(&records, "starves").expect("property record");
+    assert_eq!(
+        prop["status"], "error",
+        "an unsatisfiable injection precondition must exhaust to an error, not hang or pass: {prop}"
+    );
+    assert_eq!(code, 3, "injection exhaustion => error => exit 3");
+}
+
+#[test]
 fn same_seed_injection_is_deterministic() {
     let source =
         format!("{PROB_DEFS}@property bounded forall(p: Probability):\n  prob_value(p) <= 1.0\n");
