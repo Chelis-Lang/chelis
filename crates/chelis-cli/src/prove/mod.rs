@@ -172,10 +172,16 @@ fn is_single_explicit_deep_input(path: Option<&Path>, inputs: &[PathBuf]) -> boo
 
 fn combine_status(lhs: Status, rhs: Status) -> Status {
     use Status::*;
+    // Precedence, worst wins: Error > Failed > Unsupported > Passed. A
+    // DISPROVED property (Failed, exit 1) outranks an Unsupported one
+    // (exit 2), so a genuine falsification is never masked by a co-occurring
+    // "the prover could not handle this" -- a CI gate keying on exit 1 ("a
+    // property was disproved") sees the failure instead of a misleading
+    // exit 2 (RT #9).
     match (lhs, rhs) {
         (Error, _) | (_, Error) => Error,
-        (Unsupported, _) | (_, Unsupported) => Unsupported,
         (Failed, _) | (_, Failed) => Failed,
+        (Unsupported, _) | (_, Unsupported) => Unsupported,
         _ => Passed,
     }
 }
@@ -957,11 +963,12 @@ fn run_deep_obligations(
 ) -> Status {
     use chelis_prove::obligation_engine::{ObligationRunOptions, run_module_obligations};
 
-    // A `.dp` whose opaque type declares no invariant has nothing to verify;
-    // the engine returns an empty outcome set in that case anyway, but a
-    // type-check failure must surface as an Error (parity with RT3-F2), so we
-    // run the checker unconditionally when an invariant-carrying opaque type
-    // is present.
+    // Type-check the module unconditionally for inferred return types. A
+    // `.dp` declaring no invariant has nothing to verify (the engine returns
+    // an empty outcome set), but a type-check FAILURE must surface as an Error
+    // regardless -- the Deep prove path has no other whole-module type-check
+    // stage, so this is what keeps a type-broken `.dp` from silently passing
+    // (RT3-F2 parity with the Surf path).
     let sigs = match chelis_types::check_typed_program(exprs) {
         Ok(checked) => checked
             .signature_inference()
@@ -975,14 +982,14 @@ fn run_deep_obligations(
         // success. This mirrors `obligation_engine::run_surf_source_obligations`
         // for the Surf surface.
         Err(infer) => {
-            // No invariant-carrying opaque type => no obligations => a stray
-            // type error here is not an obligation concern (it is the user
-            // property / check pipeline's). Only escalate to an obligation
-            // Error when the module actually declares an invariant whose
-            // obligations we would otherwise be hiding.
-            if !deep_has_invariant_opaque(exprs) {
-                return Status::Passed;
-            }
+            // A type-broken `.dp` module is surfaced as an Error here, exactly
+            // as the Surf path's `obligation_run::run_obligations` does on any
+            // CheckFailed (regardless of whether an opaque invariant is
+            // declared). The Deep prove path has no other stage that
+            // type-checks the whole module, so escalating here is the ONLY
+            // thing that keeps `chelis prove foo.dp` from silently passing a
+            // module that `chelis prove foo.ch` rejects (RT3-F2 parity; the
+            // re-review caught the no-invariant case slipping through).
             let messages = infer
                 .errors
                 .iter()
@@ -1009,16 +1016,6 @@ fn run_deep_obligations(
         status = combine_status(status, s);
     }
     status
-}
-
-/// Whether the Deep program declares at least one invariant-carrying opaque
-/// type, via the SHARED collector the obligation engine uses (so the
-/// "should this type error escalate to an obligation Error" decision agrees
-/// with what the engine would have collected). Used only to decide whether a
-/// type-check failure is an obligation concern.
-#[cfg(feature = "chelis-prove")]
-fn deep_has_invariant_opaque(exprs: &[DeepExpr]) -> bool {
-    !chelis_prove::opaque::collect_opaque_invariants(exprs).is_empty()
 }
 
 /// Emit a module type-check failure as a prove error record (RT3-F2 parity).
@@ -2021,5 +2018,47 @@ impl Lcg {
     fn next_f64(&mut self, min: f64, max: f64) -> f64 {
         let unit = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
         min + (max - min) * unit
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combine_status_failed_outranks_unsupported() {
+        // RT #9: a DISPROVED property (Failed, exit 1) must win over a
+        // co-occurring Unsupported one (exit 2), so a CI gate keying on exit 1
+        // sees the falsification instead of a masking exit 2.
+        assert_eq!(
+            combine_status(Status::Failed, Status::Unsupported),
+            Status::Failed
+        );
+        assert_eq!(
+            combine_status(Status::Unsupported, Status::Failed),
+            Status::Failed
+        );
+        // The rest of the worst-wins ladder is unchanged: Error dominates all,
+        // Unsupported still beats Passed, Passed is the identity.
+        assert_eq!(combine_status(Status::Error, Status::Failed), Status::Error);
+        assert_eq!(
+            combine_status(Status::Error, Status::Unsupported),
+            Status::Error
+        );
+        assert_eq!(
+            combine_status(Status::Unsupported, Status::Passed),
+            Status::Unsupported
+        );
+        assert_eq!(
+            combine_status(Status::Failed, Status::Passed),
+            Status::Failed
+        );
+        assert_eq!(
+            combine_status(Status::Passed, Status::Passed),
+            Status::Passed
+        );
+        // Per-status exit codes are unchanged; only the combine precedence moved.
+        assert_eq!(Status::Failed.exit_code(), 1);
+        assert_eq!(Status::Unsupported.exit_code(), 2);
     }
 }

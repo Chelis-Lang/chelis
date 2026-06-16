@@ -205,3 +205,27 @@ def probability(x: f32) -> Option[Probability] =
     );
     assert_eq!(props[0]["status"], "passed");
 }
+
+/// Re-review RT1: a TYPE-BROKEN `.dp` module that declares NO opaque invariant
+/// must be reported as an Error (exit 3), exactly as the `.ch` form is. The
+/// deep obligation path type-checks the whole module unconditionally and
+/// surfaces a type-check failure, so `chelis prove foo.dp` can no longer
+/// silently pass a module `chelis prove foo.ch` rejects (the first fix
+/// short-circuited the no-invariant case to Passed; this pins the parity).
+#[test]
+fn type_broken_deep_module_with_no_invariant_errors_not_silent_pass() {
+    // `bad` returns f32 from an int32 body: a hard type error, and there is no
+    // opaque type / invariant in sight.
+    let surf = "module M\nexport (bad)\ndef bad(x: int32) -> f32 = x\n";
+    let (code, records) = prove_deep_json(surf, &[]);
+    assert_eq!(
+        code, 3,
+        "a type-broken deep module must exit 3 (Error), not silently pass: {records:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| r["kind"] == "error" && r["stage"] == "check"),
+        "the type-check failure must be surfaced as a check-error record: {records:?}"
+    );
+}
