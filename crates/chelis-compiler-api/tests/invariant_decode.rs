@@ -660,6 +660,132 @@ const TOL_DEEP_WITH_NON_CONSTANT_BINDING: &str = r#"
     (variant {} Tol (field {} value (t-prim {} f32)))))
 "#;
 
+// ── Malformed invariant metadata fails CLOSED at decode (FINDING 2) ───────
+
+/// A hand-authored Deep `deftype` that DECLARES an `invariant` whose
+/// metadata is MALFORMED: the value is a bare literal, not the well-formed
+/// `(fn {} (params {} <binder>) <body>)` shape the predicate parser expects.
+///
+/// D-WF rejects this at declaration time, so it is unreachable through a
+/// chelis-compiled module. But `decode_adt_value` is the contract chokepoint
+/// for the next external/hand-built codec, so it must fail CLOSED: a
+/// structurally-valid payload for this constructor must be REJECTED, not
+/// materialized with zero invariant check. The earlier collector skipped a
+/// malformed invariant, leaving no table entry, so the constructor looked
+/// invariant-free and a structurally-valid payload decoded with no check
+/// (a fail-OPEN). The fix records a `Malformed` entry so revalidation
+/// rejects the value.
+///
+/// The type is named `Probability` with a single `value: f32` field so the
+/// `prob_payload` helper produces a structurally-valid payload for it.
+const PROBABILITY_DEEP_MALFORMED_INVARIANT: &str = r#"
+(module {}
+  stats.prob
+  (deftype {opaque: true,
+            invariant_amenability: "linear",
+            invariant: (lit {type: (t-prim {} f32)} 1.0)}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32)))))
+"#;
+
+/// Companion to the malformed case: the SAME `Probability` type declared
+/// with a WELL-FORMED invariant `p.value >= 0.0 && p.value <= 1.0` in
+/// hand-authored Deep, to confirm the well-formed path still decodes/
+/// validates normally (and to show the malformed rejection is about the
+/// metadata shape, not about Deep authoring per se).
+const PROBABILITY_DEEP_WELL_FORMED_INVARIANT: &str = r#"
+(module {}
+  stats.prob
+  (deftype {opaque: true,
+            invariant_amenability: "linear",
+            invariant: (fn {}
+                          (params {} p)
+                          (app {}
+                            (var {} and)
+                            (app {}
+                              (var {} gte)
+                              (access {} (var {} p) value)
+                              (lit {type: (t-prim {} f32)} 0.0))
+                            (app {}
+                              (var {} lte)
+                              (access {} (var {} p) value)
+                              (lit {type: (t-prim {} f32)} 1.0))))}
+    Probability
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32)))))
+"#;
+
+#[test]
+fn malformed_invariant_metadata_fails_closed_at_decode() {
+    // FINDING 2 (red test): the deftype declares an `invariant` whose
+    // metadata is a bare literal, NOT the `(fn {} (params {} <binder>)
+    // <body>)` shape. A structurally-valid payload (`value: 0.3`, which a
+    // well-formed `[0, 1]` invariant would happily accept) must STILL be
+    // rejected -- the predicate cannot be evaluated, so the value cannot be
+    // safely materialized (spec/10 §4.1, fail-closed).
+    //
+    // Before the fix this WRONGLY returns Ok: the collector skipped the
+    // malformed metadata, leaving `Probability` with no table entry, so
+    // `revalidate_adt_value` treated it as invariant-free and decoded the
+    // payload with zero check (a fail-OPEN soundness hole).
+    let exprs = program_exprs_deep(PROBABILITY_DEEP_MALFORMED_INVARIANT);
+    let err = try_decode_adt_value(&exprs, &prob_payload(0.3)).expect_err(
+        "a malformed declared invariant must fail closed: a structurally-valid \
+         payload cannot be safely materialized without a usable predicate",
+    );
+    match err {
+        DecodeError::Invariant(msg) => {
+            assert!(
+                msg.contains("malformed"),
+                "names the malformed-metadata rejection: {msg}"
+            );
+            assert!(
+                msg.contains("Probability"),
+                "names the declaring opaque type: {msg}"
+            );
+        }
+        other => panic!(
+            "a malformed declared invariant is an invariant-class (fail-closed) \
+             decode failure, not a structural one, got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn malformed_invariant_rejects_every_payload_no_pass_through() {
+    // Parity: the malformed invariant must reject across the board (no value
+    // can be materialized), not just one probe. This pins that the fix is a
+    // categorical fail-closed, not a value-dependent fluke.
+    let exprs = program_exprs_deep(PROBABILITY_DEEP_MALFORMED_INVARIANT);
+    for v in [0.0_f64, 0.5_f64, 1.0_f64, -0.5_f64, 1.5_f64] {
+        assert!(
+            try_decode_adt_value(&exprs, &prob_payload(v)).is_err(),
+            "malformed invariant must reject payload {v} (fail-closed, never a \
+             pass-through decode)"
+        );
+    }
+}
+
+#[test]
+fn well_formed_deep_invariant_still_decodes_after_fix() {
+    // Positive companion: the SAME hand-authored-Deep `Probability` with a
+    // WELL-FORMED invariant still accepts an in-band value and rejects an
+    // out-of-band one. The Malformed fix must not regress the everyday
+    // predicate path.
+    let exprs = program_exprs_deep(PROBABILITY_DEEP_WELL_FORMED_INVARIANT);
+
+    let decoded = decode_adt_value(&exprs, &prob_payload(0.3))
+        .expect("a well-formed invariant accepts an in-band value");
+    let (ctor, fields) = decoded.as_adt().expect("decoded an ADT");
+    assert_eq!(ctor, "Probability");
+    assert_eq!(fields[0].as_f64(), Some(0.3_f32 as f64));
+
+    let err = try_decode_adt_value(&exprs, &prob_payload(1.5))
+        .expect_err("a well-formed invariant still rejects an out-of-band value");
+    assert!(matches!(err, DecodeError::Invariant(_)), "got {err:?}");
+}
+
 #[test]
 fn non_constant_value_binding_does_not_break_genuine_constant_decode() {
     // Review-3: a `(def a (var foo))` non-constant binding sits next to the

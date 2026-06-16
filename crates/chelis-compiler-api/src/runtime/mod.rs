@@ -19,7 +19,7 @@ pub(crate) use host_ops::collect_adt_ctor_fields;
 // Decode-boundary invariant revalidation surface (RFC D-DECODE). The
 // `crate::decode` chokepoint imports these as `crate::runtime::<name>`.
 pub(crate) use invariant::{
-    DecodeField, DecodeFieldType, InvariantPredicate, collect_ctor_field_types,
+    DecodeField, DecodeFieldType, InvariantEntry, collect_ctor_field_types,
     collect_type_invariants, collect_zero_arg_constants, revalidate_adt_value,
 };
 use transforms::extract_prim_from_type_expr;

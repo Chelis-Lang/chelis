@@ -41,6 +41,38 @@ pub(crate) struct InvariantPredicate {
     pub(crate) body: Expr,
 }
 
+/// One constructor's entry in the decode-time invariant table.
+///
+/// A deftype that DECLARES an `invariant` metadata entry always contributes
+/// an entry for each of its record-variant constructors. The distinction is
+/// whether the declared metadata parses into a usable predicate:
+///
+/// - [`InvariantEntry::Predicate`] -- the metadata is the well-formed
+///   `(fn {} (params {} <binder>) <body>)` shape and revalidation evaluates
+///   it (the everyday path).
+/// - [`InvariantEntry::Malformed`] -- the deftype declares an `invariant`
+///   but the metadata is NOT that shape (a bare literal, a fn missing its
+///   params or body, etc.). The predicate cannot be evaluated, and a
+///   predicate that cannot be evaluated is a decode FAILURE (spec/10 §4.1).
+///   Recording the malformed entry rather than dropping it keeps the decode
+///   chokepoint fail-CLOSED: a structurally-valid payload for that
+///   constructor is rejected instead of materializing with zero invariant
+///   check. D-WF rejects malformed metadata at declaration, so this is not
+///   reachable through a chelis-compiled module today, but the chokepoint
+///   is the contract for the next external/hand-built codec.
+///
+/// A deftype with NO `invariant` entry is simply ABSENT from the table:
+/// there is no invariant to check, which is legitimate, not a failure.
+#[derive(Debug, Clone)]
+pub(crate) enum InvariantEntry {
+    /// The declared invariant parsed into an evaluable predicate.
+    Predicate(InvariantPredicate),
+    /// The deftype declared an `invariant` whose metadata is malformed; the
+    /// predicate cannot be evaluated, so the value cannot be safely
+    /// materialized (fail-closed).
+    Malformed { type_name: String },
+}
+
 /// A decode-time invariant failure. Distinct from a *structural* decode
 /// error (wrong constructor, missing field, wrong field type), which the
 /// chokepoint reports separately, because the two have different causes:
@@ -75,6 +107,14 @@ pub(crate) enum InvariantViolation {
         invariant: String,
         reason: String,
     },
+    /// The deftype declared an invariant whose metadata is malformed (not
+    /// the `(fn {} (params {} <binder>) <body>)` shape). The predicate
+    /// cannot be evaluated, so the value cannot be safely materialized
+    /// (fail-closed, spec/10 §4.1: a predicate that cannot be evaluated is
+    /// a decode failure). D-WF rejects this at declaration, so it is not
+    /// reachable through a chelis-compiled module, but the decode chokepoint
+    /// must still fail closed for a hand-built or external codec.
+    MalformedInvariant { type_name: String },
 }
 
 impl std::fmt::Display for InvariantViolation {
@@ -108,21 +148,40 @@ impl std::fmt::Display for InvariantViolation {
                 "decode rejected for opaque type `{type_name}`: the declared invariant `{invariant}` \
                  could not be evaluated on the value ({reason})"
             ),
+            InvariantViolation::MalformedInvariant { type_name } => write!(
+                f,
+                "decode rejected for opaque type `{type_name}`: the declared invariant metadata is \
+                 malformed; the value cannot be safely materialized (fail-closed, RFC D-DECODE)"
+            ),
         }
     }
 }
 
 /// Build the invariant table from a program's `deftype` declarations.
 ///
-/// Scans every `deftype` carrying an `invariant` metadata entry of the
-/// RFC D-META shape `(fn {} (params {} <binder>) <body>)`, and keys the
-/// resulting [`InvariantPredicate`] by the type's single record-variant
-/// constructor name. Malformed metadata (no fn, no binder, no body) is
-/// skipped rather than panicking: declaration-time well-formedness is the
-/// checker's job (RFC D-WF); revalidation is fail-closed only for values,
-/// and a missing/garbled predicate simply means "no invariant to check
-/// for this constructor" here.
-pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, InvariantPredicate> {
+/// Scans every `deftype` carrying an `invariant` metadata entry and keys an
+/// [`InvariantEntry`] by the type's single record-variant constructor name.
+/// A deftype that DECLARES an invariant always contributes an entry per
+/// record-variant ctor:
+///
+/// - When the metadata parses into the RFC D-META shape
+///   `(fn {} (params {} <binder>) <body>)`, the entry is
+///   [`InvariantEntry::Predicate`].
+/// - When the metadata is present but MALFORMED (no fn, no binder, no body),
+///   the entry is [`InvariantEntry::Malformed`]. It is NOT dropped:
+///   dropping it would make the constructor look invariant-free, and a
+///   structurally-valid payload would then decode with zero invariant check
+///   (a fail-OPEN). spec/10 §4.1 requires a predicate that cannot be
+///   evaluated to be a decode FAILURE, so the malformed entry is recorded
+///   and revalidation rejects the value (fail-CLOSED). Declaration-time
+///   well-formedness (RFC D-WF) rejects malformed metadata before it can
+///   reach a chelis-compiled module, but the decode chokepoint is the
+///   contract for the next external/hand-built codec and must fail closed.
+///
+/// A deftype with NO `invariant` entry is simply absent from the table:
+/// there is no invariant to check for its constructors, which is
+/// legitimate, not a failure.
+pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, InvariantEntry> {
     let mut out = HashMap::new();
     for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {
@@ -135,15 +194,17 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
             continue;
         };
         let Some((_, inv_value)) = meta.entries.iter().find(|(key, _)| key == "invariant") else {
-            continue;
-        };
-        let Some((binder, body)) = parse_invariant_fn(inv_value) else {
+            // No declared invariant: this type contributes no table entry.
             continue;
         };
         let kids = children(list);
         let Some(type_name) = kids.first().and_then(symbol_name) else {
             continue;
         };
+        // The deftype DECLARES an invariant, so it always contributes an
+        // entry. Parse the metadata once; a malformed metadata becomes a
+        // `Malformed` entry rather than being skipped (fail-closed).
+        let parsed = parse_invariant_fn(inv_value);
         // Key by every record-variant constructor of the type. The RFC's
         // single-record-variant representation means there is exactly one
         // in V1, but iterating keeps the table honest if that widens.
@@ -157,14 +218,17 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
             let Some(ctor) = children(variant_list).first().and_then(symbol_name) else {
                 continue;
             };
-            out.insert(
-                ctor.to_string(),
-                InvariantPredicate {
+            let entry = match &parsed {
+                Some((binder, body)) => InvariantEntry::Predicate(InvariantPredicate {
                     type_name: type_name.to_string(),
                     binder: binder.clone(),
                     body: body.clone(),
+                }),
+                None => InvariantEntry::Malformed {
+                    type_name: type_name.to_string(),
                 },
-            );
+            };
+            out.insert(ctor.to_string(), entry);
         }
     }
     out
@@ -513,7 +577,7 @@ fn check_representation_finite(
     value: &RuntimeValue,
     type_name: &str,
     ctor: &str,
-    invariants: &HashMap<String, InvariantPredicate>,
+    invariants: &HashMap<String, InvariantEntry>,
     adt_fields: &HashMap<String, Vec<String>>,
     path: &str,
 ) -> Result<(), InvariantViolation> {
@@ -549,8 +613,16 @@ fn check_representation_finite(
             // The type/ctor naming the violation is the OUTERMOST opaque
             // type when we recursed from one; a nested record field that
             // is itself an invariant-carrying opaque type names ITSELF.
+            // Both entry shapes carry the inner type name (a malformed
+            // invariant still names its declaring type), so either one
+            // re-targets the diagnostic to the inner type.
             let (name_for_field, ctor_for_field) = match invariants.get(inner_ctor) {
-                Some(inner) => (inner.type_name.as_str(), inner_ctor.as_str()),
+                Some(InvariantEntry::Predicate(inner)) => {
+                    (inner.type_name.as_str(), inner_ctor.as_str())
+                }
+                Some(InvariantEntry::Malformed { type_name: inner }) => {
+                    (inner.as_str(), inner_ctor.as_str())
+                }
                 None => (type_name, ctor),
             };
             let declared = adt_fields
@@ -616,7 +688,7 @@ fn describe_non_finite(v: f64) -> String {
 /// See [`collect_zero_arg_constants`].
 pub(crate) fn revalidate_adt_value(
     value: &RuntimeValue,
-    invariants: &HashMap<String, InvariantPredicate>,
+    invariants: &HashMap<String, InvariantEntry>,
     adt_fields: &HashMap<String, Vec<String>>,
     module_constants: &HashMap<String, Expr>,
 ) -> Result<(), InvariantViolation> {
@@ -647,8 +719,23 @@ pub(crate) fn revalidate_adt_value(
         revalidate_adt_value(field, invariants, adt_fields, module_constants)?;
     }
 
-    let Some(pred) = invariants.get(ctor) else {
-        return Ok(());
+    // Match the constructor's table entry:
+    // - absent  => no declared invariant; nothing to check (Ok).
+    // - Malformed => the deftype declared an invariant whose metadata is
+    //   malformed. The predicate cannot be evaluated, so the value cannot
+    //   be safely materialized: fail CLOSED (spec/10 §4.1). Dropping this
+    //   case (the old `continue`-skip in `collect_type_invariants`) made
+    //   the constructor look invariant-free and decoded the payload with
+    //   zero check -- a fail-OPEN. Reject before any representation walk.
+    // - Predicate => evaluate it (the everyday path).
+    let pred = match invariants.get(ctor) {
+        None => return Ok(()),
+        Some(InvariantEntry::Malformed { type_name }) => {
+            return Err(InvariantViolation::MalformedInvariant {
+                type_name: type_name.clone(),
+            });
+        }
+        Some(InvariantEntry::Predicate(pred)) => pred,
     };
 
     // (1) Representation sanity pre-check (RFC H1). Walk the WHOLE value

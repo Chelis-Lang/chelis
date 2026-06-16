@@ -46,7 +46,7 @@ use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_types::types::Prim;
 
 use crate::runtime::{
-    DecodeField, DecodeFieldType, InvariantPredicate, RuntimeTensorValue, RuntimeValue,
+    DecodeField, DecodeFieldType, InvariantEntry, RuntimeTensorValue, RuntimeValue,
     collect_adt_ctor_fields, collect_ctor_field_types, collect_type_invariants,
     collect_zero_arg_constants, revalidate_adt_value,
 };
@@ -126,13 +126,13 @@ pub fn try_decode_adt_value(
 /// Decode against pre-built tables. Crate-internal so a caller that already
 /// holds the field-type / invariant tables for a program (a real codec
 /// running many decodes) does not rebuild them per call. The table types
-/// (`DecodeField`, `InvariantPredicate`) are crate-private in V1; when a
+/// (`DecodeField`, `InvariantEntry`) are crate-private in V1; when a
 /// real codec lands they are promoted to the public surface alongside it.
 pub(crate) fn decode_with_tables(
     payload: &ExecutionValue,
     field_types: &HashMap<String, Vec<DecodeField>>,
     adt_fields: &HashMap<String, Vec<String>>,
-    invariants: &HashMap<String, InvariantPredicate>,
+    invariants: &HashMap<String, InvariantEntry>,
     module_constants: &HashMap<String, Expr>,
 ) -> Result<RuntimeValue, DecodeError> {
     // Pass 1: structural conversion (constructor + field arity/order/type).
