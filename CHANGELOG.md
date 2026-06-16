@@ -34,6 +34,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   not refinement typing: no predicates in the typing judgment, no solver
   in `chelis check`. The new `kind:"obligation"` JSON records are
   additive — downstream admission parsers should update at pin time.
+- **Return-position declared-dim rigidity is now enforced (#370/#273,
+  spec/04-type-system.md §4.4.1)** — *potentially breaking*. A declared
+  dim parameter that appears only in a function's RETURN type is now
+  rigidity-checked, closing a soundness hole where a body could silently
+  pin a "for all k" return dim to a caller-visible input (e.g.
+  `def f[k](a: tensor[2, f32]) -> tensor[k, f32] = a` pinned `k := 2`
+  while promising polymorphism). The rule distinguishes two roles: an
+  **output-inferred** return dim — produced from body-internal data, e.g.
+  `def main() -> tensor[n, f32]` that genuinely builds a `tensor[3, f32]`
+  — stays legal, while an **input-coupled** one (pinned to a concrete
+  literal occurring in a parameter position, or collapsed with a
+  param-position declared dim parameter) is rejected with
+  `DimensionMismatch`, matching the param-position rigidity that shipped
+  in 0.7.9 (#272). This can reject previously-accepted but falsely
+  rank-polymorphic signatures. **Migration:** re-declare affected
+  signatures honestly — make genuinely-distinct dims distinct, let
+  body-determined output dims be output-inferred or dynamic (`*`), and
+  drop unused/false `[..]` dim parameters. Oracle:
+  `crates/chelis-cli/tests/issue_273_return_dvar_rigidity.rs`.
 - The reef package linker's reserved-name predicate is now a single
   shared definition (`chelis_types::is_linker_format_name`): the reef
   entry/test reserved-name reject (RFC v6) and the checker's
