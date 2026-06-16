@@ -19,6 +19,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   default build checks no obligations. The one-line warning names the
   count and the `--features smt` remedy; it never touches the stdout
   NDJSON stream or the exit code, so machine consumers are unaffected.
+- `chelis prove` now type-checks the module on EVERY build and errors
+  (exit 3, a `{kind:"error", stage:"check"}` record under `--json`) on a
+  type-broken module, on both the Surf and Deep paths. Previously the
+  whole-module type-check rode only on the `smt`-gated obligation engine,
+  so a default (non-`smt`) build silently passed a type-broken module that
+  the `smt` build rejected. The default build does what it can without a
+  solver (type-check + Tier-C fuzz of user properties) and messages what it
+  cannot (the obligation warning above); the up-front check uses the same
+  bare desugar + `check_typed_program` the obligation engine uses, so the
+  default and `smt` builds agree on what is type-broken.
 
 ### Fixed
 

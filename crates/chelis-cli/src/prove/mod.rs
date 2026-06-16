@@ -253,6 +253,26 @@ fn prove_surf_file(
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
     let flat = flatten_module_decls(&parsed);
     let mut file_status = Status::Passed;
+    // Default (no obligation engine) build: type-check the module up-front so a
+    // type-broken module errors instead of silently passing. A capability
+    // build gets this from the obligation path (`obligation_run::run_obligations`,
+    // which desugars + checks); without it nothing else here type-checks the
+    // module. Use the SAME bare desugar + check the engine uses
+    // (`desugar_program` then `check_typed_program`) so the default and
+    // capability builds agree on what is type-broken.
+    #[cfg(not(feature = "chelis-prove"))]
+    {
+        let deep_exprs = chelis_surf::desugar::desugar_program(&parsed);
+        if let Err(infer) = chelis_types::check_typed_program(&deep_exprs) {
+            let messages = infer
+                .errors
+                .iter()
+                .map(|err| err.message.clone())
+                .collect::<Vec<_>>();
+            emit_module_check_failure(options, &messages, totals);
+            return Ok(Status::Error);
+        }
+    }
     // Under the `chelis-prove` capability the user @property declarations run
     // through the SHARED property runner (U4 / D-PARITY): the SAME discovery
     // + engine the tide MCP tool uses, so a CLI prove and a tide prove agree
@@ -301,6 +321,38 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
         }
     }
     out
+}
+
+/// Emit a module type-check failure as a prove error record, for the default
+/// (no obligation engine) build's up-front type-check. Mirrors the shape of
+/// the capability path's check-failure record (`kind:"error", stage:"check"`)
+/// so a type-broken module reports identically whether or not the obligation
+/// engine is compiled in. The diagnostics go to the stdout NDJSON stream under
+/// `--json` and to stderr otherwise; the caller returns `Status::Error`.
+#[cfg(not(feature = "chelis-prove"))]
+fn emit_module_check_failure(
+    options: &ProveOptions<'_>,
+    messages: &[String],
+    totals: &mut Summary,
+) {
+    totals.errors += 1;
+    let joined = messages.join("; ");
+    if options.json {
+        println!(
+            "{}",
+            json!({
+                "kind": "error",
+                "stage": "check",
+                "reason": format!("module does not type-check: {joined}"),
+                "diagnostics": messages,
+            })
+        );
+    } else {
+        eprintln!("prove error: module does not type-check:");
+        for m in messages {
+            eprintln!("  - {m}");
+        }
+    }
 }
 
 #[cfg(not(feature = "chelis-prove"))]
@@ -901,6 +953,22 @@ fn prove_deep_file(
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
     if let Err(err) = chelis_validate::validate_deep(&source) {
         return Err(format!("validate {}: {err}", path.display()));
+    }
+    // Default (no obligation engine) build: type-check the module up-front so a
+    // type-broken `.dp` errors instead of silently passing. A capability build
+    // gets this from the obligation path (`run_deep_obligations`); without it,
+    // nothing else here type-checks the module. Uses the SAME bare
+    // `check_typed_program` the engine uses, so the default and capability
+    // builds agree on what is type-broken (the checker needs no solver).
+    #[cfg(not(feature = "chelis-prove"))]
+    if let Err(infer) = chelis_types::check_typed_program(&exprs) {
+        let messages = infer
+            .errors
+            .iter()
+            .map(|err| err.message.clone())
+            .collect::<Vec<_>>();
+        emit_module_check_failure(options, &messages, totals);
+        return Ok(Status::Error);
     }
     let properties = discover_deep_properties(path, &exprs, options.only)?;
     let mut file_status = Status::Passed;
