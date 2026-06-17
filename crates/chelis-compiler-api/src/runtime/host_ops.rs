@@ -2689,10 +2689,16 @@ pub(super) fn render_value(value: &RuntimeValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        RuntimeValue::Adt { ctor, fields, .. } if fields.is_empty() => ctor.clone(),
+        // Show the user-facing (de-mangled) constructor name; a reef-linked
+        // ADT carries the internal `Pkg__..__Ctor` form, which must not leak
+        // to eval output (chelis#399). `demangle_ident` is a no-op on bare /
+        // builtin constructors.
+        RuntimeValue::Adt { ctor, fields, .. } if fields.is_empty() => {
+            chelis_types::demangle_ident(ctor)
+        }
         RuntimeValue::Adt { ctor, fields, .. } => format!(
             "{}({})",
-            ctor,
+            chelis_types::demangle_ident(ctor),
             fields
                 .iter()
                 .map(render_value)

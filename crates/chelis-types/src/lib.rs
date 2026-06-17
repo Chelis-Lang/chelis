@@ -27,4 +27,6 @@ pub use infer::{
     infer_program,
 };
 pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
-pub use opacity::{LinkedProgramGuard, install_linked_program_guard, is_linker_format_name};
+pub use opacity::{
+    LinkedProgramGuard, demangle_ident, install_linked_program_guard, is_linker_format_name,
+};

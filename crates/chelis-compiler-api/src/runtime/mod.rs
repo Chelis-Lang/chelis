@@ -706,7 +706,13 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
                 .collect::<Result<Vec<_>, _>>()?,
         },
         RuntimeValue::Adt { ctor, fields, .. } => ExecutionValue::Adt {
-            ctor: ctor.clone(),
+            // De-mangle the reef-linked `Pkg__..__Ctor` form to the bare,
+            // user-facing constructor name. This is the eval `--json` ABI
+            // surface; decode (`decode_adt_value`) already keys on bare
+            // constructor names, so emitting bare here makes the encode/decode
+            // round-trip consistent and stops internal mangling leaking to
+            // consumers (chelis#399).
+            ctor: chelis_types::demangle_ident(ctor),
             fields: fields
                 .iter()
                 .map(runtime_value_to_schema)

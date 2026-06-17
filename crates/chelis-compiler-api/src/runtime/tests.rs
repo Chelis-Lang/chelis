@@ -2,6 +2,41 @@ use super::host_ops::*;
 use super::transforms::*;
 use super::*;
 
+/// chelis#399: a reef-linked ADT value carries the internal
+/// `Pkg__..__Ctor` constructor name; eval rendering (the human renderer
+/// AND the `--json` `ExecutionValue` ABI surface) must show the bare,
+/// user-facing name, matching the de-mangling already applied to
+/// diagnostics. Bare / builtin constructors pass through unchanged.
+#[test]
+fn eval_renderer_demangles_reef_linked_ctor() {
+    let mangled = RuntimeValue::Adt {
+        ctor: "Pkg__kb__chelis__agent__KellyBenchAgent__Strategy__StrategyState".to_string(),
+        fields: vec![RuntimeValue::Unit, RuntimeValue::Unit],
+        field_names: None,
+    };
+    // human renderer: bare ctor with fields
+    assert_eq!(render_value(&mangled), "StrategyState((), ())");
+    // `--json` / ExecutionValue ABI surface: bare ctor
+    match runtime_value_to_schema(&mangled).expect("schema") {
+        crate::schema::ExecutionValue::Adt { ctor, .. } => assert_eq!(ctor, "StrategyState"),
+        _ => panic!("expected ExecutionValue::Adt"),
+    }
+    // nullary reef-linked ctor de-mangles too
+    let nullary = RuntimeValue::Adt {
+        ctor: "Pkg__pkg__Mod__NoBet".to_string(),
+        fields: vec![],
+        field_names: None,
+    };
+    assert_eq!(render_value(&nullary), "NoBet");
+    // bare / builtin constructor is unchanged (demangle_ident no-op)
+    let bare = RuntimeValue::Adt {
+        ctor: "None".to_string(),
+        fields: vec![],
+        field_names: None,
+    };
+    assert_eq!(render_value(&bare), "None");
+}
+
 fn checked_surf(source: &str) -> CheckedProgram {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
