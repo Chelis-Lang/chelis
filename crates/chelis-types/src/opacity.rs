@@ -408,7 +408,11 @@ pub(crate) fn reef_module_stem(name: &str) -> Option<String> {
 /// user-facing name is the trailing `<Name>` segment. Lexical
 /// (non-reef) identifiers carry no marker prefix and pass through
 /// unchanged.
-pub(crate) fn demangle_ident(name: &str) -> String {
+///
+/// Public so the eval value renderer (chelis-compiler-api) shows the
+/// user-facing constructor name rather than the internal mangled form,
+/// matching the de-mangling already applied to diagnostics (chelis#399).
+pub fn demangle_ident(name: &str) -> String {
     if name.starts_with("Pkg__") || name.starts_with("pkg__") {
         terminal_segment(name).to_string()
     } else {

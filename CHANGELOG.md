@@ -6,6 +6,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Eval value renderer no longer leaks package-mangled ADT constructor
+  names (#399)** — a regression from #386. `chelis eval` (both the human
+  renderer and the `eval --json` `ExecutionValue` ABI) emitted the
+  internal `Pkg__<pkg>__<Module>__<Ctor>` form for reef-linked ADT values
+  where it should show the bare display name; #386 applied de-mangling to
+  diagnostics but not to the value renderer. Both render sites
+  (`render_value` and `runtime_value_to_schema`) now call
+  `chelis_types::demangle_ident` (a no-op on bare / builtin constructors),
+  restoring the bare name and keeping the eval encode/decode round-trip
+  consistent (decode already keys on bare constructor names). Surfaced by
+  the Chelis-Lang/flukeball typed-ABI consumer during the 0.7.26 cascade.
+
 ## [0.7.26] — 2026-06-16
 
 ### Changed
