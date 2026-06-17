@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.27] — 2026-06-17
+
 ### Fixed
 
 - **Eval value renderer no longer leaks package-mangled ADT constructor
