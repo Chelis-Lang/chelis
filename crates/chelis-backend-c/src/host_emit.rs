@@ -528,6 +528,12 @@ fn emit_function(
     out.push("}".to_string());
 }
 
+/// The base C indent inside the generated `main` body. Top-level `main`
+/// locals are emitted at this indent; `track_owned_alloc` releases only
+/// allocations at this depth (issue #406) so block-scoped temporaries in
+/// nested loop/conditional bodies are not freed out of scope.
+const BASE_MAIN_INDENT: &str = "    ";
+
 fn emit_main(
     out: &mut Vec<String>,
     program_name: &str,
@@ -536,18 +542,29 @@ fn emit_main(
 ) {
     out.push("int main(void) {".to_string());
     let mut emitter = HostEmitter::new(
-        "    ".to_string(),
+        BASE_MAIN_INDENT.to_string(),
         &format!("{program_name}__global"),
         HashMap::new(),
         function_specializations(program),
         &program.global_tensor_helpers,
     );
+    // issue #406: `main` is the program root — it owns every heap value
+    // it creates (globals plus the list/tuple/dict temporaries built to
+    // construct them) and returns none, so enable scope-release tracking
+    // and free each owned allocation before `return 0`. Without this the
+    // generated binary leaks them for the whole process lifetime, which
+    // a `valgrind --leak-check=full --error-exitcode=1` gate flags as
+    // "definitely lost".
+    emitter.scope_releases = Some(Vec::new());
     for (index, binding) in program.globals.iter().enumerate() {
-        emitter.emit_expr_to_var(
-            &binding.value,
-            &format!("__binding_{index}_value"),
-            &binding.ty,
-        );
+        let binding_var = format!("__binding_{index}_value");
+        emitter.emit_expr_to_var(&binding.value, &binding_var, &binding.ty);
+        // The binding-value local owns its allocation regardless of how
+        // it was produced (tensor kernel output, list/dict builtin,
+        // literal). Track it here; the alias name (`theta`) is never
+        // tracked, and dedup in `emit_scope_releases` collapses the case
+        // where the binding value *is* a literal already tracked above.
+        emitter.track_owned_alloc(&binding_var, &binding.ty);
         if hoisted.contains(binding.name.as_str()) {
             // Declared at file scope (issue #352); assign, don't shadow.
             emitter
@@ -566,6 +583,10 @@ fn emit_main(
             emitter.emit_labeled_root(display_name, binding.name.as_str(), &binding.ty);
         }
     }
+    // issue #406: free everything `main` owns before returning. Emitted
+    // after the labeled-root prints so the values are still live when
+    // printed and reclaimed immediately after.
+    emitter.emit_scope_releases();
     out.extend(emitter.lines);
     out.push("    return 0;".to_string());
     out.push("}".to_string());
@@ -711,6 +732,15 @@ struct HostEmitter<'a> {
     function_specializations: HashMap<String, HostFunctionSpecialization>,
     tensor_helpers: &'a [HostTensorHelper],
     temp_counter: usize,
+    /// When `Some`, every heap-owning allocation created in this emit
+    /// scope is recorded as `(var, type)` so the scope can release it
+    /// before returning. Set only for `emit_main` (issue #406): the
+    /// generated `main` is the program root, owns every heap value it
+    /// creates, and transfers none out, so each owned allocation must be
+    /// freed at scope exit or it leaks for the process lifetime. `None`
+    /// inside compiled functions, which already emit their own
+    /// per-local `chelis_free` cleanup.
+    scope_releases: Option<Vec<(String, HostType)>>,
 }
 
 impl<'a> HostEmitter<'a> {
@@ -729,6 +759,52 @@ impl<'a> HostEmitter<'a> {
             function_specializations,
             tensor_helpers,
             temp_counter: 0,
+            scope_releases: None,
+        }
+    }
+
+    /// Record `var` (of `ty`) as a heap-owning allocation this scope must
+    /// release before returning. No-op unless scope-release tracking is
+    /// enabled (i.e. this is the `main` emitter, issue #406). Only the
+    /// pointer-typed, heap-owning `HostType`s are tracked; scalars and
+    /// borrowed views carry no ownership.
+    fn track_owned_alloc(&mut self, var: &str, ty: &HostType) {
+        // Only track allocations declared at the scope's own (base) indent
+        // level. Temporaries created inside a nested C block -- a
+        // `map` / `flat_map` / `filter` / `fold` loop body, or an `if` /
+        // `match` arm -- are emitted at a deeper indent and are block-
+        // scoped, so they are not visible at the function-level cleanup
+        // and must not be released there (that would emit C referencing
+        // an out-of-scope identifier). Those temporaries are already
+        // freed where they are consumed by the surrounding helper.
+        if self.indent.len() != BASE_MAIN_INDENT.len() {
+            return;
+        }
+        if let Some(releases) = self.scope_releases.as_mut()
+            && release_call(var, ty).is_some()
+        {
+            releases.push((var.to_string(), ty.clone()));
+        }
+    }
+
+    /// Drain the recorded scope-owned allocations, emitting one release
+    /// call per distinct variable (deduped: an alias such as `theta =
+    /// __binding_0_value` is never recorded, only the underlying
+    /// `__binding_N_value`, so each heap pointer is freed exactly once).
+    /// Released in reverse creation order so a container is freed after
+    /// any later-created value, mirroring C scope-exit destruction order.
+    fn emit_scope_releases(&mut self) {
+        let Some(releases) = self.scope_releases.take() else {
+            return;
+        };
+        let mut seen: HashSet<String> = HashSet::new();
+        for (var, ty) in releases.into_iter().rev() {
+            if !seen.insert(var.clone()) {
+                continue;
+            }
+            if let Some(call) = release_call(&var, &ty) {
+                self.lines.push(format!("{}{call}", self.indent));
+            }
         }
     }
 
@@ -3189,6 +3265,13 @@ impl<'a> HostEmitter<'a> {
             values_name,
             items.len()
         ));
+        // issue #406: a freshly-built list temporary in the program root
+        // scope is owned by `main` and must be released at scope exit.
+        let list_ty = match ty {
+            HostType::List(_) => ty.clone(),
+            _ => HostType::List(Box::new(HostType::Unknown)),
+        };
+        self.track_owned_alloc(target, &list_ty);
     }
 
     fn assign_tuple_literal(&mut self, target: &str, items: &[HostExpr], ty: &HostType) {
@@ -3235,6 +3318,13 @@ impl<'a> HostEmitter<'a> {
             items_arg,
             items.len()
         ));
+        // issue #406: a freshly-built tuple temporary in the program root
+        // scope is owned by `main` and must be released at scope exit.
+        let tuple_ty = match ty {
+            HostType::Tuple(_) => ty.clone(),
+            _ => HostType::Tuple(Vec::new()),
+        };
+        self.track_owned_alloc(target, &tuple_ty);
     }
 
     fn assign_map(
@@ -3833,6 +3923,33 @@ impl<'a> HostEmitter<'a> {
             }
             _ => self.lines.push(format!("{}{target} = 0;", self.indent)),
         }
+    }
+}
+
+/// The runtime release call that frees the heap allocation a value of
+/// `ty` held in `var` owns, or `None` for non-owning types (scalars,
+/// borrowed views, function pointers). Used by `emit_main`'s scope-exit
+/// cleanup (issue #406) so a `chelis build --target c` program frees the
+/// list / tensor / tuple / dict / adt / string temporaries it allocates
+/// instead of leaking them for the process lifetime. The runtime release
+/// functions are refcounted, so releasing a container correctly
+/// decrements any retained element without double-freeing it.
+fn release_call(var: &str, ty: &HostType) -> Option<String> {
+    match ty {
+        HostType::Tensor(_) => Some(format!("chelis_free({var});")),
+        HostType::List(_) => Some(format!("chelis_list_release({var});")),
+        HostType::Tuple(_) => Some(format!("chelis_tuple_release({var});")),
+        HostType::Dict(_, _) => Some(format!("chelis_dict_release({var});")),
+        HostType::Adt(_, _) => Some(format!("chelis_adt_release({var});")),
+        HostType::String => Some(format!("chelis_string_release({var});")),
+        // Scalars (int/float/bool/unit), borrowed mapped files, function
+        // pointers, and Option-of-scalar carry no owned heap allocation
+        // for `main` to free. `Option` of a pointer type and `Unknown`
+        // are deliberately not auto-freed here: their concrete ownership
+        // is not recoverable from the host type alone, so freeing them
+        // blindly would risk a double-free. They remain process-lifetime
+        // until a future change threads precise ownership.
+        _ => None,
     }
 }
 

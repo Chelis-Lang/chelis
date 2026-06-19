@@ -6,6 +6,29 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **C backend: `main` no longer leaks the list / tensor temporaries it
+  allocates (#406)** — a `chelis build --target c` program leaked two
+  "definitely lost" blocks under `valgrind --leak-check=full`: the
+  `to_tensor([...])` list built by `chelis_list_from_values` and the
+  result tensor allocated via `chelis_contiguous`/`chelis_alloc`, both
+  reachable from generated `main`. The runtime helpers are correct (they
+  return owned values); the leak was that generated `main`, the program
+  root, never released the heap allocations it owns. `emit_main` now
+  tracks each owned heap allocation declared at the function's top level
+  (global binding values plus top-level list / tuple temporaries) and
+  emits the matching refcounted release (`chelis_free`,
+  `chelis_list_release`, `chelis_tuple_release`, …) before `return 0`.
+  Block-scoped temporaries inside `map` / `filter` / `fold` / `if`
+  bodies are excluded so cleanup never references an out-of-scope
+  identifier. Compiled-function bodies already emitted their own
+  per-local cleanup and are unchanged. Acceptance oracle:
+  `build_c_grad_program_has_zero_definitely_lost_under_valgrind` in
+  `crates/chelis-cli/tests/cli.rs` builds the grad_quadratic reproducer
+  to C, gcc-links it, runs it under valgrind with no suppressions, and
+  asserts `definitely lost: 0 bytes`.
+
 ## [0.7.27] — 2026-06-17
 
 ### Fixed

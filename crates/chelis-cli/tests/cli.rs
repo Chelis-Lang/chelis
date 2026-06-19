@@ -8129,3 +8129,155 @@ fn build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call() {
          nested-call form's value; got: {stdout:?}",
     );
 }
+
+// issue #406 acceptance oracle: a `chelis build --target c` program
+// must not leak the list / tensor temporaries its `main` allocates.
+//
+// On `origin/main` this program leaked two "definitely lost" blocks
+// under valgrind (`chelis_list_from_values` -> the `to_tensor` list, and
+// `chelis_alloc` <- `chelis_contiguous` -> the result tensor), both
+// reachable from `main`. The fix frees `main`'s owned heap allocations
+// at scope exit (see `chelis_backend_c::host_emit::emit_scope_releases`).
+//
+// This is the authoritative completion oracle for the leak fix: it
+// builds the grad_quadratic reproducer to C, gcc-links it against the
+// runtime static archive, runs it under
+// `valgrind --leak-check=full`, and asserts the
+// `definitely lost: 0 bytes` line with NO suppressions.
+//
+// The OpenMP thread-pool TLS that libgomp allocates via `GOMP_parallel`
+// is reported as "possibly lost" by valgrind regardless of chelis code;
+// that is a documented libgomp false positive (see issue #406), so this
+// oracle asserts on `definitely lost` specifically rather than on
+// valgrind's overall exit code.
+//
+// The C is compiled with `-mavx2` rather than the toolchain default
+// `-march=native`: on AVX-512 hosts `-march=native` emits EVEX-encoded
+// instructions that valgrind's memcheck core cannot decode, raising a
+// spurious SIGILL before the program runs. `-mavx2` keeps the codegen
+// vectorized while staying inside valgrind's supported instruction set.
+//
+// Runs by default where `valgrind` and `gcc` are installed; cleanly
+// skips (printing why) otherwise, so a toolchain without valgrind stays
+// green. Manual gate to force the leak check locally:
+//   cargo test -p chelis-cli --test cli \
+//     build_c_grad_program_has_zero_definitely_lost_under_valgrind \
+//     -- --nocapture
+// Expected success condition: the printed valgrind output contains
+// "definitely lost: 0 bytes in 0 blocks".
+#[test]
+#[cfg(unix)]
+fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
+    fn tool_available(tool: &str) -> bool {
+        StdCommand::new(tool)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    if !tool_available("valgrind") {
+        eprintln!("SKIP: valgrind not installed; cannot run the #406 leak oracle");
+        return;
+    }
+    if !tool_available("gcc") {
+        eprintln!("SKIP: gcc not installed; cannot link the #406 leak oracle");
+        return;
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("grad_quadratic.ch");
+    // grad_quadratic reproducer from issue #406: a tensor `grad` over a
+    // function param, with the wrt-tensor built from a `to_tensor([...])`
+    // list literal. Exercises both leak frames the issue reported.
+    write_file(
+        &source,
+        "module GradQuadratic\n\
+         def sumsq(theta: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(theta, theta), 0))\n\
+         def grad_sumsq(model: tensor[3, f32] -> f32, theta: tensor[3, f32]) -> tensor[3, f32] = {\n\
+         \x20 target = fn (theta_local: tensor[3, f32]) -> model(theta_local)\n\
+         \x20 grad(target, wrt=theta_local)(theta)\n\
+         }\n\
+         theta = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n\
+         dsumsq = grad_sumsq(sumsq, theta)\n",
+    );
+
+    let out_dir = dir.path().join("grad-build");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Link directly (not via gcc_link_generated): force -mavx2 in place
+    // of the toolchain's default -march=native so valgrind can decode
+    // every instruction. -fopenmp matches the runtime archive's OpenMP
+    // dependency; without it the link fails on unresolved GOMP symbols.
+    let bin = out_dir.join("grad_quadratic");
+    let link = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args([
+            "-O2",
+            "-mavx2",
+            "-fopenmp",
+            "grad_quadratic.c",
+            "-L.",
+            "-lchelis_runtime",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-o",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("gcc should run");
+    assert!(
+        link.status.success(),
+        "gcc link failed:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    let valgrind = StdCommand::new("valgrind")
+        .current_dir(&out_dir)
+        .args([
+            "--leak-check=full",
+            "--errors-for-leak-kinds=definite",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("valgrind should run");
+
+    let vg_stdout = String::from_utf8_lossy(&valgrind.stdout);
+    let vg_stderr = String::from_utf8_lossy(&valgrind.stderr);
+    println!("valgrind stdout:\n{vg_stdout}");
+    println!("valgrind stderr:\n{vg_stderr}");
+
+    // The program itself must produce the correct gradient before we
+    // care about leaks.
+    assert!(
+        vg_stdout.contains("dsumsq = tensor(shape=[3], data=[2.0, 4.0, 6.0])"),
+        "grad_quadratic produced wrong output under valgrind:\n{vg_stdout}"
+    );
+
+    // The acceptance contract: zero bytes definitely lost, no
+    // suppressions. valgrind prints the leak summary to stderr.
+    assert!(
+        vg_stderr.contains("definitely lost: 0 bytes in 0 blocks"),
+        "chelis-built C program must have zero definitely-lost bytes \
+         under valgrind (issue #406); valgrind reported:\n{vg_stderr}"
+    );
+    assert!(
+        vg_stderr.contains("suppressed: 0 bytes in 0 blocks"),
+        "the #406 leak oracle must run with NO suppressions; \
+         valgrind reported:\n{vg_stderr}"
+    );
+}
