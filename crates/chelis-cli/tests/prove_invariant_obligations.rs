@@ -23,11 +23,18 @@ use tempfile::tempdir;
 
 /// Run `chelis prove --json` on `source`, returning (exit_code, records).
 fn prove_json(source: &str, extra: &[&str]) -> (i32, Vec<Value>) {
+    prove_json_with_env(source, extra, &[])
+}
+
+fn prove_json_with_env(source: &str, extra: &[&str], envs: &[(&str, &str)]) -> (i32, Vec<Value>) {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("mod.ch");
     std::fs::write(&path, source).expect("write");
     let mut cmd = Command::cargo_bin("chelis").expect("binary");
     cmd.env("CHELIS_STYLE_GATE_DISABLE", "1");
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     cmd.arg("prove").arg(&path).arg("--json");
     for a in extra {
         cmd.arg(a);
@@ -39,6 +46,13 @@ fn prove_json(source: &str, extra: &[&str]) -> (i32, Vec<Value>) {
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .collect();
     (code, records)
+}
+
+fn properties(records: &[Value]) -> Vec<&Value> {
+    records
+        .iter()
+        .filter(|r| r.get("kind").and_then(Value::as_str) == Some("property"))
+        .collect()
 }
 
 fn obligations(records: &[Value]) -> Vec<&Value> {
@@ -80,6 +94,94 @@ fn flagship_guarded_option_proves_at_smt_tier() {
     assert_eq!(ob["producer"], "probability");
     assert_eq!(ob["arith_model"], "real");
     assert_eq!(summary(&records)["obligations"], 1);
+}
+
+#[test]
+fn c1_all_smt_discharges_have_composite_proven() {
+    let (code, records) = prove_json(FLAGSHIP, &[]);
+    assert_eq!(code, 0);
+    let ob = obligations(&records)[0];
+    assert_eq!(ob["status"], "passed");
+    assert_eq!(ob["proof_tier"], "smt");
+    assert_eq!(ob["composite_verdict"], "proven");
+    let assumptions = ob["assumptions"].as_array().expect("assumptions array");
+    assert_eq!(assumptions.len(), 1);
+    assert_eq!(assumptions[0]["name"], "invariant:Probability:probability");
+    assert_eq!(assumptions[0]["discharge"]["method"], "smt");
+    assert_eq!(assumptions[0]["discharge"]["evidence"]["status"], "proved");
+    assert_eq!(assumptions[0]["non_vacuity"]["status"], "established");
+}
+
+#[test]
+fn c2_fuzz_discharge_is_qualified_and_carries_seed_tolerance() {
+    let (code, records) = prove_json(
+        FLAGSHIP,
+        &["--tier", "fuzz-only", "--samples", "8", "--seed", "7"],
+    );
+    assert_eq!(code, 0);
+    let ob = obligations(&records)[0];
+    assert_eq!(ob["status"], "passed");
+    assert_eq!(ob["proof_tier"], "fuzz");
+    assert_eq!(
+        ob["composite_verdict"],
+        "proven_modulo_fuzz_validated_contract"
+    );
+    assert_ne!(ob["composite_verdict"], "proven");
+    let evidence = &ob["assumptions"][0]["discharge"]["evidence"];
+    assert_eq!(ob["assumptions"][0]["discharge"]["method"], "fuzz");
+    assert_eq!(evidence["status"], "validated");
+    assert_eq!(evidence["seed"], 7);
+    assert_eq!(evidence["tolerance"].as_f64().unwrap(), 1e-10);
+}
+
+#[test]
+fn c4_unsat_assumptions_are_invalid_not_green() {
+    let source = "module M
+@property vacuous forall(x: f32) where x > 0.0 && x < 0.0:
+  x == x
+";
+    let (code, records) = prove_json(source, &["--tier", "smt-only"]);
+    assert_eq!(code, 2, "invalid non-vacuity degrades to unsupported exit");
+    let props = properties(&records);
+    assert_eq!(props.len(), 1, "one property record: {records:?}");
+    let prop = props[0];
+    assert_eq!(prop["status"], "unsupported");
+    assert_eq!(prop["composite_verdict"], "invalid");
+    assert_eq!(prop["assumptions"][0]["non_vacuity"]["status"], "invalid");
+    assert!(
+        prop["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("non_vacuity_invalid"),
+        "reason names non-vacuity invalidation: {prop}"
+    );
+}
+
+#[test]
+fn c4_forced_smt_unknown_and_timeout_are_unsupported_not_failed() {
+    let source = "module M
+@property true_prop forall(x: f32):
+  x == x
+";
+    for (forced, reason) in [("unknown", "smt unknown"), ("timeout", "smt timeout")] {
+        let (code, records) = prove_json_with_env(
+            source,
+            &["--tier", "smt-only"],
+            &[("CHELIS_PROVE_TEST_FORCE_SMT_RESULT", forced)],
+        );
+        assert_eq!(code, 2, "{forced} is unsupported");
+        let prop = properties(&records)[0];
+        assert_eq!(prop["status"], "unsupported", "{forced}: {prop}");
+        assert_eq!(prop["composite_verdict"], "unsupported", "{forced}: {prop}");
+        assert!(
+            prop.get("counterexample").is_none(),
+            "{forced} must not fabricate a counterexample: {prop}"
+        );
+        assert!(
+            prop["reason"].as_str().unwrap_or("").contains(reason),
+            "{forced} reason should be honest: {prop}"
+        );
+    }
 }
 
 #[test]

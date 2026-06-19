@@ -480,6 +480,7 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
     });
     if let Some(cx) = &o.counterexample {
         value["counterexample"] = cx.clone();
+        value["shrink_steps"] = json!(o.shrink_steps);
     }
     if let Some(r) = &o.reason {
         value["reason"] = json!(r);
@@ -514,6 +515,7 @@ fn obligation_to_json(o: chelis_prove::obligation_engine::ObligationOutcome) -> 
     }
     if let Some(cx) = o.counterexample {
         value["counterexample"] = cx;
+        value["shrink_steps"] = json!(o.shrink_steps);
     }
     if let Some(r) = o.reason {
         value["reason"] = json!(r);

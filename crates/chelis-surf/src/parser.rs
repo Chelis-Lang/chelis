@@ -818,8 +818,16 @@ impl Parser {
             "tolerance" => Ok(PropertyOption::Tolerance(value, span)),
             "seed" => Ok(PropertyOption::Seed(value, span)),
             "samples" => Ok(PropertyOption::Samples(value, span)),
+            "contract" => match value {
+                Expr::Lit(Literal::Str(id), _) => Ok(PropertyOption::Contract(id, span)),
+                _ => Err(ParseError::Expected {
+                    expected: "string literal contract id".into(),
+                    found: format!("{value:?}"),
+                    offset: start.offset,
+                }),
+            },
             _ => Err(ParseError::Expected {
-                expected: "property option `tolerance`, `seed`, or `samples`".into(),
+                expected: "property option `tolerance`, `seed`, `samples`, or `contract`".into(),
                 found: name,
                 offset: start.offset,
             }),
@@ -2801,6 +2809,34 @@ mod tests {
             }
             _ => panic!("expected Sig"),
         }
+    }
+
+    #[test]
+    fn property_contract_option_requires_string_literal() {
+        let decls = p(r#"@property reflected forall(x: f32):
+  x == x
+  with contract = "std.normal_cdf.reflection"
+"#);
+        match &decls[0] {
+            Decl::Property { options, .. } => {
+                assert_eq!(options.len(), 1);
+                match &options[0] {
+                    PropertyOption::Contract(id, _) => {
+                        assert_eq!(id, "std.normal_cdf.reflection");
+                    }
+                    other => panic!("expected contract option, got {other:?}"),
+                }
+            }
+            other => panic!("expected property, got {other:?}"),
+        }
+
+        let err = p_err(
+            "@property bad forall(x: f32):\n  x == x\n  with contract = std.normal_cdf.reflection\n",
+        );
+        assert!(
+            err.to_string().contains("string literal contract id"),
+            "wrong error: {err}"
+        );
     }
 
     #[test]

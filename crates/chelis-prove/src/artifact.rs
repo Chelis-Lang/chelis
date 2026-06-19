@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::composition::{AssumptionRecord, CompositeVerdict};
 use crate::obligations::ObligationMeta;
 
 /// Which tier produced the verification result.
@@ -24,6 +25,9 @@ pub enum ProofStatus {
     Disproved { counterexample: serde_json::Value },
     /// Property statistically validated (Tier C, N samples passed).
     StatisticallyValidated { samples: usize },
+    /// The requested tier could not establish a verdict. This is distinct
+    /// from `Disproved`, which requires a counterexample.
+    Unsupported { reason: String },
     /// Property rejected as structurally ill-formed.
     Rejected { reason: String },
     /// Tier B was not amenable for this property.
@@ -46,6 +50,44 @@ pub struct ProofArtifact {
     /// `#[serde(default)]` lets old payloads deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obligation: Option<ObligationMeta>,
+    /// Assumptions this artifact depends on, each with a discharge record.
+    #[serde(default)]
+    pub assumptions: Vec<AssumptionRecord>,
+    /// Weakest-link verdict after composing the artifact with assumptions.
+    #[serde(default)]
+    pub composite_verdict: CompositeVerdict,
+}
+
+impl ProofArtifact {
+    pub fn new(
+        property_name: impl Into<String>,
+        tier: ProofTier,
+        status: ProofStatus,
+        duration_ms: u64,
+        smt_status: Option<SmtStatus>,
+    ) -> Self {
+        let composite_verdict = match &status {
+            ProofStatus::Proved => CompositeVerdict::Proven,
+            ProofStatus::StatisticallyValidated { samples } if *samples > 0 => {
+                CompositeVerdict::ProvenModuloFuzzValidatedContract
+            }
+            ProofStatus::StatisticallyValidated { .. } => CompositeVerdict::Unsupported,
+            ProofStatus::Disproved { .. } => CompositeVerdict::Failed,
+            ProofStatus::Rejected { .. }
+            | ProofStatus::NotAmenable { .. }
+            | ProofStatus::Unsupported { .. } => CompositeVerdict::Unsupported,
+        };
+        Self {
+            property_name: property_name.into(),
+            tier,
+            status,
+            duration_ms,
+            smt_status,
+            obligation: None,
+            assumptions: Vec::new(),
+            composite_verdict,
+        }
+    }
 }
 
 /// SMT solver outcome detail.
@@ -63,14 +105,13 @@ mod tests {
     use super::*;
 
     fn base() -> ProofArtifact {
-        ProofArtifact {
-            property_name: "p".to_string(),
-            tier: ProofTier::Smt,
-            status: ProofStatus::Proved,
-            duration_ms: 1,
-            smt_status: Some(SmtStatus::Proved),
-            obligation: None,
-        }
+        ProofArtifact::new(
+            "p",
+            ProofTier::Smt,
+            ProofStatus::Proved,
+            1,
+            Some(SmtStatus::Proved),
+        )
     }
 
     #[test]
@@ -106,5 +147,21 @@ mod tests {
         let old = r#"{"property_name":"p","tier":"Smt","status":"Proved","duration_ms":1,"smt_status":"Proved"}"#;
         let back: ProofArtifact = serde_json::from_str(old).unwrap();
         assert_eq!(back.obligation, None);
+        assert!(back.assumptions.is_empty());
+        assert_eq!(back.composite_verdict, CompositeVerdict::Proven);
+    }
+
+    #[test]
+    fn unsupported_artifact_is_not_a_green_composite() {
+        let artifact = ProofArtifact::new(
+            "p",
+            ProofTier::Smt,
+            ProofStatus::Unsupported {
+                reason: "cvc5 returned unknown".to_string(),
+            },
+            1,
+            Some(SmtStatus::Unknown),
+        );
+        assert_eq!(artifact.composite_verdict, CompositeVerdict::Unsupported);
     }
 }

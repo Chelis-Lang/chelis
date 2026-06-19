@@ -22,6 +22,7 @@ Canonical v1 form:
   with tolerance = 1e-6
   with seed = 0
   with samples = 100
+  with contract = "std.normal_cdf.reflection"
 ```
 
 Rules:
@@ -32,7 +33,18 @@ Rules:
 - `where` clauses are harness filters. False-precondition samples are not
   counted and the predicate is not called for them.
 - `with tolerance`, `with seed`, and `with samples` are optional.
+- `with contract = "..."` is a repeatable string-literal dependency on a
+  standard contract invariant. Unknown contract IDs make the property
+  unsupported.
 - Numeric suffixes in property names have no harness semantics.
+
+Contract options are part of Tier B lowering, not only report metadata. A
+contract-bound call to the certified implementation is replaced by a fresh SMT
+symbol and the contract assumptions needed for that symbol. The prover must
+check that the call resolves to the implementation named by the discharge
+record before applying the abstraction. For `std.normal_cdf.reflection`, the
+lowering recognizes syntactic `normal_cdf(x)` / `normal_cdf(-x)` pairs and
+asserts the reflection coupling between their fresh symbols.
 
 ## Deep Representation
 
@@ -63,6 +75,7 @@ Optional metadata:
 - `property_tolerance`
 - `property_seed`
 - `property_samples`
+- `property_contracts: (tuple {} "contract.id" ...)`
 
 The Deep `def` name is the property name. There is no `property_name` or
 `property_predicate_body` metadata. Def parameters are the canonical binder
@@ -155,11 +168,24 @@ that the module type-checked and every obligation was discharged.
 summary record.
 
 ```json
-{"kind":"property","name":"call_price_non_negative","status":"passed","samples":100,"seed":0}
-{"kind":"property","name":"req_PRC_001","status":"failed","samples":1,"seed":0,"source":{"kind":"bridge:c-earchin","spans":"references/pricing_rules.spans.json"}}
-{"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","reason":"symbolic tensor dimensions are not supported in L2 v1"}
+{"kind":"property","name":"call_price_non_negative","status":"passed","composite_verdict":"proven_modulo_fuzz_validated_contract","assumptions":[],"samples":100,"seed":0}
+{"kind":"property","name":"req_PRC_001","status":"failed","composite_verdict":"failed","assumptions":[],"samples":1,"seed":0,"source":{"kind":"bridge:c-earchin","spans":"references/pricing_rules.spans.json"}}
+{"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"reason":"symbolic tensor dimensions are not supported in L2 v1"}
 {"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0}
 ```
+
+Every `{kind:"property"}` and `{kind:"obligation"}` result record carries:
+
+- `composite_verdict`: one of `proven`,
+  `proven_modulo_fuzz_validated_contract`,
+  `proven_modulo_asserted_axiom`, `invalid`, `unsupported`, or `failed`.
+  `status:"passed"` remains the compatibility bucket; consumers that need
+  proof strength must read `composite_verdict`. A fuzz-validated result must
+  not render as `composite_verdict:"proven"`.
+- `assumptions`: an array of assumption records. Each record has `name`,
+  optional `source_type` / `producer`, optional
+  `discharge:{method:"smt"|"fuzz"|"axiom", evidence:{...}}`, and optional
+  `non_vacuity`. A missing or failed discharge degrades the composite verdict.
 
 ### Derived obligation records (additive — `opaque_invariants_rfc.md` D-OBLIG)
 
@@ -173,9 +199,9 @@ record set deliberately at pin time — it is a new record kind, not a change
 to an existing one.
 
 ```json
-{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"probability","name":"invariant:Probability:probability","status":"passed","proof_tier":"smt","samples":0,"seed":0,"arith_model":"real"}
-{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"bad_prob","name":"invariant:Probability:bad_prob","status":"failed","proof_tier":"smt","samples":0,"seed":0,"arith_model":"real","counterexample":{"__arg0":"2.0"}}
-{"kind":"obligation","obligation_kind":"invariant_producer","status":"error","reason":"opaque type `Probability`: exported producer `many` returns the type through an unsupported container (generic `List`); decompose-or-reject (RFC D-PRODUCER)"}
+{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"probability","name":"invariant:Probability:probability","status":"passed","composite_verdict":"proven","assumptions":[{"name":"invariant:Probability:probability","source_type":"Probability","producer":"probability","discharge":{"method":"smt","evidence":{"status":"proved","obligation":"invariant:Probability:probability","arith_model":"real"}},"non_vacuity":{"status":"established","evidence":{"solver":"cvc5","result":"sat","assumption_count":0,"trivial":true}}}],"proof_tier":"smt","samples":0,"seed":0,"arith_model":"real"}
+{"kind":"obligation","obligation_kind":"invariant_producer","source_type":"Probability","producer":"bad_prob","name":"invariant:Probability:bad_prob","status":"failed","composite_verdict":"failed","assumptions":[{"name":"invariant:Probability:bad_prob","source_type":"Probability","producer":"bad_prob","discharge":{"method":"smt","evidence":{"status":"failed","obligation":"invariant:Probability:bad_prob","counterexample":{"__arg0":"2.0"}}}}],"proof_tier":"smt","samples":0,"seed":0,"arith_model":"real","counterexample":{"__arg0":"2.0"}}
+{"kind":"obligation","obligation_kind":"invariant_producer","status":"error","composite_verdict":"unsupported","assumptions":[],"reason":"opaque type `Probability`: exported producer `many` returns the type through an unsupported container (generic `List`); decompose-or-reject (RFC D-PRODUCER)"}
 {"kind":"summary","total":1,"passed":1,"failed":0,"unsupported":0,"errors":0,"obligations":1}
 ```
 
@@ -194,6 +220,23 @@ covered-or-rejected / signature-rejection failure and carries only
 meaning: a failed or errored obligation participates in the same
 worst-status exit code as user properties (`Passed=0`, `Failed=1`,
 `Unsupported=2`, `Error=3`).
+
+### Composition and non-vacuity
+
+COMPOSE folds each result with the assumption discharges it depends on.
+All-SMT discharges compose to `composite_verdict:"proven"`. Any fuzz
+discharge composes to
+`"proven_modulo_fuzz_validated_contract"` unless a weaker discharge is
+present. Any asserted axiom composes to
+`"proven_modulo_asserted_axiom"`. Missing/unsupported discharges compose to
+`"unsupported"`; counterexample-backed discharges compose to `"failed"`.
+
+For every claimed green result that has assumptions, `chelis prove` checks
+the assumptions alone for satisfiability. SAT establishes non-vacuity. UNSAT
+sets `composite_verdict:"invalid"` and the record does not render as a pure
+pass. cvc5 unknown/timeout sets `composite_verdict:"unsupported"` with a
+reason such as `non_vacuity_unestablished: smt unknown`; it is never reported
+as `failed`. A `failed` verdict requires a counterexample.
 
 ### Invariant-binder generation and starvation (`--invariant-min-rate`)
 

@@ -21,6 +21,10 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_surf::ast::{Decl, Param, TypeExpr};
 
+use crate::composition::{
+    AssumptionDischarge, AssumptionRecord, DischargeMethod, FUZZ_TOLERANCE, NonVacuityRecord,
+};
+
 use super::{PropertyOutcome, PropertyRunOptions, PropertyStatus, PropertyTier};
 
 /// Does this property have at least one binder whose type is an
@@ -68,6 +72,7 @@ pub(super) fn prove_with_injection(
                         "binder `{}` has an unsupported type for injection",
                         p.name
                     )),
+                    Vec::new(),
                 );
             }
         }
@@ -140,6 +145,7 @@ pub(super) fn prove_with_injection(
                                         "generator exhausted for invariant binder `{}` of type `{}`",
                                         name, diag.type_name
                                     )),
+                                    Vec::new(),
                                 );
                             }
                             return outcome(
@@ -149,6 +155,7 @@ pub(super) fn prove_with_injection(
                                 seed,
                                 None,
                                 Some(diag.message()),
+                                Vec::new(),
                             );
                         }
                     }
@@ -178,6 +185,7 @@ pub(super) fn prove_with_injection(
                     seed,
                     Some(cx),
                     None,
+                    injection_assumptions(property_name, &binders, accepted, seed),
                 );
             }
             Err(e) => return outcome_error(property_name, seed, e),
@@ -199,6 +207,7 @@ pub(super) fn prove_with_injection(
         seed,
         None,
         None,
+        injection_assumptions(property_name, &binders, samples_needed, seed),
     )
 }
 
@@ -229,26 +238,36 @@ fn outcome(
     seed: u64,
     counterexample: Option<serde_json::Value>,
     reason: Option<String>,
+    assumptions: Vec<AssumptionRecord>,
 ) -> PropertyOutcome {
     let tier = if matches!(status, PropertyStatus::Passed | PropertyStatus::Failed) {
         PropertyTier::Fuzz
     } else {
         PropertyTier::None
     };
-    PropertyOutcome {
-        name: name.to_string(),
+    PropertyOutcome::new(
+        name,
         status,
-        proof_tier: tier,
+        tier,
         samples,
         seed,
         counterexample,
         reason,
-        injected: true,
-    }
+        true,
+        assumptions,
+    )
 }
 
 fn outcome_error(name: &str, seed: u64, reason: String) -> PropertyOutcome {
-    outcome(name, PropertyStatus::Error, 0, seed, None, Some(reason))
+    outcome(
+        name,
+        PropertyStatus::Error,
+        0,
+        seed,
+        None,
+        Some(reason),
+        Vec::new(),
+    )
 }
 
 enum Binder {
@@ -264,6 +283,44 @@ enum Binder {
         name: String,
         inv: crate::opaque::OpaqueInvariant,
     },
+}
+
+fn injection_assumptions(
+    property_name: &str,
+    binders: &[Binder],
+    samples: usize,
+    seed: u64,
+) -> Vec<AssumptionRecord> {
+    binders
+        .iter()
+        .filter_map(|binder| match binder {
+            Binder::Opaque { name, inv } => Some(
+                AssumptionRecord::new(
+                    format!("invariant:{}:binder:{name}", inv.type_name),
+                    Some(AssumptionDischarge::new(
+                        DischargeMethod::Fuzz,
+                        serde_json::json!({
+                            "status": "validated",
+                            "property": property_name,
+                            "binder": name,
+                            "source_type": inv.type_name,
+                            "samples": samples,
+                            "seed": seed,
+                            "tolerance": FUZZ_TOLERANCE,
+                        }),
+                    )),
+                    Some(NonVacuityRecord::established(serde_json::json!({
+                        "method": "fuzz",
+                        "result": "sat",
+                        "accepted_samples": samples,
+                        "seed": seed,
+                    }))),
+                )
+                .with_source(inv.type_name.clone(), format!("binder:{name}")),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> Option<Binder> {

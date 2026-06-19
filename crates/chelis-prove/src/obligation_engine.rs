@@ -18,6 +18,10 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::types::{Prim, Type};
 
+use crate::composition::{
+    AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
+    NonVacuityRecord, NonVacuityStatus, rollup_composite,
+};
 use crate::obligations::{ObligationMeta, ObligationProperty, ProducedPosition};
 use crate::opaque::{ConstEnv, OpaqueInvariant};
 use crate::tier_b::TierBResult;
@@ -33,10 +37,158 @@ pub struct ObligationOutcome {
     pub samples: usize,
     pub seed: u64,
     pub counterexample: Option<serde_json::Value>,
+    pub shrink_steps: usize,
     pub reason: Option<String>,
+    pub assumptions: Vec<AssumptionRecord>,
+    pub composite_verdict: CompositeVerdict,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ObligationOutcome {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        name: impl Into<String>,
+        meta: ObligationMeta,
+        status: ObligationStatus,
+        proof_tier: ObligationTier,
+        samples: usize,
+        seed: u64,
+        counterexample: Option<serde_json::Value>,
+        reason: Option<String>,
+        assumptions: Vec<AssumptionRecord>,
+    ) -> Self {
+        let name = name.into();
+        let (status, reason) = if status == ObligationStatus::Failed && counterexample.is_none() {
+            (
+                ObligationStatus::Unsupported,
+                Some(reason.unwrap_or_else(|| {
+                    "failed obligation outcome missing counterexample".to_string()
+                })),
+            )
+        } else {
+            (status, reason)
+        };
+        let assumptions = if assumptions.is_empty()
+            && proof_tier != ObligationTier::None
+            && status != ObligationStatus::Error
+        {
+            default_obligation_assumptions(
+                &name,
+                &meta,
+                status,
+                proof_tier,
+                samples,
+                seed,
+                counterexample.as_ref(),
+                reason.as_deref(),
+            )
+        } else {
+            assumptions
+        };
+        let base = match status {
+            ObligationStatus::Passed => match proof_tier {
+                ObligationTier::Smt => CompositeVerdict::Proven,
+                ObligationTier::Fuzz if samples > 0 => {
+                    CompositeVerdict::ProvenModuloFuzzValidatedContract
+                }
+                _ => CompositeVerdict::Unsupported,
+            },
+            ObligationStatus::Failed => {
+                if counterexample.is_some() {
+                    CompositeVerdict::Failed
+                } else {
+                    CompositeVerdict::Unsupported
+                }
+            }
+            ObligationStatus::Unsupported | ObligationStatus::Error => {
+                CompositeVerdict::Unsupported
+            }
+        };
+        let composite_verdict = rollup_composite(base, &assumptions);
+        Self {
+            name,
+            meta,
+            status,
+            proof_tier,
+            samples,
+            seed,
+            counterexample,
+            shrink_steps: 0,
+            reason,
+            assumptions,
+            composite_verdict,
+        }
+    }
+
+    fn with_shrink_steps(mut self, shrink_steps: usize) -> Self {
+        self.shrink_steps = shrink_steps;
+        self
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn default_obligation_assumptions(
+    name: &str,
+    meta: &ObligationMeta,
+    status: ObligationStatus,
+    tier: ObligationTier,
+    samples: usize,
+    seed: u64,
+    counterexample: Option<&serde_json::Value>,
+    reason: Option<&str>,
+) -> Vec<AssumptionRecord> {
+    let method = match tier {
+        ObligationTier::Smt => DischargeMethod::Smt,
+        ObligationTier::Fuzz => DischargeMethod::Fuzz,
+        ObligationTier::None => return Vec::new(),
+    };
+    let evidence = match status {
+        ObligationStatus::Passed if tier == ObligationTier::Smt => serde_json::json!({
+            "status": "proved",
+            "obligation": name,
+            "arith_model": "real",
+        }),
+        ObligationStatus::Passed => serde_json::json!({
+            "status": "validated",
+            "obligation": name,
+            "samples": samples,
+            "seed": seed,
+            "tolerance": FUZZ_TOLERANCE,
+        }),
+        ObligationStatus::Failed => serde_json::json!({
+            "status": "failed",
+            "obligation": name,
+            "counterexample": counterexample.cloned(),
+        }),
+        ObligationStatus::Unsupported => serde_json::json!({
+            "status": "unsupported",
+            "obligation": name,
+            "reason": reason.unwrap_or("unsupported"),
+        }),
+        ObligationStatus::Error => return Vec::new(),
+    };
+    let non_vacuity = if status == ObligationStatus::Passed {
+        Some(NonVacuityRecord::established(serde_json::json!({
+            "method": method.as_str(),
+            "result": "sat",
+            "assumption_count": 0,
+            "trivial": tier == ObligationTier::Smt,
+            "accepted_samples": if tier == ObligationTier::Fuzz { samples } else { 0 },
+            "seed": seed,
+        })))
+    } else {
+        None
+    };
+    vec![
+        AssumptionRecord::new(
+            name.to_string(),
+            Some(AssumptionDischarge::new(method, evidence)),
+            non_vacuity,
+        )
+        .with_source(meta.source_type.clone(), meta.producer.clone()),
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObligationStatus {
     Passed,
     Failed,
@@ -203,40 +355,42 @@ pub fn run_module_obligations(
     // outcome, NEVER silently dropped. Dropping it would let a violating
     // exported producer pass `chelis prove` with zero obligations.
     for rej in &rejections {
-        out.push(ObligationOutcome {
-            name: format!("invariant:{}", rej.type_name),
-            meta: ObligationMeta {
+        out.push(ObligationOutcome::new(
+            format!("invariant:{}", rej.type_name),
+            ObligationMeta {
                 obligation_kind: "invariant_producer".to_string(),
                 source_type: rej.type_name.clone(),
                 producer: String::new(),
             },
-            status: ObligationStatus::Error,
-            proof_tier: ObligationTier::None,
-            samples: 0,
-            seed: options.seed,
-            counterexample: None,
-            reason: Some(rej.reason.clone()),
-        });
+            ObligationStatus::Error,
+            ObligationTier::None,
+            0,
+            options.seed,
+            None,
+            Some(rej.reason.clone()),
+            Vec::new(),
+        ));
     }
 
     let consts = resolve_module_constants(exprs, &invariants);
     let collection = crate::obligations::collect_obligations(exprs, &invariants, sigs);
 
     for err in &collection.errors {
-        out.push(ObligationOutcome {
-            name: String::new(),
-            meta: ObligationMeta {
+        out.push(ObligationOutcome::new(
+            String::new(),
+            ObligationMeta {
                 obligation_kind: "invariant_producer".to_string(),
                 source_type: String::new(),
                 producer: String::new(),
             },
-            status: ObligationStatus::Error,
-            proof_tier: ObligationTier::None,
-            samples: 0,
-            seed: options.seed,
-            counterexample: None,
-            reason: Some(err.to_string()),
-        });
+            ObligationStatus::Error,
+            ObligationTier::None,
+            0,
+            options.seed,
+            None,
+            Some(err.to_string()),
+            Vec::new(),
+        ));
     }
     for ob in &collection.obligations {
         if let Some(only) = &options.only
@@ -271,14 +425,40 @@ fn run_one(
         {
             match crate::tier_b::solve_property(&lowered.property, options.smt_timeout_ms) {
                 TierBResult::Proved => {
-                    return outcome(
+                    let non_vacuity =
+                        smt_non_vacuity_record(&lowered.property, options.smt_timeout_ms);
+                    let reason = match non_vacuity.status {
+                        NonVacuityStatus::Established => None,
+                        NonVacuityStatus::Invalid | NonVacuityStatus::Unsupported => {
+                            non_vacuity.reason.clone()
+                        }
+                    };
+                    let assumptions = obligation_assumption_records(
                         ob,
-                        ObligationStatus::Passed,
+                        AssumptionDischarge::new(
+                            DischargeMethod::Smt,
+                            serde_json::json!({
+                                "status": "proved",
+                                "obligation": ob.name,
+                                "arith_model": "real",
+                            }),
+                        ),
+                        non_vacuity,
+                    );
+                    let status = if reason.is_some() {
+                        ObligationStatus::Unsupported
+                    } else {
+                        ObligationStatus::Passed
+                    };
+                    return outcome_with_assumptions(
+                        ob,
+                        status,
                         ObligationTier::Smt,
                         0,
                         options.seed,
                         None,
-                        None,
+                        reason,
+                        assumptions,
                     );
                 }
                 TierBResult::Disproved(model) => {
@@ -292,7 +472,7 @@ fn run_one(
                         None,
                     );
                 }
-                TierBResult::Timeout | TierBResult::Unknown => {
+                TierBResult::Timeout => {
                     if options.tier == "smt-only" {
                         return outcome(
                             ob,
@@ -301,7 +481,20 @@ fn run_one(
                             0,
                             options.seed,
                             None,
-                            Some("smt timeout/unknown".to_string()),
+                            Some("smt timeout".to_string()),
+                        );
+                    }
+                }
+                TierBResult::Unknown => {
+                    if options.tier == "smt-only" {
+                        return outcome(
+                            ob,
+                            ObligationStatus::Unsupported,
+                            ObligationTier::Smt,
+                            0,
+                            options.seed,
+                            None,
+                            Some("smt unknown".to_string()),
                         );
                     }
                 }
@@ -527,10 +720,9 @@ fn run_tier_c(
         match eval_obligation_body_values(exprs, inv, ob, &arg_values, consts) {
             Ok(true) => {}
             Ok(false) => {
-                let cx = arg_values
-                    .iter()
-                    .map(|a| (a.name.clone(), a.json.clone()))
-                    .collect::<serde_json::Map<_, _>>();
+                let (shrunk, shrink_steps) =
+                    shrink_obligation_counterexample(exprs, inv, ob, &kinds, consts, arg_values);
+                let cx = obligation_counterexample(&shrunk);
                 return outcome(
                     ob,
                     ObligationStatus::Failed,
@@ -539,7 +731,8 @@ fn run_tier_c(
                     seed,
                     Some(serde_json::Value::Object(cx)),
                     None,
-                );
+                )
+                .with_shrink_steps(shrink_steps);
             }
             Err(e) => {
                 return outcome(
@@ -566,6 +759,7 @@ fn run_tier_c(
 }
 
 /// A producer parameter kind for Tier C sampling.
+#[derive(Clone)]
 enum ArgKind {
     Scalar(String),
     Tensor(Vec<usize>),
@@ -574,10 +768,205 @@ enum ArgKind {
 
 /// A sampled argument value: the Deep value expr passed to the producer
 /// call, a JSON repr for counterexamples, and the param name.
+#[derive(Clone)]
 struct ArgValue {
     expr: Expr,
     json: serde_json::Value,
     name: String,
+}
+
+const MAX_OBLIGATION_SHRINK_STEPS: usize = 64;
+
+fn obligation_counterexample(args: &[ArgValue]) -> serde_json::Map<String, serde_json::Value> {
+    args.iter()
+        .map(|a| (a.name.clone(), a.json.clone()))
+        .collect()
+}
+
+fn shrink_obligation_counterexample(
+    exprs: &[Expr],
+    inv: &OpaqueInvariant,
+    ob: &ObligationProperty,
+    kinds: &[ArgKind],
+    consts: &ConstEnv,
+    mut args: Vec<ArgValue>,
+) -> (Vec<ArgValue>, usize) {
+    let mut steps = 0usize;
+    while steps < MAX_OBLIGATION_SHRINK_STEPS {
+        let mut changed = false;
+        for index in 0..args.len() {
+            let Some(kind) = kinds.get(index) else {
+                continue;
+            };
+            for candidate in obligation_shrink_candidates(&args[index], kind) {
+                if candidate.json == args[index].json {
+                    continue;
+                }
+                let mut trial = args.clone();
+                trial[index] = candidate;
+                if matches!(
+                    eval_obligation_body_values(exprs, inv, ob, &trial, consts),
+                    Ok(false)
+                ) {
+                    args = trial;
+                    steps += 1;
+                    changed = true;
+                    break;
+                }
+            }
+            if changed || steps >= MAX_OBLIGATION_SHRINK_STEPS {
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (args, steps)
+}
+
+fn obligation_shrink_candidates(value: &ArgValue, kind: &ArgKind) -> Vec<ArgValue> {
+    match kind {
+        ArgKind::Scalar(prim) if prim == "bool" => value
+            .json
+            .as_bool()
+            .or_else(|| value.json.as_f64().map(|current| current != 0.0))
+            .and_then(|current| {
+                current.then(|| ArgValue {
+                    expr: scalar_lit(prim, 0.0),
+                    json: serde_json::json!(false),
+                    name: value.name.clone(),
+                })
+            })
+            .into_iter()
+            .collect(),
+        ArgKind::Scalar(prim) if crate::opaque::is_int_width(prim) => value
+            .json
+            .as_f64()
+            .map(|current| {
+                let current = current as i64;
+                let mut candidates = Vec::new();
+                push_unique_obligation_int_candidate(&mut candidates, value, prim, current, 0);
+                push_unique_obligation_int_candidate(
+                    &mut candidates,
+                    value,
+                    prim,
+                    current,
+                    current / 2,
+                );
+                push_unique_obligation_int_candidate(
+                    &mut candidates,
+                    value,
+                    prim,
+                    current,
+                    current.signum(),
+                );
+                candidates
+            })
+            .unwrap_or_default(),
+        ArgKind::Scalar(prim) => value
+            .json
+            .as_f64()
+            .map(|current| {
+                let mut candidates = Vec::new();
+                push_unique_obligation_float_candidate(&mut candidates, value, prim, current, 0.0);
+                push_unique_obligation_float_candidate(
+                    &mut candidates,
+                    value,
+                    prim,
+                    current,
+                    current / 2.0,
+                );
+                candidates
+            })
+            .unwrap_or_default(),
+        ArgKind::Tensor(dims) => value
+            .json
+            .as_array()
+            .map(|items| {
+                let data = items
+                    .iter()
+                    .filter_map(serde_json::Value::as_f64)
+                    .collect::<Vec<_>>();
+                if data.len() != dims.iter().product::<usize>().max(1) {
+                    return Vec::new();
+                }
+                let mut candidates = Vec::new();
+                if data.iter().any(|value| value.abs() > f64::EPSILON) {
+                    let zeros = vec![0.0; data.len()];
+                    candidates.push(obligation_tensor_arg(&value.name, dims, &zeros));
+                }
+                let halves = data.iter().map(|value| value / 2.0).collect::<Vec<_>>();
+                if halves
+                    .iter()
+                    .zip(&data)
+                    .any(|(candidate, current)| (candidate - current).abs() > f64::EPSILON)
+                {
+                    candidates.push(obligation_tensor_arg(&value.name, dims, &halves));
+                }
+                candidates
+            })
+            .unwrap_or_default(),
+        ArgKind::Opaque(_) => Vec::new(),
+    }
+}
+
+fn push_unique_obligation_int_candidate(
+    candidates: &mut Vec<ArgValue>,
+    value: &ArgValue,
+    prim: &str,
+    current: i64,
+    candidate: i64,
+) {
+    if candidate == current {
+        return;
+    }
+    let Some((lo, hi)) = crate::opaque::int_sample_bounds(prim) else {
+        return;
+    };
+    let candidate = candidate.clamp(lo, hi);
+    if candidates
+        .iter()
+        .any(|arg| arg.json.as_f64() == Some(candidate as f64))
+    {
+        return;
+    }
+    candidates.push(ArgValue {
+        expr: scalar_lit(prim, candidate as f64),
+        json: serde_json::json!(candidate as f64),
+        name: value.name.clone(),
+    });
+}
+
+fn push_unique_obligation_float_candidate(
+    candidates: &mut Vec<ArgValue>,
+    value: &ArgValue,
+    prim: &str,
+    current: f64,
+    candidate: f64,
+) {
+    if (candidate - current).abs() <= f64::EPSILON
+        || candidates.iter().any(|arg| {
+            arg.json
+                .as_f64()
+                .is_some_and(|prior| (prior - candidate).abs() <= f64::EPSILON)
+        })
+    {
+        return;
+    }
+    candidates.push(ArgValue {
+        expr: scalar_lit(prim, candidate),
+        json: serde_json::json!(candidate),
+        name: value.name.clone(),
+    });
+}
+
+fn obligation_tensor_arg(name: &str, dims: &[usize], values: &[f64]) -> ArgValue {
+    ArgValue {
+        expr: crate::opaque::tensor_value_expr_pub(dims, "f32", values),
+        json: serde_json::json!(values),
+        name: name.to_string(),
+    }
 }
 
 fn unsupported(ob: &ObligationProperty, seed: u64, reason: &str) -> ObligationOutcome {
@@ -590,6 +979,74 @@ fn unsupported(ob: &ObligationProperty, seed: u64, reason: &str) -> ObligationOu
         None,
         Some(reason.to_string()),
     )
+}
+
+fn smt_non_vacuity_record(
+    smt_prop: &crate::tier_b::SmtProperty,
+    timeout_ms: u64,
+) -> NonVacuityRecord {
+    if smt_prop.preconditions.is_empty() {
+        return NonVacuityRecord::established(serde_json::json!({
+            "solver": "cvc5",
+            "result": "sat",
+            "assumption_count": 0,
+            "trivial": true,
+        }));
+    }
+    match crate::tier_b::check_assumptions_satisfiable(smt_prop, timeout_ms) {
+        crate::tier_b::AssumptionSatisfiability::Sat(model) => {
+            NonVacuityRecord::established(serde_json::json!({
+                "solver": "cvc5",
+                "result": "sat",
+                "assumption_count": smt_prop.preconditions.len(),
+                "model": model,
+            }))
+        }
+        crate::tier_b::AssumptionSatisfiability::Unsat => NonVacuityRecord::invalid(
+            "non_vacuity_invalid: assumptions are unsatisfiable",
+            serde_json::json!({
+                "solver": "cvc5",
+                "result": "unsat",
+                "assumption_count": smt_prop.preconditions.len(),
+            }),
+        ),
+        crate::tier_b::AssumptionSatisfiability::Timeout => NonVacuityRecord::unsupported(
+            "non_vacuity_unestablished: smt timeout",
+            serde_json::json!({
+                "solver": "cvc5",
+                "result": "timeout",
+                "assumption_count": smt_prop.preconditions.len(),
+            }),
+        ),
+        crate::tier_b::AssumptionSatisfiability::Unknown => NonVacuityRecord::unsupported(
+            "non_vacuity_unestablished: smt unknown",
+            serde_json::json!({
+                "solver": "cvc5",
+                "result": "unknown",
+                "assumption_count": smt_prop.preconditions.len(),
+            }),
+        ),
+        crate::tier_b::AssumptionSatisfiability::Error(reason) => NonVacuityRecord::unsupported(
+            format!("non_vacuity_unestablished: smt lowering error: {reason}"),
+            serde_json::json!({
+                "solver": "cvc5",
+                "result": "error",
+                "assumption_count": smt_prop.preconditions.len(),
+                "reason": reason,
+            }),
+        ),
+    }
+}
+
+fn obligation_assumption_records(
+    ob: &ObligationProperty,
+    discharge: AssumptionDischarge,
+    non_vacuity: NonVacuityRecord,
+) -> Vec<AssumptionRecord> {
+    vec![
+        AssumptionRecord::new(ob.name.clone(), Some(discharge), Some(non_vacuity))
+            .with_source(ob.meta.source_type.clone(), ob.meta.producer.clone()),
+    ]
 }
 
 /// Public entry: the exported base producers of `input_inv`'s type usable
@@ -696,16 +1153,40 @@ fn outcome(
     counterexample: Option<serde_json::Value>,
     reason: Option<String>,
 ) -> ObligationOutcome {
-    ObligationOutcome {
-        name: ob.name.clone(),
-        meta: ob.meta.clone(),
+    outcome_with_assumptions(
+        ob,
         status,
-        proof_tier: tier,
+        tier,
         samples,
         seed,
         counterexample,
         reason,
-    }
+        Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn outcome_with_assumptions(
+    ob: &ObligationProperty,
+    status: ObligationStatus,
+    tier: ObligationTier,
+    samples: usize,
+    seed: u64,
+    counterexample: Option<serde_json::Value>,
+    reason: Option<String>,
+    assumptions: Vec<AssumptionRecord>,
+) -> ObligationOutcome {
+    ObligationOutcome::new(
+        ob.name.clone(),
+        ob.meta.clone(),
+        status,
+        tier,
+        samples,
+        seed,
+        counterexample,
+        reason,
+        assumptions,
+    )
 }
 
 fn producer_param_types(

@@ -91,6 +91,10 @@ solver.set_option("tlimit-per", "5000"); // 5 seconds per check-sat call
 
 CLI flag: `chelis prove --smt-timeout 5000`
 
+On smt-only prove paths, cvc5 timeout/unknown is reported as
+`unsupported` with a reason, never `failed` without a counterexample. In
+auto mode the runner may fall back to Tier C fuzz validation.
+
 ## Reverting to Subprocess (Fallback)
 
 If the library binding proves problematic in future, the `Solver` trait in

@@ -303,6 +303,7 @@ fn format_property_option(option: &PropertyOption) -> String {
         }
         PropertyOption::Seed(value, _) => format!("  with seed = {}", format_expr(value)),
         PropertyOption::Samples(value, _) => format!("  with samples = {}", format_expr(value)),
+        PropertyOption::Contract(id, _) => format!("  with contract = {id:?}"),
     }
 }
 
@@ -876,6 +877,33 @@ mod tests {
             rendered.contains("! { Test }"),
             "Test effect row must be preserved; got: {rendered}"
         );
+    }
+
+    #[test]
+    fn property_contract_option_formats_round_trip() {
+        let source = r#"@property reflected forall(x: f32):
+  x == x
+  with contract = "std.normal_cdf.reflection"
+"#;
+        let program = crate::parser::parse_str(source).expect("parse");
+        let rendered = format_program(&program);
+        assert!(
+            rendered.contains(r#"with contract = "std.normal_cdf.reflection""#),
+            "contract option lost: {rendered}"
+        );
+        let reparsed = crate::parser::parse_str(&rendered).expect("reparse formatted contract");
+        assert_eq!(
+            format_program(&reparsed),
+            rendered,
+            "formatted contract property must be idempotent"
+        );
+        let [Decl::Property { options, .. }] = reparsed.as_slice() else {
+            panic!("formatted source should parse back to one property: {reparsed:?}");
+        };
+        assert!(matches!(
+            options.as_slice(),
+            [PropertyOption::Contract(contract, _)] if contract == "std.normal_cdf.reflection"
+        ));
     }
 
     #[test]

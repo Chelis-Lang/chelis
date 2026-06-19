@@ -78,24 +78,22 @@ pub fn dispatch_property(
             let tier_a_result = crate::tier_a::check(_property_source, _property_name);
             match tier_a_result {
                 TierAResult::Rejected(reason) => {
-                    return ProofArtifact {
-                        property_name: _property_name.to_string(),
-                        tier: ProofTier::TypeSystem,
-                        status: ProofStatus::Rejected { reason },
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        smt_status: None,
-                        obligation: None,
-                    };
+                    return artifact(
+                        _property_name,
+                        ProofTier::TypeSystem,
+                        ProofStatus::Rejected { reason },
+                        start,
+                        None,
+                    );
                 }
                 TierAResult::Proved => {
-                    return ProofArtifact {
-                        property_name: _property_name.to_string(),
-                        tier: ProofTier::TypeSystem,
-                        status: ProofStatus::Proved,
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        smt_status: None,
-                        obligation: None,
-                    };
+                    return artifact(
+                        _property_name,
+                        ProofTier::TypeSystem,
+                        ProofStatus::Proved,
+                        start,
+                        None,
+                    );
                 }
                 TierAResult::Inconclusive => {}
             }
@@ -103,80 +101,80 @@ pub fn dispatch_property(
     }
 
     if options.tier_mode == TierMode::TypeOnly {
-        return ProofArtifact {
-            property_name: _property_name.to_string(),
-            tier: ProofTier::TypeSystem,
-            status: ProofStatus::StatisticallyValidated { samples: 0 },
-            duration_ms: start.elapsed().as_millis() as u64,
-            smt_status: None,
-            obligation: None,
-        };
+        return artifact(
+            _property_name,
+            ProofTier::TypeSystem,
+            ProofStatus::Unsupported {
+                reason: "type-only tier did not produce a proof artifact".to_string(),
+            },
+            start,
+            None,
+        );
     }
 
     // Tier B: SMT
     if options.tier_mode != TierMode::FuzzOnly {
         if !amenability.is_smt_amenable() {
             if options.tier_mode == TierMode::SmtOnly {
-                return ProofArtifact {
-                    property_name: _property_name.to_string(),
-                    tier: ProofTier::Smt,
-                    status: ProofStatus::NotAmenable {
+                return artifact(
+                    _property_name,
+                    ProofTier::Smt,
+                    ProofStatus::NotAmenable {
                         reason: "property not amenable to SMT verification; use --tier auto for fuzz fallback".to_string(),
                     },
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    smt_status: Some(SmtStatus::NotAmenable),
-                    obligation: None,
-                };
+                    start,
+                    Some(SmtStatus::NotAmenable),
+                );
             }
         } else {
             let tier_b_result =
                 crate::tier_b::solve(_property_source, _property_name, options.smt_timeout_ms);
             match tier_b_result {
                 TierBResult::Proved => {
-                    return ProofArtifact {
-                        property_name: _property_name.to_string(),
-                        tier: ProofTier::Smt,
-                        status: ProofStatus::Proved,
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        smt_status: Some(SmtStatus::Proved),
-                        obligation: None,
-                    };
+                    return artifact(
+                        _property_name,
+                        ProofTier::Smt,
+                        ProofStatus::Proved,
+                        start,
+                        Some(SmtStatus::Proved),
+                    );
                 }
                 TierBResult::Disproved(model) => {
-                    return ProofArtifact {
-                        property_name: _property_name.to_string(),
-                        tier: ProofTier::Smt,
-                        status: ProofStatus::Disproved {
+                    return artifact(
+                        _property_name,
+                        ProofTier::Smt,
+                        ProofStatus::Disproved {
                             counterexample: model,
                         },
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        smt_status: Some(SmtStatus::Disproved),
-                        obligation: None,
-                    };
+                        start,
+                        Some(SmtStatus::Disproved),
+                    );
                 }
                 TierBResult::Timeout => {
                     if options.tier_mode == TierMode::SmtOnly {
-                        return ProofArtifact {
-                            property_name: _property_name.to_string(),
-                            tier: ProofTier::Smt,
-                            status: ProofStatus::StatisticallyValidated { samples: 0 },
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            smt_status: Some(SmtStatus::Timeout),
-                            obligation: None,
-                        };
+                        return artifact(
+                            _property_name,
+                            ProofTier::Smt,
+                            ProofStatus::Unsupported {
+                                reason: "cvc5 timed out".to_string(),
+                            },
+                            start,
+                            Some(SmtStatus::Timeout),
+                        );
                     }
                     // Fall through to Tier C
                 }
                 TierBResult::Unknown => {
                     if options.tier_mode == TierMode::SmtOnly {
-                        return ProofArtifact {
-                            property_name: _property_name.to_string(),
-                            tier: ProofTier::Smt,
-                            status: ProofStatus::StatisticallyValidated { samples: 0 },
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            smt_status: Some(SmtStatus::Unknown),
-                            obligation: None,
-                        };
+                        return artifact(
+                            _property_name,
+                            ProofTier::Smt,
+                            ProofStatus::Unsupported {
+                                reason: "cvc5 returned unknown".to_string(),
+                            },
+                            start,
+                            Some(SmtStatus::Unknown),
+                        );
                     }
                     // Fall through to Tier C
                 }
@@ -185,14 +183,13 @@ pub fn dispatch_property(
                     // (RT5-F1). In smt-only this is rejected; otherwise
                     // fall through to Tier C.
                     if options.tier_mode == TierMode::SmtOnly {
-                        return ProofArtifact {
-                            property_name: _property_name.to_string(),
-                            tier: ProofTier::Smt,
-                            status: ProofStatus::Rejected { reason },
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            smt_status: Some(SmtStatus::NotAmenable),
-                            obligation: None,
-                        };
+                        return artifact(
+                            _property_name,
+                            ProofTier::Smt,
+                            ProofStatus::Unsupported { reason },
+                            start,
+                            Some(SmtStatus::NotAmenable),
+                        );
                     }
                     // Fall through to Tier C
                 }
@@ -208,31 +205,44 @@ pub fn dispatch_property(
         options.fuzz_seed,
     );
     match tier_c_result {
-        TierCResult::AllPassed(n) => ProofArtifact {
-            property_name: _property_name.to_string(),
-            tier: ProofTier::Fuzz,
-            status: ProofStatus::StatisticallyValidated { samples: n },
-            duration_ms: start.elapsed().as_millis() as u64,
-            smt_status: None,
-            obligation: None,
-        },
-        TierCResult::Failed(counterexample) => ProofArtifact {
-            property_name: _property_name.to_string(),
-            tier: ProofTier::Fuzz,
-            status: ProofStatus::Disproved { counterexample },
-            duration_ms: start.elapsed().as_millis() as u64,
-            smt_status: None,
-            obligation: None,
-        },
-        TierCResult::Error(reason) => ProofArtifact {
-            property_name: _property_name.to_string(),
-            tier: ProofTier::Fuzz,
-            status: ProofStatus::Rejected { reason },
-            duration_ms: start.elapsed().as_millis() as u64,
-            smt_status: None,
-            obligation: None,
-        },
+        TierCResult::AllPassed(n) => artifact(
+            _property_name,
+            ProofTier::Fuzz,
+            ProofStatus::StatisticallyValidated { samples: n },
+            start,
+            None,
+        ),
+        TierCResult::Failed(counterexample) => artifact(
+            _property_name,
+            ProofTier::Fuzz,
+            ProofStatus::Disproved { counterexample },
+            start,
+            None,
+        ),
+        TierCResult::Error(reason) => artifact(
+            _property_name,
+            ProofTier::Fuzz,
+            ProofStatus::Rejected { reason },
+            start,
+            None,
+        ),
     }
+}
+
+fn artifact(
+    property_name: &str,
+    tier: ProofTier,
+    status: ProofStatus,
+    start: Instant,
+    smt_status: Option<SmtStatus>,
+) -> ProofArtifact {
+    ProofArtifact::new(
+        property_name,
+        tier,
+        status,
+        start.elapsed().as_millis() as u64,
+        smt_status,
+    )
 }
 
 // Re-export tier result types used by dispatch.

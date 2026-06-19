@@ -2176,6 +2176,10 @@ fn wire_property_option(option: &chelis_surf::ast::PropertyOption) -> WireProper
             value: wire_expr(value),
             span: span(*s),
         },
+        chelis_surf::ast::PropertyOption::Contract(id, s) => WirePropertyOption::Contract {
+            id: id.clone(),
+            span: span(*s),
+        },
     }
 }
 

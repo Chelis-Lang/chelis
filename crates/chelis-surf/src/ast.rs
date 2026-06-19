@@ -115,12 +115,16 @@ pub enum PropertyOption {
     Tolerance(Expr, Span),
     Seed(Expr, Span),
     Samples(Expr, Span),
+    Contract(String, Span),
 }
 
 impl PropertyOption {
     pub fn span(&self) -> Span {
         match self {
-            Self::Tolerance(_, span) | Self::Seed(_, span) | Self::Samples(_, span) => *span,
+            Self::Tolerance(_, span)
+            | Self::Seed(_, span)
+            | Self::Samples(_, span)
+            | Self::Contract(_, span) => *span,
         }
     }
 }

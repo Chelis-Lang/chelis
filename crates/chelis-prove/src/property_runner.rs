@@ -16,7 +16,7 @@
 //! test locks). This mirrors [`crate::obligation_engine`], which already
 //! shares the derived-obligation run across the two surfaces.
 
-use std::collections::BTreeMap;
+use std::{cell::RefCell, collections::BTreeMap};
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, MetaMap};
@@ -25,9 +25,14 @@ use chelis_surf::ast::{
 };
 
 mod smt_lower;
-use smt_lower::{InlineCtx, surf_expr_to_smt};
+use smt_lower::{ContractAbstraction, InlineCtx, surf_expr_to_smt};
 
 mod injection;
+use crate::composition::{
+    AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
+    NonVacuityRecord, NonVacuityStatus, rollup_composite,
+};
+use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry};
 
 /// The verification status of one user property.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,19 +71,78 @@ pub struct PropertyOutcome {
     pub samples: usize,
     pub seed: u64,
     pub counterexample: Option<serde_json::Value>,
+    pub shrink_steps: usize,
     pub reason: Option<String>,
     /// `true` when the property was verified through the assumption-injection
     /// path (an invariant-carrying opaque binder). Only affects rendering.
     pub injected: bool,
+    /// Assumptions used by this proof, with their discharge evidence.
+    pub assumptions: Vec<AssumptionRecord>,
+    /// Weakest-link verdict after composing the proof and its assumptions.
+    pub composite_verdict: CompositeVerdict,
 }
 
 impl PropertyOutcome {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        name: impl Into<String>,
+        status: PropertyStatus,
+        proof_tier: PropertyTier,
+        samples: usize,
+        seed: u64,
+        counterexample: Option<serde_json::Value>,
+        reason: Option<String>,
+        injected: bool,
+        assumptions: Vec<AssumptionRecord>,
+    ) -> Self {
+        let base = base_verdict(&status, proof_tier, samples, counterexample.as_ref());
+        let composite_verdict = rollup_composite(base, &assumptions);
+        Self {
+            name: name.into(),
+            status,
+            proof_tier,
+            samples,
+            seed,
+            counterexample,
+            shrink_steps: 0,
+            reason,
+            injected,
+            assumptions,
+            composite_verdict,
+        }
+    }
+
+    pub(super) fn with_shrink_steps(mut self, shrink_steps: usize) -> Self {
+        self.shrink_steps = shrink_steps;
+        self
+    }
+
+    fn append_assumptions(&mut self, assumptions: Vec<AssumptionRecord>) {
+        if assumptions.is_empty() {
+            return;
+        }
+        self.assumptions.extend(assumptions);
+        let base = base_verdict(
+            &self.status,
+            self.proof_tier,
+            self.samples,
+            self.counterexample.as_ref(),
+        );
+        self.composite_verdict = rollup_composite(base, &self.assumptions);
+    }
+
     /// Whether this outcome is a genuine pass. A pass is `Passed` with at
     /// least one sample (or an SMT proof, which carries `samples == 0` but
     /// `proof_tier == Smt`). A `Passed` with zero fuzz samples is NOT a
     /// genuine pass -- it is the vacuous/timeout sentinel and the fold must
     /// treat it as not-ok (U4).
     pub fn is_pass(&self) -> bool {
+        if matches!(
+            self.composite_verdict,
+            CompositeVerdict::Failed | CompositeVerdict::Invalid | CompositeVerdict::Unsupported
+        ) {
+            return false;
+        }
         self.status == PropertyStatus::Passed
             && (self.proof_tier == PropertyTier::Smt || self.samples > 0)
     }
@@ -90,6 +154,16 @@ impl PropertyOutcome {
     /// method, so a property's reported status can never diverge between the
     /// two surfaces.
     pub fn display_status(&self) -> &'static str {
+        if self.status == PropertyStatus::Error {
+            return "error";
+        }
+        match self.composite_verdict {
+            CompositeVerdict::Failed => return "failed",
+            CompositeVerdict::Invalid | CompositeVerdict::Unsupported => return "unsupported",
+            CompositeVerdict::Proven
+            | CompositeVerdict::ProvenModuloFuzzValidatedContract
+            | CompositeVerdict::ProvenModuloAssertedAxiom => {}
+        }
         if self.is_pass() {
             "passed"
         } else {
@@ -103,6 +177,31 @@ impl PropertyOutcome {
                 PropertyStatus::Passed => "unsupported",
             }
         }
+    }
+}
+
+fn base_verdict(
+    status: &PropertyStatus,
+    proof_tier: PropertyTier,
+    samples: usize,
+    counterexample: Option<&serde_json::Value>,
+) -> CompositeVerdict {
+    match status {
+        PropertyStatus::Passed => match proof_tier {
+            PropertyTier::Smt => CompositeVerdict::Proven,
+            PropertyTier::Fuzz if samples > 0 => {
+                CompositeVerdict::ProvenModuloFuzzValidatedContract
+            }
+            _ => CompositeVerdict::Unsupported,
+        },
+        PropertyStatus::Failed => {
+            if counterexample.is_some() {
+                CompositeVerdict::Failed
+            } else {
+                CompositeVerdict::Unsupported
+            }
+        }
+        PropertyStatus::Unsupported | PropertyStatus::Error => CompositeVerdict::Unsupported,
     }
 }
 
@@ -168,10 +267,49 @@ pub fn run_surf_source_properties(
 ) -> Result<PropertyRunResult, String> {
     let parsed = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
     let flat = flatten_module_decls(&parsed);
-    let properties = collect_surf_properties(&flat, options.only.as_deref());
+    run_surf_decls_properties(&flat, &flat, &parsed, options)
+}
+
+/// Run properties discovered in `entry_decls` while lowering/evaluating
+/// against `all_decls`. The CLI prove path uses this for Reef-linked inputs:
+/// imports are available to Tier B/C, but only the user's entry properties are
+/// reported.
+pub fn run_surf_decls_properties(
+    all_decls: &[Decl],
+    entry_decls: &[Decl],
+    module_decls: &[Decl],
+    options: &PropertyRunOptions,
+) -> Result<PropertyRunResult, String> {
+    run_surf_decls_properties_with_contract_decls(
+        all_decls,
+        entry_decls,
+        module_decls,
+        &[],
+        options,
+    )
+}
+
+/// Run linked Surf properties with an explicit trusted implementation slice
+/// for standard contracts. The CLI Reef path passes the bundled chelis-std
+/// declarations here; unlinked source paths pass an empty slice, so a user
+/// cannot obtain std contract assumptions by spelling a linker-shaped name.
+pub fn run_surf_decls_properties_with_contract_decls(
+    all_decls: &[Decl],
+    entry_decls: &[Decl],
+    module_decls: &[Decl],
+    trusted_contract_decls: &[Decl],
+    options: &PropertyRunOptions,
+) -> Result<PropertyRunResult, String> {
+    let properties = collect_surf_properties(entry_decls, options.only.as_deref());
     let mut out = Vec::new();
     for property in &properties {
-        out.push(prove_surf_property(&flat, &parsed, property, options));
+        out.push(prove_surf_property(
+            all_decls,
+            module_decls,
+            trusted_contract_decls,
+            property,
+            options,
+        ));
     }
     Ok(PropertyRunResult::Ran(out))
 }
@@ -203,6 +341,7 @@ struct Property {
     body: Expr,
     samples: Option<usize>,
     seed: Option<u64>,
+    contracts: Vec<String>,
 }
 
 fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
@@ -238,6 +377,7 @@ fn collect_surf_properties(decls: &[Decl], only: Option<&str>) -> Vec<Property> 
                 body: body.clone(),
                 samples: property_samples(options),
                 seed: property_seed(options),
+                contracts: property_contracts(options),
             }),
             _ => None,
         })
@@ -262,6 +402,16 @@ fn property_seed(options: &[PropertyOption]) -> Option<u64> {
     })
 }
 
+fn property_contracts(options: &[PropertyOption]) -> Vec<String> {
+    options
+        .iter()
+        .filter_map(|option| match option {
+            PropertyOption::Contract(id, _) => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 // ===========================================================================
 // Surf property running (Tier B -> Tier C, with injection)
 // ===========================================================================
@@ -269,14 +419,33 @@ fn property_seed(options: &[PropertyOption]) -> Option<u64> {
 fn prove_surf_property(
     decls: &[Decl],
     module_decls: &[Decl],
+    trusted_contract_decls: &[Decl],
     property: &Property,
     options: &PropertyRunOptions,
 ) -> PropertyOutcome {
+    let seed = options.effective_seed(property.seed);
+    let contract_assumptions = match contract_assumptions(property) {
+        Ok(records) => records,
+        Err(reason) => {
+            return PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Unsupported,
+                PropertyTier::None,
+                0,
+                seed,
+                None,
+                Some(reason),
+                false,
+                Vec::new(),
+            );
+        }
+    };
+
     // Assumption injection (RFC D-INJECT): a property with an
     // invariant-carrying opaque binder is verified ONLY over
     // invariant-satisfying binder values; the injection path owns it.
     if injection::property_has_opaque_invariant_binder(module_decls, &property.params) {
-        return injection::prove_with_injection(
+        let mut outcome = injection::prove_with_injection(
             module_decls,
             &property.name,
             &property.params,
@@ -284,34 +453,75 @@ fn prove_surf_property(
             &property.body,
             options,
         );
+        outcome.append_assumptions(contract_assumptions);
+        return outcome;
     }
-
-    let seed = options.effective_seed(property.seed);
 
     // Tier B: attempt SMT proof when --tier auto / smt-only.
     if options.tier == "auto" || options.tier == "smt-only" {
-        if let Some(outcome) = try_surf_tier_b(decls, property, options, seed) {
+        if let Some(mut outcome) =
+            try_surf_tier_b(decls, trusted_contract_decls, property, options, seed)
+        {
+            outcome.append_assumptions(contract_assumptions);
             return outcome;
         }
         if options.tier == "smt-only" {
             // smt-only: a property that does not lower to Tier B is
             // unsupported (no fuzz fallback). This matches the obligation
             // engine's smt-only handling and the CLI's exit semantics.
-            return PropertyOutcome {
-                name: property.name.clone(),
-                status: PropertyStatus::Unsupported,
-                proof_tier: PropertyTier::Smt,
-                samples: 0,
+            let mut outcome = PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Unsupported,
+                PropertyTier::Smt,
+                0,
                 seed,
-                counterexample: None,
-                reason: Some("property does not lower to Tier B (smt-only)".to_string()),
-                injected: false,
-            };
+                None,
+                Some("property does not lower to Tier B (smt-only)".to_string()),
+                false,
+                Vec::new(),
+            );
+            outcome.append_assumptions(contract_assumptions);
+            return outcome;
         }
     }
 
     // Tier C: fuzz.
-    prove_surf_property_fuzz(decls, property, options, seed)
+    let mut outcome = prove_surf_property_fuzz(decls, property, options, seed);
+    outcome.append_assumptions(contract_assumptions);
+    outcome
+}
+
+fn contract_assumptions(property: &Property) -> Result<Vec<AssumptionRecord>, String> {
+    let contracts = expanded_contracts(property);
+    if contracts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let registry = standard_contract_registry();
+    let probe = registry.probe_consumer(
+        &property.name,
+        CompositeVerdict::Proven,
+        contracts.iter().map(String::as_str),
+    );
+    if let Some(missing) = probe
+        .assumptions
+        .iter()
+        .find(|record| record.discharge.is_none())
+    {
+        return Err(format!("unknown contract `{}`", missing.name));
+    }
+    Ok(probe.assumptions)
+}
+
+fn expanded_contracts(property: &Property) -> Vec<String> {
+    let mut contracts = property.contracts.clone();
+    if contracts.iter().any(|id| id == NORMAL_CDF_REFLECTION)
+        && !contracts.iter().any(|id| id == NORMAL_CDF_RANGE)
+    {
+        contracts.push(NORMAL_CDF_RANGE.to_string());
+    }
+    contracts.sort();
+    contracts.dedup();
+    contracts
 }
 
 /// Try Tier B (SMT) for a surf property. Returns `Some(outcome)` for a
@@ -320,10 +530,16 @@ fn prove_surf_property(
 /// solver timed out / errored).
 fn try_surf_tier_b(
     decls: &[Decl],
+    trusted_contract_decls: &[Decl],
     property: &Property,
     options: &PropertyRunOptions,
     seed: u64,
 ) -> Option<PropertyOutcome> {
+    let contracts = expanded_contracts(property);
+    let contract_abstraction = RefCell::new(ContractAbstraction::for_contracts(
+        &contracts,
+        trusted_contract_decls,
+    ));
     let postcondition = surf_expr_to_smt(
         &property.body,
         &InlineCtx {
@@ -331,6 +547,7 @@ fn try_surf_tier_b(
             depth: 0,
             max_depth: 3,
             call_stack: vec![],
+            contracts: Some(&contract_abstraction),
         },
     )?;
     let variables: Vec<(String, crate::solver::SmtSort)> = property
@@ -368,6 +585,7 @@ fn try_surf_tier_b(
                     depth: 0,
                     max_depth: 3,
                     call_stack: vec![],
+                    contracts: Some(&contract_abstraction),
                 },
             )
         })
@@ -375,6 +593,40 @@ fn try_surf_tier_b(
     if preconditions.len() != property.preconditions.len() {
         return None;
     }
+    let abstraction = contract_abstraction.into_inner();
+    if abstraction.requires_normal_cdf() && !abstraction.used_normal_cdf() {
+        return Some(PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Smt,
+            0,
+            seed,
+            None,
+            Some(
+                "contract abstraction did not bind any call to Std.Contracts.normal_cdf"
+                    .to_string(),
+            ),
+            false,
+            Vec::new(),
+        ));
+    }
+    if abstraction.requires_reflection_pair() && !abstraction.has_reflection_pair() {
+        return Some(PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Smt,
+            0,
+            seed,
+            None,
+            Some("normal CDF reflection contract requires a syntactic normal_cdf(x) / normal_cdf(-x) call pair".to_string()),
+            false,
+            Vec::new(),
+        ));
+    }
+    let mut variables = variables;
+    variables.extend(abstraction.variables());
+    let mut preconditions = preconditions;
+    preconditions.extend(abstraction.preconditions());
     let smt_prop = crate::tier_b::SmtProperty {
         variables,
         preconditions,
@@ -387,29 +639,180 @@ fn try_surf_tier_b(
         return None;
     }
     match crate::solve_property(&smt_prop, options.smt_timeout_ms) {
-        crate::tier_b::TierBResult::Proved => Some(PropertyOutcome {
-            name: property.name.clone(),
-            status: PropertyStatus::Passed,
-            proof_tier: PropertyTier::Smt,
-            samples: 0,
+        crate::tier_b::TierBResult::Proved => {
+            let non_vacuity = smt_non_vacuity_record(&smt_prop, options.smt_timeout_ms);
+            let reason = match non_vacuity.status {
+                NonVacuityStatus::Established => None,
+                NonVacuityStatus::Invalid | NonVacuityStatus::Unsupported => {
+                    non_vacuity.reason.clone()
+                }
+            };
+            let assumptions = property_assumption_records(
+                &property.name,
+                &smt_prop,
+                AssumptionDischarge::new(
+                    DischargeMethod::Smt,
+                    serde_json::json!({
+                        "status": "proved",
+                        "property": property.name,
+                        "arith_model": "real",
+                    }),
+                ),
+                non_vacuity,
+            );
+            let status = if reason.is_some() {
+                PropertyStatus::Unsupported
+            } else {
+                PropertyStatus::Passed
+            };
+            Some(PropertyOutcome::new(
+                property.name.clone(),
+                status,
+                PropertyTier::Smt,
+                0,
+                seed,
+                None,
+                reason,
+                false,
+                assumptions,
+            ))
+        }
+        crate::tier_b::TierBResult::Disproved(model) => Some(PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Failed,
+            PropertyTier::Smt,
+            0,
             seed,
-            counterexample: None,
-            reason: None,
-            injected: false,
-        }),
-        crate::tier_b::TierBResult::Disproved(_model) => Some(PropertyOutcome {
-            name: property.name.clone(),
-            status: PropertyStatus::Failed,
-            proof_tier: PropertyTier::Smt,
-            samples: 0,
-            seed,
-            counterexample: None,
-            reason: Some("smt counterexample".to_string()),
-            injected: false,
-        }),
-        // Timeout / Unknown / Error: fall through to Tier C (auto) or be
-        // handled as unsupported by the caller (smt-only).
-        _ => None,
+            Some(model),
+            None,
+            false,
+            Vec::new(),
+        )),
+        crate::tier_b::TierBResult::Timeout => {
+            if options.tier == "smt-only" {
+                Some(PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Unsupported,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    None,
+                    Some("smt timeout".to_string()),
+                    false,
+                    Vec::new(),
+                ))
+            } else {
+                None
+            }
+        }
+        crate::tier_b::TierBResult::Unknown => {
+            if options.tier == "smt-only" {
+                Some(PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Unsupported,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    None,
+                    Some("smt unknown".to_string()),
+                    false,
+                    Vec::new(),
+                ))
+            } else {
+                None
+            }
+        }
+        crate::tier_b::TierBResult::Error(reason) => {
+            if options.tier == "smt-only" {
+                Some(PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Unsupported,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    None,
+                    Some(format!("smt lowering error: {reason}")),
+                    false,
+                    Vec::new(),
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn smt_non_vacuity_record(
+    smt_prop: &crate::tier_b::SmtProperty,
+    timeout_ms: u64,
+) -> NonVacuityRecord {
+    if smt_prop.preconditions.is_empty() {
+        return NonVacuityRecord::established(serde_json::json!({
+            "solver": "cvc5",
+            "result": "sat",
+            "assumption_count": 0,
+            "trivial": true,
+        }));
+    }
+    match crate::tier_b::check_assumptions_satisfiable(smt_prop, timeout_ms) {
+        crate::tier_b::AssumptionSatisfiability::Sat(model) => {
+            NonVacuityRecord::established(serde_json::json!({
+                "solver": "cvc5",
+                "result": "sat",
+                "assumption_count": smt_prop.preconditions.len(),
+                "model": model,
+            }))
+        }
+        crate::tier_b::AssumptionSatisfiability::Unsat => NonVacuityRecord::invalid(
+            "non_vacuity_invalid: assumptions are unsatisfiable",
+            serde_json::json!({
+                "solver": "cvc5",
+                "result": "unsat",
+                "assumption_count": smt_prop.preconditions.len(),
+            }),
+        ),
+        crate::tier_b::AssumptionSatisfiability::Timeout => NonVacuityRecord::unsupported(
+            "non_vacuity_unestablished: smt timeout",
+            serde_json::json!({
+                "solver": "cvc5",
+                "result": "timeout",
+                "assumption_count": smt_prop.preconditions.len(),
+            }),
+        ),
+        crate::tier_b::AssumptionSatisfiability::Unknown => NonVacuityRecord::unsupported(
+            "non_vacuity_unestablished: smt unknown",
+            serde_json::json!({
+                "solver": "cvc5",
+                "result": "unknown",
+                "assumption_count": smt_prop.preconditions.len(),
+            }),
+        ),
+        crate::tier_b::AssumptionSatisfiability::Error(reason) => NonVacuityRecord::unsupported(
+            format!("non_vacuity_unestablished: smt lowering error: {reason}"),
+            serde_json::json!({
+                "solver": "cvc5",
+                "result": "error",
+                "assumption_count": smt_prop.preconditions.len(),
+                "reason": reason,
+            }),
+        ),
+    }
+}
+
+fn property_assumption_records(
+    property_name: &str,
+    smt_prop: &crate::tier_b::SmtProperty,
+    discharge: AssumptionDischarge,
+    non_vacuity: NonVacuityRecord,
+) -> Vec<AssumptionRecord> {
+    if smt_prop.preconditions.is_empty() {
+        Vec::new()
+    } else {
+        vec![AssumptionRecord::new(
+            format!("preconditions:{property_name}"),
+            Some(discharge),
+            Some(non_vacuity),
+        )]
     }
 }
 
@@ -452,16 +855,19 @@ fn prove_surf_property_fuzz(
         match eval_surf_sample(decls, property, &sample, false) {
             Ok(true) => {}
             Ok(false) => {
-                return PropertyOutcome {
-                    name: property.name.clone(),
-                    status: PropertyStatus::Failed,
-                    proof_tier: PropertyTier::Fuzz,
-                    samples: accepted,
+                let (shrunk, shrink_steps) = shrink_surf_counterexample(decls, property, sample);
+                return PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Failed,
+                    PropertyTier::Fuzz,
+                    accepted,
                     seed,
-                    counterexample: Some(counterexample_json(&sample)),
-                    reason: None,
-                    injected: false,
-                };
+                    Some(counterexample_json(&shrunk)),
+                    None,
+                    false,
+                    Vec::new(),
+                )
+                .with_shrink_steps(shrink_steps);
             }
             Err(err) => return error(&property.name, seed, err),
         }
@@ -477,42 +883,75 @@ fn prove_surf_property_fuzz(
         );
     }
 
-    PropertyOutcome {
-        name: property.name.clone(),
-        status: PropertyStatus::Passed,
-        proof_tier: PropertyTier::Fuzz,
-        samples: accepted,
+    PropertyOutcome::new(
+        property.name.clone(),
+        PropertyStatus::Passed,
+        PropertyTier::Fuzz,
+        accepted,
         seed,
-        counterexample: None,
-        reason: None,
-        injected: false,
-    }
+        None,
+        None,
+        false,
+        fuzz_precondition_assumptions(&property.name, property.preconditions.len(), accepted, seed),
+    )
 }
 
 fn unsupported(name: &str, seed: u64, reason: String) -> PropertyOutcome {
-    PropertyOutcome {
-        name: name.to_string(),
-        status: PropertyStatus::Unsupported,
-        proof_tier: PropertyTier::None,
-        samples: 0,
+    PropertyOutcome::new(
+        name,
+        PropertyStatus::Unsupported,
+        PropertyTier::None,
+        0,
         seed,
-        counterexample: None,
-        reason: Some(reason),
-        injected: false,
-    }
+        None,
+        Some(reason),
+        false,
+        Vec::new(),
+    )
 }
 
 fn error(name: &str, seed: u64, reason: String) -> PropertyOutcome {
-    PropertyOutcome {
-        name: name.to_string(),
-        status: PropertyStatus::Error,
-        proof_tier: PropertyTier::None,
-        samples: 0,
+    PropertyOutcome::new(
+        name,
+        PropertyStatus::Error,
+        PropertyTier::None,
+        0,
         seed,
-        counterexample: None,
-        reason: Some(reason),
-        injected: false,
+        None,
+        Some(reason),
+        false,
+        Vec::new(),
+    )
+}
+
+fn fuzz_precondition_assumptions(
+    property_name: &str,
+    precondition_count: usize,
+    samples: usize,
+    seed: u64,
+) -> Vec<AssumptionRecord> {
+    if precondition_count == 0 {
+        return Vec::new();
     }
+    vec![AssumptionRecord::new(
+        format!("preconditions:{property_name}"),
+        Some(AssumptionDischarge::new(
+            DischargeMethod::Fuzz,
+            serde_json::json!({
+                "status": "validated",
+                "property": property_name,
+                "samples": samples,
+                "seed": seed,
+                "tolerance": FUZZ_TOLERANCE,
+            }),
+        )),
+        Some(NonVacuityRecord::established(serde_json::json!({
+            "method": "fuzz",
+            "result": "sat",
+            "accepted_samples": samples,
+            "seed": seed,
+        }))),
+    )]
 }
 
 // ===========================================================================
@@ -906,6 +1345,320 @@ fn counterexample_json(sample: &Sample) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+const MAX_SHRINK_STEPS: usize = 64;
+
+fn shrink_surf_counterexample(
+    decls: &[Decl],
+    property: &Property,
+    sample: Sample,
+) -> (Sample, usize) {
+    shrink_counterexample(sample, &property.params, |candidate| {
+        sample_still_fails_surf(decls, property, candidate)
+    })
+}
+
+fn shrink_deep_counterexample(
+    exprs: &[DeepExpr],
+    property: &DeepProperty,
+    sample: Sample,
+) -> (Sample, usize) {
+    shrink_counterexample(sample, &property.params, |candidate| {
+        sample_still_fails_deep(exprs, property, candidate)
+    })
+}
+
+fn shrink_counterexample<F>(
+    mut sample: Sample,
+    params: &[Param],
+    mut still_fails: F,
+) -> (Sample, usize)
+where
+    F: FnMut(&Sample) -> bool,
+{
+    let mut steps = 0usize;
+    while steps < MAX_SHRINK_STEPS {
+        let mut changed = false;
+        for index in 0..sample.values.len() {
+            let Some(ty) = params
+                .iter()
+                .find(|param| param.name == sample.values[index].name)
+                .and_then(|param| param.ty.as_ref())
+            else {
+                continue;
+            };
+            for candidate in shrink_candidates(&sample.values[index], ty) {
+                if candidate.json == sample.values[index].json {
+                    continue;
+                }
+                let mut trial = sample.clone();
+                trial.values[index] = candidate;
+                if still_fails(&trial) {
+                    sample = trial;
+                    steps += 1;
+                    changed = true;
+                    break;
+                }
+            }
+            if changed || steps >= MAX_SHRINK_STEPS {
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (sample, steps)
+}
+
+fn sample_still_fails_surf(decls: &[Decl], property: &Property, sample: &Sample) -> bool {
+    if !property.preconditions.is_empty() {
+        match eval_surf_sample(decls, property, sample, true) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return false,
+        }
+    }
+    matches!(eval_surf_sample(decls, property, sample, false), Ok(false))
+}
+
+fn sample_still_fails_deep(exprs: &[DeepExpr], property: &DeepProperty, sample: &Sample) -> bool {
+    if !property.preconditions.is_empty() {
+        match eval_deep_sample(exprs, property, sample, true) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return false,
+        }
+    }
+    matches!(eval_deep_sample(exprs, property, sample, false), Ok(false))
+}
+
+fn shrink_candidates(value: &SampleValue, ty: &TypeExpr) -> Vec<SampleValue> {
+    match ty {
+        TypeExpr::Named(type_name, _) if type_name == "bool" => value
+            .json
+            .as_bool()
+            .and_then(|current| current.then(|| bool_sample(&value.name, false)))
+            .into_iter()
+            .collect(),
+        TypeExpr::Named(type_name, _) if crate::opaque::is_int_width(type_name) => value
+            .json
+            .as_i64()
+            .map(|current| {
+                let mut candidates = Vec::new();
+                push_unique_int_candidate(&mut candidates, &value.name, type_name, current, 0);
+                push_unique_int_candidate(
+                    &mut candidates,
+                    &value.name,
+                    type_name,
+                    current,
+                    current / 2,
+                );
+                push_unique_int_candidate(
+                    &mut candidates,
+                    &value.name,
+                    type_name,
+                    current,
+                    current.signum(),
+                );
+                candidates
+            })
+            .unwrap_or_default(),
+        TypeExpr::Named(type_name, _) if type_name == "f32" || type_name == "f64" => value
+            .json
+            .as_f64()
+            .map(|current| {
+                let mut candidates = Vec::new();
+                push_unique_float_candidate(&mut candidates, &value.name, type_name, current, 0.0);
+                push_unique_float_candidate(
+                    &mut candidates,
+                    &value.name,
+                    type_name,
+                    current,
+                    current / 2.0,
+                );
+                candidates
+            })
+            .unwrap_or_default(),
+        TypeExpr::Named(type_name, _) if type_name == "string" => value
+            .json
+            .as_str()
+            .map(|current| {
+                let mut candidates = Vec::new();
+                push_unique_string_candidate(&mut candidates, &value.name, current, "");
+                if !current.is_empty() {
+                    push_unique_string_candidate(
+                        &mut candidates,
+                        &value.name,
+                        current,
+                        &current[..current.len() / 2],
+                    );
+                }
+                candidates
+            })
+            .unwrap_or_default(),
+        TypeExpr::Tensor(_, precision, _) => tensor_shrink_candidates(value, precision),
+        _ => Vec::new(),
+    }
+}
+
+fn push_unique_int_candidate(
+    candidates: &mut Vec<SampleValue>,
+    name: &str,
+    type_name: &str,
+    current: i64,
+    candidate: i64,
+) {
+    if candidate != current
+        && !candidates
+            .iter()
+            .any(|sample| sample.json.as_i64() == Some(candidate))
+    {
+        candidates.push(int_sample(name, type_name, candidate));
+    }
+}
+
+fn push_unique_float_candidate(
+    candidates: &mut Vec<SampleValue>,
+    name: &str,
+    type_name: &str,
+    current: f64,
+    candidate: f64,
+) {
+    if (candidate - current).abs() > f64::EPSILON
+        && !candidates.iter().any(|sample| {
+            sample
+                .json
+                .as_f64()
+                .is_some_and(|prior| (prior - candidate).abs() <= f64::EPSILON)
+        })
+    {
+        candidates.push(float_sample(name, type_name, candidate));
+    }
+}
+
+fn push_unique_string_candidate(
+    candidates: &mut Vec<SampleValue>,
+    name: &str,
+    current: &str,
+    candidate: &str,
+) {
+    if candidate != current
+        && !candidates
+            .iter()
+            .any(|sample| sample.json.as_str() == Some(candidate))
+    {
+        candidates.push(string_sample(name, candidate));
+    }
+}
+
+fn bool_sample(name: &str, value: bool) -> SampleValue {
+    scalar_sample(
+        name,
+        Expr::Lit(Literal::Bool(value), chelis_deep::Span::new(0, 0)),
+        deep_lit(deep_bool(value), "bool"),
+        serde_json::json!(value),
+    )
+}
+
+fn int_sample(name: &str, type_name: &str, value: i64) -> SampleValue {
+    let (lo, hi) =
+        crate::opaque::int_sample_bounds(type_name).expect("int shrink only uses int widths");
+    let value = value.clamp(lo, hi);
+    let lit = Expr::Lit(Literal::Int(value), chelis_deep::Span::new(0, 0));
+    let surf_expr = if type_name == "int32" {
+        lit
+    } else {
+        cast_expr(lit, type_name)
+    };
+    scalar_sample(
+        name,
+        surf_expr,
+        deep_lit(deep_int(value), type_name),
+        serde_json::json!(value),
+    )
+}
+
+fn float_sample(name: &str, type_name: &str, value: f64) -> SampleValue {
+    let lit = Expr::Lit(Literal::Float(value), chelis_deep::Span::new(0, 0));
+    let surf_expr = if type_name == "f64" {
+        cast_expr(lit, "f64")
+    } else {
+        lit
+    };
+    scalar_sample(
+        name,
+        surf_expr,
+        deep_lit(deep_float(value), type_name),
+        serde_json::json!(value),
+    )
+}
+
+fn string_sample(name: &str, value: &str) -> SampleValue {
+    scalar_sample(
+        name,
+        Expr::Lit(
+            Literal::Str(value.to_string()),
+            chelis_deep::Span::new(0, 0),
+        ),
+        deep_lit(deep_string(value), "string"),
+        serde_json::json!(value),
+    )
+}
+
+fn tensor_shrink_candidates(value: &SampleValue, precision: &str) -> Vec<SampleValue> {
+    let Some(shape) = value
+        .json
+        .get("shape")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_u64().map(|dim| dim as usize))
+                .collect::<Vec<_>>()
+        })
+    else {
+        return Vec::new();
+    };
+    let Some(data) = value
+        .json
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_f64)
+                .collect::<Vec<_>>()
+        })
+    else {
+        return Vec::new();
+    };
+    if shape.iter().product::<usize>() != data.len() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    let zeros = vec![0.0; data.len()];
+    if data.iter().any(|value| value.abs() > f64::EPSILON) {
+        candidates.push(tensor_sample(&value.name, &shape, precision, &zeros));
+    }
+    let halves = data.iter().map(|value| value / 2.0).collect::<Vec<_>>();
+    if halves
+        .iter()
+        .zip(&data)
+        .any(|(candidate, current)| (candidate - current).abs() > f64::EPSILON)
+    {
+        candidates.push(tensor_sample(&value.name, &shape, precision, &halves));
+    }
+    candidates
+}
+
+fn tensor_sample(name: &str, shape: &[usize], precision: &str, values: &[f64]) -> SampleValue {
+    SampleValue {
+        name: name.to_string(),
+        surf_expr: tensor_surf_expr(shape, precision, values),
+        deep_expr: tensor_deep_expr(shape, precision, values),
+        json: serde_json::json!({ "shape": shape, "data": values }),
+        tensor_binding: None,
+    }
+}
+
 // ===========================================================================
 // Deep property model + discovery + running
 // ===========================================================================
@@ -1048,16 +1801,17 @@ fn prove_deep_property(
     // `smt-only` is Unsupported rather than a silent fuzz run; `fuzz-only`
     // and `auto` run the Tier C fuzz loop below.
     if options.tier == "smt-only" {
-        return PropertyOutcome {
-            name: property.name.clone(),
-            status: PropertyStatus::Unsupported,
-            proof_tier: PropertyTier::Smt,
-            samples: 0,
+        return PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Smt,
+            0,
             seed,
-            counterexample: None,
-            reason: Some("deep property has no Tier B (SMT) lowering path (smt-only)".to_string()),
-            injected: false,
-        };
+            None,
+            Some("deep property has no Tier B (SMT) lowering path (smt-only)".to_string()),
+            false,
+            Vec::new(),
+        );
     }
     let samples_needed = if options.samples != 100 {
         options.samples
@@ -1092,16 +1846,19 @@ fn prove_deep_property(
         match eval_deep_sample(exprs, property, &sample, false) {
             Ok(true) => {}
             Ok(false) => {
-                return PropertyOutcome {
-                    name: property.name.clone(),
-                    status: PropertyStatus::Failed,
-                    proof_tier: PropertyTier::Fuzz,
-                    samples: accepted,
+                let (shrunk, shrink_steps) = shrink_deep_counterexample(exprs, property, sample);
+                return PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Failed,
+                    PropertyTier::Fuzz,
+                    accepted,
                     seed,
-                    counterexample: Some(counterexample_json(&sample)),
-                    reason: None,
-                    injected: false,
-                };
+                    Some(counterexample_json(&shrunk)),
+                    None,
+                    false,
+                    Vec::new(),
+                )
+                .with_shrink_steps(shrink_steps);
             }
             Err(err) => return error(&property.name, seed, err),
         }
@@ -1117,16 +1874,17 @@ fn prove_deep_property(
         );
     }
 
-    PropertyOutcome {
-        name: property.name.clone(),
-        status: PropertyStatus::Passed,
-        proof_tier: PropertyTier::Fuzz,
-        samples: accepted,
+    PropertyOutcome::new(
+        property.name.clone(),
+        PropertyStatus::Passed,
+        PropertyTier::Fuzz,
+        accepted,
         seed,
-        counterexample: None,
-        reason: None,
-        injected: false,
-    }
+        None,
+        None,
+        false,
+        fuzz_precondition_assumptions(&property.name, property.preconditions.len(), accepted, seed),
+    )
 }
 
 fn sample_deep_property(property: &DeepProperty, rng: &mut Lcg) -> Result<Sample, String> {
