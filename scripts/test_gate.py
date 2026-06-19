@@ -74,6 +74,11 @@ NON_GATE_WORKFLOWS = {
     "release.yml",
     "conformance.yml",
     "conformance-nightly.yml",
+    # The ecosystem drift canary is a scheduled cross-repo workflow that
+    # builds chelis HEAD and runs each downstream shell's gate against it.
+    # It runs nothing the per-PR gate owns and never runs on PR/push, so it
+    # is out of the gate.py quartet scope by design.
+    "ecosystem-drift.yml",
 }
 
 
