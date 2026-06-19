@@ -1,1 +1,1 @@
-(def {} answer (cast {} (app {} (var {} sin) (lit {type: (t-prim {} f32)} 7.0)) (t-prim {} f32)))
+(def {} answer (app {} (var {} sin) (app {} (var {} add) (app {} (var {} sin) (lit {type: (t-prim {} f32)} 2.0)) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 8.0)))))

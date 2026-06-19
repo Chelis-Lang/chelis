@@ -1,1 +1,1 @@
-(def {} answer (app {} (var {} sqrt) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 7.0)) (var {} xa))))
+(def {} answer (app {} (var {} log) (let {} (bind {} xa (lit {type: (t-prim {} f32)} 2.0)) (var {} xa))))
