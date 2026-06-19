@@ -108,9 +108,20 @@ jobs:
       # draws a distinct program sequence.
       - name: Fresh full campaign (live Hull reference)
         working-directory: hull
+        # The campaign's `.ch` driver spawns the compiler via
+        # `process_run("chelis", ...)` BY NAME -- a Chelis script under
+        # `chelis test` has no argv/env to receive an absolute path, so the
+        # spawned `chelis` is PATH-controlled by design (run_differential_suite.ch
+        # lines 283-298; hull PHASE_STATE Phase 3 carry-forward #3). The
+        # `--chelis-bin` flag below only pins the OUTER `chelis test` binary;
+        # the inner per-program spawn needs the release dir on PATH. Without it
+        # every shard fails with `process_run failed to spawn \`chelis\`: No such
+        # file or directory`. (The "Re-validate the frozen corpus" step does not
+        # need this: run_conformance.py spawns chelis by absolute path.)
         run: |
           SEED=$(date -u +%Y%m%d)
           mkdir -p corpus/scratch
+          export PATH="$GITHUB_WORKSPACE/chelis/target/release:$PATH"
           ../chelis/.venv/bin/python scripts/run_differential_suite.py \
             --check-n 10000 --eval-n 1000 --shards 16 \
             --seed "$SEED" \
