@@ -46,7 +46,6 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 # `gate.py` only owns the `lint-and-unit` and `integration` jobs; these
 # are listed by name so the parity test's exclusion is visible.
 NON_GATE_JOBS = {
-    "loc-report",
     "macos-smoke",
     "backend-sanitizers",
     "no-ai-authorship",
@@ -79,6 +78,10 @@ NON_GATE_WORKFLOWS = {
     # It runs nothing the per-PR gate owns and never runs on PR/push, so it
     # is out of the gate.py quartet scope by design.
     "ecosystem-drift.yml",
+    # LOC report moved out of ci.yml's per-merge path into its own weekly
+    # scheduled workflow; it commits a docs/loc_report.md bot commit and runs
+    # nothing the per-PR gate owns, so it is out of gate.py scope by design.
+    "loc-report.yml",
 }
 
 
