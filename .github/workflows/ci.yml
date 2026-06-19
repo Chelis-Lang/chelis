@@ -179,32 +179,9 @@ jobs:
         continue-on-error: true
         run: python3 scripts/test_timing_check.py --junit target/nextest/ci/junit.xml
 
-  loc-report:
-    name: LOC Report
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [lint-and-unit, integration]
-    steps:
-      - uses: actions/checkout@v6
-
-      # Pinned to v8.1.0 — see lint-and-unit job for rationale.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Generate LOC report
-        run: cd py && uv run loc-report
-
-      - name: Commit LOC report
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/loc_report.md
-          if git diff --cached --quiet; then
-            echo "LOC report unchanged"
-            exit 0
-          fi
-          git commit -m "Update LOC report"
-          git push || echo "LOC report push skipped: token lacks write access"
+  # NOTE: the LOC report moved to its own weekly workflow
+  # (.github/workflows/loc-report.yml) so it no longer commits a bot
+  # commit to main on every merge. See WS-7 / spend-trim.
 
   macos-smoke:
     name: macOS Smoke
