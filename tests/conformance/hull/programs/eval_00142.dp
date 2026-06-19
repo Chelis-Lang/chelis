@@ -1,1 +1,1 @@
-(def {} answer (app {} (var {} sub) (lit {type: (t-prim {} f32)} 7.0) (app {} (var {} neg) (if {} (lit {type: (t-prim {} bool)} false) (app {} (var {} sin) (lit {type: (t-prim {} f32)} 0.0)) (app {} (var {} sin) (lit {type: (t-prim {} f32)} 0.0))))))
+(def {} answer (app {} (var {} sub) (app {} (var {} add) (lit {type: (t-prim {} f32)} 4.0) (lit {type: (t-prim {} f32)} 0.0)) (app {} (var {} sin) (app {} (var {} neg) (if {} (lit {type: (t-prim {} bool)} false) (lit {type: (t-prim {} f32)} 0.0) (lit {type: (t-prim {} f32)} 4.0))))))

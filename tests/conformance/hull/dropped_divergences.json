@@ -28,11 +28,5 @@
     "program": "(def {} answer (fn {} (params {} (tb {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} int64))})) (fn {} (params {} (ta {type: (t-tensor {} (d-name {} rdim) (d-lit {} 1) (t-prim {} int64))})) (app {} (var {} gather) (var {} ta) (var {} tb) (lit {type: (t-prim {} int32)} 0)))))",
     "reason": "type mismatch: hull '(t-fn {} (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-lit {} 1) (t-prim {} int64)) (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} int64))))' vs compiler '(t-fn {} (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} int64)) (t-fn {} (t-tensor {} (d-name {} rdim) (d-lit {} 1) (t-prim {} int64)) (t-tensor {} (d-lit {} 3) (d-lit {} 1) (d-lit {} 1) (t-prim {} int64))))'",
     "rule_tag": "RGather"
-  },
-  {
-    "lane": "eval",
-    "program": "(def {} answer (app {} (var {} div) (lit {type: (t-prim {} int64)} 6) (app {} (fn {} (params {} (xa {type: (t-prim {} f32)})) (lit {type: (t-prim {} int64)} 4)) (let {} (bind {} xa (let {} (bind {} xa (lit {type: (t-prim {} f32)} 7.0)) (var {} xa))) (app {} (var {} sin) (var {} xa))))))",
-    "reason": "reference 1.5 vs compiler 1.0",
-    "rule_tag": "RDiv"
   }
 ]

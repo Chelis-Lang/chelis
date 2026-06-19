@@ -1,1 +1,1 @@
-(def {} answer (app {} (var {} sin) (lit {type: (t-prim {} f32)} 0.0)))
+(def {} answer (app {} (var {} sqrt) (app {} (var {} sin) (lit {type: (t-prim {} f32)} 7.0))))
