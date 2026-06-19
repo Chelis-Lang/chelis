@@ -741,6 +741,38 @@ struct HostEmitter<'a> {
     /// inside compiled functions, which already emit their own
     /// per-local `chelis_free` cleanup.
     scope_releases: Option<Vec<(String, HostType)>>,
+    /// Stack of open release-tracking `let` blocks (issue #406, the
+    /// function-body sibling of the `emit_main` leak). One entry per block;
+    /// each records the slots the block transfers an owned reference into
+    /// (`owned_destinations`: its result target plus each binding's value
+    /// temp) and the heap bindings it frees at its close (`bindings`).
+    ///
+    /// A bare pointer-copy that aliases one of a block's `bindings` into an
+    /// `owned_destinations` slot (emitted directly for a `Var` body or
+    /// inside an `if`/`match` arm) is retained: that destination owns an
+    /// independent reference and the retain cancels the eventual release so
+    /// the caller keeps one reference. A transient read of a binding into an
+    /// internal arg temp (e.g. `__arg0 = p` feeding `chelis_tuple_get`) is
+    /// not an owned destination, so it is left untouched. Empty outside a
+    /// tracked block (e.g. `emit_main`, whose alias handling is the distinct
+    /// global-binding path above).
+    let_scopes: Vec<LetReleaseScope>,
+}
+
+/// One open release-tracking `let` block; see `HostEmitter::let_scopes`.
+struct LetReleaseScope {
+    /// C variables this block transfers an owned reference into: the block's
+    /// result target (the enclosing-scope variable it writes its result to)
+    /// plus each binding's `__let_N` value temp. A bare pointer-copy that
+    /// aliases one of this block's `bindings` into one of these destinations
+    /// must be retained so the destination owns an independent reference —
+    /// that destination is itself released later (a binding at this block's
+    /// close, or by whatever owns the result target). A copy into any other
+    /// temp (a transient arg fed to `chelis_tuple_get`, say) is a borrow and
+    /// is not retained.
+    owned_destinations: HashSet<String>,
+    /// Heap binding names this block releases at its close.
+    bindings: HashSet<String>,
 }
 
 impl<'a> HostEmitter<'a> {
@@ -760,6 +792,7 @@ impl<'a> HostEmitter<'a> {
             tensor_helpers,
             temp_counter: 0,
             scope_releases: None,
+            let_scopes: Vec::new(),
         }
     }
 
@@ -805,6 +838,42 @@ impl<'a> HostEmitter<'a> {
             if let Some(call) = release_call(&var, &ty) {
                 self.lines.push(format!("{}{call}", self.indent));
             }
+        }
+    }
+
+    /// Retain `target` when a bare pointer-copy `target = source` moves a
+    /// heap `let` binding into a slot that owns an independent reference
+    /// (issue #406). Fires only when `source` is a binding some open block
+    /// frees at its close *and* `target` is one of that block's
+    /// `owned_destinations` (its result target or another binding's value
+    /// temp). The retain cancels the eventual release of the destination so
+    /// every owned slot — the escaping result, and any binding that aliases
+    /// an earlier one — carries exactly one reference.
+    ///
+    /// A transient read of a binding into an internal arg temp (e.g.
+    /// `__arg0 = p` feeding `chelis_tuple_get`) is not an owned destination,
+    /// so it is left alone: `chelis_tuple_get` does its own element retain
+    /// and the binding's single release still balances its construction. A
+    /// transfer of a parameter or outer-scope value is likewise untouched —
+    /// no open block frees it, so a retain would leak.
+    fn retain_transferred_result(&mut self, target: &str, source: &str, ty: &HostType) {
+        // `source` may be a binding of an outer block while `target` is an
+        // owned slot of an inner one (a nested `let b = a in ...`), so test
+        // the two conditions independently across all open scopes rather
+        // than within a single scope.
+        let target_is_owned = self
+            .let_scopes
+            .iter()
+            .any(|scope| scope.owned_destinations.contains(target));
+        let source_is_binding = self
+            .let_scopes
+            .iter()
+            .any(|scope| scope.bindings.contains(source));
+        if !(target_is_owned && source_is_binding) {
+            return;
+        }
+        if let Some(call) = retain_call(target, ty) {
+            self.lines.push(format!("{}{call}", self.indent));
         }
     }
 
@@ -892,16 +961,19 @@ impl<'a> HostEmitter<'a> {
                         .push(format!("{}{target} = chelis_list_empty();", self.indent));
                 } else if name == "None" && matches!(ty, HostType::Option(_)) {
                     self.assign_option_none(target, ty);
+                } else if name == "Nil" && matches!(var_ty, HostType::List(_)) {
+                    self.lines
+                        .push(format!("{}{target} = chelis_list_empty();", self.indent));
                 } else {
-                    self.lines.push(format!(
-                        "{}{target} = {};",
-                        self.indent,
-                        if name == "Nil" && matches!(var_ty, HostType::List(_)) {
-                            "chelis_list_empty()"
-                        } else {
-                            name
-                        }
-                    ));
+                    // `target = name` is a bare pointer copy that does not
+                    // bump the refcount. When `name` is a heap `let` binding
+                    // freed at its block close (issue #406), retain the
+                    // transferred result to keep the caller's reference
+                    // alive; a parameter or outer-scope `name` is left
+                    // untouched (the block does not free it).
+                    self.lines
+                        .push(format!("{}{target} = {name};", self.indent));
+                    self.retain_transferred_result(target, name, ty);
                 }
             }
             HostExprKind::Call {
@@ -1061,6 +1133,21 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!("{}{{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                // issue #406: this `let` introduces a nested C scope that
+                // owns every heap binding it declares. The block body's
+                // result is written to `target` in the *outer* scope, so
+                // each heap binding must be released at block close or it
+                // leaks (the function-body sibling of the `emit_main`
+                // leak). Track this block's owned destinations + heap
+                // bindings; a bare pointer-copy of a binding into an owned
+                // destination (the escaping result, or another binding's
+                // value temp that aliases an earlier binding) is retained so
+                // each owned slot keeps exactly one reference.
+                self.let_scopes.push(LetReleaseScope {
+                    owned_destinations: HashSet::from([target.to_string()]),
+                    bindings: HashSet::new(),
+                });
+                let mut heap_bindings: Vec<(String, HostType)> = Vec::new();
                 for binding in bindings {
                     // Compute the value into a temp before declaring the binding name.
                     // If the compiler inlines a recursive call that reuses a binding
@@ -1068,6 +1155,17 @@ impl<'a> HostEmitter<'a> {
                     // declaring the inner name first would shadow the outer variable
                     // before its value is read, yielding a NULL pointer at runtime.
                     let temp = self.next_temp("let");
+                    // The value temp is an owned slot of this block: if the
+                    // binding's value is a bare alias of an earlier binding
+                    // (`b = a`), the copy into the temp must retain so `b`
+                    // owns an independent reference and the two distinct
+                    // block releases do not double-free the shared
+                    // allocation. Register it before emitting the value.
+                    if binding_release(&temp, &binding.ty).is_some()
+                        && let Some(scope) = self.let_scopes.last_mut()
+                    {
+                        scope.owned_destinations.insert(temp.clone());
+                    }
                     self.emit_expr_to_var(&binding.value, &temp, &binding.ty);
                     self.lines.push(format!(
                         "{}{};",
@@ -1076,8 +1174,30 @@ impl<'a> HostEmitter<'a> {
                     ));
                     self.lines
                         .push(format!("{}{} = {};", self.indent, binding.name, temp));
+                    // Track the binding name (not its `__let_N` temp: the
+                    // two alias the same allocation, so releasing only the
+                    // name frees it exactly once). Add it to the scope's
+                    // binding set after its value is computed so a binding
+                    // whose value reads an *earlier* binding still retains
+                    // on that transfer.
+                    if binding_release(&binding.name, &binding.ty).is_some() {
+                        heap_bindings.push((binding.name.clone(), binding.ty.clone()));
+                        if let Some(scope) = self.let_scopes.last_mut() {
+                            scope.bindings.insert(binding.name.clone());
+                        }
+                    }
                 }
                 self.assign_expr(target, body, effective_ty);
+                // Release the block's heap bindings in reverse declaration
+                // order, before closing the C block while they are still in
+                // scope. Last-declared shadows of a reused name win the C
+                // lookup, mirroring C scope-exit destruction order.
+                for (name, binding_ty) in heap_bindings.iter().rev() {
+                    if let Some(call) = binding_release(name, binding_ty) {
+                        self.lines.push(format!("{}{call}", self.indent));
+                    }
+                }
+                self.let_scopes.pop();
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
@@ -3801,6 +3921,14 @@ impl<'a> HostEmitter<'a> {
                 ));
                 self.assign_unboxed_value(&field_value, field_ty, &field_var);
                 self.emit_labeled_root(&field_name, &field_value, field_ty);
+                // issue #406: `chelis_tuple_get` retains the boxed element
+                // it returns (a no-op for scalar fields). The labeled-root
+                // printer only reads it, so release the retained handle once
+                // the field has been printed — otherwise a tuple field that
+                // is itself a heap container (a nested tuple/list/adt) leaks
+                // that reference for the process lifetime.
+                self.lines
+                    .push(format!("{}chelis_value_release({field_var});", self.indent));
             }
             return;
         }
@@ -3951,6 +4079,43 @@ fn release_call(var: &str, ty: &HostType) -> Option<String> {
         // until a future change threads precise ownership.
         _ => None,
     }
+}
+
+/// The runtime retain call that adds one reference to the heap allocation
+/// a value of `ty` held in `var` owns, or `None` for non-refcounted types.
+/// Used by the `let`-block scope release (issue #406): when a block result
+/// is transferred to a `target` in the outer scope via a bare pointer copy
+/// (`target = <heap var>` for a `Var` body or an `if`/`match` arm), the
+/// target shares the source allocation's reference. Retaining at the
+/// transfer leaf lets the block uniformly release every heap binding it
+/// declared without freeing the value the caller now holds.
+///
+/// Only the refcounted host-value types are retainable. `Tensor` is
+/// excluded deliberately: it is freed by the unconditional `chelis_free`,
+/// has no refcount retain, and tensor locals are already cleaned up by the
+/// tensor-helper lane — so tensor `let` bindings are never tracked for
+/// block release in the first place (see `binding_release`).
+fn retain_call(var: &str, ty: &HostType) -> Option<String> {
+    match ty {
+        HostType::List(_) => Some(format!("chelis_list_retain({var});")),
+        HostType::Tuple(_) => Some(format!("chelis_tuple_retain({var});")),
+        HostType::Dict(_, _) => Some(format!("chelis_dict_retain({var});")),
+        HostType::Adt(_, _) => Some(format!("chelis_adt_retain({var});")),
+        HostType::String => Some(format!("chelis_string_retain({var});")),
+        _ => None,
+    }
+}
+
+/// The release call for a `let` binding tracked by the block-scope cleanup
+/// (issue #406), or `None` if the binding's type is not a refcounted
+/// host-value (so it owns no heap allocation the block must reclaim, or it
+/// is a `Tensor` reclaimed by the tensor-helper lane and has no matching
+/// `retain_call` to pair the transfer-leaf retain against). Restricting
+/// the tracked set to exactly the `retain_call` types keeps every
+/// retain/release balanced regardless of how the block result is produced.
+fn binding_release(var: &str, ty: &HostType) -> Option<String> {
+    retain_call(var, ty)?;
+    release_call(var, ty)
 }
 
 fn c_type(ty: &HostType) -> &'static str {
