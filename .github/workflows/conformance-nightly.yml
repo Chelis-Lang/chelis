@@ -40,6 +40,19 @@ jobs:
     # The sharded ~15-20 min campaign wall plus build + checkout head room.
     timeout-minutes: 30
     steps:
+      # Mint a short-lived token scoped to the private `hull` repo so the
+      # cross-repo Hull checkout can read it. The default GITHUB_TOKEN only
+      # grants access to this repo, which is why the Hull checkout previously
+      # failed with git exit 128. Auto-revoked at job end.
+      - name: Mint cross-repo token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          repositories: hull
+
       - name: Checkout chelis
         uses: actions/checkout@v6
         with:
@@ -63,6 +76,7 @@ jobs:
           repository: ${{ env.HULL_REPO }}
           ref: ${{ steps.hull.outputs.commit }}
           path: hull
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
