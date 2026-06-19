@@ -1,9 +1,22 @@
-# Phase 5 — Host-lane scalar AD (deferred)
+# Phase 5 — Host-lane scalar AD
 
-**Status:** Deferred. No current downstream user needs this; the canonical
-work-around (locally-bound fn over tensor input, returning a scalar) covers
-every active use case. Revisit when a real customer or paper requires scalar
-AD; do **not** start implementation without a focused design session.
+**Status:** Implemented (chelis#405). Forward-mode dual numbers, per the
+locked design below. `grad(f, wrt=...)(args)` over a scalar `f32 -> f32`
+(or multi-scalar-param) top-level def now lowers on the host lane and builds
+to C. The previous `__unresolved_grad` rejection is retained for the cases
+the dual transform does not cover (container `wrt`, unsupported scalar ops);
+the tensor-lane reverse-mode AD path is untouched.
+
+Implementation: `try_lower_scalar_grad_app` / `dual_eval` in
+`crates/chelis-ir/src/host.rs` (forward-mode dual transform at host-IR
+lowering time, emitting parallel value/derivative trees over the existing
+host scalar builtins — no new runtime struct or C builtin). Oracle:
+`build_c_scalar_grad_builds_and_is_numerically_correct` in
+`crates/chelis-cli/tests/cli.rs`, with multi-param and container-rejection
+parity tests beside it.
+
+The original deferral rationale and design analysis are preserved below for
+context.
 
 ## Background
 

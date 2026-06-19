@@ -1991,6 +1991,191 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
     assert!(status.success(), "gcc failed with status {status}");
 }
 
+/// chelis#405 oracle: host-lane scalar forward-mode AD. A top-level scalar
+/// function `def square(x: f32) -> f32 = mul(x, x)` lands in the host lane,
+/// which previously had no AD transform, so `grad(square, wrt=x)(x)` rejected
+/// with the `__unresolved_grad` guard. With forward-mode dual lowering it now
+/// builds to C: `dsquare(x) = grad(square, wrt=x)(x)` emits `2x`. Verifies:
+/// build exits 0, the generated C compiles + links + runs, and `dsquare(2.0)`
+/// equals 4.0 within a finite-difference tolerance of 1e-5.
+#[test]
+fn build_c_scalar_grad_builds_and_is_numerically_correct() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scalar_grad.ch");
+    let out_dir = dir.path().join("scalar-grad-build-out");
+    write_file(
+        &path,
+        "def square(x: f32) -> f32 = mul(x, x)\n\
+         def dsquare(x: f32) -> f32 = grad(square, wrt=(x))(x)\n\
+         out = dsquare(2.0)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("scalar_grad.c")).expect("generated c");
+    assert!(
+        !source.contains("__result = call(")
+            && !source.contains("unsupported builtin")
+            && !source.contains("__unresolved_grad")
+            && !source.contains("__unresolved_vmap"),
+        "scalar grad lowering must not degrade to fallback / unresolved markers:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "scalar_grad.c", "scalar_grad");
+    assert!(status.success(), "gcc link failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("scalar_grad"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // Parse `out = <value>` from the printed line.
+    let value: f64 = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("out = "))
+        .and_then(|rhs| rhs.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("could not parse `out = <f64>` from:\n{stdout}"));
+
+    // Finite-difference reference: d/dx(x*x) at x = 2.0.
+    let f = |x: f64| x * x;
+    let x = 2.0_f64;
+    let h = 1e-4_f64;
+    let fd = (f(x + h) - f(x - h)) / (2.0 * h);
+    assert!(
+        (value - fd).abs() < 1e-5,
+        "dsquare(2.0) = {value}, finite-difference reference = {fd} (|Δ| >= 1e-5)"
+    );
+    // Exact analytic value is 4.0.
+    assert!(
+        (value - 4.0).abs() < 1e-5,
+        "dsquare(2.0) must equal 4.0, got {value}"
+    );
+}
+
+/// chelis#405: multi-parameter scalar forward-mode AD. `grad(f, wrt=(x, y))`
+/// over a two-scalar-param function emits one dual pass per parameter and
+/// combines the results into a gradient tuple. Verifies the build succeeds,
+/// the binary runs, and `grad(x*y + sin(x))` at (1, 3) equals
+/// `(y + cos(x), x) = (3 + cos(1), 1) ≈ (3.5403, 1.0)`.
+#[test]
+fn build_c_scalar_grad_multi_param_wrt_builds_and_is_numerically_correct() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scalar_grad_multi.ch");
+    let out_dir = dir.path().join("scalar-grad-multi-build-out");
+    write_file(
+        &path,
+        "def f(x: f32, y: f32) -> f32 = add(mul(x, y), sin(x))\n\
+         def df(x: f32, y: f32) -> (f32, f32) = grad(f, wrt=(x, y))(x, y)\n\
+         out = df(1.0, 3.0)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("scalar_grad_multi.c")).expect("generated c");
+    assert!(
+        !source.contains("__result = call(")
+            && !source.contains("unsupported builtin")
+            && !source.contains("__unresolved_grad"),
+        "multi-param scalar grad must not degrade to fallback / unresolved markers:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "scalar_grad_multi.c", "scalar_grad_multi");
+    assert!(status.success(), "gcc link failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("scalar_grad_multi"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "binary failed: {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    let dfdx: f64 = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("out.0 = "))
+        .and_then(|rhs| rhs.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("could not parse `out.0 = <f64>` from:\n{stdout}"));
+    let dfdy: f64 = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("out.1 = "))
+        .and_then(|rhs| rhs.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("could not parse `out.1 = <f64>` from:\n{stdout}"));
+    // df/dx = y + cos(x), df/dy = x at (x, y) = (1.0, 3.0).
+    let expect_dx = 3.0 + 1.0_f64.cos();
+    assert!(
+        (dfdx - expect_dx).abs() < 1e-5,
+        "df/dx = {dfdx}, expected {expect_dx}"
+    );
+    assert!((dfdy - 1.0).abs() < 1e-5, "df/dy = {dfdy}, expected 1.0");
+}
+
+/// chelis#405 negative parity: `grad` over a host container parameter
+/// (`List[f32]`) must still be rejected — the dual transform only covers
+/// scalar `wrt`. The type checker rejects `wrt` over a non-differentiable
+/// container parameter before the host lane is even reached, so the build
+/// fails with a clear "not differentiable" diagnostic rather than emitting
+/// wrong C. This locks the spec's container-AD escalation (step 5).
+#[test]
+fn build_c_scalar_grad_rejects_container_wrt() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scalar_grad_container.ch");
+    let out_dir = dir.path().join("scalar-grad-container-build-out");
+    write_file(
+        &path,
+        "def g(xs: List[f32]) -> f32 = fold(fn (acc: f32, e: f32) -> add(acc, e), 0.0, xs)\n\
+         def dg(xs: List[f32]) -> List[f32] = grad(g, wrt=xs)(xs)\n\
+         out = dg([1.0, 2.0])\n",
+    );
+
+    let assert = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("not differentiable") || stderr.contains("can't lower these defs"),
+        "container `wrt` must be rejected with a clear diagnostic, got:\n{stderr}"
+    );
+}
+
 /// Regression test for the Coral UPSTREAM_BUGS.md pattern:
 /// `grad(loss, wrt=theta)(theta, x)` applied to a multi-param named top-level def
 /// (two tensor arguments, differentiating w.r.t. the first).

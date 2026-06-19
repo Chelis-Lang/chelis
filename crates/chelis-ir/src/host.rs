@@ -4962,12 +4962,450 @@ fn lower_tuple_get_host_expr(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Host-lane scalar forward-mode AD (chelis#405).
+//
+// Per `spec/design/phase5_host_scalar_ad.md`, the locked design is
+// forward-mode dual numbers. A scalar function `f: f32 -> f32` (or
+// multi-scalar-param) that lands in the host lane has no reverse-mode
+// transform, so `grad(f, wrt=(p))(args)` previously rejected with the
+// `__unresolved_grad` marker. This pass implements the dual transform
+// entirely at compile time: it walks `f`'s pure-scalar body and produces
+// two parallel HostExpr trees — a value tree and a derivative tree — using
+// only the existing host scalar builtins (`add`/`mul`/`sub`/`div`/`neg`/
+// `exp`/`log`/`sin`/`cos`/`tanh`/`sqrt`/`pow`/`abs`/`cast`). No new runtime
+// struct and no new C builtin are required: the dual "struct" is split into
+// two `double`-typed expression trees at lowering time, which is the
+// forward-mode dual-number scheme the spec prescribes (one directional
+// derivative per pass).
+//
+// Multi-parameter `wrt=(p1, p2, ...)` emits one derivative tree per
+// parameter (each with that parameter's seed = 1.0 and the rest = 0.0) and
+// combines them into a host tuple — the gradient tuple.
+//
+// `wrt` over a host container (list/dict/ADT/tuple) is rejected: this pass
+// returns `None`, the caller falls through to the `__unresolved_grad`
+// marker, and the existing `cmd_build` guard surfaces the clean diagnostic.
+// Tensor-lane reverse-mode AD is untouched: a grad whose differentiated fn
+// is tensor-typed is handled by `lower_grad_callable_app` on the DAG path
+// and never reaches this host-lane pass.
+
+/// A dual value: the primal value expression and its derivative expression,
+/// both ordinary scalar (`Float64`) host expressions.
+struct Dual {
+    value: HostExpr,
+    deriv: HostExpr,
+}
+
+fn dual_float(value: f64, deriv: f64) -> Dual {
+    Dual {
+        value: HostExpr::new(HostExprKind::Float(value)),
+        deriv: HostExpr::new(HostExprKind::Float(deriv)),
+    }
+}
+
+fn scalar_builtin(name: &str, args: Vec<HostExpr>) -> HostExpr {
+    HostExpr::new(HostExprKind::Builtin {
+        name: name.to_string(),
+        args,
+        ty: HostType::Float64,
+    })
+}
+
+fn host_float(value: f64) -> HostExpr {
+    HostExpr::new(HostExprKind::Float(value))
+}
+
+/// `true` if a host type is a scalar this pass can differentiate. Integer
+/// inputs are accepted (their derivative seed is 0 unless they are the
+/// active `wrt`, but `wrt` over an integer is still a directional
+/// derivative). Everything else — list/dict/ADT/tuple/tensor/option — is a
+/// container and is rejected.
+fn is_dual_scalar_type(ty: &HostType) -> bool {
+    matches!(ty, HostType::Float64 | HostType::Int64)
+}
+
+/// Resolve a top-level scalar def by name into `(param_names, param_tys, body)`.
+/// Returns `None` if the def is not a `(fn (params ...) body)` form or any
+/// parameter is non-scalar.
+fn resolve_scalar_def<'a>(
+    program: &'a CheckedProgram,
+    name: &str,
+) -> Option<(Vec<String>, Vec<HostType>, &'a Expr)> {
+    let mut found: Option<(&'a List,)> = None;
+    for expr in top_level_items(program.exprs()) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(def_name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        if !terminal_name_matches(def_name, name) {
+            continue;
+        }
+        let Some(Expr::List(body_list, _)) = kids.get(1) else {
+            continue;
+        };
+        if tag(body_list) != Some("fn") {
+            continue;
+        }
+        found = Some((body_list,));
+        break;
+    }
+    let (fn_list,) = found?;
+    let fn_kids = children(fn_list);
+    let params_list = fn_kids.first().and_then(as_list)?;
+    if tag(params_list) != Some("params") {
+        return None;
+    }
+    let mut param_names = Vec::new();
+    let mut param_tys = Vec::new();
+    for param in children(params_list) {
+        let pname = param_name(param)?;
+        let pty = param_host_type(param)
+            .or_else(|| {
+                lookup_declared_fn_type(program, name).and_then(|(tys, _)| tys.first().cloned())
+            })
+            .unwrap_or(HostType::Float64);
+        param_names.push(pname);
+        param_tys.push(pty);
+    }
+    let body = fn_kids.get(1)?;
+    Some((param_names, param_tys, body))
+}
+
+/// Try to lower `app(grad(f, wrt=...), arg0, ...)` as a host-lane scalar
+/// forward-mode derivative. Returns `Some(host_expr)` on success, `None`
+/// when this is not a scalar-grad app this pass handles (tensor lane,
+/// container `wrt`, unsupported op, unresolvable callee — all fall through
+/// to the existing `__unresolved_grad` rejection path).
+fn try_lower_scalar_grad_app(
+    list: &List,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostType>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+) -> Option<HostExpr> {
+    let kids = children(list);
+    let callee = kids.first().and_then(as_list)?;
+    if tag(callee) != Some("grad") {
+        return None;
+    }
+    // The function being differentiated: `(grad {wrt:...} (var f) (lit 0))`.
+    let grad_kids = children(callee);
+    let fn_var = grad_kids.first().and_then(as_list)?;
+    if tag(fn_var) != Some("var") {
+        return None;
+    }
+    let fn_name = children(fn_var).first().and_then(symbol_name)?.to_string();
+
+    let (param_names, param_tys, body) = resolve_scalar_def(program, &fn_name)?;
+
+    // Return type must be scalar; reject (fall through) otherwise. We infer
+    // it from the def's declared signature when available.
+    if let Some((_, ret_ty)) = lookup_declared_fn_type(program, &fn_name)
+        && !is_dual_scalar_type(&ret_ty)
+    {
+        return None;
+    }
+    // Every parameter must be a scalar. A container parameter that is not the
+    // `wrt` target is still fine to treat as a constant, but the call args
+    // would be containers we cannot evaluate in the dual tree, so reject the
+    // whole app (the canonical container-AD escalation in the spec).
+    if param_tys.iter().any(|ty| !is_dual_scalar_type(ty)) {
+        return None;
+    }
+
+    // Resolve the `wrt` parameter names from the grad meta. Absent `wrt`
+    // means "all parameters" (single-param defs commonly omit it).
+    let wrt_names = grad_wrt_param_names(callee, &param_names)?;
+    if wrt_names.is_empty() {
+        return None;
+    }
+
+    // Lower each call argument once into a value HostExpr. Their derivative
+    // seed is determined per `wrt` pass below.
+    let call_args = &kids[1..];
+    if call_args.len() != param_names.len() {
+        return None;
+    }
+    let arg_values: Vec<HostExpr> = call_args
+        .iter()
+        .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+        .collect();
+
+    // One forward pass per `wrt` parameter.
+    let mut derivs = Vec::new();
+    for wrt_name in &wrt_names {
+        let mut env: HashMap<String, Dual> = HashMap::new();
+        for (idx, pname) in param_names.iter().enumerate() {
+            let seed = if pname == wrt_name { 1.0 } else { 0.0 };
+            env.insert(
+                pname.clone(),
+                Dual {
+                    value: arg_values[idx].clone(),
+                    deriv: host_float(seed),
+                },
+            );
+        }
+        let dual = dual_eval(body, &env, program)?;
+        derivs.push(dual.deriv);
+    }
+
+    if derivs.len() == 1 {
+        Some(derivs.pop().unwrap())
+    } else {
+        let tys = derivs.iter().map(|_| HostType::Float64).collect();
+        Some(HostExpr::new(HostExprKind::Tuple(
+            derivs,
+            HostType::Tuple(tys),
+        )))
+    }
+}
+
+/// Read the `wrt` meta off a `grad` list and resolve it to a list of
+/// parameter names. `None` is returned when `wrt` references something that
+/// is not a parameter name (e.g. a tuple element / field access), which is
+/// the container-AD case the spec rejects. Absent `wrt` defaults to all
+/// parameters.
+fn grad_wrt_param_names(grad_list: &List, param_names: &[String]) -> Option<Vec<String>> {
+    let meta = match grad_list.elements.get(1) {
+        Some(Expr::Map(meta, _)) => meta,
+        _ => return Some(param_names.to_vec()),
+    };
+    let Some((_, wrt_expr)) = meta.entries.iter().find(|(key, _)| key == "wrt") else {
+        return Some(param_names.to_vec());
+    };
+    let mut names = Vec::new();
+    collect_wrt_names(wrt_expr, &mut names)?;
+    // Each named target must actually be a parameter of the differentiated
+    // function. A name that is not a parameter is a container/field access
+    // we don't support.
+    if names.iter().all(|n| param_names.contains(n)) {
+        Some(names)
+    } else {
+        None
+    }
+}
+
+fn collect_wrt_names(expr: &Expr, out: &mut Vec<String>) -> Option<()> {
+    match expr {
+        Expr::Atom(Atom::Symbol(name), _) => {
+            out.push(name.clone());
+            Some(())
+        }
+        Expr::List(list, _) => match tag(list) {
+            Some("var") => {
+                let name = children(list).first().and_then(symbol_name)?;
+                out.push(name.to_string());
+                Some(())
+            }
+            Some("tuple") => {
+                for child in children(list) {
+                    collect_wrt_names(child, out)?;
+                }
+                Some(())
+            }
+            // Field access / index / anything else => container, reject.
+            _ => None,
+        },
+        Expr::MetaExpr(meta, _) => collect_wrt_names(&meta.expr, out),
+        _ => None,
+    }
+}
+
+/// Forward-mode dual evaluation of a pure-scalar Deep body. Returns `None`
+/// for any construct this pass does not support (non-scalar op, unresolved
+/// var, control flow) so the caller falls through to the rejection path.
+fn dual_eval(expr: &Expr, env: &HashMap<String, Dual>, program: &CheckedProgram) -> Option<Dual> {
+    match expr {
+        Expr::Atom(Atom::Float(v), _) => Some(dual_float(*v, 0.0)),
+        Expr::Atom(Atom::Int(v), _) => Some(dual_float(*v as f64, 0.0)),
+        Expr::List(list, _) => match tag(list) {
+            Some("lit") => {
+                let inner = children(list).first()?;
+                dual_eval(inner, env, program)
+            }
+            Some("var") => {
+                let name = children(list).first().and_then(symbol_name)?;
+                let dual = env.get(name)?;
+                Some(Dual {
+                    value: dual.value.clone(),
+                    deriv: dual.deriv.clone(),
+                })
+            }
+            Some("app") => dual_eval_app(list, env, program),
+            _ => None,
+        },
+        Expr::MetaExpr(meta, _) => dual_eval(&meta.expr, env, program),
+        _ => None,
+    }
+}
+
+fn dual_eval_app(
+    list: &List,
+    env: &HashMap<String, Dual>,
+    program: &CheckedProgram,
+) -> Option<Dual> {
+    let kids = children(list);
+    let callee = kids.first().and_then(as_list)?;
+    if tag(callee) != Some("var") {
+        return None;
+    }
+    let op = children(callee).first().and_then(symbol_name)?;
+    let arg_exprs = &kids[1..];
+    let mut args: Vec<Dual> = Vec::new();
+    for a in arg_exprs {
+        args.push(dual_eval(a, env, program)?);
+    }
+
+    // Helper closures over scalar builtins.
+    let v = |d: &Dual| d.value.clone();
+    let dv = |d: &Dual| d.deriv.clone();
+
+    match (op, args.len()) {
+        ("add", 2) => Some(Dual {
+            value: scalar_builtin("add", vec![v(&args[0]), v(&args[1])]),
+            deriv: scalar_builtin("add", vec![dv(&args[0]), dv(&args[1])]),
+        }),
+        ("sub", 2) => Some(Dual {
+            value: scalar_builtin("sub", vec![v(&args[0]), v(&args[1])]),
+            deriv: scalar_builtin("sub", vec![dv(&args[0]), dv(&args[1])]),
+        }),
+        ("mul", 2) => {
+            // (uv)' = u'v + uv'
+            let lhs = scalar_builtin("mul", vec![dv(&args[0]), v(&args[1])]);
+            let rhs = scalar_builtin("mul", vec![v(&args[0]), dv(&args[1])]);
+            Some(Dual {
+                value: scalar_builtin("mul", vec![v(&args[0]), v(&args[1])]),
+                deriv: scalar_builtin("add", vec![lhs, rhs]),
+            })
+        }
+        ("div", 2) => {
+            // (u/v)' = (u'v - uv') / v^2
+            let num_l = scalar_builtin("mul", vec![dv(&args[0]), v(&args[1])]);
+            let num_r = scalar_builtin("mul", vec![v(&args[0]), dv(&args[1])]);
+            let num = scalar_builtin("sub", vec![num_l, num_r]);
+            let den = scalar_builtin("mul", vec![v(&args[1]), v(&args[1])]);
+            Some(Dual {
+                value: scalar_builtin("div", vec![v(&args[0]), v(&args[1])]),
+                deriv: scalar_builtin("div", vec![num, den]),
+            })
+        }
+        ("neg", 1) => Some(Dual {
+            value: scalar_builtin("neg", vec![v(&args[0])]),
+            deriv: scalar_builtin("neg", vec![dv(&args[0])]),
+        }),
+        ("exp", 1) => {
+            // (e^u)' = e^u * u'
+            let value = scalar_builtin("exp", vec![v(&args[0])]);
+            Some(Dual {
+                deriv: scalar_builtin("mul", vec![value.clone(), dv(&args[0])]),
+                value,
+            })
+        }
+        ("log", 1) => {
+            // (ln u)' = u' / u
+            Some(Dual {
+                value: scalar_builtin("log", vec![v(&args[0])]),
+                deriv: scalar_builtin("div", vec![dv(&args[0]), v(&args[0])]),
+            })
+        }
+        ("sin", 1) => {
+            // (sin u)' = cos(u) * u'
+            let cos = scalar_builtin("cos", vec![v(&args[0])]);
+            Some(Dual {
+                value: scalar_builtin("sin", vec![v(&args[0])]),
+                deriv: scalar_builtin("mul", vec![cos, dv(&args[0])]),
+            })
+        }
+        ("cos", 1) => {
+            // (cos u)' = -sin(u) * u'
+            let sin = scalar_builtin("sin", vec![v(&args[0])]);
+            let neg_sin = scalar_builtin("neg", vec![sin]);
+            Some(Dual {
+                value: scalar_builtin("cos", vec![v(&args[0])]),
+                deriv: scalar_builtin("mul", vec![neg_sin, dv(&args[0])]),
+            })
+        }
+        ("tanh", 1) => {
+            // (tanh u)' = (1 - tanh(u)^2) * u'
+            let t = scalar_builtin("tanh", vec![v(&args[0])]);
+            let t2 = scalar_builtin("mul", vec![t.clone(), t.clone()]);
+            let one_minus = scalar_builtin("sub", vec![host_float(1.0), t2]);
+            Some(Dual {
+                value: t,
+                deriv: scalar_builtin("mul", vec![one_minus, dv(&args[0])]),
+            })
+        }
+        ("sqrt", 1) => {
+            // (sqrt u)' = u' / (2 sqrt(u))
+            let s = scalar_builtin("sqrt", vec![v(&args[0])]);
+            let den = scalar_builtin("mul", vec![host_float(2.0), s.clone()]);
+            Some(Dual {
+                value: s,
+                deriv: scalar_builtin("div", vec![dv(&args[0]), den]),
+            })
+        }
+        ("pow", 2) => {
+            // Only constant exponents are supported in forward mode here:
+            // (u^c)' = c * u^(c-1) * u'. A non-constant exponent (`deriv`
+            // not identically zero) needs the general
+            // u^v * (v' ln u + v u'/u) form; reject to stay correct.
+            let exponent = float_const(&args[1].value)?;
+            if !is_zero_float(&args[1].deriv) {
+                return None;
+            }
+            let pow_inner = scalar_builtin("pow", vec![v(&args[0]), host_float(exponent - 1.0)]);
+            let coeff = scalar_builtin("mul", vec![host_float(exponent), pow_inner]);
+            Some(Dual {
+                value: scalar_builtin("pow", vec![v(&args[0]), v(&args[1])]),
+                deriv: scalar_builtin("mul", vec![coeff, dv(&args[0])]),
+            })
+        }
+        // `cast` between scalar precisions is value-preserving for the dual
+        // tree (host scalars are all `double`); the derivative passes
+        // through unchanged.
+        ("cast", _) if !args.is_empty() => Some(Dual {
+            value: v(&args[0]),
+            deriv: dv(&args[0]),
+        }),
+        _ => None,
+    }
+}
+
+/// Extract a compile-time float constant from a HostExpr if it is a literal.
+fn float_const(expr: &HostExpr) -> Option<f64> {
+    match &expr.kind {
+        HostExprKind::Float(v) => Some(*v),
+        HostExprKind::Int(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
+fn is_zero_float(expr: &HostExpr) -> bool {
+    matches!(&expr.kind, HostExprKind::Float(v) if *v == 0.0)
+        || matches!(&expr.kind, HostExprKind::Int(0))
+}
+
 fn lower_app_host_expr(
     list: &List,
     program: &CheckedProgram,
     scope: &HashMap<String, HostType>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
+    // chelis#405: host-lane scalar forward-mode AD. When the callee is a
+    // `grad(...)` form differentiating a scalar `f32 -> f32` (or
+    // multi-scalar-param) top-level def, emit the dual-propagated derivative
+    // directly. A `None` return falls through to the generic path, which
+    // produces the `__unresolved_grad` marker for the `cmd_build` guard to
+    // reject (container `wrt`, tensor-lane grad, unsupported op).
+    if let Some(grad_lowered) = try_lower_scalar_grad_app(list, program, scope, tensor_helpers) {
+        return grad_lowered;
+    }
     let app_expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
     let kids = children(list);
     let name = kids
