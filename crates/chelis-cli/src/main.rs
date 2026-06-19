@@ -1100,12 +1100,35 @@ fn copy_cost_for_file(
         return copy_cost_for_checked(&checked, &deep_exprs, &deep_exprs);
     }
 
-    let (decls, entry_decls) = load_check_build_decls(file)?;
+    let prepared = chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?;
+    let (decls, entry_decls, linked_program) = match prepared {
+        Some(prepared) => (prepared.decls, prepared.entry_decls, true),
+        None => {
+            let source = fs::read_to_string(file)?;
+            (
+                chelis_surf::parser::parse_str(&source)
+                    .map_err(|e| format!("{}: {e}", file.display()))?,
+                Vec::new(),
+                false,
+            )
+        }
+    };
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
-    let checked =
-        checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
-    copy_cost_for_checked(&checked, &deep_exprs, &entry_deep_exprs)
+    let check_deep_exprs = if linked_program {
+        let live_deep_exprs =
+            drop_unreachable_eval_only_defs(deep_exprs.clone(), &entry_deep_exprs);
+        prune_build_program_to_reachable_defs(&live_deep_exprs, &entry_deep_exprs)
+    } else {
+        deep_exprs.clone()
+    };
+    // Reef package sources are linker-rewritten before they reach the Deep
+    // checker. Mirror `check`/`build`: accept reserved linker names only for
+    // that prepared package path, not for raw single-file inputs.
+    let _linked_guard = linked_program.then(chelis_types::install_linked_program_guard);
+    let checked = checked_program_with_effects(&check_deep_exprs)
+        .map_err(|e| format!("Check errors: {e}"))?;
+    copy_cost_for_checked(&checked, &check_deep_exprs, &entry_deep_exprs)
 }
 
 fn copy_cost_for_checked(
@@ -2167,19 +2190,21 @@ fn cmd_build(
         _ => None,
     };
 
-    let preserve_host_library_surface =
-        if target == "c" && pruned_deep_exprs.len() != full_deep_exprs.len() {
-            let full_checked = checked_program_with_effects(&full_deep_exprs)
-                .map_err(|e| format!("Check errors: {e}"))?;
-            chelis_ir::host::try_lower_compiled_program(&full_checked)
-                .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
-                .host
-                .as_ref()
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false)
-        } else {
-            false
-        };
+    let preserve_host_library_surface = if prepared.is_none()
+        && target == "c"
+        && pruned_deep_exprs.len() != full_deep_exprs.len()
+    {
+        let full_checked = checked_program_with_effects(&full_deep_exprs)
+            .map_err(|e| format!("Check errors: {e}"))?;
+        chelis_ir::host::try_lower_compiled_program(&full_checked)
+            .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
+            .host
+            .as_ref()
+            .map(chelis_ir::host::host_program_requires_host_backend)
+            .unwrap_or(false)
+    } else {
+        false
+    };
     let deep_exprs = if preserve_host_library_surface {
         full_deep_exprs
     } else {
@@ -5082,19 +5107,6 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
         }
     }
     out
-}
-
-fn load_check_build_decls(
-    file: &Path,
-) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::error::Error>> {
-    if let Some(prepared) =
-        chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?
-    {
-        return Ok((prepared.decls, prepared.entry_decls));
-    }
-    let source = fs::read_to_string(file)?;
-    let decls = chelis_surf::parser::parse_str(&source)?;
-    Ok((decls.clone(), decls))
 }
 
 fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::error::Error>> {

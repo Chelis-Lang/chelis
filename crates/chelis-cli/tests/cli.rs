@@ -268,6 +268,48 @@ fn cost_json_omits_bytes_for_symbolic_copy_shapes() {
 }
 
 #[test]
+fn cost_json_accepts_reef_linked_package_names() {
+    let dir = tempdir().expect("tempdir");
+    let pkg = dir.path().join("linked-cost");
+    fs::create_dir_all(pkg.join("src")).expect("create src");
+    write_file(
+        &pkg.join("reef.toml"),
+        r#"[package]
+name = "linked-cost"
+version = "0.1.0"
+compiler = "=0.7.27"
+module_prefix = "LinkedCost"
+"#,
+    );
+    write_file(
+        &pkg.join("src/helper.ch"),
+        r#"module LinkedCost.Helper
+export (double)
+def double(x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)
+"#,
+    );
+    let main_path = pkg.join("src/main.ch");
+    write_file(
+        &main_path,
+        r#"module LinkedCost.Main
+import LinkedCost.Helper (double)
+export (main)
+def main(x: tensor[2, f32]) -> tensor[2, f32] = double(x)
+"#,
+    );
+
+    let json = run_cost_json(&main_path);
+
+    assert_eq!(json["file"], main_path.display().to_string());
+    assert!(
+        json["functions"]
+            .as_array()
+            .is_some_and(|functions| !functions.is_empty()),
+        "linked package cost output must include at least one function: {json}"
+    );
+}
+
+#[test]
 fn cost_json_fixture_baseline_matches_documented_examples() {
     let baseline_path = example_path("../../docs/copy_drop_fixture_fitness_baseline.json");
     let baseline: Value =

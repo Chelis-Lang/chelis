@@ -1056,9 +1056,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         let pty = param_host_type(param)
             .or_else(|| declared_param_tys.get(index).cloned())
             .filter(|ty| *ty != HostType::Unknown)?;
-        let HostType::Tensor(tensor_ty) = pty else {
-            return None;
-        };
+        let tensor_ty = tensor_type_from_host_input(&pty)?;
         scope.insert(pname, tensor_ty);
     }
 
@@ -6060,9 +6058,6 @@ fn call_graph_reaches_any(
     start: &str,
     targets: &HashSet<String>,
 ) -> bool {
-    if targets.contains(start) {
-        return true;
-    }
     let mut visited = HashSet::new();
     let mut stack = graph
         .get(start)
@@ -8208,6 +8203,74 @@ mod tests {
             .filter(|node| matches!(node.op, RiscOp::Copy))
             .count();
         assert_eq!(copy_count, 1, "{:?}", dag.nodes());
+    }
+
+    #[test]
+    fn named_entry_dag_accepts_scalar_numeric_params() {
+        let checked = parse_and_check(
+            r#"
+                (def {} add_scalar
+                  (fn {type: (t-fn {}
+                                (t-prim {} f32)
+                                (t-prim {} f32)
+                                (t-prim {} f32))}
+                    (params {}
+                      (x {type: (t-prim {} f32)})
+                      (y {type: (t-prim {} f32)}))
+                    (app {type: (t-prim {} f32)}
+                      (var {} add)
+                      (var {} x)
+                      (var {} y))))
+            "#,
+        );
+
+        let dag = lower_named_tensor_entry_dag(&checked, "add_scalar").expect("lower scalar entry");
+        let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
+
+        assert_eq!(root.op, RiscOp::Add, "{:?}", dag.nodes());
+        let scalar_loads = dag
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(node.op, RiscOp::Load { .. })
+                    && node.output_type.dims.is_empty()
+                    && node.output_type.precision == Prim::F32
+            })
+            .count();
+        assert_eq!(scalar_loads, 2, "{:?}", dag.nodes());
+    }
+
+    #[test]
+    fn call_graph_recursion_detection_does_not_mark_every_function_recursive() {
+        let graph = HashMap::from([
+            ("plain".to_string(), HashSet::from(["leaf".to_string()])),
+            ("leaf".to_string(), HashSet::new()),
+            (
+                "self_rec".to_string(),
+                HashSet::from(["self_rec".to_string()]),
+            ),
+            ("mut_a".to_string(), HashSet::from(["mut_b".to_string()])),
+            ("mut_b".to_string(), HashSet::from(["mut_a".to_string()])),
+        ]);
+
+        let recursive = recursive_top_level_fn_names_from_graph(&graph);
+
+        assert!(
+            !recursive.contains("plain"),
+            "ordinary top-level callers must not be classified as recursive"
+        );
+        assert!(
+            !recursive.contains("leaf"),
+            "leaf functions must not be classified as recursive"
+        );
+        assert!(
+            recursive.contains("self_rec"),
+            "direct self-recursion must still be detected"
+        );
+        assert!(
+            recursive.contains("mut_a") && recursive.contains("mut_b"),
+            "mutual recursion must still be detected"
+        );
     }
 
     #[test]
