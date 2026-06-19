@@ -1,0 +1,43 @@
+name: LOC Report
+
+# Weekly LOC report refresh. Previously this ran as a job in ci.yml on every
+# push to main and committed a github-actions[bot] "Update LOC report" commit
+# per merge — pure bookkeeping churn on the per-merge path. Moved to a weekly
+# schedule (+ manual dispatch) in #413 so main no longer gets a bot commit on
+# every merge; this file (the new workflow) was dropped during the 0.8.0
+# release work while #413's ci.yml job-removal + test_gate.py changes landed,
+# so it is restored here. Out of the gate.py developer-quartet scope by design
+# (already in scripts/test_gate.py NON_GATE_WORKFLOWS).
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  loc-report:
+    name: LOC Report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Pinned to v8.1.0 — see ci.yml lint-and-unit job for rationale.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Generate LOC report
+        run: cd py && uv run loc-report
+
+      - name: Commit LOC report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/loc_report.md
+          if git diff --cached --quiet; then
+            echo "LOC report unchanged"
+            exit 0
+          fi
+          git commit -m "Update LOC report"
+          git push || echo "LOC report push skipped: token lacks write access"
