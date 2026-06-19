@@ -982,6 +982,7 @@ impl DesugarCtx {
             ("property_quantifiers".to_string(), params_node.clone()),
             ("property_preconditions".to_string(), precondition_node),
         ];
+        let mut contract_ids = Vec::new();
         for option in options {
             match option {
                 PropertyOption::Tolerance(value, _) => meta_entries.push((
@@ -996,7 +997,14 @@ impl DesugarCtx {
                     "property_samples".to_string(),
                     self.desugar_expr_with_scope(value, &param_scope),
                 )),
+                PropertyOption::Contract(id, _) => contract_ids.push(string(id)),
             }
+        }
+        if !contract_ids.is_empty() {
+            meta_entries.push((
+                "property_contracts".to_string(),
+                node("tuple", contract_ids),
+            ));
         }
 
         let fn_node = node(
@@ -2217,6 +2225,55 @@ mod tests {
             s(),
         )));
         assert_eq!(result, "(lit {type: (t-prim {} string)} \"hello\")");
+    }
+
+    #[test]
+    fn property_contracts_desugar_to_repeatable_metadata() {
+        let source = r#"@property reflected forall(x: f32):
+  x == x
+  with contract = "std.normal_cdf.reflection"
+  with contract = "std.normal_cdf.range"
+"#;
+        let decls = crate::parser::parse_str(source).expect("parse");
+        let deep = desugar_program(&decls);
+        let contracts = deep
+            .iter()
+            .filter_map(|expr| match expr {
+                deep::Expr::List(list, _) => Some(list),
+                _ => None,
+            })
+            .find(|list| {
+                matches!(
+                    list.elements.first(),
+                    Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)) if tag == "def"
+                )
+            })
+            .and_then(|list| match list.elements.get(1) {
+                Some(deep::Expr::Map(meta, _)) => meta
+                    .entries
+                    .iter()
+                    .find(|(name, _)| name == "property_contracts")
+                    .map(|(_, value)| value),
+                _ => None,
+            })
+            .and_then(|value| match value {
+                deep::Expr::List(list, _) => Some(
+                    list.elements
+                        .iter()
+                        .skip(2)
+                        .filter_map(|expr| match expr {
+                            deep::Expr::Atom(deep::Atom::Str(value), _) => Some(value.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .expect("property_contracts metadata");
+        assert_eq!(
+            contracts,
+            vec!["std.normal_cdf.reflection", "std.normal_cdf.range"]
+        );
     }
 
     // --- Variables ---

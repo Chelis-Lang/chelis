@@ -551,6 +551,7 @@ pub enum WirePropertyOption {
     Tolerance { value: WireSurfExpr, span: Span },
     Seed { value: WireSurfExpr, span: Span },
     Samples { value: WireSurfExpr, span: Span },
+    Contract { id: String, span: Span },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1154,6 +1155,26 @@ mod tests {
         match serde_json::from_str::<WireRiscOp>(&one_hot).unwrap() {
             WireRiscOp::OneHot { vocab } => assert_eq!(vocab, 7),
             other => panic!("expected one_hot wire op, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_property_contract_option_round_trips() {
+        let option = WirePropertyOption::Contract {
+            id: "std.normal_cdf.reflection".to_string(),
+            span: Span { offset: 7, len: 31 },
+        };
+        let json = serde_json::to_string(&option).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"contract","id":"std.normal_cdf.reflection","span":{"offset":7,"len":31}}"#
+        );
+        match serde_json::from_str::<WirePropertyOption>(&json).unwrap() {
+            WirePropertyOption::Contract { id, span } => {
+                assert_eq!(id, "std.normal_cdf.reflection");
+                assert_eq!(span, Span { offset: 7, len: 31 });
+            }
+            other => panic!("expected contract option, got {other:?}"),
         }
     }
 

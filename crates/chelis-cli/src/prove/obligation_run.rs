@@ -13,6 +13,7 @@
 //! Tier B SMT lowering uses).
 #![cfg(feature = "chelis-prove")]
 
+use chelis_prove::CompositeVerdict;
 use chelis_prove::obligation_engine::{
     ObligationOutcome, ObligationRunOptions, ObligationRunResult, ObligationStatus, ObligationTier,
     run_surf_source_obligations,
@@ -67,6 +68,29 @@ pub(super) fn run_obligations(
     status
 }
 
+/// Type-check an already-linked Surf declaration set without collecting
+/// producer obligations. This preserves the prove command's module-check
+/// invariant for imported files that have no opaque producers, while avoiding
+/// a lossy Surf-source round-trip through linker-internal names.
+pub(super) fn check_linked_decls(
+    decls: &[Decl],
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Status {
+    let deep_exprs = chelis_surf::desugar::desugar_program(decls);
+    let _linked = chelis_types::install_linked_program_guard();
+    if let Err(infer) = chelis_types::check_typed_program(&deep_exprs) {
+        let messages = infer
+            .errors
+            .iter()
+            .map(|err| err.message.clone())
+            .collect::<Vec<_>>();
+        emit_check_failure(options, &messages, totals);
+        return Status::Error;
+    }
+    Status::Passed
+}
+
 /// Emit a module type-check failure as a prove error record (RT3-F2). The
 /// check diagnostics are surfaced so the failure is visible, never hidden.
 fn emit_check_failure(options: &ProveOptions<'_>, messages: &[String], totals: &mut Summary) {
@@ -95,29 +119,29 @@ fn render_outcome(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
-    match outcome.status {
-        ObligationStatus::Error => {
+    match obligation_display_status(outcome) {
+        "error" => {
             // A collection-time declaration error (covered-or-rejected /
             // signature rejection). Always surfaces.
             totals.errors += 1;
             emit(outcome, options);
             Status::Error
         }
-        ObligationStatus::Passed => {
+        "passed" => {
             totals.total += 1;
             totals.obligations += 1;
             totals.passed += 1;
             emit(outcome, options);
             Status::Passed
         }
-        ObligationStatus::Failed => {
+        "failed" => {
             totals.total += 1;
             totals.obligations += 1;
             totals.failed += 1;
             emit(outcome, options);
             Status::Failed
         }
-        ObligationStatus::Unsupported => {
+        _ => {
             totals.total += 1;
             totals.obligations += 1;
             totals.unsupported += 1;
@@ -127,13 +151,26 @@ fn render_outcome(
     }
 }
 
+fn obligation_display_status(outcome: &ObligationOutcome) -> &'static str {
+    if outcome.status == ObligationStatus::Error {
+        return "error";
+    }
+    match outcome.composite_verdict {
+        CompositeVerdict::Failed => "failed",
+        CompositeVerdict::Invalid | CompositeVerdict::Unsupported => "unsupported",
+        CompositeVerdict::Proven
+        | CompositeVerdict::ProvenModuloFuzzValidatedContract
+        | CompositeVerdict::ProvenModuloAssertedAxiom => match outcome.status {
+            ObligationStatus::Passed => "passed",
+            ObligationStatus::Failed => "failed",
+            ObligationStatus::Unsupported => "unsupported",
+            ObligationStatus::Error => "error",
+        },
+    }
+}
+
 fn emit(outcome: &ObligationOutcome, options: &ProveOptions<'_>) {
-    let status = match outcome.status {
-        ObligationStatus::Passed => "passed",
-        ObligationStatus::Failed => "failed",
-        ObligationStatus::Unsupported => "unsupported",
-        ObligationStatus::Error => "error",
-    };
+    let status = obligation_display_status(outcome);
     if options.json {
         if outcome.status == ObligationStatus::Error {
             // Declaration errors carry no producer/name; emit a minimal
@@ -145,6 +182,8 @@ fn emit(outcome: &ObligationOutcome, options: &ProveOptions<'_>) {
                     "kind": "obligation",
                     "obligation_kind": "invariant_producer",
                     "status": "error",
+                    "composite_verdict": outcome.composite_verdict.as_str(),
+                    "assumptions": &outcome.assumptions,
                     "reason": outcome.reason,
                 })
             );
@@ -157,6 +196,8 @@ fn emit(outcome: &ObligationOutcome, options: &ProveOptions<'_>) {
             "producer": outcome.meta.producer,
             "name": outcome.name,
             "status": status,
+            "composite_verdict": outcome.composite_verdict.as_str(),
+            "assumptions": &outcome.assumptions,
             "proof_tier": outcome.proof_tier.as_str(),
             "samples": outcome.samples,
             "seed": outcome.seed,
@@ -166,6 +207,7 @@ fn emit(outcome: &ObligationOutcome, options: &ProveOptions<'_>) {
         }
         if let Some(cx) = &outcome.counterexample {
             value["counterexample"] = cx.clone();
+            value["shrink_steps"] = json!(outcome.shrink_steps);
         }
         if let Some(r) = &outcome.reason {
             value["reason"] = json!(r);

@@ -13,12 +13,15 @@
 //! Tier-C-only property path in the parent module.
 #![cfg(feature = "chelis-prove")]
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use chelis_prove::property_runner::{
     PropertyOutcome, PropertyRunOptions, PropertyRunResult, PropertyTier,
-    run_deep_source_properties, run_surf_source_properties,
+    run_deep_source_properties, run_surf_decls_properties_with_contract_decls,
+    run_surf_source_properties,
 };
+use chelis_surf::ast::Decl;
 use serde_json::json;
 
 use super::{ProveOptions, Status, Summary};
@@ -50,6 +53,33 @@ pub(super) fn run_surf_properties_shared(
         // (prove_surf_file parses first); treat as no properties.
         Err(_) => return Status::Passed,
     };
+    render_all(path, &outcomes, "surf", options, totals)
+}
+
+pub(super) fn run_surf_linked_properties_shared(
+    path: &Path,
+    all_decls: &[Decl],
+    entry_decls: &[Decl],
+    trusted_contract_decls: &[Decl],
+    display_names: &BTreeMap<String, String>,
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Status {
+    let mut outcomes = match run_surf_decls_properties_with_contract_decls(
+        all_decls,
+        entry_decls,
+        all_decls,
+        trusted_contract_decls,
+        &run_opts(options),
+    ) {
+        Ok(PropertyRunResult::Ran(o)) => o,
+        Err(message) => return emit_discovery_error(path, &message, options, totals),
+    };
+    for outcome in &mut outcomes {
+        if let Some(display_name) = display_names.get(&outcome.name) {
+            outcome.name = display_name.clone();
+        }
+    }
     render_all(path, &outcomes, "surf", options, totals)
 }
 
@@ -185,6 +215,8 @@ fn emit(
             "kind": "property",
             "name": outcome.name,
             "status": status,
+            "composite_verdict": outcome.composite_verdict.as_str(),
+            "assumptions": &outcome.assumptions,
             "samples": outcome.samples,
             "seed": outcome.seed,
             "source": json!({ "kind": source_kind, "file": path.display().to_string() }),
@@ -192,9 +224,12 @@ fn emit(
         if outcome.proof_tier != PropertyTier::None {
             value["proof_tier"] = json!(outcome.proof_tier.as_str());
         }
+        if outcome.proof_tier == PropertyTier::Smt {
+            value["arith_model"] = json!("real");
+        }
         if let Some(cx) = &outcome.counterexample {
             value["counterexample"] = cx.clone();
-            value["shrink_steps"] = json!(0);
+            value["shrink_steps"] = json!(outcome.shrink_steps);
         }
         if let Some(r) = &outcome.reason {
             value["reason"] = json!(r);

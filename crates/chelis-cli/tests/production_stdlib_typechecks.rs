@@ -98,3 +98,8 @@ fn production_stdlib_test_typechecks() {
 fn production_stdlib_process_typechecks() {
     assert_stdlib_clean("src/process.ch");
 }
+
+#[test]
+fn production_stdlib_contracts_typechecks() {
+    assert_stdlib_clean("src/contracts.ch");
+}

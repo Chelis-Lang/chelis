@@ -3165,6 +3165,12 @@ fn reconstruct_graph_from_lockfile(
                 );
             }
             LockSource::Path { path } => {
+                if dep.name == CHELIS_STD_PACKAGE_NAME {
+                    return Err(
+                        "`chelis-std` is the bundled language runtime and cannot be loaded from a path dependency"
+                            .to_string(),
+                    );
+                }
                 let dep_root = root.join(path).canonicalize().map_err(|e| {
                     format!("failed to resolve path dependency `{}`: {e}", dep.name)
                 })?;
@@ -3335,6 +3341,12 @@ fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
                     "dependency `{name}` cannot specify both `version` and `path`"
                 ));
             }
+            (_, Some(_)) if name == CHELIS_STD_PACKAGE_NAME => {
+                return Err(
+                    "`chelis-std` is the language runtime bundled with the compiler; it cannot be supplied as a path dependency"
+                        .to_string(),
+                );
+            }
             (None, None) => {
                 return Err(format!(
                     "dependency `{name}` must specify exactly one of `version` or `path`"
@@ -3433,6 +3445,12 @@ fn resolve_package_recursive(
     for (dep_name, dep) in &manifest.dependencies {
         match (&dep.version, &dep.path) {
             (_, Some(path)) => {
+                if dep_name == CHELIS_STD_PACKAGE_NAME {
+                    return Err(
+                        "`chelis-std` is the language runtime bundled with the compiler; it cannot be supplied as a path dependency"
+                            .to_string(),
+                    );
+                }
                 let dep_root = root.join(path);
                 let dep_root = dep_root
                     .canonicalize()
@@ -5323,6 +5341,7 @@ fn rewrite_property_option(option: &PropertyOption, resolver: &NameResolver) -> 
         PropertyOption::Samples(value, span) => {
             PropertyOption::Samples(rewrite_expr(value, resolver, &mut locals), *span)
         }
+        PropertyOption::Contract(id, span) => PropertyOption::Contract(id.clone(), *span),
     }
 }
 

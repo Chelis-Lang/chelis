@@ -238,6 +238,7 @@ fn check_surf_decls(
                         surf::PropertyOption::Tolerance(expr, _)
                         | surf::PropertyOption::Seed(expr, _)
                         | surf::PropertyOption::Samples(expr, _) => expr,
+                        surf::PropertyOption::Contract(_, _) => continue,
                     };
                     check_surf_expr(ctx, source, expr, catalog, module, out);
                 }

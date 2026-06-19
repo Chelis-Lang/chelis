@@ -282,8 +282,55 @@ fn prove_surf_file(
     #[cfg(feature = "chelis-prove")]
     {
         let _ = (&flat, &parsed);
-        let prop_status = property_run::run_surf_properties_shared(path, &source, options, totals);
+        let linked_program = chelis_reef::prepare_program_for_file(path);
+        let prop_status = match &linked_program {
+            Ok(Some(prepared)) => {
+                let display_names = linked_property_display_names(&flat, &prepared.entry_decls);
+                property_run::run_surf_linked_properties_shared(
+                    path,
+                    &prepared.decls,
+                    &prepared.entry_decls,
+                    &prepared.stdlib_decls,
+                    &display_names,
+                    options,
+                    totals,
+                )
+            }
+            Ok(None) => property_run::run_surf_properties_shared(path, &source, options, totals),
+            Err(message) => {
+                totals.errors += 1;
+                if options.json {
+                    println!(
+                        "{}",
+                        json!({
+                            "kind": "error",
+                            "stage": "property-discovery",
+                            "reason": format!("import resolution failed; properties not verified: {message}"),
+                            "source": json!({ "kind": "surf", "file": path.display().to_string() }),
+                        })
+                    );
+                } else {
+                    eprintln!(
+                        "prove error: import resolution failed in {}; properties not verified: {message}",
+                        path.display()
+                    );
+                }
+                Status::Error
+            }
+        };
         file_status = combine_status(file_status, prop_status);
+
+        let obligation_count = count_invariant_opaque_surf(&flat);
+        let ob_status = match (&linked_program, obligation_count) {
+            (Ok(Some(prepared)), 0) => {
+                obligation_run::check_linked_decls(&prepared.decls, options, totals)
+            }
+            (Ok(None), 0) => obligation_run::run_obligations(&parsed, options, totals),
+            (Err(_), 0) => Status::Passed,
+            (Ok(_), _) => obligation_run::run_obligations(&parsed, options, totals),
+            (Err(_), _) => Status::Passed,
+        };
+        file_status = combine_status(file_status, ob_status);
     }
     #[cfg(not(feature = "chelis-prove"))]
     {
@@ -292,13 +339,6 @@ fn prove_surf_file(
             let status = prove_surf_property(&flat, &parsed, &property, options, totals);
             file_status = combine_status(file_status, status);
         }
-    }
-    // Derived producer obligations (RFC D-OBLIG): collected from the
-    // FULL module-bearing decls so the export/module wrappers survive.
-    #[cfg(feature = "chelis-prove")]
-    {
-        let ob_status = obligation_run::run_obligations(&parsed, options, totals);
-        file_status = combine_status(file_status, ob_status);
     }
     // CR2-5: warn whenever obligations were NOT SMT-verified, gated on the
     // actual capability (`smt`) rather than on the optional `chelis-prove`
@@ -321,6 +361,30 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
         }
     }
     out
+}
+
+#[cfg(feature = "chelis-prove")]
+fn linked_property_display_names(
+    source_entry_decls: &[Decl],
+    linked_entry_decls: &[Decl],
+) -> BTreeMap<String, String> {
+    property_names(linked_entry_decls)
+        .into_iter()
+        .zip(property_names(source_entry_decls))
+        .collect()
+}
+
+#[cfg(feature = "chelis-prove")]
+fn property_names(decls: &[Decl]) -> Vec<String> {
+    let mut names = Vec::new();
+    for decl in decls {
+        match decl {
+            Decl::Module { decls, .. } => names.extend(property_names(decls)),
+            Decl::Property { name, .. } => names.push(name.clone()),
+            _ => {}
+        }
+    }
+    names
 }
 
 /// Emit a module type-check failure as a prove error record, for the default
@@ -455,15 +519,16 @@ fn prove_surf_property(
         match eval_surf_sample(decls, property, &sample, false) {
             Ok(true) => {}
             Ok(false) => {
+                let (shrunk, shrink_steps) = shrink_surf_counterexample(decls, property, sample);
                 totals.failed += 1;
                 emit_record(
                     options,
                     property,
                     "failed",
                     accepted,
-                    Some(counterexample_json(&sample)),
+                    Some(counterexample_json(&shrunk)),
                     None,
-                    0,
+                    shrink_steps,
                 );
                 return Status::Failed;
             }
@@ -942,6 +1007,323 @@ fn counterexample_json(sample: &Sample) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+const MAX_SHRINK_STEPS: usize = 64;
+
+#[cfg(not(feature = "chelis-prove"))]
+fn shrink_surf_counterexample(
+    decls: &[Decl],
+    property: &Property,
+    sample: Sample,
+) -> (Sample, usize) {
+    shrink_counterexample(sample, &property.params, |candidate| {
+        sample_still_fails_surf(decls, property, candidate)
+    })
+}
+
+fn shrink_deep_counterexample(
+    exprs: &[DeepExpr],
+    property: &DeepProperty,
+    sample: Sample,
+) -> (Sample, usize) {
+    shrink_counterexample(sample, &property.params, |candidate| {
+        sample_still_fails_deep(exprs, property, candidate)
+    })
+}
+
+fn shrink_counterexample<F>(
+    mut sample: Sample,
+    params: &[Param],
+    mut still_fails: F,
+) -> (Sample, usize)
+where
+    F: FnMut(&Sample) -> bool,
+{
+    let mut steps = 0usize;
+    while steps < MAX_SHRINK_STEPS {
+        let mut changed = false;
+        for index in 0..sample.values.len() {
+            let Some(ty) = params
+                .iter()
+                .find(|param| param.name == sample.values[index].name)
+                .and_then(|param| param.ty.as_ref())
+            else {
+                continue;
+            };
+            for candidate in shrink_candidates(&sample.values[index], ty) {
+                if candidate.json == sample.values[index].json {
+                    continue;
+                }
+                let mut trial = sample.clone();
+                trial.values[index] = candidate;
+                if still_fails(&trial) {
+                    sample = trial;
+                    steps += 1;
+                    changed = true;
+                    break;
+                }
+            }
+            if changed || steps >= MAX_SHRINK_STEPS {
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (sample, steps)
+}
+
+#[cfg(not(feature = "chelis-prove"))]
+fn sample_still_fails_surf(decls: &[Decl], property: &Property, sample: &Sample) -> bool {
+    if !property.preconditions.is_empty() {
+        match eval_surf_sample(decls, property, sample, true) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return false,
+        }
+    }
+    matches!(eval_surf_sample(decls, property, sample, false), Ok(false))
+}
+
+fn sample_still_fails_deep(exprs: &[DeepExpr], property: &DeepProperty, sample: &Sample) -> bool {
+    if !property.preconditions.is_empty() {
+        match eval_deep_sample(exprs, property, sample, true) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return false,
+        }
+    }
+    matches!(eval_deep_sample(exprs, property, sample, false), Ok(false))
+}
+
+fn shrink_candidates(value: &SampleValue, ty: &TypeExpr) -> Vec<SampleValue> {
+    match ty {
+        TypeExpr::Named(type_name, _) if type_name == "bool" => value
+            .json
+            .as_bool()
+            .and_then(|current| current.then(|| bool_sample(&value.name, false)))
+            .into_iter()
+            .collect(),
+        TypeExpr::Named(type_name, _) if is_int_width(type_name) => value
+            .json
+            .as_i64()
+            .map(|current| {
+                let mut candidates = Vec::new();
+                push_unique_int_candidate(&mut candidates, &value.name, type_name, current, 0);
+                push_unique_int_candidate(
+                    &mut candidates,
+                    &value.name,
+                    type_name,
+                    current,
+                    current / 2,
+                );
+                push_unique_int_candidate(
+                    &mut candidates,
+                    &value.name,
+                    type_name,
+                    current,
+                    current.signum(),
+                );
+                candidates
+            })
+            .unwrap_or_default(),
+        TypeExpr::Named(type_name, _) if type_name == "f32" || type_name == "f64" => value
+            .json
+            .as_f64()
+            .map(|current| {
+                let mut candidates = Vec::new();
+                push_unique_float_candidate(&mut candidates, &value.name, type_name, current, 0.0);
+                push_unique_float_candidate(
+                    &mut candidates,
+                    &value.name,
+                    type_name,
+                    current,
+                    current / 2.0,
+                );
+                candidates
+            })
+            .unwrap_or_default(),
+        TypeExpr::Named(type_name, _) if type_name == "string" => value
+            .json
+            .as_str()
+            .map(|current| {
+                let mut candidates = Vec::new();
+                push_unique_string_candidate(&mut candidates, &value.name, current, "");
+                if !current.is_empty() {
+                    push_unique_string_candidate(
+                        &mut candidates,
+                        &value.name,
+                        current,
+                        &current[..current.len() / 2],
+                    );
+                }
+                candidates
+            })
+            .unwrap_or_default(),
+        TypeExpr::Tensor(_, precision, _) => tensor_shrink_candidates(value, precision),
+        _ => Vec::new(),
+    }
+}
+
+fn push_unique_int_candidate(
+    candidates: &mut Vec<SampleValue>,
+    name: &str,
+    type_name: &str,
+    current: i64,
+    candidate: i64,
+) {
+    if candidate != current
+        && !candidates
+            .iter()
+            .any(|sample| sample.json.as_i64() == Some(candidate))
+    {
+        candidates.push(int_sample(name, type_name, candidate));
+    }
+}
+
+fn push_unique_float_candidate(
+    candidates: &mut Vec<SampleValue>,
+    name: &str,
+    type_name: &str,
+    current: f64,
+    candidate: f64,
+) {
+    if (candidate - current).abs() > f64::EPSILON
+        && !candidates.iter().any(|sample| {
+            sample
+                .json
+                .as_f64()
+                .is_some_and(|prior| (prior - candidate).abs() <= f64::EPSILON)
+        })
+    {
+        candidates.push(float_sample(name, type_name, candidate));
+    }
+}
+
+fn push_unique_string_candidate(
+    candidates: &mut Vec<SampleValue>,
+    name: &str,
+    current: &str,
+    candidate: &str,
+) {
+    if candidate != current
+        && !candidates
+            .iter()
+            .any(|sample| sample.json.as_str() == Some(candidate))
+    {
+        candidates.push(string_sample(name, candidate));
+    }
+}
+
+fn bool_sample(name: &str, value: bool) -> SampleValue {
+    scalar_sample(
+        name,
+        Expr::Lit(Literal::Bool(value), chelis_deep::Span::new(0, 0)),
+        deep_lit(deep_bool(value), "bool"),
+        json!(value),
+    )
+}
+
+fn int_sample(name: &str, type_name: &str, value: i64) -> SampleValue {
+    let (lo, hi) = chelis_types::types::Prim::parse_name(type_name)
+        .and_then(|p| p.integer_fuzz_bounds())
+        .expect("int shrink only uses int widths");
+    let value = value.clamp(lo, hi);
+    let lit = Expr::Lit(Literal::Int(value), chelis_deep::Span::new(0, 0));
+    let surf_expr = if type_name == "int32" {
+        lit
+    } else {
+        cast_expr(lit, type_name)
+    };
+    scalar_sample(
+        name,
+        surf_expr,
+        deep_lit(deep_int(value), type_name),
+        json!(value),
+    )
+}
+
+fn float_sample(name: &str, type_name: &str, value: f64) -> SampleValue {
+    let lit = Expr::Lit(Literal::Float(value), chelis_deep::Span::new(0, 0));
+    let surf_expr = if type_name == "f64" {
+        cast_expr(lit, "f64")
+    } else {
+        lit
+    };
+    scalar_sample(
+        name,
+        surf_expr,
+        deep_lit(deep_float(value), type_name),
+        json!(value),
+    )
+}
+
+fn string_sample(name: &str, value: &str) -> SampleValue {
+    scalar_sample(
+        name,
+        Expr::Lit(
+            Literal::Str(value.to_string()),
+            chelis_deep::Span::new(0, 0),
+        ),
+        deep_lit(deep_string(value), "string"),
+        json!(value),
+    )
+}
+
+fn tensor_shrink_candidates(value: &SampleValue, precision: &str) -> Vec<SampleValue> {
+    let Some(shape) = value
+        .json
+        .get("shape")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_u64().map(|dim| dim as usize))
+                .collect::<Vec<_>>()
+        })
+    else {
+        return Vec::new();
+    };
+    let Some(data) = value
+        .json
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_f64)
+                .collect::<Vec<_>>()
+        })
+    else {
+        return Vec::new();
+    };
+    if shape.iter().product::<usize>() != data.len() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    let zeros = vec![0.0; data.len()];
+    if data.iter().any(|value| value.abs() > f64::EPSILON) {
+        candidates.push(tensor_sample(&value.name, &shape, precision, &zeros));
+    }
+    let halves = data.iter().map(|value| value / 2.0).collect::<Vec<_>>();
+    if halves
+        .iter()
+        .zip(&data)
+        .any(|(candidate, current)| (candidate - current).abs() > f64::EPSILON)
+    {
+        candidates.push(tensor_sample(&value.name, &shape, precision, &halves));
+    }
+    candidates
+}
+
+fn tensor_sample(name: &str, shape: &[usize], precision: &str, values: &[f64]) -> SampleValue {
+    SampleValue {
+        name: name.to_string(),
+        surf_expr: tensor_surf_expr(shape, precision, values),
+        deep_expr: tensor_deep_expr(shape, precision, values),
+        json: json!({ "shape": shape, "data": values }),
+        tensor_binding: None,
+    }
+}
+
 fn prove_deep_file(
     path: &Path,
     options: &ProveOptions<'_>,
@@ -1185,6 +1567,8 @@ fn emit_obligation_record(
                     "kind": "obligation",
                     "obligation_kind": "invariant_producer",
                     "status": "error",
+                    "composite_verdict": outcome.composite_verdict.as_str(),
+                    "assumptions": &outcome.assumptions,
                     "reason": outcome.reason,
                 })
             );
@@ -1197,6 +1581,8 @@ fn emit_obligation_record(
             "producer": outcome.meta.producer,
             "name": outcome.name,
             "status": status,
+            "composite_verdict": outcome.composite_verdict.as_str(),
+            "assumptions": &outcome.assumptions,
             "proof_tier": outcome.proof_tier.as_str(),
             "samples": outcome.samples,
             "seed": outcome.seed,
@@ -1206,6 +1592,7 @@ fn emit_obligation_record(
         }
         if let Some(cx) = &outcome.counterexample {
             value["counterexample"] = cx.clone();
+            value["shrink_steps"] = json!(outcome.shrink_steps);
         }
         if let Some(r) = &outcome.reason {
             value["reason"] = json!(r);
@@ -1236,10 +1623,9 @@ fn emit_obligation_record(
     }
 }
 
-/// Count opaque types that carry a declared invariant in flattened Surf
-/// decls. Used only in non-smt builds to warn that their producer
-/// obligations were not SMT-verified.
-#[cfg(not(feature = "smt"))]
+/// Count opaque types that carry a declared invariant in flattened Surf decls.
+/// The capability path uses this to skip a no-op obligation collection pass;
+/// non-smt builds also use it to warn that obligations were not SMT-verified.
 fn count_invariant_opaque_surf(decls: &[Decl]) -> usize {
     decls
         .iter()
@@ -1372,15 +1758,16 @@ fn prove_deep_property(
         match eval_deep_sample(exprs, property, &sample, false) {
             Ok(true) => {}
             Ok(false) => {
+                let (shrunk, shrink_steps) = shrink_deep_counterexample(exprs, property, sample);
                 totals.failed += 1;
                 emit_deep_record(
                     options,
                     property,
                     "failed",
                     accepted,
-                    Some(counterexample_json(&sample)),
+                    Some(counterexample_json(&shrunk)),
                     None,
-                    0,
+                    shrink_steps,
                 );
                 return Status::Failed;
             }
@@ -1829,6 +2216,15 @@ fn matches_filter(name: &str, only: Option<&str>) -> bool {
     name.contains(pattern)
 }
 
+fn simple_composite_verdict(status: &str, samples: usize) -> &'static str {
+    match status {
+        "passed" if samples > 0 => "proven_modulo_fuzz_validated_contract",
+        "passed" => "unsupported",
+        "failed" => "failed",
+        _ => "unsupported",
+    }
+}
+
 #[cfg(not(feature = "chelis-prove"))]
 fn emit_record(
     options: &ProveOptions<'_>,
@@ -1844,6 +2240,8 @@ fn emit_record(
             "kind": "property",
             "name": property.name,
             "status": status,
+            "composite_verdict": simple_composite_verdict(status, samples),
+            "assumptions": [],
             "samples": samples,
             "seed": options.effective_seed(property.seed),
             "source": source_json(property, options),
@@ -1883,6 +2281,8 @@ fn emit_error(options: &ProveOptions<'_>, property: &Property, message: &str) {
                 "kind": "property",
                 "name": property.name,
                 "status": "error",
+                "composite_verdict": "unsupported",
+                "assumptions": [],
                 "samples": 0,
                 "seed": options.effective_seed(property.seed),
                 "reason": message,
@@ -1908,6 +2308,8 @@ fn emit_deep_record(
             "kind": "property",
             "name": property.name,
             "status": status,
+            "composite_verdict": simple_composite_verdict(status, samples),
+            "assumptions": [],
             "samples": samples,
             "seed": options.effective_seed(property.seed),
             "source": source_json_deep(property, options),
@@ -1960,6 +2362,8 @@ fn emit_deep_error(options: &ProveOptions<'_>, property: &DeepProperty, message:
                 "kind": "property",
                 "name": property.name,
                 "status": "error",
+                "composite_verdict": "unsupported",
+                "assumptions": [],
                 "samples": 0,
                 "seed": options.effective_seed(property.seed),
                 "reason": message,

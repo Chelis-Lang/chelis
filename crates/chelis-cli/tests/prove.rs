@@ -9,6 +9,23 @@ fn write_prop(source: &str) -> tempfile::TempDir {
     dir
 }
 
+#[cfg(feature = "smt")]
+fn write_file(path: &std::path::Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create parent");
+    }
+    std::fs::write(path, contents).expect("write file");
+}
+
+fn property_records(output: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("json line"))
+        .filter(|record| record.get("kind").and_then(Value::as_str) == Some("property"))
+        .collect()
+}
+
 #[test]
 fn prove_passes_filtered_samples() {
     // Pin `--tier fuzz-only` so the test asserts exactly one behavior
@@ -67,6 +84,43 @@ fn prove_reports_counterexample_exit_one() {
 }
 
 #[test]
+fn prove_fuzz_json_shrinks_counterexample() {
+    let dir = write_prop(
+        r#"
+@property always_positive forall(x: f32):
+  x > 0.0
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "10",
+            "--seed",
+            "0",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "failed");
+    assert_eq!(props[0]["counterexample"]["x"], 0.0);
+    assert_eq!(props[0]["shrink_steps"], 1);
+}
+
+#[test]
 fn prove_json_schema_has_property_and_summary_records() {
     let dir = write_prop(
         r#"
@@ -100,6 +154,293 @@ fn prove_json_schema_has_property_and_summary_records() {
     assert_eq!(records[0]["status"], "passed");
     assert_eq!(records[1]["kind"], "summary");
     assert_eq!(records[1]["passed"], 1);
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn prove_surf_reef_input_lowers_against_linked_declarations() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("myapp");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+
+[dependencies]
+mylib = {{ path = "./mylib" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/reef.toml"),
+        &format!(
+            r#"[package]
+name = "mylib"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Mylib"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/src/math.ch"),
+        "module Mylib.Math\nexport (double)\ndef double(x: f32) -> f32 = x + x\n",
+    );
+    let entry = root.join("src/proofs.ch");
+    write_file(
+        &entry,
+        r#"module App.Proofs
+import Mylib.Math (double)
+@property double_identity forall(x: f32):
+  double(x) == x + x
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "smt-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["name"], "double_identity");
+    assert_eq!(props[0]["status"], "passed");
+    assert_eq!(props[0]["proof_tier"], "smt");
+    assert_eq!(props[0]["arith_model"], "real");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn user_smt_property_json_carries_real_arith_model_and_refutation_model() {
+    let dir = write_prop(
+        r#"
+@property false_claim forall(x: f32):
+  x > x
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--json",
+            "--tier",
+            "smt-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "failed");
+    assert_eq!(props[0]["proof_tier"], "smt");
+    assert_eq!(props[0]["arith_model"], "real");
+    assert!(
+        props[0]["counterexample"].get("x").is_some(),
+        "SMT counterexample should surface model bindings: {}",
+        props[0]
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn prove_k1_parity_consumes_bundled_normal_cdf_contract() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("myapp");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+
+[dependencies]
+chelis-std = {{ version = "0.4.0" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    let entry = root.join("src/proofs.ch");
+    write_file(
+        &entry,
+        r#"module App.Proofs
+import Std.Contracts (normal_cdf)
+@property put_call_parity_with_cdf_contract forall(s: f32, k: f32, disc: f32, d1: f32, d2: f32)
+  where s >= 0.0, k >= 0.0, disc >= 0.0, disc <= 1.0:
+  (((s * normal_cdf(d1)) - (k * (disc * normal_cdf(d2)))) - ((k * (disc * normal_cdf(-d2))) - (s * normal_cdf(-d1)))) == (s - (k * disc))
+  with contract = "std.normal_cdf.reflection"
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "smt-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    assert_eq!(prop["name"], "put_call_parity_with_cdf_contract");
+    assert_eq!(prop["status"], "passed");
+    assert_eq!(prop["proof_tier"], "smt");
+    assert_eq!(
+        prop["composite_verdict"],
+        "proven_modulo_fuzz_validated_contract"
+    );
+    let assumptions = prop["assumptions"].as_array().expect("assumptions array");
+    assert!(
+        assumptions
+            .iter()
+            .any(|a| a["name"] == "std.normal_cdf.reflection"
+                && a["discharge"]["evidence"]["implementation"] == "Std.Contracts.normal_cdf"),
+        "reflection assumption must name bundled implementation: {prop}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn contract_rejects_local_linker_shaped_normal_cdf_spoof() {
+    let dir = write_prop(
+        r#"
+def pkg__chelis__std__Std__Contracts__normal_cdf(x: f32) -> f32 = x
+@property spoofed_reflection forall(x: f32):
+  pkg__chelis__std__Std__Contracts__normal_cdf(-x) == 1.0 - pkg__chelis__std__Std__Contracts__normal_cdf(x)
+  with contract = "std.normal_cdf.reflection"
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--json",
+            "--tier",
+            "smt-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "local linker-shaped spoof must not be a clean green\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let props = property_records(&output.stdout);
+    assert!(
+        props.iter().all(|prop| prop["status"] != "passed"),
+        "spoofed contract property must not pass: {props:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn reef_rejects_path_dependency_named_chelis_std() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("myapp");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+
+[dependencies]
+chelis-std = {{ path = "./fake-std" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("fake-std/reef.toml"),
+        &format!(
+            r#"[package]
+name = "chelis-std"
+version = "0.4.0"
+compiler = "={}"
+module_prefix = "Std"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("fake-std/src/contracts.ch"),
+        "module Std.Contracts\nexport (normal_cdf)\ndef normal_cdf(x: f32) -> f32 = x\n",
+    );
+    let entry = root.join("src/proofs.ch");
+    write_file(
+        &entry,
+        r#"module App.Proofs
+import Std.Contracts (normal_cdf)
+@property spoofed_reflection forall(x: f32):
+  normal_cdf(-x) == 1.0 - normal_cdf(x)
+  with contract = "std.normal_cdf.reflection"
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "smt-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "path-backed chelis-std must be rejected\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("cannot be supplied as a path dependency"),
+        "diagnostic should name chelis-std path rejection: stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]

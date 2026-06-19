@@ -243,16 +243,39 @@ def jac_row[n](
 }
 ```
 
-`grad` is **not** currently supported on the **host lane** — top-level
-functions whose return type is a scalar `f32` and whose differentiation
-input is a scalar (e.g. `def square(x: f32) -> f32 = mul(x, x);
-def dsquare(x: f32) -> f32 = grad(square)(x)`). `chelis check` accepts
-these, but `chelis build --target c` rejects with a guard pointing at the
-working pattern. The host lane has no AD transform; adding scalar AD to the
-host lane is tracked under Phase 5
-(`spec/design/phase5_host_scalar_ad.md` — recommendation: forward-mode
-dual numbers; deferred until a real driver appears). All current downstream
-consumers (Coral, Nautilus, Shoals) use the supported tensor-lane pattern.
+`chelis eval` and the Tide host runtime apply `grad`/`vmap` by lowering the
+runtime transform application back into the RISC DAG evaluator. That path is
+not a separate host-lane AD engine: it uses the same reverse-mode rules as the
+tensor lane after rewriting a narrow set of host-list boundary idioms into
+ordinary tensor DAG structure.
+
+The supported eval/Tide AD boundary idioms are:
+
+- `to_tensor(to_list(x))`, which is the identity boundary and whose adjoint is
+  the identity cotangent
+- `to_tensor(map(f, to_list(x)))` and equivalent let-bound aliases, for
+  concrete rank-1 `x`; the runtime lowering recurses into `f` element-by-element
+  and stacks the scalar results
+- `to_tensor(filter(p, to_list(x)))`, for concrete rank-1 `x`, in scalar-loss
+  AD contexts; the primal predicate mask is treated as constant, selected
+  positions receive cotangents, and rejected positions receive zero
+- `fold(step, init, to_list(x))`, for concrete rank-1 `x`; lowering unrolls the
+  recurrence so the reverse pass scans the recorded scalar trajectory through
+  the ordinary structural adjoints
+
+These rewrites deliberately use differentiable structural primitives
+(`shrink`/`reshape`/`pad`/`add`) rather than `gather`/`scatter_add` for
+`map`, so `grad(grad(...))` through boundary+map is supported by composition
+of first-order rules. Dynamic-length list materialization remains a host value
+operation outside this AD boundary subset. In particular, differentiating a
+body that observes the selected cardinality of `filter(...)` through
+`shape`/`len`/`numel` is unsupported; the supported `filter` rule is the
+constant-mask cotangent path for scalar losses over the selected values.
+
+`chelis build --target c` still rejects scalar-only host-lane AD patterns that
+do not enter the tensor DAG transform path. Adding a general scalar host AD
+engine remains tracked under Phase 5
+(`spec/design/phase5_host_scalar_ad.md`).
 
 ### 2.11 Interaction With Phase 2a Effects
 

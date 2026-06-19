@@ -2609,6 +2609,43 @@ fn children(list: &List) -> &[Expr] {
     }
 }
 
+fn app_var_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("app") {
+        return None;
+    }
+    let kids = children(list);
+    let func = kids.first()?;
+    let Expr::List(func_list, _) = func else {
+        return None;
+    };
+    if get_tag(func_list) != Some("var") {
+        return None;
+    }
+    let name = children(func_list).first().and_then(|expr| match expr {
+        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        _ => None,
+    })?;
+    Some((name, &kids[1..]))
+}
+
+fn to_list_source_expr(expr: &Expr) -> Option<&Expr> {
+    let ("to_list", [source]) = app_var_name_and_args(expr)? else {
+        return None;
+    };
+    Some(source)
+}
+
+fn concrete_dim_len(dim: &DimInfo) -> Option<usize> {
+    match dim {
+        DimInfo::Lit(n) => Some(*n),
+        DimInfo::Named(_, Some(n)) => Some(*n),
+        DimInfo::Named(_, None) => None,
+    }
+}
+
 /// Helper: is `expr` an `app` of a `var` whose name equals `expected`?
 fn is_app_of_builtin(expr: &Expr, expected: &str) -> bool {
     let Expr::List(list, _) = expr else {
@@ -3264,6 +3301,7 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
 struct LowerCtx {
     dag: Dag,
     bindings: HashMap<String, LoweredValue>,
+    list_bindings: HashMap<String, Expr>,
     local_callables: HashMap<String, Expr>,
     program_types: HashMap<String, TensorType>,
     program_defs: HashMap<String, Expr>,
@@ -3304,6 +3342,10 @@ struct LowerCtx {
     /// the spec's monomorphization invariant; a surviving rank var is a
     /// monomorphization bug, not a backend input.
     rank_substitutions: HashMap<String, Vec<DimInfo>>,
+    /// True only while lowering the body of an AD transform. Host-list
+    /// combinator rewrites are an AD bridge, not the general C/backend
+    /// lowering for ordinary list programs.
+    allow_host_list_ad_rewrites: bool,
     /// The span_id of the Deep `Expr` currently being lowered. Threaded
     /// through `lower_expr` (set on entry, restored on exit) so every
     /// helper that calls `self.dag.add_node(...)` can pass the
@@ -3322,6 +3364,7 @@ impl LowerCtx {
         Self {
             dag: Dag::new(),
             bindings: HashMap::new(),
+            list_bindings: HashMap::new(),
             local_callables: HashMap::new(),
             program_types,
             program_defs,
@@ -3332,6 +3375,7 @@ impl LowerCtx {
             dim_substitutions: HashMap::new(),
             prec_substitutions: HashMap::new(),
             rank_substitutions: HashMap::new(),
+            allow_host_list_ad_rewrites: false,
             current_span_id: None,
         }
     }
@@ -4128,6 +4172,9 @@ impl LowerCtx {
         };
         let body_id = self.lower_expr(&elems[3]);
         if !name.is_empty() {
+            if self.is_host_list_expr(&elems[3]) {
+                self.list_bindings.insert(name.clone(), elems[3].clone());
+            }
             self.bindings.insert(name, body_id.clone());
             if let Some(callable) = self.callable_binding_expr(&elems[3]) {
                 self.local_callables.insert(
@@ -4153,6 +4200,7 @@ impl LowerCtx {
             ));
         }
         let saved = self.bindings.clone();
+        let saved_list_bindings = self.list_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
@@ -4170,6 +4218,10 @@ impl LowerCtx {
                     // `bindings` entry, not through the outer fn's
                     // `Parameter` classification.
                     self.fn_typed_params.remove(name);
+                    if self.is_host_list_expr(&bind_kids[i + 1]) {
+                        self.list_bindings
+                            .insert(name.clone(), bind_kids[i + 1].clone());
+                    }
                     if let Some(callable) = self.callable_binding_expr(&bind_kids[i + 1]) {
                         self.local_callables.insert(name.clone(), callable);
                     } else {
@@ -4183,6 +4235,7 @@ impl LowerCtx {
 
         let result = self.lower_expr(&elems[3]);
         self.bindings = saved; // Restore scope
+        self.list_bindings = saved_list_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -4636,6 +4689,7 @@ impl LowerCtx {
         // reached while differentiating the body monomorphizes to concrete
         // ranks instead of tripping the rank-monomorphization boundary.
         subctx.rank_substitutions = grad_rank_subst;
+        subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for grad's parameters carry the grad-call's span.
         subctx.current_span_id = self.current_span_id.clone();
@@ -4723,6 +4777,7 @@ impl LowerCtx {
                 .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
         };
         let saved = self.bindings.clone();
+        let saved_list_bindings = self.list_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
@@ -4858,6 +4913,7 @@ impl LowerCtx {
             self.inlining_names.remove(&name);
         }
         self.bindings = saved;
+        self.list_bindings = saved_list_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
@@ -4876,6 +4932,7 @@ impl LowerCtx {
                 .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
         };
         let saved = self.bindings.clone();
+        let saved_list_bindings = self.list_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
@@ -4893,6 +4950,7 @@ impl LowerCtx {
             self.repair_output_type_if_default(&result, &ret_ty);
         }
         self.bindings = saved;
+        self.list_bindings = saved_list_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
@@ -4985,6 +5043,7 @@ impl LowerCtx {
             self.program_defs.clone(),
             LinearityInfo::default(),
         );
+        subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap's parameters carry the vmap-call's span.
         subctx.current_span_id = self.current_span_id.clone();
@@ -5157,6 +5216,7 @@ impl LowerCtx {
             self.program_defs.clone(),
             LinearityInfo::default(),
         );
+        subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap(grad)'s parameters carry the call's span.
         subctx.current_span_id = self.current_span_id.clone();
@@ -6340,6 +6400,24 @@ impl LowerCtx {
                     self.current_span_id.clone(),
                 )
             }
+            "fold" if args.len() == 3 => {
+                if self.allow_host_list_ad_rewrites
+                    && let Some(node) = self.lower_host_list_fold(&args[0], &args[1], &args[2], ty)
+                {
+                    return node;
+                }
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                self.dag.add_node(
+                    RiscOp::Load {
+                        name: func_name.into(),
+                    },
+                    vec![],
+                    Self::default_type(),
+                    self.current_span_id.clone(),
+                )
+            }
 
             // Issue Chelis-Lang/chelis#218:
             // `to_tensor(<literal Cons chain>)` lowers into an IR DAG
@@ -6355,6 +6433,11 @@ impl LowerCtx {
             // helper extractor uses to reject the helper and force
             // host-lane routing for runtime-shaped to_tensor calls.
             "to_tensor" if args.len() == 1 => {
+                if self.allow_host_list_ad_rewrites
+                    && let Some(node) = self.lower_host_list_to_tensor(&args[0], ty)
+                {
+                    return node;
+                }
                 if let Some(literal) = extract_cons_chain_tensor(&args[0]) {
                     return self.emit_literal_tensor(&literal, ty);
                 }
@@ -6497,6 +6580,222 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             )
         })
+    }
+
+    fn resolved_list_expr(&self, expr: &Expr) -> Expr {
+        bare_var_name(expr)
+            .and_then(|name| self.list_bindings.get(&name).cloned())
+            .unwrap_or_else(|| expr.clone())
+    }
+
+    fn is_host_list_expr(&self, expr: &Expr) -> bool {
+        if bare_var_name(expr)
+            .as_deref()
+            .is_some_and(|name| self.list_bindings.contains_key(name))
+        {
+            return true;
+        }
+        matches!(
+            app_var_name_and_args(expr),
+            Some(("to_list", [_])) | Some(("map", [_, _])) | Some(("filter", [_, _]))
+        )
+    }
+
+    fn lower_host_list_to_tensor(&mut self, expr: &Expr, ty: &TensorType) -> Option<NodeId> {
+        let resolved = self.resolved_list_expr(expr);
+        if let Some(source) = to_list_source_expr(&resolved) {
+            return Some(self.lower_expr_node(source, "to_list/tensor AD boundary"));
+        }
+
+        let (name, args) = app_var_name_and_args(&resolved)?;
+        match (name, args) {
+            ("map", [callback, list_expr]) => {
+                let list_resolved = self.resolved_list_expr(list_expr);
+                let source = to_list_source_expr(&list_resolved)?;
+                let source_node = self.lower_expr_node(source, "map source");
+                self.lower_host_list_map(callback, source_node)
+            }
+            ("filter", [predicate, list_expr]) => {
+                let list_resolved = self.resolved_list_expr(list_expr);
+                let source = to_list_source_expr(&list_resolved)?;
+                let source_node = self.lower_expr_node(source, "filter source");
+                self.lower_host_list_filter(predicate, source_node)
+            }
+            _ => {
+                let _ = ty;
+                None
+            }
+        }
+    }
+
+    fn lower_host_list_map(&mut self, callback: &Expr, source_node: NodeId) -> Option<NodeId> {
+        let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
+            return None;
+        };
+        let (len, elem_ty, out_dim) = self.rank1_list_source_parts(source_node)?;
+        let mut mapped = Vec::with_capacity(len);
+        for index in 0..len {
+            let item = self.rank1_item(source_node, index, &elem_ty);
+            let item_out = self
+                .lower_plain_callable_with_values(&fn_expr, &[LoweredValue::Node(item)])
+                .expect_node("map callback");
+            mapped.push(item_out);
+        }
+        self.stack_scalar_nodes(&mapped, out_dim)
+    }
+
+    fn lower_host_list_filter(&mut self, predicate: &Expr, source_node: NodeId) -> Option<NodeId> {
+        let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(predicate)? else {
+            return None;
+        };
+        let (len, elem_ty, out_dim) = self.rank1_list_source_parts(source_node)?;
+        let mut masked = Vec::with_capacity(len);
+        for index in 0..len {
+            let item = self.rank1_item(source_node, index, &elem_ty);
+            let mask = self
+                .lower_plain_callable_with_values(&fn_expr, &[LoweredValue::Node(item)])
+                .expect_node("filter predicate");
+            let mask_as_value = self.dag.add_node(
+                RiscOp::Cast {
+                    new_precision: elem_ty.precision,
+                },
+                vec![mask],
+                elem_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let selected = self.dag.add_node(
+                RiscOp::Mul,
+                vec![item, mask_as_value],
+                elem_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            masked.push(selected);
+        }
+        self.stack_scalar_nodes(&masked, out_dim)
+    }
+
+    fn lower_host_list_fold(
+        &mut self,
+        callback: &Expr,
+        init: &Expr,
+        list_expr: &Expr,
+        ty: &TensorType,
+    ) -> Option<NodeId> {
+        let list_resolved = self.resolved_list_expr(list_expr);
+        let source = to_list_source_expr(&list_resolved)?;
+        let source_node = self.lower_expr_node(source, "fold source");
+        let source_ty = self.dag.get(source_node)?.output_type.clone();
+        if source_ty.dims.len() != 1 {
+            return None;
+        }
+        let len = concrete_dim_len(&source_ty.dims[0])?;
+        let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
+            return None;
+        };
+        let mut acc = self.lower_expr(init);
+        let elem_ty = TensorType {
+            dims: vec![],
+            precision: source_ty.precision,
+        };
+        for index in 0..len {
+            let item = self.rank1_item(source_node, index, &elem_ty);
+            acc = self.lower_plain_callable_with_values(&fn_expr, &[acc, LoweredValue::Node(item)]);
+        }
+        let acc_node = acc.expect_node("fold callback");
+        if let Some(node) = self.dag.get(acc_node)
+            && node.output_type == Self::default_type()
+            && ty != &Self::default_type()
+        {
+            let op = node.op.clone();
+            let inputs = node.inputs.clone();
+            self.dag.replace_node(acc_node, op, inputs, ty.clone());
+        }
+        Some(acc_node)
+    }
+
+    fn rank1_list_source_parts(&self, source_node: NodeId) -> Option<(usize, TensorType, DimInfo)> {
+        let source_ty = self.dag.get(source_node)?.output_type.clone();
+        if source_ty.dims.len() != 1 {
+            return None;
+        }
+        let dim = source_ty.dims[0].clone();
+        let len = concrete_dim_len(&dim)?;
+        let elem_ty = TensorType {
+            dims: vec![],
+            precision: source_ty.precision,
+        };
+        Some((len, elem_ty, dim))
+    }
+
+    fn rank1_item(&mut self, source_node: NodeId, index: usize, elem_ty: &TensorType) -> NodeId {
+        let unit_ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: elem_ty.precision,
+        };
+        let sliced = self.dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(index, index + 1)],
+            },
+            vec![source_node],
+            unit_ty,
+            self.current_span_id.clone(),
+        );
+        self.dag.add_node(
+            RiscOp::Reshape { new_shape: vec![] },
+            vec![sliced],
+            elem_ty.clone(),
+            self.current_span_id.clone(),
+        )
+    }
+
+    fn stack_scalar_nodes(&mut self, nodes: &[NodeId], out_dim: DimInfo) -> Option<NodeId> {
+        let first_ty = self.dag.get(*nodes.first()?)?.output_type.clone();
+        if !first_ty.dims.is_empty() {
+            return None;
+        }
+        let out_len = concrete_dim_len(&out_dim)?;
+        let out_ty = TensorType {
+            dims: vec![out_dim],
+            precision: first_ty.precision,
+        };
+        let unit_ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: first_ty.precision,
+        };
+        let mut accumulator = None;
+        for (index, node) in nodes.iter().copied().enumerate() {
+            let node_ty = self.dag.get(node)?.output_type.clone();
+            if !node_ty.dims.is_empty() || node_ty.precision != first_ty.precision {
+                return None;
+            }
+            let unit = self.dag.add_node(
+                RiscOp::Reshape {
+                    new_shape: unit_ty.dims.clone(),
+                },
+                vec![node],
+                unit_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let padded = self.dag.add_node(
+                RiscOp::Pad {
+                    padding: vec![(index, out_len - index - 1)],
+                    fill: 0.0,
+                },
+                vec![unit],
+                out_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            accumulator = Some(match accumulator {
+                Some(prev) => self.dag.add_node(
+                    RiscOp::Add,
+                    vec![prev, padded],
+                    out_ty.clone(),
+                    self.current_span_id.clone(),
+                ),
+                None => padded,
+            });
+        }
+        accumulator
     }
 
     /// Extract a raw axis value from an expression (for
@@ -7055,6 +7354,7 @@ impl LowerCtx {
             ));
         }
         let saved = self.bindings.clone();
+        let saved_list_bindings = self.list_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
@@ -7080,6 +7380,7 @@ impl LowerCtx {
 
         let result = self.lower_expr(&elems[3]);
         self.bindings = saved; // Restore scope
+        self.list_bindings = saved_list_bindings;
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result

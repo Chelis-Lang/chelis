@@ -38,6 +38,43 @@ fn only_outcome(outcomes: &[ObligationOutcome]) -> &ObligationOutcome {
     &outcomes[0]
 }
 
+fn synthetic_obligation() -> ObligationProperty {
+    ObligationProperty {
+        name: "invariant:Probability:make".to_string(),
+        source_type: "Probability".to_string(),
+        producer: "make".to_string(),
+        is_constant: false,
+        position: ProducedPosition::Direct,
+        meta: ObligationMeta {
+            obligation_kind: "invariant_producer".to_string(),
+            source_type: "Probability".to_string(),
+            producer: "make".to_string(),
+        },
+    }
+}
+
+#[test]
+fn failed_obligation_without_counterexample_is_unsupported_not_failed() {
+    let ob = synthetic_obligation();
+    let out = outcome(
+        &ob,
+        ObligationStatus::Failed,
+        ObligationTier::Smt,
+        0,
+        0,
+        None,
+        None,
+    );
+    assert_eq!(out.status, ObligationStatus::Unsupported);
+    assert_eq!(out.composite_verdict, CompositeVerdict::Unsupported);
+    assert!(out.counterexample.is_none());
+    assert!(
+        out.reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("missing counterexample"))
+    );
+}
+
 // --- scalar field, +Inf, inequality invariant ---
 
 const SCALAR_INF_INEQ: &str = "module M.Prob
@@ -218,6 +255,31 @@ def make(x: {width}) -> Option[Counter] =
         );
         assert!(o.samples > 0, "collected fuzz samples for {width}");
     }
+}
+
+#[test]
+fn tier_c_obligation_counterexample_records_accepted_shrink_steps() {
+    let surf = "module M
+export (make)
+@opaque
+@invariant(p) p.value > 5.0
+type Probability =
+  | Probability { value: f32 }
+def make(x: f32) -> Option[Probability] =
+  if x >= 0.0 then Some(Probability { value: x }) else None
+";
+    let outcomes = run(surf, "fuzz-only");
+    let o = only_outcome(&outcomes);
+    assert_eq!(o.status, ObligationStatus::Failed, "{o:?}");
+    assert!(
+        o.shrink_steps > 0,
+        "failed fuzz obligation should record accepted shrink steps: {o:?}"
+    );
+    assert_eq!(
+        o.counterexample.as_ref().and_then(|cx| cx["x"].as_f64()),
+        Some(0.0),
+        "zero is still a failing producer input for p.value > 5.0: {o:?}"
+    );
 }
 
 /// The fuzz-sampling bounds are single-source and width-clamped: an int8

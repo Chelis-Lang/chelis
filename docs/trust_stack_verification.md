@@ -38,6 +38,13 @@ properties and dispatches them through three verification tiers:
   PRNG. Statistical validation when Tier A is inconclusive and Tier B times out
   or is not amenable.
 
+- **COMPOSE:** Folds each proof with the producer/contract assumptions it
+  depends on. Result JSON carries `composite_verdict` plus per-assumption
+  `discharge:{method,evidence}` records. All-SMT discharges compose to
+  `proven`; fuzz discharges are qualified as
+  `proven_modulo_fuzz_validated_contract`; asserted axioms are qualified as
+  `proven_modulo_asserted_axiom`.
+
 **chelis prove (existing)** is the per-program runtime verification layer. It
 discovers `@property` declarations and evaluates them with random inputs. The
 three-tier dispatcher extends this with static verification for properties that
@@ -119,7 +126,12 @@ DORA, SR 11-7, and EU AI Act compliance buyers need.
 - No uninterpreted function abstraction until v0.2 (soundness risk).
 - Tier A does NOT discharge range/bounds/monotonicity (requires refinement types
   not yet in chelis-types).
-- Tier B timeout → Inconclusive → Tier C. Fully automatic, no human review.
+- Tier B timeout/unknown is unsupported with a reason on smt-only paths, or
+  Tier C fallback in auto mode. It is never reported as failed without a
+  counterexample.
+- Assumption-backed green proofs run a non-vacuity check over the assumptions
+  alone. SAT establishes the assumption domain, UNSAT makes the composed
+  verdict `invalid`, and unknown/timeout makes it `unsupported`.
 
 ## Multi-Domain Evidence (v0.1)
 

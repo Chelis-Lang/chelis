@@ -68,6 +68,128 @@ fn u4_failing_property_is_not_pass() {
     assert!(!outcomes[0].is_pass());
 }
 
+#[test]
+fn fuzz_counterexample_records_accepted_shrink_steps() {
+    let outcomes = run_surf(
+        "module M
+@property too_strong forall(x: f32):
+  (x > 5.0)
+",
+        "fuzz-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:?}");
+    assert!(
+        outcome.shrink_steps > 0,
+        "fuzz failure should record accepted shrink steps: {outcome:?}"
+    );
+    assert_eq!(
+        outcome
+            .counterexample
+            .as_ref()
+            .and_then(|cx| cx["x"].as_f64()),
+        Some(0.0),
+        "zero is still a failing counterexample for x > 5.0: {outcome:?}"
+    );
+}
+
+const UNKNOWN_CONTRACT_PROPERTY: &str = r#"module M
+@property unknown_contract forall(x: f32):
+  x == x
+  with contract = "std.normal_cdf.not_a_contract"
+"#;
+
+#[test]
+fn contract_unknown_id_is_unsupported() {
+    let outcomes = run_surf(UNKNOWN_CONTRACT_PROPERTY, "auto");
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert!(
+        outcomes[0]
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unknown contract"),
+        "reason should name unknown contract: {:?}",
+        outcomes[0]
+    );
+}
+
+const NO_CALL_CONTRACT_PROPERTY: &str = r#"module M
+@property no_contract_call forall(x: f32):
+  x == x
+  with contract = "std.normal_cdf.reflection"
+"#;
+
+#[test]
+fn contract_without_bound_call_is_unsupported() {
+    let outcomes = run_surf(NO_CALL_CONTRACT_PROPERTY, "auto");
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert!(
+        outcomes[0]
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("did not bind"),
+        "reason should report no binding: {:?}",
+        outcomes[0]
+    );
+}
+
+const MISMATCHED_CONTRACT_PROPERTY: &str = r#"module M
+def other_cdf(x: f32) -> f32 = x
+@property wrong_binding forall(x: f32):
+  other_cdf(0.0 - x) == 1.0 - other_cdf(x)
+  with contract = "std.normal_cdf.reflection"
+"#;
+
+#[test]
+fn contract_bound_to_wrong_call_is_unsupported() {
+    let outcomes = run_surf(MISMATCHED_CONTRACT_PROPERTY, "auto");
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert!(
+        outcomes[0]
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("did not bind"),
+        "reason should report binding mismatch: {:?}",
+        outcomes[0]
+    );
+}
+
+#[cfg(feature = "smt")]
+const REFLECTION_CONTRACT_PROPERTY: &str = r#"module M
+def pkg__chelis__std__Std__Contracts__normal_cdf(x: f32) -> f32 = x
+@property reflected forall(x: f32):
+  pkg__chelis__std__Std__Contracts__normal_cdf(-x) == 1.0 - pkg__chelis__std__Std__Contracts__normal_cdf(x)
+  with contract = "std.normal_cdf.reflection"
+"#;
+
+#[cfg(feature = "smt")]
+#[test]
+fn local_linker_shaped_normal_cdf_does_not_receive_std_contract() {
+    let outcomes = run_surf(REFLECTION_CONTRACT_PROPERTY, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(
+        outcome.status,
+        PropertyStatus::Unsupported,
+        "a local spoofed linker-shaped normal_cdf must not bind std contract assumptions: {outcome:?}"
+    );
+    assert!(
+        outcome
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("did not bind"),
+        "reason should report missing trusted std binding: {outcome:?}"
+    );
+}
+
 const INJECTION_PROPERTY: &str = "module M.Prob
 export (probability)
 @opaque
@@ -126,22 +248,30 @@ fn u4_injection_does_not_hide_a_false_property() {
 fn u4_statistically_validated_zero_samples_is_not_pass() {
     // A Passed outcome with zero fuzz samples (the vacuous/timeout sentinel)
     // is NOT a genuine pass.
-    let zero = PropertyOutcome {
-        name: "p".to_string(),
-        status: PropertyStatus::Passed,
-        proof_tier: PropertyTier::Fuzz,
-        samples: 0,
-        seed: 0,
-        counterexample: None,
-        reason: None,
-        injected: false,
-    };
+    let zero = PropertyOutcome::new(
+        "p",
+        PropertyStatus::Passed,
+        PropertyTier::Fuzz,
+        0,
+        0,
+        None,
+        None,
+        false,
+        Vec::new(),
+    );
     assert!(!zero.is_pass(), "Passed with 0 fuzz samples is not a pass");
     // A Passed SMT proof carries 0 samples but IS a pass.
-    let smt = PropertyOutcome {
-        proof_tier: PropertyTier::Smt,
-        ..zero.clone()
-    };
+    let smt = PropertyOutcome::new(
+        "p",
+        PropertyStatus::Passed,
+        PropertyTier::Smt,
+        0,
+        0,
+        None,
+        None,
+        false,
+        Vec::new(),
+    );
     assert!(
         smt.is_pass(),
         "an SMT-proved property is a pass at 0 samples"

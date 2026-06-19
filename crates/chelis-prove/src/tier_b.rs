@@ -30,6 +30,21 @@ pub enum TierBResult {
     Error(String),
 }
 
+/// Satisfiability of a property's assumptions alone.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssumptionSatisfiability {
+    /// The assumptions are satisfiable; the proof is non-vacuous.
+    Sat(Value),
+    /// The assumptions are contradictory; a green proof would be invalid.
+    Unsat,
+    /// Solver timed out.
+    Timeout,
+    /// Solver returned unknown.
+    Unknown,
+    /// The assumption formula could not be lowered safely.
+    Error(String),
+}
+
 /// Structured property input for SMT solving.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SmtProperty {
@@ -62,6 +77,9 @@ pub fn solve(_property_source: &str, _property_name: &str, _timeout_ms: u64) -> 
 /// This is the primary entry point for Tier B when the caller has already
 /// parsed the property into SmtExpr form.
 pub fn solve_property(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
+    if let Some(forced) = forced_smt_result_from_env() {
+        return forced;
+    }
     #[cfg(feature = "smt")]
     {
         // When a production host has enabled isolation (only the `chelis`
@@ -82,6 +100,47 @@ pub fn solve_property(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     {
         let _ = (property, timeout_ms);
         TierBResult::Timeout
+    }
+}
+
+/// Check only the assumptions/preconditions for satisfiability. This is the
+/// non-vacuity oracle: SAT establishes that the assumed domain is inhabited;
+/// UNSAT invalidates any claimed green proof under those assumptions; unknown
+/// and timeout are unsupported, never failed.
+pub fn check_assumptions_satisfiable(
+    property: &SmtProperty,
+    timeout_ms: u64,
+) -> AssumptionSatisfiability {
+    let assumptions_as_property = SmtProperty {
+        variables: property.variables.clone(),
+        preconditions: property.preconditions.clone(),
+        postcondition: SmtExpr::BoolLit(false),
+    };
+    match solve_property(&assumptions_as_property, timeout_ms) {
+        TierBResult::Proved => AssumptionSatisfiability::Unsat,
+        TierBResult::Disproved(model) => AssumptionSatisfiability::Sat(model),
+        TierBResult::Timeout => AssumptionSatisfiability::Timeout,
+        TierBResult::Unknown => AssumptionSatisfiability::Unknown,
+        TierBResult::Error(reason) => AssumptionSatisfiability::Error(reason),
+    }
+}
+
+/// Test-only surface for integration tests that need deterministic
+/// timeout/unknown classification without relying on host cvc5 timing.
+fn forced_smt_result_from_env() -> Option<TierBResult> {
+    match std::env::var("CHELIS_PROVE_TEST_FORCE_SMT_RESULT")
+        .ok()?
+        .as_str()
+    {
+        "proved" => Some(TierBResult::Proved),
+        "disproved" => Some(TierBResult::Disproved(serde_json::json!({
+            "__forced": true
+        }))),
+        "timeout" => Some(TierBResult::Timeout),
+        "unknown" => Some(TierBResult::Unknown),
+        value => Some(TierBResult::Error(format!(
+            "invalid CHELIS_PROVE_TEST_FORCE_SMT_RESULT value `{value}`"
+        ))),
     }
 }
 
@@ -777,6 +836,46 @@ mod tests {
         };
         let result = solve_property(&prop, 5000);
         assert_eq!(result, TierBResult::Proved);
+    }
+
+    #[test]
+    fn non_vacuity_sat_assumptions_are_established_with_a_model() {
+        let prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Gt,
+                Box::new(SmtExpr::Var("x".to_string())),
+                Box::new(SmtExpr::RealLit(0.0)),
+            )],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        let result = check_assumptions_satisfiable(&prop, 5000);
+        match result {
+            AssumptionSatisfiability::Sat(model) => assert!(model.get("x").is_some()),
+            other => panic!("expected satisfiable assumptions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_vacuity_unsat_assumptions_are_invalid_not_green() {
+        let prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![
+                SmtExpr::Cmp(
+                    CmpOp::Gt,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(0.0)),
+                ),
+                SmtExpr::Cmp(
+                    CmpOp::Lt,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(0.0)),
+                ),
+            ],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        let result = check_assumptions_satisfiable(&prop, 5000);
+        assert_eq!(result, AssumptionSatisfiability::Unsat);
     }
 
     #[test]

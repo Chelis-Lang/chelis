@@ -904,6 +904,7 @@ PropertyDecl  <- '@property' S Ident S 'forall' S Params
                  (S 'where' S Expr (S ',' S Expr)*)?
                  S ':' S Expr PropertyOption*
 PropertyOption <- S 'with' S ('tolerance' / 'seed' / 'samples') S '=' S Expr
+                / S 'with' S 'contract' S '=' S StringLit
 
 # ═══════════════════════════════════════════════════
 #  FUNCTION DEFINITIONS
