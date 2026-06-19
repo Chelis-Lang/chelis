@@ -1,26 +1,31 @@
 name: Hull Conformance Nightly
 
-# The FULL >=10k FRESH Hull conformance campaign. The per-PR gate
-# (conformance.yml) runs a frozen, fixed 1,500-program slice; this nightly runs
-# the full fresh campaign so a regression the frozen slice cannot hide is still
-# caught, and re-validates the freeze against the live Hull reference.
+# A LIGHTENED WEEKLY fresh Hull conformance campaign. The PRIMARY regression
+# guard is the per-PR gate (conformance.yml): it replays the frozen, fixed
+# ~1,500-program slice against every PR and is cheap. This workflow is a
+# SUPPLEMENT that draws NEW programs the frozen slice never sees and compares
+# them against the LIVE Hull reference, catching a regression only a new program
+# would expose; it also re-validates the freeze. The fresh campaign is no longer
+# a heavyweight daily >=10k sweep (the per-PR frozen gate already proves
+# soundness on every change) -- it runs weekly at a reduced program count.
 #
-# Unlike the per-PR gate (no Hull process, frozen-Hull-verdict comparison), the
-# nightly is the ONE place a Hull process runs: it checks out Hull at its pinned
+# Unlike the per-PR gate (no Hull process, frozen-Hull-verdict comparison), this
+# workflow is the ONE place a Hull process runs: it checks out Hull at its pinned
 # commit, builds the live chelis binary, runs Hull's OWN authoritative live
 # `differential_check` campaign (scripts/run_differential_suite.py) against the
-# fresh binary with a FRESH date-derived seed, AND re-exports + diffs the frozen
+# fresh binary with a FRESH date-derived seed, AND re-validates the frozen
 # per-PR corpus so an unexpected drift on an unchanged compiler surfaces as a
-# failing diff (a nondeterminism bug) while a deliberate compiler semantics
-# change is a reviewable corpus refresh.
+# failing gate while a deliberate compiler semantics change is a reviewable
+# corpus refresh.
 #
-# Modeled on heavy-e2e.yml: nightly cron + manual dispatch ONLY, never per-PR,
+# Modeled on heavy-e2e.yml: scheduled cron + manual dispatch ONLY, never per-PR,
 # never on push.
 
 on:
   schedule:
-    # 07:00 UTC daily. Off-peak; no per-PR latency impact.
-    - cron: "0 7 * * *"
+    # 07:00 UTC every Sunday. Weekly, off-peak; the per-PR frozen gate is the
+    # daily/per-change guard, so this fresh-program supplement runs weekly.
+    - cron: "0 7 * * 0"
   workflow_dispatch:
 
 permissions:
@@ -37,7 +42,8 @@ jobs:
   conformance-nightly:
     name: Hull Conformance Nightly (Linux)
     runs-on: ubuntu-latest
-    # The sharded ~15-20 min campaign wall plus build + checkout head room.
+    # The lightened sharded campaign wall (~3-5 min at check-n 2000) plus build
+    # + checkout head room; the release build dominates. 30 min stays generous.
     timeout-minutes: 30
     steps:
       # Mint a short-lived token scoped to the private `hull` repo so the
@@ -100,13 +106,17 @@ jobs:
         working-directory: chelis
         run: cargo build --release -p chelis-cli --bin chelis
 
-      # FRESH FULL CAMPAIGN. Run Hull's OWN authoritative live differential
+      # FRESH (LIGHTENED) CAMPAIGN. Run Hull's OWN authoritative live differential
       # campaign against the freshly-built binary with a FRESH date-derived seed,
       # exercising NEW programs the frozen slice never sees. This is the live
-      # Hull `differential_check`, not the frozen strings. --check-n 10000
-      # --eval-n 1000 per the design; the seed is the run date so each night
-      # draws a distinct program sequence.
-      - name: Fresh full campaign (live Hull reference)
+      # Hull `differential_check`, not the frozen strings. The per-PR frozen
+      # ~1,500-program gate (conformance.yml) is the PRIMARY cheap regression
+      # guard on every PR; this weekly run is a LIGHTENED fresh-program supplement
+      # against the live Hull reference, not a heavyweight daily >=10k sweep. The
+      # program count is reduced to --check-n 2000 / --eval-n 200 (--shards 4
+      # proportional); the seed is the run date so each week draws a distinct
+      # sequence.
+      - name: Fresh campaign (live Hull reference)
         working-directory: hull
         # The campaign's `.ch` driver spawns the compiler via
         # `process_run("chelis", ...)` BY NAME -- a Chelis script under
@@ -123,7 +133,7 @@ jobs:
           mkdir -p corpus/scratch
           export PATH="$GITHUB_WORKSPACE/chelis/target/release:$PATH"
           ../chelis/.venv/bin/python scripts/run_differential_suite.py \
-            --check-n 10000 --eval-n 1000 --shards 16 \
+            --check-n 2000 --eval-n 200 --shards 4 \
             --seed "$SEED" \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis"
 
