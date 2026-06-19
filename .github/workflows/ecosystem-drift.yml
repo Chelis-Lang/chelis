@@ -1,0 +1,294 @@
+name: Ecosystem Drift Canary
+
+# The deliberate cross-repo drift signal. Every shell nightly pins the
+# SAME fixed chelis version its own per-PR CI pins, so none of them can
+# catch "a chelis change on main broke a downstream shell" — the recurring
+# pain (e.g. nautilus #11, noticed ~40 days late after a release lag).
+#
+# This canary closes that gap: it builds the chelis toolchain from THIS
+# repo's HEAD and, for each downstream shell, checks out the shell at
+# `main` and runs the shell's own core gate (`chelis reef build` +
+# `chelis test tests/`, or the cargo gate for the Rust shells) against the
+# HEAD toolchain. A break surfaces within a day, at the offending chelis
+# commit, instead of weeks later in a shell user's bug report.
+#
+# A failing shell leg files/updates a tracking issue IN THAT SHELL'S repo
+# (open-on-fail / close-on-pass), mirroring the heavy-e2e.yml report
+# pattern, so the signal lands where the shell maintainers see it.
+#
+# Modeled on conformance-nightly.yml (HEAD toolchain build + uv venv) and
+# release.yml (the toolchain tarball recipe). Scheduled + manual dispatch
+# ONLY; never per-PR, never on push — it is purely additive and cannot
+# affect existing CI.
+
+on:
+  schedule:
+    # 09:00 UTC daily. Staggered off the 07:00 heavy-e2e / conformance
+    # nightlies and the 08:00 shell nightlies so the canary's HEAD build
+    # does not contend with them for the org's runner pool.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Match release.yml: a stripped release binary with no debuginfo.
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+
+jobs:
+  # Build the HEAD chelis toolchain and publish it as a workflow artifact
+  # that is a HEAD equivalent of release.yml's linux-x86_64 tarball: the
+  # `chelis` binary, the runtime staticlib + headers, AND a freshly
+  # rebuilt-from-HEAD `packages/chelis-std/` so each shell can populate its
+  # local Reef registry with HEAD chelis-std via `reef install
+  # --from-monorepo` — exactly the path the shells' own `install_chelis_std.py`
+  # uses against a release tag, but pointed at HEAD instead.
+  build-chelis:
+    name: Build chelis toolchain (HEAD)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout chelis (HEAD)
+        uses: actions/checkout@v6
+
+      - name: Install C dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python`; any cargo
+      # build that transitively pulls pyo3 needs a matching uv-managed venv
+      # first (pyo3-build-config runs as a build-dep before compilation).
+      # Same pattern as heavy-e2e.yml / conformance-nightly.yml.
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build chelis-cli (release)
+        run: cargo build --release -p chelis-cli
+
+      - name: Build chelis-runtime staticlib (release)
+        run: cargo build --release -p chelis-runtime
+
+      # Rebuild chelis-std from HEAD source with the HEAD binary so the
+      # bundled package genuinely reflects HEAD (catches a chelis change
+      # that breaks chelis-std's own lowering — a nautilus-#11-class bug).
+      # Emits packages/chelis-std/dist/chelis-std-<ver>.{chb,tar.zst}.
+      - name: Rebuild HEAD chelis-std bundle
+        run: ./target/release/chelis reef build packages/chelis-std
+
+      - name: Record HEAD chelis version
+        id: version
+        run: |
+          set -euo pipefail
+          ver="$(./target/release/chelis --version | awk '{print $2}')"
+          echo "chelis_version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "HEAD chelis version: ${ver}"
+
+      # Stage a HEAD equivalent of release.yml's linux-x86_64 tarball plus
+      # the freshly built packages/chelis-std/ tree (so `reef install
+      # --from-monorepo <extracted>` resolves chelis-std). The monorepo
+      # layout (a `packages/` dir) is what `--from-monorepo` expects.
+      - name: Strip binary
+        run: strip target/release/chelis
+
+      - name: Stage toolchain tarball
+        run: |
+          set -euo pipefail
+          staging="chelis-head-toolchain"
+          mkdir -p "$staging/bin" "$staging/lib" "$staging/include" \
+                   "$staging/packages/chelis-std" "$staging/scripts"
+          cp target/release/chelis "$staging/bin/"
+          cp target/release/libchelis_runtime.a "$staging/lib/"
+          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
+          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
+          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
+          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
+          # The chelis-std source + freshly built dist artifacts. reef
+          # install --from-monorepo reads packages/<name>/dist/.
+          cp -R packages/chelis-std/. "$staging/packages/chelis-std/"
+          # The canary's own helper scripts, so the `drift` job (which
+          # checks out the SHELL, not chelis) can repin + report without a
+          # second chelis checkout.
+          cp scripts/drift_repin_compiler.py "$staging/scripts/"
+          cp scripts/drift_report_issue.py "$staging/scripts/"
+          tar czf chelis-head-toolchain.tar.gz "$staging"
+          ls -la chelis-head-toolchain.tar.gz
+
+      - name: Upload HEAD toolchain artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: chelis-head-toolchain
+          path: chelis-head-toolchain.tar.gz
+          retention-days: 7
+
+    outputs:
+      chelis_version: ${{ steps.version.outputs.chelis_version }}
+
+  # One matrix leg per downstream shell. fail-fast:false so one shell's
+  # break never cancels the others — the canary's whole job is to report
+  # EACH shell independently.
+  drift:
+    name: ${{ matrix.repo }} (${{ matrix.type }}) vs chelis HEAD
+    needs: build-chelis
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- Pure-Chelis / reef shells (toolchain-binary consumers).
+          # `reef_deps` is a space-separated list of released
+          # `<org>/<repo>@<tag>` entries resolved as the shell's own CI
+          # resolves them (its reef.toml dependency tags). chelis-std is
+          # NOT listed — it comes from the HEAD toolchain. Mind the dep
+          # graph: coral->nautilus, shoals->nautilus+coral, whale->shoals
+          # (transitively nautilus+coral).
+          - repo: nautilus
+            type: reef
+            reef_deps: ""
+          - repo: coral
+            type: reef
+            reef_deps: "Chelis-Lang/nautilus@v0.7.26"
+          - repo: shoals
+            type: reef
+            reef_deps: "Chelis-Lang/nautilus@v0.7.26 Chelis-Lang/coral@v0.7.25"
+          - repo: school
+            type: reef
+            reef_deps: ""
+          - repo: hull
+            type: reef
+            reef_deps: ""
+          - repo: whale
+            type: reef
+            reef_deps: "Chelis-Lang/nautilus@v0.7.26 Chelis-Lang/coral@v0.7.25 Chelis-Lang/shoals@v0.20.1"
+    steps:
+      - name: Mint per-shell App token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          # contents:read for the checkout + dep release downloads;
+          # issues:write for the per-shell tracking issue.
+          repositories: ${{ matrix.repo }}
+
+      - name: Checkout ${{ matrix.repo }} at main
+        uses: actions/checkout@v6
+        with:
+          repository: Chelis-Lang/${{ matrix.repo }}
+          ref: main
+          token: ${{ steps.token.outputs.token }}
+          path: shell
+
+      - name: Download HEAD toolchain artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: chelis-head-toolchain
+          path: toolchain
+
+      - name: Extract HEAD toolchain onto PATH
+        run: |
+          set -euo pipefail
+          tar -xzf toolchain/chelis-head-toolchain.tar.gz -C toolchain
+          tdir="$GITHUB_WORKSPACE/toolchain/chelis-head-toolchain"
+          echo "${tdir}/bin" >> "$GITHUB_PATH"
+          # Exported for the install + repin steps below.
+          echo "CHELIS_TOOLCHAIN=${tdir}" >> "$GITHUB_ENV"
+
+      - name: Install C dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev
+
+      - name: Verify HEAD chelis on PATH
+        run: |
+          set -euo pipefail
+          got="$(chelis --version | awk '{print $2}')"
+          test "$got" = "${{ needs.build-chelis.outputs.chelis_version }}"
+          echo "chelis ${got} (HEAD) on PATH"
+
+      # Populate the local Reef registry with HEAD chelis-std from the
+      # extracted toolchain monorepo subset (mirrors the shells' own
+      # install_chelis_std.py, but the source is HEAD, not a release tag).
+      - name: Install HEAD chelis-std into local registry
+        run: chelis reef install --from-monorepo "$CHELIS_TOOLCHAIN" chelis-std
+
+      # Resolve the shell's released reef deps as @tags, exactly as the
+      # shell's own ci.yml does. Each dep's prebuilt artifact was built
+      # against the released chelis; HEAD chelis accepts it (validated).
+      # Empty for shells whose only dependency is chelis-std.
+      - name: Install released reef dependencies
+        if: matrix.reef_deps != ''
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          for dep in ${{ matrix.reef_deps }}; do
+            echo "::group::reef install ${dep}"
+            chelis reef install --from-github "$dep"
+            echo "::endgroup::"
+          done
+
+      # Rewrite the shell's compiler pin to HEAD's version. Shells pin a
+      # hard equality and `chelis reef build` rejects any mismatch before
+      # exercising the language — so a shell still on an older pin would
+      # fail at the manifest gate, not on real drift. Repinning asks the
+      # real question: "if this shell were bumped to chelis HEAD, would it
+      # still build and test?" The token's checkout is throwaway; the pin
+      # rewrite is never committed.
+      - name: Repin shell to HEAD chelis
+        run: |
+          set -euo pipefail
+          python3 "$CHELIS_TOOLCHAIN/scripts/drift_repin_compiler.py" \
+            shell/reef.toml "${{ needs.build-chelis.outputs.chelis_version }}"
+
+      - name: chelis reef build (${{ matrix.repo }} vs HEAD)
+        working-directory: shell
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+        run: chelis reef build
+
+      - name: chelis test tests/ (${{ matrix.repo }} vs HEAD)
+        working-directory: shell
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -uo pipefail
+          if [ ! -d tests ] || [ -z "$(find tests -maxdepth 1 -name '*.ch' -type f -print -quit)" ]; then
+            echo "No tests/*.ch files; skipping chelis test (reef build is the gate)."
+            exit 0
+          fi
+          chelis test tests/ --timeout 600 --jobs auto
+
+      # Open-on-fail / close-on-pass tracking issue IN THE SHELL'S OWN
+      # repo, via the minted App token (issues:write). Same logic as the
+      # heavy-e2e.yml report job, retargeted cross-repo. if:always() so it
+      # runs whether the gate above passed or failed; `job.status` is the
+      # aggregate result of the preceding steps in this matrix leg.
+      - name: File/update drift tracking issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          SHELL_REPO: ${{ matrix.repo }}
+          JOB_STATUS: ${{ job.status }}
+          HEAD_VERSION: ${{ needs.build-chelis.outputs.chelis_version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHELIS_SHA: ${{ github.sha }}
+        run: python3 "$CHELIS_TOOLCHAIN/scripts/drift_report_issue.py"
