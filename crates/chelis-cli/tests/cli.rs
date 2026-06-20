@@ -8492,3 +8492,81 @@ fn build_c_nested_tuple_print_has_zero_definitely_lost_under_valgrind() {
         &["out.0.0 = 6", "out.1.1 = 8"],
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn build_c_call_return_tuple_escape_has_zero_definitely_lost_under_valgrind() {
+    // Issue #406 call-escape: a block-frame heap binding that escapes the
+    // block *through a function-call return* (not a bare `__result = p`)
+    // was freed by the block release while the returned alias still lived
+    // -- a use-after-free that crashed a correct program (`expected
+    // float64 value`, exit 1; under valgrind: invalid reads + a 56-byte
+    // definitely-lost block from the prematurely-dropped tuple).
+    //
+    // `id_pair` returns its bare argument, so the analysis
+    // (`analyze_returns_arg`) flags arg 0 as escaping; the emit site
+    // retains the call result before the block releases `p`, leaving
+    // exactly one live reference. Asserts both correct output and zero
+    // definitely-lost: a regression reintroduces the UAF (wrong output /
+    // crash) or, if the retain is unbalanced, a leak.
+    //
+    // origin/main has no function-body block release at all (the #406 fix
+    // lives only on this branch), so this oracle is meaningful as a GREEN
+    // assertion on the branch; there is no red-on-main counterpart.
+    assert_built_c_has_zero_definitely_lost(
+        "call_return_tuple_escape",
+        "def id_pair(p: (f32, f32)) -> (f32, f32) = p\n\
+         def mk(x: f32) -> (f32, f32) = {\n\
+         \x20 p = (mul(x, 2.0), add(x, 1.0))\n\
+         \x20 id_pair(p)\n\
+         }\n\
+         out = mk(3.0)\n",
+        &["out.0 = 6", "out.1 = 4"],
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn build_c_call_return_list_escape_has_zero_definitely_lost_under_valgrind() {
+    // The list sibling of the call-return tuple escape: a `let`-bound list
+    // returned through `id2(xs)` SEGFAULTED on the branch before the fix
+    // (exit 139) because the block released `xs` while the returned alias
+    // still pointed at it. The same `analyze_returns_arg` + retain-on-
+    // call-escape path covers every refcounted host-value type, so the
+    // list case must be correct and definitely-lost-free too.
+    assert_built_c_has_zero_definitely_lost(
+        "call_return_list_escape",
+        "def id2(a: List[int64]) -> List[int64] = a\n\
+         def mk(n: int64) -> List[int64] = {\n\
+         \x20 xs = [n, mul(n, cast(2, int64)), mul(n, cast(3, int64))]\n\
+         \x20 id2(xs)\n\
+         }\n\
+         out = mk(cast(5, int64))\n",
+        &["out = [5, 10, 15]"],
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn build_c_call_fresh_result_does_not_over_retain_under_valgrind() {
+    // Precision guard for the #406 call-escape retain: a call whose callee
+    // builds a *fresh* result (does not return its argument) must NOT
+    // retain the block result, or the block-frame binding it was built
+    // from leaks. `dup` constructs a new list, so `analyze_returns_arg`
+    // reports it returns none of its parameters and the emit site retains
+    // nothing -- the block release of `xs` then balances its construction
+    // and the program is definitely-lost-free. A naive
+    // conservative-retain-everything fallback would leak the `xs`
+    // allocation here; this oracle locks the precise interprocedural
+    // behavior so a later regression to over-retain is caught as a leak.
+    assert_built_c_has_zero_definitely_lost(
+        "call_fresh_result_no_over_retain",
+        "def dup(a: List[int64]) -> List[int64] = [len(a), len(a)]\n\
+         def mk(n: int64) -> List[int64] = {\n\
+         \x20 xs = [n, mul(n, cast(2, int64)), mul(n, cast(3, int64))]\n\
+         \x20 dup(xs)\n\
+         }\n\
+         out = mk(cast(5, int64))\n",
+        &["out = [3, 3]"],
+    );
+}
