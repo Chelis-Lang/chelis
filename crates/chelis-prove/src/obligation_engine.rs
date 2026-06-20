@@ -18,6 +18,8 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::types::{Prim, Type};
 
+use crate::discharge::DischargeEngine;
+
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
     NonVacuityRecord, NonVacuityStatus, rollup_composite,
@@ -423,7 +425,15 @@ fn run_one(
         if let Some(lowered) =
             crate::tier_b_lower::lower_obligation(exprs, inv, ob, &pparams, consts)
         {
-            match crate::tier_b::solve_property(&lowered.property, options.smt_timeout_ms) {
+            // Route the cvc5 solve through the discharge-engine seam (WI-4).
+            // The cvc5 engine wraps the same solve_property pipeline, so
+            // `into_result()` yields the identical TierBResult and the match
+            // arms below are unchanged.
+            let discharge = crate::discharge::Cvc5Engine::new().discharge(
+                &crate::discharge::Goal::smt(lowered.property.clone()),
+                options.smt_timeout_ms,
+            );
+            match discharge.into_result() {
                 TierBResult::Proved => {
                     let non_vacuity =
                         smt_non_vacuity_record(&lowered.property, options.smt_timeout_ms);
