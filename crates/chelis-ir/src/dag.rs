@@ -888,6 +888,133 @@ impl RiscOp {
             accumulator,
         })
     }
+
+    /// Whether this op is part of the pinned verifier / Beacon target
+    /// subset (master plan WI-2, `spec/design/verification_stack_master_plan.md`
+    /// §4.1; transformer corpus in `spec/design/beacon_plan.md` §3.1).
+    ///
+    /// Beacon discharges a goal by pushing a sound numeric envelope
+    /// *forward* through the RISC DAG using abstract domains in the
+    /// CROWN lineage (interval, zonotope, linear relaxation). An op is
+    /// "verifier-targetable" when Beacon has — or can in-house — a sound
+    /// abstract transformer for it that maps an input envelope to an
+    /// output envelope. Shape-movement and deterministic structural ops
+    /// qualify because the envelope passes through them unchanged (up to
+    /// reindexing); numeric ops qualify when a sound relaxation exists
+    /// or is in-house buildable per the corpus.
+    ///
+    /// This is a deliberately exhaustive, wildcard-free match: adding a
+    /// new `RiscOp` is a hard compile error here, forcing an explicit
+    /// in-or-out classification rather than letting a new op silently
+    /// inherit a default. The companion exhaustiveness test
+    /// (`every_risc_op_is_classified_for_verifier_subset`) guards the
+    /// same invariant at runtime over a constructed sample of every
+    /// variant.
+    ///
+    /// The classification is conservative: an op is excluded unless it
+    /// has a clear sound transformer story. Excluding an op is not a
+    /// claim that it can never be targeted; it records that, today, the
+    /// pinned target surface does not include it, so a producer pinning
+    /// to this surface must not assume Beacon bounds it.
+    pub fn is_verifier_targetable(&self) -> bool {
+        match self {
+            // --- Elementwise arithmetic and comparison ---
+            // `Add`, `Mul`, `Div` (with a denominator-excludes-zero
+            // precondition), and `CmpLt` (the branch predicate that
+            // drives branch-and-bound on piecewise definitions such as
+            // the `erf64` sign/small-x folds) all have sound interval /
+            // linear-relaxation transformers (beacon_plan.md §3.1, §3.3).
+            RiscOp::Add | RiscOp::Mul | RiscOp::Div | RiscOp::CmpLt | RiscOp::MaxElem => true,
+
+            // --- Unary elementwise math ---
+            // `Exp`, `Log`, `Sqrt` are direct ports of the auto_LiRPA
+            // relaxation corpus; `Recip` needs the reciprocal transformer
+            // with the denominator-excludes-zero precondition; the
+            // remaining transcendental and rounding ops are in-house
+            // transformers, not blockers (beacon_plan.md §3.1).
+            RiscOp::Neg
+            | RiscOp::Exp
+            | RiscOp::Log
+            | RiscOp::Sin
+            | RiscOp::Sqrt
+            | RiscOp::Cos
+            | RiscOp::Tan
+            | RiscOp::Atan
+            | RiscOp::Abs
+            | RiscOp::Floor
+            | RiscOp::Ceil
+            | RiscOp::Recip => true,
+
+            // --- Reductions ---
+            // Sum / max / min / prod reductions and windowed reductions
+            // are folds of targetable elementwise transformers; the
+            // forward envelope propagates through them.
+            RiscOp::Sum { .. }
+            | RiscOp::MaxReduce { .. }
+            | RiscOp::MinReduce { .. }
+            | RiscOp::ProdReduce { .. }
+            | RiscOp::ReduceWindow { .. } => true,
+
+            // --- Movement / structural ---
+            // Pure reindexing: the numeric envelope passes through
+            // unchanged, only the shape map changes.
+            RiscOp::Reshape { .. }
+            | RiscOp::Permute { .. }
+            | RiscOp::Expand { .. }
+            | RiscOp::Pad { .. }
+            | RiscOp::Shrink { .. }
+            | RiscOp::Stride { .. } => true,
+
+            // --- Memory / linear-algebra value nodes ---
+            // `Const` is an exact (degenerate) envelope; `Load` is the
+            // input box itself; `BlasMatmul` is a sum-of-products fold of
+            // targetable transformers (the pricer and NN graphs both hit
+            // it).
+            RiscOp::Const { .. } | RiscOp::Load { .. } | RiscOp::BlasMatmul { .. } => true,
+
+            // --- Cast ---
+            // Real-valued first: identity on the real envelope. The
+            // roundoff-aware cast transformer is a documented later layer
+            // (beacon_plan.md §6); until it lands a Cast discharge stays
+            // in the real-valued qualifier, but the op is on the target
+            // surface today.
+            RiscOp::Cast { .. } => true,
+
+            // --- NOT verifier-targetable (today) ---
+            // Stochastic ops have no deterministic value to bound.
+            RiscOp::UniformLike { .. } | RiscOp::Dropout { .. } => false,
+
+            // Argmax/argmin return discrete indices, not a numeric
+            // envelope over the reals; outside the forward-bound story.
+            RiscOp::Argmax { .. } | RiscOp::Argmin { .. } => false,
+
+            // `OneHot` produces a discrete 0/1 indicator from an integer
+            // index; it is an internal lowering marker (dag.rs) consumed
+            // before backend emission and is not part of the numeric
+            // forward-bound surface.
+            RiscOp::OneHot { .. } => false,
+
+            // Sparse gather/scatter index data movement; no real-valued
+            // transformer is pinned, and `Scatter` is `no_grad`.
+            RiscOp::Gather { .. } | RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } => false,
+
+            // Linearity / lifecycle markers carry no numeric semantics
+            // (backends emit nothing for `Drop`); they are transparent to
+            // bound propagation but are not themselves targetable ops.
+            RiscOp::Copy | RiscOp::Drop | RiscOp::Realize | RiscOp::Store { .. } => false,
+
+            // AD-only adjoint of a windowed reduction; the gradient-graph
+            // path is a later Beacon item (WI-B8 verified Greeks), not the
+            // pinned forward surface today.
+            RiscOp::ReduceWindowGrad { .. } => false,
+
+            // `FusedElem` is a backend specialization that bundles
+            // elementwise steps into one kernel; Beacon targets the
+            // pre-fusion elementwise ops, not the fused marker, so it is
+            // off the pinned surface.
+            RiscOp::FusedElem { .. } => false,
+        }
+    }
 }
 
 /// Spec §5.7.1 narrowness rule: `accumulator` must be (a) at least as
@@ -1915,5 +2042,161 @@ mod tests {
             None,
         );
         assert!(symbolic_occurrences(&dag).is_empty());
+    }
+
+    /// One instance of every `RiscOp` variant. The
+    /// `is_verifier_targetable` classifier (WI-2) is a wildcard-free
+    /// exhaustive match, so adding a variant to the enum is a compile
+    /// error there; this sample is the runtime companion guard. If a new
+    /// variant is added but not appended here, the count assertion in
+    /// `every_risc_op_is_classified_for_verifier_subset` fails, so a new
+    /// op cannot silently escape classification by either route.
+    fn one_of_every_risc_op() -> Vec<RiscOp> {
+        vec![
+            RiscOp::Add,
+            RiscOp::Mul,
+            RiscOp::Div,
+            RiscOp::CmpLt,
+            RiscOp::MaxElem,
+            RiscOp::Neg,
+            RiscOp::Exp,
+            RiscOp::Log,
+            RiscOp::Sin,
+            RiscOp::Sqrt,
+            RiscOp::Cos,
+            RiscOp::Tan,
+            RiscOp::Atan,
+            RiscOp::Abs,
+            RiscOp::Floor,
+            RiscOp::Ceil,
+            RiscOp::Recip,
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 7,
+            },
+            RiscOp::Dropout { rate: 0.5, seed: 7 },
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            RiscOp::MaxReduce { axis: 0 },
+            RiscOp::MinReduce { axis: 0 },
+            RiscOp::ProdReduce { axis: 0 },
+            RiscOp::ReduceWindow {
+                reducer: ReduceWindowKind::Max,
+                window_shape: vec![2],
+                strides: vec![1],
+            },
+            RiscOp::ReduceWindowGrad {
+                reducer: ReduceWindowKind::Max,
+                window_shape: vec![2],
+                strides: vec![1],
+            },
+            RiscOp::Argmax { axis: 0 },
+            RiscOp::Argmin { axis: 0 },
+            RiscOp::Reshape {
+                new_shape: vec![DimInfo::Lit(4)],
+            },
+            RiscOp::Permute { axes: vec![0] },
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Concrete(4),
+            },
+            RiscOp::OneHot { vocab: 8 },
+            RiscOp::Pad {
+                padding: vec![(0, 0)],
+                fill: 0.0,
+            },
+            RiscOp::Shrink {
+                bounds: vec![(0, 1)],
+            },
+            RiscOp::Stride { strides: vec![1] },
+            RiscOp::Const { value: 1.0 },
+            RiscOp::Load {
+                name: LoadStoreName::must("x"),
+            },
+            RiscOp::Store {
+                name: LoadStoreName::must("y"),
+            },
+            RiscOp::Copy,
+            RiscOp::Drop,
+            RiscOp::Realize,
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            RiscOp::FusedElem { ops: vec![] },
+            RiscOp::BlasMatmul {
+                batch_dims: vec![],
+                m: DimExpr::Concrete(2),
+                n: DimExpr::Concrete(2),
+                k: DimExpr::Concrete(2),
+                accumulator: Prim::F32,
+            },
+            RiscOp::Gather { axis: 0 },
+            RiscOp::ScatterAdd { axis: 0 },
+            RiscOp::Scatter { axis: 0 },
+        ]
+    }
+
+    /// Exhaustiveness guard for the WI-2 verifier/Beacon op subset: every
+    /// `RiscOp` variant must be classified, and the in/out partition must
+    /// match the documented `beacon_plan.md` §3.1 corpus. A future new op
+    /// added to the enum (and to `one_of_every_risc_op`) must land in one
+    /// side of this partition explicitly; if it is added to the enum but
+    /// not to the partition lists here, the count assertions fail.
+    #[test]
+    fn every_risc_op_is_classified_for_verifier_subset() {
+        let all = one_of_every_risc_op();
+        // 46-variant closed vocabulary (spec WI-2 / dag.rs RiscOp).
+        assert_eq!(
+            all.len(),
+            46,
+            "one_of_every_risc_op must list all 46 RiscOp variants"
+        );
+
+        // The classifier returns a definite bool for every variant (no
+        // panic, no escape); count both sides and pin the partition.
+        let targetable = all.iter().filter(|op| op.is_verifier_targetable()).count();
+        let excluded = all.len() - targetable;
+
+        // Pinned partition per beacon_plan.md §3.1: the elementwise math
+        // (5 binary/cmp + 12 unary), 5 reductions, 6 movement, 3 memory/
+        // blas value nodes, and Cast are targetable (32); stochastic (2),
+        // arg-reductions (2), one_hot (1), sparse gather/scatter (3),
+        // linearity/lifecycle markers + store (4), reduce-window-grad (1),
+        // and fused-elem (1) are excluded (14).
+        assert_eq!(
+            targetable, 32,
+            "targetable op count drifted from the pinned WI-2 subset"
+        );
+        assert_eq!(
+            excluded, 14,
+            "excluded op count drifted from the pinned WI-2 subset"
+        );
+
+        // Spot-check a representative op on each side so a wrong
+        // reclassification (not just a count drift) is caught.
+        assert!(RiscOp::Add.is_verifier_targetable());
+        assert!(RiscOp::Exp.is_verifier_targetable());
+        assert!(
+            RiscOp::CmpLt.is_verifier_targetable(),
+            "CmpLt drives erf64 branch-and-bound; must be targetable"
+        );
+        assert!(
+            RiscOp::Cast {
+                new_precision: Prim::F32
+            }
+            .is_verifier_targetable(),
+            "Cast is real-valued-first targetable (beacon_plan.md §6)"
+        );
+        assert!(
+            !RiscOp::Dropout { rate: 0.5, seed: 0 }.is_verifier_targetable(),
+            "stochastic ops have no deterministic envelope to bound"
+        );
+        assert!(
+            !RiscOp::Argmax { axis: 0 }.is_verifier_targetable(),
+            "argmax returns discrete indices, not a real envelope"
+        );
     }
 }
