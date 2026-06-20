@@ -8,6 +8,35 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **C backend: function-body heap temporaries and nested-tuple printing no
+  longer leak (completes #406)** — #412 freed the heap temporaries the
+  program-root `main` allocates, but two sibling "definitely lost" classes
+  of the same shape survived, each a `chelis_*_from_values` allocation
+  generated `main` never released transitively. (1) A heap host value
+  (tuple / list / dict / adt / string) built as an *intermediate* inside a
+  compiled function body — e.g. a `let`-bound `p = (a, b)` consumed by the
+  body — was never released: #412 only enabled scope-release tracking for
+  `emit_main`, whose flat-scope guard skips the deeper indent a function
+  body's block introduces. The `let` lowering now releases a block's heap
+  bindings at block close, retaining any binding the block result aliases
+  (directly or through an `if` / `match` arm, or a `b = a` binding-to-
+  binding alias) so the caller keeps exactly one reference — implemented as
+  a `LetReleaseScope` stack plus `retain_transferred_result` /
+  `binding_release` in `chelis_backend_c::host_emit`. (2) A tuple field
+  that is itself a heap container (a *nested* tuple / list / adt) leaked at
+  the labeled-root printer, because `chelis_tuple_get` retains the boxed
+  element it returns and the printer only read it; the printer now releases
+  the retained handle after printing the field. Acceptance oracles in
+  `crates/chelis-cli/tests/cli.rs`:
+  `build_c_function_body_heap_temp_has_zero_definitely_lost_under_valgrind`,
+  `build_c_function_body_list_temp_has_zero_definitely_lost_under_valgrind`,
+  `build_c_function_body_tuple_transfer_has_zero_definitely_lost_under_valgrind`,
+  and `build_c_nested_tuple_print_has_zero_definitely_lost_under_valgrind`
+  each build the reproducer to C, gcc-link it, run it under
+  `valgrind --leak-check=full` with no suppressions, and assert
+  `definitely lost: 0 bytes` (red on the post-#412 tree, green after this
+  change).
+
 - **C backend: `main` no longer leaks the list / tensor temporaries it
   allocates (#406)** — a `chelis build --target c` program leaked two
   "definitely lost" blocks under `valgrind --leak-check=full`: the

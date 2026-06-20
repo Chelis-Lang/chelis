@@ -8281,3 +8281,292 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
          valgrind reported:\n{vg_stderr}"
     );
 }
+
+// issue #406 (complete): the sibling leaks #412 did not reach. #412 freed
+// the heap temporaries the program-root `main` allocates, but two more
+// "definitely lost" classes of the same shape survived, each via a
+// `chelis_*_from_values` allocation `main` never released transitively:
+//
+//   1. A heap host value (tuple / list / dict / adt / string) built as an
+//      *intermediate* inside a compiled function body — e.g. a `let`-bound
+//      `p = (a, b)` consumed by the body — was never released at the
+//      function's block exit. #412 only enabled scope-release tracking for
+//      `emit_main`, whose flat-scope guard deliberately skips the deeper
+//      indents a function body's `{ ... }` block introduces.
+//
+//   2. A tuple field that is itself a heap container (a *nested* tuple /
+//      list / adt) leaked at the labeled-root printer: `chelis_tuple_get`
+//      retains the boxed element it returns, and the printer only read it.
+//
+// The fix releases a compiled `let` block's heap bindings at block close,
+// retaining any binding the block result aliases so the caller keeps one
+// reference (`chelis_backend_c::host_emit`'s `LetReleaseScope` /
+// `retain_transferred_result`), and releases the retained tuple-field
+// handle after the labeled-root printer reads it.
+//
+// Both reproducers below leaked under valgrind on the post-#412 tree and
+// are clean after the fix. They share the #412 oracle's harness contract:
+// build to C, gcc-link `-mavx2` against the runtime archive, run under
+// `valgrind --leak-check=full` with NO suppressions, and assert
+// `definitely lost: 0 bytes`. (`-mavx2` keeps codegen inside valgrind's
+// decodable instruction set on AVX-512 hosts; the libgomp `GOMP_parallel`
+// TLS is a documented "possibly lost" false positive, so the contract is
+// on `definitely lost` specifically.) Run by default where `valgrind` and
+// `gcc` exist; cleanly skip (printing why) otherwise. Manual gate:
+//   cargo test -p chelis-cli --test cli \
+//     build_c_function_body_heap_temp_has_zero_definitely_lost_under_valgrind \
+//     -- --nocapture
+//   cargo test -p chelis-cli --test cli \
+//     build_c_nested_tuple_print_has_zero_definitely_lost_under_valgrind \
+//     -- --nocapture
+// Expected success condition: the printed valgrind output contains
+// "definitely lost: 0 bytes in 0 blocks".
+#[cfg(unix)]
+fn assert_built_c_has_zero_definitely_lost(name: &str, source: &str, expected_stdout: &[&str]) {
+    fn tool_available(tool: &str) -> bool {
+        StdCommand::new(tool)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    if !tool_available("valgrind") {
+        eprintln!("SKIP: valgrind not installed; cannot run the #406 leak oracle");
+        return;
+    }
+    if !tool_available("gcc") {
+        eprintln!("SKIP: gcc not installed; cannot link the #406 leak oracle");
+        return;
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join(format!("{name}.ch"));
+    write_file(&src, source);
+
+    let out_dir = dir.path().join(format!("{name}-build"));
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let bin = out_dir.join(name);
+    let link = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args([
+            "-O2",
+            "-mavx2",
+            "-fopenmp",
+            &format!("{name}.c"),
+            "-L.",
+            "-lchelis_runtime",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-o",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("gcc should run");
+    assert!(
+        link.status.success(),
+        "gcc link failed:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    let valgrind = StdCommand::new("valgrind")
+        .current_dir(&out_dir)
+        .args([
+            "--leak-check=full",
+            "--errors-for-leak-kinds=definite",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("valgrind should run");
+
+    let vg_stdout = String::from_utf8_lossy(&valgrind.stdout);
+    let vg_stderr = String::from_utf8_lossy(&valgrind.stderr);
+    println!("valgrind stdout:\n{vg_stdout}");
+    println!("valgrind stderr:\n{vg_stderr}");
+
+    // The program must produce its correct output before leaks matter.
+    for expected in expected_stdout {
+        assert!(
+            vg_stdout.contains(expected),
+            "{name} produced wrong output under valgrind; \
+             expected to contain {expected:?}:\n{vg_stdout}"
+        );
+    }
+
+    assert!(
+        vg_stderr.contains("definitely lost: 0 bytes in 0 blocks"),
+        "chelis-built C program {name} must have zero definitely-lost \
+         bytes under valgrind (issue #406); valgrind reported:\n{vg_stderr}"
+    );
+    assert!(
+        vg_stderr.contains("suppressed: 0 bytes in 0 blocks"),
+        "the #406 leak oracle must run with NO suppressions; \
+         valgrind reported:\n{vg_stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn build_c_function_body_heap_temp_has_zero_definitely_lost_under_valgrind() {
+    // A tuple built as an intermediate inside a compiled function body and
+    // consumed by the body (not returned): leaked the tuple via
+    // `chelis_tuple_from_values` on the post-#412 tree.
+    assert_built_c_has_zero_definitely_lost(
+        "fn_body_tuple_temp",
+        "def mk(x: f32, y: f32) -> f32 = {\n\
+         \x20 p = (mul(x, 2.0), add(y, 1.0))\n\
+         \x20 add(p.0, p.1)\n\
+         }\n\
+         out = mk(3.0, 4.0)\n",
+        &["out = 11"],
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn build_c_function_body_list_temp_has_zero_definitely_lost_under_valgrind() {
+    // The list sibling of the tuple intermediate: a `let`-bound list built
+    // and consumed inside a function body leaked via
+    // `chelis_list_from_values`. Confirms the block-scope release covers
+    // every refcounted host-value type, not just tuples.
+    assert_built_c_has_zero_definitely_lost(
+        "fn_body_list_temp",
+        "def mk(n: int64) -> int64 = {\n\
+         \x20 xs = [n, mul(n, cast(2, int64)), mul(n, cast(3, int64))]\n\
+         \x20 len(xs)\n\
+         }\n\
+         out = mk(cast(5, int64))\n",
+        &["out = 3"],
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn build_c_function_body_tuple_transfer_has_zero_definitely_lost_under_valgrind() {
+    // Negative-direction parity: the block result *escapes* by aliasing a
+    // heap binding through an `if`/`else` (the unchosen branch's tuple was
+    // leaking, and a naive release of both arms would use-after-free the
+    // chosen one). Asserts both correct output and zero definitely-lost,
+    // so a regression that double-frees or leaks here is caught.
+    assert_built_c_has_zero_definitely_lost(
+        "fn_body_tuple_transfer",
+        "def mk(x: f32, y: f32) -> (f32, f32) = {\n\
+         \x20 p = (mul(x, 2.0), add(y, 1.0))\n\
+         \x20 q = (add(x, 1.0), mul(y, 2.0))\n\
+         \x20 if gt(x, 0.0) then p else q\n\
+         }\n\
+         out = mk(3.0, 4.0)\n",
+        &["out.0 = 6", "out.1 = 5"],
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn build_c_nested_tuple_print_has_zero_definitely_lost_under_valgrind() {
+    // A nested tuple returned and printed: the labeled-root printer's
+    // `chelis_tuple_get` retained each nested-container field and never
+    // released it, leaking the inner tuples for the process lifetime.
+    assert_built_c_has_zero_definitely_lost(
+        "nested_tuple_print",
+        "def mk(x: f32, y: f32) -> ((f32, f32), (f32, f32)) = {\n\
+         \x20 p = (mul(x, 2.0), add(y, 1.0))\n\
+         \x20 q = (add(x, 1.0), mul(y, 2.0))\n\
+         \x20 (p, q)\n\
+         }\n\
+         out = mk(3.0, 4.0)\n",
+        &["out.0.0 = 6", "out.1.1 = 8"],
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn build_c_call_return_tuple_escape_has_zero_definitely_lost_under_valgrind() {
+    // Issue #406 call-escape: a block-frame heap binding that escapes the
+    // block *through a function-call return* (not a bare `__result = p`)
+    // was freed by the block release while the returned alias still lived
+    // -- a use-after-free that crashed a correct program (`expected
+    // float64 value`, exit 1; under valgrind: invalid reads + a 56-byte
+    // definitely-lost block from the prematurely-dropped tuple).
+    //
+    // `id_pair` returns its bare argument, so the analysis
+    // (`analyze_returns_arg`) flags arg 0 as escaping; the emit site
+    // retains the call result before the block releases `p`, leaving
+    // exactly one live reference. Asserts both correct output and zero
+    // definitely-lost: a regression reintroduces the UAF (wrong output /
+    // crash) or, if the retain is unbalanced, a leak.
+    //
+    // origin/main has no function-body block release at all (the #406 fix
+    // lives only on this branch), so this oracle is meaningful as a GREEN
+    // assertion on the branch; there is no red-on-main counterpart.
+    assert_built_c_has_zero_definitely_lost(
+        "call_return_tuple_escape",
+        "def id_pair(p: (f32, f32)) -> (f32, f32) = p\n\
+         def mk(x: f32) -> (f32, f32) = {\n\
+         \x20 p = (mul(x, 2.0), add(x, 1.0))\n\
+         \x20 id_pair(p)\n\
+         }\n\
+         out = mk(3.0)\n",
+        &["out.0 = 6", "out.1 = 4"],
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn build_c_call_return_list_escape_has_zero_definitely_lost_under_valgrind() {
+    // The list sibling of the call-return tuple escape: a `let`-bound list
+    // returned through `id2(xs)` SEGFAULTED on the branch before the fix
+    // (exit 139) because the block released `xs` while the returned alias
+    // still pointed at it. The same `analyze_returns_arg` + retain-on-
+    // call-escape path covers every refcounted host-value type, so the
+    // list case must be correct and definitely-lost-free too.
+    assert_built_c_has_zero_definitely_lost(
+        "call_return_list_escape",
+        "def id2(a: List[int64]) -> List[int64] = a\n\
+         def mk(n: int64) -> List[int64] = {\n\
+         \x20 xs = [n, mul(n, cast(2, int64)), mul(n, cast(3, int64))]\n\
+         \x20 id2(xs)\n\
+         }\n\
+         out = mk(cast(5, int64))\n",
+        &["out = [5, 10, 15]"],
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn build_c_call_fresh_result_does_not_over_retain_under_valgrind() {
+    // Precision guard for the #406 call-escape retain: a call whose callee
+    // builds a *fresh* result (does not return its argument) must NOT
+    // retain the block result, or the block-frame binding it was built
+    // from leaks. `dup` constructs a new list, so `analyze_returns_arg`
+    // reports it returns none of its parameters and the emit site retains
+    // nothing -- the block release of `xs` then balances its construction
+    // and the program is definitely-lost-free. A naive
+    // conservative-retain-everything fallback would leak the `xs`
+    // allocation here; this oracle locks the precise interprocedural
+    // behavior so a later regression to over-retain is caught as a leak.
+    assert_built_c_has_zero_definitely_lost(
+        "call_fresh_result_no_over_retain",
+        "def dup(a: List[int64]) -> List[int64] = [len(a), len(a)]\n\
+         def mk(n: int64) -> List[int64] = {\n\
+         \x20 xs = [n, mul(n, cast(2, int64)), mul(n, cast(3, int64))]\n\
+         \x20 dup(xs)\n\
+         }\n\
+         out = mk(cast(5, int64))\n",
+        &["out = [3, 3]"],
+    );
+}
