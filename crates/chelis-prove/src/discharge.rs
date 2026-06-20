@@ -321,6 +321,15 @@ pub enum DischargeError {
 /// Constructed only through [`Discharge::new`], which enforces the integrity
 /// invariant that a discharge cannot carry a qualifier its soundness does not
 /// support.
+///
+/// `Discharge` deliberately does not derive `Serialize`/`Deserialize`, while
+/// its parts (`Soundness`, `QualifierSet`) do. Because the integrity invariant
+/// lives in [`Discharge::new`], a `Discharge` must never be reconstructed
+/// field-by-field from separately (de)serialized parts: that bypasses the
+/// constructor and could rejoin a weak soundness with a strong qualifier
+/// outside the seam. Any future wire form of a discharge (WI-6 and later) must
+/// round-trip through [`Discharge::new`] (or a `Deserialize` impl that
+/// re-validates through it), never by independent field assembly.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Discharge {
     soundness: Soundness,
