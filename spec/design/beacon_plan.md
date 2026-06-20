@@ -1,7 +1,7 @@
 # Beacon Engine: Specification and Implementation Plan
 
-Intended location: `spec/design/beacon_plan.md` (chelis repo, Beacon shell).
-Companion: the master plan (`spec/design/verification_stack_master_plan.md`).
+Intended location: `spec/design/beacon_plan.md` (chelis repo).
+Companion documents: the master plan (`spec/design/verification_stack_master_plan.md`), the whole-stack sketch (`spec/design/verification_stack_sketch.md`), the dependency map (`spec/design/verification_stack_dependency_map.md`), and the VNN-LIB front-end placeholder (`spec/design/vnnlib_frontend_placeholder.md`).
 
 ## 1. What Beacon is
 

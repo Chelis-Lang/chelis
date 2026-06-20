@@ -1,7 +1,7 @@
 # Chelis Verification Stack: Master Implementation Plan
 
 Intended location: `spec/design/verification_stack_master_plan.md` (chelis repo).
-Companion documents: the Beacon engine plan (`spec/design/beacon_plan.md`) and the VNN-LIB front-end placeholder (`spec/design/vnnlib_frontend_placeholder.md`).
+Companion documents: the whole-stack sketch (`spec/design/verification_stack_sketch.md`), the dependency map (`spec/design/verification_stack_dependency_map.md`), the Beacon engine plan (`spec/design/beacon_plan.md`), and the VNN-LIB front-end placeholder (`spec/design/vnnlib_frontend_placeholder.md`).
 
 ## 1. Purpose and scope
 
@@ -11,7 +11,7 @@ The backend and library components evaluated separately (Sollya, Arb/FLINT, Z3, 
 
 ## 2. Context
 
-The stack verifies properties of numerical programs by dispatching each goal to the engine whose method fits its shape, then aggregating the heterogeneous results behind one honest composite verdict, all on the chelis tensor IR so the verified artifact is the executed artifact. cvc5 is the exact engine for the polynomial and logical core. Beacon is the in-house, IR-native, sound bound-propagation engine that scales where SMT cannot and runs the same on finance pricing graphs and neural networks. The remaining engines fill what those two cannot close. The composite never launders a weak guarantee into a strong one. Background design is in the architecture sketch and the component evaluation; this plan is the build-of-record.
+The stack verifies properties of numerical programs by dispatching each goal to the engine whose method fits its shape, then aggregating the heterogeneous results behind one honest composite verdict, all on the chelis tensor IR so the verified artifact is the executed artifact. cvc5 is the exact engine for the polynomial and logical core. Beacon is the in-house, IR-native, sound bound-propagation engine that scales where SMT cannot and runs the same on finance pricing graphs and neural networks. The remaining engines fill what those two cannot close. The composite never launders a weak guarantee into a strong one. Background design is in the whole-stack sketch (`spec/design/verification_stack_sketch.md`) and the component evaluation, with the dependency structure in the dependency map (`spec/design/verification_stack_dependency_map.md`); this plan is the build-of-record.
 
 ## 3. How to read this plan
 

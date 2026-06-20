@@ -1,6 +1,7 @@
 # VNN-LIB Front-End: Placeholder Specification
 
 Intended location: `spec/design/vnnlib_frontend_placeholder.md` (chelis repo).
+Companion documents: the master plan (`spec/design/verification_stack_master_plan.md`), the whole-stack sketch (`spec/design/verification_stack_sketch.md`), the dependency map (`spec/design/verification_stack_dependency_map.md`), and the Beacon engine plan (`spec/design/beacon_plan.md`).
 Status: placeholder, backlogged. This records the intended shape for continuity; it is not a build spec.
 
 ## Intent
