@@ -416,7 +416,7 @@ supporting the C backend. Different artifact, different role.
 The ecosystem's other reef packages are **shells**: distributable
 libraries that build on `chelis-std`. The currently shipped shells
 are `nautilus`, `coral`, `shoals`, and `octant`. Designed but not
-yet shipped: `school`, `darwin`, `hull`, `beacon`.
+yet shipped: `school`, `darwin`, `hull`, `hydrostatic`.
 
 ---
 

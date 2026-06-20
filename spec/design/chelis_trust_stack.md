@@ -163,7 +163,7 @@ Full design: `chelis_reference_implementations_spec.md`.
 
 ### Level 3 -- Automated Static Analysis (future, power-tool, opt-in)
 
-A specialized analysis tool (working name: Beacon) that runs on the compiled tensor DAG and computes over-approximations of value ranges at each node. The user doesn't annotate anything. The tool infers properties automatically.
+A specialized analysis tool (working name: Hydrostatic) that runs on the compiled tensor DAG and computes over-approximations of value ranges at each node. The user doesn't annotate anything. The tool infers properties automatically.
 
 ```bash
 chelis analyze --input-ranges "spot:[0.01,10000] vol:[0.001,5.0] rate:[-0.1,0.5]" src/pricer.ch
@@ -181,9 +181,9 @@ pricer.ch:25  result          -- bounded in [0.0, 9987.3] for specified input ra
 
 Computationally expensive (minutes, not milliseconds). A pre-deployment gate, not an inner-loop tool. Inspired by Astree, which verified the absence of runtime errors in the Airbus A380 flight control software.
 
-Not currently designed. Recorded as a future shell (Beacon) in the ecosystem. Depends on the tensor DAG being stable (it is) and the input range specification mechanism (needs design).
+Not currently designed. Recorded as a future shell (Hydrostatic) in the ecosystem. Depends on the tensor DAG being stable (it is) and the input range specification mechanism (needs design).
 
-**Contract evolution:** Phase 5g's trusted annotations (`@convex`, `@lipschitz`) start as documentation. As Beacon matures, it can verify some of these annotations automatically: check whether `@convex` actually holds by analyzing the second derivative's sign over the specified input ranges. The annotations don't change; the verification level increases over time.
+**Contract evolution:** Phase 5g's trusted annotations (`@convex`, `@lipschitz`) start as documentation. As Hydrostatic matures, it can verify some of these annotations automatically: check whether `@convex` actually holds by analyzing the second derivative's sign over the specified input ranges. The annotations don't change; the verification level increases over time.
 
 ### What's NOT in the stack
 
@@ -229,7 +229,7 @@ For the strongest guarantee, the customer writes the properties themselves. They
 
 Scope of v0.1.0: the PURE in-fragment surface (tensor/scalar ops, lambda, let, if, match with `PVar`/`PLit`/`PWildcard`, and the surface `grad` check). The same agreement pattern (reference implementation + production implementation + agreement checking) is what `@property matches_reference forall(...)` does for user code; Hull proves it on the highest-stakes code in the system, the compiler itself. Hull covers the compiler/spec layer that `chelis prove` (per-program `@property`) and c-earchin (spec translation) do not. Three documented v0.1.0 boundaries, all scoped for v0.2.0 in Hull's `docs/v0_2_0_roadmap.md`: grad conservatism is a BUILD-differential concern (the compiler's linearity/Δ rejection is at lowering, not at `chelis check`, so it is out of the v0.1.0 check+eval differential); effects and ADTs (`EConstruct`/`PConstruct`) are out of the typed fragment; builtin-name shadowing and division-by-zero are documented reference/UB gaps, not soundness findings.
 
-**Phase 5g (trusted annotations).** `@convex`, `@lipschitz` start as trusted, evolve toward verified as Beacon (abstract interpretation) matures. No change to the current plan -- this document extends the vision.
+**Phase 5g (trusted annotations).** `@convex`, `@lipschitz` start as trusted, evolve toward verified as Hydrostatic (abstract interpretation) matures. No change to the current plan -- this document extends the vision.
 
 **Octant.** LaTeX-to-Deep provenance gives formula traceability. Combined with `@property matches_textbook forall(...)`, the trust chain is: LaTeX formula (human-verified) -> compiled Deep (provenance-linked) -> optimized code (property-verified against the formula). Every link in the chain is machine-checkable, and the chain is shipped end-to-end. Octant emits span-attributed Deep + sidecar `.spans.json`; the chelis-side preservation of those spans through IR lowering, transformation passes, and backend codegen lands per `chelis_span_survival.md` (phases S0-S6, all shipped). Both the DAG-routed path (compute-heavy tensor kernels, §2.4) and the host-routed path (pure-scalar / control-flow / scaffolding, §2.4 host-path rules + §2.4.2) preserve spans, and the post-S6 canary in §4 demonstrably runs Black-Scholes scalar form end-to-end: LaTeX byte range -> Deep node -> IR / HostExpr node -> emitted `// span: <id>` comment in the generated C source line.
 
@@ -276,7 +276,7 @@ These limits are stable: each will move from "limit" to "shipped" only when a co
 | Shell/Tool | Change | Status |
 |---|---|---|
 | `chelis prove` | Evolve from CLI flags to first-class Chelis property functions with `@property`, type-directed input generation, counterexample minimization | V1 shipped (v0.7.1); symbolic-dim tensor binders + counterexample minimization pending |
-| Beacon (abstract interpretation) | New future shell: automated static analysis on the tensor DAG, input range specification, overflow/div-zero/NaN detection | Future, not designed |
+| Hydrostatic (abstract interpretation) | New future shell: automated static analysis on the tensor DAG, input range specification, overflow/div-zero/NaN detection | Future, not designed |
 | `Std.Test` | No change -- `chelis test` remains for deterministic assertion-based tests. `chelis prove` is the companion for property-based verification. | Shipped |
 | Hull | The compiler-vs-spec differential layer. Hull's reference checker + evaluator agree with the shipped compiler on 10k generated programs (zero CompilerUnsound), CI-enforced by `tests/conformance/hull/` + `conformance.yml`. Validates the pattern (differential testing against a reference) that user-facing `@property matches_reference` uses, on the compiler itself. | Shipped (v0.1.2) |
-| Phase 5g annotations | No change to near-term plan. Long-term: Beacon may verify annotations automatically. | Deferred |
+| Phase 5g annotations | No change to near-term plan. Long-term: Hydrostatic may verify annotations automatically. | Deferred |

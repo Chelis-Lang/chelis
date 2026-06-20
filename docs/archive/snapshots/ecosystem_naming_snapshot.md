@@ -417,7 +417,7 @@ The canonical reference (`spec/design/chelis_canonical_reference.md` lines
 > cannot be substituted independently."
 
 The same table marks `chelis-std` as `Runtime (compiler-bundled)` while
-`nautilus`, `coral`, `shoals`, `octant`, `school`, `darwin`, `hull`, `beacon`
+`nautilus`, `coral`, `shoals`, `octant`, `school`, `darwin`, `hull`, `hydrostatic`
 are marked as `Shell`. There is no remaining naming reconciliation work
 here; the two names refer to two different things by design.
 

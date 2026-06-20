@@ -149,7 +149,7 @@ All project-level naming follows the turtle/ocean metaphor.
 | Classical ML shell | **School** | A school of fish learning together — and the ML sense of *learning* |
 | Evolutionary algorithms shell | **Darwin** | Natural selection — survival of the fittest programs, mutated and crossed over the Deep AST |
 | Language specification shell | **Hull** | The hull defines the shape of the vessel — the spec defines the shape of the language |
-| Automated static analysis shell | **Beacon** | A lighthouse warning of hazards |
+| Automated static analysis shell | **Hydrostatic** | A pressure test proving the hull holds before the vessel sails |
 
 Chelis is pronounced **CHEL-is**.
 The domain is **chelis.ch**.
@@ -190,7 +190,7 @@ deterministic lowering + rendering + provenance) has the same prerequisite as
 Part B (finance-notation lowering through `shoals`, Greek rendering, notebook) is
 sequential after `shoals`. `school` is **active** (the ML shell — see its
 table row). `darwin` (evolutionary
-algorithms), `hull` (executable language specification), and `beacon` (automated
+algorithms), `hull` (executable language specification), and `hydrostatic` (automated
 static analysis on the tensor DAG) are post-Phase-3 stubs, as is `octant-docs` (full
 LaTeX document ingestion, Octant Phase 4).
 
@@ -204,7 +204,7 @@ LaTeX document ingestion, Octant Phase 4).
 | `school` | Shell | `chelis-std` (+ `nautilus` + `coral` planned re-adds) | **Active** (P0–P5 shipped; pinned `=0.7.23`) | Machine learning. Sole home of the NN surface since chelis-std 0.4.0 (`School.Nn.*`, `School.Loss.*`, `School.Optim`, `School.Schedule`): layers, activations, norms, attention, losses, 9 optimizers, schedules, HPO, data utilities, training loop, six-model zoo. Intent is a general deep-learning framework (School `spec/vision.md`); the classical-ML scope (regression, trees, SVMs, clustering, pipelines, cross-validation) remains roadmap. Reference implementation for [`shell_repo_contract.md`](shell_repo_contract.md). |
 | `darwin` | Shell | `chelis-std` + `nautilus` required, `coral` optional | **Stub** (post-3) | Evolutionary algorithms — GA, genetic programming over the Deep AST, evolution strategies, population-based training, neural architecture search. Uniquely natural fit because Deep is homoiconic: program mutation and crossover are typed AST operations, and the compiler's 0–1 fitness scoring is literally the fitness function for evolutionary search. `coral` is optional for evolving feature-engineering pipelines over tabular data. |
 | `hull` | Shell | `chelis-std` | **Stub** (post-3) | Executable language specification. Self-hosted reference type checker and evaluator implementing the LaCaDiLE typing rules and operational semantics as Chelis functions over Deep AST ADTs. Differential testing against the real compiler. Spec-driven random well-typed program generation. The spec of Chelis, written in Chelis, checked by Chelis. |
-| `beacon` | Shell | `chelis-std` + compiler DAG IR | **Future** | Automated static analysis: value range inference, div-zero detection, overflow detection, NaN propagation, bounded output verification. Input ranges specified by user; output ranges inferred. Pre-deployment gate (minutes, not milliseconds). Inspired by Astree (Airbus A380 flight control verification). Trust stack Level 3. |
+| `hydrostatic` | Shell | `chelis-std` + compiler DAG IR | **Future** | Automated static analysis: value range inference, div-zero detection, overflow detection, NaN propagation, bounded output verification. Input ranges specified by user; output ranges inferred. Pre-deployment gate (minutes, not milliseconds). Inspired by Astree (Airbus A380 flight control verification). Trust stack Level 3. |
 
 Design rule: the chelis-std runtime covers what every Chelis program may need
 (tensors, neural primitives, time, decimal); the substitutability criterion
@@ -214,7 +214,7 @@ methods. `coral` owns tabular data. `shoals` is finance-only. `school` owns
 machine learning — the NN surface migrated from chelis-std 0.4.0 plus the
 classical-ML roadmap. `darwin` is evolutionary search only. If it's about the language's own specification and
 conformance testing, it goes in `hull`. If it's about automated static analysis on the
-DAG (range inference, overflow detection, numerical stability), it goes in `beacon`.
+DAG (range inference, overflow detection, numerical stability), it goes in `hydrostatic`.
 `octant` is a notation bridge layered on top of `nautilus` and (optionally) `shoals` —
 it consumes their APIs and adds no numerical capabilities of its own. Time and decimal
 stay in `chelis-std` because every domain needs dates and exact arithmetic.
