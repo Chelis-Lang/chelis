@@ -33,6 +33,7 @@ use crate::composition::{
     NonVacuityRecord, NonVacuityStatus, rollup_composite,
 };
 use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry};
+use crate::discharge::DischargeEngine;
 
 /// The verification status of one user property.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -638,7 +639,14 @@ fn try_surf_tier_b(
     ) {
         return None;
     }
-    match crate::solve_property(&smt_prop, options.smt_timeout_ms) {
+    // Route the cvc5 solve through the discharge-engine seam (WI-4). The cvc5
+    // engine wraps the same solve_property pipeline, so `into_result()` yields
+    // the identical TierBResult and the match arms below are unchanged.
+    let discharge = crate::discharge::Cvc5Engine::new().discharge(
+        &crate::discharge::Goal::smt(smt_prop.clone()),
+        options.smt_timeout_ms,
+    );
+    match discharge.into_result() {
         crate::tier_b::TierBResult::Proved => {
             let non_vacuity = smt_non_vacuity_record(&smt_prop, options.smt_timeout_ms);
             let reason = match non_vacuity.status {
