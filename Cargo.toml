@@ -61,3 +61,4 @@ miette = { version = "7", features = ["fancy"] }
 serde = { version = "1", features = ["derive", "rc"] }
 libc = "0.2"
 half = { version = "2", features = ["serde"] }
+stacker = "0.1"
