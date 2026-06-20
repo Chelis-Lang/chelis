@@ -277,6 +277,7 @@ These limits are stable: each will move from "limit" to "shipped" only when a co
 |---|---|---|
 | `chelis prove` | Evolve from CLI flags to first-class Chelis property functions with `@property`, type-directed input generation, counterexample minimization | V1 shipped (v0.7.1); symbolic-dim tensor binders + counterexample minimization pending |
 | Hydrostatic (abstract interpretation) | New future shell: automated static analysis on the tensor DAG, input range specification, overflow/div-zero/NaN detection | Future, not designed |
+| Beacon (bound-propagation verification) | New future shell: IR-native sound bound propagation; proves output bounds, bounded Greeks, and neural-network properties; plugs into the verification orchestrator through the discharge-engine interface | Future; design in `verification_stack_master_plan.md` / `beacon_plan.md` |
 | `Std.Test` | No change -- `chelis test` remains for deterministic assertion-based tests. `chelis prove` is the companion for property-based verification. | Shipped |
 | Hull | The compiler-vs-spec differential layer. Hull's reference checker + evaluator agree with the shipped compiler on 10k generated programs (zero CompilerUnsound), CI-enforced by `tests/conformance/hull/` + `conformance.yml`. Validates the pattern (differential testing against a reference) that user-facing `@property matches_reference` uses, on the compiler itself. | Shipped (v0.1.2) |
 | Phase 5g annotations | No change to near-term plan. Long-term: Hydrostatic may verify annotations automatically. | Deferred |

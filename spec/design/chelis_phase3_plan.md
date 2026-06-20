@@ -1744,6 +1744,11 @@ Three further shells are named and reserved but scoped as stubs beyond Phase 3:
   to detect division by zero, overflow, NaN propagation, and unbounded outputs without
   user annotations. Pre-deployment gate (minutes, not milliseconds). Trust stack
   Level 3. Future stub, not designed.
+- `beacon` — IR-native bound-propagation verification engine. Depends on `chelis-std`
+  + the compiler's DAG IR. Proves sound output bounds by forward propagation through the
+  RISC DAG; the same engine bounds finance pricing graphs and neural networks (via
+  Hydronnx). Plugs into the verification orchestrator through the discharge-engine
+  interface. Future stub; design in `verification_stack_master_plan.md` and `beacon_plan.md`.
 
 `chelis prove` scope has expanded from a CLI-flag property testing tool to first-class
 executable properties with `@property` annotations. See `chelis_trust_stack.md` for the
@@ -1889,6 +1894,7 @@ since moved to `School.*` in chelis-std 0.4.0; `Std.Time` / `Std.Decimal` stayed
 | `3t`: Native Testing | medium | Bug 9 fix, fast eval | Chelis library (`Std.Test`) + CLI (`chelis test` command) + test migrations for Nautilus and Coral |
 | `3f`: SKILL.md v2 | small | all above | Documentation |
 | Hydrostatic (future) | TBD | `chelis-std` + DAG IR | Automated static analysis shell (value range inference, hazard detection). **Future**, not in Phase 3. |
+| Beacon (future) | TBD | `chelis-std` + DAG IR | IR-native bound-propagation verification engine (output bounds, bounded Greeks, NN verification). **Future**, not in Phase 3. |
 
 This phase is intentionally pragmatic. The remaining work is now shell ecosystem and
 testing work rather than the earlier compiler/runtime foundations. `3k` is the next
@@ -1898,8 +1904,9 @@ unshipped shell. `3l` depends on `3j` and `3k`. `3n` can proceed against `3j`, w
 shells.
 
 `school` (classical ML, sklearn competitor), `darwin` (evolutionary algorithms), `hull`
-(executable language specification), and `hydrostatic` (automated static analysis on the
-tensor DAG) are post-Phase-3 shell stubs and do not appear as Phase 3 sub-phases.
+(executable language specification), `hydrostatic` (automated static analysis on the
+tensor DAG), and `beacon` (IR-native bound-propagation verification) are post-Phase-3
+shell stubs and do not appear as Phase 3 sub-phases.
 
 ---
 

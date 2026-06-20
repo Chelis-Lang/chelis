@@ -831,6 +831,14 @@ but no Phase 3 sub-phase implements them.
   an inner-loop tool. Inspired by Astree (Airbus A380 flight control verification).
   Future shell, not designed. Marine rationale: a pressure test proving the hull holds before the vessel sails. Full
   design pointer: `chelis_trust_stack.md` (Level 3 of the trust stack).
+- **`beacon`** — IR-native bound-propagation verification engine (`chelis-lang/beacon`).
+  Depends on `chelis-std` and the compiler's tensor DAG IR. Proves sound output bounds for
+  numerical programs by forward propagation through the RISC DAG (CROWN lineage: interval,
+  zonotope, then linear relaxation with branch-and-bound). The same engine bounds finance
+  pricing graphs and neural networks (the latter via Hydronnx). Plugs into the in-core
+  verification orchestrator through the discharge-engine interface and runs standalone for
+  the VNN-COMP path. Future shell. Marine rationale: a guiding light marking safe passage
+  through proven bounds. Full design: `verification_stack_master_plan.md` and `beacon_plan.md`.
 
 ### 3t: Chelis-Native Testing
 

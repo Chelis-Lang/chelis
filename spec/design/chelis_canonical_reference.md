@@ -150,6 +150,7 @@ All project-level naming follows the turtle/ocean metaphor.
 | Evolutionary algorithms shell | **Darwin** | Natural selection — survival of the fittest programs, mutated and crossed over the Deep AST |
 | Language specification shell | **Hull** | The hull defines the shape of the vessel — the spec defines the shape of the language |
 | Automated static analysis shell | **Hydrostatic** | A pressure test proving the hull holds before the vessel sails |
+| Bound-propagation verification shell | **Beacon** | A guiding light marking safe passage through proven bounds |
 
 Chelis is pronounced **CHEL-is**.
 The domain is **chelis.ch**.
@@ -190,8 +191,9 @@ deterministic lowering + rendering + provenance) has the same prerequisite as
 Part B (finance-notation lowering through `shoals`, Greek rendering, notebook) is
 sequential after `shoals`. `school` is **active** (the ML shell — see its
 table row). `darwin` (evolutionary
-algorithms), `hull` (executable language specification), and `hydrostatic` (automated
-static analysis on the tensor DAG) are post-Phase-3 stubs, as is `octant-docs` (full
+algorithms), `hull` (executable language specification), `hydrostatic` (automated
+static analysis on the tensor DAG), and `beacon` (IR-native bound-propagation
+verification) are post-Phase-3 stubs, as is `octant-docs` (full
 LaTeX document ingestion, Octant Phase 4).
 
 | Package | Kind | Depends On | Status | Contents |
@@ -205,6 +207,7 @@ LaTeX document ingestion, Octant Phase 4).
 | `darwin` | Shell | `chelis-std` + `nautilus` required, `coral` optional | **Stub** (post-3) | Evolutionary algorithms — GA, genetic programming over the Deep AST, evolution strategies, population-based training, neural architecture search. Uniquely natural fit because Deep is homoiconic: program mutation and crossover are typed AST operations, and the compiler's 0–1 fitness scoring is literally the fitness function for evolutionary search. `coral` is optional for evolving feature-engineering pipelines over tabular data. |
 | `hull` | Shell | `chelis-std` | **Stub** (post-3) | Executable language specification. Self-hosted reference type checker and evaluator implementing the LaCaDiLE typing rules and operational semantics as Chelis functions over Deep AST ADTs. Differential testing against the real compiler. Spec-driven random well-typed program generation. The spec of Chelis, written in Chelis, checked by Chelis. |
 | `hydrostatic` | Shell | `chelis-std` + compiler DAG IR | **Future** | Automated static analysis: value range inference, div-zero detection, overflow detection, NaN propagation, bounded output verification. Input ranges specified by user; output ranges inferred. Pre-deployment gate (minutes, not milliseconds). Inspired by Astree (Airbus A380 flight control verification). Trust stack Level 3. |
+| `beacon` | Shell | `chelis-std` + compiler DAG IR | **Future** | IR-native, sound bound-propagation verification engine (CROWN lineage: interval, zonotope, then linear relaxation with branch-and-bound). Proves output bounds for numerical programs; the same engine bounds finance pricing graphs and neural networks (the latter via Hydronnx ONNX-to-IR). Plugs into the in-core verification orchestrator through the discharge-engine interface and runs standalone for the VNN-COMP path. Design: `verification_stack_master_plan.md`, `beacon_plan.md`. |
 
 Design rule: the chelis-std runtime covers what every Chelis program may need
 (tensors, neural primitives, time, decimal); the substitutability criterion
@@ -215,6 +218,8 @@ machine learning — the NN surface migrated from chelis-std 0.4.0 plus the
 classical-ML roadmap. `darwin` is evolutionary search only. If it's about the language's own specification and
 conformance testing, it goes in `hull`. If it's about automated static analysis on the
 DAG (range inference, overflow detection, numerical stability), it goes in `hydrostatic`.
+If it's about discharging a verification goal by sound bound propagation over the DAG
+(proving output ranges, bounded Greeks, or neural-network properties), it goes in `beacon`.
 `octant` is a notation bridge layered on top of `nautilus` and (optionally) `shoals` —
 it consumes their APIs and adds no numerical capabilities of its own. Time and decimal
 stay in `chelis-std` because every domain needs dates and exact arithmetic.
