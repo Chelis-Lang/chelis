@@ -13,6 +13,7 @@ pub mod artifact;
 pub mod composition;
 pub mod concrete_eval;
 pub mod contracts;
+pub mod discharge;
 pub mod dispatch;
 pub mod from_property_spec;
 pub mod inlineability;
@@ -35,6 +36,10 @@ pub use composition::{
 pub use concrete_eval::{eval_arith, eval_bool};
 pub use contracts::{
     ContractInvariant, StandardContract, standard_contract_registry, standard_contracts,
+};
+pub use discharge::{
+    Cvc5Engine, Discharge, DischargeEngine, DischargeError, Goal, GoalError, GoalShape,
+    IntervalBox, IrHandle, OutputRange, Qualifier, QualifierSet, Soundness,
 };
 // Re-export the chelis-pred predicate helpers so downstream CLI/tide
 // consumers reach them through chelis-prove (RFC D-PRED consumer surface).
