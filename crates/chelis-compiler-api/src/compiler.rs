@@ -2572,6 +2572,7 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
 
 fn wire_dag(dag: &Dag) -> WireDag {
     WireDag {
+        schema_version: crate::schema::WIRE_DAG_SCHEMA_VERSION,
         nodes: dag.nodes().iter().map(wire_dag_node).collect(),
         roots: dag.roots().iter().map(|id| id.0).collect(),
     }

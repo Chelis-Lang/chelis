@@ -220,6 +220,40 @@ fn u4_property_with_opaque_invariant_binder_uses_injection() {
     assert!(outcomes[0].injected, "verified through the injection path");
 }
 
+#[test]
+fn wi8_injected_binder_assumption_carries_prover_stamped_discharge_tier() {
+    // WI-8: the binder-matched (injected) assumption carries a prover-stamped
+    // discharge tier recording which engine discharged it and with what
+    // guarantee, keyed to the binder's source identity. c-earchin emits only
+    // source identity; the tier is the prover's stamp.
+    let outcomes = run_surf(INJECTION_PROPERTY, "auto");
+    assert_eq!(outcomes.len(), 1, "one property: {outcomes:?}");
+    assert!(outcomes[0].injected);
+
+    let binder_assumption = outcomes[0]
+        .assumptions
+        .iter()
+        .find(|a| a.name == "invariant:Probability:binder:p")
+        .unwrap_or_else(|| panic!("injected binder assumption present: {:?}", outcomes[0]));
+
+    let tier = binder_assumption
+        .discharge_tier
+        .as_ref()
+        .expect("injected assumption carries a prover-stamped discharge tier");
+    assert_eq!(
+        tier.engine, "fuzz-sampler",
+        "discharged by the fuzz sampler"
+    );
+    assert_eq!(tier.guarantee, "fuzz", "with the fuzz guarantee kind");
+    // The tier is keyed to the binder's source identity (the same id the
+    // assumption carries), so the artifact can join tier -> source.
+    assert_eq!(
+        tier.source.as_deref(),
+        Some("invariant:Probability:binder:p"),
+        "the tier is keyed to the binder source identity"
+    );
+}
+
 const INJECTION_FALSE_PROPERTY: &str = "module M.Prob
 export (probability)
 @opaque

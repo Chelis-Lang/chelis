@@ -16,7 +16,253 @@ use crate::linearity::LinearityInfo;
 use crate::types::*;
 use crate::unify::*;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+
+/// Stack red-zone (in bytes) the checker keeps in reserve. Every
+/// recursive AST walker in the `infer_program` pipeline checks, before
+/// recursing, that at least this much native stack remains; if less
+/// remains it bails with a typed diagnostic instead of recursing into a
+/// native stack overflow.
+///
+/// Why a stack-budget guard at all: `infer_expr`/`infer_app` (and the
+/// sibling walkers below) mutually recurse one native frame per AST level
+/// over deeply-nested `app` trees -- a reef-linked program such as the
+/// Shoals pricer desugars into very deep curried-application chains. The
+/// recursion is *finite* (a 512 MiB stack completes the real pricer) but
+/// `chelis check` runs the checker on the process main thread (8 MiB
+/// default on Linux), which overflows partway through. A native stack
+/// overflow `abort()`s the process (Rust's overflow handler is not a
+/// panic), so it cannot be turned into a diagnostic after the fact -- the
+/// only correctness-preserving option is to refuse to recurse *before* the
+/// frame that would overflow. (A type checker should not SIGSEGV on input;
+/// this guard bounds the checker's *own* inference recursion. It is not a
+/// general guarantee: the foundational `chelis_deep::Expr` derived
+/// `Clone`/`Drop` and `chelis_deep::validate::validate_expr` still overflow
+/// on deeper input, which a per-site guard here cannot reach -- see the
+/// WI-1 follow-up note.)
+///
+/// Why a byte budget and not a depth constant: the depth at which a given
+/// chain overflows is build- and stack-profile dependent -- the same
+/// `var`-only chain overflows around depth ~27 (debug / 2 MiB) through
+/// ~6090 (release / 32 MiB), a >200x spread (measured; see
+/// docs/investigations/wi1_infer_recursion_depth.md). A static depth
+/// constant is a tuning treadmill: it drifts with per-frame size and
+/// assumes a fixed thread stack. `stacker::remaining_stack()` measures the
+/// actual resource, so the guard stays correct under any build profile and
+/// any thread stack size without tuning -- this is the same mechanism
+/// rustc uses for its own recursive passes.
+///
+/// 128 KiB is a generous red zone: the heaviest single `infer_expr` frame
+/// measured is well under that, so reserving 128 KiB guarantees the
+/// current frame plus a few more can unwind and allocate the diagnostic
+/// without touching the guard page, while costing negligibly little of an
+/// 8 MiB stack.
+const STACK_RED_ZONE_BYTES: usize = 128 * 1024;
+
+/// Fallback recursion-depth cap used *only* when
+/// `stacker::remaining_stack()` returns `None` (the platform cannot report
+/// remaining stack). On such a platform the byte budget is unavailable, so
+/// the guard degrades to a conservative static depth cap -- never worse
+/// than a pure static-depth guard would have been. Chosen below the
+/// smallest measured overflow (debug / 2 MiB overflows around depth ~27,
+/// so even a 2 MiB stack survives this cap with margin) and far above any
+/// legitimate source nesting (hand-written and decompiler-emitted Surf
+/// nests in the low hundreds at most -- but legitimate-deep programs on a
+/// `None` platform are the price of having no byte budget there; the
+/// primary, non-fallback path imposes no such depth ceiling). The
+/// `RecursionDepthGuard` RAII counter exists to feed this fallback.
+const FALLBACK_MAX_DEPTH: usize = 20;
+
+thread_local! {
+    /// Current pipeline native-recursion depth on this thread, maintained
+    /// by `RecursionDepthGuard`. Only consulted on platforms where
+    /// `stacker::remaining_stack()` returns `None`; on the normal path the
+    /// byte budget governs and this counter is merely incremented and
+    /// decremented. Thread-local so concurrent checks on different threads
+    /// (e.g. nextest workers) do not share or corrupt the counter.
+    static RECURSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// RAII recursion-depth counter. Increments `RECURSION_DEPTH` on
+/// construction and decrements it on drop, so the count tracks live native
+/// recursion depth even across the early-return paths inside the guarded
+/// walkers. Used by `stack_guard_tripped` as the `None`-platform
+/// fallback. Construct one at the top of every guarded recursive walker.
+struct RecursionDepthGuard;
+
+impl RecursionDepthGuard {
+    fn enter() -> Self {
+        RECURSION_DEPTH.with(|cell| cell.set(cell.get() + 1));
+        RecursionDepthGuard
+    }
+
+    fn depth() -> usize {
+        RECURSION_DEPTH.with(Cell::get)
+    }
+}
+
+impl Drop for RecursionDepthGuard {
+    fn drop(&mut self) {
+        RECURSION_DEPTH.with(|cell| cell.set(cell.get().saturating_sub(1)));
+    }
+}
+
+thread_local! {
+    /// First stack-exhaustion bail recorded during the current check unit,
+    /// as `(walker_site, optional_span_id)`. Set (first-write-wins) by
+    /// `stack_guard_tripped` whenever any guarded recursive walker bails on
+    /// low stack; reset to `None` when the OUTERMOST `StackExhaustionScope`
+    /// is entered and drained into the check's error vector before its
+    /// empty-errors gate. This is the soundness funnel: a stack bail that
+    /// merely stopped a no-error walker recursing (so it could not push its
+    /// own diagnostic) must STILL turn the whole check into a hard, located
+    /// failure rather than a silent green or partial result
+    /// (covered-or-rejected: exhaustion -> rejected, never swallowed).
+    /// Thread-local so concurrent checks on different threads do not
+    /// cross-contaminate.
+    static STACK_EXHAUSTED: RefCell<Option<(String, Option<String>)>> = const { RefCell::new(None) };
+
+    /// Re-entrancy depth of `StackExhaustionScope` on this thread. The flag
+    /// is reset only when this transitions 0 -> 1 (the outermost scope), so
+    /// an inner public entry (e.g. `check_typed_program` -> `infer_program`)
+    /// does not wipe a bail the outer pass already recorded.
+    static STACK_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Marks a check unit for stack-exhaustion tracking. Construct one at the
+/// top of every public check entry. Entering the OUTERMOST scope resets the
+/// flag (so a prior exhausted run on a pooled thread cannot leak in);
+/// nested scopes are no-ops for the reset. Call `drain_into` after the
+/// pipeline to surface any recorded bail as a hard located error.
+struct StackExhaustionScope;
+
+impl StackExhaustionScope {
+    fn enter() -> Self {
+        STACK_SCOPE_DEPTH.with(|d| {
+            let depth = d.get();
+            if depth == 0 {
+                STACK_EXHAUSTED.with(|cell| *cell.borrow_mut() = None);
+            }
+            d.set(depth + 1);
+        });
+        StackExhaustionScope
+    }
+
+    /// If a stack bail was recorded during this scope, push the located
+    /// failure diagnostic into `errors`. Idempotent: takes the flag, so a
+    /// second call is a no-op. Call after the whole pipeline has run and
+    /// before the empty-errors gate, so exhaustion always surfaces as a hard
+    /// check failure.
+    fn drain_into(&self, errors: &mut Vec<CheckError>) {
+        if let Some((site, span_id)) = STACK_EXHAUSTED.with(|cell| cell.borrow_mut().take()) {
+            errors.push(stack_depth_error(&site, span_id.as_deref()));
+        }
+    }
+}
+
+impl Drop for StackExhaustionScope {
+    fn drop(&mut self) {
+        STACK_SCOPE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
+/// True when the current native stack is too close to exhaustion to safely
+/// recurse one more pipeline frame; when it returns `true` it has also
+/// recorded the bail (first-write-wins) into `STACK_EXHAUSTED` so the check
+/// entry boundary turns it into a hard located failure even for walkers
+/// that carry no error vector and can only `return`.
+///
+/// Primary path: `true` when `stacker::remaining_stack()` reports fewer than
+/// `STACK_RED_ZONE_BYTES` remaining. Fallback path (`remaining_stack()` is
+/// `None`, i.e. the platform cannot report remaining stack): `true` when the
+/// `RecursionDepthGuard` depth exceeds `FALLBACK_MAX_DEPTH`, so a `None`
+/// platform is never worse off than a pure static-depth guard. Callers must
+/// already hold a live `RecursionDepthGuard` so the fallback depth reflects
+/// this call.
+///
+/// `span_id` is a closure, not an already-resolved `Option<&str>`, so the
+/// span lookup -- a linear scan of the node's metadata map -- runs ONLY on
+/// the rare exhausted branch and never on the per-node type-checker hot path.
+fn stack_guard_tripped<'a>(site: &str, span_id: impl FnOnce() -> Option<&'a str>) -> bool {
+    let exceeded = match stacker::remaining_stack() {
+        Some(remaining) => remaining < STACK_RED_ZONE_BYTES,
+        None => RecursionDepthGuard::depth() > FALLBACK_MAX_DEPTH,
+    };
+    if exceeded {
+        let span_id = span_id();
+        STACK_EXHAUSTED.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = Some((site.to_string(), span_id.map(str::to_string)));
+            }
+        });
+    }
+    exceeded
+}
+
+/// Stack-recursion guard for one recursive AST walker. Place at the top of
+/// every self-recursive walker that descends a `deep::Expr` tree:
+///
+/// ```ignore
+/// stack_guard!("walker_name", expr, /* bail value */ false);
+/// ```
+///
+/// It constructs a live `RecursionDepthGuard` for the current frame (so the
+/// `None`-platform depth fallback is accurate), then, if the stack budget is
+/// exhausted, records the located bail in `STACK_EXHAUSTED` (so the check
+/// entry boundary fails hard -- never a silent partial result) and returns
+/// the supplied neutral bail value, stopping the recursion before the frame
+/// that would overflow. The bail value is whatever "stop / nothing found"
+/// means for the walker's return type (`false`, `None`, `()` via no third
+/// argument, an identity `expr.clone()`, etc.). `$expr` must be a
+/// `&deep::Expr` (or anything with a `span_id()` method) so the diagnostic
+/// can name where the depth is.
+macro_rules! stack_guard {
+    ($site:expr, $expr:expr, $bail:expr) => {
+        let _stack_depth_guard = RecursionDepthGuard::enter();
+        if stack_guard_tripped($site, || $expr.span_id()) {
+            return $bail;
+        }
+    };
+    ($site:expr, $expr:expr) => {
+        let _stack_depth_guard = RecursionDepthGuard::enter();
+        if stack_guard_tripped($site, || $expr.span_id()) {
+            return;
+        }
+    };
+}
+
+/// Build the typed diagnostic emitted when the check fails because a
+/// recursive walker bailed on a nearly-exhausted native stack. The message
+/// names the `site` (the walker that bailed first) and, when available, the
+/// external-source `span_id` of the construct it bailed at, so the user is
+/// told *where* the depth is rather than just that the program is "too deep"
+/// -- a valid-but-deeply-nested program can legitimately reach this while
+/// inference remains recursive.
+fn stack_depth_error(site: &str, span_id: Option<&str>) -> CheckError {
+    let where_clause = match span_id {
+        Some(id) if !id.is_empty() => format!(" near source span `{id}`"),
+        _ => String::new(),
+    };
+    CheckError::new(
+        CheckErrorKind::Other,
+        format!(
+            "type-checker stack budget exhausted while analyzing deeply-nested \
+             input in `{site}`{where_clause}: the program nests deeper than the \
+             checker can analyze on the available native stack. The recursion is \
+             finite (this is a checker limitation, not necessarily a type error); \
+             see WI-1 / spec/design/verification_stack_master_plan.md \u{00A7}4.1."
+        ),
+        vec![
+            "Deeply-nested application chains (often from reef-linking many \
+             exports into one program) can exhaust the recursive checker's stack \
+             budget; reduce the nesting or split the program. An iterative / \
+             stack-growing inference follow-up (stacker::maybe_grow) is tracked to \
+             lift this for legitimately-deep programs."
+                .to_string(),
+        ],
+    )
+}
 
 thread_local! {
     /// Per-annotation-pass map from a def name to its declared
@@ -68,6 +314,14 @@ impl Drop for DeclaredSigGuard {
 /// argument type expressions are stored (the trailing return type is
 /// dropped). A re-declared name keeps the first sig seen.
 fn collect_defsig_param_types(expr: &deep::Expr, map: &mut HashMap<String, Vec<deep::Expr>>) {
+    // Bail before unbounded recursion exhausts the native stack on a
+    // deeply-nested input. No error vector here; `stack_guard_tripped`
+    // records the bail so the check entry boundary fails hard with a located
+    // diagnostic. See `STACK_RED_ZONE_BYTES`. (In practice this walker only
+    // descends `module` wrappers, which do not nest deeply, but the guard
+    // keeps the "every recursive walker is bounded" invariant uniform and
+    // cheap.)
+    stack_guard!("collect_defsig_param_types", expr);
     let deep::Expr::List(list, _) = expr else {
         return;
     };
@@ -260,6 +514,10 @@ pub struct ParamSignatureInference {
 
 /// Run type inference on a list of top-level Deep expressions.
 pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
+    // Reset the stack-exhaustion flag for this check unit; `drain` below
+    // turns any walker stack bail into a hard located error so deep input
+    // can never produce a silent green / partial result.
+    let stack_scope = StackExhaustionScope::enter();
     let (mut env, mut vg) = builtins::builtin_env();
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
@@ -339,6 +597,10 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     let local_ir_env = build_ir_type_env(exprs);
     validate_polymorphic_op_constraints(exprs, &local_ir_env, &mut errors);
 
+    // If any walker bailed on a nearly-exhausted stack during this run,
+    // surface it as a hard located failure (covered-or-rejected).
+    stack_scope.drain_into(&mut errors);
+
     InferResult {
         errors,
         typed_nodes,
@@ -362,6 +624,9 @@ pub fn check_ir_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferRes
 /// [`check_ir_with_context`]. The library state is `Arc`-shared and
 /// never mutated, so concurrent reads are cheap.
 pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
+    // Reset the stack-exhaustion flag for this check unit; drained below
+    // before the empty-errors gate (covered-or-rejected on deep input).
+    let stack_scope = StackExhaustionScope::enter();
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -401,6 +666,9 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
     log_sub("suppress_unbound_for_cycle", &mut sub_t);
+    // Surface a stack-exhaustion bail from the passes above as a hard
+    // located error before the gate (and before the errors drain below).
+    stack_scope.drain_into(&mut result.errors);
     if !result.errors.is_empty() {
         return Err(result);
     }
@@ -448,6 +716,19 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
     log_sub("annotate_library_exprs_outer_loop", &mut sub_t);
     let library_ir_annotated = build_ir_type_env(&library_annotated);
     log_sub("build_ir_type_env_from_annotated", &mut sub_t);
+
+    // The annotation loop above recurses (annotate_expr_with_scope); if it
+    // bailed on low stack, reject rather than return a partially-annotated
+    // library context.
+    let mut post_annotate_errors = Vec::new();
+    stack_scope.drain_into(&mut post_annotate_errors);
+    if !post_annotate_errors.is_empty() {
+        return Err(InferResult {
+            errors: post_annotate_errors,
+            typed_nodes: 0,
+            total_nodes: 0,
+        });
+    }
 
     Ok(TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -498,6 +779,12 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
 pub fn build_compiled_library_context(
     library_exprs: &[deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    // Reset the stack-exhaustion flag for this check unit; drained into the
+    // error vector below before the empty-errors gate (and again after the
+    // annotation pass) so a deep-input stack bail on the library-compile path
+    // always fails the check rather than returning a silent green / partial
+    // CheckedProgram. Mirrors `check_ir_with_signature_context`.
+    let stack_scope = StackExhaustionScope::enter();
     // Mirror `build_type_env_from_library` up through the validators so the
     // type_env half stays bit-compatible with the existing public API.
     let empty = TypeEnv::empty();
@@ -517,6 +804,9 @@ pub fn build_compiled_library_context(
     crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
+    // Surface any stack-exhaustion bail from the passes above as a hard
+    // located error (covered-or-rejected) before the empty-errors gate.
+    stack_scope.drain_into(&mut result.errors);
     if !result.errors.is_empty() {
         return Err(result);
     }
@@ -555,6 +845,12 @@ pub fn build_compiled_library_context(
             annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
         })
         .collect();
+    // Annotation also recurses (annotate_expr_with_scope); if it bailed on
+    // low stack, reject rather than return a partially-annotated program.
+    stack_scope.drain_into(&mut result.errors);
+    if !result.errors.is_empty() {
+        return Err(result);
+    }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
 
     let type_env = TypeEnv::from_inner(TypeEnvInner {
@@ -611,6 +907,13 @@ pub fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     library_exprs: &[deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    // Reset the stack-exhaustion flag for this check unit; drained into the
+    // error vector below before the empty-errors gate (and again after the
+    // annotation pass) so a deep-input stack bail on the layered
+    // library-compile path always fails the check rather than returning a
+    // silent green / partial CheckedProgram. Mirrors
+    // `check_ir_with_signature_context`.
+    let stack_scope = StackExhaustionScope::enter();
     // Seed from the base context's snapshot rather than the empty state.
     let mut state = base.inner().clone();
 
@@ -644,6 +947,9 @@ pub fn build_compiled_library_context_with_base(
         &base.inner().library_def_names,
         &mut result.errors,
     );
+    // Surface any stack-exhaustion bail from the passes above as a hard
+    // located error (covered-or-rejected) before the empty-errors gate.
+    stack_scope.drain_into(&mut result.errors);
     if !result.errors.is_empty() {
         return Err(result);
     }
@@ -675,6 +981,12 @@ pub fn build_compiled_library_context_with_base(
             annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
         })
         .collect();
+    // Annotation also recurses (annotate_expr_with_scope); if it bailed on
+    // low stack, reject rather than return a partially-annotated program.
+    stack_scope.drain_into(&mut result.errors);
+    if !result.errors.is_empty() {
+        return Err(result);
+    }
     let new_ir_annotated = build_ir_type_env(&library_annotated);
 
     // The returned TypeEnv's `ir_types` is the union: base declared types
@@ -746,6 +1058,10 @@ pub fn check_ir_with_signature_context(
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
+    // Reset the stack-exhaustion flag for this check unit; drained into the
+    // error vector below before the empty-errors gate so a deep-input stack
+    // bail always fails the check (never a silent green / partial result).
+    let stack_scope = StackExhaustionScope::enter();
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -799,6 +1115,9 @@ pub fn check_ir_with_signature_context(
         &mut result.errors,
     );
     log_sub("suppress_unbound_for_cycle", &mut sub_t);
+    // Surface any stack-exhaustion bail from the passes above as a hard
+    // located error (covered-or-rejected) before the empty-errors gate.
+    stack_scope.drain_into(&mut result.errors);
     if !result.errors.is_empty() {
         return Err(result);
     }
@@ -807,6 +1126,12 @@ pub fn check_ir_with_signature_context(
     // snapshot state so library names resolve during annotation.
     let annotated_exprs = annotate_ir_program_with_context(context, new_exprs);
     log_sub("annotate_ir_program_with_context", &mut sub_t);
+    // Annotation also recurses (annotate_expr_with_scope); if it bailed on
+    // low stack, reject rather than return a partially-annotated program.
+    stack_scope.drain_into(&mut result.errors);
+    if !result.errors.is_empty() {
+        return Err(result);
+    }
     // Surface library declared types in the returned type_env so downstream
     // passes (lower, effects, linearity) can resolve `(var libname)` calls
     // from new-code without a separate library lookup. New-code types take
@@ -826,10 +1151,19 @@ pub fn check_ir_with_signature_context(
 }
 
 pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
-    let result = infer_program(exprs);
+    // Outermost scope covers both inference (which has its own inner scope)
+    // and the annotation pass below, so a bail in either surfaces as a hard
+    // located failure rather than a partially-annotated `Ok`.
+    let stack_scope = StackExhaustionScope::enter();
+    let mut result = infer_program(exprs);
     if result.errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs);
         let annotated_type_env = build_ir_type_env(&annotated_exprs);
+        // Annotation recurses; reject if it bailed on low stack.
+        stack_scope.drain_into(&mut result.errors);
+        if !result.errors.is_empty() {
+            return Err(result);
+        }
         Ok(CheckedProgram::from_parts(
             annotated_exprs,
             annotated_type_env,
@@ -840,6 +1174,7 @@ pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Infer
 }
 
 pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
+    let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
     let mut result = infer_ir_program_with_env(exprs, &type_env);
     validate_ir_program(exprs, &type_env, &mut result.errors);
@@ -847,6 +1182,8 @@ pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
     crate::invariants::validate_type_invariants_in_program(exprs, &mut result.errors);
     validate_polymorphic_op_constraints(exprs, &type_env, &mut result.errors);
     suppress_unbound_for_cycle_members(exprs, &mut result.errors);
+    // Surface any walker stack bail as a hard located error.
+    stack_scope.drain_into(&mut result.errors);
     result
 }
 
@@ -1238,6 +1575,7 @@ fn collect_terminal_callees(
     shadowed: &HashSet<String>,
     out: &mut HashSet<String>,
 ) -> bool {
+    stack_guard!("collect_terminal_callees", expr, false);
     match expr {
         deep::Expr::MetaExpr(meta, _) => collect_terminal_callees(&meta.expr, shadowed, out),
         deep::Expr::List(list, _) => match get_tag(list) {
@@ -1332,6 +1670,7 @@ fn fn_body_is_direct_self_call(def_body: &deep::Expr, def_name: &str) -> bool {
 /// is a potential base case and the recursion isn't trivial.
 #[allow(dead_code)]
 fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> bool {
+    stack_guard!("every_terminal_is_self_call", expr, false);
     match expr {
         deep::Expr::MetaExpr(meta, _) => every_terminal_is_self_call(&meta.expr, def_name),
         deep::Expr::List(list, _) => match get_tag(list) {
@@ -1909,6 +2248,13 @@ fn collect_top_level_calls(
     bound: &mut Vec<HashSet<String>>,
     calls: &mut HashSet<String>,
 ) {
+    // Bail before this walker's own unbounded recursion exhausts the native
+    // stack on a deeply-nested `app` body. This pass accumulates into
+    // `calls`/`bound` and carries no error vector, so it cannot push a
+    // diagnostic itself; the guard records the bail in `STACK_EXHAUSTED` so
+    // the check entry boundary still turns it into a hard located failure
+    // (never a silent partial collection). See `STACK_RED_ZONE_BYTES`.
+    stack_guard!("collect_top_level_calls", expr);
     match expr {
         deep::Expr::Atom(_, _) => {}
         deep::Expr::Map(map, _) => {
@@ -2011,6 +2357,7 @@ fn param_has_consuming_use_inner(
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
 ) -> bool {
+    stack_guard!("param_has_consuming_use_inner", expr, false);
     match expr {
         deep::Expr::Atom(_, _) => false,
         deep::Expr::Map(map, _) => map.entries.iter().any(|(_, value)| {
@@ -2247,6 +2594,7 @@ fn expr_mentions_unshadowed_name(
     name: &str,
     bound: &mut Vec<HashSet<String>>,
 ) -> bool {
+    stack_guard!("expr_mentions_unshadowed_name", expr, false);
     match expr {
         deep::Expr::Atom(_, _) => false,
         deep::Expr::Map(map, _) => map
@@ -2522,6 +2870,11 @@ fn pattern_names_for_signature(expr: &deep::Expr) -> HashSet<String> {
 }
 
 fn collect_pattern_names_for_signature(expr: &deep::Expr, names: &mut HashSet<String>) {
+    // Bail before unbounded recursion exhausts the native stack on a
+    // deeply-nested pattern. No error vector here; the guard records the bail
+    // so the check entry boundary fails hard with a located diagnostic. See
+    // `STACK_RED_ZONE_BYTES`.
+    stack_guard!("collect_pattern_names_for_signature", expr);
     let deep::Expr::List(list, _) = expr else {
         return;
     };
@@ -2866,6 +3219,7 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
 }
 
 fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
+    stack_guard!("param_name_for_refs", param, None);
     match param {
         deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some(name.clone()),
         deep::Expr::MetaExpr(meta, _) => param_name_for_refs(&meta.expr),
@@ -2908,6 +3262,7 @@ fn collect_eager_refs(
     refs: &mut HashSet<String>,
     applied: &mut HashSet<String>,
 ) {
+    stack_guard!("collect_eager_refs", expr);
     match expr {
         deep::Expr::List(list, _) => match get_tag(list) {
             Some("var") => {
@@ -3027,6 +3382,16 @@ fn walk_for_tensor_precision(
     seen: &mut HashSet<(String, String)>,
     def_context: &str,
 ) {
+    // Bail before this walker's own unbounded recursion exhausts the
+    // native stack (gdb confirmed this is a real SIGSEGV site on deep `app`
+    // trees, distinct from `infer_expr`). The bail records into
+    // `STACK_EXHAUSTED`; the check entry boundary turns that into a single
+    // located failure, so we just stop recursing here. See
+    // `STACK_RED_ZONE_BYTES`.
+    stack_guard!(
+        "validate_tensor_precisions (walk_for_tensor_precision)",
+        expr
+    );
     match expr {
         deep::Expr::List(list, _span) => {
             // Check t-tensor nodes at this level.
@@ -3376,6 +3741,7 @@ fn walk_for_poly_op_constraint_violations(
     scope: &HashMap<String, deep::Expr>,
     errors: &mut Vec<CheckError>,
 ) {
+    stack_guard!("walk_for_poly_op_constraint_violations", expr);
     match expr {
         deep::Expr::List(list, _span) => {
             // Check if this is `(app (var name) arg1 arg2 ...)` calling
@@ -3636,6 +4002,7 @@ fn walk_body_for_restricted_ops(
     call_site_list: &deep::List,
     errors: &mut Vec<CheckError>,
 ) {
+    stack_guard!("walk_body_for_restricted_ops", expr);
     if let deep::Expr::List(list, _) = expr
         && get_tag(list) == Some("app")
     {
@@ -3821,6 +4188,7 @@ fn validate_ir_expr(
     failed_let_names: &mut HashSet<String>,
     errors: &mut Vec<CheckError>,
 ) -> StaticValue {
+    stack_guard!("validate_ir_expr", expr, StaticValue::Unknown);
     match expr {
         deep::Expr::List(list, _) => {
             if get_tag(list) == Some("module") {
@@ -4875,6 +5243,9 @@ fn annotate_expr_with_scope(
     subst: &Subst,
     adt_reg: &AdtRegistry,
 ) -> deep::Expr {
+    // Bail value is the identity (unannotated) expr: annotation is a
+    // best-effort pass and the entry boundary fails the check anyway.
+    stack_guard!("annotate_expr_with_scope", expr, expr.clone());
     match expr {
         deep::Expr::Atom(_, _) => expr.clone(),
         deep::Expr::Map(map, span) => deep::Expr::Map(
@@ -5380,6 +5751,7 @@ fn stamp_pattern_binding_types(
     arm_env: &Env,
     pattern_subst: &Subst,
 ) -> deep::Expr {
+    stack_guard!("stamp_pattern_binding_types", pat, pat.clone());
     match pat {
         deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => pat.clone(),
         deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
@@ -5756,6 +6128,7 @@ fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
 /// marked failed so the suppression propagates unboundedly down the
 /// chain.
 fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
+    stack_guard!("let_rhs_is_recognized_shape_sensitive", expr, false);
     let inner = peel_borrow(expr);
     let deep::Expr::List(list, _) = inner else {
         return false;
@@ -5795,6 +6168,7 @@ fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
 }
 
 fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    stack_guard!("expr_type_expr", expr, None);
     match expr {
         deep::Expr::List(list, _) => {
             if let Some(meta) = get_meta(list)
@@ -6575,6 +6949,9 @@ fn arg_tensor_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep:
 }
 
 fn peel_borrow(expr: &deep::Expr) -> &deep::Expr {
+    // Recurses only through nested `borrow` wrappers (shallow in practice),
+    // but guarded for uniformity; bail value is the identity input.
+    stack_guard!("peel_borrow", expr, expr);
     if let deep::Expr::List(list, _) = expr
         && get_tag(list) == Some("borrow")
         && let Some(child) = children(list).first()
@@ -7546,6 +7923,7 @@ fn check_rank_body_discipline(
     user_def_names: &HashSet<String>,
     errors: &mut Vec<CheckError>,
 ) {
+    stack_guard!("check_rank_body_discipline", expr);
     let deep::Expr::List(list, _) = expr else {
         return;
     };
@@ -7954,6 +8332,14 @@ fn infer_expr(
     typed_nodes: &mut usize,
     total_nodes: &mut usize,
 ) -> Type {
+    // Bail before a deeply-nested `app` tree exhausts the native stack and
+    // aborts the process (this is the gdb-pinned real-pricer crash site):
+    // when the budget is gone we record the located bail in `STACK_EXHAUSTED`
+    // (so the check entry boundary fails hard) and return `Type::Error`,
+    // letting the stack unwind normally (no panic, no `catch_unwind`). See
+    // `STACK_RED_ZONE_BYTES`.
+    stack_guard!("infer_expr", expr, Type::Error);
+
     *total_nodes += 1;
 
     let result = match expr {
@@ -11980,6 +12366,7 @@ fn shape_a_relaxed_return(body_expr: &deep::Expr, body_ty: &Type, decl_ty: &Type
 /// bare-var returns would extend the relaxation beyond v3 scope and
 /// need a richer coercion story.
 fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
+    stack_guard!("descend_to_tail_var", expr, None);
     let list = match expr {
         deep::Expr::List(list, _) => list,
         _ => return None,
@@ -13865,6 +14252,7 @@ fn is_shape_app(app_list: &deep::List) -> bool {
 /// is defense-in-depth on Deep-direct paths; the post-fix tests use
 /// `parse_deep` rather than the Surf parser.
 fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
+    stack_guard!("extract_int_for_dim", expr, None);
     if let Some(value) = extract_int_literal(expr) {
         return Some(value);
     }
@@ -15100,6 +15488,7 @@ fn static_to_tensor_shape(arg: &deep::Expr, expected_rank: usize) -> Option<Vec<
 /// of uniform length). `dims` is the rank-N shape (outermost axis
 /// first).
 fn walk_static_cons_chain_shape(expr: &deep::Expr) -> Option<Vec<usize>> {
+    stack_guard!("walk_static_cons_chain_shape", expr, None);
     let elements = collect_cons_chain_for_shape(expr)?;
     if elements.is_empty() {
         // Empty list at the outermost level has rank 1, size 0.
@@ -15175,6 +15564,7 @@ fn collect_cons_chain_for_shape(expr: &deep::Expr) -> Option<Vec<&deep::Expr>> {
 /// "static to_tensor leaf." We don't need the actual value here,
 /// only the static-recognition predicate.
 fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
+    stack_guard!("extract_numeric_leaf_for_shape", expr, None);
     match expr {
         deep::Expr::Atom(deep::Atom::Int(_), _) => Some(()),
         deep::Expr::Atom(deep::Atom::Float(_), _) => Some(()),
@@ -16052,6 +16442,7 @@ fn pattern_bindings(
     covered_variants: &mut Vec<String>,
     has_wildcard: &mut bool,
 ) {
+    stack_guard!("pattern_bindings", pat);
     if let deep::Expr::List(list, _) = pat {
         let tag = get_tag(list).unwrap_or("");
         let kids = children(list);
@@ -17768,6 +18159,7 @@ fn deep_type_to_type_inner(
     dvar_map: &mut HashMap<String, DimVar>,
     rvar_map: &mut HashMap<String, RankVar>,
 ) -> Type {
+    stack_guard!("deep_type_to_type_inner", expr, Type::Error);
     match expr {
         deep::Expr::List(list, _) => {
             let tag = get_tag(list).unwrap_or("");
@@ -18023,6 +18415,123 @@ mod tests {
                 .any(|e| std::mem::discriminant(&e.kind) == std::mem::discriminant(&expected_kind)),
             "expected {expected_kind:?}, got: {:?}",
             result.errors
+        );
+    }
+
+    // ── WI-1 stack-budget guard (per-walker coverage) ────────────
+
+    /// Build a left-nested `app` chain of `depth` distinct names directly in
+    /// Deep, for the recursion-depth guard tests.
+    fn deep_app_chain_node(depth: usize) -> deep::Expr {
+        let sym = |s: &str| deep::Expr::Atom(deep::Atom::Symbol(s.to_string()), Span::new(0, 0));
+        let meta = || deep::Expr::Map(deep::MetaMap::default(), Span::new(0, 0));
+        let var = |n: &str| {
+            deep::Expr::List(
+                deep::List {
+                    elements: vec![sym("var"), meta(), sym(n)],
+                },
+                Span::new(0, 0),
+            )
+        };
+        let mut e = var("f0");
+        for i in 1..=depth {
+            e = deep::Expr::List(
+                deep::List {
+                    elements: vec![sym("app"), meta(), e, var(&format!("f{i}"))],
+                },
+                Span::new(0, 0),
+            );
+        }
+        e
+    }
+
+    /// The sibling walker `walk_for_tensor_precision` is independently
+    /// guarded: run it (via `validate_tensor_precisions_in_program`) on a
+    /// chain deep enough to overflow an unguarded recursion, on a bounded
+    /// stack. gdb showed this walker -- not `infer_expr` -- is the SIGSEGV
+    /// site for this pass on deep input; reaching the assertion at all proves
+    /// the guard prevented the overflow, and the recorded `STACK_EXHAUSTED`
+    /// flag proves the bail surfaces.
+    #[test]
+    fn walk_for_tensor_precision_sibling_is_guarded_not_sigsegv() {
+        let flagged = std::thread::Builder::new()
+            .name("sibling-guard-test".to_string())
+            // 1 MiB: small enough that a 4000-deep chain trips the byte
+            // budget early, well inside the guard, with no risk of overflow.
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let program = vec![deep_app_chain_node(4000)];
+                let _scope = StackExhaustionScope::enter();
+                let mut errors = Vec::new();
+                // Drive ONLY the tensor-precision pass (whose deep walker is
+                // walk_for_tensor_precision), isolating it from infer_expr.
+                validate_tensor_precisions_in_program(&program, &mut errors);
+                STACK_EXHAUSTED.with(|cell| cell.borrow().clone())
+            })
+            .expect("spawn sibling-guard worker")
+            .join()
+            .expect("sibling walker aborted (stack overflow?) instead of returning");
+
+        let (site, _span) = flagged.expect(
+            "walk_for_tensor_precision must record a stack-exhaustion bail on a \
+             4000-deep chain run on a 1 MiB stack",
+        );
+        assert!(
+            site.contains("walk_for_tensor_precision"),
+            "the bail must be attributed to the precision walker, got site: {site}",
+        );
+    }
+
+    /// The funnel is sound: a walker that bails with NO error vector (here the
+    /// tensor-precision pass is driven in isolation) still makes the flag set,
+    /// and `StackExhaustionScope::drain_into` turns it into a hard located
+    /// error -- never a silent empty result.
+    #[test]
+    fn stack_exhaustion_drains_into_a_located_error() {
+        let errors = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let program = vec![deep_app_chain_node(4000)];
+                let scope = StackExhaustionScope::enter();
+                let mut errors = Vec::new();
+                validate_tensor_precisions_in_program(&program, &mut errors);
+                // Before drain: the precision pass carries no error vector of
+                // its own for the bail, so `errors` may be empty here ...
+                scope.drain_into(&mut errors);
+                // ... but after drain the exhaustion is a hard error.
+                errors
+            })
+            .expect("spawn drain-test worker")
+            .join()
+            .expect("worker aborted instead of returning");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("stack budget exhausted")),
+            "drain_into must surface a located stack-budget error; got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>(),
+        );
+    }
+
+    /// Negative: a moderate-depth chain does not trip the guard in the
+    /// precision pass either (no false positive on the sibling site).
+    #[test]
+    fn moderate_chain_does_not_trip_sibling_guard() {
+        let flagged = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let program = vec![deep_app_chain_node(20)];
+                let _scope = StackExhaustionScope::enter();
+                let mut errors = Vec::new();
+                validate_tensor_precisions_in_program(&program, &mut errors);
+                STACK_EXHAUSTED.with(|cell| cell.borrow().is_some())
+            })
+            .expect("spawn worker")
+            .join()
+            .expect("worker aborted");
+        assert!(
+            !flagged,
+            "a 20-deep chain must not trip the precision walker's stack guard",
         );
     }
 

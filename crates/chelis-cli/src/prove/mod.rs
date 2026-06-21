@@ -2225,6 +2225,77 @@ fn simple_composite_verdict(status: &str, samples: usize) -> &'static str {
     }
 }
 
+/// Mirror of `chelis_prove::composition::FUZZ_TOLERANCE`. The CLI-local
+/// Tier-C-fuzz path is compiled in the default (no-`chelis-prove`) build,
+/// where the `chelis-prove` crate is not linked and its constant cannot be
+/// imported, so the value is duplicated here. The two must stay equal: the
+/// `cli_fuzz_tolerance_matches_chelis_prove` test below (compiled only under
+/// `chelis-prove`, where both are reachable) asserts the equality so they
+/// cannot silently drift.
+const CLI_FUZZ_TOLERANCE: f64 = 1e-10;
+
+/// The non-vacuity assumption records a green CLI-local fuzz verdict carries
+/// (WI-7). This Tier-C-only path (non-capability user properties and bridge
+/// c-earchin properties) renders a green by rejection-sampling: it only counts
+/// the `accepted` samples that satisfied every precondition, so an
+/// unsatisfiable precondition set EXHAUSTS into a generator-exhaustion error
+/// and never reaches a green here. A green over a non-empty precondition set is
+/// therefore non-vacuous by construction -- the accepted samples ARE the
+/// satisfiability witness -- and the green now CARRIES that evidence as an
+/// established non-vacuity record instead of an empty assumption list, so no
+/// green-rendering path reports a pass without recording the non-vacuity it
+/// established. The shape mirrors the shared runner's
+/// `fuzz_precondition_assumptions` so a CLI-local green and a shared-runner
+/// green agree on the same module. A property with no preconditions has nothing
+/// that could be vacuous, so it carries no assumption record (an empty list).
+fn precondition_non_vacuity_assumptions(
+    property_name: &str,
+    status: &str,
+    precondition_count: usize,
+    samples: usize,
+    seed: u64,
+) -> serde_json::Value {
+    // Only a genuine green (a pass with at least one witnessing sample) over a
+    // non-empty precondition set records established non-vacuity. A failed,
+    // unsupported, or zero-sample outcome is not a green and carries none.
+    if precondition_count == 0 || status != "passed" || samples == 0 {
+        return json!([]);
+    }
+    let name = format!("preconditions:{property_name}");
+    json!([
+        {
+            "name": name,
+            "discharge": {
+                "method": "fuzz",
+                "evidence": {
+                    "status": "validated",
+                    "property": property_name,
+                    "samples": samples,
+                    "seed": seed,
+                    "tolerance": CLI_FUZZ_TOLERANCE,
+                },
+            },
+            "non_vacuity": {
+                "status": "established",
+                "evidence": {
+                    "method": "fuzz",
+                    "result": "sat",
+                    "accepted_samples": samples,
+                    "seed": seed,
+                },
+            },
+            // WI-8: the prover-side discharge tier, shaped exactly like the
+            // shared runner's fuzz_precondition_assumptions stamp so a
+            // CLI-local green and a shared-runner green agree byte-for-byte.
+            "discharge_tier": {
+                "engine": "fuzz-sampler",
+                "guarantee": "fuzz",
+                "source": name,
+            },
+        }
+    ])
+}
+
 #[cfg(not(feature = "chelis-prove"))]
 fn emit_record(
     options: &ProveOptions<'_>,
@@ -2236,14 +2307,21 @@ fn emit_record(
     shrink_steps: usize,
 ) {
     if options.json {
+        let seed = options.effective_seed(property.seed);
         let mut value = json!({
             "kind": "property",
             "name": property.name,
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
-            "assumptions": [],
+            "assumptions": precondition_non_vacuity_assumptions(
+                &property.name,
+                status,
+                property.preconditions.len(),
+                samples,
+                seed,
+            ),
             "samples": samples,
-            "seed": options.effective_seed(property.seed),
+            "seed": seed,
             "source": source_json(property, options),
         });
         if let Some(counterexample) = counterexample {
@@ -2304,14 +2382,21 @@ fn emit_deep_record(
     shrink_steps: usize,
 ) {
     if options.json {
+        let seed = options.effective_seed(property.seed);
         let mut value = json!({
             "kind": "property",
             "name": property.name,
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
-            "assumptions": [],
+            "assumptions": precondition_non_vacuity_assumptions(
+                &property.name,
+                status,
+                property.preconditions.len(),
+                samples,
+                seed,
+            ),
             "samples": samples,
-            "seed": options.effective_seed(property.seed),
+            "seed": seed,
             "source": source_json_deep(property, options),
         });
         if let Some(counterexample) = counterexample {
@@ -2549,5 +2634,18 @@ mod tests {
         // Per-status exit codes are unchanged; only the combine precedence moved.
         assert_eq!(Status::Failed.exit_code(), 1);
         assert_eq!(Status::Unsupported.exit_code(), 2);
+    }
+
+    // The CLI-local fuzz tolerance constant must equal the shared runner's
+    // `chelis_prove::composition::FUZZ_TOLERANCE`. Compiled only under
+    // `chelis-prove`, the single build where both are linked, so the mirror
+    // cannot drift from the source of truth without this test failing.
+    #[cfg(feature = "chelis-prove")]
+    #[test]
+    fn cli_fuzz_tolerance_matches_chelis_prove() {
+        assert_eq!(
+            CLI_FUZZ_TOLERANCE,
+            chelis_prove::composition::FUZZ_TOLERANCE
+        );
     }
 }

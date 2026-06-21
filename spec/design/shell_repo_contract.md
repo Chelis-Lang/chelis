@@ -3,7 +3,7 @@
 **Status:** NORMATIVE for every shell repo in the
 [`chelis_canonical_reference.md`](chelis_canonical_reference.md) §Shell
 Ecosystem table (`nautilus`, `coral`, `shoals`, `octant`, `school`, `darwin`,
-`hull`, `beacon`, and any future shell). Made binding by `AGENTS.md`
+`hull`, `hydrostatic`, `beacon`, and any future shell). Made binding by `AGENTS.md`
 §Downstream Shell Contract. Changes to this contract land in the monorepo
 first and propagate to every shell per §10.
 

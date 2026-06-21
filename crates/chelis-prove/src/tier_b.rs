@@ -46,7 +46,7 @@ pub enum AssumptionSatisfiability {
 }
 
 /// Structured property input for SMT solving.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SmtProperty {
     /// Variable names and their sorts.
     pub variables: Vec<(String, SmtSort)>,

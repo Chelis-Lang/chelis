@@ -68,7 +68,7 @@ roster. Results:
 | `School`   | 5                        | accepted (short run) |
 | `Darwin`   | 5                        | accepted (short run) |
 | `Hull`     | 3                        | accepted (short run) |
-| `Beacon`   | 5                        | accepted (short run) |
+| `Hydrostatic` | 5                        | accepted (short run) |
 
 So only `Capstone` is actually flagged today among the names the
 user's report names. The detection logic at L228-276 is **correct**:
@@ -92,7 +92,7 @@ Cross-checked three sources:
    lists active and stub shells:
    - Runtime: `Chelis`, `Std`
    - Active shells: `Nautilus`, `Coral`, `Shoals`, `Octant`
-   - Post-Phase-3 stubs: `School`, `Darwin`, `Hull`, `Beacon`
+   - Post-Phase-3 stubs: `School`, `Darwin`, `Hull`, `Hydrostatic`
    - Special-case external: `CEarchin`
 3. **`Cargo.toml` workspace `members`** lists crate dirs prefixed
    `chelis-*`. All map to the `Chelis` module prefix; no other ecosystem
@@ -111,7 +111,7 @@ The current allowlist (L61-170) already covers:
   `Coral`, `Shoals`, `Octant`) plus the runtime `Chelis` and the
   special-case `CEarchin`.
 - All four post-Phase-3 stub shells (`School`, `Darwin`, `Hull`,
-  `Beacon`) — via the short-run path, not the allowlist, but accepted
+  `Hydrostatic`) — via the short-run path, not the allowlist, but accepted
   nonetheless.
 
 The single allowlist gap relative to the user's report is `Capstone`.

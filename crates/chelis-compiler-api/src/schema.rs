@@ -892,10 +892,157 @@ pub struct WireRecordPatternField {
     pub pattern: WirePattern,
 }
 
+/// Current monotonic schema version of the serialized [`WireDag`] surface
+/// (master plan WI-2, `spec/design/verification_stack_master_plan.md`
+/// §4.1). Bump this whenever the wire shape of the IR DAG changes in a
+/// way a pinned consumer (Beacon's transformers, an offline verifier)
+/// must observe. Bumping is monotonic and never reused: a higher number
+/// always means "newer than" a lower one.
+///
+/// Version history:
+/// - `1`: initial pinned surface (46-variant `WireRiscOp`, additive
+///   `accumulator` defaults on `Sum`/`BlasMatmul`).
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 1;
+
+/// Backwards-compat default for [`WireDag::schema_version`]. A wire
+/// payload predating WI-2 carries no `schema_version`; it is the
+/// pre-versioning surface, which is version `1`, so a missing field
+/// deserializes to the current baseline. This keeps deserialize additive
+/// (same rationale as [`default_sum_accumulator_name`]). The default is
+/// applied by serde at deserialize time; the *validation* of the value
+/// is a separate explicit step ([`WireDag::validate_schema_version`]),
+/// not a `Deserialize` side effect, so a mismatch surfaces as a typed
+/// [`WireDagSchemaError`] rather than a raw serde error.
+fn default_wire_dag_schema_version() -> u32 {
+    WIRE_DAG_SCHEMA_VERSION
+}
+
+/// A typed failure from validating a serialized [`WireDag`] against the
+/// supported schema version (WI-2). This is deliberately its own error
+/// type rather than a reuse of [`crate::decode::DecodeError`] (opaque-ADT
+/// invariant decoding) or [`crate::cache_envelope::CacheError`]: the
+/// concern is IR-DAG wire-surface compatibility, a distinct domain.
+///
+/// Policy: an unknown or mismatched schema version is **rejected**, never
+/// silently accepted and never a panic. A consumer pinned to
+/// [`WIRE_DAG_SCHEMA_VERSION`] that is handed a payload stamped with a
+/// version it does not recognize (in practice, a *newer* version it
+/// cannot interpret) must fail closed — interpreting an unknown surface
+/// would risk reading a renamed or re-shaped field as if it were the old
+/// one. A strictly-lower version is forward-compatible only up to the
+/// additive-default guarantee; this check rejects anything greater than
+/// the version this build supports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireDagSchemaError {
+    /// The payload's `schema_version` is greater than the version this
+    /// build supports, so its wire shape cannot be safely interpreted.
+    UnknownSchemaVersion {
+        /// The version stamped on the payload.
+        found: u32,
+        /// The newest version this build understands
+        /// ([`WIRE_DAG_SCHEMA_VERSION`]).
+        supported: u32,
+    },
+}
+
+impl std::fmt::Display for WireDagSchemaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WireDagSchemaError::UnknownSchemaVersion { found, supported } => write!(
+                f,
+                "WireDag schema version {found} is newer than the supported \
+                 version {supported}; this build cannot interpret it. Rebuild \
+                 against a chelis that emits version {found} or lower."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WireDagSchemaError {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireDag {
+    /// Monotonic schema version of this serialized DAG surface (WI-2).
+    /// Emitted as [`WIRE_DAG_SCHEMA_VERSION`] by the producer; defaults to
+    /// the current baseline when absent (pre-versioning payloads), and is
+    /// validated explicitly on consume via
+    /// [`WireDag::validate_schema_version`].
+    #[serde(default = "default_wire_dag_schema_version")]
+    pub schema_version: u32,
     pub nodes: Vec<WireDagNode>,
     pub roots: Vec<usize>,
+}
+
+impl WireDag {
+    /// Validate this DAG's [`schema_version`](Self::schema_version)
+    /// against the version this build supports (WI-2).
+    ///
+    /// Returns `Ok(())` for any version less than or equal to
+    /// [`WIRE_DAG_SCHEMA_VERSION`] (a lower version is accepted under the
+    /// additive-default guarantee), and a typed
+    /// [`WireDagSchemaError::UnknownSchemaVersion`] for any greater
+    /// version. Callers consuming a serialized `WireDag` from an
+    /// untrusted or cross-version producer MUST call this before relying
+    /// on the DAG's shape; deserialize alone does not validate the
+    /// version (the field has a serde default), so skipping this check
+    /// would silently accept an unknown surface.
+    pub fn validate_schema_version(&self) -> Result<(), WireDagSchemaError> {
+        if self.schema_version > WIRE_DAG_SCHEMA_VERSION {
+            return Err(WireDagSchemaError::UnknownSchemaVersion {
+                found: self.schema_version,
+                supported: WIRE_DAG_SCHEMA_VERSION,
+            });
+        }
+        Ok(())
+    }
+
+    /// Deserialize a `WireDag` from JSON and validate its schema version
+    /// in one step (WI-2). This is the recommended consume path for a
+    /// payload from another build or process: it fails closed on an
+    /// unknown version with a typed [`WireDagSchemaError`] rather than
+    /// returning a `WireDag` whose shape this build cannot trust.
+    ///
+    /// A serde parse failure surfaces as [`serde_json::Error`]; a
+    /// version mismatch on an otherwise-parseable payload surfaces as
+    /// [`WireDagSchemaError`]. The two failure classes are distinct so a
+    /// caller can tell a malformed payload from a version-incompatible
+    /// one.
+    pub fn from_validated_json(json: &str) -> Result<Self, WireDagDecodeError> {
+        let dag: WireDag = serde_json::from_str(json).map_err(WireDagDecodeError::Parse)?;
+        dag.validate_schema_version()
+            .map_err(WireDagDecodeError::Schema)?;
+        Ok(dag)
+    }
+}
+
+/// Combined failure type for [`WireDag::from_validated_json`]: either the
+/// JSON did not parse, or it parsed but carries an unsupported schema
+/// version. Kept distinct so a caller can branch on malformed-vs-
+/// incompatible.
+#[derive(Debug)]
+pub enum WireDagDecodeError {
+    /// The payload is not valid `WireDag` JSON.
+    Parse(serde_json::Error),
+    /// The payload parsed but its schema version is unsupported.
+    Schema(WireDagSchemaError),
+}
+
+impl std::fmt::Display for WireDagDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WireDagDecodeError::Parse(e) => write!(f, "WireDag JSON parse error: {e}"),
+            WireDagDecodeError::Schema(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for WireDagDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WireDagDecodeError::Parse(e) => Some(e),
+            WireDagDecodeError::Schema(e) => Some(e),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1126,6 +1273,99 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_wire_dag() -> WireDag {
+        WireDag {
+            schema_version: WIRE_DAG_SCHEMA_VERSION,
+            nodes: vec![],
+            roots: vec![],
+        }
+    }
+
+    // WI-2 positive: a `WireDag` carries its schema version, the version
+    // survives a serialize -> deserialize round-trip, and the recovered
+    // DAG validates against the supported version.
+    #[test]
+    fn wire_dag_carries_schema_version_and_round_trips() {
+        let dag = empty_wire_dag();
+        assert_eq!(dag.schema_version, WIRE_DAG_SCHEMA_VERSION);
+
+        let json = serde_json::to_string(&dag).expect("serialize WireDag");
+        // The version is actually emitted on the wire, not merely a
+        // default-on-read.
+        assert!(
+            json.contains(&format!("\"schema_version\":{WIRE_DAG_SCHEMA_VERSION}")),
+            "serialized WireDag must carry schema_version, got {json}"
+        );
+
+        let back: WireDag = serde_json::from_str(&json).expect("deserialize WireDag");
+        assert_eq!(back.schema_version, WIRE_DAG_SCHEMA_VERSION);
+        back.validate_schema_version()
+            .expect("current-version DAG validates");
+
+        // The combined consume path accepts it too.
+        let validated = WireDag::from_validated_json(&json).expect("validated decode");
+        assert_eq!(validated.schema_version, WIRE_DAG_SCHEMA_VERSION);
+    }
+
+    // WI-2 additive-default: a pre-versioning payload (no schema_version
+    // field) deserializes to the current baseline rather than failing,
+    // keeping the wire surface additive.
+    #[test]
+    fn wire_dag_missing_schema_version_defaults_to_baseline() {
+        let legacy = r#"{"nodes":[],"roots":[]}"#;
+        let dag: WireDag = serde_json::from_str(legacy).expect("legacy payload deserializes");
+        assert_eq!(
+            dag.schema_version, WIRE_DAG_SCHEMA_VERSION,
+            "missing schema_version defaults to the current baseline"
+        );
+        dag.validate_schema_version()
+            .expect("defaulted version validates");
+    }
+
+    // WI-2 negative twin: a payload stamped with a version NEWER than this
+    // build supports is REJECTED with the typed
+    // `WireDagSchemaError::UnknownSchemaVersion` — not silently accepted,
+    // not a panic, and not a bare serde error (the field parses fine; the
+    // version value is what is rejected).
+    #[test]
+    fn wire_dag_rejects_unknown_schema_version() {
+        let future = WIRE_DAG_SCHEMA_VERSION + 1;
+        let json = format!(r#"{{"schema_version":{future},"nodes":[],"roots":[]}}"#);
+
+        // It still PARSES (additive serde) ...
+        let dag: WireDag = serde_json::from_str(&json).expect("future payload parses");
+        assert_eq!(dag.schema_version, future);
+
+        // ... but explicit validation REJECTS it with the typed error.
+        let err = dag
+            .validate_schema_version()
+            .expect_err("future schema version must be rejected");
+        assert_eq!(
+            err,
+            WireDagSchemaError::UnknownSchemaVersion {
+                found: future,
+                supported: WIRE_DAG_SCHEMA_VERSION,
+            },
+            "rejection must be the typed UnknownSchemaVersion error"
+        );
+
+        // The combined consume path surfaces it as the Schema arm, not a
+        // parse error and not a silent accept.
+        match WireDag::from_validated_json(&json) {
+            Err(WireDagDecodeError::Schema(WireDagSchemaError::UnknownSchemaVersion {
+                found,
+                supported,
+            })) => {
+                assert_eq!(found, future);
+                assert_eq!(supported, WIRE_DAG_SCHEMA_VERSION);
+            }
+            other => panic!(
+                "from_validated_json must reject a future version with a typed \
+                 Schema error, got {other:?}"
+            ),
+        }
+    }
 
     #[test]
     fn sparse_wire_risc_ops_round_trip_as_additive_variants() {

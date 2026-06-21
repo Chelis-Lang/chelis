@@ -13,6 +13,7 @@ pub mod artifact;
 pub mod composition;
 pub mod concrete_eval;
 pub mod contracts;
+pub mod discharge;
 pub mod dispatch;
 pub mod from_property_spec;
 pub mod inlineability;
@@ -30,12 +31,20 @@ pub mod worker;
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
 pub use composition::{
     AssumptionDischarge, AssumptionRecord, AssumptionRegistry, CompositeVerdict, CompositionProbe,
-    DischargeMethod, NonVacuityRecord, NonVacuityStatus, rollup_composite,
+    DischargeMethod, DischargeTier, NonVacuityRecord, NonVacuityStatus, rollup_composite,
 };
 pub use concrete_eval::{eval_arith, eval_bool};
 pub use contracts::{
     ContractInvariant, StandardContract, standard_contract_registry, standard_contracts,
 };
+pub use discharge::{
+    Discharge, DischargeEngine, DischargeError, Goal, GoalError, GoalShape, IntervalBox, IrHandle,
+    OutputRange, Qualifier, QualifierSet, Soundness,
+};
+// The cvc5 engine exists only when cvc5 is linked (the smt feature); the
+// default build keeps zero cvc5-named symbols (the solver-free gate).
+#[cfg(feature = "smt")]
+pub use discharge::Cvc5Engine;
 // Re-export the chelis-pred predicate helpers so downstream CLI/tide
 // consumers reach them through chelis-prove (RFC D-PRED consumer surface).
 pub use chelis_pred::{PredAmenability, predicate_free_vars};

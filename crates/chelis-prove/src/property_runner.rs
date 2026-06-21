@@ -33,6 +33,8 @@ use crate::composition::{
     NonVacuityRecord, NonVacuityStatus, rollup_composite,
 };
 use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry};
+#[cfg(feature = "smt")]
+use crate::discharge::DischargeEngine;
 
 /// The verification status of one user property.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -638,7 +640,22 @@ fn try_surf_tier_b(
     ) {
         return None;
     }
-    match crate::solve_property(&smt_prop, options.smt_timeout_ms) {
+    // Route the cvc5 solve through the discharge-engine seam (WI-4) under the
+    // smt feature. The cvc5 engine wraps the same solve_property pipeline, so
+    // `into_result()` yields the identical TierBResult and the match arms below
+    // are unchanged. The default (non-smt) binary has no cvc5 engine, so it
+    // calls the same solve_property stub directly -- identical result, and no
+    // cvc5-named symbol leaks into the solver-free default build.
+    #[cfg(feature = "smt")]
+    let discharge_result = crate::discharge::Cvc5Engine::new()
+        .discharge(
+            &crate::discharge::Goal::smt(smt_prop.clone()),
+            options.smt_timeout_ms,
+        )
+        .into_result();
+    #[cfg(not(feature = "smt"))]
+    let discharge_result = crate::tier_b::solve_property(&smt_prop, options.smt_timeout_ms);
+    match discharge_result {
         crate::tier_b::TierBResult::Proved => {
             let non_vacuity = smt_non_vacuity_record(&smt_prop, options.smt_timeout_ms);
             let reason = match non_vacuity.status {
@@ -808,11 +825,18 @@ fn property_assumption_records(
     if smt_prop.preconditions.is_empty() {
         Vec::new()
     } else {
-        vec![AssumptionRecord::new(
-            format!("preconditions:{property_name}"),
-            Some(discharge),
-            Some(non_vacuity),
-        )]
+        // WI-8: stamp the prover-side discharge tier from the discharge method,
+        // keyed to the property's precondition source identity.
+        let name = format!("preconditions:{property_name}");
+        let tier = crate::composition::DischargeTier::new(
+            discharge.method.engine(),
+            discharge.method,
+            Some(name.clone()),
+        );
+        vec![
+            AssumptionRecord::new(name, Some(discharge), Some(non_vacuity))
+                .with_discharge_tier(tier),
+        ]
     }
 }
 
@@ -933,25 +957,35 @@ fn fuzz_precondition_assumptions(
     if precondition_count == 0 {
         return Vec::new();
     }
-    vec![AssumptionRecord::new(
-        format!("preconditions:{property_name}"),
-        Some(AssumptionDischarge::new(
-            DischargeMethod::Fuzz,
-            serde_json::json!({
-                "status": "validated",
-                "property": property_name,
-                "samples": samples,
+    let name = format!("preconditions:{property_name}");
+    vec![
+        AssumptionRecord::new(
+            name.clone(),
+            Some(AssumptionDischarge::new(
+                DischargeMethod::Fuzz,
+                serde_json::json!({
+                    "status": "validated",
+                    "property": property_name,
+                    "samples": samples,
+                    "seed": seed,
+                    "tolerance": FUZZ_TOLERANCE,
+                }),
+            )),
+            Some(NonVacuityRecord::established(serde_json::json!({
+                "method": "fuzz",
+                "result": "sat",
+                "accepted_samples": samples,
                 "seed": seed,
-                "tolerance": FUZZ_TOLERANCE,
-            }),
+            }))),
+        )
+        // WI-8: stamp the prover-side fuzz discharge tier, keyed to the
+        // precondition source identity.
+        .with_discharge_tier(crate::composition::DischargeTier::new(
+            DischargeMethod::Fuzz.engine(),
+            DischargeMethod::Fuzz,
+            Some(name),
         )),
-        Some(NonVacuityRecord::established(serde_json::json!({
-            "method": "fuzz",
-            "result": "sat",
-            "accepted_samples": samples,
-            "seed": seed,
-        }))),
-    )]
+    ]
 }
 
 // ===========================================================================

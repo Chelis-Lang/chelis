@@ -18,6 +18,9 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::types::{Prim, Type};
 
+#[cfg(feature = "smt")]
+use crate::discharge::DischargeEngine;
+
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
     NonVacuityRecord, NonVacuityStatus, rollup_composite,
@@ -184,7 +187,13 @@ fn default_obligation_assumptions(
             Some(AssumptionDischarge::new(method, evidence)),
             non_vacuity,
         )
-        .with_source(meta.source_type.clone(), meta.producer.clone()),
+        .with_source(meta.source_type.clone(), meta.producer.clone())
+        // WI-8: stamp the prover-side discharge tier, keyed to the obligation.
+        .with_discharge_tier(crate::composition::DischargeTier::new(
+            method.engine(),
+            method,
+            Some(name.to_string()),
+        )),
     ]
 }
 
@@ -423,7 +432,24 @@ fn run_one(
         if let Some(lowered) =
             crate::tier_b_lower::lower_obligation(exprs, inv, ob, &pparams, consts)
         {
-            match crate::tier_b::solve_property(&lowered.property, options.smt_timeout_ms) {
+            // Route the cvc5 solve through the discharge-engine seam (WI-4)
+            // under the smt feature. The cvc5 engine wraps the same
+            // solve_property pipeline, so `into_result()` yields the identical
+            // TierBResult and the match arms below are unchanged. The default
+            // (non-smt) binary has no cvc5 engine, so it calls the same
+            // solve_property stub directly -- identical result, and no
+            // cvc5-named symbol leaks into the solver-free default build.
+            #[cfg(feature = "smt")]
+            let discharge_result = crate::discharge::Cvc5Engine::new()
+                .discharge(
+                    &crate::discharge::Goal::smt(lowered.property.clone()),
+                    options.smt_timeout_ms,
+                )
+                .into_result();
+            #[cfg(not(feature = "smt"))]
+            let discharge_result =
+                crate::tier_b::solve_property(&lowered.property, options.smt_timeout_ms);
+            match discharge_result {
                 TierBResult::Proved => {
                     let non_vacuity =
                         smt_non_vacuity_record(&lowered.property, options.smt_timeout_ms);
@@ -1043,9 +1069,17 @@ fn obligation_assumption_records(
     discharge: AssumptionDischarge,
     non_vacuity: NonVacuityRecord,
 ) -> Vec<AssumptionRecord> {
+    // WI-8: stamp the prover-side discharge tier from the discharge's method
+    // (which engine + guarantee), keyed to the obligation's source identity.
+    let tier = crate::composition::DischargeTier::new(
+        discharge.method.engine(),
+        discharge.method,
+        Some(ob.name.clone()),
+    );
     vec![
         AssumptionRecord::new(ob.name.clone(), Some(discharge), Some(non_vacuity))
-            .with_source(ob.meta.source_type.clone(), ob.meta.producer.clone()),
+            .with_source(ob.meta.source_type.clone(), ob.meta.producer.clone())
+            .with_discharge_tier(tier),
     ]
 }
 
