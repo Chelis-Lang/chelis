@@ -179,12 +179,17 @@ impl Drop for StackExhaustionScope {
 /// platform is never worse off than a pure static-depth guard. Callers must
 /// already hold a live `RecursionDepthGuard` so the fallback depth reflects
 /// this call.
-fn stack_guard_tripped(site: &str, span_id: Option<&str>) -> bool {
+///
+/// `span_id` is a closure, not an already-resolved `Option<&str>`, so the
+/// span lookup -- a linear scan of the node's metadata map -- runs ONLY on
+/// the rare exhausted branch and never on the per-node type-checker hot path.
+fn stack_guard_tripped<'a>(site: &str, span_id: impl FnOnce() -> Option<&'a str>) -> bool {
     let exceeded = match stacker::remaining_stack() {
         Some(remaining) => remaining < STACK_RED_ZONE_BYTES,
         None => RecursionDepthGuard::depth() > FALLBACK_MAX_DEPTH,
     };
     if exceeded {
+        let span_id = span_id();
         STACK_EXHAUSTED.with(|cell| {
             let mut slot = cell.borrow_mut();
             if slot.is_none() {
@@ -215,13 +220,13 @@ fn stack_guard_tripped(site: &str, span_id: Option<&str>) -> bool {
 macro_rules! stack_guard {
     ($site:expr, $expr:expr, $bail:expr) => {
         let _stack_depth_guard = RecursionDepthGuard::enter();
-        if stack_guard_tripped($site, $expr.span_id()) {
+        if stack_guard_tripped($site, || $expr.span_id()) {
             return $bail;
         }
     };
     ($site:expr, $expr:expr) => {
         let _stack_depth_guard = RecursionDepthGuard::enter();
-        if stack_guard_tripped($site, $expr.span_id()) {
+        if stack_guard_tripped($site, || $expr.span_id()) {
             return;
         }
     };
@@ -774,6 +779,12 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
 pub fn build_compiled_library_context(
     library_exprs: &[deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    // Reset the stack-exhaustion flag for this check unit; drained into the
+    // error vector below before the empty-errors gate (and again after the
+    // annotation pass) so a deep-input stack bail on the library-compile path
+    // always fails the check rather than returning a silent green / partial
+    // CheckedProgram. Mirrors `check_ir_with_signature_context`.
+    let stack_scope = StackExhaustionScope::enter();
     // Mirror `build_type_env_from_library` up through the validators so the
     // type_env half stays bit-compatible with the existing public API.
     let empty = TypeEnv::empty();
@@ -793,6 +804,9 @@ pub fn build_compiled_library_context(
     crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
+    // Surface any stack-exhaustion bail from the passes above as a hard
+    // located error (covered-or-rejected) before the empty-errors gate.
+    stack_scope.drain_into(&mut result.errors);
     if !result.errors.is_empty() {
         return Err(result);
     }
@@ -831,6 +845,12 @@ pub fn build_compiled_library_context(
             annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
         })
         .collect();
+    // Annotation also recurses (annotate_expr_with_scope); if it bailed on
+    // low stack, reject rather than return a partially-annotated program.
+    stack_scope.drain_into(&mut result.errors);
+    if !result.errors.is_empty() {
+        return Err(result);
+    }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
 
     let type_env = TypeEnv::from_inner(TypeEnvInner {
@@ -887,6 +907,13 @@ pub fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     library_exprs: &[deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    // Reset the stack-exhaustion flag for this check unit; drained into the
+    // error vector below before the empty-errors gate (and again after the
+    // annotation pass) so a deep-input stack bail on the layered
+    // library-compile path always fails the check rather than returning a
+    // silent green / partial CheckedProgram. Mirrors
+    // `check_ir_with_signature_context`.
+    let stack_scope = StackExhaustionScope::enter();
     // Seed from the base context's snapshot rather than the empty state.
     let mut state = base.inner().clone();
 
@@ -920,6 +947,9 @@ pub fn build_compiled_library_context_with_base(
         &base.inner().library_def_names,
         &mut result.errors,
     );
+    // Surface any stack-exhaustion bail from the passes above as a hard
+    // located error (covered-or-rejected) before the empty-errors gate.
+    stack_scope.drain_into(&mut result.errors);
     if !result.errors.is_empty() {
         return Err(result);
     }
@@ -951,6 +981,12 @@ pub fn build_compiled_library_context_with_base(
             annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
         })
         .collect();
+    // Annotation also recurses (annotate_expr_with_scope); if it bailed on
+    // low stack, reject rather than return a partially-annotated program.
+    stack_scope.drain_into(&mut result.errors);
+    if !result.errors.is_empty() {
+        return Err(result);
+    }
     let new_ir_annotated = build_ir_type_env(&library_annotated);
 
     // The returned TypeEnv's `ir_types` is the union: base declared types
