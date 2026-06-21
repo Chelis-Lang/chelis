@@ -2205,6 +2205,19 @@ fn cmd_build(
     } else {
         false
     };
+    // Cross-module checks (e.g. the §opaque-encapsulation rule) reject a
+    // reference to an unexported producer whose signature mentions an
+    // opaque type. That producer is unreachable from the entry point, so
+    // build-time pruning drops it; checking only the pruned program would
+    // then report the bare reference as a plain unbound variable and mask
+    // the `OpaqueTypeViolation`. Mirror `chelis check`: when pruning fired
+    // for a reef-prepared package, run the cross-module check against the
+    // full program first so the encapsulation diagnostic surfaces, then
+    // fall through to the existing pruned-lowering path (which preserves
+    // the reef pricer/layered-cache lowering target unchanged).
+    if prepared.is_some() && pruned_deep_exprs.len() != full_deep_exprs.len() {
+        checked_program_with_effects(&full_deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
+    }
     let deep_exprs = if preserve_host_library_surface {
         full_deep_exprs
     } else {
