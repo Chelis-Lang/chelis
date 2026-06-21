@@ -2225,6 +2225,15 @@ fn simple_composite_verdict(status: &str, samples: usize) -> &'static str {
     }
 }
 
+/// Mirror of `chelis_prove::composition::FUZZ_TOLERANCE`. The CLI-local
+/// Tier-C-fuzz path is compiled in the default (no-`chelis-prove`) build,
+/// where the `chelis-prove` crate is not linked and its constant cannot be
+/// imported, so the value is duplicated here. The two must stay equal: the
+/// `cli_fuzz_tolerance_matches_chelis_prove` test below (compiled only under
+/// `chelis-prove`, where both are reachable) asserts the equality so they
+/// cannot silently drift.
+const CLI_FUZZ_TOLERANCE: f64 = 1e-10;
+
 /// The non-vacuity assumption records a green CLI-local fuzz verdict carries
 /// (WI-7). This Tier-C-only path (non-capability user properties and bridge
 /// c-earchin properties) renders a green by rejection-sampling: it only counts
@@ -2263,7 +2272,7 @@ fn precondition_non_vacuity_assumptions(
                     "property": property_name,
                     "samples": samples,
                     "seed": seed,
-                    "tolerance": 1e-10,
+                    "tolerance": CLI_FUZZ_TOLERANCE,
                 },
             },
             "non_vacuity": {
@@ -2625,5 +2634,18 @@ mod tests {
         // Per-status exit codes are unchanged; only the combine precedence moved.
         assert_eq!(Status::Failed.exit_code(), 1);
         assert_eq!(Status::Unsupported.exit_code(), 2);
+    }
+
+    // The CLI-local fuzz tolerance constant must equal the shared runner's
+    // `chelis_prove::composition::FUZZ_TOLERANCE`. Compiled only under
+    // `chelis-prove`, the single build where both are linked, so the mirror
+    // cannot drift from the source of truth without this test failing.
+    #[cfg(feature = "chelis-prove")]
+    #[test]
+    fn cli_fuzz_tolerance_matches_chelis_prove() {
+        assert_eq!(
+            CLI_FUZZ_TOLERANCE,
+            chelis_prove::composition::FUZZ_TOLERANCE
+        );
     }
 }

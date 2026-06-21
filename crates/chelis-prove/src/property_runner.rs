@@ -972,7 +972,7 @@ fn fuzz_precondition_assumptions(
         // WI-8: stamp the prover-side fuzz discharge tier, keyed to the
         // precondition source identity.
         .with_discharge_tier(crate::composition::DischargeTier::new(
-            "fuzz-sampler",
+            DischargeMethod::Fuzz.engine(),
             DischargeMethod::Fuzz,
             Some(name),
         )),

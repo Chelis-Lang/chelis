@@ -323,7 +323,7 @@ fn injection_assumptions(
                 // the fuzz sampler discharging the invariant of an opaque
                 // binder, keyed to the binder's source identity.
                 .with_discharge_tier(DischargeTier::new(
-                    "fuzz-sampler",
+                    DischargeMethod::Fuzz.engine(),
                     DischargeMethod::Fuzz,
                     Some(format!("invariant:{}:binder:{name}", inv.type_name)),
                 )),
