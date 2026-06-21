@@ -38,9 +38,13 @@ pub use contracts::{
     ContractInvariant, StandardContract, standard_contract_registry, standard_contracts,
 };
 pub use discharge::{
-    Cvc5Engine, Discharge, DischargeEngine, DischargeError, Goal, GoalError, GoalShape,
-    IntervalBox, IrHandle, OutputRange, Qualifier, QualifierSet, Soundness,
+    Discharge, DischargeEngine, DischargeError, Goal, GoalError, GoalShape, IntervalBox, IrHandle,
+    OutputRange, Qualifier, QualifierSet, Soundness,
 };
+// The cvc5 engine exists only when cvc5 is linked (the smt feature); the
+// default build keeps zero cvc5-named symbols (the solver-free gate).
+#[cfg(feature = "smt")]
+pub use discharge::Cvc5Engine;
 // Re-export the chelis-pred predicate helpers so downstream CLI/tide
 // consumers reach them through chelis-prove (RFC D-PRED consumer surface).
 pub use chelis_pred::{PredAmenability, predicate_free_vars};

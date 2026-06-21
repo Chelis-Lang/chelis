@@ -33,6 +33,7 @@ use crate::composition::{
     NonVacuityRecord, NonVacuityStatus, rollup_composite,
 };
 use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry};
+#[cfg(feature = "smt")]
 use crate::discharge::DischargeEngine;
 
 /// The verification status of one user property.
@@ -639,14 +640,22 @@ fn try_surf_tier_b(
     ) {
         return None;
     }
-    // Route the cvc5 solve through the discharge-engine seam (WI-4). The cvc5
-    // engine wraps the same solve_property pipeline, so `into_result()` yields
-    // the identical TierBResult and the match arms below are unchanged.
-    let discharge = crate::discharge::Cvc5Engine::new().discharge(
-        &crate::discharge::Goal::smt(smt_prop.clone()),
-        options.smt_timeout_ms,
-    );
-    match discharge.into_result() {
+    // Route the cvc5 solve through the discharge-engine seam (WI-4) under the
+    // smt feature. The cvc5 engine wraps the same solve_property pipeline, so
+    // `into_result()` yields the identical TierBResult and the match arms below
+    // are unchanged. The default (non-smt) binary has no cvc5 engine, so it
+    // calls the same solve_property stub directly -- identical result, and no
+    // cvc5-named symbol leaks into the solver-free default build.
+    #[cfg(feature = "smt")]
+    let discharge_result = crate::discharge::Cvc5Engine::new()
+        .discharge(
+            &crate::discharge::Goal::smt(smt_prop.clone()),
+            options.smt_timeout_ms,
+        )
+        .into_result();
+    #[cfg(not(feature = "smt"))]
+    let discharge_result = crate::tier_b::solve_property(&smt_prop, options.smt_timeout_ms);
+    match discharge_result {
         crate::tier_b::TierBResult::Proved => {
             let non_vacuity = smt_non_vacuity_record(&smt_prop, options.smt_timeout_ms);
             let reason = match non_vacuity.status {

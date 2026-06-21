@@ -411,8 +411,10 @@ pub trait DischargeEngine {
 /// `SmtProperty -> SmtExpr -> Solver` pipeline ([`crate::tier_b::solve_property`]),
 /// so the SmtExpr lowering sites stay cvc5-internal and behavior is unchanged.
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg(feature = "smt")]
 pub struct Cvc5Engine;
 
+#[cfg(feature = "smt")]
 impl Cvc5Engine {
     pub const fn new() -> Self {
         Self
@@ -435,6 +437,7 @@ impl Cvc5Engine {
     }
 }
 
+#[cfg(feature = "smt")]
 impl DischargeEngine for Cvc5Engine {
     fn name(&self) -> &'static str {
         "cvc5"
@@ -509,6 +512,7 @@ mod tests {
         assert!(goal.as_smt().is_some());
     }
 
+    #[cfg(feature = "smt")]
     #[test]
     fn cvc5_engine_fitness_accepts_smt_goal_rejects_box_range() {
         let engine = Cvc5Engine::new();
