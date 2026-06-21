@@ -2225,6 +2225,59 @@ fn simple_composite_verdict(status: &str, samples: usize) -> &'static str {
     }
 }
 
+/// The non-vacuity assumption records a green CLI-local fuzz verdict carries
+/// (WI-7). This Tier-C-only path (non-capability user properties and bridge
+/// c-earchin properties) renders a green by rejection-sampling: it only counts
+/// the `accepted` samples that satisfied every precondition, so an
+/// unsatisfiable precondition set EXHAUSTS into a generator-exhaustion error
+/// and never reaches a green here. A green over a non-empty precondition set is
+/// therefore non-vacuous by construction -- the accepted samples ARE the
+/// satisfiability witness -- and the green now CARRIES that evidence as an
+/// established non-vacuity record instead of an empty assumption list, so no
+/// green-rendering path reports a pass without recording the non-vacuity it
+/// established. The shape mirrors the shared runner's
+/// `fuzz_precondition_assumptions` so a CLI-local green and a shared-runner
+/// green agree on the same module. A property with no preconditions has nothing
+/// that could be vacuous, so it carries no assumption record (an empty list).
+fn precondition_non_vacuity_assumptions(
+    property_name: &str,
+    status: &str,
+    precondition_count: usize,
+    samples: usize,
+    seed: u64,
+) -> serde_json::Value {
+    // Only a genuine green (a pass with at least one witnessing sample) over a
+    // non-empty precondition set records established non-vacuity. A failed,
+    // unsupported, or zero-sample outcome is not a green and carries none.
+    if precondition_count == 0 || status != "passed" || samples == 0 {
+        return json!([]);
+    }
+    json!([
+        {
+            "name": format!("preconditions:{property_name}"),
+            "discharge": {
+                "method": "fuzz",
+                "evidence": {
+                    "status": "validated",
+                    "property": property_name,
+                    "samples": samples,
+                    "seed": seed,
+                    "tolerance": 1e-10,
+                },
+            },
+            "non_vacuity": {
+                "status": "established",
+                "evidence": {
+                    "method": "fuzz",
+                    "result": "sat",
+                    "accepted_samples": samples,
+                    "seed": seed,
+                },
+            },
+        }
+    ])
+}
+
 #[cfg(not(feature = "chelis-prove"))]
 fn emit_record(
     options: &ProveOptions<'_>,
@@ -2236,14 +2289,21 @@ fn emit_record(
     shrink_steps: usize,
 ) {
     if options.json {
+        let seed = options.effective_seed(property.seed);
         let mut value = json!({
             "kind": "property",
             "name": property.name,
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
-            "assumptions": [],
+            "assumptions": precondition_non_vacuity_assumptions(
+                &property.name,
+                status,
+                property.preconditions.len(),
+                samples,
+                seed,
+            ),
             "samples": samples,
-            "seed": options.effective_seed(property.seed),
+            "seed": seed,
             "source": source_json(property, options),
         });
         if let Some(counterexample) = counterexample {
@@ -2304,14 +2364,21 @@ fn emit_deep_record(
     shrink_steps: usize,
 ) {
     if options.json {
+        let seed = options.effective_seed(property.seed);
         let mut value = json!({
             "kind": "property",
             "name": property.name,
             "status": status,
             "composite_verdict": simple_composite_verdict(status, samples),
-            "assumptions": [],
+            "assumptions": precondition_non_vacuity_assumptions(
+                &property.name,
+                status,
+                property.preconditions.len(),
+                samples,
+                seed,
+            ),
             "samples": samples,
-            "seed": options.effective_seed(property.seed),
+            "seed": seed,
             "source": source_json_deep(property, options),
         });
         if let Some(counterexample) = counterexample {

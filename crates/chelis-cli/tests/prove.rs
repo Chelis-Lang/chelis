@@ -683,6 +683,208 @@ fn deep_property_uses_metadata_quantifiers_and_cli_samples() {
     assert_eq!(records[0]["samples"], 2);
 }
 
+// --- WI-7 mandatory non-vacuity: close the CLI-local green bypass ---
+//
+// The CLI-local Tier-C fuzz path (non-capability user properties and bridge
+// c-earchin properties) used to render a green with `"assumptions": []`,
+// recording NO non-vacuity even when the property carried preconditions. That
+// is the WI-7 bypass: a green should never be reported without recording the
+// non-vacuity it established. These tests enumerate the green-rendering paths
+// and pin that each now carries an established non-vacuity record, and that the
+// vacuous (unsatisfiable-precondition) case cannot reach a green at all.
+
+/// Helper: the single non-vacuity record a green precondition-bearing local
+/// property must now carry.
+fn assert_established_precondition_non_vacuity(record: &Value, property_name: &str) {
+    let assumptions = record["assumptions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("assumptions must be an array: {record}"));
+    assert_eq!(
+        assumptions.len(),
+        1,
+        "a green over a non-empty precondition set records one non-vacuity assumption: {record}"
+    );
+    let assumption = &assumptions[0];
+    assert_eq!(assumption["name"], format!("preconditions:{property_name}"));
+    assert_eq!(
+        assumption["non_vacuity"]["status"], "established",
+        "the precondition non-vacuity is established by the accepted samples: {record}"
+    );
+    assert_eq!(assumption["discharge"]["method"], "fuzz");
+    assert_eq!(assumption["discharge"]["evidence"]["status"], "validated");
+}
+
+#[test]
+fn wi7_deep_user_green_with_preconditions_carries_established_non_vacuity() {
+    // A green user `.dp` property WITH a precondition must carry an established
+    // non-vacuity record, not an empty assumption list. (In the default build
+    // this is the CLI-local path; the smt build routes user properties through
+    // the shared runner, which records non-vacuity too.)
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("prop.dp");
+    std::fs::write(
+        &path,
+        r#"
+(def {chelis_role: "property",
+      property_source_kind: "user",
+      property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+      property_preconditions: (tuple {} (app {} (var {} gte) (var {} x) (lit {type: (t-prim {} f32)} 0.0)))}
+  deep_pre_green
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (app {} (var {} gte) (var {} x) (lit {type: (t-prim {} f32)} 0.0))))
+"#,
+    )
+    .expect("write deep");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "4",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = property_records(&output.stdout);
+    let record = &records[0];
+    assert_eq!(record["status"], "passed");
+    assert_eq!(
+        record["composite_verdict"],
+        "proven_modulo_fuzz_validated_contract"
+    );
+    assert_established_precondition_non_vacuity(record, "deep_pre_green");
+}
+
+#[test]
+fn wi7_deep_user_green_without_preconditions_carries_no_assumption() {
+    // A green property with NO preconditions has nothing that could be vacuous,
+    // so it carries an empty assumption list -- non-vacuity is only recorded
+    // where there is an assumption set to be non-vacuous about.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("prop.dp");
+    std::fs::write(
+        &path,
+        r#"
+(def {chelis_role: "property",
+      property_source_kind: "user",
+      property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+      property_preconditions: (tuple {})}
+  deep_no_pre_green
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (app {} (var {} gte) (var {} x) (var {} x))))
+"#,
+    )
+    .expect("write deep");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "4",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = property_records(&output.stdout);
+    assert_eq!(records[0]["status"], "passed");
+    assert_eq!(
+        records[0]["assumptions"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(usize::MAX),
+        0,
+        "a no-precondition green records no non-vacuity assumption: {}",
+        records[0]
+    );
+}
+
+#[test]
+fn wi7_vacuous_preconditions_cannot_reach_a_green_on_the_local_path() {
+    // The negative test: a property whose preconditions are jointly
+    // unsatisfiable cannot reach a green by the CLI-local fuzz path. Rejection
+    // sampling never accepts a sample, so the run exhausts into a
+    // generator-exhaustion error (exit 3), never a green -- there is no
+    // green-rendering path for a vacuous precondition set.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("prop.dp");
+    std::fs::write(
+        &path,
+        r#"
+(def {chelis_role: "property",
+      property_source_kind: "user",
+      property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+      property_preconditions: (tuple {}
+        (app {} (var {} gt) (var {} x) (lit {type: (t-prim {} f32)} 0.0))
+        (app {} (var {} lt) (var {} x) (lit {type: (t-prim {} f32)} 0.0)))}
+  deep_vacuous
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (app {} (var {} gte) (var {} x) (var {} x))))
+"#,
+    )
+    .expect("write deep");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "4",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        !output.status.success(),
+        "a vacuous precondition set must not exit success: stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let records = property_records(&output.stdout);
+    assert_ne!(
+        records[0]["status"], "passed",
+        "vacuous preconditions cannot render a green: {}",
+        records[0]
+    );
+    assert_ne!(
+        records[0]["composite_verdict"], "proven",
+        "vacuous preconditions cannot render proven: {}",
+        records[0]
+    );
+    assert_ne!(
+        records[0]["composite_verdict"], "proven_modulo_fuzz_validated_contract",
+        "vacuous preconditions cannot render a green badge: {}",
+        records[0]
+    );
+}
+
 #[test]
 fn deep_property_quantifiers_must_match_fn_params() {
     let dir = tempdir().expect("tempdir");
