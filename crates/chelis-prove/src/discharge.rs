@@ -243,11 +243,34 @@ impl Qualifier {
         }
     }
 
-    /// Whether this qualifier may only ride a [`Soundness::Exact`] discharge.
-    /// `exact` is the one kind that claims a no-approximation proof, so it is
-    /// rejected on any weaker soundness (the integrity invariant tested below).
-    fn requires_exact_soundness(self) -> bool {
-        matches!(self, Qualifier::Exact)
+    /// The MINIMUM [`Soundness`] a discharge must carry to be allowed to wear
+    /// this qualifier. A discharge whose soundness is strictly below this floor
+    /// is rejected by [`Discharge::new`]: attaching a guarantee a weaker result
+    /// cannot back would launder the weaker result into a stronger badge.
+    ///
+    /// The floors follow each kind's establishment demand, weakest-link first:
+    ///
+    /// - [`Qualifier::Exact`] and [`Qualifier::CertificateBearing`] claim a
+    ///   no-approximation result (an exact decision, or an independently checked
+    ///   exact witness), so they demand [`Soundness::Exact`].
+    /// - [`Qualifier::DeltaComplete`], [`Qualifier::SpecialFunctionCertified`],
+    ///   and [`Qualifier::SoundOverApproximation`] are sound but conservative
+    ///   (a delta-relaxed decision, a certified envelope, an over-approximating
+    ///   bound), so they demand [`Soundness::SoundApproximate`].
+    /// - [`Qualifier::Fuzz`] is empirical sampling, so it demands
+    ///   [`Soundness::Empirical`].
+    /// - [`Qualifier::Axiom`] is asserted, not established, so it places no
+    ///   establishment demand: its floor is [`Soundness::Untrusted`], the bottom
+    ///   of the lattice, and it rides any soundness.
+    fn min_soundness(self) -> Soundness {
+        match self {
+            Qualifier::Exact | Qualifier::CertificateBearing => Soundness::Exact,
+            Qualifier::DeltaComplete
+            | Qualifier::SpecialFunctionCertified
+            | Qualifier::SoundOverApproximation => Soundness::SoundApproximate,
+            Qualifier::Fuzz => Soundness::Empirical,
+            Qualifier::Axiom => Soundness::Untrusted,
+        }
     }
 }
 
@@ -305,12 +328,17 @@ impl QualifierSet {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DischargeError {
     /// A qualifier was attached that the discharge's soundness cannot support.
-    /// Specifically: a non-exact-soundness discharge (e.g. a fuzz result)
-    /// cannot carry the `exact` qualifier; that would launder a weaker
-    /// guarantee into a stronger badge.
-    #[error("qualifier `{qualifier}` requires exact soundness but discharge is `{soundness:?}`")]
+    /// Each qualifier has a minimum soundness floor (see
+    /// [`Qualifier::min_soundness`]); a discharge whose soundness falls strictly
+    /// below that floor cannot carry the qualifier, because that would launder a
+    /// weaker result into a stronger badge (e.g. a fuzz result wearing the
+    /// `exact` badge, or an empirical result wearing `delta_complete`).
+    #[error(
+        "qualifier `{qualifier}` requires at least `{required:?}` soundness but discharge is `{soundness:?}`"
+    )]
     QualifierExceedsSoundness {
         qualifier: &'static str,
+        required: Soundness,
         soundness: Soundness,
     },
 }
@@ -343,23 +371,26 @@ pub struct Discharge {
 
 impl Discharge {
     /// Build a discharge, enforcing the integrity invariant: every qualifier in
-    /// the set must be supportable by `soundness`. A `fuzz` (or any non-exact)
-    /// discharge that tries to carry `exact` is rejected here, in the
-    /// constructor, rather than silently producing a laundered badge.
+    /// the set must be supportable by `soundness`. Each qualifier has a minimum
+    /// soundness floor ([`Qualifier::min_soundness`]); any qualifier whose floor
+    /// is strictly above `soundness` is rejected here, in the constructor,
+    /// rather than silently producing a laundered badge. For example a `fuzz`
+    /// (empirical) discharge cannot carry `exact`, and an `empirical` discharge
+    /// cannot carry `delta_complete`.
     pub fn new(
         soundness: Soundness,
         qualifier_set: QualifierSet,
         result: TierBResult,
         evidence: serde_json::Value,
     ) -> Result<Self, DischargeError> {
-        if soundness != Soundness::Exact {
-            for q in qualifier_set.iter() {
-                if q.requires_exact_soundness() {
-                    return Err(DischargeError::QualifierExceedsSoundness {
-                        qualifier: q.as_str(),
-                        soundness,
-                    });
-                }
+        for q in qualifier_set.iter() {
+            let required = q.min_soundness();
+            if soundness < required {
+                return Err(DischargeError::QualifierExceedsSoundness {
+                    qualifier: q.as_str(),
+                    required,
+                    soundness,
+                });
             }
         }
         Ok(Self {
@@ -628,6 +659,7 @@ mod tests {
             err,
             DischargeError::QualifierExceedsSoundness {
                 qualifier: "exact",
+                required: Soundness::Exact,
                 soundness: Soundness::Empirical,
             }
         ));
@@ -659,6 +691,85 @@ mod tests {
         .expect("fuzz qualifier on empirical soundness is valid");
         assert!(discharge.qualifier_set().contains(Qualifier::Fuzz));
         assert!(!discharge.qualifier_set().contains(Qualifier::Exact));
+    }
+
+    /// Exhaustive integrity oracle for the per-qualifier minimum-soundness map.
+    ///
+    /// This is the primitive every later no-laundering guarantee rests on, so it
+    /// gets its own table-driven negative+positive oracle: for each of the seven
+    /// qualifiers, `Discharge::new` must be REJECTED at every soundness strictly
+    /// below the qualifier's minimum, and ACCEPTED at/above it.
+    ///
+    /// The expected minimums are written out by hand here (NOT read back from
+    /// `min_soundness`), so a silent edit to the production map is caught by this
+    /// oracle rather than tautologically agreeing with itself.
+    #[test]
+    fn discharge_new_enforces_per_qualifier_minimum_soundness_exhaustively() {
+        // Weakest-to-strongest, matching the `Soundness` `Ord`.
+        let all_soundness = [
+            Soundness::Untrusted,
+            Soundness::Empirical,
+            Soundness::SoundApproximate,
+            Soundness::Exact,
+        ];
+
+        // (qualifier, its expected minimum soundness floor) for all 7 kinds.
+        // The minimums are written out by hand, NOT read from `min_soundness`,
+        // so a silent edit to the production map is caught here.
+        let table = [
+            (Qualifier::Exact, Soundness::Exact),
+            (Qualifier::CertificateBearing, Soundness::Exact),
+            (Qualifier::DeltaComplete, Soundness::SoundApproximate),
+            (
+                Qualifier::SpecialFunctionCertified,
+                Soundness::SoundApproximate,
+            ),
+            (
+                Qualifier::SoundOverApproximation,
+                Soundness::SoundApproximate,
+            ),
+            (Qualifier::Fuzz, Soundness::Empirical),
+            (Qualifier::Axiom, Soundness::Untrusted),
+        ];
+
+        // Guard: the table must cover every qualifier kind exactly once, so a
+        // newly added qualifier cannot slip past this oracle uncovered.
+        assert_eq!(
+            table.len(),
+            7,
+            "the qualifier vocabulary is closed at 7 kinds; update the table if it changes"
+        );
+
+        for (qualifier, expected_min) in table {
+            for soundness in all_soundness {
+                let result = Discharge::new(
+                    soundness,
+                    QualifierSet::from_iter_kinds([qualifier]),
+                    TierBResult::Proved,
+                    serde_json::json!({}),
+                );
+                if soundness < expected_min {
+                    let err = result
+                        .expect_err("below-minimum soundness must be rejected by Discharge::new");
+                    assert_eq!(
+                        err,
+                        DischargeError::QualifierExceedsSoundness {
+                            qualifier: qualifier.as_str(),
+                            required: expected_min,
+                            soundness,
+                        },
+                        "qualifier {qualifier:?} at {soundness:?} must report its \
+                         minimum {expected_min:?}"
+                    );
+                } else {
+                    assert!(
+                        result.is_ok(),
+                        "qualifier {qualifier:?} must be ACCEPTED at/above its \
+                         minimum {expected_min:?}, but {soundness:?} was rejected"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

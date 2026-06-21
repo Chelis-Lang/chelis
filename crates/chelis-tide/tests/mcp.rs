@@ -193,6 +193,42 @@ fn tool_failures_preserve_structured_errors() {
 }
 
 #[test]
+fn grad_tool_response_carries_validated_schema_version() {
+    // WI-2 validate-on-consume (WS-5 Part A): the gradient DAG the MCP tool
+    // hands back to the client is validated at the boundary, so it carries the
+    // supported `schema_version` and the response is not a schema-stage error.
+    let supported = chelis_tide::schema::WIRE_DAG_SCHEMA_VERSION as u64;
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":42,
+        "method":"tools/call",
+        "params":{
+            "name":"chelis_grad",
+            "arguments":{
+                "source_kind":"surf",
+                "source":LOSS_PROGRAM,
+                "output_name":"loss",
+                "wrt_names":["x"]
+            }
+        }
+    }))
+    .expect("tool response");
+    assert_eq!(response["result"]["isError"], false);
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ok"], true, "grad succeeded: {structured}");
+    assert_ne!(
+        structured["stage"].as_str(),
+        Some("schema"),
+        "the happy path never surfaces a schema-stage failure"
+    );
+    assert_eq!(
+        structured["result"]["dag"]["schema_version"].as_u64(),
+        Some(supported),
+        "gradient DAG crosses the MCP boundary stamped at the supported version"
+    );
+}
+
+#[test]
 fn invalid_tool_arguments_return_mcp_error_payload() {
     let response = handle_message(&json!({
         "jsonrpc":"2.0",

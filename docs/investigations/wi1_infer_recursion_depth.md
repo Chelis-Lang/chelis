@@ -1,15 +1,19 @@
 # WI-1: type-checker recursion depth and the deep-`app` SIGSEGV
 
-Status: investigation note for the WI-1 Phase-1 close. The shipped fix is a
-shared `stacker::remaining_stack()` budget guard at every self-recursive
-`deep::Expr` walker in `crates/chelis-types/src/infer.rs`, plus a
-thread-local exhaustion flag drained at every public check entry. This note
+Status: investigation note for the WI-1 Phase-1 close, updated for the WS-2
+follow-up. The original fix is a shared `stacker::remaining_stack()` budget
+guard at every self-recursive `deep::Expr` walker in
+`crates/chelis-types/src/infer.rs`, plus a thread-local exhaustion flag
+drained at every public check entry. The **WS-2 follow-up (now landed)** adds
+`stacker::grow` at every public check entry and at the CLI `cmd_check_one`
+boundary, so a legitimately deep-but-finite reef-linked program checks
+end-to-end on a grown native stack instead of tripping the per-site guard or
+SIGSEGV-ing in `chelis_deep`'s derived `Clone`/`Drop`/validator. This note
 records why a byte budget (not a depth constant) was chosen, the
-covered-or-rejected soundness funnel, the deferred capability (full pricer
-checking end-to-end), the residual overflow surface in the `chelis_deep`
-core AST crate that the deferred follow-up must address, and two adjacent
-bugs found while diagnosing it. The follow-up itself is not implemented
-here.
+covered-or-rejected soundness funnel, the now-landed end-to-end capability and
+how the depth was confirmed reef-linking-induced (finite) rather than
+intrinsic/infinite, the `chelis_deep` residual the grow covers, and two
+adjacent bugs found while diagnosing it.
 
 ## What the guard fixes
 
@@ -110,52 +114,181 @@ These live on the foundational `Expr` type. A per-site guard cannot reach a
 derived `Drop`, and hand-writing non-recursive `Clone`/`Drop`/`PartialEq`
 (plus explicit serde) for `Expr` is an invasive change to the core AST type
 with broad blast radius (every consumer, the serde wire format, the 62-tag
-Deep contract). The shipped `chelis_types` guard makes the gdb-pinned
+Deep contract). The original `chelis_types` guard made the gdb-pinned
 real-pricer crash (which overflows in `infer_expr` first) a clean located
-diagnostic; closing the `chelis_deep` residual is the deferred follow-up's
-job.
+diagnostic but did not cover this `chelis_deep` residual.
 
-## Deferred capability (a): full pricer checks end-to-end
+**The WS-2 follow-up covers this residual without touching `Expr`'s derived
+traits:** because the whole CLI check operation now runs inside
+`stacker::grow` (via `run_on_grown_stack` around `cmd_check_one`), the
+derived `Clone`/`Drop` and `chelis_deep::validate` all execute on the grown
+segment alongside inference. There is no per-site guard for a derived `Drop`,
+but a derived `Drop` running on a 512 MiB segment does not overflow at any
+realistic finite depth. So the residual is closed at the stack-budget level,
+not by rewriting the AST traits. See "Capability (a)" below.
 
-The `#[ignore]`d repro in the test suite anchors this: the real pricer (or a
-synthetic chain at the pricer's true depth) should `check` cleanly. It
-cannot today (the guard fires, and the `chelis_deep` clone/drop surface
-would overflow anyway), so it is `#[ignore]`d and flips green when the
-follow-up lands.
+## Capability (a): full pricer checks end-to-end -- LANDED (WS-2)
 
-The deferred fix should use **`stacker::maybe_grow`** at the check entry --
-NOT a hand-rolled larger thread stack, and NOT per-site rewrites. `maybe_grow`
-transparently allocates a new stack segment when the budget is low, so it
-covers inference, cloning, dropping, AND `chelis_deep::validate` uniformly
-with one wrapper, reusing the `stacker` dependency this PR already paid for.
-A bigger fixed thread stack only moves the cliff; rewriting `Expr`'s derived
-traits is large and still would not cover every future recursive consumer.
-`maybe_grow` at the boundary is the profile-independent, low-marginal-cost
-fix; the per-site bail guards shipped here become the safety net for the
-(rare) case where even a grown stack hits its cap.
+The previously `#[ignore]`d repro
+(`pricer_depth_chain_checks_without_depth_error_once_followup_lands` in
+`crates/chelis-types/tests/infer_recursion_depth_guard.rs`) is now un-ignored
+and green: a depth-4000 chain (standing in for the pricer's true nesting)
+`check`s cleanly through `check_ir_program` instead of tripping the guard.
 
-**Before implementing, diagnose the *source* of the depth.** Do not assume
-the program is intrinsically that deep:
+### The depth is reef-linking-induced and FINITE, not intrinsic/infinite
 
-- If the depth is **intrinsic** to the pricer (its computation genuinely
-  nests that deep), `maybe_grow` at the entry is the right fix.
-- If the depth is **induced** by reef-linking expanding the 15 exports into
-  deep `app` trees **without sharing** (each export re-inlined rather than
-  referenced), the depth is a linker artifact, and the real fix is in
-  linking/sharing (let the linked program reference each export once). In
-  that case `maybe_grow` only treats the symptom and the trees stay
-  needlessly large for every downstream pass.
+This was confirmed before choosing the fix (the brief's required diagnosis):
 
-Diagnose which before choosing the fix.
+- **The reef linker concatenates, it does not re-inline.**
+  `link_graph_with_package_tags` (`crates/chelis-reef/src/lib.rs`) walks every
+  package/module and pushes each module's `rewrite_module_decls` output into a
+  flat `LinkedModule` list. `rewrite_module_decls` renames symbols to mangled
+  `internal_name(package, module, name)` references; it does **not** inline a
+  callee's body into its call sites. So a program that references export `foo`
+  N times yields N `(var <mangled-foo>)` leaves, not N copies of `foo`'s body.
+  Linking adds **breadth** (more decls, more sibling references), not unbounded
+  per-expression **depth**. The "each export re-inlined rather than referenced"
+  failure mode the brief warned about does not occur.
+- **The recursion is structural over a finite tree.** `infer_expr`/`infer_app`
+  recurse only on `children(...)` -- strictly-smaller subtrees of a finite,
+  acyclic `deep::Expr`. There is no fixed-point or self-referential `Expr`, so
+  the descent depth is bounded by the deepest single desugared `app` body
+  (the pricer's deepest export, which nests in the low thousands). A 512 MiB
+  thread completes the real pricer (measured), confirming finite depth.
 
-## Adjacent bug (b): `chelis build` ICE on the pricer
+Therefore the depth is a *finite source/linking property*, and growing the
+native stack is the correct fix -- it is not papering over an infinite
+recursion. (The orthogonal observation that the linked trees are large for
+every downstream pass is a separate efficiency matter, not a soundness one,
+and is out of scope for the SIGSEGV fix.)
+
+### The fix: `stacker::grow` at every public check entry (NOT entry `maybe_grow`)
+
+The shipped fix runs the WHOLE check pipeline on a freshly-grown stack
+segment (`with_grown_stack` -> `stacker::grow(512 MiB, ...)`), wrapped around:
+
+- every public check entry in `crates/chelis-types/src/infer.rs`
+  (`check_ir_with_signature_context` -- the funnel for `check_ir_program` and
+  `check_ir_with_context` -- plus `infer_program`, `infer_ir_program`,
+  `build_type_env_from_library`, `check_typed_program`), and
+- the CLI `cmd_check_one` operation
+  (`crates/chelis-cli/src/main.rs`, via the public `run_on_grown_stack`),
+  which additionally covers the reef/deep loader, the linked-program
+  `clone()`, the desugarer, the fitness structure walk, `chelis_deep::validate`,
+  and the implicit drop of the deep tree -- the derived-recursive `chelis_deep`
+  surface that lives outside the type checker.
+
+**Correction to the original plan above:** the plan proposed
+`stacker::maybe_grow` at the entry. That does NOT work, and the implementation
+deliberately diverges. `maybe_grow` grows only when the *current* frame is
+within the red zone of stack exhaustion. A check starts on a fresh, near-empty
+thread stack, so at the entry `maybe_grow` sees ample headroom and never grows;
+the stack only nears exhaustion many frames INTO the recursive descent, far
+from the entry, with no further grow site there -- so a per-site `stack_guard!`
+fires first (verified empirically: an entry `maybe_grow` left the depth-4000
+repro failing in `validate_tensor_precisions` after `infer_expr` was covered).
+Per-site `maybe_grow` at `infer_expr` alone also fails: it just moves the cliff
+to the next recursive pass (validate / annotate), since ~30 walkers descend the
+same tree. Unconditional `stacker::grow` at the boundary allocates one large
+segment that ALL passes (inference, validate, annotate, clone, drop) share, so
+the cliff is lifted uniformly. `grow` reserves the segment via `mmap`; on Linux
+the pages are demand-zeroed, so a shallow check only commits what it touches --
+the 512 MiB is reserved address space, not resident memory.
+
+The per-site bail `stack_guard!`s shipped in the original PR remain the safety
+net for input deeper than even a grown segment can hold (covered-or-rejected),
+and for the `None`-platform fallback. The depth-guard test suite exercises that
+net by shrinking the grown segment (test-only `set_grow_segment_bytes_for_test`
+thread-local override) so a depth-4000 chain overflows it and the guard fires
+with a located diagnostic -- proving the net still backs up the grow.
+
+## WI-1 guard-completeness residual (WS-5 walker scan; WS-2 red zone)
+
+WS-5's syn-based source scan of `infer.rs` (locked by the walker-coverage
+test in `crates/chelis-types/tests/`) proved the "every recursive
+`deep::Expr` walker carries `stack_guard!`" invariant is INCOMPLETE: beyond
+the ~27 guarded sites, six production recursive walkers descend
+arbitrary-depth structures WITHOUT a guard --
+`type_expr_has_tensor_prec_var` (the one clearly unbounded, over nested type
+exprs), `literal_static_value`, `tensor_dim_exprs_from_type_expr`,
+`tensor_precision_expr`, `tensor_dims_from_type_expr`,
+`top_level_arm_is_irrefutable` -- plus three `(module ...)`-only descenders
+and one cycle-guarded false positive. The coverage test allowlists these
+with category-coded reasons (locks "no NEW unguarded walker" without
+claiming completeness); its stale-entry assertion auto-detects when each is
+later guarded.
+
+Mitigation in place: WS-2's unconditional `stacker::grow` at the check
+entries (the 512 MiB segment all passes share) means these unguarded
+walkers no longer SIGSEGV at realistic depth -- the residual is a
+located-diagnostic gap on a sufficiently deep input on an exhausted segment,
+not a live crash. WS-2 also flagged that the 128 KiB red zone is not
+provably sufficient for arbitrarily small grown segments (a single deep
+`infer_expr`/validate step can exceed 128 KiB between guard checks);
+harmless at the 512 MiB production size.
+
+Follow-up (deferred): guard the six arbitrary-depth walkers (start with
+`type_expr_has_tensor_prec_var`); the allowlist test names exactly which
+entries to delete as each is fixed.
+
+Scope correction (red-team checkpoint 1): "covered-or-rejected on deep
+input" holds for the GUARDED `chelis-types/infer.rs` walkers, NOT for the
+`chelis_deep` surface. The derived `chelis_deep::ast::Expr` Drop/Clone (a
+destructor cannot carry `stack_guard!`) AND `chelis_deep::validate::validate_expr`
+(`validate.rs:151`) are grow-MITIGATED by WS-2's 512 MiB segment but are NOT
+covered-or-rejected: gdb confirms a RAW SIGSEGV with no located diagnostic at
+`drop_in_place<Expr>` ~45k depth debug / ~140k release, and in `validate_expr`
+on a deep `t-fn` sig on a small segment. Real reef-pricer depth is low
+thousands (~100x margin), so not reachable in practice. Note `validate_expr`
+is outside BOTH the infer.rs guard set AND WS-5's coverage scan (which only
+`include_str!`s infer.rs), so it is tracked HERE explicitly. The proper close
+for this surface is `stacker::maybe_grow`/per-pass guards reaching into
+`chelis_deep`, on the same follow-up.
+
+## Adjacent bug (b): `chelis build` ICE on the pricer -- ROOT IS chelis-types (WS-3)
 
 Distinct from the checker overflow: `chelis build src/pricing.ch` hits a
 deliberate ICE `panic!` at `crates/chelis-ir/src/dag.rs:1345`:
 "internal compiler error: symbolic dim `*` referenced by a non-Load node
-(Reshape) ... but no Load input declares it." It originates from the
-`const_col` / `spot_col` reshape in the pricer producing a `Reshape` whose
-op-internal symbolic dim is not declared by any `Load` input. This is an
-IR-producing-pass bug (a `Reshape` should carry/declare its symbolic dims
-the same way a `Load` does), not a checker-recursion issue. File and fix
-separately.
+(Reshape) ... but no Load input declares it" (the Sum bucket at :1308 is the
+same root in a different node).
+
+WS-3 traced it end-to-end (instrumented DAG dumps) and the root is NOT an
+IR-producing-pass bug -- it is in chelis-types. `nn = cast(shape(spots,0),
+int64)` semantically IS the spots `Load`'s dim 0 (`n`), but the checker
+infers the reshape operand `to_tensor(map(.., range(0, nn)))` (a
+runtime-length list) as the shape-erased wildcard `*` (`Dim::Wildcard`), and
+`*` wins over `nn` during inference. So `const_col`'s CALL-SITE result type
+is `tensor[*, 1]` -- the link from `nn` back to the declared `n` is erased
+BEFORE lowering. `vmap` reads its batch dim from that `*`; the kernel's Load
+and Sum carry `*`; backend-c `rename_anonymous_dims` mints a separate
+`_anon_dim_*` per node, so the Sum/Reshape references a name no Load declares
+and the dag.rs guard correctly panics. Three prototyped chelis-ir fixes all
+got clobbered: the call-site `*` is re-injected from scope at every IR/host
+pass (`actualize_tensor_helper_types`, `remap_tensor_helper_dim_symbols`);
+no chelis-ir-only change recovers `n` because the recovery source (`spots`)
+is not in the kernel's scope.
+
+The fork:
+- **CLEAN (recommended):** fix chelis-types so `const_col` returns
+  `tensor[n, 1]` -- preserve `n` through the `nn = shape(spots,0)` /
+  `to_tensor` / `reshape` chain. Then `nn` traces to the spots `Load` in the
+  IR too, the kernel batch dim is `n` (Load-declared), the guard passes.
+  Single-altitude, no IR/codegen schema change.
+- **FOUNDATIONAL (not recommended for one idiom):** relax the
+  dag.rs:1331-1334 Load-only invariant to permit ENTRY-declared symbolic dims
+  (bound at kernel entry from input metadata), have codegen emit
+  `int <dim> = inputs[slot]->shape[axis]`, and stop the wildcard
+  re-injection. Bigger blast radius (the guard contract, host helper
+  actualization, codegen).
+
+Secondary real bug (insufficient alone): `rename_anonymous_dims` mints a
+fresh `_anon_dim` per node over output types only, desyncing the same logical
+dim -- fixing it alone just turns `*` into an `_anon_dim` the guard still
+correctly rejects.
+
+Status: DEFERRED to a focused chelis-types follow-up (the CLEAN fix). Pinned
+by `crates/chelis-cli/tests/reshape_symbolic_dim_vmap_column.rs` (de269c7a):
+`vmap_over_symbolic_column_currently_ices_at_the_vmap_kernel` passes today;
+`vmap_over_symbolic_column_builds_without_symbolic_dim_ice` is `#[ignore]`d
+and auto-flips green when the chelis-types fix lands.

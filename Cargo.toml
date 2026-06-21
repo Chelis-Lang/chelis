@@ -62,3 +62,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 libc = "0.2"
 half = { version = "2", features = ["serde"] }
 stacker = "0.1"
+# Source-scanning invariant tests parse Rust with syn (e.g. the
+# stack_guard! walker-coverage test in chelis-types). Dev-only.
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+quote = "1"

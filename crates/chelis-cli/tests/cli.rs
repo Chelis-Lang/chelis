@@ -1853,9 +1853,14 @@ fn build_c_map_tensor_grad_specializes_callback_item_type() {
         .success();
 
     let source = fs::read_to_string(out_dir.join("grad_rows_map.c")).expect("generated c");
+    // WS-4: `xs: List[f32]` makes the map item an `f32`, so the callback
+    // param lowers to a 4-byte `float`. Before the precision fix the host
+    // lane collapsed the list element to `Float64`/`double`, widening the
+    // declared `f32`. The key invariant this test guards is that the item
+    // is a float scalar (not silently degraded to `int`).
     assert!(
-        source.contains("double __map_item_") && source.contains("double x = __map_item_"),
-        "expected map callback item to lower as double rather than int:\n{source}"
+        source.contains("float __map_item_") && source.contains("float x = __map_item_"),
+        "expected map callback item to lower as float rather than int:\n{source}"
     );
     assert!(
         !source.contains("int __map_item_") && !source.contains("int x;"),
@@ -1911,8 +1916,10 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
         .success();
 
     let source = fs::read_to_string(out_dir.join("grad_rows_branching.c")).expect("generated c");
+    // WS-4: the `x: f32` scalar param makes the host loss helper return a
+    // `float` (the declared width), not the previously-widened `double`.
     assert!(
-        source.contains("static inline double loss("),
+        source.contains("static inline float loss("),
         "expected host-side scalar loss helper to be emitted:\n{source}"
     );
     assert!(
@@ -2778,24 +2785,27 @@ fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
 
     let generated = out_dir.join("library_surface.c");
     let source = fs::read_to_string(&generated).expect("generated c");
+    // WS-4: `cube(x: f32)` emits a 4-byte `float` signature, not the
+    // previously-widened `double`. The downstream driver must match the
+    // real ABI, so its forward declaration and call use `float` too.
     assert!(
-        source.contains("double cube(double x)"),
+        source.contains("float cube(float x)"),
         "expected unreachable host def to survive build pruning for downstream drivers:\n{source}"
     );
 
     fs::write(
         &generated,
-        source.replace("double main", "double chelis_entry"),
+        source.replace("float main", "float chelis_entry"),
     )
     .expect("rename generated entry point");
     write_file(
         &out_dir.join("driver.c"),
         r#"#include <stdio.h>
 
-double cube(double x);
+float cube(float x);
 
 int main(void) {
-    printf("%.1f\n", cube(3.0));
+    printf("%.1f\n", (double)cube(3.0f));
     return 0;
 }
 "#,
@@ -3405,7 +3415,14 @@ fn build_c_emits_host_function_for_mixed_tensor_scalar_program() {
         .stdout(predicate::str::contains("Compile object:"));
 
     let source = fs::read_to_string(out_dir.join("mixed_3c.c")).expect("generated source");
-    assert!(source.contains("chelis_string check_loss(chelis_tensor* x, double threshold)"));
+    // WS-4: the declared `f32` scalar param emits a 4-byte `float` C type.
+    // Before the precision fix the host lane collapsed every float to
+    // `Float64` and widened this to `double`, silently disagreeing with
+    // the declared `f32` width.
+    assert!(
+        source.contains("chelis_string check_loss(chelis_tensor* x, float threshold)"),
+        "{source}"
+    );
     assert!(source.contains("check_loss__tensor_0"));
     assert!(source.contains("chelis_tensor_to_f64"));
 }
@@ -8081,8 +8098,11 @@ fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
 
     let source = fs::read_to_string(out_dir.join("scalar_fn_param.c")).expect("generated c");
     // The wrapper definition must be emitted, not just the prototype.
+    // WS-4: every param here is declared `f32`, so the emitted C uses the
+    // 4-byte `float` type. Before the precision fix the host lane collapsed
+    // these to `double`, silently widening the declared `f32` signature.
     assert!(
-        source.contains("static inline double apply(double (*model)(double), double x) {"),
+        source.contains("static inline float apply(float (*model)(float), float x) {"),
         "expected `apply` wrapper definition in the C source; only a forward \
          declaration would leave gcc with `implicit declaration`. Source:\n{source}",
     );
