@@ -12,11 +12,16 @@
 //! surface as a hard check failure -- never a silent green or partial result
 //! (covered-or-rejected).
 //!
-//! Scope: these tests cover the *checker's own* inference recursion. The
-//! general "never SIGSEGV on arbitrary deep input" property is NOT proven
-//! here -- the foundational `chelis_deep::Expr` derived `Clone`/`Drop` still
-//! overflow on deeper synthetic input, which is the deferred `maybe_grow`
-//! follow-up's job (see the investigation note).
+//! Scope: these tests cover the per-site guard (the safety net) AND the WI-1
+//! stack-growing follow-up. The follow-up runs the whole check pipeline on a
+//! freshly-grown stack segment (`with_grown_stack` -> `stacker::grow`), so a
+//! legitimately deep-but-finite program checks end-to-end -- covering not just
+//! the checker's own inference recursion but the validate / annotate passes and
+//! the foundational `chelis_deep::Expr` derived `Clone`/`Drop`, all of which run
+//! inside that one grown segment. The safety-net tests shrink the segment (via
+//! the test-only `set_grow_segment_bytes_for_test`) to confirm the per-site
+//! guard still converts an overflow of even a grown segment into a located
+//! diagnostic rather than a SIGSEGV (see the investigation note).
 //!
 //! These tests build the deep `app` tree directly in Deep (bypassing the Surf
 //! parser/desugarer) so the recursion depth is exactly the chain length and
@@ -97,44 +102,77 @@ fn program_with_body(body: Expr) -> Vec<Expr> {
     vec![def]
 }
 
-/// Run `check_ir_program` on a worker thread with an explicit stack size, so
-/// the depth guard (not a native stack overflow) is what bounds the
-/// recursion. The thread join would surface a panic; a SIGSEGV would abort
-/// the whole test process, so reaching the assertions at all proves the guard
-/// prevented the overflow. 8 MiB matches the default `chelis check` main-thread
-/// stack on Linux; the `infer_expr` budget guard fires well before a depth-4000
-/// chain exhausts it.
-fn check_deep_on_bounded_stack(program: Vec<Expr>, stack_mib: usize) -> Vec<String> {
+/// Run `check_ir_program` on a worker thread sized at `stack_mib`. The WI-1
+/// follow-up grows the stack at the check entry, so the per-site guard fires
+/// only when the recursion exhausts the GROWN segment, not the worker thread.
+/// `grow_segment_bytes` overrides that grown-segment size (via the test-only
+/// `set_grow_segment_bytes_for_test`, installed on this worker thread before
+/// the check), so the safety-net tests can shrink it and drive a chain deep
+/// enough to overflow it -- `None` keeps the production 512 MiB segment, used
+/// by the capability test that must check a deep program cleanly.
+///
+/// The thread join would surface a panic; a SIGSEGV would abort the whole test
+/// process, so reaching the assertions at all proves the guard prevented the
+/// overflow.
+fn check_deep_on_bounded_stack(
+    program: Vec<Expr>,
+    stack_mib: usize,
+    grow_segment_bytes: Option<usize>,
+) -> Vec<String> {
     std::thread::Builder::new()
         .name("infer-depth-guard-test".to_string())
         .stack_size(stack_mib * 1024 * 1024)
-        .spawn(move || match check_ir_program(&program) {
-            Ok(_) => Vec::new(),
-            Err(result) => result
-                .errors
-                .iter()
-                .map(|e| e.message.clone())
-                .collect::<Vec<_>>(),
+        .spawn(move || {
+            if let Some(bytes) = grow_segment_bytes {
+                chelis_types::set_grow_segment_bytes_for_test(bytes);
+            }
+            match check_ir_program(&program) {
+                Ok(_) => Vec::new(),
+                Err(result) => result
+                    .errors
+                    .iter()
+                    .map(|e| e.message.clone())
+                    .collect::<Vec<_>>(),
+            }
         })
         .expect("spawn checker worker thread")
         .join()
         .expect("checker worker thread aborted (stack overflow?) instead of returning")
 }
 
-/// POSITIVE: a chain far deeper than the stack budget allows yields the typed
-/// located depth diagnostic through the FULL pipeline, NOT a SIGSEGV. Depth
-/// 4000 reliably exhausts the budget on an 8 MiB stack while staying well
-/// under the depth that would overflow the same stack outright, so the guard
-/// (not a crash) is what stops it.
+/// A grown-segment size small enough that a depth-4000 `app` chain exhausts the
+/// guard's byte budget (so the per-site guard fires with a located diagnostic),
+/// but large enough that the guard's 128 KiB red zone catches the recursion
+/// well before a raw native overflow. 8 MiB matches the default `chelis check`
+/// main-thread stack on Linux, the profile the original guard tests pinned: a
+/// depth-4000 chain reliably trips the budget on 8 MiB while staying under the
+/// depth (~1550 release / far more debug headroom via the red zone) that would
+/// overflow it outright, so the guard -- not a crash -- is what stops it. A much
+/// smaller segment (e.g. 2 MiB) leaves too little margin between the red zone
+/// and the segment end for a single deep `infer_expr`/`infer_app` step plus the
+/// validate passes, and can SIGSEGV before the guard fires.
+const SAFETY_NET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
+
+/// POSITIVE (safety net): a chain far deeper than a (shrunk) grown segment
+/// allows yields the typed located depth diagnostic through the FULL pipeline,
+/// NOT a SIGSEGV. With the grown segment shrunk to 2 MiB, depth 4000 reliably
+/// exhausts the budget while staying well under the depth that would overflow
+/// the same segment outright, so the per-site guard (not a crash) is what stops
+/// it. This proves the guard still backs up the grow for input deeper than a
+/// segment can hold.
 #[test]
 fn deep_app_chain_yields_stack_budget_diagnostic_not_sigsegv() {
-    let messages = check_deep_on_bounded_stack(program_with_body(deep_app_chain(4000)), 8);
+    let messages = check_deep_on_bounded_stack(
+        program_with_body(deep_app_chain(4000)),
+        8,
+        Some(SAFETY_NET_SEGMENT_BYTES),
+    );
     assert!(
         messages
             .iter()
             .any(|m| m.contains("stack budget exhausted")),
         "expected a located 'stack budget exhausted' diagnostic for a 4000-deep \
-         app chain through check_ir_program; got: {messages:?}",
+         app chain that overflows a shrunk grown segment; got: {messages:?}",
     );
 }
 
@@ -143,7 +181,11 @@ fn deep_app_chain_yields_stack_budget_diagnostic_not_sigsegv() {
 /// than a bare "too deep".
 #[test]
 fn stack_budget_diagnostic_names_the_walker_site() {
-    let messages = check_deep_on_bounded_stack(program_with_body(deep_app_chain(4000)), 8);
+    let messages = check_deep_on_bounded_stack(
+        program_with_body(deep_app_chain(4000)),
+        8,
+        Some(SAFETY_NET_SEGMENT_BYTES),
+    );
     assert!(
         messages
             .iter()
@@ -160,7 +202,7 @@ fn stack_budget_diagnostic_names_the_walker_site() {
 #[test]
 fn deep_app_chain_is_rejected_never_silently_passes() {
     let program = program_with_body(deep_app_chain(4000));
-    let messages = check_deep_on_bounded_stack(program, 8);
+    let messages = check_deep_on_bounded_stack(program, 8, Some(SAFETY_NET_SEGMENT_BYTES));
     assert!(
         !messages.is_empty(),
         "a chain past the stack budget must reject (Err with errors), never \
@@ -171,12 +213,14 @@ fn deep_app_chain_is_rejected_never_silently_passes() {
 /// NEGATIVE (no false positive, no behavior change for normal input): a
 /// moderate-depth chain, comfortably within the budget, never trips the guard.
 /// The unbound names still produce ordinary `unbound variable` errors, but NOT
-/// the stack-depth diagnostic.
+/// the stack-depth diagnostic. Run on the production grown segment (no
+/// override) so this also confirms the grow path itself never spuriously trips
+/// the guard on shallow input.
 #[test]
 fn moderate_depth_chain_does_not_trip_stack_guard() {
     // Depth 20 is far below any stack budget bail and below even the smallest
     // (2 MiB) native overflow depth, so it is safe on any stack.
-    let messages = check_deep_on_bounded_stack(program_with_body(deep_app_chain(20)), 8);
+    let messages = check_deep_on_bounded_stack(program_with_body(deep_app_chain(20)), 8, None);
     assert!(
         !messages
             .iter()
@@ -186,30 +230,41 @@ fn moderate_depth_chain_does_not_trip_stack_guard() {
     );
 }
 
-/// DEFERRED CAPABILITY (`#[ignore]`d): the real pricer -- or a synthetic chain
-/// at the pricer's true nesting depth -- should `check` cleanly end-to-end. It
-/// cannot today: a chain deep enough to model the pricer trips the stack-budget
-/// guard (and, beyond `chelis_types`, the deep AST's own derived clone/drop in
-/// `chelis_deep` would overflow -- see the follow-up note). This is `#[ignore]`d
-/// so it anchors the deferred capability; it flips green when the
-/// stack-growing (`stacker::maybe_grow`) follow-up lands.
+/// FOLLOW-UP LANDED (WI-1 stack-growing): the real pricer -- or a synthetic
+/// chain at the pricer's true nesting depth -- now `check`s cleanly end-to-end.
+/// A chain deep enough to model the pricer (4000) used to trip the stack-budget
+/// guard on an 8 MiB stack; the public check entries now run the WHOLE pipeline
+/// on a freshly-grown stack segment (`with_grown_stack` -> `stacker::grow` in
+/// `chelis-types/src/infer.rs`), so inference AND every validate / annotate
+/// pass (plus the deep `Expr` clones and the final drop) run with room and the
+/// per-site guard never fires for a legitimately deep-but-finite program. The
+/// per-site guard remains the safety net for input deeper than the grown
+/// segment (covered-or-rejected; exercised by
+/// `deep_app_chain_yields_stack_budget_diagnostic_not_sigsegv` with a shrunk
+/// segment). The depth is finite and reef-linking-induced, not an infinite
+/// recursion -- the reef linker concatenates each module's decls under mangled
+/// internal names and references each export once rather than re-inlining
+/// bodies, so it adds breadth, not unbounded depth, and `infer_app` recurses
+/// only on strictly-smaller subtrees of a finite AST (see
+/// docs/investigations/wi1_infer_recursion_depth.md).
 ///
-/// Manual gate: `cargo nextest run -p chelis-types -- --ignored`.
-/// Expected once the follow-up lands: zero `stack budget exhausted` errors for
-/// a pricer-depth chain.
+/// This is the negative of `deep_app_chain_yields_stack_budget_diagnostic_not_sigsegv`:
+/// that test SHRINKS the grown segment so depth 4000 overflows it and asserts
+/// the guard converts the overflow into a located diagnostic; this one runs the
+/// PRODUCTION grown segment and asserts the same depth instead checks WITHOUT a
+/// stack-depth error. Both prove there is no SIGSEGV; they differ only in the
+/// grown-segment size, which is the whole point of the follow-up.
 #[test]
-#[ignore = "deferred: full-depth checking needs the WI-1 stacker::maybe_grow \
-            follow-up (and the chelis_deep deep-clone/drop surface); today the \
-            guard fires. See docs/investigations/wi1_infer_recursion_depth.md"]
 fn pricer_depth_chain_checks_without_depth_error_once_followup_lands() {
     // 4000 stands in for the pricer's true (deep) nesting; the real pricer
     // fixture is reachable through the CLI, not this crate's unit surface.
-    let messages = check_deep_on_bounded_stack(program_with_body(deep_app_chain(4000)), 8);
+    // `None` -> the production grown segment.
+    let messages = check_deep_on_bounded_stack(program_with_body(deep_app_chain(4000)), 8, None);
     assert!(
         !messages
             .iter()
             .any(|m| m.contains("stack budget exhausted")),
-        "deferred: once depth handling grows the stack, a pricer-depth chain \
-         must check without a stack-depth error",
+        "the WI-1 stack-growing follow-up must let a pricer-depth chain \
+         check without a stack-depth error; got: {messages:?}",
     );
 }

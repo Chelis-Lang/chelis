@@ -1472,6 +1472,25 @@ fn cmd_check_one(
     show_inferred: bool,
     allow_style_violations: bool,
 ) -> Result<(String, bool), Box<dyn std::error::Error>> {
+    // WI-1 follow-up: run the WHOLE check operation on a grown native stack.
+    // The chelis-types check entries grow the stack around their own recursion,
+    // but the reef/deep loader, the linked-program `clone()`, the desugarer,
+    // the fitness structure walk, `chelis_deep::validate`, and the implicit
+    // drop of the deep `Expr` tree all run here, OUTSIDE those entries. A
+    // deeply-nested but finite reef-linked program (the Shoals pricer) would
+    // otherwise SIGSEGV in one of those derived-recursive passes even though
+    // the type checker itself is now safe. One grow at this boundary covers
+    // them all uniformly. See docs/investigations/wi1_infer_recursion_depth.md.
+    chelis_types::run_on_grown_stack(|| {
+        cmd_check_one_on_grown_stack(file, show_inferred, allow_style_violations)
+    })
+}
+
+fn cmd_check_one_on_grown_stack(
+    file: &Path,
+    show_inferred: bool,
+    allow_style_violations: bool,
+) -> Result<(String, bool), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file).ok();
     if let Some(source) = &source {
         style_gate::enforce_style_gate(file, source, allow_style_violations)?;

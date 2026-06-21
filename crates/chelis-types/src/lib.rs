@@ -24,7 +24,7 @@ pub use infer::{
     CheckedProgram, InferResult, build_compiled_library_context,
     build_compiled_library_context_with_base, build_type_env_from_library, check_ir_program,
     check_ir_with_context, check_ir_with_signature_context, check_typed_program, infer_ir_program,
-    infer_program,
+    infer_program, run_on_grown_stack, set_grow_segment_bytes_for_test,
 };
 pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
 pub use opacity::{
