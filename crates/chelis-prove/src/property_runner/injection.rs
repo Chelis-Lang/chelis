@@ -22,7 +22,8 @@ use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_surf::ast::{Decl, Param, TypeExpr};
 
 use crate::composition::{
-    AssumptionDischarge, AssumptionRecord, DischargeMethod, FUZZ_TOLERANCE, NonVacuityRecord,
+    AssumptionDischarge, AssumptionRecord, DischargeMethod, DischargeTier, FUZZ_TOLERANCE,
+    NonVacuityRecord,
 };
 
 use super::{PropertyOutcome, PropertyRunOptions, PropertyStatus, PropertyTier};
@@ -316,7 +317,16 @@ fn injection_assumptions(
                         "seed": seed,
                     }))),
                 )
-                .with_source(inv.type_name.clone(), format!("binder:{name}")),
+                .with_source(inv.type_name.clone(), format!("binder:{name}"))
+                // WI-8: stamp the prover-side discharge tier on the
+                // binder-matched (injected) assumption. The injection path is
+                // the fuzz sampler discharging the invariant of an opaque
+                // binder, keyed to the binder's source identity.
+                .with_discharge_tier(DischargeTier::new(
+                    "fuzz-sampler",
+                    DischargeMethod::Fuzz,
+                    Some(format!("invariant:{}:binder:{name}", inv.type_name)),
+                )),
             ),
             _ => None,
         })

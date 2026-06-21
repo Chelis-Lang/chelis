@@ -31,7 +31,7 @@ pub mod worker;
 pub use artifact::{ProofArtifact, ProofStatus, ProofTier};
 pub use composition::{
     AssumptionDischarge, AssumptionRecord, AssumptionRegistry, CompositeVerdict, CompositionProbe,
-    DischargeMethod, NonVacuityRecord, NonVacuityStatus, rollup_composite,
+    DischargeMethod, DischargeTier, NonVacuityRecord, NonVacuityStatus, rollup_composite,
 };
 pub use concrete_eval::{eval_arith, eval_bool};
 pub use contracts::{

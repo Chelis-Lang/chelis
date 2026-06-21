@@ -816,11 +816,18 @@ fn property_assumption_records(
     if smt_prop.preconditions.is_empty() {
         Vec::new()
     } else {
-        vec![AssumptionRecord::new(
-            format!("preconditions:{property_name}"),
-            Some(discharge),
-            Some(non_vacuity),
-        )]
+        // WI-8: stamp the prover-side discharge tier from the discharge method,
+        // keyed to the property's precondition source identity.
+        let name = format!("preconditions:{property_name}");
+        let tier = crate::composition::DischargeTier::new(
+            discharge.method.engine(),
+            discharge.method,
+            Some(name.clone()),
+        );
+        vec![
+            AssumptionRecord::new(name, Some(discharge), Some(non_vacuity))
+                .with_discharge_tier(tier),
+        ]
     }
 }
 
@@ -941,25 +948,35 @@ fn fuzz_precondition_assumptions(
     if precondition_count == 0 {
         return Vec::new();
     }
-    vec![AssumptionRecord::new(
-        format!("preconditions:{property_name}"),
-        Some(AssumptionDischarge::new(
-            DischargeMethod::Fuzz,
-            serde_json::json!({
-                "status": "validated",
-                "property": property_name,
-                "samples": samples,
+    let name = format!("preconditions:{property_name}");
+    vec![
+        AssumptionRecord::new(
+            name.clone(),
+            Some(AssumptionDischarge::new(
+                DischargeMethod::Fuzz,
+                serde_json::json!({
+                    "status": "validated",
+                    "property": property_name,
+                    "samples": samples,
+                    "seed": seed,
+                    "tolerance": FUZZ_TOLERANCE,
+                }),
+            )),
+            Some(NonVacuityRecord::established(serde_json::json!({
+                "method": "fuzz",
+                "result": "sat",
+                "accepted_samples": samples,
                 "seed": seed,
-                "tolerance": FUZZ_TOLERANCE,
-            }),
+            }))),
+        )
+        // WI-8: stamp the prover-side fuzz discharge tier, keyed to the
+        // precondition source identity.
+        .with_discharge_tier(crate::composition::DischargeTier::new(
+            "fuzz-sampler",
+            DischargeMethod::Fuzz,
+            Some(name),
         )),
-        Some(NonVacuityRecord::established(serde_json::json!({
-            "method": "fuzz",
-            "result": "sat",
-            "accepted_samples": samples,
-            "seed": seed,
-        }))),
-    )]
+    ]
 }
 
 // ===========================================================================

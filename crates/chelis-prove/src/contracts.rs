@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use crate::composition::CompositeVerdict;
 use crate::composition::{
-    AssumptionDischarge, AssumptionRecord, AssumptionRegistry, DischargeMethod, FUZZ_TOLERANCE,
-    NonVacuityRecord,
+    AssumptionDischarge, AssumptionRecord, AssumptionRegistry, DischargeMethod, DischargeTier,
+    FUZZ_TOLERANCE, NonVacuityRecord,
 };
 
 pub const NORMAL_CDF_RANGE: &str = "std.normal_cdf.range";
@@ -144,7 +144,14 @@ fn smt_invariant(id: &str, description: &str, assumption: &str) -> ContractInvar
                 "contract": id,
             }))),
         )
-        .with_source("std_contract", id),
+        .with_source("std_contract", id)
+        // WI-8: the standard contract is discharged by cvc5 at the SMT tier,
+        // keyed to the contract id.
+        .with_discharge_tier(DischargeTier::new(
+            DischargeMethod::Smt.engine(),
+            DischargeMethod::Smt,
+            Some(id.to_string()),
+        )),
     }
 }
 
@@ -174,7 +181,14 @@ fn fuzz_invariant(
                 "contract": id,
             }))),
         )
-        .with_source("std_contract", id),
+        .with_source("std_contract", id)
+        // WI-8: the standard contract is fuzz-validated by the sampler, keyed
+        // to the contract id.
+        .with_discharge_tier(DischargeTier::new(
+            DischargeMethod::Fuzz.engine(),
+            DischargeMethod::Fuzz,
+            Some(id.to_string()),
+        )),
     }
 }
 

@@ -1094,6 +1094,115 @@ fn bridge_failure_resolves_spans_manifest_to_ears_source() {
 }
 
 #[test]
+fn wi8_bridge_green_assumption_discharge_tier_joins_to_c_earchin_source_id() {
+    // WI-8: the artifact JSON shows the prover-stamped discharge_tier joined to
+    // its c-earchin source id. A bridge (c-earchin) property carrying a
+    // precondition, proved green through the CLI-local fuzz path, records the
+    // WI-7 precondition non-vacuity assumption; that assumption now carries a
+    // prover-stamped discharge_tier (engine + guarantee + the source identity
+    // it is keyed to), and the same artifact record carries the c-earchin
+    // source id (source.requirement.id), so the tier joins to the source. The
+    // c-earchin emission (the def metadata + spans) carries only source
+    // identity -- the property_source_id and the requirement -- and NO tier.
+    let dir = tempdir().expect("tempdir");
+    let deep = dir.path().join("req.dp");
+    let spans = dir.path().join("req.spans.json");
+    std::fs::write(
+        &deep,
+        r#"
+(def {chelis_role: "property",
+      property_source_kind: "bridge:c-earchin",
+      property_source_id: "FIN-007",
+      property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+      property_preconditions: (tuple {} (app {} (var {} gte) (var {} x) (lit {type: (t-prim {} f32)} 0.0)))}
+  req_FIN_007
+  (fn {}
+    (params {} (x {type: (t-prim {} f32)}))
+    (app {} (var {} gte) (var {} x) (lit {type: (t-prim {} f32)} 0.0))))
+"#,
+    )
+    .expect("write deep");
+    std::fs::write(
+        &spans,
+        r#"
+{
+  "source": "references/finance_options/options_rules.ears",
+  "source_hash": "sha256:test",
+  "spans": [
+    {
+      "deep_node_id": "req_FIN_007",
+      "deep_path": "module.def[2]",
+      "ears_id": "FIN-007",
+      "ears_file": "references/finance_options/options_rules.ears",
+      "ears_text": "The premium shall be non-negative.",
+      "ears": {
+        "start_byte": 1,
+        "end_byte": 34,
+        "start_line": 7,
+        "start_column": 1,
+        "end_line": 7,
+        "end_column": 34
+      },
+      "clauses": []
+    }
+  ]
+}
+"#,
+    )
+    .expect("write spans");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            deep.to_str().unwrap(),
+            "--spans",
+            spans.to_str().unwrap(),
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "4",
+            "--seed",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = property_records(&output.stdout);
+    let record = &records[0];
+    assert_eq!(record["status"], "passed");
+
+    // The c-earchin source identity is in the artifact (prover-untouched).
+    assert_eq!(
+        record["source"]["requirement"]["id"], "FIN-007",
+        "the artifact carries the c-earchin source id: {record}"
+    );
+
+    // The prover-stamped discharge tier is on the (precondition non-vacuity)
+    // assumption, joined to its source identity.
+    let assumption = &record["assumptions"][0];
+    let tier = &assumption["discharge_tier"];
+    assert_eq!(
+        tier["engine"], "fuzz-sampler",
+        "the tier names the discharging engine: {record}"
+    );
+    assert_eq!(
+        tier["guarantee"], "fuzz",
+        "the tier names the guarantee kind: {record}"
+    );
+    assert_eq!(
+        tier["source"], "preconditions:req_FIN_007",
+        "the tier is keyed to the assumption source identity: {record}"
+    );
+}
+
+#[test]
 fn prove_accepts_dotted_deep_symbols_for_bridge_references() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bridge.dp");

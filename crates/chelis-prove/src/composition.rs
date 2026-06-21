@@ -31,6 +31,17 @@ impl DischargeMethod {
             DischargeMethod::Axiom => "axiom",
         }
     }
+
+    /// The canonical discharging-engine name for this method (WI-8). cvc5 is
+    /// the SMT engine; the fuzz sampler discharges fuzz-validated assumptions;
+    /// an axiom is asserted, not discharged by an engine.
+    pub fn engine(self) -> &'static str {
+        match self {
+            DischargeMethod::Smt => "cvc5",
+            DischargeMethod::Fuzz => "fuzz-sampler",
+            DischargeMethod::Axiom => "axiom",
+        }
+    }
 }
 
 /// The composed proof verdict, after folding the base proof together with
@@ -395,6 +406,41 @@ impl From<AssumptionSatisfiability> for NonVacuityRecord {
     }
 }
 
+/// The prover-stamped discharge provenance of an assumption (WI-8): which
+/// engine discharged it and with what guarantee kind, keyed to the source
+/// identity it was discharged against. This is stamped PROVER-side at discharge
+/// time, where the engine and the guarantee are known. c-earchin (the bridge)
+/// emits only source identity and never a tier: it cannot compute which engine
+/// closed the goal or with what guarantee, so the tier is the prover's to
+/// stamp, and the artifact joins this tier to the c-earchin source id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DischargeTier {
+    /// The engine that discharged the assumption (e.g. `cvc5` for an SMT
+    /// proof, `fuzz-sampler` for a fuzz-validated discharge).
+    pub engine: String,
+    /// The guarantee kind the discharge carries, the canonical
+    /// [`DischargeMethod`] spelling (`smt` / `fuzz` / `axiom`).
+    pub guarantee: String,
+    /// The source identity this tier is keyed to: the c-earchin source id for a
+    /// bridge property, or the binder / producer identity for an injected or
+    /// derived assumption. The artifact joins the tier to this source. `None`
+    /// when the discharge has no distinct source identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+impl DischargeTier {
+    /// Stamp a tier from the prover side. `engine` is the discharging engine,
+    /// `method` the guarantee kind, `source` the identity it is keyed to.
+    pub fn new(engine: impl Into<String>, method: DischargeMethod, source: Option<String>) -> Self {
+        Self {
+            engine: engine.into(),
+            guarantee: method.as_str().to_string(),
+            source,
+        }
+    }
+}
+
 /// One assumption the proof depends on, with its discharge and
 /// non-vacuity records.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -408,6 +454,12 @@ pub struct AssumptionRecord {
     pub discharge: Option<AssumptionDischarge>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_vacuity: Option<NonVacuityRecord>,
+    /// Prover-stamped discharge provenance (WI-8): which engine discharged this
+    /// assumption and with what guarantee, keyed to its source identity. Serde-
+    /// additive (`skip_serializing_if`) so existing artifacts stay
+    /// byte-identical and old payloads still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discharge_tier: Option<DischargeTier>,
 }
 
 impl AssumptionRecord {
@@ -422,6 +474,7 @@ impl AssumptionRecord {
             producer: None,
             discharge,
             non_vacuity,
+            discharge_tier: None,
         }
     }
 
@@ -432,6 +485,14 @@ impl AssumptionRecord {
     ) -> Self {
         self.source_type = Some(source_type.into());
         self.producer = Some(producer.into());
+        self
+    }
+
+    /// Stamp the prover-side discharge tier (WI-8). The tier records which
+    /// engine discharged this assumption and with what guarantee, keyed to the
+    /// given source identity.
+    pub fn with_discharge_tier(mut self, tier: DischargeTier) -> Self {
+        self.discharge_tier = Some(tier);
         self
     }
 

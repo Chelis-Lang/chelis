@@ -2252,9 +2252,10 @@ fn precondition_non_vacuity_assumptions(
     if precondition_count == 0 || status != "passed" || samples == 0 {
         return json!([]);
     }
+    let name = format!("preconditions:{property_name}");
     json!([
         {
-            "name": format!("preconditions:{property_name}"),
+            "name": name,
             "discharge": {
                 "method": "fuzz",
                 "evidence": {
@@ -2273,6 +2274,14 @@ fn precondition_non_vacuity_assumptions(
                     "accepted_samples": samples,
                     "seed": seed,
                 },
+            },
+            // WI-8: the prover-side discharge tier, shaped exactly like the
+            // shared runner's fuzz_precondition_assumptions stamp so a
+            // CLI-local green and a shared-runner green agree byte-for-byte.
+            "discharge_tier": {
+                "engine": "fuzz-sampler",
+                "guarantee": "fuzz",
+                "source": name,
             },
         }
     ])

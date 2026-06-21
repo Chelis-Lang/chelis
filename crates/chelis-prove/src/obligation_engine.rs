@@ -186,7 +186,13 @@ fn default_obligation_assumptions(
             Some(AssumptionDischarge::new(method, evidence)),
             non_vacuity,
         )
-        .with_source(meta.source_type.clone(), meta.producer.clone()),
+        .with_source(meta.source_type.clone(), meta.producer.clone())
+        // WI-8: stamp the prover-side discharge tier, keyed to the obligation.
+        .with_discharge_tier(crate::composition::DischargeTier::new(
+            method.engine(),
+            method,
+            Some(name.to_string()),
+        )),
     ]
 }
 
@@ -1053,9 +1059,17 @@ fn obligation_assumption_records(
     discharge: AssumptionDischarge,
     non_vacuity: NonVacuityRecord,
 ) -> Vec<AssumptionRecord> {
+    // WI-8: stamp the prover-side discharge tier from the discharge's method
+    // (which engine + guarantee), keyed to the obligation's source identity.
+    let tier = crate::composition::DischargeTier::new(
+        discharge.method.engine(),
+        discharge.method,
+        Some(ob.name.clone()),
+    );
     vec![
         AssumptionRecord::new(ob.name.clone(), Some(discharge), Some(non_vacuity))
-            .with_source(ob.meta.source_type.clone(), ob.meta.producer.clone()),
+            .with_source(ob.meta.source_type.clone(), ob.meta.producer.clone())
+            .with_discharge_tier(tier),
     ]
 }
 
