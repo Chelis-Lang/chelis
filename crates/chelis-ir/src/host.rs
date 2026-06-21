@@ -2154,6 +2154,8 @@ fn lower_host_function(
     let mut host_body = if let HostType::Tensor(expected) = ret_ty.clone()
         && !any_callable_param
         && !expr_needs_host_lane_tensor_lowering(&body_expr, program)
+        && !expr_calls_top_level_fn_with_callable_param(&body_expr, program)
+        && !expr_calls_summary_rejecting_top_level_fn(&body_expr, program)
         && !should_keep_tensor_expr_in_host_lane(&body_expr)
     {
         try_lower_tensor_helper_call(&body_expr, program, &scope, &mut tensor_helpers, expected)
@@ -5603,9 +5605,23 @@ fn lower_app_host_expr(
     let callee_is_local_callable = scope
         .get(&name)
         .is_some_and(|ty| matches!(ty, HostType::Fn(_, _)));
+    // A callee carrying a callable (fn-pointer) parameter cannot be
+    // summarized through the tensor-helper DAG: the DAG has no
+    // representation for a fn-pointer input. Such a callee is lowered by
+    // inlining its body at the call site (the `has_callable_params`
+    // branch below), where the local-wrapper grad/vmap form keeps its
+    // rank-polymorphic shape symbolic. Skip both tensor-helper branches
+    // so the inline path wins; otherwise the call monomorphizes against
+    // the concrete arg shapes. This restores the lowering altitude the
+    // over-broad recursion classification used to force.
+    let has_callable_params = fn_sig
+        .as_ref()
+        .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostType::Fn(..))));
     if let Some(tensor_ty) = helper_tensor_ty.clone()
         && !callee_is_local_callable
+        && !has_callable_params
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
+        && !top_level_fn_helper_summary_rejects(program, &name)
         && !should_keep_tensor_expr_in_host_lane(&app_expr)
         && let Some(tensor_call) = try_lower_tensor_helper_call(
             &helper_expr,
@@ -5627,7 +5643,9 @@ fn lower_app_host_expr(
     }
     if let Some(tensor_ty) = helper_tensor_ty
         && !callee_is_local_callable
+        && !has_callable_params
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
+        && !top_level_fn_helper_summary_rejects(program, &name)
         && !should_keep_tensor_expr_in_host_lane(&app_expr)
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
     {
@@ -5641,9 +5659,6 @@ fn lower_app_host_expr(
             return tensor_call;
         }
     }
-    let has_callable_params = fn_sig
-        .as_ref()
-        .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostType::Fn(..))));
     let tensor_result = matches!(explicit_ty, HostType::Tensor(_))
         || matches!(inferred_ret_ty, HostType::Tensor(_));
     // WS-A8: if the callee is a polymorphic-precision sig, the host
@@ -5998,6 +6013,88 @@ fn top_level_fn_needs_host_lane_tensor_lowering(program: &CheckedProgram, name: 
     let graph = top_level_fn_call_graph(program);
     let recursive = recursive_top_level_fn_names_from_graph(&graph);
     call_graph_reaches_any(&graph, name, &recursive)
+}
+
+/// A caller of `name` must fall back to a plain host function call
+/// (`name(args)`) rather than inlining `name`'s body and re-summarizing
+/// it, when `name`'s own tensor-helper lowering would be a *summary
+/// rejection*. Inlining a rejected helper into the caller would either
+/// register a false sparse/BLAS summary on the caller or rebuild the
+/// caller around the rejected helper's `__tensor_*` shim; the
+/// unspecialized helper is the only honest lowering, so the caller
+/// emits a direct call to it.
+///
+/// This is the structured replacement for the previous incidental
+/// trigger: the over-broad recursion classification (every function was
+/// marked recursive by the reflexive `call_graph_reaches_any`) forced
+/// every caller through the host-lane fallback, which happened to route
+/// rejected helpers to a host call. With recursion classification
+/// corrected, the fallback is driven directly off the
+/// `SummaryRejection` machinery instead.
+fn top_level_fn_helper_summary_rejects(program: &CheckedProgram, name: &str) -> bool {
+    // Guard against unbounded re-entry: while we are already inlining
+    // `name` we must not recursively re-lower it to probe its
+    // rejections.
+    if is_inlining(name) {
+        return false;
+    }
+    let defs = collect_program_defs(program.exprs());
+    let Some(body) = lookup_program_def(&defs, name) else {
+        return false;
+    };
+    if !matches!(body, Expr::List(list, _) if tag(list) == Some("fn")) {
+        return false;
+    }
+    let pushed = push_inlining(name);
+    let rejects = lower_host_function(name, body, None, program)
+        .map(|mut function| {
+            collect_function_summary_rejections(&mut function);
+            !function.summary_rejections.is_empty()
+        })
+        .unwrap_or(false);
+    if pushed {
+        pop_inlining(name);
+    }
+    rejects
+}
+
+/// A top-level expression body needs host-lane lowering when it calls a
+/// top-level fn whose lowering cannot be cleanly summarized into a
+/// tensor helper at the call site. Today that is any callee carrying a
+/// callable (fn-pointer) parameter: the tensor-helper DAG has no
+/// representation for a fn-pointer input and would coerce it into a
+/// scalar-tensor placeholder, so the call must stay in the host lane
+/// where the fn application lowers to a direct `f(x)` call.
+///
+/// This replaces the prior incidental trigger (the over-broad recursion
+/// classification) for the local-wrapper-over-callable-param case.
+fn expr_calls_top_level_fn_with_callable_param(expr: &Expr, program: &CheckedProgram) -> bool {
+    let graph = top_level_fn_call_graph(program);
+    let fn_names = graph.keys().cloned().collect::<HashSet<_>>();
+    collect_called_top_level_fns(expr, &fn_names)
+        .iter()
+        .any(|name| top_level_fn_has_callable_param(program, name))
+}
+
+fn top_level_fn_has_callable_param(program: &CheckedProgram, name: &str) -> bool {
+    let Some((param_tys, _)) = lookup_declared_fn_type(program, name) else {
+        return false;
+    };
+    param_tys.iter().any(|ty| matches!(ty, HostType::Fn(_, _)))
+}
+
+/// A tensor-returning body that calls a summary-rejecting top-level fn
+/// must not be summarized through the tensor-helper DAG: doing so
+/// inlines the rejected helper's body into the caller (registering a
+/// false summary or rebuilding the caller around the rejected shim).
+/// Route such bodies through host-lane lowering so the call lowers to a
+/// direct host function call to the unspecialized helper.
+fn expr_calls_summary_rejecting_top_level_fn(expr: &Expr, program: &CheckedProgram) -> bool {
+    let graph = top_level_fn_call_graph(program);
+    let fn_names = graph.keys().cloned().collect::<HashSet<_>>();
+    collect_called_top_level_fns(expr, &fn_names)
+        .iter()
+        .any(|name| top_level_fn_helper_summary_rejects(program, name))
 }
 
 fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<String>> {

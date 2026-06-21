@@ -274,12 +274,15 @@ fn cost_json_accepts_reef_linked_package_names() {
     fs::create_dir_all(pkg.join("src")).expect("create src");
     write_file(
         &pkg.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "linked-cost"
 version = "0.1.0"
-compiler = "=0.7.27"
+compiler = "={ver}"
 module_prefix = "LinkedCost"
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     );
     write_file(
         &pkg.join("src/helper.ch"),
