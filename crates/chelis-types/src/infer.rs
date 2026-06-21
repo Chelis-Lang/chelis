@@ -73,6 +73,97 @@ const STACK_RED_ZONE_BYTES: usize = 128 * 1024;
 /// `RecursionDepthGuard` RAII counter exists to feed this fallback.
 const FALLBACK_MAX_DEPTH: usize = 20;
 
+/// Size of the fresh stack segment `with_grown_stack` allocates for the whole
+/// check pipeline. 512 MiB comfortably clears the depth the real reef-linked
+/// Shoals pricer reaches (its deepest desugared `app` body nests in the low
+/// thousands -- a finite source property: the reef linker concatenates each
+/// module's decls under mangled internal names and references every export
+/// once rather than re-inlining bodies, so linking adds breadth, not unbounded
+/// depth; see docs/investigations/wi1_infer_recursion_depth.md). The
+/// investigation measured a 512 MiB thread completing the real pricer, and
+/// every recursive pass over the tree (inference, the validate / annotate
+/// passes, plus the `deep::Expr` clones and the final drop) runs inside this
+/// one segment, so the cliff is lifted uniformly rather than moved to the next
+/// pass. `stacker::grow` reserves the segment via `mmap`; on Linux the pages
+/// are demand-zeroed, so a shallow check that never descends deep only commits
+/// the few pages it actually touches -- the 512 MiB is reserved address space,
+/// not resident memory.
+const GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
+
+thread_local! {
+    /// Test-only per-thread override (in bytes) for the `with_grown_stack`
+    /// segment size. Reserved for the recursion-depth-guard test corpus, which
+    /// must still exercise the per-site `stack_guard!` SAFETY NET: with the
+    /// production 512 MiB segment no realistic test depth exhausts the stack,
+    /// so the safety-net tests shrink the segment (via `set_grow_segment_bytes_for_test`)
+    /// to a few MiB and drive a chain deep enough to overflow it, proving the
+    /// guard still converts the overflow into a located diagnostic rather than
+    /// a SIGSEGV.
+    ///
+    /// A thread-local (not a process-global env var) is used deliberately: the
+    /// override and the `grow` it governs run on the SAME check thread, so a
+    /// concurrent check on another thread -- another test in the same process
+    /// under `cargo test`, or a real parallel compile -- can never observe a
+    /// shrunk segment. `None` means "use the production `GROW_SEGMENT_BYTES`".
+    static GROW_SEGMENT_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Install a test-only per-thread `with_grown_stack` segment size. Call from a
+/// test worker thread BEFORE invoking the checker on that thread. Not for
+/// production use; a too-small value makes a legitimately-deep program bail
+/// where it would otherwise check.
+#[doc(hidden)]
+pub fn set_grow_segment_bytes_for_test(bytes: usize) {
+    GROW_SEGMENT_OVERRIDE.with(|cell| cell.set(Some(bytes)));
+}
+
+fn grow_segment_bytes() -> usize {
+    GROW_SEGMENT_OVERRIDE
+        .with(Cell::get)
+        .filter(|&n| n > 0)
+        .unwrap_or(GROW_SEGMENT_BYTES)
+}
+
+/// Run the whole check pipeline `f` on a freshly-allocated stack segment
+/// (`GROW_SEGMENT_BYTES`, or a `CHELIS_GROW_SEGMENT_BYTES` test override).
+/// Wrap every PUBLIC check entry in this: a single grow at the boundary covers
+/// EVERY recursive pass that descends the `deep::Expr` tree (inference, the
+/// validate / annotate walkers, the deep `Expr` clones the pipeline makes, and
+/// the implicit drop of the result), because they all run inside this one
+/// closure on the grown segment. This is the WI-1 follow-up that lets a
+/// legitimately deep-but-finite program (a reef-linked pricer) check
+/// end-to-end instead of tripping a per-site `stack_guard!` partway through one
+/// of those passes.
+///
+/// We use `stacker::grow` (always allocate a fresh segment) rather than
+/// `stacker::maybe_grow` (allocate only when near exhaustion) on purpose: a
+/// check typically starts on a fresh, near-empty thread stack, so `maybe_grow`
+/// would see ample headroom and never grow -- the stack only nears exhaustion
+/// many frames INTO the descent, by which point we are deep inside the
+/// recursive walkers, far from this boundary, with no further grow site. One
+/// of those walkers' per-site `stack_guard!`s would then fire first. Allocating
+/// the big segment up front guarantees the headroom is in place before the
+/// descent begins. The per-site guards remain the safety net for input deeper
+/// than even this segment can hold (covered-or-rejected).
+fn with_grown_stack<R>(f: impl FnOnce() -> R) -> R {
+    stacker::grow(grow_segment_bytes(), f)
+}
+
+/// Public wrapper over [`with_grown_stack`] for callers OUTSIDE this crate
+/// (the CLI `chelis check` entry) that drive deep `chelis_deep::Expr` work the
+/// chelis-types check entries do not themselves wrap: the reef/deep loader, the
+/// `prepared.decls.clone()` of the linked program, the desugarer, the fitness
+/// structure walk, `chelis_deep::validate`, and the final drop of the deep
+/// tree. Wrapping the whole CLI check operation in this runs ALL of that on one
+/// grown segment, so a deeply-nested but finite reef-linked program (the Shoals
+/// pricer) cannot SIGSEGV in a derived `Clone`/`Drop`/validator outside the
+/// type checker. The per-entry grows inside this crate still apply to their own
+/// recursion when called directly (eval, build, lsp), so nesting this around
+/// them is at worst a redundant -- not incorrect -- second grow.
+pub fn run_on_grown_stack<R>(f: impl FnOnce() -> R) -> R {
+    with_grown_stack(f)
+}
+
 thread_local! {
     /// Current pipeline native-recursion depth on this thread, maintained
     /// by `RecursionDepthGuard`. Only consulted on platforms where
@@ -514,6 +605,13 @@ pub struct ParamSignatureInference {
 
 /// Run type inference on a list of top-level Deep expressions.
 pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
+    // WI-1 follow-up: run the whole pipeline on a grown stack so a deeply
+    // nested but finite program checks end-to-end instead of tripping a
+    // per-site `stack_guard!` partway through one of the recursive passes.
+    with_grown_stack(|| infer_program_inner(exprs))
+}
+
+fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
     // Reset the stack-exhaustion flag for this check unit; `drain` below
     // turns any walker stack bail into a hard located error so deep input
     // can never produce a silent green / partial result.
@@ -624,6 +722,11 @@ pub fn check_ir_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferRes
 /// [`check_ir_with_context`]. The library state is `Arc`-shared and
 /// never mutated, so concurrent reads are cheap.
 pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
+    // WI-1 follow-up: grow the stack for the whole library pipeline.
+    with_grown_stack(|| build_type_env_from_library_inner(library_exprs))
+}
+
+fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
     // Reset the stack-exhaustion flag for this check unit; drained below
     // before the empty-errors gate (covered-or-rejected on deep input).
     let stack_scope = StackExhaustionScope::enter();
@@ -1058,6 +1161,19 @@ pub fn check_ir_with_signature_context(
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
+    // WI-1 follow-up: grow the stack for the whole check pipeline. This is the
+    // funnel for `check_ir_program` and `check_ir_with_context`, so wrapping
+    // here grows the stack for all three.
+    with_grown_stack(|| {
+        check_ir_with_signature_context_inner(context, signature_context, new_exprs)
+    })
+}
+
+fn check_ir_with_signature_context_inner(
+    context: &TypeEnv,
+    signature_context: &SignatureInferenceMetadata,
+    new_exprs: &[deep::Expr],
+) -> Result<CheckedProgram, InferResult> {
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate so a deep-input stack
     // bail always fails the check (never a silent green / partial result).
@@ -1151,6 +1267,12 @@ pub fn check_ir_with_signature_context(
 }
 
 pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
+    // WI-1 follow-up: grow the stack so both the inference call below and the
+    // annotation pass run with headroom on deep input.
+    with_grown_stack(|| check_typed_program_inner(exprs))
+}
+
+fn check_typed_program_inner(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
     // Outermost scope covers both inference (which has its own inner scope)
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
@@ -1174,6 +1296,11 @@ pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Infer
 }
 
 pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
+    // WI-1 follow-up: grow the stack for the whole pipeline.
+    with_grown_stack(|| infer_ir_program_inner(exprs))
+}
+
+fn infer_ir_program_inner(exprs: &[deep::Expr]) -> InferResult {
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
     let mut result = infer_ir_program_with_env(exprs, &type_env);
@@ -8337,7 +8464,12 @@ fn infer_expr(
     // when the budget is gone we record the located bail in `STACK_EXHAUSTED`
     // (so the check entry boundary fails hard) and return `Type::Error`,
     // letting the stack unwind normally (no panic, no `catch_unwind`). See
-    // `STACK_RED_ZONE_BYTES`.
+    // `STACK_RED_ZONE_BYTES`. The WI-1 follow-up grows the native stack ONCE at
+    // each public check entry (`with_grown_stack`), so on a legitimately deep
+    // but finite program every recursive pass -- this one and the validate /
+    // annotate / clone / drop passes -- runs inside the grown segment and this
+    // guard does not fire; it remains the safety net for input deeper than the
+    // grown segment can hold (covered-or-rejected).
     stack_guard!("infer_expr", expr, Type::Error);
 
     *total_nodes += 1;
