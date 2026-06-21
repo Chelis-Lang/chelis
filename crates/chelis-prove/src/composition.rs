@@ -213,30 +213,26 @@ impl VerdictRollup {
                 Terminal::Unestablished => CompositeVerdict::Unsupported,
             };
         }
-        // The two axes must agree before the badge is read off them: a green
-        // rollup whose soundness fell below `Exact` MUST carry a non-exact
-        // qualifier (`fuzz` is the only sub-exact green kind today), and a
-        // rollup that still claims `Exact` soundness must not carry `fuzz`.
-        // This is the laundering guard expressed structurally: the soundness
-        // axis and the qualifier set cannot disagree about how strong the
-        // rolled-up guarantee is.
-        debug_assert_eq!(
-            self.soundness < Soundness::Exact,
-            self.qualifiers.contains(Qualifier::Fuzz),
-            "rolled-up soundness and qualifier set disagree: soundness={:?}, qualifiers carry fuzz={}",
-            self.soundness,
-            self.qualifiers.contains(Qualifier::Fuzz),
-        );
-        // All-green. An empty/identity rollup (no contribution) is `Proven`.
-        // The qualifier set drives the badge, weakest kind first: an asserted
-        // axiom is a weaker green than a fuzz-validated contract, which is
-        // weaker than an exact proof, matching the legacy precedence.
+        // All-green. The qualifier set drives the badge, weakest kind first:
+        // an asserted axiom is a weaker green than a fuzz-validated contract,
+        // which is weaker than an exact proof, matching the legacy precedence.
+        // Covered-or-rejected: only `Exact` soundness with no weaker qualifier
+        // may render `Proven`. A green rollup at sub-`Exact` soundness carrying
+        // a non-fuzz/non-axiom qualifier (`SoundOverApproximation`,
+        // `DeltaComplete`, `SpecialFunctionCertified`, `CertificateBearing`)
+        // has no green badge yet, so it conservatively renders `Unsupported`
+        // rather than laundering into `Proven`. The proper sound-over-
+        // approximation green badge and its lattice projection land with WI-9
+        // when a producer first emits those qualifiers; until then any such
+        // rollup is rejected from the green path here at the rendering point.
         if self.qualifiers.contains(Qualifier::Axiom) {
             CompositeVerdict::ProvenModuloAssertedAxiom
         } else if self.qualifiers.contains(Qualifier::Fuzz) {
             CompositeVerdict::ProvenModuloFuzzValidatedContract
-        } else {
+        } else if self.soundness == Soundness::Exact {
             CompositeVerdict::Proven
+        } else {
+            CompositeVerdict::Unsupported
         }
     }
 }
@@ -877,5 +873,51 @@ mod tests {
             rollup_composite(CompositeVerdict::Proven, &[proved, vacuous]),
             CompositeVerdict::Invalid
         );
+    }
+
+    #[test]
+    fn wi6_sub_exact_non_fuzz_non_axiom_green_does_not_launder_into_proven() {
+        // Covered-or-rejected at the badge-rendering point: a green rollup at
+        // sub-Exact soundness carrying a qualifier that is neither Fuzz nor
+        // Axiom (here SoundOverApproximation) has no green badge yet, so it must
+        // render Unsupported -- NOT Proven. Previously the terminal-free
+        // projection special-cased only Axiom and Fuzz, then fell through to
+        // Proven, laundering these kinds into the strong badge. The proper
+        // green badge for these lands with WI-9; until then they are rejected
+        // from the green path here.
+        let rollup = VerdictRollup::identity().fold(VerdictGuarantee::Green {
+            soundness: Soundness::SoundApproximate,
+            qualifiers: QualifierSet::from_iter_kinds([Qualifier::SoundOverApproximation]),
+        });
+        assert_ne!(
+            rollup.badge(),
+            CompositeVerdict::Proven,
+            "a sub-Exact sound-over-approximation green must not launder into proven"
+        );
+        assert_eq!(
+            rollup.badge(),
+            CompositeVerdict::Unsupported,
+            "a sub-Exact non-fuzz/non-axiom green has no green badge yet and must \
+             render Unsupported, not a strong proven"
+        );
+
+        // The other producer qualifiers WI-9 will emit (DeltaComplete,
+        // SpecialFunctionCertified, CertificateBearing) take the same
+        // conservative rejection at sub-Exact soundness rather than laundering.
+        for qualifier in [
+            Qualifier::DeltaComplete,
+            Qualifier::SpecialFunctionCertified,
+            Qualifier::CertificateBearing,
+        ] {
+            let rolled = VerdictRollup::identity().fold(VerdictGuarantee::Green {
+                soundness: Soundness::SoundApproximate,
+                qualifiers: QualifierSet::from_iter_kinds([qualifier]),
+            });
+            assert_eq!(
+                rolled.badge(),
+                CompositeVerdict::Unsupported,
+                "sub-Exact green carrying {qualifier:?} must render Unsupported, not proven"
+            );
+        }
     }
 }
