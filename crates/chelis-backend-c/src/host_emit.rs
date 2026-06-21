@@ -1694,11 +1694,24 @@ impl<'a> HostEmitter<'a> {
             }
             "cast" => {
                 let expr = match (&arg_vars[0].1, ty) {
+                    // WS-4: float entry params can now be `Float32`, so the
+                    // int<->float casts must cover both float widths. The C
+                    // numeric cast handles the narrowing/widening to the
+                    // declared destination type.
                     (HostType::Int64, HostType::Float64) => {
                         format!("(double){0}", arg_vars[0].0)
                     }
-                    (HostType::Float64, HostType::Int64) => {
+                    (HostType::Int64, HostType::Float32) => {
+                        format!("(float){0}", arg_vars[0].0)
+                    }
+                    (HostType::Float64 | HostType::Float32, HostType::Int64) => {
                         format!("(int64_t){0}", arg_vars[0].0)
+                    }
+                    (HostType::Float64, HostType::Float32) => {
+                        format!("(float){0}", arg_vars[0].0)
+                    }
+                    (HostType::Float32, HostType::Float64) => {
+                        format!("(double){0}", arg_vars[0].0)
                     }
                     (HostType::Bool, HostType::Int64) => {
                         format!("(int64_t){0}", arg_vars[0].0)
@@ -2164,7 +2177,11 @@ impl<'a> HostEmitter<'a> {
             "string_len" => format!("chelis_string_len({})", arg_vars[0].0),
             "to_string" => match arg_vars[0].1 {
                 HostType::Int64 => format!("chelis_string_from_int64({})", arg_vars[0].0),
-                HostType::Float64 => format!("chelis_string_from_f64({})", arg_vars[0].0),
+                // f32 promotes to double for formatting (lossless); there is
+                // no separate f32 formatter in the runtime.
+                HostType::Float64 | HostType::Float32 => {
+                    format!("chelis_string_from_f64({})", arg_vars[0].0)
+                }
                 HostType::Bool => format!("chelis_string_from_bool({})", arg_vars[0].0),
                 HostType::String => arg_vars[0].0.clone(),
                 _ => "chelis_string_from_cstr(\"<value>\")".to_string(),
@@ -4147,7 +4164,9 @@ impl<'a> HostEmitter<'a> {
     fn box_value_expr(&self, value: &str, ty: &HostType) -> String {
         match ty {
             HostType::Int64 => format!("chelis_value_from_int64({value})"),
-            HostType::Float64 => format!("chelis_value_from_f64({value})"),
+            // The boxed value option has no separate f32 slot; an f32
+            // promotes losslessly to the f64 box (WS-4).
+            HostType::Float64 | HostType::Float32 => format!("chelis_value_from_f64({value})"),
             HostType::Bool => format!("chelis_value_from_bool({value})"),
             HostType::String => format!("chelis_value_from_string({value})"),
             HostType::Adt(_, _) => format!("chelis_value_from_adt({value})"),
@@ -4162,7 +4181,11 @@ impl<'a> HostEmitter<'a> {
     fn assign_unboxed_value(&mut self, target: &str, ty: &HostType, value_expr: &str) {
         let expr = match ty {
             HostType::Int64 => format!("chelis_value_as_int64({value_expr})"),
-            HostType::Float64 => format!("chelis_value_as_f64({value_expr})"),
+            // f32 is unboxed via the f64 accessor (the box stored it as
+            // f64); the surrounding `c_decl` narrows back to `float` (WS-4).
+            HostType::Float64 | HostType::Float32 => {
+                format!("chelis_value_as_f64({value_expr})")
+            }
             HostType::Bool => format!("chelis_value_as_bool({value_expr})"),
             HostType::String => format!("chelis_value_as_string({value_expr})"),
             HostType::Adt(_, _) => format!("chelis_value_as_adt({value_expr})"),
@@ -4186,7 +4209,7 @@ impl<'a> HostEmitter<'a> {
                 "{}printf(\"%lld\\n\", (long long){});",
                 self.indent, value
             )),
-            HostType::Float64 => self
+            HostType::Float64 | HostType::Float32 => self
                 .lines
                 .push(format!("{}printf(\"%.16g\\n\", {});", self.indent, value)),
             HostType::Bool => self.lines.push(format!(
@@ -4277,7 +4300,7 @@ impl<'a> HostEmitter<'a> {
                 "{}printf(\"%lld\", (long long){});",
                 self.indent, value
             )),
-            HostType::Float64 => self
+            HostType::Float64 | HostType::Float32 => self
                 .lines
                 .push(format!("{}printf(\"%.16g\", {});", self.indent, value)),
             HostType::Bool => self.lines.push(format!(
@@ -4443,6 +4466,11 @@ fn binding_release(var: &str, ty: &HostType) -> Option<String> {
 fn c_type(ty: &HostType) -> &'static str {
     match ty {
         HostType::Int64 => "int64_t",
+        // WS-4: a declared `f32` scalar gets a 4-byte C storage type, not
+        // `double`. The host lane previously collapsed every float to
+        // `Float64`/`double`, so an `f32` entry parameter was widened to
+        // 8 bytes on the C boundary.
+        HostType::Float32 => "float",
         HostType::Float64 => "double",
         HostType::Bool => "bool",
         HostType::String => "chelis_string",
@@ -4455,6 +4483,9 @@ fn c_type(ty: &HostType) -> &'static str {
         HostType::MappedFile => "chelis_mapped_file*",
         HostType::Option(inner) => match inner.as_ref() {
             HostType::Int64 => "chelis_option_i64",
+            // No dedicated `chelis_option_f32` runtime type exists; an
+            // optional f32 boxes through the generic value option, same
+            // as every non-i64/f64 inner. Keep the f64 fast-path intact.
             HostType::Float64 => "chelis_option_f64",
             _ => "chelis_option_value",
         },
