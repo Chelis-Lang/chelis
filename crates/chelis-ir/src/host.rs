@@ -707,6 +707,14 @@ pub enum HostCallbackKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostType {
     Int64,
+    /// IEEE single-precision (`f32`) host scalar. Kept distinct from
+    /// `Float64` so a declared `f32`/`f64` entry parameter lowers to a
+    /// `Load` of the *declared* width rather than silently downgrading
+    /// f64 to f32 (WS-4 / verification-stack Phase 2). Builtin-result
+    /// inference that genuinely cannot recover the operand width still
+    /// classifies floats coarsely as `Float64` (Issue #308); only the
+    /// type-syntax-driven entry-param path threads the precise variant.
+    Float32,
     Float64,
     Bool,
     String,
@@ -4543,7 +4551,7 @@ fn lower_match_host_expr(
     let scrutinee_ty = host_expr_type(&scrutinee);
     if matches!(
         scrutinee_ty,
-        HostType::Int64 | HostType::Float64 | HostType::Bool | HostType::String
+        HostType::Int64 | HostType::Float64 | HostType::Float32 | HostType::Bool | HostType::String
     ) {
         return lower_literal_match_host_expr(
             list,
@@ -5022,7 +5030,7 @@ fn host_float(value: f64) -> HostExpr {
 /// derivative). Everything else — list/dict/ADT/tuple/tensor/option — is a
 /// container and is rejected.
 fn is_dual_scalar_type(ty: &HostType) -> bool {
-    matches!(ty, HostType::Float64 | HostType::Int64)
+    matches!(ty, HostType::Float64 | HostType::Float32 | HostType::Int64)
 }
 
 /// Resolve a top-level scalar def by name into `(param_names, param_tys, body)`.
@@ -6791,9 +6799,18 @@ fn collect_tensor_scope(scope: &HashMap<String, HostType>) -> HashMap<String, Te
 fn tensor_type_from_host_input(ty: &HostType) -> Option<TensorType> {
     match ty {
         HostType::Tensor(tensor) => Some(tensor.clone()),
-        HostType::Float64 => Some(TensorType {
+        // WS-4: map each declared float width to its own precision. The
+        // previous unconditional `Float64 -> F32` silently truncated f64
+        // scalar entry parameters to 4-byte storage; the declared width
+        // now survives because `parse_host_type_with_subst` preserves the
+        // `f32`/`f64` distinction.
+        HostType::Float32 => Some(TensorType {
             dims: vec![],
             precision: chelis_types::types::Prim::F32,
+        }),
+        HostType::Float64 => Some(TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::F64,
         }),
         HostType::Int64 => Some(TensorType {
             dims: vec![],
@@ -6812,9 +6829,20 @@ fn host_type_from_tensor_input(ty: &TensorType) -> HostType {
         match ty.precision {
             chelis_types::types::Prim::Bool => HostType::Bool,
             chelis_types::types::Prim::Int8
+            | chelis_types::types::Prim::Int16
             | chelis_types::types::Prim::Int32
             | chelis_types::types::Prim::Int64 => HostType::Int64,
-            _ => HostType::Float64,
+            // WS-4: restore the float width on the reverse boundary so a
+            // rank-0 f32 tensor round-trips to `Float32` (declared width)
+            // rather than collapsing every float to `Float64`. The
+            // narrower IEEE floats (`f16`/`bf16`) have no dedicated host
+            // scalar variant, so they keep the coarse `Float32` class.
+            chelis_types::types::Prim::F32
+            | chelis_types::types::Prim::F16
+            | chelis_types::types::Prim::Bf16
+            | chelis_types::types::Prim::F8e4m3 => HostType::Float32,
+            chelis_types::types::Prim::F64 => HostType::Float64,
+            chelis_types::types::Prim::String => HostType::String,
         }
     } else {
         HostType::Tensor(ty.clone())
@@ -7234,7 +7262,12 @@ fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) ->
     match tag(list) {
         Some("t-prim") => match children(list).first().and_then(symbol_name) {
             Some("int64") | Some("int32") => HostType::Int64,
-            Some("f64") | Some("f32") => HostType::Float64,
+            // Thread the declared float width through verbatim so a
+            // declared `f64` entry parameter lowers to an f64 `Load`
+            // instead of being silently downgraded to f32 by the
+            // `tensor_type_from_host_input` boundary (WS-4).
+            Some("f32") => HostType::Float32,
+            Some("f64") => HostType::Float64,
             Some("bool") => HostType::Bool,
             Some("string") => HostType::String,
             _ => HostType::Unknown,
@@ -7512,6 +7545,12 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                 Some(HostType::Tensor(tensor_ty))
             } else if arg_tys.iter().any(|ty| matches!(ty, HostType::Float64)) {
                 Some(HostType::Float64)
+            } else if arg_tys.iter().any(|ty| matches!(ty, HostType::Float32)) {
+                // WS-4: an f32 scalar operand keeps the result in f32; only
+                // a genuine f64 operand widens the result. Falling through
+                // to `Int64` here would mis-type an all-f32 scalar
+                // arithmetic result as an integer.
+                Some(HostType::Float32)
             } else {
                 Some(HostType::Int64)
             }
@@ -8335,6 +8374,149 @@ mod tests {
             })
             .count();
         assert_eq!(scalar_loads, 2, "{:?}", dag.nodes());
+    }
+
+    // ── WS-4: declared float width survives entry-param lowering ──
+    //
+    // `tensor_type_from_host_input` previously mapped every
+    // `HostType::Float64` (which collapsed both f32 and f64) to
+    // `Prim::F32`, silently truncating an f64 scalar entry parameter to
+    // 4-byte storage. The declared `f32`/`f64` width now threads through
+    // `parse_host_type_with_subst` so each lowers to a `Load` of its own
+    // precision.
+
+    #[test]
+    fn named_entry_dag_lowers_f64_scalar_params_to_f64_loads() {
+        let checked = parse_and_check(
+            r#"
+                (def {} add_scalar
+                  (fn {type: (t-fn {}
+                                (t-prim {} f64)
+                                (t-prim {} f64)
+                                (t-prim {} f64))}
+                    (params {}
+                      (x {type: (t-prim {} f64)})
+                      (y {type: (t-prim {} f64)}))
+                    (app {type: (t-prim {} f64)}
+                      (var {} add)
+                      (var {} x)
+                      (var {} y))))
+            "#,
+        );
+
+        let dag =
+            lower_named_tensor_entry_dag(&checked, "add_scalar").expect("lower f64 scalar entry");
+        let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
+        assert_eq!(root.op, RiscOp::Add, "{:?}", dag.nodes());
+
+        let f64_loads = dag
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(node.op, RiscOp::Load { .. })
+                    && node.output_type.dims.is_empty()
+                    && node.output_type.precision == Prim::F64
+            })
+            .count();
+        assert_eq!(
+            f64_loads,
+            2,
+            "an f64 scalar entry param must lower to an f64 Load, not f32: {:?}",
+            dag.nodes()
+        );
+    }
+
+    #[test]
+    fn named_entry_dag_does_not_downgrade_f64_scalar_params_to_f32() {
+        // Negative twin: the historical bug. NO scalar Load produced for
+        // a declared-f64 entry param may carry `Prim::F32`.
+        let checked = parse_and_check(
+            r#"
+                (def {} add_scalar
+                  (fn {type: (t-fn {}
+                                (t-prim {} f64)
+                                (t-prim {} f64)
+                                (t-prim {} f64))}
+                    (params {}
+                      (x {type: (t-prim {} f64)})
+                      (y {type: (t-prim {} f64)}))
+                    (app {type: (t-prim {} f64)}
+                      (var {} add)
+                      (var {} x)
+                      (var {} y))))
+            "#,
+        );
+
+        let dag =
+            lower_named_tensor_entry_dag(&checked, "add_scalar").expect("lower f64 scalar entry");
+        let f32_scalar_loads = dag
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(node.op, RiscOp::Load { .. })
+                    && node.output_type.dims.is_empty()
+                    && node.output_type.precision == Prim::F32
+            })
+            .count();
+        assert_eq!(
+            f32_scalar_loads,
+            0,
+            "an f64 scalar entry param must NOT be silently downgraded to an f32 Load: {:?}",
+            dag.nodes()
+        );
+    }
+
+    #[test]
+    fn parse_host_type_preserves_declared_float_width() {
+        // Unit-level pin on the precision-threading site: the `t-prim`
+        // syntax for f32 and f64 must map to distinct host scalar
+        // variants so the entry-param boundary can recover the width.
+        let f32_ty = parse_deep_app("(t-prim {} f32)");
+        assert_eq!(
+            parse_host_type_with_subst(&f32_ty, &HashMap::new()),
+            HostType::Float32,
+        );
+
+        let f64_ty = parse_deep_app("(t-prim {} f64)");
+        assert_eq!(
+            parse_host_type_with_subst(&f64_ty, &HashMap::new()),
+            HostType::Float64,
+        );
+    }
+
+    #[test]
+    fn host_input_tensor_round_trip_preserves_float_width() {
+        // The two boundary helpers must agree: a declared f32/f64 host
+        // scalar lowers to a rank-0 tensor of the matching precision, and
+        // the reverse map restores the same host width.
+        assert_eq!(
+            tensor_type_from_host_input(&HostType::Float32),
+            Some(TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            }),
+        );
+        assert_eq!(
+            tensor_type_from_host_input(&HostType::Float64),
+            Some(TensorType {
+                dims: vec![],
+                precision: Prim::F64,
+            }),
+        );
+        assert_eq!(
+            host_type_from_tensor_input(&TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            }),
+            HostType::Float32,
+        );
+        assert_eq!(
+            host_type_from_tensor_input(&TensorType {
+                dims: vec![],
+                precision: Prim::F64,
+            }),
+            HostType::Float64,
+        );
     }
 
     #[test]
