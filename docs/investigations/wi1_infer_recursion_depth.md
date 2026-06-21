@@ -202,14 +202,93 @@ net by shrinking the grown segment (test-only `set_grow_segment_bytes_for_test`
 thread-local override) so a depth-4000 chain overflows it and the guard fires
 with a located diagnostic -- proving the net still backs up the grow.
 
-## Adjacent bug (b): `chelis build` ICE on the pricer
+## WI-1 guard-completeness residual (WS-5 walker scan; WS-2 red zone)
+
+WS-5's syn-based source scan of `infer.rs` (locked by the walker-coverage
+test in `crates/chelis-types/tests/`) proved the "every recursive
+`deep::Expr` walker carries `stack_guard!`" invariant is INCOMPLETE: beyond
+the ~27 guarded sites, six production recursive walkers descend
+arbitrary-depth structures WITHOUT a guard --
+`type_expr_has_tensor_prec_var` (the one clearly unbounded, over nested type
+exprs), `literal_static_value`, `tensor_dim_exprs_from_type_expr`,
+`tensor_precision_expr`, `tensor_dims_from_type_expr`,
+`top_level_arm_is_irrefutable` -- plus three `(module ...)`-only descenders
+and one cycle-guarded false positive. The coverage test allowlists these
+with category-coded reasons (locks "no NEW unguarded walker" without
+claiming completeness); its stale-entry assertion auto-detects when each is
+later guarded.
+
+Mitigation in place: WS-2's unconditional `stacker::grow` at the check
+entries (the 512 MiB segment all passes share) means these unguarded
+walkers no longer SIGSEGV at realistic depth -- the residual is a
+located-diagnostic gap on a sufficiently deep input on an exhausted segment,
+not a live crash. WS-2 also flagged that the 128 KiB red zone is not
+provably sufficient for arbitrarily small grown segments (a single deep
+`infer_expr`/validate step can exceed 128 KiB between guard checks);
+harmless at the 512 MiB production size.
+
+Follow-up (deferred): guard the six arbitrary-depth walkers (start with
+`type_expr_has_tensor_prec_var`); the allowlist test names exactly which
+entries to delete as each is fixed.
+
+Scope correction (red-team checkpoint 1): "covered-or-rejected on deep
+input" holds for the GUARDED `chelis-types/infer.rs` walkers, NOT for the
+`chelis_deep` surface. The derived `chelis_deep::ast::Expr` Drop/Clone (a
+destructor cannot carry `stack_guard!`) AND `chelis_deep::validate::validate_expr`
+(`validate.rs:151`) are grow-MITIGATED by WS-2's 512 MiB segment but are NOT
+covered-or-rejected: gdb confirms a RAW SIGSEGV with no located diagnostic at
+`drop_in_place<Expr>` ~45k depth debug / ~140k release, and in `validate_expr`
+on a deep `t-fn` sig on a small segment. Real reef-pricer depth is low
+thousands (~100x margin), so not reachable in practice. Note `validate_expr`
+is outside BOTH the infer.rs guard set AND WS-5's coverage scan (which only
+`include_str!`s infer.rs), so it is tracked HERE explicitly. The proper close
+for this surface is `stacker::maybe_grow`/per-pass guards reaching into
+`chelis_deep`, on the same follow-up.
+
+## Adjacent bug (b): `chelis build` ICE on the pricer -- ROOT IS chelis-types (WS-3)
 
 Distinct from the checker overflow: `chelis build src/pricing.ch` hits a
 deliberate ICE `panic!` at `crates/chelis-ir/src/dag.rs:1345`:
 "internal compiler error: symbolic dim `*` referenced by a non-Load node
-(Reshape) ... but no Load input declares it." It originates from the
-`const_col` / `spot_col` reshape in the pricer producing a `Reshape` whose
-op-internal symbolic dim is not declared by any `Load` input. This is an
-IR-producing-pass bug (a `Reshape` should carry/declare its symbolic dims
-the same way a `Load` does), not a checker-recursion issue. File and fix
-separately.
+(Reshape) ... but no Load input declares it" (the Sum bucket at :1308 is the
+same root in a different node).
+
+WS-3 traced it end-to-end (instrumented DAG dumps) and the root is NOT an
+IR-producing-pass bug -- it is in chelis-types. `nn = cast(shape(spots,0),
+int64)` semantically IS the spots `Load`'s dim 0 (`n`), but the checker
+infers the reshape operand `to_tensor(map(.., range(0, nn)))` (a
+runtime-length list) as the shape-erased wildcard `*` (`Dim::Wildcard`), and
+`*` wins over `nn` during inference. So `const_col`'s CALL-SITE result type
+is `tensor[*, 1]` -- the link from `nn` back to the declared `n` is erased
+BEFORE lowering. `vmap` reads its batch dim from that `*`; the kernel's Load
+and Sum carry `*`; backend-c `rename_anonymous_dims` mints a separate
+`_anon_dim_*` per node, so the Sum/Reshape references a name no Load declares
+and the dag.rs guard correctly panics. Three prototyped chelis-ir fixes all
+got clobbered: the call-site `*` is re-injected from scope at every IR/host
+pass (`actualize_tensor_helper_types`, `remap_tensor_helper_dim_symbols`);
+no chelis-ir-only change recovers `n` because the recovery source (`spots`)
+is not in the kernel's scope.
+
+The fork:
+- **CLEAN (recommended):** fix chelis-types so `const_col` returns
+  `tensor[n, 1]` -- preserve `n` through the `nn = shape(spots,0)` /
+  `to_tensor` / `reshape` chain. Then `nn` traces to the spots `Load` in the
+  IR too, the kernel batch dim is `n` (Load-declared), the guard passes.
+  Single-altitude, no IR/codegen schema change.
+- **FOUNDATIONAL (not recommended for one idiom):** relax the
+  dag.rs:1331-1334 Load-only invariant to permit ENTRY-declared symbolic dims
+  (bound at kernel entry from input metadata), have codegen emit
+  `int <dim> = inputs[slot]->shape[axis]`, and stop the wildcard
+  re-injection. Bigger blast radius (the guard contract, host helper
+  actualization, codegen).
+
+Secondary real bug (insufficient alone): `rename_anonymous_dims` mints a
+fresh `_anon_dim` per node over output types only, desyncing the same logical
+dim -- fixing it alone just turns `*` into an `_anon_dim` the guard still
+correctly rejects.
+
+Status: DEFERRED to a focused chelis-types follow-up (the CLEAN fix). Pinned
+by `crates/chelis-cli/tests/reshape_symbolic_dim_vmap_column.rs` (de269c7a):
+`vmap_over_symbolic_column_currently_ices_at_the_vmap_kernel` passes today;
+`vmap_over_symbolic_column_builds_without_symbolic_dim_ice` is `#[ignore]`d
+and auto-flips green when the chelis-types fix lands.
