@@ -716,8 +716,10 @@ dependencies = [
  "chelis-macros",
  "chelis-pred",
  "chelis-surf",
+ "quote",
  "serde",
  "stacker",
+ "syn",
  "thiserror",
 ]
 

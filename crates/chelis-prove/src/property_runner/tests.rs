@@ -462,3 +462,121 @@ fn f6_deep_bridge_source_kind_is_skipped_not_error() {
         "the shared runner skips bridge:c-earchin properties: {outcomes:?}"
     );
 }
+
+// --- WI-8 tier-coverage invariant (WS-5 Part B): every AssumptionRecord
+// produced on a green discharge path carries a prover-stamped discharge_tier ---
+
+/// Assert the WI-8 coverage invariant on one outcome: every assumption it
+/// carries has a prover-stamped discharge tier. Returns the number of
+/// assumptions checked so the caller can assert the path actually produced
+/// some (a vacuous zero-assumption pass must not silently satisfy the
+/// invariant).
+fn assert_assumptions_are_tiered(outcome: &PropertyOutcome) -> usize {
+    for assumption in &outcome.assumptions {
+        assert!(
+            assumption.discharge_tier.is_some(),
+            "green-path assumption `{}` on property `{}` is missing a prover-stamped \
+             discharge_tier (WI-8): {assumption:?}",
+            assumption.name,
+            outcome.name,
+        );
+    }
+    outcome.assumptions.len()
+}
+
+/// A green fuzz property whose `where` precondition drives the
+/// `fuzz_precondition_assumptions` discharge site: the pass carries one
+/// `preconditions:*` assumption that must be tiered.
+const GREEN_FUZZ_PRECONDITION_PROPERTY: &str = "module M
+@property guarded forall(x: f32) where (x > 0.0):
+  (x + 1.0 > x)
+";
+
+#[test]
+fn wi8_green_fuzz_precondition_assumptions_carry_discharge_tier() {
+    let outcomes = run_surf(GREEN_FUZZ_PRECONDITION_PROPERTY, "fuzz-only");
+    assert_eq!(outcomes.len(), 1, "one property: {outcomes:?}");
+    assert!(
+        outcomes[0].is_pass(),
+        "the guarded property passes via fuzz: {:?}",
+        outcomes[0]
+    );
+    let checked = assert_assumptions_are_tiered(&outcomes[0]);
+    assert_eq!(
+        checked, 1,
+        "the green fuzz precondition path emits exactly one tiered assumption: {:?}",
+        outcomes[0]
+    );
+}
+
+#[test]
+fn wi8_green_injection_binder_assumptions_carry_discharge_tier() {
+    // The injection green path (a binder-matched invariant) emits a binder
+    // assumption that must also be tiered. INJECTION_PROPERTY is defined above.
+    let outcomes = run_surf(INJECTION_PROPERTY, "auto");
+    assert_eq!(outcomes.len(), 1, "one property: {outcomes:?}");
+    assert!(outcomes[0].is_pass(), "injected property passes");
+    assert!(outcomes[0].injected, "verified through the injection path");
+    let checked = assert_assumptions_are_tiered(&outcomes[0]);
+    assert!(
+        checked >= 1,
+        "the injection green path emits at least one tiered assumption: {:?}",
+        outcomes[0]
+    );
+}
+
+#[test]
+fn wi8_smt_precondition_discharge_site_stamps_discharge_tier() {
+    // The SMT green discharge site (`property_assumption_records`) is only
+    // reached at runtime when Tier B returns Proved, which the default (non-smt)
+    // build cannot do (solve_property is a stub). Lock the site directly with a
+    // unit call: a discharge with a non-empty precondition set must yield an
+    // AssumptionRecord carrying a prover-stamped discharge_tier keyed to the
+    // precondition source identity. This is race-free (no process-global env
+    // override) and does not require the cvc5 manual gate.
+    let smt_prop = crate::tier_b::SmtProperty {
+        variables: vec![("x".to_string(), crate::solver::SmtSort::Real)],
+        preconditions: vec![crate::solver::SmtExpr::BoolLit(true)],
+        postcondition: crate::solver::SmtExpr::BoolLit(true),
+    };
+    let discharge = AssumptionDischarge::new(
+        DischargeMethod::Smt,
+        serde_json::json!({"solver": "cvc5", "result": "proved"}),
+    );
+    let non_vacuity = NonVacuityRecord::established(serde_json::json!({"result": "sat"}));
+    let records = property_assumption_records("guarded", &smt_prop, discharge, non_vacuity);
+    assert_eq!(
+        records.len(),
+        1,
+        "a non-empty precondition set produces one assumption record"
+    );
+    let tier = records[0]
+        .discharge_tier
+        .as_ref()
+        .expect("the SMT discharge site stamps a prover-side discharge tier (WI-8)");
+    assert_eq!(tier.engine, "cvc5", "discharged by the SMT engine");
+    assert_eq!(tier.guarantee, "smt", "with the smt guarantee kind");
+    assert_eq!(
+        tier.source.as_deref(),
+        Some("preconditions:guarded"),
+        "keyed to the precondition source identity"
+    );
+
+    // Negative companion: an empty precondition set produces no assumption,
+    // so there is nothing to tier (the site is vacuous, not silently untiered).
+    let empty = crate::tier_b::SmtProperty {
+        variables: Vec::new(),
+        preconditions: Vec::new(),
+        postcondition: crate::solver::SmtExpr::BoolLit(true),
+    };
+    let none = property_assumption_records(
+        "p",
+        &empty,
+        AssumptionDischarge::new(DischargeMethod::Smt, serde_json::json!({})),
+        NonVacuityRecord::established(serde_json::json!({})),
+    );
+    assert!(
+        none.is_empty(),
+        "no preconditions => no assumption record to tier"
+    );
+}
