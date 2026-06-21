@@ -488,6 +488,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "smt")]
     fn false_property() -> SmtProperty {
         // postcondition 1.0 < 0.0 is false: cvc5 disproves it.
         SmtProperty {
